@@ -50,7 +50,11 @@ layout(set = 0, binding = 0) uniform ClipmapInject {
                            // (--clipmap-dependent-rays): fewer, and it keeps its split but waits for the round-robin;
                            // y at most how many dependent probes a frame (--clipmap-dependent-share of the budget), so
                            // the round-robin always keeps the rest: given all of it, 600-1,200 dependent probes stopped
-                           // the round-robin and the scene stayed at its first solves (rest median 32% against 10%)
+                           // the round-robin and the scene stayed at its first solves (rest median 32% against 10%);
+                           // z 1: every hit's sun by a shadow ray, the cascades not consulted (--clipmap-shadow-rays)
+    // The sun's cascades, as the lit pass rendered them this frame: a hit they cover is answered there, a shadow
+    // ray only beyond them (frame audit F4; screen probes measured their shadow rays at 30% of their pass).
+    mat4 uCascadeVP[3];
 } u;
 
 layout(set = 0, binding = 1, rgba16f) uniform image2D uClipmapIrradiance;
@@ -60,6 +64,7 @@ layout(set = 0, binding = 2, rgba16f) uniform image2D uClipmapDepth;
 // texel's rays, so they add up to the whole; uClipmapIrradiance, what every reader samples, is their sum.
 layout(set = 0, binding = 7, rgba16f) uniform image2D uClipmapStatic;
 layout(set = 0, binding = 8, rgba16f) uniform image2D uClipmapDynamic;
+layout(set = 0, binding = 9) uniform sampler2D uCascadeShadowMaps[3];
 // Beside the engine's flags (SOLVED 1, BURIED 2, solves in bits 8-15): bits 16-23, how many of the probe's rays crossed
 // a moving reach at its last solve while something moved. Dependence is a fraction, not a flag: the coarse levels'
 // probes nearly all see some of the curtain's box (6,506 probes against a budget of 512 a frame, when any ray
@@ -82,6 +87,7 @@ layout(std430, set = 0, binding = 5) buffer ClipmapQueue { uint queue[]; };
 #define BLIX_RAY_SET 0
 #define BLIX_RAY_BINDING 13
 #include "ray_query.glsl"
+#include "shadow.glsl"
 
 #define BLIX_CLIPMAP_IRRADIANCE(t) imageLoad(uClipmapIrradiance, t)
 #define BLIX_CLIPMAP_DEPTH(t) imageLoad(uClipmapDepth, t)
@@ -236,8 +242,19 @@ void main() {
         float ndotl = max(dot(n, toSun), 0.0);
         // The gather segment, and the hit's way to the sun (stage 4f).
         dependent = crossesMovingReach(origin, dir, hit.t) || (ndotl > 0.0 && crossesMovingReach(hitPos + n * 0.01, toSun, 1e30));
-        float sun = ndotl > 0.0 && !blix_traceAny(hitPos + n * 0.01, toSun, 0.0, uintBitsToFloat(0x7F800000u), blix_pcg(seed ^ lane ^ 0x5bd1e995u))
-            ? ndotl : 0.0;
+        float sun = 0.0;
+        if (ndotl > 0.0) {
+            int cascade = -1;
+            float lit = 1.0;
+            if (u.uDynamicQueue.z < 0.5) {
+                lit = blix_sun_shadow_cascaded_hard(
+                    uCascadeShadowMaps[0], uCascadeShadowMaps[1], uCascadeShadowMaps[2],
+                    u.uCascadeVP[0], u.uCascadeVP[1], u.uCascadeVP[2], hitPos + n * 0.01, ndotl, cascade);
+            }
+            if (cascade < 0)
+                lit = blix_traceAny(hitPos + n * 0.01, toSun, 0.0, uintBitsToFloat(0x7F800000u), blix_pcg(seed ^ lane ^ 0x5bd1e995u)) ? 0.0 : 1.0;
+            sun = ndotl * lit;
+        }
         // What the clipmap knows at the hit, from earlier solves: bounce in rgb, sky visibility in a. Beyond its
         // coarsest level it knows nothing, and the sky is taken as open there.
         // What the clipmap knows arrives at the hit, from earlier solves: all the indirect light, sky included. Where

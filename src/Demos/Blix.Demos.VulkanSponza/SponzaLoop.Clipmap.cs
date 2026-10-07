@@ -32,6 +32,8 @@ internal sealed partial class SponzaLoop
     private int clipmapDependentRays = 32;
     // --clipmap-dependent-share F: at most this share of the budget re-solves dependent probes a frame.
     private float clipmapDependentShare = 0.5f;
+    // --clipmap-shadow-rays: every hit's sun by a shadow ray, as before the cascades were consulted (the A/B).
+    private bool clipmapShadowRays;
     private GpuBufferHandle clipmapState;
     private GpuBufferHandle clipmapQueue;
     private ShaderInterface clipmapInterface = null!;
@@ -133,6 +135,9 @@ internal sealed partial class SponzaLoop
             new ShaderTextureBinding("uClipmapDynamic", clipmapDynamic),
             new ShaderTextureBinding("uIrradiance", irradianceCubeTexture),
             new ShaderTextureBinding("uSkyRadiance", envCubeTexture),
+            new ShaderTextureBinding("uCascadeShadowMaps[0]", graph.GetDepthTexture(cascadeHandles[0])),
+            new ShaderTextureBinding("uCascadeShadowMaps[1]", graph.GetDepthTexture(cascadeHandles[1])),
+            new ShaderTextureBinding("uCascadeShadowMaps[2]", graph.GetDepthTexture(cascadeHandles[2])),
         };
         // The reach of what moved this frame: the mover's while it moves (stage 4f).
         var dynamicActive = MoverActive && moverMoved && !noDependency && !noClipmapDependency;
@@ -154,7 +159,8 @@ internal sealed partial class SponzaLoop
             new("uFallback", new Vector4Uniform(new Vector4(clipmapUnknownSky, MathF.Min(1.5f, Math.Max(0, iblPrefilterMips - 1)), 0f, 0f))),
             new("uDynamicMin", new Vector4Uniform(dynamicActive ? new Vector4(moverReach.Min, 1f) : Vector4.Zero)),
             new("uDynamicMax", new Vector4Uniform(new Vector4(MoverActive ? moverReach.Max : Vector3.Zero, clipmapDynamicConverge))),
-            new("uDynamicQueue", new Vector4Uniform(new Vector4(clipmapDependentRays, MathF.Floor(clipmapBudget * clipmapDependentShare), 0f, 0f))),
+            new("uDynamicQueue", new Vector4Uniform(new Vector4(clipmapDependentRays, MathF.Floor(clipmapBudget * clipmapDependentShare), clipmapShadowRays ? 1f : 0f, 0f))),
+            new("uCascadeVP", new Matrix4x4ArrayUniform(cascadeViewProj)),
         }, textures, Buffers: buffers);
         graph.Dispatch(clipmapPassHandle, Phase(0, 1));
         graph.Dispatch(clipmapPassHandle, Phase(1, (slots + 63) / 64));

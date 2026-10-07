@@ -191,6 +191,7 @@ internal sealed partial class SponzaLoop
         noClipmapDependency = args.Flag("no-clipmap-dependency");
         if (args.Int("clipmap-dependent-rays") is { } cdr) clipmapDependentRays = Math.Clamp(cdr, 1, 64);
         if (args.Float("clipmap-dependent-share") is { } cds) clipmapDependentShare = Math.Clamp(cds, 0f, 1f);
+        clipmapShadowRays = args.Flag("clipmap-shadow-rays");
         if (args.Float("clipmap-dynamic-converge") is { } cdc) clipmapDynamicConverge = Math.Clamp(cdc, 0.01f, 1f);
         // --surface-check: hold the pre-pass's SurfaceKey and velocity against CPU rays at the shot (stage 4e-iv).
         surfaceCheck = args.Flag("surface-check");
@@ -368,8 +369,6 @@ internal sealed partial class SponzaLoop
         cullPassHandle = graph.ComputePass("scene-cull").Shader(cullInterface).Handle;
         raySurfaceBakeInterface = Reflect("ray_surface_bake.comp");
         raySurfaceBakePassHandle = graph.ComputePass("ray-surface-bake").Shader(raySurfaceBakeInterface).Handle;
-        clipmapInterface = Reflect("clipmap_inject.comp");
-        clipmapPassHandle = graph.ComputePass("probe-clipmap").Shader(clipmapInterface).Handle;
         rayCheckInterface = Reflect("ray_check.comp");
         rayCheckPassHandle = graph.ComputePass("ray-check").Shader(rayCheckInterface).Handle;
 
@@ -382,6 +381,13 @@ internal sealed partial class SponzaLoop
                 .Shader(shadowOpaqueInterface, shadowMaskInterface)
                 .Handle;
         }
+
+        // The clipmap's solve, after the cascades it takes the sun from where they cover a hit (frame audit F4), and
+        // before the fog, screen probes and incident pass that read it.
+        clipmapInterface = Reflect("clipmap_inject.comp");
+        var clipmapBuilder = graph.ComputePass("probe-clipmap").Shader(clipmapInterface);
+        for (var c = 0; c < CascadeCount; c++) clipmapBuilder = clipmapBuilder.Read(cascadeHandles[c]);
+        clipmapPassHandle = clipmapBuilder.Handle;
 
         // Froxel fog compute pass — fills the 3D scattering grid. Declared
         // between the cascade passes and the lit pass so it runs after the

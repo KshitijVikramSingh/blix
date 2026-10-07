@@ -399,9 +399,20 @@ F. *The frame audit* (opened 2026-10-07: "a lot of pure performance on the table
      format to the round trip). Cost: the 22-27 ms injection is gone; the clipmap's incident pass is now 11.6-12.4
      ms (three clipmap samples a pixel for the gradient, up to 8 screen probes) -- a step 4/5 target.
      Left on the asset side, unused by this demo: SkyVisibilityBaker, BlixSkyVolume, .blixsky in the cook script.
-   F4 (next) duplicated work: one Hi-Z pyramid, skip the empty late pre-pass, the clipmap's sun through the
-     cascades where they cover a hit, one previous-frame camera. Then F1 the instrument, F5 hot spots (incident
-     pass, screen-probe register pressure, barriers, CPU allocations).
+   F4 DONE duplicated work: the clipmap's injection takes the sun from the cascades where they cover a hit (its
+     pass now after them), a shadow ray only beyond (`--clipmap-shadow-rays` the A/B). Paired, same session:
+     probe-clipmap 5.1 / 6.1 -> 3.8 / 3.8 ms; total indirect |err| Bistro 0.1521 -> 0.1519, Sponza 0.00113 ->
+     0.00122 (+8%, floor unmeasured). Looked at and moved to F5 (need the instrument, or are not duplication):
+     the two Hi-Z pyramids read DIFFERENT depths (early for occlusion, final for GTAO) -- what is wasted is
+     both channels in each (each reader wants one) and 12 passes of mostly fixed cost (0.37-0.5 ms each
+     isolated, whatever the level): a single-dispatch downsample is the win; the late pre-pass loads and stores
+     five attachments even when its list is empty (needs the count on the GPU, or a cheaper attachment set);
+     six previous-frame cameras (hygiene, no measurable cost).
+   Next: F1 the instrument (lifetime GPU totals reset at load, the 32-pass query cap, a TOTAL that counts
+     only frames a pass ran), then F5 hot spots: the clipmap's incident pass (11.6-12.4 ms: three clipmap
+     samples a pixel for the gradient, up to 8 screen probes), screen-probe register pressure (the second
+     layer's 16-point candidate arrays in every lane) and lane-0 SH reduction, the pyramids, barriers around
+     buffer dispatches, CPU allocations.
 5. *PRT baked by the cook*: per-region probe transfer, relit by the sun at runtime: the static base and
    warm start of 4.
 
