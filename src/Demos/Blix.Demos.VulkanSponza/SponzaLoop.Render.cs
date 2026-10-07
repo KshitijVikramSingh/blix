@@ -2097,6 +2097,10 @@ internal sealed partial class SponzaLoop
             new("uMode",                new Vector4Uniform(new Vector4(
                 taaMotionReprojection ? 1f : 0f, taaVarianceClip ? 1f : 0f, taaGamma, taaLinearBlend ? 1f : 0f))),
             new("uAccumulate",          new Vector4Uniform(new Vector4(taaHistory16 ? taaAccumulate : 0f, taaRelax, 0.25f, taaNoKey ? 1f : 0f))),
+            // Stage 4f: what moved this frame, for TAA's per-pixel dependency (surface variant only).
+            new("uDynamicMin",          new Vector4Uniform(MoverActive && moverMoved && !taaNoDependency ? new Vector4(moverReach.Min, 1f) : Vector4.Zero)),
+            new("uDynamicMax",          new Vector4Uniform(new Vector4(MoverActive ? moverReach.Max : Vector3.Zero, taaDynamicCount))),
+            new("uSunDirection",        new Vector4Uniform(new Vector4(sunDirection, 0f))),
         };
         if (taaStats.Equals(default(GpuBufferHandle))) taaStats = Own(device.CreateGpuBuffer(8, name: "sponza.taa.stats"));
         var bindings = new List<ShaderTextureBinding>

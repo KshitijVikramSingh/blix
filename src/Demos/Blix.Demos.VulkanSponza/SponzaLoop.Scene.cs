@@ -632,6 +632,9 @@ internal sealed partial class SponzaLoop
     // A surface's identity (stage 4e): the instance that draws it and the source primitive it was cooked from.
     // Without provenance (a primitive built in memory) the staged primitive itself stands in for its source.
     private const uint StochasticSurface = 0x80000000u;
+    // The placement may move (declared dynamic, with a reach: the mover's rows): a fact about the surface, set once
+    // the mover is chosen, that TAA reads to know a pixel's shading follows that placement's pose (stage 4f).
+    private const uint DynamicSurface = 0x40000000u;
 
     private readonly record struct SurfaceIdentity(PlacementInstance Instance, int SourceMesh, int SourcePrimitive, int Unsourced);
 

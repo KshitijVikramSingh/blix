@@ -231,6 +231,10 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private readonly GraphResourceHandle[] taaCountHandles = new GraphResourceHandle[2];
     // --taa-no-key: the surface-identity test off in taa_surface.frag (the A/B for what it rejects).
     private bool taaNoKey;
+    // Stage 4f: --taa-dynamic-count N, the count a pixel whose shading depends on the mover accumulates up to;
+    // --taa-no-dependency, the A/B.
+    private float taaDynamicCount = 4f;
+    private bool taaNoDependency;
     // Last frame's un-jittered view-projection, for the velocity (the camera's half of it).
     private Matrix4x4 velocityPrevViewProj;
     private bool velocityPrevValid;

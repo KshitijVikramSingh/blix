@@ -378,10 +378,16 @@ exactly where the world has changed.
        ring, slow: p90 4.3 -> 10.8% (a ghosting tail at the edge the clamp leaves); fast: +0.5 pt bias
        the moving curtain itself: slow -3.4 -> -2.4% bias, fast +0.5 -> +8.3% -- TAA's own staleness: history
        correctly owned by a surface whose shading changes as it turns (n.l, its own shadow).
-     Open (TAA's 4f): the same dependency, per pixel -- a pixel's shading depends on the mover when its key is
-     the mover's (its own pose changes its shading: here surface motion IS the input that changed, known from
-     the key, not inferred from displacement) or its way to the sun crosses the moving reach (a shadow
-     receiver); such pixels accumulate on a short count.
+     TAA's 4f, DONE: a pixel depends on the mover when its key carries DynamicSurface (0x40000000, set at load
+     for placements declared dynamic -- the key states that its own pose changes its shading, nothing inferred
+     from displacement) or its way to the sun crosses the moving reach (a shadow receiver); it accumulates up to
+     `--taa-dynamic-count` (4; `--taa-no-dependency` the A/B). Deterministic (held runs bit-identical before
+     and after). Resolved vs held, curtain median / bias | ring median / bias | rest p90:
+       slow  off 6.0 / -2.4 | 1.44 / -1.2 | 1.28%     count 4 5.0 / -3.4 (= before TAA) | 1.30 / -0.3 | 1.69%
+       fast  off 28.2 / +8.3 | 6.6 / -6.0 | 4.3%      count 4 27.9 / +7.7 | 7.8 / -5.6 | 6.2%   count 2 +5.0 bias
+     Slow: TAA adds no bias on the curtain any more, for a noisier tail where shadow receivers run short. Fast:
+     even 2 frames leave +4.5 points -- at ~3 deg a frame one frame of history is a different orientation's
+     shading; only knowing HOW the shading changed (not that it did) would remove it. Not pursued.
    Only after 4f-i proves the shape: representations that scale past one mover (change epochs per reach,
    coarse spatial dirty fields, dependency hashes, reach IDs).
 5. *PRT baked by the cook*: per-region probe transfer, relit by the sun at runtime: the static base and

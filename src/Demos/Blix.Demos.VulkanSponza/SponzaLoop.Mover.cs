@@ -108,7 +108,11 @@ internal sealed partial class SponzaLoop
         var rows = Enumerable.Range(0, sceneTransforms.Count).Where(r => sceneTransformInstances[r] == chosen).ToArray();
         moverRows = rows;
         moverRest = rows.Select(r => sceneTransforms[r]).ToArray();
-        foreach (var r in rows) moverKeys.Add(sceneTransformSurfaceKeys[r]);
+        foreach (var r in rows)
+        {
+            sceneTransformSurfaceKeys[r] |= DynamicSurface;
+            moverKeys.Add(sceneTransformSurfaceKeys[r]);
+        }
 
         Bounds3? union = null;
         foreach (var list in new[] { opaquePlacements, blendPlacements })
@@ -137,7 +141,7 @@ internal sealed partial class SponzaLoop
                 };
         if (!gpuCull) moverPreviousCpu = sceneTransforms.ToArray();
         Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] mover: {chosen} ({candidates.Count} candidate instances for '{moverName}'), {rows.Length} rows, keys {string.Join(',', moverKeys.Select(k => (k & 0x7FFFFFFFu).ToString()))}; rest bounds {size.X:0.00} x {size.Y:0.00} x {size.Z:0.00} m, pivot {moverPivot.X:0.00},{moverPivot.Y:0.00},{moverPivot.Z:0.00}, axis {(moverAxis.X > 0 ? "x" : "z")}, +-{moverAngleDegrees:0} deg every {moverPeriodSeconds:0.0} s{(moverHold is { } h ? $", held at frame {h}" : "")}"));
+            $"[VulkanSponza] mover: {chosen} ({candidates.Count} candidate instances for '{moverName}'), {rows.Length} rows, keys {string.Join(',', moverKeys.Select(k => (k & 0x3FFFFFFFu).ToString()))}; rest bounds {size.X:0.00} x {size.Y:0.00} x {size.Z:0.00} m, pivot {moverPivot.X:0.00},{moverPivot.Y:0.00},{moverPivot.Z:0.00}, axis {(moverAxis.X > 0 ? "x" : "z")}, +-{moverAngleDegrees:0} deg every {moverPeriodSeconds:0.0} s{(moverHold is { } h ? $", held at frame {h}" : "")}"));
     }
 
     // Once per lit frame, before anything culls or draws: the new pose, and last frame's as the rows' previous.

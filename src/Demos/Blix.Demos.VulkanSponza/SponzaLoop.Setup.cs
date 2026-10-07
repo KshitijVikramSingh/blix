@@ -198,6 +198,8 @@ internal sealed partial class SponzaLoop
         if (args.Int("stability") is { } stability) stabilityFrames = Math.Max(2, stability);
         noIncidentGradient = args.Flag("no-incident-gradient");
         taaNoKey = args.Flag("taa-no-key");
+        if (args.Float("taa-dynamic-count") is { } tdc) taaDynamicCount = Math.Max(1f, tdc);
+        taaNoDependency = args.Flag("taa-no-dependency");
         ParseMoverArgs();
         // --probe-support-now: screen probes measure support at where a point is now, not where it was (the A/B for the
         // world-motion target, which only a mover can show).

@@ -49,6 +49,13 @@ layout(set = 0, binding = 0) uniform Taa {
     // one jittered frame rarely contains what sub-pixel foliage averages to, so it clipped (and reset) every frame.
     // w: 1 skips the surface-identity test (taa_surface.frag only; the A/B for what it rejects).
     vec4 uAccumulate;
+    // Stage 4f, the surface variant: the reach of what moved this frame (w of the min 1 when there is one), the count
+    // a dependent pixel accumulates up to (w of the max), and the direction the sun travels. A pixel's shading
+    // depends on the mover when its surface is the mover's (the key's DynamicSurface bit: its own pose changes its
+    // shading) or its way to the sun crosses the reach (a shadow receiver).
+    vec4 uDynamicMin;
+    vec4 uDynamicMax;
+    vec4 uSunDirection;
 } t;
 
 layout(std430, set = 0, binding = 4) buffer TaaStats { uint refusedCount; uint totalCount; };
@@ -181,6 +188,24 @@ void main() {
                     // The long count is for pixels that hold still: by a pixel of motion it is back to 10 frames,
                     // the fixed 0.9 weight's, so a moving view behaves as it did.
                     float cap = mix(t.uAccumulate.x, min(t.uAccumulate.x, 10.0), clamp(motionPx, 0.0, 1.0));
+#ifdef TAA_SURFACE
+                    // Correctly owned history of a surface whose shading is changing is stale all the same: on the
+                    // moving curtain TAA added +7.8 points of bias (30 deg / 1 s) on top of the image it resolved.
+                    if (t.uDynamicMin.w > 0.5) {
+                        bool dependent = (key & 0x40000000u) != 0u;
+                        if (!dependent) {
+                            vec4 w4 = t.uInvViewProjJittered * vec4(vUv * 2.0 - 1.0, depth, 1.0);
+                            vec3 p = w4.xyz / w4.w;
+                            vec3 toSun = -normalize(t.uSunDirection.xyz);
+                            vec3 safe = mix(toSun, vec3(1e-8), lessThan(abs(toSun), vec3(1e-8)));
+                            vec3 t0 = (t.uDynamicMin.xyz - p) / safe;
+                            vec3 t1 = (t.uDynamicMax.xyz - p) / safe;
+                            vec3 a = min(t0, t1), b = max(t0, t1);
+                            dependent = max(max(a.x, a.y), max(a.z, 0.0)) <= min(b.x, min(b.y, b.z));
+                        }
+                        if (dependent) cap = min(cap, max(t.uDynamicMax.w, 1.0));
+                    }
+#endif
                     accumulated = min(count + 1.0, cap);
                     weight = 1.0 - 1.0 / accumulated;
                 }
