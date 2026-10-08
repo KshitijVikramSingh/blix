@@ -42,8 +42,11 @@ layout(set = 0, binding = 0) uniform ClipmapInject {
     vec4 uSunDirection;    // xyz the direction the sun travels
     vec4 uSunIrradiance;   // rgb measured irradiance, w 1 when the sky irradiance cube is valid
     vec4 uFrame;           // x frame counter, y bounce strength, z sky strength, w depth lobe exponent
+    vec4 uGuide;           // x 1: half of each solve's rays guided by the probe's radiance bins (--clipmap-guide), y the
+                           // bins' floor, as a share of their mean luminance
     vec4 uFallback;        // x the sky visibility taken at a hit no probe answers for, y the sky's mip for a ray
                            // z young probes: fewer solves than this are queued before the round-robin (0: none)
+                           // w visible probes: at most this many a frame (0: none queued as visible)
     // Stage 4f: the reach of what can move, w of the min 1 when there is one (paths are classified against it whether
     // or not it moved this frame); w of the max the blend of a probe's dynamic part (paths through the reach) per update.
     vec4 uDynamicMin;
@@ -68,6 +71,9 @@ layout(set = 0, binding = 2, rgba16f) uniform image2D uClipmapDepth;
 layout(set = 0, binding = 7, rgba16f) uniform image2D uClipmapStatic;
 layout(set = 0, binding = 8, rgba16f) uniform image2D uClipmapDynamic;
 layout(set = 0, binding = 9) uniform sampler2D uCascadeShadowMaps[3];
+// Stage 4g-iv: what each probe's rays have seen, by direction -- 6x6 octahedral bins of mean radiance (rgb; a 1 once
+// written) at the first 6x6 texels of its tile, private to this pass. It guides where the next solve sends rays.
+layout(set = 0, binding = 11, rgba16f) uniform image2D uClipmapRadiance;
 // Beside the engine's flags (SOLVED 1, BURIED 2, solves in bits 8-15): bits 16-23, how many of the probe's rays crossed
 // a moving reach at its last solve while something moved. Dependence is a fraction, not a flag: the coarse levels'
 // probes nearly all see some of the curtain's box (6,506 probes against a budget of 512 a frame, when any ray
@@ -92,7 +98,14 @@ layout(std430, set = 0, binding = 4) buffer ClipmapState { uvec4 states[]; };
 // is worth is about 1/(n+1) of the probe's answer, so the fewest solves go first; the round-robin keeps what is left,
 // and under 1/n an old probe barely moves when it is re-solved.
 #define CLIPMAP_YOUNG_BUCKETS 4
+// Before them (stage 4g-iii): the probes this frame's image reads (clipmap_mark.comp stamps them), by solves in
+// powers of two (1, 2-3, ... 128-254), fewest first, up to uFallback.w of the budget. Their answers are what is on
+// screen, so their noise is what is seen: concentrating the budget there is what takes it down.
+#define CLIPMAP_VISIBLE_BUCKETS 8
+#define CLIPMAP_BUCKETS (CLIPMAP_VISIBLE_BUCKETS + CLIPMAP_YOUNG_BUCKETS)
 layout(std430, set = 0, binding = 5) buffer ClipmapQueue { uint queue[]; };
+// The frame each slot was last read by the image (clipmap_mark.comp); seen within the last two counts as visible.
+layout(std430, set = 0, binding = 10) readonly buffer ClipmapSeen { uint seen[]; };
 
 #define BLIX_RAY_SET 0
 #define BLIX_RAY_BINDING 13
@@ -104,6 +117,18 @@ layout(std430, set = 0, binding = 5) buffer ClipmapQueue { uint queue[]; };
 #define BLIX_CLIPMAP_STATE(s) states[s]
 #include "probe_clipmap.glsl"
 
+// Guided sampling (stage 4g-iv). In bounce-lit enclosures a probe's light arrives through a few sunlit patches and
+// saturated curtains that only a handful of 64 uniform rays hit, so neighbouring probes catch different numbers of
+// them and hold different wrong answers (two identical runs 12% apart in Sponza's arcade, as probe-sized blocks).
+// Half the rays keep the uniform spiral; the other half go where the probe's own past solves saw radiance (the bins
+// above, in proportion to their luminance plus a floor). Every ray is weighted by 1/p of the MIXTURE density, in
+// every sum below, so the estimate is the same quantity with less noise: p >= 0.5/(4 pi) everywhere, so no weight
+// exceeds 2 and a wrong guide costs efficiency, never correctness. uGuide.x turns it on.
+shared float sBinQ[36];      // the guide's probability per bin
+shared float sBinCdf[36];
+shared float sWeight[RAYS];  // 1 / (4 pi p(dir)) for each ray: 1 for uniform sampling alone
+shared uint sGuided;
+shared int sRayBin[RAYS];    // the radiance bin each ray's direction falls in
 shared vec3 sRadiance[RAYS];
 shared vec3 sDirection[RAYS];
 shared float sDistance[RAYS];
@@ -166,18 +191,22 @@ void main() {
     int mode = int(u.uParams.z + 0.5);
 
     uint cursorAt = 8u + 2u * uint(perLevel * BLIX_CLIPMAP_LEVELS);
-    uint youngAt = cursorAt + 1u;                              // the bucket counts
-    uint youngListAt = youngAt + uint(CLIPMAP_YOUNG_BUCKETS);  // then each bucket's list, every slot's worth
+    // Bucket counts after the cursor (visible first, then young), then each bucket's list, every slot's worth.
+    uint bucketAt = cursorAt + 1u;
+    uint bucketListAt = bucketAt + uint(CLIPMAP_BUCKETS);
+    uint total = uint(perLevel * BLIX_CLIPMAP_LEVELS);
     if (mode == 0) {
         if (gl_GlobalInvocationID.x == 0u) {
             // Last frame's round-robin share, from last frame's counts, before they are cleared.
             uint unsolved = queue[0] + queue[1] + queue[2] + queue[3];
-            uint young = 0u;
-            for (int b = 0; b < CLIPMAP_YOUNG_BUCKETS; ++b) young += queue[youngAt + uint(b)];
-            uint used = min(uint(u.uParams.w), unsolved + min(queue[7], uint(u.uDynamicQueue.y)) + young);
-            queue[cursorAt] = (queue[cursorAt] + uint(u.uParams.w) - used) % uint(perLevel * BLIX_CLIPMAP_LEVELS);
+            uint visible = 0u, young = 0u;
+            for (int b = 0; b < CLIPMAP_VISIBLE_BUCKETS; ++b) visible += queue[bucketAt + uint(b)];
+            for (int b = CLIPMAP_VISIBLE_BUCKETS; b < CLIPMAP_BUCKETS; ++b) young += queue[bucketAt + uint(b)];
+            uint used = min(uint(u.uParams.w), unsolved + min(queue[7], uint(u.uDynamicQueue.y))
+                + min(visible, uint(u.uFallback.w)) + young);
+            queue[cursorAt] = (queue[cursorAt] + uint(u.uParams.w) - used) % total;
             for (int i = 0; i < 8; ++i) queue[i] = 0u;
-            for (int b = 0; b < CLIPMAP_YOUNG_BUCKETS; ++b) queue[youngAt + uint(b)] = 0u;
+            for (int b = 0; b < CLIPMAP_BUCKETS; ++b) queue[bucketAt + uint(b)] = 0u;
         }
         return;
     }
@@ -202,10 +231,13 @@ void main() {
             queue[8u + uint(BLIX_CLIPMAP_LEVELS * perLevel) + k] = uint(g);
         } else {
             uint solves = (state.w >> 8) & 0xFFu;
-            if (solves < uint(u.uFallback.z)) {
-                int b = min(findMSB(max(solves, 1u)), CLIPMAP_YOUNG_BUCKETS - 1);
-                uint k = atomicAdd(queue[youngAt + uint(b)], 1u);
-                queue[youngListAt + uint(b * perLevel * BLIX_CLIPMAP_LEVELS) + k] = uint(g);
+            bool visible = u.uFallback.w > 0.5 && solves < 255u && seen[g] + 2u > uint(u.uFrame.x);
+            int b = -1;
+            if (visible) b = min(findMSB(max(solves, 1u)), CLIPMAP_VISIBLE_BUCKETS - 1);
+            else if (solves < uint(u.uFallback.z)) b = CLIPMAP_VISIBLE_BUCKETS + min(findMSB(max(solves, 1u)), CLIPMAP_YOUNG_BUCKETS - 1);
+            if (b >= 0) {
+                uint k = atomicAdd(queue[bucketAt + uint(b)], 1u);
+                queue[bucketListAt + uint(b) * total + k] = uint(g);
             }
         }
         return;
@@ -226,14 +258,16 @@ void main() {
             if (k < count) chosen = int(queue[8 + BLIX_CLIPMAP_LEVELS * perLevel + k]);
             else k -= count;
         }
-        for (int b = 0; b < CLIPMAP_YOUNG_BUCKETS && chosen < 0; ++b) {
-            int count = int(queue[youngAt + uint(b)]);
-            if (k < count) chosen = int(queue[youngListAt + uint(b * perLevel * BLIX_CLIPMAP_LEVELS) + uint(k)]);
+        // Visible probes, fewest solves first, up to their share; then young ones off screen.
+        int visibleLeft = int(u.uFallback.w);
+        for (int b = 0; b < CLIPMAP_BUCKETS && chosen < 0; ++b) {
+            int count = int(queue[bucketAt + uint(b)]);
+            if (b < CLIPMAP_VISIBLE_BUCKETS) { count = min(count, visibleLeft); visibleLeft -= count; }
+            if (k < count) chosen = int(queue[bucketListAt + uint(b) * total + uint(k)]);
             else k -= count;
         }
         if (chosen < 0) {
             // The budget the queues left over sweeps every probe in turn, from the cursor.
-            uint total = uint(perLevel * BLIX_CLIPMAP_LEVELS);
             chosen = int((queue[cursorAt] + uint(k)) % total);
         }
         sProbe = chosen;
@@ -253,7 +287,66 @@ void main() {
     float farDistance = spacing * float(max(c.dims.x, max(c.dims.y, c.dims.z))) * 2.0;
 
     uint seed = blix_pcg(uint(u.uFrame.x) * 2654435761u + uint(g));
-    vec3 dir = rotation(seed) * fibonacci(int(lane), RAYS);
+    uint stateWord = states[g].w;
+    // Guide only from this cell's own history (a re-pointed slot's bins belong to another cell).
+    bool guide = u.uGuide.x > 0.5 && (stateWord & BLIX_CLIPMAP_SOLVED) != 0u && ((stateWord >> 8) & 0xFFu) > 0u;
+    ivec2 radianceTile = blix_clipmapTileOrigin(c, level, slot);
+    if (lane < 36u) {
+        vec4 bin = guide ? imageLoad(uClipmapRadiance, radianceTile + ivec2(int(lane) % 6, int(lane) / 6)) : vec4(1.0);
+        sBinQ[lane] = bin.a > 0.5 ? dot(bin.rgb, vec3(0.2126, 0.7152, 0.0722)) : -1.0;
+    }
+    barrier();
+    if (lane == 0u) {
+        // A bin no ray has reached yet counts as the mean; every bin keeps a floor of the mean.
+        float sum = 0.0, known = 0.0;
+        for (int b = 0; b < 36; ++b) if (sBinQ[b] >= 0.0) { sum += sBinQ[b]; known += 1.0; }
+        float mean = known > 0.0 ? sum / known : 1.0;
+        float total = 0.0;
+        for (int b = 0; b < 36; ++b) {
+            float q = (sBinQ[b] >= 0.0 ? sBinQ[b] : mean) + u.uGuide.y * mean + 1e-6;
+            sBinQ[b] = q;
+            total += q;
+        }
+        float running = 0.0;
+        for (int b = 0; b < 36; ++b) { sBinQ[b] /= total; running += sBinQ[b]; sBinCdf[b] = running; }
+        sGuided = guide ? 1u : 0u;
+    }
+    barrier();
+    vec3 dir;
+    const int halfRays = RAYS / 2;
+    if (sGuided != 0u && int(lane) >= halfRays) {
+        // A bin by the guide (stratified over the guided lanes), then a uniform point inside it.
+        int j = int(lane) - halfRays;
+        uint r = blix_pcg(seed ^ (lane * 0x9E3779B9u));
+        float pick = (float(j) + float(r & 0xFFFFu) / 65536.0) / float(halfRays);
+        int b = 0;
+        while (b < 35 && sBinCdf[b] < pick) ++b;
+        uint r2 = blix_pcg(r);
+        vec2 inBin = vec2(float(r2 & 0xFFFFu), float(r2 >> 16)) / 65536.0;
+        dir = blix_octDecode(((vec2(b % 6, b / 6) + inBin) / 6.0) * 2.0 - 1.0);
+    } else {
+        dir = rotation(seed) * (sGuided != 0u ? fibonacci(int(lane), halfRays) : fibonacci(int(lane), RAYS));
+    }
+    {
+        vec2 uvBin = blix_octEncode(dir);
+        ivec2 b2 = clamp(ivec2(floor((uvBin * 0.5 + 0.5) * 6.0)), ivec2(0), ivec2(5));
+        sRayBin[lane] = b2.y * 6 + b2.x;
+    }
+    if (sGuided != 0u) {
+        // The mixture's density at dir, in solid angle: half uniform, half the guide's bin probability spread evenly
+        // over the bin's square (4/36 of [-1,1]^2's area 4, so density 9 q per unit), where a unit of square is 1/|p|^3 steradians
+        // (p the octahedron point, |p|_1 = 1).
+        vec2 uv = blix_octEncode(dir);
+        ivec2 bxy = clamp(ivec2(floor((uv * 0.5 + 0.5) * 6.0)), ivec2(0), ivec2(5));
+        vec3 pOct = vec3(uv, 1.0 - abs(uv.x) - abs(uv.y));
+        if (pOct.z < 0.0) pOct.xy = (1.0 - abs(pOct.yx)) * vec2(pOct.x >= 0.0 ? 1.0 : -1.0, pOct.y >= 0.0 ? 1.0 : -1.0);
+        float len = length(pOct);
+        float pGuide = sBinQ[bxy.y * 6 + bxy.x] * 9.0 * len * len * len;
+        float pMix = 0.5 / (4.0 * PI) + 0.5 * pGuide;
+        sWeight[lane] = 1.0 / (4.0 * PI * pMix);
+    } else {
+        sWeight[lane] = 1.0;
+    }
     vec3 toSun = -normalize(u.uSunDirection.xyz);
     BlixRayHit hit;
     vec3 radiance = vec3(0.0);
@@ -313,13 +406,14 @@ void main() {
         float cosSum = 0.0, skySum = 0.0;
         float dSum = 0.0, d2Sum = 0.0, dWeight = 0.0;
         for (int i = 0; i < RAYS; ++i) {
-            float k = max(dot(texelDir, sDirection[i]), 0.0);
-            if (k <= 0.0) continue;
+            float cosine = max(dot(texelDir, sDirection[i]), 0.0);
+            if (cosine <= 0.0) continue;
+            float k = cosine * sWeight[i];
             if (sDependent[i] != 0u) irrDynamic += sRadiance[i] * k;
             else irr += sRadiance[i] * k;
             skySum += sEscaped[i] * k;
             cosSum += k;
-            float w = pow(k, u.uFrame.w);
+            float w = pow(cosine, u.uFrame.w) * sWeight[i];
             dSum += sDistance[i] * w;
             d2Sum += sDistance[i] * sDistance[i] * w;
             dWeight += w;
@@ -330,6 +424,27 @@ void main() {
         sMoments[lane] = vec2(mean, dWeight > 0.0 ? max(d2Sum / dWeight - mean * mean, 0.0) : 0.0);
     }
     barrier();
+
+    // The radiance bins: the mean radiance this solve's rays saw in each, blended in (1/n, never under 0.1: a guide
+    // follows what the light is now). A slot's first solve for its cell writes every bin (one no ray reached takes the
+    // solve's mean), so no bin keeps another cell's past.
+    if (u.uGuide.x > 0.5 && lane < 36u) {
+        vec3 sum = vec3(0.0), all = vec3(0.0);
+        float count = 0.0;
+        for (int i = 0; i < RAYS; ++i) {
+            all += sRadiance[i];
+            if (sRayBin[i] == int(lane)) { sum += sRadiance[i]; count += 1.0; }
+        }
+        uint solvesBefore = (stateWord & BLIX_CLIPMAP_SOLVED) != 0u ? (stateWord >> 8) & 0xFFu : 0u;
+        ivec2 at = radianceTile + ivec2(int(lane) % 6, int(lane) / 6);
+        if (solvesBefore == 0u) {
+            imageStore(uClipmapRadiance, at, vec4(count > 0.0 ? sum / count : all / float(RAYS), 1.0));
+        } else if (count > 0.0) {
+            vec4 old = imageLoad(uClipmapRadiance, at);
+            float rate = max(1.0 / float(solvesBefore + 1u), 0.1);
+            imageStore(uClipmapRadiance, at, vec4(mix(old.rgb, sum / count, rate), 1.0));
+        }
+    }
 
     uint previousFlags = states[g].w;
     bool solvedBefore = (previousFlags & BLIX_CLIPMAP_SOLVED) != 0u;

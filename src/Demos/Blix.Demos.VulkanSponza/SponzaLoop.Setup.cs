@@ -199,6 +199,10 @@ internal sealed partial class SponzaLoop
         // converged; the A/B). Default 0: each solve weighs 1/n, up to n = 255.
         if (args.Float("clipmap-converge-floor") is { } ccf) clipmapConvergeFloor = Math.Clamp(ccf, 0f, 1f);
         if (args.Int("clipmap-young") is { } young) clipmapYoung = Math.Clamp(young, 0, 16);
+        // --clipmap-visible-share F: at most this share of the budget a frame goes to the probes the image reads (0: none,
+        // the A/B).
+        if (args.Float("clipmap-visible-share") is { } cvs) clipmapVisibleShare = Math.Clamp(cvs, 0f, 1f);
+        if (args.Float("clipmap-guide") is { } cg) { clipmapGuide = cg > 0f; clipmapGuideFloor = Math.Clamp(cg, 0.01f, 10f); }
         // --surface-check: hold the pre-pass's SurfaceKey and velocity against CPU rays at the shot (stage 4e-iv).
         surfaceCheck = args.Flag("surface-check");
         if (args.Float("incident-normal-bias") is { } nb) incidentNormalBias = Math.Clamp(nb, 0f, 12f);
@@ -543,6 +547,11 @@ internal sealed partial class SponzaLoop
         // clipmap's atlases, device-owned rather than graph resources, so declaration order carries that dependency.
         // Screen probes read this frame's depth and normals and write buffers the incident pass reads; declared
         // between them, and fenced like every pass that binds GPU buffers.
+        // The probes this frame's image reads, stamped for the next solve (stage 4g-iii): after the depth and normals
+        // it reads, and fenced like every pass that binds GPU buffers.
+        clipmapMarkInterface = Reflect("clipmap_mark.comp");
+        clipmapMarkPassHandle = graph.ComputePass("clipmap-mark").Shader(clipmapMarkInterface)
+            .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
         // Three stages (place, trace, integrate: screen_probe_kernel.glsl), each its own pass so each is timed.
         for (var stage = 0; stage < ScreenProbeStages.Length; stage++)
         {
@@ -811,6 +820,8 @@ internal sealed partial class SponzaLoop
         var clipmapSpv = File.ReadAllBytes(Path.Combine(shaderDir, "clipmap_inject.comp.spv"));
         clipmapPipeline = Own(device.CreateComputePipeline(
             Own(device.CreateComputeShaderProgramFromSpv(clipmapSpv, clipmapInterface, "clipmap_inject")), "clipmap_inject"));
+        clipmapMarkPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
+            File.ReadAllBytes(Path.Combine(shaderDir, "clipmap_mark.comp.spv")), clipmapMarkInterface, "clipmap_mark")), "clipmap_mark"));
         for (var stage = 0; stage < ScreenProbeStages.Length; stage++)
         {
             var name = $"screen_probe_{ScreenProbeStages[stage]}";

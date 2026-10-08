@@ -1,0 +1,68 @@
+#version 450
+// Which clipmap probes this frame's image reads (stage 4g-iii). Every fourth pixel each way: the surface behind it,
+// the level that answers there (and the next, inside its blend band), and the eight probes the incident pass weighs
+// -- each stamped with the frame number, so the next solve can spend its budget on what is on screen. A probe's
+// answer is noisy in proportion to 1/sqrt(its rays), and the image only shows the ones read here: 65,536 probes share
+// 512 solves a frame, and a few thousand of them are all a view ever needs.
+//
+// Stamps rather than flags: nothing has to clear them, and a probe off screen for two frames simply stops counting.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform ClipmapMark {
+    mat4 uInvProjection;
+    mat4 uInvView;
+    vec4 uTarget;      // xy the depth target's pixels, zw the pixel stride
+    vec4 uDims;        // xyz probes per level, w base spacing
+    vec4 uParams;      // x blend band (probes), y the stamp (the frame number the next solve will run as)
+    vec4 uOrigin0;
+    vec4 uOrigin1;
+    vec4 uOrigin2;
+    vec4 uOrigin3;
+} u;
+
+layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
+layout(set = 0, binding = 2) uniform sampler2D uPrepassNormal;
+layout(std430, set = 0, binding = 3) buffer ClipmapSeen { uint seen[]; };
+
+// Addressing only: the sampling half of probe_clipmap.glsl is left out (no atlas or state is read here).
+#include "probe_clipmap.glsl"
+
+void stamp(BlixClipmap c, int level, vec3 world, vec3 n) {
+    float spacing = blix_clipmapSpacing(c, level);
+    vec3 p = world + n * (0.25 * spacing);   // lifted as blix_clipmapLevelSample lifts it
+    ivec3 base = ivec3(floor(p / spacing - 0.5));
+    int perLevel = c.dims.x * c.dims.y * c.dims.z;
+    uint value = uint(u.uParams.y);
+    for (int i = 0; i < 8; ++i) {
+        ivec3 cell = base + ivec3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
+        seen[level * perLevel + blix_clipmapSlotIndex(c, blix_clipmapSlot(c, cell))] = value;
+    }
+}
+
+void main() {
+    ivec2 at = ivec2(gl_GlobalInvocationID.xy) * ivec2(u.uTarget.zw);
+    if (any(greaterThanEqual(at, ivec2(u.uTarget.xy)))) return;
+    vec2 uv = (vec2(at) + 0.5) / u.uTarget.xy;
+    float raw = texelFetch(uSceneDepth, at, 0).r;
+    if (raw >= 1.0 - 1e-6) return;
+    vec4 view = u.uInvProjection * vec4(uv * 2.0 - 1.0, raw, 1.0);
+    vec3 world = (u.uInvView * vec4(view.xyz / view.w, 1.0)).xyz;
+    vec4 nSample = texelFetch(uPrepassNormal, at, 0);
+    if (dot(nSample.xyz, nSample.xyz) < 1e-6) return;
+    vec3 n = normalize(nSample.xyz);
+
+    BlixClipmap c;
+    c.dims = ivec3(u.uDims.xyz);
+    c.baseSpacing = u.uDims.w;
+    c.blendProbes = u.uParams.x;
+    c.origin[0] = ivec3(u.uOrigin0.xyz);
+    c.origin[1] = ivec3(u.uOrigin1.xyz);
+    c.origin[2] = ivec3(u.uOrigin2.xyz);
+    c.origin[3] = ivec3(u.uOrigin3.xyz);
+    float blend;
+    int level = blix_clipmapLocate(c, world, blend);
+    if (level < 0) return;
+    stamp(c, level, world, n);
+    if (blend > 0.0 && level + 1 < BLIX_CLIPMAP_LEVELS) stamp(c, level + 1, world, n);
+}

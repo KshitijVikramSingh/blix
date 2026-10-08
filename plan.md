@@ -418,8 +418,30 @@ exactly where the world has changed.
      probe-sized blocks (white, grey, red) that differs run to run. In bounce-lit enclosures the light arrives through
      a few sunlit patches and saturated curtains that only a handful of each probe's rays hit: per-probe VARIANCE,
      shown as hard blocks by the interpolation. Settling does not end at the right answer, only at a stable one.
+   4g-iii DONE the budget goes to what the image reads. `clipmap_mark.comp` (after the depth pre-pass, every 4th pixel
+     each way) stamps the 8 probes the incident pass weighs at each surface (both levels inside a blend band) with
+     the frame; the scan queues probes stamped in the last two frames by solves, powers of two, fewest first, up to
+     `--clipmap-visible-share` (0.75) of the budget, after unsolved and dependent probes and before off-screen young
+     ones. The arcade's image reads ~1,300 probes: they reach 129 solves by frame 600 (4-7 without) and the 255 cap
+     by 2580; off-screen probes sit at 2-3 solves meanwhile.
+   4g-iv DONE guided rays. Each probe keeps 36 octahedral bins of the mean radiance its rays saw (`clipmapRadiance`,
+     written whole on a slot's first solve for its cell, then 1/n never under 0.1). Half of each solve's 64 rays keep
+     the uniform spiral; half pick a bin by luminance (floor 0.25 of the mean, stratified) and a uniform point in it;
+     every ray is weighted by 1/(4 pi p) of the MIXTURE density in every sum (p >= 0.5/(4 pi): no weight over 2), the
+     octahedral map's solid angle per unit of square being 1/|p|^3. `--clipmap-guide 0` is the control (every
+     weight exactly 1, the old estimator).
+     Measured (floors: two identical held runs, 2580 frames, incident median / tinted > 0.03):
+       arcade  11.6 / 15.6% -> visible 5.7 / 2.1% -> + guided 3.75 / 2.9%
+       atrium   3.9 / 0.6%  -> visible 0.45 / 0.0% -> + guided 0.57 / 0.0% (guiding neutral where light is broad)
+     Walk then stop, against the new floor's reference (young-first only -> all on): arcade at the stop 53 -> 37%,
+     +30 frames 24%, +60 18%, +120 49 -> 14%, +960 31 -> 9% (tinted 63 -> 34 -> 16 -> 4.4%); atrium at the stop
+     24 -> 15%, +15 frames 3.9%, +120 8.7 -> 2.6%, +960 1.8%. Path-traced walking reference, off -> on: Sponza total
+     |err| 0.00137 -> 0.00112, as shaded 0.00048 -> 0.00044; Bistro 0.154 -> 0.147, 0.182 -> 0.178 (no bias, a little
+     closer). Mover (slow protocol, clipmap only): ring / rest / curtain bias -0.2 / -0.7 / +0.3% (was -3.1 / -5.3).
+     COST: frame interleaved, off 47.4 / 46.0 ms vs on 49.4 / 51.6 ms (+2-5 ms). Unattributed; suspect the budget now
+     solving indoor probes whose rays all hit (traversal + sun + clipmap at each hit) where the round-robin spent much
+     of it on coarse outdoor probes whose rays escape. Measure isolated before deciding anything.
    Open, measured:
-     clipmap probe variance in bounce-lit enclosures (above): the next problem for what the user sees.
      FOG made the stability instrument unrepeatable: it is on by default and reads wall time (time.Total) for its
        density drift and sample jitter, so the same build, pose and flags gave 45k / 62k / 102k presented pixels
        over 2% (darkest decile 1.05-3.62%) while the incident light matched to 0.01%. With `--no-fog` two repeats
