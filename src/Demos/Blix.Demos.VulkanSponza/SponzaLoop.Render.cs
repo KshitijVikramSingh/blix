@@ -706,6 +706,8 @@ internal sealed partial class SponzaLoop
         // the rejections and removes the whole class.
         RecordRaySurfaceBake();
         RecordClipmap();
+        PickWatchPoints();
+        RecordClipmapWatch();
         RecordRayCheck();
 
         // Occlusion needs the pre-pass's depth; without one the early list is the whole frustum's.
@@ -896,6 +898,7 @@ internal sealed partial class SponzaLoop
         SampleStability();
         WriteWalkDumps();
         WriteLevelProbeDumps();
+        SampleWatch();
         if (shotPath is { } path && !shotWritten && fullyLoaded && !AbOffPhase
             && framePeriodCount >= 60 && measuredFrames >= shotFrame)
         {
@@ -916,6 +919,7 @@ internal sealed partial class SponzaLoop
             WriteStability(Path.ChangeExtension(path, null));
             WriteSurfaceCheck();
             WriteMoverShot(Path.ChangeExtension(path, null));
+            WriteWatch();
             WritePassBreakdown();
             WriteLodCensus();
             WriteClusterCensus();

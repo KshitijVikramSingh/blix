@@ -91,7 +91,8 @@ internal sealed partial class SponzaLoop
     }
 
     private const int ClipmapLevels = 4;
-    private static readonly Int3 ClipmapDims = new(32, 16, 32);
+    // Probes per level, x y z. --clipmap-height N sets y (16: level 0 reaches +-4 m vertically, 32: +-8 m); stage 4g-viii.
+    private Int3 ClipmapDims = new(32, 16, 32);
     // The depth moments' lobe: sharper keeps walls as edges, but each texel then hears fewer of 64 rays.
     private const float ClipmapDepthLobe = 12f;
     // What a probe's light that crosses no moving reach can still be stale by: nothing, short of the slot being re-pointed
@@ -133,7 +134,9 @@ internal sealed partial class SponzaLoop
     private void CreateClipmap()
     {
         if (clipmap is not null) return;
-        clipmap = new ProbeClipmap(ClipmapLevels, ClipmapDims, clipmapSpacing);
+        clipmap = clipmapBlendOverride >= 0f
+            ? new ProbeClipmap(ClipmapLevels, ClipmapDims, clipmapSpacing, clipmapBlendOverride)
+            : new ProbeClipmap(ClipmapLevels, ClipmapDims, clipmapSpacing);
         clipmapIrradiance = Own(device.CreateStorageTexture2D(clipmap.AtlasWidth, clipmap.AtlasHeight, TextureFormat.Rgba16F,
             SamplerDescription.LinearClamp, "sponza.clipmap.irradiance"));
         clipmapDepth = Own(device.CreateStorageTexture2D(clipmap.AtlasWidth, clipmap.AtlasHeight, TextureFormat.Rgba16F,

@@ -1,0 +1,45 @@
+#version 450
+// The clipmap's answer at fixed world points (stage 4g-viii, --watch). A surface's light should not depend on where
+// the camera stands; the clipmap follows the camera, so as it walks a point is answered by one level, then by a
+// coarser one, and its light changes. This evaluates exactly what the incident pass would (the blended answer, the
+// same filtered fetches) at points chosen once, every frame, so the change can be read as a series.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform ClipmapWatch {
+    vec4 uDims;        // xyz probes per level, w base spacing
+    vec4 uParams;      // x blend band (probes), y how many points
+    vec4 uOrigin0;
+    vec4 uOrigin1;
+    vec4 uOrigin2;
+    vec4 uOrigin3;
+} u;
+
+layout(set = 0, binding = 1) uniform sampler2D uClipmapIrradiance;
+layout(set = 0, binding = 2) uniform sampler2D uClipmapDepth;
+layout(std430, set = 0, binding = 3) readonly buffer ClipmapState { uvec4 states[]; };
+layout(std430, set = 0, binding = 4) readonly buffer WatchPoints { vec4 points[]; };   // pairs: position, normal
+layout(std430, set = 0, binding = 5) writeonly buffer WatchOut { vec4 answers[]; };  // rgb irradiance, a 1 if found
+
+#define BLIX_CLIPMAP_IRRADIANCE(t) texelFetch(uClipmapIrradiance, t, 0)
+#define BLIX_CLIPMAP_DEPTH(t) texelFetch(uClipmapDepth, t, 0)
+#define BLIX_CLIPMAP_IRRADIANCE_FILTERED(p) textureLod(uClipmapIrradiance, (p) / vec2(textureSize(uClipmapIrradiance, 0)), 0.0)
+#define BLIX_CLIPMAP_DEPTH_FILTERED(p) textureLod(uClipmapDepth, (p) / vec2(textureSize(uClipmapDepth, 0)), 0.0)
+#define BLIX_CLIPMAP_STATE(s) states[s]
+#include "probe_clipmap.glsl"
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= uint(u.uParams.y)) return;
+    BlixClipmap c;
+    c.dims = ivec3(u.uDims.xyz);
+    c.baseSpacing = u.uDims.w;
+    c.blendProbes = u.uParams.x;
+    c.origin[0] = ivec3(u.uOrigin0.xyz);
+    c.origin[1] = ivec3(u.uOrigin1.xyz);
+    c.origin[2] = ivec3(u.uOrigin2.xyz);
+    c.origin[3] = ivec3(u.uOrigin3.xyz);
+    bool found;
+    vec4 field = blix_clipmapSample(c, points[2u * i].xyz, normalize(points[2u * i + 1u].xyz), found);
+    answers[i] = vec4(field.rgb, found ? 1.0 : 0.0);
+}

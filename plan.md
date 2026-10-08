@@ -476,6 +476,16 @@ exactly where the world has changed.
      Cornell energy 0.996-1.000 (target met), median 1.027-1.031 (met), relative |error| 0.171 (target 0.10, not met);
      thin-wall leak 0.091-0.111 over five runs (target 0.01, not met), open-room energy 0.889-0.898 (not met).
      Also: the reference's leak summary threw on a scene with no light to compare (fixed).
+   4g-viii the cheap hand-off fixes, measured and NOT taken. `--watch` (clipmap_watch.comp): a 24x16 grid of CPU rays
+     picks fixed surface points at the walk's start, and the shipped blended answer is evaluated there every frame --
+     a surface's light against where the camera stands. Still camera: every point within 0.1% (the floor is zero),
+     so all change while walking is the camera's. Sponza, walking backwards (6,3,0) -> (-6,3,0) looking +x, points
+     ~3 -> ~15 m away, spread / range / largest step, median: base 6.7 / 16 / 8.2%; `--clipmap-height 32` (level 0
+     +-8 m vertically, twice the probes) 8.8 / 21 / 11.3% -- worse: the visible budget spread over twice the probes;
+     `--clipmap-blend 4` 6.7 / 21 / 6.3% (smaller steps, cleaner after stopping, same range) but the GI gate breaks:
+     Cornell point error 0.171 -> 0.207, energy +3.8% (more of the coarser, wronger level in every answer). So the
+     light moves because the levels hold different answers; blending and reach only move where it shows. What fixes
+     it is resolution where the image looks, not a cleverer camera-centred box.
    Open, measured:
      FOG made the stability instrument unrepeatable: it is on by default and reads wall time (time.Total) for its
        density drift and sample jitter, so the same build, pose and flags gave 45k / 62k / 102k presented pixels

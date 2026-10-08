@@ -204,6 +204,12 @@ internal sealed partial class SponzaLoop
         if (args.Float("clipmap-visible-share") is { } cvs) clipmapVisibleShare = Math.Clamp(cvs, 0f, 1f);
         if (args.Float("clipmap-lift") is { } lift) clipmapLift = Math.Max(0f, lift);
         clipmapNoBounce = args.Flag("clipmap-no-bounce");
+        // --clipmap-height N: probes per level vertically (16; 32 doubles level 0's reach to +-8 m and every level's
+        // probe count). --clipmap-blend B: the band between levels, in probes (2), held inside a level: 2B + 1 under
+        // the smallest dimension.
+        if (args.Int("clipmap-height") is { } ch) ClipmapDims = new Int3(32, Math.Clamp(ch, 8, 32), 32);
+        if (args.Float("clipmap-blend") is { } cb)
+            clipmapBlendOverride = Math.Clamp(cb, 0f, (Math.Min(ClipmapDims.X, Math.Min(ClipmapDims.Y, ClipmapDims.Z)) - 1) / 2f - 0.01f);
         if (args.Float("clipmap-visibility-power") is { } vp) clipmapVisibilityPower = Math.Max(0f, vp);
         if (args.Float("clipmap-guide") is { } cg) { clipmapGuide = cg > 0f; clipmapGuideFloor = Math.Clamp(cg, 0.01f, 10f); }
         // --surface-check: hold the pre-pass's SurfaceKey and velocity against CPU rays at the shot (stage 4e-iv).
@@ -240,6 +246,7 @@ internal sealed partial class SponzaLoop
         // of one photograph of it. Ignores --cam, which is the still counterpart.
         if (args.Flag("orbit")) orbit = true;
         ReadWalkArgs(args);
+        ReadWatchArgs(args);
         // --cam x,y,z,yaw,pitch — a reproducible viewpoint. Without it every capture and every
         // census speaks only for wherever the camera happens to start, which for a question like
         // "how much of this scene is occluded" is the difference between a measurement and an
@@ -402,6 +409,9 @@ internal sealed partial class SponzaLoop
         var clipmapBuilder = graph.ComputePass("probe-clipmap").Shader(clipmapInterface);
         for (var c = 0; c < CascadeCount; c++) clipmapBuilder = clipmapBuilder.Read(cascadeHandles[c]);
         clipmapPassHandle = clipmapBuilder.Handle;
+        // --watch: the clipmap's answer at fixed points each frame, right after the solve (stage 4g-viii).
+        clipmapWatchInterface = Reflect("clipmap_watch.comp");
+        clipmapWatchPassHandle = graph.ComputePass("clipmap-watch").Shader(clipmapWatchInterface).Handle;
 
         // Froxel fog compute pass — fills the 3D scattering grid. Declared
         // between the cascade passes and the lit pass so it runs after the
@@ -823,6 +833,8 @@ internal sealed partial class SponzaLoop
         var clipmapSpv = File.ReadAllBytes(Path.Combine(shaderDir, "clipmap_inject.comp.spv"));
         clipmapPipeline = Own(device.CreateComputePipeline(
             Own(device.CreateComputeShaderProgramFromSpv(clipmapSpv, clipmapInterface, "clipmap_inject")), "clipmap_inject"));
+        clipmapWatchPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
+            File.ReadAllBytes(Path.Combine(shaderDir, "clipmap_watch.comp.spv")), clipmapWatchInterface, "clipmap_watch")), "clipmap_watch"));
         clipmapMarkPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "clipmap_mark.comp.spv")), clipmapMarkInterface, "clipmap_mark")), "clipmap_mark"));
         for (var stage = 0; stage < ScreenProbeStages.Length; stage++)
