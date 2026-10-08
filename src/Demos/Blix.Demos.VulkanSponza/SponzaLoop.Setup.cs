@@ -195,6 +195,9 @@ internal sealed partial class SponzaLoop
         if (args.Float("clipmap-dependent-share") is { } cds) clipmapDependentShare = Math.Clamp(cds, 0f, 1f);
         clipmapShadowRays = args.Flag("clipmap-shadow-rays");
         if (args.Float("clipmap-dynamic-converge") is { } cdc) clipmapDynamicConverge = Math.Clamp(cdc, 0.01f, 1f);
+        // --clipmap-converge-floor F: the static light's blend never falls below F (0.25 was the steady rate before it
+        // converged; the A/B). Default 0: each solve weighs 1/n, up to n = 255.
+        if (args.Float("clipmap-converge-floor") is { } ccf) clipmapConvergeFloor = Math.Clamp(ccf, 0f, 1f);
         // --surface-check: hold the pre-pass's SurfaceKey and velocity against CPU rays at the shot (stage 4e-iv).
         surfaceCheck = args.Flag("surface-check");
         if (args.Float("incident-normal-bias") is { } nb) incidentNormalBias = Math.Clamp(nb, 0f, 12f);

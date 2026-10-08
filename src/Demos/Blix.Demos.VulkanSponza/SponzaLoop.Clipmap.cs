@@ -94,7 +94,12 @@ internal sealed partial class SponzaLoop
     private static readonly Int3 ClipmapDims = new(32, 16, 32);
     // The depth moments' lobe: sharper keeps walls as edges, but each texel then hears fewer of 64 rays.
     private const float ClipmapDepthLobe = 12f;
-    private const float ClipmapConvergence = 0.25f;
+    // What a probe's light that crosses no moving reach can still be stale by: nothing, short of the slot being re-pointed
+    // when the clipmap scrolls (which restarts its count). So it averages every solve evenly (1/n, to n = 255): with the
+    // bounce read back from neighbours that are themselves converging, that is a stochastic approximation of the
+    // fixed point, where a fixed 25% blend kept wandering (dark, bounce-lit areas worst; --stability, d175e53).
+    // --clipmap-converge-floor sets a floor for the A/B.
+    private float clipmapConvergeFloor;
 
     private void CreateClipmap()
     {
@@ -151,14 +156,18 @@ internal sealed partial class SponzaLoop
             new ShaderTextureBinding("uCascadeShadowMaps[2]", graph.GetDepthTexture(cascadeHandles[2])),
         };
         // The reach of what moved this frame: the mover's while it moves (stage 4f).
-        var dynamicActive = MoverActive && moverMoved && !noDependency && !noClipmapDependency;
+        // The reach classifies paths whenever there is a mover, held or not: the static part averages every solve
+        // (1/n), so a path through the reach counted static while the mover held would stay stale once it moved.
+        // Priority re-solving is for when it moved this frame (uDynamicQueue.w).
+        var dynamicReach = MoverActive && !noDependency && !noClipmapDependency;
+        var dynamicActive = dynamicReach && moverMoved;
         var buffers = rayBlockBuffers
             .Append(new ShaderBufferBinding("ClipmapState", clipmapState))
             .Append(new ShaderBufferBinding("ClipmapQueue", clipmapQueue)).ToArray();
         DispatchCommand Phase(int mode, int groups) => new(clipmapPipeline, groups, 1, 1, new ShaderUniform[]
         {
             new("uDims", new Vector4Uniform(new Vector4(ClipmapDims.X, ClipmapDims.Y, ClipmapDims.Z, clipmapSpacing))),
-            new("uParams", new Vector4Uniform(new Vector4(clipmap.BlendProbes, ClipmapConvergence, mode, clipmapBudget))),
+            new("uParams", new Vector4Uniform(new Vector4(clipmap.BlendProbes, clipmapConvergeFloor, mode, clipmapBudget))),
             new("uOrigin0", new Vector4Uniform(origins[0])),
             new("uOrigin1", new Vector4Uniform(origins[1])),
             new("uOrigin2", new Vector4Uniform(origins[2])),
@@ -168,9 +177,9 @@ internal sealed partial class SponzaLoop
             new("uFrame", new Vector4Uniform(new Vector4(clipmapFrame, 1f, 1f, ClipmapDepthLobe))),
             // y: the prefiltered sky's mip a probe ray reads, about a ray's 1/64 of the sphere (a ~15 degree cone).
             new("uFallback", new Vector4Uniform(new Vector4(clipmapUnknownSky, MathF.Min(1.5f, Math.Max(0, iblPrefilterMips - 1)), 0f, 0f))),
-            new("uDynamicMin", new Vector4Uniform(dynamicActive ? new Vector4(moverReach.Min, 1f) : Vector4.Zero)),
+            new("uDynamicMin", new Vector4Uniform(dynamicReach ? new Vector4(moverReach.Min, 1f) : Vector4.Zero)),
             new("uDynamicMax", new Vector4Uniform(new Vector4(MoverActive ? moverReach.Max : Vector3.Zero, clipmapDynamicConverge))),
-            new("uDynamicQueue", new Vector4Uniform(new Vector4(clipmapDependentRays, MathF.Floor(clipmapBudget * clipmapDependentShare), clipmapShadowRays ? 1f : 0f, 0f))),
+            new("uDynamicQueue", new Vector4Uniform(new Vector4(clipmapDependentRays, MathF.Floor(clipmapBudget * clipmapDependentShare), clipmapShadowRays ? 1f : 0f, dynamicActive ? 1f : 0f))),
             new("uCascadeVP", new Matrix4x4ArrayUniform(cascadeViewProj)),
         }, textures, Buffers: buffers);
         graph.Dispatch(clipmapPassHandle, Phase(0, 1));

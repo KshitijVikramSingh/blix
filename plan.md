@@ -378,6 +378,39 @@ exactly where the world has changed.
      shading; only knowing HOW the shading changed (not that it did) would remove it. Not pursued.
    Only after 4f-i proves the shape: representations that scale past one mover (change epochs per reach,
    coarse spatial dirty fields, dependency hashes, reach IDs).
+4g. *Lighting that settles* (opened 2026-10-08: walking Sponza headed, "the light doesn't really seem to settle,
+   especially in low light areas"; and around foliage). Instrument: `--stability K` now splits by class -- foliage
+   solid / edge (the pre-pass key's alpha bit in all / some of the K frames) and the rest by brightness decile.
+   Three poses (start hall; -5.62,5.14,-0.03,96.75,-3.71 where the user stood; the 2nd-floor gallery 2.3,8.3,-3.5,
+   180,0), 120 still frames at 1800, default config. Presented-image variation rose as pixels darkened; freezing
+   the clipmap (`--clipmap-freeze`) halved the pixels over 2% and took most of the dark deciles' variation.
+   4g-i DONE the clipmap's static light averages every solve (1/n to n = 255) where it kept a 25% blend: nothing
+     it depends on moves, the slot's re-pointing restarts the count, and with bounce read back from converging
+     neighbours 1/n is a stochastic approximation of the fixed point. To keep that honest, paths are classified
+     against the mover's reach whenever there is a mover (it was only while it moved, so a held mover's paths
+     went to the static part, which would now keep them); priority re-solving still only on motion
+     (uDynamicQueue.w); depth moments and sky visibility of a probe with paths through the reach keep 0.25.
+     `--clipmap-converge-floor F` is the A/B (0.25 = before). Pixels over 2%, presented, before -> after:
+     45 -> 19%, 55 -> 22%, 43 -> 32%; darkest decile median 2.5 -> 1.5, 4.0 -> 1.9, 1.6 -> 0.7%. Walking
+     reference unchanged (Sponza |err| 0.00045 -> 0.00044, Bistro 0.182 -> 0.182). Mover (slow protocol,
+     `--mover-angle 12 --mover-period 3`, 1200 frames), ring / rest bias: full stack +7.0 / +1.1 -> +2.5 / +1.2%;
+     clipmap only -3.4 / -6.1 -> -3.1 / -5.3%, but the ring's median scatter 22 -> 31% there (one pair; unchecked
+     against a floor). Under the default swing (25 deg / 2 s) 1/n is slower to forget its start: the moving run's
+     rest -15 vs -9.5% at 1200 frames, -5.5 vs -4.2% at 2400 (its round-robin runs at half budget while
+     dependents take the rest) -- convergence speed, not staleness. (Default-swing mover numbers are a different
+     protocol from 4f's: ring -27% with screen probes already at 408934b. Not a regression.)
+   Open, measured:
+     foliage EDGES are now the largest share of what moves (presented median 2.9-3.5%, 67-71% of edge pixels over
+       2%, a quarter to a third of all unstable pixels), and the clipmap does not move them. Suspect, unverified:
+       TAA's key test -- jitter alternates leaf and background at an edge, so the key changes every frame and
+       history may be dropped every frame.
+     mid-brightness surfaces in the gallery (deciles 6-9, presented 1.9-3.7% median) while the incident light
+       there moves under 1%: shading under jitter (texture / specular detail), not GI.
+     the clipmap's DYNAMIC part keeps its short blend while the mover holds still (noise near the reach for as
+       long as there is a mover); it could average while held and restart when it moves -- needs a per-probe
+       "moved since my last solve" (a motion epoch), not a frame flag.
+     screen probes still classify only while the mover moves (4f-i); with their 256-frame static history the
+       same held-mover staleness applies, smaller (camera-local, short-lived probes).
 F. *The frame audit* (opened 2026-10-07: "a lot of pure performance on the table"). Structural first, then the
    instrument, then hot spots. Isolated per-pass GPU ms (`--gpu-isolate`; totals across sessions are NOT comparable
    on this laptop -- the same lit pass isolated 15.2 ms one morning, 21.4 the next afternoon).
@@ -393,8 +426,10 @@ F. *The frame audit* (opened 2026-10-07: "a lot of pure performance on the table
      references and censuses are deleted (29 files, -3,033 lines); scene bounds come from placements (2% pad,
      with the mover's reach). Walking vs the surface reference, total indirect |err|: Bistro bounds 0.405 ->
      clipmap 0.153, Sponza 0.0111 -> 0.0011. As shaded: Sponza clipmap 1.71 ratio / 0.00040 (+ screen probes
-     1.13 / 0.00030), Bistro 0.88 / 0.181 (0.91 / 0.137). Glass reflections are unoccluded now (no baked sky
-     visibility), diffuse transmission's back side takes the clipmap's. Engine gap found: the Vulkan->engine
+     1.13 / 0.00030), Bistro 0.88 / 0.181 (0.91 / 0.137). Glass reflections lost their occluder with the baked
+     volume and mirrored open sky everywhere (the user saw it); since f488fd3 a pane asks the clipmap how much sky
+     R sees from it (lit.frag binds the clipmap; every lit-interface program binds its state). Diffuse
+     transmission's back side takes the clipmap's sky visibility. Engine gap found: the Vulkan->engine
      format map lacked R16F/R32Uint/Rg16F, so readbacks of R16F read garbage (test BX.1 now holds every colour
      format to the round trip). Cost: the 22-27 ms injection is gone; the clipmap's incident pass is now 11.6-12.4
      ms (three clipmap samples a pixel for the gradient, up to 8 screen probes) -- a step 4/5 target.

@@ -33,7 +33,8 @@ layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) uniform ClipmapInject {
     vec4 uDims;            // xyz probes per level, w base spacing (m)
-    vec4 uParams;          // x blend band (probes), y temporal convergence, z mode, w update budget (probes a frame)
+    vec4 uParams;          // x blend band (probes), y the static light's blend floor (0: 1/n throughout), z mode,
+                           // w update budget (probes a frame)
     vec4 uOrigin0;         // each level's lowest cell (xyz), levels 0-3
     vec4 uOrigin1;
     vec4 uOrigin2;
@@ -42,8 +43,8 @@ layout(set = 0, binding = 0) uniform ClipmapInject {
     vec4 uSunIrradiance;   // rgb measured irradiance, w 1 when the sky irradiance cube is valid
     vec4 uFrame;           // x frame counter, y bounce strength, z sky strength, w depth lobe exponent
     vec4 uFallback;        // x the sky visibility taken at a hit no probe answers for, y the sky's mip for a ray
-    // Stage 4f: the reach of what moved this frame, w of the min 1 when there is one; w of the max the blend of a
-    // probe's dynamic part (paths through the reach) per update.
+    // Stage 4f: the reach of what can move, w of the min 1 when there is one (paths are classified against it whether
+    // or not it moved this frame); w of the max the blend of a probe's dynamic part (paths through the reach) per update.
     vec4 uDynamicMin;
     vec4 uDynamicMax;
     vec4 uDynamicQueue;    // x how many of a probe's rays must cross the reach for it to be re-solved first
@@ -52,6 +53,7 @@ layout(set = 0, binding = 0) uniform ClipmapInject {
                            // the round-robin always keeps the rest: given all of it, 600-1,200 dependent probes stopped
                            // the round-robin and the scene stayed at its first solves (rest median 32% against 10%);
                            // z 1: every hit's sun by a shadow ray, the cascades not consulted (--clipmap-shadow-rays)
+                           // w 1: the mover moved this frame, so dependent probes are queued first
     // The sun's cascades, as the lit pass rendered them this frame: a hit they cover is answered there, a shadow
     // ray only beyond them (frame audit F4; screen probes measured their shadow rays at 30% of their pass).
     mat4 uCascadeVP[3];
@@ -182,7 +184,7 @@ void main() {
         if ((state.w & BLIX_CLIPMAP_SOLVED) == 0u) {
             uint k = atomicAdd(queue[level], 1u);
             queue[8u + uint(level * perLevel) + k] = uint(g);
-        } else if (u.uDynamicMin.w > 0.5 && ((state.w >> CLIPMAP_DEPENDENT_SHIFT) & 0xFFu) >= uint(u.uDynamicQueue.x)) {
+        } else if (u.uDynamicQueue.w > 0.5 && ((state.w >> CLIPMAP_DEPENDENT_SHIFT) & 0xFFu) >= uint(u.uDynamicQueue.x)) {
             uint k = atomicAdd(queue[7], 1u);
             queue[8u + uint(BLIX_CLIPMAP_LEVELS * perLevel) + k] = uint(g);
         }
@@ -306,13 +308,18 @@ void main() {
 
     uint previousFlags = states[g].w;
     bool solvedBefore = (previousFlags & BLIX_CLIPMAP_SOLVED) != 0u;
-    // How many times this slot has been solved for its cell (bits 8-15). The first solves average evenly (1/n), so
-    // an early answer (made while its neighbours were unsolved, and so wrong) does not keep a quarter of its weight
-    // for hundreds of frames; past that, the steady blend.
+    // How many times this slot has been solved for its cell (bits 8-15). The static light averages every solve evenly
+    // (1/n): nothing it depends on moves, and re-pointing the slot restarts the count. A fixed blend never settled --
+    // each re-solve moved the probe by a quarter of one solve's noise, which in dark, bounce-lit areas is most of it.
+    // uParams.y is a floor for the A/B (0.25 was the old steady rate).
     uint solves = solvedBefore ? (previousFlags >> 8) & 0xFFu : 0u;
     // A quarter of the rays meeting back faces: the probe sits inside something.
     bool buried = float(sBackfaces) > 0.25 * float(RAYS);
     float converge = max(u.uParams.y, 1.0 / float(solves + 1u));
+    // Depth moments and sky visibility move with the geometry: a probe whose rays cross a moving reach keeps the short
+    // blend for them.
+    uint dependentNow = u.uDynamicMin.w > 0.5 ? sDependentRays : 0u;
+    float geometryConverge = dependentNow > 0u ? max(converge, 0.25) : converge;
     ivec2 tile = blix_clipmapTileOrigin(c, level, slot);
     ivec2 texel = ivec2(int(lane) % 8, int(lane) / 8);
     ivec2 src = blix_octBorderSource(texel, 8);
@@ -326,12 +333,12 @@ void main() {
     imageStore(uClipmapStatic, tile + texel, vec4(newStatic, 1.0));
     imageStore(uClipmapDynamic, tile + texel, vec4(newDynamic, 1.0));
     imageStore(uClipmapIrradiance, tile + texel, vec4(newStatic + newDynamic, 1.0));
-    imageStore(uClipmapDepth, tile + texel, vec4(mix(oldDepth.rg, sMoments[interior], converge), 0.0, mix(oldDepth.a, value.a, converge)));
+    imageStore(uClipmapDepth, tile + texel, vec4(mix(oldDepth.rg, sMoments[interior], geometryConverge), 0.0, mix(oldDepth.a, value.a, geometryConverge)));
     barrier();
     if (lane == 0u) {
-        // Dependent stays set while nothing moves (no path can be classified then), so a probe that depended on the
-        // mover is queued again the moment it moves; a solve while it moves sets or clears it.
-        uint dependentRays = u.uDynamicMin.w > 0.5 ? sDependentRays : (previousFlags >> CLIPMAP_DEPENDENT_SHIFT) & 0xFFu;
+        // How many rays crossed the reach at this solve: a probe that depends on the mover is queued first the moment
+        // it moves (uDynamicQueue.w).
+        uint dependentRays = dependentNow;
         if (sAnyDependent != 0u) atomicAdd(queue[6], 1u);
         states[g] = uvec4(uvec3(cell), BLIX_CLIPMAP_SOLVED | (buried ? BLIX_CLIPMAP_BURIED : 0u)
             | (min(solves + 1u, 255u) << 8) | (dependentRays << CLIPMAP_DEPENDENT_SHIFT));
