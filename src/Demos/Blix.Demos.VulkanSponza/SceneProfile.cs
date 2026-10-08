@@ -143,7 +143,30 @@ internal sealed record SceneProfile(
         StartPitch: 0f,
         MoveSpeed: 3f);
 
-    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell };
+    /// <summary>Two rooms sharing a 0.1 m wall, one open to the sky, one sealed (<c>blix thinwall</c>): a leak scene.</summary>
+    /// <remarks>
+    /// The truth inside the sealed room (x &gt; 0) is exactly no light, so every bit of indirect light the GI puts
+    /// there crossed the wall. The camera starts at its centre, facing the shared wall; <c>--cam -3.05,3,0,90,0</c>
+    /// is the same view from the open room, the light a leak is a fraction of.
+    /// </remarks>
+    public static readonly SceneProfile ThinWall = new(
+        Name: "thinwall",
+        Title: "Vulkan thin wall",
+        AssetsVariable: "BLIX_TESTBED_ASSETS",
+        SetupHint: "tools/testbeds/setup.sh generates and cooks it",
+        Packs: new ScenePack[] { new("thinwall", Required: true) },
+        ProbeDirectory: "textures",
+        ProbeCandidates: Array.Empty<string>(),
+        FarPlane: 100f,
+        CascadeSplits: new[] { 0.1f, 8f, 20f, 50f },
+        SunDistance: 20f,
+        FogFar: 30f,
+        StartPosition: new Vector3(3.05f, 3f, 0f),
+        StartYaw: -90f,
+        StartPitch: 0f,
+        MoveSpeed: 3f);
+
+    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, ThinWall };
 
     /// <summary>The profile <c>--scene</c> names, Sponza when it names none.</summary>
     public static SceneProfile Named(string? name)

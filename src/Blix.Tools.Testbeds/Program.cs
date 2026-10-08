@@ -90,6 +90,56 @@ public static class Program
         return 0;
     }
 
+    /// <summary>
+    /// Two rooms sharing one thin wall: one open to the sky, one sealed. Every bit of indirect light in the sealed
+    /// room is light that crossed the wall -- a leak, with nothing true to confuse it with.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Room A (x &lt; 0) has no roof: the sun and the sky flood it. Room B (x &gt; 0) is closed on every side by
+    /// 0.2 m slabs, so the truth inside it is exactly zero. They share a single wall --wall m thick (0.1 by
+    /// default), much thinner than the coarse probes are apart (0.5 / 1 / 2 / 4 m): what keeps A's light out of B
+    /// is only how the GI tells a probe on the far side of a wall from one on this side.
+    /// </para>
+    /// <para>
+    /// The camera stands inside B (the scene profile's pose), facing the shared wall; a second pose in A gives the
+    /// light the leak is a fraction of. Matte white throughout, so the leak is not coloured by anything.
+    /// </para>
+    /// </remarks>
+    [BlixApp("thinwall", Summary = "write two rooms sharing a thin wall, one open to the sky and one sealed, as glTF: a GI leak scene")]
+    public static int ThinWall(AppArgs args)
+    {
+        var output = args.String("out") ?? "thinwall.gltf";
+        var size = args.Float("size") ?? 6f;
+        var wall = args.Float("wall") ?? 0.1f;
+        if (size < 2f || wall <= 0f || wall > 1f)
+            throw new AppArgsException("--size must be at least 2 m and --wall between 0 and 1 m.");
+
+        var white = Matte("white", new Vector3(0.73f, 0.73f, 0.73f));
+        var mesh = new Mesh("thinwall");
+        var p = mesh.UsePrimitive(white);
+        const float t = 0.2f;
+        var h = size / 2f;
+        var w = wall / 2f;
+        // Room A spans x in [-size - w, -w], room B x in [w, size + w]; both z in [-h, h], y in [0, size].
+        var left = -size - w;
+        var right = size + w;
+        Box(p, new Vector3(left - t, -t, -h - t), new Vector3(right + t, 0f, h + t));      // one floor under both
+        Box(p, new Vector3(left - t, 0f, -h - t), new Vector3(right + t, size, -h));       // back wall, both rooms
+        Box(p, new Vector3(left - t, 0f, h), new Vector3(right + t, size, h + t));         // front wall, both rooms
+        Box(p, new Vector3(left - t, 0f, -h), new Vector3(left, size, h));                  // A's outer wall
+        Box(p, new Vector3(right, 0f, -h), new Vector3(right + t, size, h));                // B's outer wall
+        Box(p, new Vector3(-w, 0f, -h), new Vector3(w, size + t, h));                       // the shared thin wall
+        Box(p, new Vector3(-w, size, -h - t), new Vector3(right + t, size + t, h + t));     // B's roof (A has none)
+
+        var scene = new SceneBuilder();
+        scene.AddRigidMesh(mesh, Matrix4x4.Identity);
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!);
+        scene.ToGltf2().SaveGLTF(output);
+        Console.WriteLine($"thinwall: two {size:0.##} m rooms sharing a {wall:0.###} m wall (A open to the sky, B sealed) -> {output}");
+        return 0;
+    }
+
     // The glTF vertex the cook reads in full: position, normal, one UV set (the cook generates the tangent).
     private sealed class Mesh : MeshBuilder<VertexPositionNormal, VertexTexture1, VertexEmpty>
     {

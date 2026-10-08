@@ -320,6 +320,8 @@ internal sealed partial class SponzaLoop
         Console.WriteLine(string.Create(Inv, $"    clipmap twin: CPU over GPU field {Q(answered.Where(r => r.Field > 1e-5).Select(r => r.Twin / r.Field))}"));
         Console.WriteLine(string.Create(Inv,
             $"    leak: share of each answer from probes the surface cannot see: mean {answered.Average(r => r.LeakShare):0.000}, pixels with any {answered.Count(r => r.LeakShare > 0.001)} of {answered.Length}, over a quarter {answered.Count(r => r.LeakShare > 0.25)}"));
+        // A sealed room (the thin-wall scene) has no light to compare with: what is above is all there is to say.
+        if (read.Length == 0) return;
         Console.WriteLine(string.Create(Inv,
             $"    field as answered (twin):  mean {read.Average(r => r.Twin):0.00000} against {read.Average(r => r.Ref):0.00000}, ratio {Q(read.Select(r => r.Twin / r.Ref))}, mean |error| {read.Average(r => Math.Abs(r.Twin - r.Ref)):0.00000}"));
         Console.WriteLine(string.Create(Inv,

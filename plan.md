@@ -464,6 +464,18 @@ exactly where the world has changed.
      samples) / 0.208 / 0.485 / 0.516, bias -1.5 / -0.7 / +12 / +8%. So the levels' pattern holds in a box, and
      Sponza's ~2.5x total-indirect excess is NOT an energy fault in the GI (the same code is exact here): it is
      Sponza's -- leaks, foliage or geometry -- to find there.
+   4g-vii the thin-wall scene and the GI gate. `blix thinwall`: two 6 m rooms sharing a 0.1 m wall, A open to the sky,
+     B sealed (`--scene=thinwall` starts inside B facing the wall; `--cam -3.05,3,0,90,0` is A). The truth in B is no
+     light at all. B holds 9.2% of A's (field 0.259 vs 2.81), every level leaking (forced alone 0.18 / 0.30 / 0.21 /
+     0.32), and spread evenly through B rather than by the wall: `--clipmap-no-bounce` (no clipmap light at a probe
+     ray's hit) leaves 2.5% (0.039 vs 1.53) -- the interpolation lets ~2.5% across and the room's own bounce (albedo
+     0.73) roughly triples it. A fix has to stop the crossing; the bounce multiplies whatever gets through.
+     `tools/testbeds/gate.sh` (BLIX_TESTBED_ASSETS; ~2.5 min, three headed 960x540 runs through `./blix run --build`
+     at Release) holds both scenes against the path trace (`tools/testbeds/gate.py`): each metric has a TARGET
+     (reported met / not met) and a RATCHET (broken = fail; tighten it when a change improves the number). Today:
+     Cornell energy 0.996-1.000 (target met), median 1.027-1.031 (met), relative |error| 0.171 (target 0.10, not met);
+     thin-wall leak 0.091-0.111 over five runs (target 0.01, not met), open-room energy 0.889-0.898 (not met).
+     Also: the reference's leak summary threw on a scene with no light to compare (fixed).
    Open, measured:
      FOG made the stability instrument unrepeatable: it is on by default and reads wall time (time.Total) for its
        density drift and sample jitter, so the same build, pose and flags gave 45k / 62k / 102k presented pixels

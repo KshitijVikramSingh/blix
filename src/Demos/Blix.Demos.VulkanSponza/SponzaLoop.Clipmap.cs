@@ -102,6 +102,9 @@ internal sealed partial class SponzaLoop
     private float clipmapConvergeFloor;
     // --clipmap-lift M / --clipmap-visibility-power P: the incident pass's lookup lift (0: a quarter of the spacing)
     // and Chebyshev power (0: 3). Knobs for the level probe (stage 4g-v), not tuned defaults.
+    // --clipmap-no-bounce: a probe ray's hit takes no light from the clipmap (sun only): single-bounce probes, the
+    // control for what multiple bounces carry -- in the sealed thin-wall room, whether a leak is fed back and grown.
+    private bool clipmapNoBounce;
     private float clipmapLift;
     private float clipmapVisibilityPower;
     // The blend band between levels, in probes, as every reader takes it (the overlay's slider; -1: the clipmap's own).
@@ -206,7 +209,7 @@ internal sealed partial class SponzaLoop
             new("uOrigin3", new Vector4Uniform(origins[3])),
             new("uSunDirection", new Vector4Uniform(new Vector4(sunDirection, 0f))),
             new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 1f))),
-            new("uFrame", new Vector4Uniform(new Vector4(clipmapFrame, 1f, 1f, ClipmapDepthLobe))),
+            new("uFrame", new Vector4Uniform(new Vector4(clipmapFrame, clipmapNoBounce ? 0f : 1f, 1f, ClipmapDepthLobe))),
             // y: the prefiltered sky's mip a probe ray reads, about a ray's 1/64 of the sphere (a ~15 degree cone).
             new("uGuide", new Vector4Uniform(new Vector4(clipmapGuide ? 1f : 0f, clipmapGuideFloor, 0f, 0f))),
             new("uFallback", new Vector4Uniform(new Vector4(clipmapUnknownSky, MathF.Min(1.5f, Math.Max(0, iblPrefilterMips - 1)), clipmapYoung, MathF.Floor(clipmapBudget * clipmapVisibleShare)))),
