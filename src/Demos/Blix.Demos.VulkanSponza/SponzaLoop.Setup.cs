@@ -1073,6 +1073,7 @@ internal sealed partial class SponzaLoop
     private void BakeProceduralIbl()
     {
         var sky = ProceduralSky.Bake(device, SkyBakeSunDirection);
+        proceduralSky = true;
         envCubeTexture = sky.EnvCube;
         skyCubeTexture = sky.EnvCube;
         irradianceCubeTexture = sky.Irradiance;

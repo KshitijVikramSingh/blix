@@ -39,9 +39,14 @@ internal sealed partial class SponzaLoop
     private Vector3? skyAnnulusMean;
     private const float SunDiscRadius = 0.03f;
 
+    // Lit by the procedural sky (no cooked probe: the city, the correctness scenes): the reference reads the same
+    // analytic radiance the sky was baked from. It answered zero here, so a procedural scene's reference had no sky
+    // at all -- the Cornell box's field read 2.6x "too bright" against a reference missing all its skylight.
+    private bool proceduralSky;
+
     private Vector3 SkyRadiance(Vector3 d)
     {
-        if (iblProbeCpu is not { } probe) return Vector3.Zero;
+        if (iblProbeCpu is not { } probe) return proceduralSky ? ProceduralSky.SkyColor(d, SkyBakeSunDirection) : Vector3.Zero;
         var value = CubeTexel(probe.EnvCube, probe.EnvFaceSize, d);
         if (probe.SunDirection is not { } sun) return float.IsFinite(value.X + value.Y + value.Z) ? value : Vector3.Zero;
         var toSun = -Vector3.Normalize(sun);
@@ -438,7 +443,7 @@ internal sealed partial class SponzaLoop
         Vector3 SkyTrace(Vector3 origin, Vector3 dir, int depth, Random rng)
         {
             var hit = scene.Closest(new Ray(origin, dir), 0f, float.PositiveInfinity, (uint)rng.Next());
-            if (hit is not { } h) return probe is null ? Vector3.Zero : SkyRadiance(dir);
+            if (hit is not { } h) return SkyRadiance(dir);
             if (depth < 0) return Vector3.Zero;
             var n = Normal(h);
             if (Vector3.Dot(n, dir) > 0f) n = -n;

@@ -119,7 +119,31 @@ internal sealed record SceneProfile(
         StartPitch: 0f,
         MoveSpeed: 15f);
 
-    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City };
+    /// <summary>The Cornell box at room scale, sunlit through a skylight (<c>blix cornell</c>, tools/testbeds/setup.sh).</summary>
+    /// <remarks>
+    /// A correctness scene: one sunlit patch on the floor, and every other surface lit by its bounce, coloured by a
+    /// red and a green wall; 0.2 m solid slabs, so light inside that did not come through the skylight or the open
+    /// front is a leak. Procedural sky (no probe), whose default sun stands high enough to reach the floor. The
+    /// camera stands outside the open front, looking in.
+    /// </remarks>
+    public static readonly SceneProfile Cornell = new(
+        Name: "cornell",
+        Title: "Vulkan Cornell box",
+        AssetsVariable: "BLIX_TESTBED_ASSETS",
+        SetupHint: "tools/testbeds/setup.sh generates and cooks it",
+        Packs: new ScenePack[] { new("cornell", Required: true) },
+        ProbeDirectory: "textures",
+        ProbeCandidates: Array.Empty<string>(),
+        FarPlane: 100f,
+        CascadeSplits: new[] { 0.1f, 8f, 20f, 50f },
+        SunDistance: 20f,
+        FogFar: 30f,
+        StartPosition: new Vector3(0f, 3f, 10f),
+        StartYaw: 0f,
+        StartPitch: 0f,
+        MoveSpeed: 3f);
+
+    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell };
 
     /// <summary>The profile <c>--scene</c> names, Sponza when it names none.</summary>
     public static SceneProfile Named(string? name)

@@ -44,7 +44,7 @@ internal static class ProceduralSky
 
     // Analytic sky radiance (linear) for a world direction. Zenith→horizon
     // gradient, dim ground below, plus a soft warm glow toward the sun.
-    private static Vector3 SkyColor(Vector3 d, Vector3 sunDirection)
+    internal static Vector3 SkyColor(Vector3 d, Vector3 sunDirection)
     {
         d = Vector3.Normalize(d);
         var zenith  = new Vector3(0.22f, 0.42f, 0.82f);

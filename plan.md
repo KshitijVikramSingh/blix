@@ -454,6 +454,16 @@ exactly where the world has changed.
      the fix is more of what is SEEN answered finely, not weighting (2026-09-19 already refuted weighting fixes for
      this, incl. dividing by nominal weight). The overlay's "GI levels" panel answers from one level or the blend and
      carries the blend band, lift and visibility power live.
+   4g-vi correctness scenes, first: the Cornell box (`blix cornell`, tools/testbeds/setup.sh with BLIX_TESTBED_ASSETS,
+     `--scene=cornell`). Room scale (6 m inside: the finest probes are 0.5 m apart) and lit by the sun through a 1.5 m
+     skylight (the GI takes light from the sun and the sky only; nothing emits), 0.2 m solid slabs, the published
+     reflectances, the front open. Found on its first run: --probe-reference had NO sky for a procedurally lit scene
+     (SkyRadiance returned zero without a cooked probe), so the field read 2.6x "too bright"; it now reads the analytic
+     sky the procedural bake is made from. Against the path trace from the start pose (173 samples): total indirect
+     mean 1.21582 against 1.21587 (the energy is right), median 1.03; per level alone, |err| 0.068 (level 0, its 20
+     samples) / 0.208 / 0.485 / 0.516, bias -1.5 / -0.7 / +12 / +8%. So the levels' pattern holds in a box, and
+     Sponza's ~2.5x total-indirect excess is NOT an energy fault in the GI (the same code is exact here): it is
+     Sponza's -- leaks, foliage or geometry -- to find there.
    Open, measured:
      FOG made the stability instrument unrepeatable: it is on by default and reads wall time (time.Total) for its
        density drift and sample jitter, so the same build, pose and flags gave 45k / 62k / 102k presented pixels
