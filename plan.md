@@ -509,8 +509,15 @@ exactly where the world has changed.
      point error 0.082 (met), leak 0.065. Bistro: still worse on than off (0.143 -> 0.154-0.156 at radius 12 / 20 / 40
      m) -- and the radius barely matters, because Bistro's clipmap never converges even OFF: the orbit (~34 m circle,
      ~0.18 m a frame) keeps re-pointing slabs, unsolved probes come first whether anything reads them, and the 1,339
-     probes the image reads sit at a median of 4 solves at frame 1500. Next: what is on screen first (an unsolved probe
-     the image reads before an off-screen one), then the hash index (Bistro's dense index is 62 MB).
+     probes the image reads sit at a median of 4 solves at frame 1500.
+     Tried and REVERTED, on-screen first (visible probes, unsolved ones included, before off-screen unsolved): Bistro's
+     visible probes converged (median 4 -> 16 solves) but DARKER -- off 0.143 -> 0.160, median ratio 0.94 -> 0.90 --
+     and the GI gate's open-room energy fell 0.89 -> 0.83 (ratchet broken), on and off; Sponza alone improved (0.00118 ->
+     0.00107). Bounce is why: a probe's rays read the probes at their hits, mostly off screen; starved, those answer
+     nothing and the visible probes converge on hits with no bounce. Unsolved-first protects multi-bounce energy.
+     The structural version: probes READ AT HITS count as read too (importance carried from the image through the
+     probes' rays), so bounce sources are scheduled by being needed, not by being unsolved. Then the hash index
+     (Bistro's dense index is 62 MB).
    Open, measured:
      FOG made the stability instrument unrepeatable: it is on by default and reads wall time (time.Total) for its
        density drift and sample jitter, so the same build, pose and flags gave 45k / 62k / 102k presented pixels
