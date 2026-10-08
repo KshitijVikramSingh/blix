@@ -15,6 +15,13 @@
 
 #define BLIX_SURFACE_ALLOCATED 4u   // in the state word's flags, beside SOLVED 1 and BURIED 2
 
+// How many solves a surface probe needs before its answer is trusted whole: 16 x 64 rays. A probe with fewer is a few
+// rays' guess -- noisier than the clipmap's coarse but long-solved probes -- so its answer is weighed by what it knows.
+// (Bistro, where probes churned at a median of 2 solves, got WORSE preferring them unconditionally: 0.144 -> 0.161.)
+#ifndef BLIX_SURFACE_TRUSTED_SOLVES
+#define BLIX_SURFACE_TRUSTED_SOLVES 16.0
+#endif
+
 struct BlixSurfaceGrid {
     ivec3 minCell;    // the index's lowest world cell
     ivec3 dims;       // cells the index spans
@@ -47,9 +54,12 @@ int blix_surfaceSlot(BlixSurfaceGrid s, ivec3 cell) {
 #ifdef BLIX_CLIPMAP_IRRADIANCE
 // The surface probes' answer at a point for a surface facing n: as blix_clipmapLevelSample at level 0 -- the eight
 // probes around the lifted point, trilinear share x facing x Chebyshev visibility -- over those allocated, solved and
-// not buried. weight is what survived (0: nothing here; the clipmap answers instead).
-vec4 blix_surfaceSample(BlixSurfaceGrid s, vec3 world, vec3 n, out float weight) {
+// not buried. weight is what survived (0: nothing here); confidence is how much of that weight is trusted (each probe's
+// min(solves / BLIX_SURFACE_TRUSTED_SOLVES, 1)): the share of the answer the surface probes should have over the clipmap.
+vec4 blix_surfaceSample(BlixSurfaceGrid s, vec3 world, vec3 n, out float weight, out float confidence) {
     weight = 0.0;
+    confidence = 0.0;
+    float trusted = 0.0;
     if (!s.enabled) return vec4(0.0);
     float spacing = s.spacing;
     vec3 p = world + n * BLIX_CLIPMAP_LIFT(spacing);
@@ -83,16 +93,22 @@ vec4 blix_surfaceSample(BlixSurfaceGrid s, vec3 world, vec3 n, out float weight)
         if (w <= 1e-6) continue;
         sum += w * vec4(blix_clipmapTileSample(tile, n, false).rgb, blix_clipmapTileSample(tile, n, true).a);
         weight += w;
+        trusted += w * min(float((state.w >> 8) & 0xFFu) / BLIX_SURFACE_TRUSTED_SOLVES, 1.0);
     }
+    confidence = weight > 0.0 ? trusted / weight : 0.0;
     return weight > 0.0 ? sum / weight : vec4(0.0);
 }
 
-// What shading reads: the surface probes where they answer, the clipmap where they do not.
+// What shading reads: the surface probes by how much they know, the clipmap for the rest.
 vec4 blix_worldSample(BlixSurfaceGrid s, BlixClipmap c, vec3 world, vec3 n, out bool found) {
-    float w;
-    vec4 a = blix_surfaceSample(s, world, n, w);
-    if (w > 0.0) { found = true; return a; }
-    return blix_clipmapSample(c, world, n, found);
+    float w, confidence;
+    vec4 a = blix_surfaceSample(s, world, n, w, confidence);
+    if (confidence >= 1.0) { found = true; return a; }
+    bool clipFound;
+    vec4 b = blix_clipmapSample(c, world, n, clipFound);
+    found = clipFound || w > 0.0;
+    if (!clipFound) return w > 0.0 ? a : b;
+    return mix(b, a, confidence);
 }
 #endif
 #endif

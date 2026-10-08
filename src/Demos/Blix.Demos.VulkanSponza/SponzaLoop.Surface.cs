@@ -27,6 +27,13 @@ internal sealed partial class SponzaLoop
     private int surfaceColumns = 1;
     private GpuBufferHandle surfaceIndex;
     private GpuBufferHandle surfaceAlloc;
+    // Stage B: the lifecycle. --surface-reclaim-age F: under pressure, a probe unseen this many frames gives its slot
+    // back (surface_reclaim.comp).
+    private int surfaceReclaimAge = 300;
+    private ShaderInterface surfaceReclaimInterface = null!;
+    private PassHandle surfaceReclaimPassHandle;
+    private PipelineHandle surfaceReclaimPipeline;
+    private const int SurfaceAllocHeader = 8;
 
     private bool SurfaceProbesOn => surfaceCapacity > 0 && clipmap is not null;
 
@@ -34,6 +41,7 @@ internal sealed partial class SponzaLoop
     {
         if (args.Int("surface-probes") is { } n) surfaceCapacity = Math.Clamp(n, 0, 1 << 18);
         if (args.Float("surface-radius") is { } r) surfaceRadius = Math.Max(1f, r);
+        if (args.Int("surface-reclaim-age") is { } age) surfaceReclaimAge = Math.Max(2, age);
     }
 
     // Called from CreateClipmap (before the scene's bounds are fitted): where surface tiles start in the atlases, and a
@@ -44,7 +52,8 @@ internal sealed partial class SponzaLoop
         surfaceColumns = atlasWidth / 8;
         surfaceTileRow0 = clipmapAtlasHeight;
         surfaceIndex = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.surface.index.none"));
-        surfaceAlloc = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.surface.alloc"));
+        var allocBytes = (SurfaceAllocHeader + Math.Max(1, surfaceCapacity)) * 4;
+        surfaceAlloc = Own(device.CreateGpuBuffer(allocBytes, new byte[allocBytes], "sponza.surface.alloc"));
         if (surfaceCapacity == 0) return clipmapAtlasHeight;
         return clipmapAtlasHeight + (surfaceCapacity + surfaceColumns - 1) / surfaceColumns * 8;
     }
@@ -67,6 +76,28 @@ internal sealed partial class SponzaLoop
             $"[VulkanSponza] surface probes: {surfaceCapacity:N0} slots at {s:0.##} m, within {surfaceRadius:0} m of the camera; index {dims.X}x{dims.Y}x{dims.Z} cells ({cells * 4 / 1024.0:0} KB); tiles from atlas row {surfaceTileRow0}."));
     }
 
+    // Before clipmap_mark.comp allocates: clamp the ring and decide the pressure, then reclaim (surface_reclaim.comp).
+    private void RecordSurfaceReclaim()
+    {
+        if (!SurfaceProbesOn || surfaceDims.X <= 1) return;
+        var surface = SurfaceUniforms(ClipmapLevels * clipmap!.ProbesPerLevel);
+        var buffers = new[]
+        {
+            new ShaderBufferBinding("ClipmapState", clipmapState),
+            new ShaderBufferBinding("ClipmapSeen", clipmapSeen),
+            new ShaderBufferBinding("SurfaceIndex", surfaceIndex),
+            new ShaderBufferBinding("SurfaceAlloc", surfaceAlloc),
+        };
+        DispatchCommand Mode(int mode, int groups) => new(surfaceReclaimPipeline, groups, 1, 1, new ShaderUniform[]
+        {
+            new("uSurfaceGrid", new Vector4Uniform(surface.Grid)),
+            new("uSurfaceDims", new Vector4Uniform(surface.Dims)),
+            new("uReclaim", new Vector4Uniform(new Vector4(mode, surfaceReclaimAge, clipmapFrame, surfaceCapacity))),
+        }, Array.Empty<ShaderTextureBinding>(), Buffers: buffers);
+        graph.Dispatch(surfaceReclaimPassHandle, Mode(0, 1));
+        graph.Dispatch(surfaceReclaimPassHandle, Mode(1, (surfaceCapacity + 63) / 64));
+    }
+
     // The three vectors every reader takes (probe_surface.glsl's BlixSurfaceGrid).
     private (Vector4 Grid, Vector4 Dims, Vector4 Atlas) SurfaceUniforms(int clipSlots) => (
         new Vector4(surfaceMinCell.X, surfaceMinCell.Y, surfaceMinCell.Z, clipmapSpacing),
@@ -76,8 +107,10 @@ internal sealed partial class SponzaLoop
     private void WriteSurfaceCensus(uint[] stateWords, uint[] seenStamps, int clipSlots)
     {
         if (!SurfaceProbesOn) return;
-        var allocated = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(surfaceAlloc, 0, 4).AsSpan())[0];
+        var header = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(surfaceAlloc, 0, SurfaceAllocHeader * 4).AsSpan()).ToArray();
+        var allocated = header[0];
         var used = (int)Math.Min(allocated, (uint)surfaceCapacity);
+        var free = header[2] - Math.Min(header[1], header[2]);
         var solves = new List<uint>();
         var visible = 0;
         for (var k = 0; k < used; k++)
@@ -88,7 +121,7 @@ internal sealed partial class SponzaLoop
         }
         solves.Sort();
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[VulkanSponza] surface probes: {allocated:N0} allocated of {surfaceCapacity:N0}{(allocated > surfaceCapacity ? " (FULL: the clipmap answers where they ran out)" : "")}, {solves.Count:N0} solved, "
+            $"[VulkanSponza] surface probes: {Math.Min(allocated, (uint)surfaceCapacity):N0} fresh slots of {surfaceCapacity:N0} handed out, {free:N0} free, {header[4]:N0} reclaimed so far (pressure {header[3]}), {solves.Count:N0} solved, "
             + $"solves median {(solves.Count > 0 ? solves[solves.Count / 2] : 0)} (p10 {(solves.Count > 0 ? solves[solves.Count / 10] : 0)}); {visible:N0} read by the image now."));
     }
 }

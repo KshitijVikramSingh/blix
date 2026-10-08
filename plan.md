@@ -499,8 +499,18 @@ exactly where the world has changed.
      shaded 0.00048 -> 0.00051 (15k probes allocated by the orbit, median 19 solves at 1500: still converging).
      Bistro: the pool FILLS (no eviction) and allocation starves (14k of 85k solved, median 2): no gain, and the
      dense index is 62 MB there. Frame time inconclusive (off 55 / 68, on 70 / 63 ms: inside this laptop's drift).
-     Next, stage B: a lifecycle -- reclaim slots unseen for long (free list; the state holds the cell, so the index
-     entry can be cleared), so a pool follows the camera; then a hash for the index (Bistro, the city).
+   4g-ix stage B, first part DONE: the lifecycle and trust. `surface_reclaim.comp` (before the mark): under pressure
+     (fresh slots spent, under a sixteenth free) a probe unseen `--surface-reclaim-age` (300) frames clears its index
+     entry and state and goes on a free ring the mark allocates from first. Preferring surface probes unconditionally
+     made churned Bistro WORSE (0.144 -> 0.161: probes at 1-2 solves are noisier than the clipmap), so a surface probe
+     is trusted by what it knows: min(solves / 16, 1) weighs its answer against the clipmap's (incident pass, ray hits,
+     watch), and the mark keeps stamping the clipmap's probes until the surface probes there are trusted. Sponza on:
+     total |err| 0.00118 -> 0.00098, as shaded 0.00048 -> 0.00048, walking 0.00% (probes at the 255 cap); gate Cornell
+     point error 0.082 (met), leak 0.065. Bistro: still worse on than off (0.143 -> 0.154-0.156 at radius 12 / 20 / 40
+     m) -- and the radius barely matters, because Bistro's clipmap never converges even OFF: the orbit (~34 m circle,
+     ~0.18 m a frame) keeps re-pointing slabs, unsolved probes come first whether anything reads them, and the 1,339
+     probes the image reads sit at a median of 4 solves at frame 1500. Next: what is on screen first (an unsolved probe
+     the image reads before an off-screen one), then the hash index (Bistro's dense index is 62 MB).
    Open, measured:
      FOG made the stability instrument unrepeatable: it is on by default and reads wall time (time.Total) for its
        density drift and sample jitter, so the same build, pose and flags gave 45k / 62k / 102k presented pixels

@@ -157,9 +157,9 @@ void main() {
     sg.tileRow0 = int(g.uSurfaceAtlas.x);
     sg.columns = int(g.uSurfaceAtlas.y);
     sg.enabled = g.uSurfaceAtlas.w > 0.5 && g.uClipParams.y < 0.5;   // a forced level is the clipmap's alone
-    float surfaceWeight;
-    vec4 surfaceField = blix_surfaceSample(sg, worldPos, N, surfaceWeight);
-    if (surfaceWeight > 0.0) outIncident = surfaceField;
+    float surfaceWeight, surfaceConfidence;
+    vec4 surfaceField = blix_surfaceSample(sg, worldPos, N, surfaceWeight, surfaceConfidence);
+    if (surfaceWeight > 0.0) outIncident = found ? mix(outIncident, surfaceField, surfaceConfidence) : surfaceField;
     vec3 gathered;
     float confidence;
     if (g.uScreen.x > 0.5 && screenProbesAt(worldPos, N, viewDepth, gathered, confidence)) {

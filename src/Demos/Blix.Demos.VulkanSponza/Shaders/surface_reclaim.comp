@@ -1,0 +1,53 @@
+#version 450
+// The surface probes' lifecycle (stage 4g-ix B): when the pool runs short, probes no image has read for a while give
+// their slots back, so the pool follows the camera instead of filling with where it once was. Two dispatches a frame,
+// before clipmap_mark.comp allocates:
+//
+//   0  one thread: the free ring's consumer end is clamped to its producer end (allocation that found the ring empty
+//      overshot it and took a fresh slot instead), and whether the pool is under pressure is decided: every fresh
+//      slot handed out and less than a sixteenth of the pool free.
+//   1  one thread a slot, under pressure: an allocated probe unseen for uReclaim.y frames clears its index entry and
+//      its state and goes on the ring. A slot reused later starts with no solves, so its first solve overwrites its
+//      tiles whole (1/n at n = 0, the radiance bins written whole), and no trace of its old cell survives.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform SurfaceReclaim {
+    vec4 uSurfaceGrid;   // the index's lowest cell xyz, spacing w
+    vec4 uSurfaceDims;   // dims xyz, first slot w
+    vec4 uReclaim;       // x mode, y the age (frames unseen) at which a probe may be reclaimed, z the frame, w slots
+} u;
+
+layout(std430, set = 0, binding = 1) buffer ClipmapState { uvec4 states[]; };
+layout(std430, set = 0, binding = 2) readonly buffer ClipmapSeen { uint seen[]; };
+layout(std430, set = 0, binding = 3) buffer SurfaceIndex { uint surfaceIndex[]; };
+// fresh: slots handed out new; head / tail: the free ring's consumer and producer ends; pressure 1 this frame;
+// reclaimed: how many, ever; then the ring.
+layout(std430, set = 0, binding = 4) buffer SurfaceAlloc { uint fresh; uint freeHead; uint freeTail; uint pressure; uint reclaimed; uint pad0; uint pad1; uint pad2; uint ring[]; };
+
+#define BLIX_SURFACE_ALLOCATED 4u
+
+void main() {
+    uint capacity = uint(u.uReclaim.w);
+    if (int(u.uReclaim.x + 0.5) == 0) {
+        if (gl_GlobalInvocationID.x != 0u) return;
+        freeHead = min(freeHead, freeTail);
+        pressure = (fresh >= capacity && freeTail - freeHead < capacity / 16u) ? 1u : 0u;
+        return;
+    }
+    uint k = gl_GlobalInvocationID.x;
+    if (k >= capacity || pressure == 0u) return;
+    uint g = uint(u.uSurfaceDims.w) + k;
+    uvec4 state = states[g];
+    if ((state.w & BLIX_SURFACE_ALLOCATED) == 0u) return;
+    uint frame = uint(u.uReclaim.z);
+    if (frame - min(seen[g], frame) < uint(u.uReclaim.y)) return;
+    ivec3 i = ivec3(state.xyz) - ivec3(u.uSurfaceGrid.xyz);
+    ivec3 dims = ivec3(u.uSurfaceDims.xyz);
+    if (all(greaterThanEqual(i, ivec3(0))) && all(lessThan(i, dims)))
+        surfaceIndex[(i.z * dims.y + i.y) * dims.x + i.x] = 0u;
+    states[g] = uvec4(0u);
+    uint t = atomicAdd(freeTail, 1u);
+    ring[t % capacity] = k;
+    atomicAdd(reclaimed, 1u);
+}

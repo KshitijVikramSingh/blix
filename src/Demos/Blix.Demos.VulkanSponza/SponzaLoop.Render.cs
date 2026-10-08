@@ -831,6 +831,7 @@ internal sealed partial class SponzaLoop
             {
                 Matrix4x4.Invert(cameraProjection, out var incidentInvProj);
                 Matrix4x4.Invert(cameraView, out var incidentInvView);
+                RecordSurfaceReclaim();
                 RecordClipmapMark(incidentInvProj, incidentInvView, frame.Width, frame.Height);
                 RecordScreenProbes(frame.Width, frame.Height);
                 RecordIncidentClipmap(incidentInvProj, incidentInvView, frame.Width, frame.Height, frame.Width, frame.Height);

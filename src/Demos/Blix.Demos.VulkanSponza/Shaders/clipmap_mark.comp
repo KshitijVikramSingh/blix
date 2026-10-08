@@ -35,7 +35,8 @@ layout(std430, set = 0, binding = 3) buffer ClipmapSeen { uint seen[]; };
 // Allocating a surface probe writes its slot's state (cell, ALLOCATED) and publishes the slot in the index.
 layout(std430, set = 0, binding = 4) buffer ClipmapState { uvec4 states[]; };
 layout(std430, set = 0, binding = 5) buffer SurfaceIndex { uint surfaceIndex[]; };
-layout(std430, set = 0, binding = 6) buffer SurfaceAlloc { uint surfaceAllocated; };
+// fresh slots handed out, the free ring's ends (surface_reclaim.comp fills it under pressure), then the ring.
+layout(std430, set = 0, binding = 6) buffer SurfaceAlloc { uint fresh; uint freeHead; uint freeTail; uint pressure; uint reclaimed; uint pad0; uint pad1; uint pad2; uint ring[]; };
 
 // Addressing only: the sampling half of probe_clipmap.glsl is left out (no atlas or state is read here).
 #include "probe_clipmap.glsl"
@@ -44,7 +45,9 @@ layout(std430, set = 0, binding = 6) buffer SurfaceAlloc { uint surfaceAllocated
 // The surface probes around a seen point: the eight a lookup there would weigh, each found or allocated, and stamped.
 // Allocation: the first to swap the cell's 0 for "allocating" takes the next slot, writes its state, then publishes
 // slot + 1; a cell whose pool is spent is marked full (the clipmap answers there).
-// Returns whether all eight are (now) surface probes: then the clipmap is not what this point is shaded with.
+// Returns whether all eight are surface probes the shading trusts whole (BLIX_SURFACE_TRUSTED_SOLVES): only then is the
+// clipmap not what this point is shaded with. A young surface probe's answer is blended with the clipmap's, so the
+// clipmap's probes there must keep their budget until it is not.
 bool surfaceProbesAt(BlixSurfaceGrid s, vec3 world, vec3 n, uint value) {
     bool all = true;
     float spacing = s.spacing;
@@ -57,18 +60,25 @@ bool surfaceProbesAt(BlixSurfaceGrid s, vec3 world, vec3 n, uint value) {
         uint v = surfaceIndex[index];
         if (v == 0u) {
             if (atomicCompSwap(surfaceIndex[index], 0u, 0xFFFFFFFEu) != 0u) { all = false; continue; }
-            uint slot = atomicAdd(surfaceAllocated, 1u);
-            if (slot < uint(u.uSurfaceAtlas.z)) {
+            // A reclaimed slot first (the ring's producer end is fixed during this pass: reclaim runs before it); an
+            // overshoot past it takes a fresh slot, and the next reclaim clamps the consumer end back.
+            uint capacity = uint(u.uSurfaceAtlas.z);
+            uint k = atomicAdd(freeHead, 1u);
+            uint slot = k < freeTail ? ring[k % capacity] : atomicAdd(fresh, 1u);
+            if (slot < capacity) {
                 states[s.firstSlot + int(slot)] = uvec4(uvec3(cell), BLIX_SURFACE_ALLOCATED);
                 seen[s.firstSlot + int(slot)] = value;
                 memoryBarrierBuffer();
                 surfaceIndex[index] = slot + 1u;
+                all = false;   // new: no solves yet
             } else {
                 surfaceIndex[index] = 0xFFFFFFFFu;
                 all = false;
             }
         } else if (v < 0xFFFFFFFEu) {
-            seen[s.firstSlot + int(v - 1u)] = value;
+            int g = s.firstSlot + int(v - 1u);
+            seen[g] = value;
+            if (float((states[g].w >> 8) & 0xFFu) < BLIX_SURFACE_TRUSTED_SOLVES) all = false;
         } else {
             all = false;
         }

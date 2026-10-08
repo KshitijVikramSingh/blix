@@ -563,6 +563,9 @@ internal sealed partial class SponzaLoop
         // between them, and fenced like every pass that binds GPU buffers.
         // The probes this frame's image reads, stamped for the next solve (stage 4g-iii): after the depth and normals
         // it reads, and fenced like every pass that binds GPU buffers.
+        // Surface probes give back slots unseen for long before the mark allocates new ones (stage 4g-ix B).
+        surfaceReclaimInterface = Reflect("surface_reclaim.comp");
+        surfaceReclaimPassHandle = graph.ComputePass("surface-reclaim").Shader(surfaceReclaimInterface).Handle;
         clipmapMarkInterface = Reflect("clipmap_mark.comp");
         clipmapMarkPassHandle = graph.ComputePass("clipmap-mark").Shader(clipmapMarkInterface)
             .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
@@ -836,6 +839,8 @@ internal sealed partial class SponzaLoop
             Own(device.CreateComputeShaderProgramFromSpv(clipmapSpv, clipmapInterface, "clipmap_inject")), "clipmap_inject"));
         clipmapWatchPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "clipmap_watch.comp.spv")), clipmapWatchInterface, "clipmap_watch")), "clipmap_watch"));
+        surfaceReclaimPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
+            File.ReadAllBytes(Path.Combine(shaderDir, "surface_reclaim.comp.spv")), surfaceReclaimInterface, "surface_reclaim")), "surface_reclaim"));
         clipmapMarkPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "clipmap_mark.comp.spv")), clipmapMarkInterface, "clipmap_mark")), "clipmap_mark"));
         for (var stage = 0; stage < ScreenProbeStages.Length; stage++)
