@@ -22,6 +22,49 @@ internal sealed partial class SponzaLoop
     private int[] dumpAt = System.Array.Empty<int>();
     private int dumpNext;
 
+    // --level-probe: how far the clipmap's levels disagree, on one frozen state. From 20 frames before the shot the
+    // clipmap stops solving; then the incident light comes from level 0, 1, 2, 3 alone (no blend), each held 4 frames
+    // and dumped on the last (<shot>.level<k>.incident.rgb; -1 where that level does not answer), and the normal
+    // answer is dumped first (<shot>.levelN). Every level evaluated at the same pixels from the same probes' state:
+    // its difference from level 0 is what a surface's light does when it crosses into that level.
+    private bool levelProbe;
+    private int levelProbeForced = -1;
+    private int levelProbeDumped = -2;
+
+    // --force-level K: the incident light from level K alone for the whole run (-1 where it does not answer), every
+    // level's visible probes solved alike: what the path-traced reference (--probe-reference) holds each level against.
+    private int forceLevel = -1;
+
+    private void UpdateLevelProbe()
+    {
+        if (forceLevel >= 0) { levelProbeForced = forceLevel; return; }
+        levelProbeForced = -1;
+        if (!levelProbe || shotPath is null || !fullyLoaded) return;
+        var start = shotFrame - 20;
+        if (postLoadFrames == start) clipmapFreeze = clipmapFrame;
+        var k = postLoadFrames - start - 1;
+        levelProbeForced = k >= 0 && k < 16 ? k / 4 : -1;
+    }
+
+    private void WriteLevelProbeDumps()
+    {
+        if (!levelProbe || shotPath is null || !fullyLoaded) return;
+        var start = shotFrame - 20;
+        var k = postLoadFrames - start - 1;
+        var basePath = Path.ChangeExtension(shotPath, null);
+        if (postLoadFrames == start && levelProbeDumped < -1)
+        {
+            WriteRgb(basePath + ".levelN.incident.rgb", incidentHandle);
+            levelProbeDumped = -1;
+        }
+        // The last of each level's four frames: the three before it rendered with it.
+        if (k >= 0 && k < 16 && k % 4 == 3 && levelProbeDumped < k / 4)
+        {
+            WriteRgb(basePath + $".level{k / 4}.incident.rgb", incidentHandle);
+            levelProbeDumped = k / 4;
+        }
+    }
+
     private void ReadWalkArgs(AppArgs args)
     {
         if (args.String("walk") is { } walk)
@@ -32,6 +75,8 @@ internal sealed partial class SponzaLoop
         }
         if (args.Int("walk-at") is { } at) walkAt = Math.Max(0, at);
         if (args.Int("walk-frames") is { } frames) walkFrames = Math.Max(1, frames);
+        levelProbe = args.Flag("level-probe");
+        if (args.Int("force-level") is { } fl) forceLevel = Math.Clamp(fl, 0, 3);
         if (args.String("dump-at") is { } dumps)
             dumpAt = dumps.Split(',').Select(s => int.Parse(s, CultureInfo.InvariantCulture)).OrderBy(f => f).ToArray();
     }

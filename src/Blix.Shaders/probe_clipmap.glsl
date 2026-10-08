@@ -88,6 +88,14 @@ int blix_clipmapLocate(BlixClipmap c, vec3 world, out float blend) {
 //   BLIX_CLIPMAP_DEPTH_FILTERED(vec2 position)      -> vec4
 // Each lookup is then one fetch, not four texelFetch (the shading's clipmap sample was ~10 ms of the incident pass:
 // eight probes, five lookups each, sometimes over two levels, at every pixel).
+// How far a lookup is lifted off the surface along its normal, and how a probe's Chebyshev visibility becomes its
+// weight. Overridable so the level probe can test them (--clipmap-lift, --clipmap-visibility-power).
+#ifndef BLIX_CLIPMAP_LIFT
+#define BLIX_CLIPMAP_LIFT(spacing) (0.25 * (spacing))
+#endif
+#ifndef BLIX_CLIPMAP_VISIBILITY
+#define BLIX_CLIPMAP_VISIBILITY(c) ((c) * (c) * (c))
+#endif
 #define BLIX_CLIPMAP_SOLVED 1u
 #define BLIX_CLIPMAP_BURIED 2u
 
@@ -121,7 +129,7 @@ vec4 blix_clipmapTileSample(ivec2 tile, vec3 dir, bool depth) {
 // and is solved and not buried. weight is what survived (0: nothing could answer).
 vec4 blix_clipmapLevelSample(BlixClipmap c, int level, vec3 world, vec3 n, out float weight) {
     float spacing = blix_clipmapSpacing(c, level);
-    vec3 p = world + n * (0.25 * spacing);                 // lifted off the surface, a quarter cell
+    vec3 p = world + n * BLIX_CLIPMAP_LIFT(spacing);       // lifted off the surface, a quarter cell
     vec3 g = p / spacing - 0.5;
     ivec3 base = ivec3(floor(g));
     vec3 frac = g - vec3(base);
@@ -148,7 +156,7 @@ vec4 blix_clipmapLevelSample(BlixClipmap c, int level, vec3 world, vec3 n, out f
             float variance = max(moments.y, 1e-5);
             float d = dist - moments.x;
             float chebyshev = variance / (variance + d * d);
-            w *= max(chebyshev * chebyshev * chebyshev, 0.0);
+            w *= max(BLIX_CLIPMAP_VISIBILITY(chebyshev), 0.0);
         }
         if (w <= 1e-6) continue;
         sum += w * vec4(blix_clipmapTileSample(tile, n, false).rgb, blix_clipmapTileSample(tile, n, true).a);
@@ -188,7 +196,7 @@ float blix_clipmapSolvesAt(BlixClipmap c, vec3 world, vec3 n, out int answeredBy
     if (first < 0) return 0.0;
     for (int level = first; level < BLIX_CLIPMAP_LEVELS; ++level) {
         float spacing = blix_clipmapSpacing(c, level);
-        vec3 p = world + n * (0.25 * spacing);
+        vec3 p = world + n * BLIX_CLIPMAP_LIFT(spacing);
         vec3 g = p / spacing - 0.5;
         ivec3 base = ivec3(floor(g));
         vec3 frac = g - vec3(base);
@@ -213,7 +221,7 @@ float blix_clipmapSolvesAt(BlixClipmap c, vec3 world, vec3 n, out int answeredBy
                 float variance = max(moments.y, 1e-5);
                 float d = dist - moments.x;
                 float chebyshev = variance / (variance + d * d);
-                w *= max(chebyshev * chebyshev * chebyshev, 0.0);
+                w *= max(BLIX_CLIPMAP_VISIBILITY(chebyshev), 0.0);
             }
             if (w <= 1e-6) continue;
             sum += w * float((state.w >> 8) & 0xFFu);
@@ -230,7 +238,7 @@ float blix_clipmapSolvesAt(BlixClipmap c, vec3 world, vec3 n, out int answeredBy
 vec4 blix_clipmapLevelSampleDirs(BlixClipmap c, int level, vec3 world, vec3 n, vec3 d1, vec3 d2,
                                  out float weight, out vec3 e1, out vec3 e2) {
     float spacing = blix_clipmapSpacing(c, level);
-    vec3 p = world + n * (0.25 * spacing);
+    vec3 p = world + n * BLIX_CLIPMAP_LIFT(spacing);
     vec3 g = p / spacing - 0.5;
     ivec3 base = ivec3(floor(g));
     vec3 frac = g - vec3(base);
@@ -258,7 +266,7 @@ vec4 blix_clipmapLevelSampleDirs(BlixClipmap c, int level, vec3 world, vec3 n, v
             float variance = max(moments.y, 1e-5);
             float d = dist - moments.x;
             float chebyshev = variance / (variance + d * d);
-            w *= max(chebyshev * chebyshev * chebyshev, 0.0);
+            w *= max(BLIX_CLIPMAP_VISIBILITY(chebyshev), 0.0);
         }
         if (w <= 1e-6) continue;
         sum += w * vec4(blix_clipmapTileSample(tile, n, false).rgb, blix_clipmapTileSample(tile, n, true).a);

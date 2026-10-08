@@ -441,6 +441,19 @@ exactly where the world has changed.
      COST: frame interleaved, off 47.4 / 46.0 ms vs on 49.4 / 51.6 ms (+2-5 ms). Unattributed; suspect the budget now
      solving indoor probes whose rays all hit (traversal + sun + clipmap at each hit) where the round-robin spent much
      of it on coarse outdoor probes whose rays escape. Measure isolated before deciding anything.
+   4g-v the levels disagree, and coarser is less right. The user saw distant surfaces brighten / darken as they
+     walked ("green itself is problematic": the 0 -> 1 hand-off). `--level-probe` freezes the clipmap and dumps the
+     incident light from each level alone on the same frame (every level's visible probes solved alike); adjacent
+     levels differ, median: 1 vs 0 ~10% (p90 25-66%), 2 vs 1 ~19% (arcade bias +35%), 3 vs 2 28-161% (the arcade
+     +1316%: 4 m probes outside the building light the covered arcade). Neither knob moved it: a fixed 0.125 m lookup
+     lift for every level, a Chebyshev power of 8, nor both -- the probes hold different answers; the lookup is not
+     it. `--force-level K` against the path-traced reference, same samples (Sponza 539, Bistro 385): Sponza |err|
+     level 0 0.00085 / blended 0.00102 / 1 0.00270 / 2 0.00170 / 3 0.00445 (bias +233 / +284 / +776 / +486 / +1292%:
+     the field alone, before GTAO's near-field occlusion); Bistro 0.121 / 0.121 / 0.142 / 0.186 / 0.256 (bias -11 to
+     -25%, coarse levels smooth light away). So level 0 is the most accurate in both and error grows with spacing:
+     the fix is more of what is SEEN answered finely, not weighting (2026-09-19 already refuted weighting fixes for
+     this, incl. dividing by nominal weight). The overlay's "GI levels" panel answers from one level or the blend and
+     carries the blend band, lift and visibility power live.
    Open, measured:
      FOG made the stability instrument unrepeatable: it is on by default and reads wall time (time.Total) for its
        density drift and sample jitter, so the same build, pose and flags gave 45k / 62k / 102k presented pixels

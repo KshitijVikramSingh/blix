@@ -202,6 +202,8 @@ internal sealed partial class SponzaLoop
         // --clipmap-visible-share F: at most this share of the budget a frame goes to the probes the image reads (0: none,
         // the A/B).
         if (args.Float("clipmap-visible-share") is { } cvs) clipmapVisibleShare = Math.Clamp(cvs, 0f, 1f);
+        if (args.Float("clipmap-lift") is { } lift) clipmapLift = Math.Max(0f, lift);
+        if (args.Float("clipmap-visibility-power") is { } vp) clipmapVisibilityPower = Math.Max(0f, vp);
         if (args.Float("clipmap-guide") is { } cg) { clipmapGuide = cg > 0f; clipmapGuideFloor = Math.Clamp(cg, 0.01f, 10f); }
         // --surface-check: hold the pre-pass's SurfaceKey and velocity against CPU rays at the shot (stage 4e-iv).
         surfaceCheck = args.Flag("surface-check");

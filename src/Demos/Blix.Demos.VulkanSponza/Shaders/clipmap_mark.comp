@@ -14,7 +14,9 @@ layout(set = 0, binding = 0) uniform ClipmapMark {
     mat4 uInvView;
     vec4 uTarget;      // xy the depth target's pixels, zw the pixel stride
     vec4 uDims;        // xyz probes per level, w base spacing
-    vec4 uParams;      // x blend band (probes), y the stamp (the frame number the next solve will run as)
+    vec4 uParams;      // x blend band (probes), y the stamp (the frame number the next solve will run as), z 1: every
+                       // level whose block holds the point, not only those that answer (--level-probe: each level's
+                       // probes then get the same budget, so levels compare by what they are, not by how solved)
     vec4 uOrigin0;
     vec4 uOrigin1;
     vec4 uOrigin2;
@@ -64,5 +66,8 @@ void main() {
     int level = blix_clipmapLocate(c, world, blend);
     if (level < 0) return;
     stamp(c, level, world, n);
-    if (blend > 0.0 && level + 1 < BLIX_CLIPMAP_LEVELS) stamp(c, level + 1, world, n);
+    if (u.uParams.z > 0.5) {
+        for (int l = level + 1; l < BLIX_CLIPMAP_LEVELS; ++l)
+            if (blix_clipmapInsideDistance(c, l, world) >= 0.0) stamp(c, l, world, n);
+    } else if (blend > 0.0 && level + 1 < BLIX_CLIPMAP_LEVELS) stamp(c, level + 1, world, n);
 }

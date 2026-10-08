@@ -79,7 +79,7 @@ internal sealed partial class SponzaLoop
                 new("uInvView", new Matrix4x4Uniform(invView)),
                 new("uTarget", new Vector4Uniform(new Vector4(width, height, 1f / width, 1f / height))),
                 new("uClipDims", new Vector4Uniform(new Vector4(ClipmapDims.X, ClipmapDims.Y, ClipmapDims.Z, clipmapSpacing))),
-                new("uClipParams", new Vector4Uniform(new Vector4(clipmap.BlendProbes, 0f, 0f, 0f))),
+                new("uClipParams", new Vector4Uniform(new Vector4(ClipmapBlend, levelProbeForced + 1, clipmapLift, clipmapVisibilityPower))),
                 new("uOrigin0", new Vector4Uniform(new Vector4(origins[0].X, origins[0].Y, origins[0].Z, 0f))),
                 new("uOrigin1", new Vector4Uniform(new Vector4(origins[1].X, origins[1].Y, origins[1].Z, 0f))),
                 new("uOrigin2", new Vector4Uniform(new Vector4(origins[2].X, origins[2].Y, origins[2].Z, 0f))),
@@ -100,6 +100,14 @@ internal sealed partial class SponzaLoop
     // fixed point, where a fixed 25% blend kept wandering (dark, bounce-lit areas worst; --stability, d175e53).
     // --clipmap-converge-floor sets a floor for the A/B.
     private float clipmapConvergeFloor;
+    // --clipmap-lift M / --clipmap-visibility-power P: the incident pass's lookup lift (0: a quarter of the spacing)
+    // and Chebyshev power (0: 3). Knobs for the level probe (stage 4g-v), not tuned defaults.
+    private float clipmapLift;
+    private float clipmapVisibilityPower;
+    // The blend band between levels, in probes, as every reader takes it (the overlay's slider; -1: the clipmap's own).
+    // Under 7.5: the band must fit inside a level 16 probes tall.
+    private float clipmapBlendOverride = -1f;
+    private float ClipmapBlend => clipmap is null ? 0f : clipmapBlendOverride >= 0f ? clipmapBlendOverride : clipmap.BlendProbes;
     // --clipmap-young N: probes with fewer than N solves are queued before the round-robin, fewest first (0: off, the
     // A/B). Up to 16 (four buckets: 1, 2-3, 4-7, 8-15).
     private float clipmapYoung = 8f;
@@ -191,7 +199,7 @@ internal sealed partial class SponzaLoop
         DispatchCommand Phase(int mode, int groups) => new(clipmapPipeline, groups, 1, 1, new ShaderUniform[]
         {
             new("uDims", new Vector4Uniform(new Vector4(ClipmapDims.X, ClipmapDims.Y, ClipmapDims.Z, clipmapSpacing))),
-            new("uParams", new Vector4Uniform(new Vector4(clipmap.BlendProbes, clipmapConvergeFloor, mode, clipmapBudget))),
+            new("uParams", new Vector4Uniform(new Vector4(ClipmapBlend, clipmapConvergeFloor, mode, clipmapBudget))),
             new("uOrigin0", new Vector4Uniform(origins[0])),
             new("uOrigin1", new Vector4Uniform(origins[1])),
             new("uOrigin2", new Vector4Uniform(origins[2])),
@@ -225,7 +233,7 @@ internal sealed partial class SponzaLoop
             new("uInvView", new Matrix4x4Uniform(invView)),
             new("uTarget", new Vector4Uniform(new Vector4(width, height, ClipmapMarkStride, ClipmapMarkStride))),
             new("uDims", new Vector4Uniform(new Vector4(ClipmapDims.X, ClipmapDims.Y, ClipmapDims.Z, clipmapSpacing))),
-            new("uParams", new Vector4Uniform(new Vector4(clipmap.BlendProbes, clipmapFrame, 0f, 0f))),
+            new("uParams", new Vector4Uniform(new Vector4(ClipmapBlend, clipmapFrame, levelProbe || forceLevel >= 0 ? 1f : 0f, 0f))),
             new("uOrigin0", new Vector4Uniform(new Vector4(origins[0].X, origins[0].Y, origins[0].Z, 0f))),
             new("uOrigin1", new Vector4Uniform(new Vector4(origins[1].X, origins[1].Y, origins[1].Z, 0f))),
             new("uOrigin2", new Vector4Uniform(new Vector4(origins[2].X, origins[2].Y, origins[2].Z, 0f))),

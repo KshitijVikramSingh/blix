@@ -105,6 +105,19 @@ internal sealed partial class SponzaLoop
             incidentField = debug.Controls.Toggle("Incident field (off: open sky cube)", incidentField);
         }
 
+        // The clipmap's levels, live (stage 4g-v): answer from one level alone or the blend, and the knobs the level
+        // probe measured. Each level alone shows what a surface's light does when it crosses into that level.
+        if (clipmap is not null)
+        {
+            using (debug.Scope("GI levels"))
+            {
+                forceLevel = debug.Controls.Enum("Answer from", forceLevel + 1, ClipmapAnswerNames) - 1;
+                clipmapBlendOverride = debug.Controls.Float("Blend band (probes)", ClipmapBlend, 0f, 7f);
+                clipmapLift = debug.Controls.Float("Lookup lift (m, 0: quarter spacing)", clipmapLift, 0f, 2f);
+                clipmapVisibilityPower = debug.Controls.Float("Visibility power (0: 3)", clipmapVisibilityPower, 0f, 16f);
+            }
+        }
+
         // Spatial gizmos: sun direction + the three cascade ortho boxes.
         // Every primitive below belongs to the main view; the scope supplies its matrix.
         using var view = debug.Draw.In("main", viewProj);

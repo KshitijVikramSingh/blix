@@ -24,7 +24,8 @@ layout(set = 0, binding = 0) uniform IncidentClipmap {
     mat4 uInvView;
     vec4 uTarget;
     vec4 uClipDims;      // xyz probes per level, w base spacing
-    vec4 uClipParams;    // x blend band (probes)
+    vec4 uClipParams;    // x blend band (probes), y 1 + a level to answer from alone (--level-probe; 0: the normal answer),
+                         // z a fixed lift (m, --clipmap-lift; 0: a quarter spacing), w the visibility power (0: 3)
     vec4 uOrigin0;
     vec4 uOrigin1;
     vec4 uOrigin2;
@@ -89,9 +90,17 @@ bool screenProbesAt(vec3 worldPos, vec3 n, float viewDepth, out vec3 irradiance,
 #define BLIX_CLIPMAP_IRRADIANCE_FILTERED(p) textureLod(uClipmapIrradiance, (p) / vec2(textureSize(uClipmapIrradiance, 0)), 0.0)
 #define BLIX_CLIPMAP_DEPTH_FILTERED(p) textureLod(uClipmapDepth, (p) / vec2(textureSize(uClipmapDepth, 0)), 0.0)
 #define BLIX_CLIPMAP_STATE(s) states[s]
+// uClipParams.z: a fixed lift in metres for every level (0: a quarter of the spacing); w: the Chebyshev visibility's
+// power (0: cubed). The level probe's knobs.
+// Copied to globals at the top of main: the library's functions have a local named g.
+float clipLiftKnob, clipVisibilityKnob;
+#define BLIX_CLIPMAP_LIFT(spacing) (clipLiftKnob > 0.0 ? clipLiftKnob : 0.25 * (spacing))
+#define BLIX_CLIPMAP_VISIBILITY(c) (clipVisibilityKnob > 0.0 ? pow(max(c, 0.0), clipVisibilityKnob) : (c) * (c) * (c))
 #include "probe_clipmap.glsl"
 
 void main() {
+    clipLiftKnob = g.uClipParams.z;
+    clipVisibilityKnob = g.uClipParams.w;
     float raw = texture(uSceneDepth, vUv).r;
     if (raw >= 1.0 - 1e-6) {
         outIncident = vec4(0.0, 0.0, 0.0, 1.0);
@@ -121,6 +130,15 @@ void main() {
     const float tilt = 0.35;
     const float s = tilt / 1.0595;   // tilt / sqrt(1 + tilt^2)
     vec3 e1, e2;
+    if (g.uClipParams.y > 0.5) {
+        // One level alone, no blend (the level probe): where its block holds the point and a probe answers; -1 where not.
+        int forced = int(g.uClipParams.y + 0.5) - 1;
+        float w = 0.0;
+        vec4 f = blix_clipmapInsideDistance(c, forced, worldPos) >= 0.0 ? blix_clipmapLevelSample(c, forced, worldPos, N, w) : vec4(0.0);
+        outIncident = w > 0.0 ? f : vec4(-1.0);
+        outIncidentGradient = vec4(0.0);
+        return;
+    }
     vec4 field = blix_clipmapSampleDirs(c, worldPos, N, normalize(N + tilt * t1), normalize(N + tilt * t2), found, e1, e2);
     outIncident = found ? field : vec4(texture(uIrradiance, N).rgb, 1.0);
     vec3 gathered;

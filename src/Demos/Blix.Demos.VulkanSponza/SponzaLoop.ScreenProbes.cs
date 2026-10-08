@@ -151,7 +151,7 @@ internal sealed partial class SponzaLoop
                 new("uPrevViewProj", new Matrix4x4Uniform(screenProbePrevViewProj)),
                 new("uTarget", new Vector4Uniform(new Vector4(frameWidth, frameHeight, tiles.Item1, tiles.Item2))),
                 new("uDims", new Vector4Uniform(new Vector4(ClipmapDims.X, ClipmapDims.Y, ClipmapDims.Z, clipmapSpacing))),
-                new("uParams", new Vector4Uniform(new Vector4(clipmap.BlendProbes, screenProbeHistoryValid ? 1f : 0f, pixelAtUnitDepth, screenProbeAblate))),
+                new("uParams", new Vector4Uniform(new Vector4(ClipmapBlend, screenProbeHistoryValid ? 1f : 0f, pixelAtUnitDepth, screenProbeAblate))),
                 new("uOrigin0", new Vector4Uniform(new Vector4(origins[0].X, origins[0].Y, origins[0].Z, 0f))),
                 new("uOrigin1", new Vector4Uniform(new Vector4(origins[1].X, origins[1].Y, origins[1].Z, 0f))),
                 new("uOrigin2", new Vector4Uniform(new Vector4(origins[2].X, origins[2].Y, origins[2].Z, 0f))),

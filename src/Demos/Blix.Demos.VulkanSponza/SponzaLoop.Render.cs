@@ -385,6 +385,7 @@ internal sealed partial class SponzaLoop
         }
         if (orbit) ApplyOrbit();
         else ApplyWalk();
+        UpdateLevelProbe();
         var stamp = System.Diagnostics.Stopwatch.GetTimestamp();
         if (lastFrameStamp != 0)
         {
@@ -491,7 +492,7 @@ internal sealed partial class SponzaLoop
             new("uPrevViewProjUnjittered", new Matrix4x4Uniform(velocityPrevValid ? velocityPrevViewProj : viewProj)),
             // The clipmap, for glass reflections' sky visibility (read only when uIncident.z says it has solved).
             new("uClipDims",         new Vector4Uniform(new Vector4(ClipmapDims.X, ClipmapDims.Y, ClipmapDims.Z, clipmapSpacing))),
-            new("uClipOrigin0",      new Vector4Uniform(ClipmapOrigin(0) with { W = clipmap?.BlendProbes ?? 0f })),
+            new("uClipOrigin0",      new Vector4Uniform(ClipmapOrigin(0) with { W = ClipmapBlend })),
             new("uClipOrigin1",      new Vector4Uniform(ClipmapOrigin(1))),
             new("uClipOrigin2",      new Vector4Uniform(ClipmapOrigin(2))),
             new("uClipOrigin3",      new Vector4Uniform(ClipmapOrigin(3))),
@@ -673,7 +674,7 @@ internal sealed partial class SponzaLoop
                 new("uBoundsMin",     new Vector4Uniform(new Vector4(sceneBoundsMin, 0f))),
                 // The clipmap the medium is lit by, as the surfaces are.
                 new("uClipDims",      new Vector4Uniform(new Vector4(ClipmapDims.X, ClipmapDims.Y, ClipmapDims.Z, clipmapSpacing))),
-                new("uClipParams",    new Vector4Uniform(new Vector4(clipmap?.BlendProbes ?? 0f, 0f, 0f, 0f))),
+                new("uClipParams",    new Vector4Uniform(new Vector4(ClipmapBlend, 0f, 0f, 0f))),
                 new("uOrigin0",       new Vector4Uniform(ClipmapOrigin(0))),
                 new("uOrigin1",       new Vector4Uniform(ClipmapOrigin(1))),
                 new("uOrigin2",       new Vector4Uniform(ClipmapOrigin(2))),
@@ -894,6 +895,7 @@ internal sealed partial class SponzaLoop
         var measuredFrames = postLoadFrames;
         SampleStability();
         WriteWalkDumps();
+        WriteLevelProbeDumps();
         if (shotPath is { } path && !shotWritten && fullyLoaded && !AbOffPhase
             && framePeriodCount >= 60 && measuredFrames >= shotFrame)
         {

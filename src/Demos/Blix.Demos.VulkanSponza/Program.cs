@@ -433,6 +433,9 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private float vizChannel;
 
     /// <summary>What each viz channel shows, in the order lit.frag tests them.</summary>
+    private static readonly string[] ClipmapAnswerNames =
+        { "Blended (normal)", "Level 0 alone (0.5 m)", "Level 1 alone (1 m)", "Level 2 alone (2 m)", "Level 3 alone (4 m)" };
+
     private static readonly string[] VizChannelNames =
     {
         "Lit scene", "Geometric normal", "Shading normal", "Tangent-space normal",
