@@ -203,6 +203,26 @@ vec3 fresnelSchlick(float cosTheta, vec3 F0) {
 // view-depth boundary arcs that can occur across a wide frustum, and it owns PCF, normal offset,
 // bias, and diagnostic tint consistently with other renderers.
 
+vec3 vizClipmap(vec3 worldPos, vec3 n, bool solves) {
+    if (frame.uIncident.z < 0.5) return vec3(0.0);
+    BlixClipmap c;
+    c.dims = ivec3(frame.uClipDims.xyz);
+    c.baseSpacing = frame.uClipDims.w;
+    c.blendProbes = frame.uClipOrigin0.w;
+    c.origin[0] = ivec3(frame.uClipOrigin0.xyz);
+    c.origin[1] = ivec3(frame.uClipOrigin1.xyz);
+    c.origin[2] = ivec3(frame.uClipOrigin2.xyz);
+    c.origin[3] = ivec3(frame.uClipOrigin3.xyz);
+    int level;
+    float n8 = blix_clipmapSolvesAt(c, worldPos, n, level);
+    if (level < 0) return vec3(0.0);
+    if (!solves) {
+        return level == 0 ? vec3(1.0) : level == 1 ? vec3(0.1, 0.9, 0.2) : level == 2 ? vec3(0.2, 0.4, 1.0) : vec3(1.0, 0.2, 1.0);
+    }
+    return n8 < 1.5 ? vec3(1.0, 0.1, 0.1) : n8 < 3.5 ? vec3(1.0, 0.5, 0.1) : n8 < 7.5 ? vec3(1.0, 0.9, 0.1)
+         : n8 < 31.5 ? vec3(0.2, 0.9, 0.3) : vec3(0.2, 0.4, 1.0);
+}
+
 void main() {
     // A shader that statically writes gl_SampleMask must assign it on every invocation; opaque
     // fragments start fully covered and cutout handling narrows the mask below.
@@ -611,6 +631,10 @@ void main() {
             // with geometric channel 1 and shading channel 2 to localize reconstruction faults.
             frame.uVizChannel < 22.5 && frame.uVizChannel > 21.5
                 ? texture(sampler2D(uPrepassNormalViz, uLinearClamp), gl_FragCoord.xy / frame.uFog.xy).xyz * 0.5 + 0.5 :
+            // 23-24 inspect the clipmap behind the incident light: 23 how many solves its probes have had (red 1,
+            // orange 2-3, yellow 4-7, green 8-31, blue 32+; black where none answers), 24 which level answers
+            // (white 0 at 0.5 m, green 1, blue 2, magenta 3; dimmed while the clipmap has not solved).
+            frame.uVizChannel > 22.5 && frame.uVizChannel < 24.5 ? vizClipmap(vWorldPos, vizGeometricN, frame.uVizChannel < 23.5) :
             // 21 is unused (the retired volume's leak metric); black.
                                        vec3(0.0);
         // Straight out, no exposure and no tonemap — these are directions and flags, and a film

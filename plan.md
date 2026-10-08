@@ -399,7 +399,27 @@ exactly where the world has changed.
      rest -15 vs -9.5% at 1200 frames, -5.5 vs -4.2% at 2400 (its round-robin runs at half budget while
      dependents take the rest) -- convergence speed, not staleness. (Default-swing mover numbers are a different
      protocol from 4f's: ring -27% with screen probes already at 408934b. Not a regression.)
+   4g-ii DONE young probes first, and an instrument for walking. The user saw walls turn green / red and settle as
+     they walked; `--viz 23` (the solves behind each pixel's light: red 1 ... blue 32+) and `--viz 24` (the answering
+     level) put the spots on probes of 7 solves or fewer. The orbit could not show it: a slow 5 m circle that barely
+     scrolls the clipmap, at a 960x540 window's frame rate (the schedule is per FRAME: a 128-frame sweep is ~2 s
+     there and ~6.4 s full-screen at 20 fps). Scheduling: probes under `--clipmap-young N` (8) solves are queued
+     after the unsolved and dependent ones, before the round-robin, fewest first (buckets 1, 2-3, 4-7, 8-15).
+     `--walk x,y,z,yaw,pitch` (`--walk-at` 1500, `--walk-frames` 120) walks then stops; `--dump-at f,...` writes the
+     incident light and the presented image as RGB floats; walk_cmp holds each dump against a run that sat at the
+     destination (luminance error, and colour error: chromaticity distance, share tinted > 0.03 / 0.06). Walks
+     of 120 frames, then stopped (young 0 -> 8), incident median / tinted > 0.03:
+       open atrium (W2: -5.62,5.14,-0.03 -> 6,5.14,-0.03), floor 3.9% / 0.6%: at the stop 28 -> 24% / 42 -> 31%;
+         120 frames on 12.3 -> 8.7% / 23 -> 16%; 960 on 7.9 / 8.7% (both ~2x the floor).
+       enclosed arcade (W1: -9,1.8,-5 -> 8,1.8,-5), floor 11.6% / 15.6%: at the stop 59 -> 53% / 74 -> 73%;
+         960 on 39 -> 31%.
+     So young-first is real but modest, and the arcade's FLOOR is the finding: two identical runs held there 2580
+     frames (every probe 8-31 solves, ~1,300 rays) differ by 12% median with visible colour error -- a patchwork of
+     probe-sized blocks (white, grey, red) that differs run to run. In bounce-lit enclosures the light arrives through
+     a few sunlit patches and saturated curtains that only a handful of each probe's rays hit: per-probe VARIANCE,
+     shown as hard blocks by the interpolation. Settling does not end at the right answer, only at a stable one.
    Open, measured:
+     clipmap probe variance in bounce-lit enclosures (above): the next problem for what the user sees.
      FOG made the stability instrument unrepeatable: it is on by default and reads wall time (time.Total) for its
        density drift and sample jitter, so the same build, pose and flags gave 45k / 62k / 102k presented pixels
        over 2% (darkest decile 1.05-3.62%) while the incident light matched to 0.01%. With `--no-fog` two repeats

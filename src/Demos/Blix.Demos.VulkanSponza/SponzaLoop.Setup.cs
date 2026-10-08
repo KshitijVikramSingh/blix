@@ -198,6 +198,7 @@ internal sealed partial class SponzaLoop
         // --clipmap-converge-floor F: the static light's blend never falls below F (0.25 was the steady rate before it
         // converged; the A/B). Default 0: each solve weighs 1/n, up to n = 255.
         if (args.Float("clipmap-converge-floor") is { } ccf) clipmapConvergeFloor = Math.Clamp(ccf, 0f, 1f);
+        if (args.Int("clipmap-young") is { } young) clipmapYoung = Math.Clamp(young, 0, 16);
         // --surface-check: hold the pre-pass's SurfaceKey and velocity against CPU rays at the shot (stage 4e-iv).
         surfaceCheck = args.Flag("surface-check");
         if (args.Float("incident-normal-bias") is { } nb) incidentNormalBias = Math.Clamp(nb, 0f, 12f);
@@ -231,6 +232,7 @@ internal sealed partial class SponzaLoop
         // --orbit: drive the camera on a fixed path so a measurement is of the renderer rather than
         // of one photograph of it. Ignores --cam, which is the still counterpart.
         if (args.Flag("orbit")) orbit = true;
+        ReadWalkArgs(args);
         // --cam x,y,z,yaw,pitch — a reproducible viewpoint. Without it every capture and every
         // census speaks only for wherever the camera happens to start, which for a question like
         // "how much of this scene is occluded" is the difference between a measurement and an

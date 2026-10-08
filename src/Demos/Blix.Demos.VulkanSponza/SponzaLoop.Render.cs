@@ -384,6 +384,7 @@ internal sealed partial class SponzaLoop
             host.RequestClose();
         }
         if (orbit) ApplyOrbit();
+        else ApplyWalk();
         var stamp = System.Diagnostics.Stopwatch.GetTimestamp();
         if (lastFrameStamp != 0)
         {
@@ -891,6 +892,7 @@ internal sealed partial class SponzaLoop
         // readback targets. Deadlines use post-load frames and require a useful timing sample set.
         var measuredFrames = postLoadFrames;
         SampleStability();
+        WriteWalkDumps();
         if (shotPath is { } path && !shotWritten && fullyLoaded && !AbOffPhase
             && framePeriodCount >= 60 && measuredFrames >= shotFrame)
         {

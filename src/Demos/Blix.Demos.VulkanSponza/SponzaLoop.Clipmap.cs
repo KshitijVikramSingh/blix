@@ -100,6 +100,10 @@ internal sealed partial class SponzaLoop
     // fixed point, where a fixed 25% blend kept wandering (dark, bounce-lit areas worst; --stability, d175e53).
     // --clipmap-converge-floor sets a floor for the A/B.
     private float clipmapConvergeFloor;
+    // --clipmap-young N: probes with fewer than N solves are queued before the round-robin, fewest first (0: off, the
+    // A/B). Up to 16 (four buckets: 1, 2-3, 4-7, 8-15).
+    private float clipmapYoung = 8f;
+    private const int ClipmapYoungBuckets = 4;
 
     private void CreateClipmap()
     {
@@ -118,8 +122,9 @@ internal sealed partial class SponzaLoop
         var initial = new uint[slots * 4];
         for (var i = 0; i < slots; i++) { initial[i * 4] = 0x80000000u; initial[i * 4 + 1] = 0x80000000u; initial[i * 4 + 2] = 0x80000000u; }
         clipmapState = Own(device.CreateGpuBuffer(slots * 16, MemoryMarshal.AsBytes(initial.AsSpan()), "sponza.clipmap.state"));
-        // Counters, the per-level unsolved queues, and the dependent queue (stage 4f).
-        clipmapQueue = Own(device.CreateGpuBuffer((8 + 2 * slots + 1) * 4, name: "sponza.clipmap.queue"));
+        // Counters, the per-level unsolved queues, the dependent queue (stage 4f), the cursor, and the young probes'
+        // four counts and four queues (stage 4g-ii).
+        clipmapQueue = Own(device.CreateGpuBuffer((8 + 2 * slots + 1 + ClipmapYoungBuckets * (1 + slots)) * 4, name: "sponza.clipmap.queue"));
         // The lit pass's glass reads the clipmap: swap its placeholders for the real thing.
         if (passBindings is not null)
         {
@@ -176,7 +181,7 @@ internal sealed partial class SponzaLoop
             new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 1f))),
             new("uFrame", new Vector4Uniform(new Vector4(clipmapFrame, 1f, 1f, ClipmapDepthLobe))),
             // y: the prefiltered sky's mip a probe ray reads, about a ray's 1/64 of the sphere (a ~15 degree cone).
-            new("uFallback", new Vector4Uniform(new Vector4(clipmapUnknownSky, MathF.Min(1.5f, Math.Max(0, iblPrefilterMips - 1)), 0f, 0f))),
+            new("uFallback", new Vector4Uniform(new Vector4(clipmapUnknownSky, MathF.Min(1.5f, Math.Max(0, iblPrefilterMips - 1)), clipmapYoung, 0f))),
             new("uDynamicMin", new Vector4Uniform(dynamicReach ? new Vector4(moverReach.Min, 1f) : Vector4.Zero)),
             new("uDynamicMax", new Vector4Uniform(new Vector4(MoverActive ? moverReach.Max : Vector3.Zero, clipmapDynamicConverge))),
             new("uDynamicQueue", new Vector4Uniform(new Vector4(clipmapDependentRays, MathF.Floor(clipmapBudget * clipmapDependentShare), clipmapShadowRays ? 1f : 0f, dynamicActive ? 1f : 0f))),
@@ -209,6 +214,17 @@ internal sealed partial class SponzaLoop
             if ((words[g * 4 + 3] & 1u) != 0) solved[level]++;
             if ((words[g * 4 + 3] & 2u) != 0) buried[level]++;
         }
+        // How many solves the probes hold (state bits 8-15), and how many were queued as young last frame.
+        var solveBuckets = new int[5];
+        for (var g = 0; g < slots; g++)
+        {
+            if ((words[g * 4 + 3] & 1u) == 0) continue;
+            var n = (words[g * 4 + 3] >> 8) & 0xFFu;
+            solveBuckets[n < 2 ? 0 : n < 4 ? 1 : n < 8 ? 2 : n < 32 ? 3 : 4]++;
+        }
+        var youngCounts = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(clipmapQueue, (8 + 2 * slots + 1) * 4, ClipmapYoungBuckets * 4).AsSpan()).ToArray();
+        Console.WriteLine(string.Create(Inv,
+            $"[VulkanSponza] probe clipmap solves: 1 {solveBuckets[0]:N0}, 2-3 {solveBuckets[1]:N0}, 4-7 {solveBuckets[2]:N0}, 8-31 {solveBuckets[3]:N0}, 32+ {solveBuckets[4]:N0}; young queued last frame {youngCounts.Sum(c => (long)c):N0} (--clipmap-young {clipmapYoung:0})."));
         var counters = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(clipmapQueue, 0, 32).AsSpan()).ToArray();
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] probe clipmap, last frame: {counters[4]:N0} ray hits, {counters[5]:N0} ({100.0 * counters[5] / Math.Max(1u, counters[4]):0.0}%) where no probe answered (sky taken as {clipmapUnknownSky:0.##}); dependent probes queued {counters[7]:N0}, solved with a path through a moving reach {counters[6]:N0} (budget {clipmapBudget})."));

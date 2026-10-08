@@ -178,6 +178,52 @@ vec4 blix_clipmapSample(BlixClipmap c, vec3 world, vec3 n, out bool found) {
     return vec4(0.0);
 }
 
+// For inspection: how many solves the probes behind blix_clipmapSample's answer have had (state bits 8-15), averaged
+// with the SAME weights, at the first level that answers (the level is returned; -1 where none does). Young probes are
+// a few 64-ray samples of their surroundings, which is where a strongly coloured, still-settling answer comes from.
+float blix_clipmapSolvesAt(BlixClipmap c, vec3 world, vec3 n, out int answeredBy) {
+    float blend;
+    int first = blix_clipmapLocate(c, world, blend);
+    answeredBy = -1;
+    if (first < 0) return 0.0;
+    for (int level = first; level < BLIX_CLIPMAP_LEVELS; ++level) {
+        float spacing = blix_clipmapSpacing(c, level);
+        vec3 p = world + n * (0.25 * spacing);
+        vec3 g = p / spacing - 0.5;
+        ivec3 base = ivec3(floor(g));
+        vec3 frac = g - vec3(base);
+        float sum = 0.0, weight = 0.0;
+        for (int i = 0; i < 8; ++i) {
+            ivec3 offset = ivec3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
+            ivec3 cell = base + offset;
+            ivec3 slot = blix_clipmapSlot(c, cell);
+            uvec4 state = BLIX_CLIPMAP_STATE(level * c.dims.x * c.dims.y * c.dims.z + blix_clipmapSlotIndex(c, slot));
+            if ((state.w & BLIX_CLIPMAP_SOLVED) == 0u || (state.w & BLIX_CLIPMAP_BURIED) != 0u
+                || ivec3(state.xyz) != cell) continue;
+            vec3 t = mix(1.0 - frac, frac, vec3(offset));
+            float w = t.x * t.y * t.z;
+            vec3 toProbe = blix_clipmapProbePosition(c, level, cell) - p;
+            float dist = length(toProbe);
+            vec3 dir = dist > 1e-5 ? toProbe / dist : n;
+            float facing = dot(dir, n) * 0.5 + 0.5;
+            w *= facing * facing;
+            if (w <= 1e-6) continue;
+            vec2 moments = blix_clipmapTileSample(blix_clipmapTileOrigin(c, level, slot), -dir, true).rg;
+            if (dist > moments.x) {
+                float variance = max(moments.y, 1e-5);
+                float d = dist - moments.x;
+                float chebyshev = variance / (variance + d * d);
+                w *= max(chebyshev * chebyshev * chebyshev, 0.0);
+            }
+            if (w <= 1e-6) continue;
+            sum += w * float((state.w >> 8) & 0xFFu);
+            weight += w;
+        }
+        if (weight > 0.0) { answeredBy = level; return sum / weight; }
+    }
+    return 0.0;
+}
+
 // The same answer, plus irradiance for two more directions (d1, d2) from the SAME probes with the SAME weights:
 // how the light at this point changes with the normal, with nothing but the lookup direction in each probe's map
 // moved. Deterministic, so a gradient taken from it adds no noise. found as blix_clipmapSample.
