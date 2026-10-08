@@ -20,6 +20,9 @@ internal sealed partial class SponzaLoop
     // taaHandles[taaWrite]: this is sampled after the current frame flipped the pair.
     private readonly List<float[]> stabilityResolved = new();
     private (int W, int H) stabilityGrid;
+    // Per grid pixel: in how many of the K frames the pre-pass saw an alpha-tested surface there (the key's top bit).
+    // Every frame: solid foliage; some: a foliage edge, where TAA's jitter alternates leaf and background.
+    private int[]? stabilityAlphaFrames;
     private const int StabilityStride = 4;
 
     // Called each frame before the shot: reads what the last completed frame left in both targets.
@@ -61,6 +64,19 @@ internal sealed partial class SponzaLoop
                     var rp = BitConverter.ToUInt32(resolved, (py * sw + px) * 4);
                     res[y * gw + x] = Lum(UnpackFloat(rp & 0x7FF, 6), UnpackFloat((rp >> 11) & 0x7FF, 6), UnpackFloat((rp >> 22) & 0x3FF, 5));
                 }
+            }
+        }
+        if (SurfaceTargets)
+        {
+            var keys = device.ReadTexture(graph.GetColorTexture(surfaceKeyHandle), out var kw, out var kh, out _);
+            stabilityAlphaFrames ??= new int[gw * gh];
+            for (var y = 0; y < gh; y++)
+            for (var x = 0; x < gw; x++)
+            {
+                var kx = Math.Min(kw - 1, x * StabilityStride * kw / sw);
+                var ky = Math.Min(kh - 1, y * StabilityStride * kh / sh);
+                var key = BitConverter.ToUInt32(keys, (ky * kw + kx) * 4);
+                if ((key & 0x80000000u) != 0) stabilityAlphaFrames[y * gw + x]++;
             }
         }
         stabilityIncident.Add(inc);
@@ -172,6 +188,61 @@ internal sealed partial class SponzaLoop
                 rgba[i * 4] = b; rgba[i * 4 + 1] = b; rgba[i * 4 + 2] = b; rgba[i * 4 + 3] = 255;
             }
             PngWriter.WriteRgba8(basePath + (name.StartsWith("presented") ? ".stability-presented.png" : ".stability.png"), rgba, gw, gh);
+        }
+        StabilityByClass("incident light", stabilityIncident);
+        StabilityByClass("presented", stabilityResolved.Count >= 2 ? stabilityResolved : stabilityScene);
+    }
+
+    // Where the variation is: foliage (solid / edge, from the surface key) apart, and the rest by brightness decile of
+    // the presented image's mean, darkest first. For each class: its share of pixels, its median and p90 variation,
+    // the share of its pixels over 2%, and its share of all the image's pixels over 2%.
+    private void StabilityByClass(string name, List<float[]> frames)
+    {
+        if (frames.Count < 2) return;
+        var brightnessFrames = stabilityResolved.Count >= 2 ? stabilityResolved : stabilityScene;
+        var (gw, gh) = stabilityGrid;
+        var n = gw * gh;
+        var cv = new double[n];
+        var brightness = new double[n];
+        var valid = new bool[n];
+        for (var i = 0; i < n; i++)
+        {
+            double sum = 0, sum2 = 0;
+            foreach (var f in frames) { sum += f[i]; sum2 += f[i] * f[i]; }
+            var mean = sum / frames.Count;
+            double b = 0;
+            foreach (var f in brightnessFrames) b += f[i];
+            brightness[i] = b / brightnessFrames.Count;
+            if (mean < 1e-5) continue;
+            valid[i] = true;
+            cv[i] = Math.Sqrt(Math.Max(0, sum2 / frames.Count - mean * mean)) / mean;
+        }
+        var classOf = new int[n];   // 0..9 brightness deciles, 10 foliage edge, 11 solid foliage, -1 none
+        var rest = new List<int>();
+        for (var i = 0; i < n; i++)
+        {
+            classOf[i] = -1;
+            if (!valid[i]) continue;
+            var alpha = stabilityAlphaFrames?[i] ?? 0;
+            if (alpha >= frames.Count) classOf[i] = 11;
+            else if (alpha > 0) classOf[i] = 10;
+            else rest.Add(i);
+        }
+        rest.Sort((a, b) => brightness[a].CompareTo(brightness[b]));
+        for (var r = 0; r < rest.Count; r++) classOf[rest[r]] = r * 10 / rest.Count;
+        var total = classOf.Count(c => c >= 0);
+        var totalOver = Enumerable.Range(0, n).Count(i => classOf[i] >= 0 && cv[i] > 0.02);
+        Console.WriteLine(string.Create(Inv,
+            $"[VulkanSponza] stability by class, {name} ({frames.Count} frames; {totalOver} of {total} pixels over 2%):"));
+        for (var c = 0; c < 12; c++)
+        {
+            var members = Enumerable.Range(0, n).Where(i => classOf[i] == c).Select(i => cv[i]).OrderBy(v => v).ToList();
+            if (members.Count == 0) continue;
+            var over = members.Count(v => v > 0.02);
+            var bright = Enumerable.Range(0, n).Where(i => classOf[i] == c).Average(i => brightness[i]);
+            var label = c == 11 ? "foliage, solid" : c == 10 ? "foliage, edge" : $"decile {c + 1,2} (lum {bright:0.000})";
+            Console.WriteLine(string.Create(Inv,
+                $"    {label,-24} {100.0 * members.Count / total,5:0.0}% of pixels  median {100 * members[members.Count / 2],6:0.00}%  p90 {100 * members[members.Count * 9 / 10],6:0.00}%  over 2%: {100.0 * over / members.Count,5:0.0}% of class, {100.0 * over / Math.Max(1, totalOver),5:0.0}% of all"));
         }
     }
 }
