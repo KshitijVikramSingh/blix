@@ -21,14 +21,60 @@ layout(set = 0, binding = 0) uniform ClipmapMark {
     vec4 uOrigin1;
     vec4 uOrigin2;
     vec4 uOrigin3;
+    // Stage 4g-ix: the surface probes (probe_surface.glsl) -- grid, dims and first slot, atlas, and the camera with the
+    // radius inside which a seen surface gets probes of its own (xyz camera, w radius; 0: none allocated).
+    vec4 uSurfaceGrid;
+    vec4 uSurfaceDims;
+    vec4 uSurfaceAtlas;
+    vec4 uSurfaceCamera;
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
 layout(set = 0, binding = 2) uniform sampler2D uPrepassNormal;
 layout(std430, set = 0, binding = 3) buffer ClipmapSeen { uint seen[]; };
+// Allocating a surface probe writes its slot's state (cell, ALLOCATED) and publishes the slot in the index.
+layout(std430, set = 0, binding = 4) buffer ClipmapState { uvec4 states[]; };
+layout(std430, set = 0, binding = 5) buffer SurfaceIndex { uint surfaceIndex[]; };
+layout(std430, set = 0, binding = 6) buffer SurfaceAlloc { uint surfaceAllocated; };
 
 // Addressing only: the sampling half of probe_clipmap.glsl is left out (no atlas or state is read here).
 #include "probe_clipmap.glsl"
+#include "probe_surface.glsl"
+
+// The surface probes around a seen point: the eight a lookup there would weigh, each found or allocated, and stamped.
+// Allocation: the first to swap the cell's 0 for "allocating" takes the next slot, writes its state, then publishes
+// slot + 1; a cell whose pool is spent is marked full (the clipmap answers there).
+// Returns whether all eight are (now) surface probes: then the clipmap is not what this point is shaded with.
+bool surfaceProbesAt(BlixSurfaceGrid s, vec3 world, vec3 n, uint value) {
+    bool all = true;
+    float spacing = s.spacing;
+    vec3 p = world + n * (0.25 * spacing);
+    ivec3 base = ivec3(floor(p / spacing - 0.5));
+    for (int i = 0; i < 8; ++i) {
+        ivec3 cell = base + ivec3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
+        int index = blix_surfaceCellIndex(s, cell);
+        if (index < 0) { all = false; continue; }
+        uint v = surfaceIndex[index];
+        if (v == 0u) {
+            if (atomicCompSwap(surfaceIndex[index], 0u, 0xFFFFFFFEu) != 0u) { all = false; continue; }
+            uint slot = atomicAdd(surfaceAllocated, 1u);
+            if (slot < uint(u.uSurfaceAtlas.z)) {
+                states[s.firstSlot + int(slot)] = uvec4(uvec3(cell), BLIX_SURFACE_ALLOCATED);
+                seen[s.firstSlot + int(slot)] = value;
+                memoryBarrierBuffer();
+                surfaceIndex[index] = slot + 1u;
+            } else {
+                surfaceIndex[index] = 0xFFFFFFFFu;
+                all = false;
+            }
+        } else if (v < 0xFFFFFFFEu) {
+            seen[s.firstSlot + int(v - 1u)] = value;
+        } else {
+            all = false;
+        }
+    }
+    return all;
+}
 
 void stamp(BlixClipmap c, int level, vec3 world, vec3 n) {
     float spacing = blix_clipmapSpacing(c, level);
@@ -65,6 +111,21 @@ void main() {
     float blend;
     int level = blix_clipmapLocate(c, world, blend);
     if (level < 0) return;
+    bool surfaceAnswers = false;
+    if (u.uSurfaceAtlas.w > 0.5 && distance(world, u.uSurfaceCamera.xyz) < u.uSurfaceCamera.w) {
+        BlixSurfaceGrid s;
+        s.minCell = ivec3(u.uSurfaceGrid.xyz);
+        s.spacing = u.uSurfaceGrid.w;
+        s.dims = ivec3(u.uSurfaceDims.xyz);
+        s.firstSlot = int(u.uSurfaceDims.w);
+        s.tileRow0 = int(u.uSurfaceAtlas.x);
+        s.columns = int(u.uSurfaceAtlas.y);
+        s.enabled = true;
+        surfaceAnswers = surfaceProbesAt(s, world, n, uint(u.uParams.y));
+    }
+    // Where surface probes answer, the clipmap's are not what is shaded: their budget goes elsewhere. (A level probe
+    // or forced level compares the clipmap's levels, so it stamps them regardless.)
+    if (surfaceAnswers && u.uParams.z < 0.5) return;
     stamp(c, level, world, n);
     if (u.uParams.z > 0.5) {
         for (int l = level + 1; l < BLIX_CLIPMAP_LEVELS; ++l)

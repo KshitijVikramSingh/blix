@@ -33,6 +33,9 @@ layout(set = 0, binding = 0) uniform IncidentClipmap {
     vec4 uScreen;        // screen probes: x 1 when they answer, yz tiles across and down; w 1: write no gradient
                          // (--no-incident-gradient, the control for what the normal map adds; screen probes or not)
     vec4 uFrameSize;     // xy the frame's pixels (the probes' tiles are in them)
+    vec4 uSurfaceGrid;   // the surface probes (probe_surface.glsl, stage 4g-ix): lowest cell xyz, spacing w
+    vec4 uSurfaceDims;   // dims xyz, first slot w
+    vec4 uSurfaceAtlas;  // tile row, tiles across, slots, w 1 when on
 } g;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -97,6 +100,9 @@ float clipLiftKnob, clipVisibilityKnob;
 #define BLIX_CLIPMAP_LIFT(spacing) (clipLiftKnob > 0.0 ? clipLiftKnob : 0.25 * (spacing))
 #define BLIX_CLIPMAP_VISIBILITY(c) (clipVisibilityKnob > 0.0 ? pow(max(c, 0.0), clipVisibilityKnob) : (c) * (c) * (c))
 #include "probe_clipmap.glsl"
+layout(std430, set = 0, binding = 9) readonly buffer SurfaceIndex { uint surfaceIndex[]; };
+#define BLIX_SURFACE_INDEX(i) surfaceIndex[i]
+#include "probe_surface.glsl"
 
 void main() {
     clipLiftKnob = g.uClipParams.z;
@@ -141,6 +147,19 @@ void main() {
     }
     vec4 field = blix_clipmapSampleDirs(c, worldPos, N, normalize(N + tilt * t1), normalize(N + tilt * t2), found, e1, e2);
     outIncident = found ? field : vec4(texture(uIrradiance, N).rgb, 1.0);
+    // The surface probes answer where they exist: the same surface keeps the same probes wherever the camera stands.
+    // The gradient below stays the clipmap's (relative, applied to whatever light the pixel ends with).
+    BlixSurfaceGrid sg;
+    sg.minCell = ivec3(g.uSurfaceGrid.xyz);
+    sg.spacing = g.uSurfaceGrid.w;
+    sg.dims = ivec3(g.uSurfaceDims.xyz);
+    sg.firstSlot = int(g.uSurfaceDims.w);
+    sg.tileRow0 = int(g.uSurfaceAtlas.x);
+    sg.columns = int(g.uSurfaceAtlas.y);
+    sg.enabled = g.uSurfaceAtlas.w > 0.5 && g.uClipParams.y < 0.5;   // a forced level is the clipmap's alone
+    float surfaceWeight;
+    vec4 surfaceField = blix_surfaceSample(sg, worldPos, N, surfaceWeight);
+    if (surfaceWeight > 0.0) outIncident = surfaceField;
     vec3 gathered;
     float confidence;
     if (g.uScreen.x > 0.5 && screenProbesAt(worldPos, N, viewDepth, gathered, confidence)) {

@@ -122,6 +122,7 @@ internal sealed partial class SponzaLoop
         sceneBoundsMin = min;
         sceneBoundsSpan = max - min;
         Console.WriteLine($"[VulkanSponza] scene bounds: {min} .. {max}");
+        CreateSurfaceIndex();
     }
 
     private void TryFinishLoad()

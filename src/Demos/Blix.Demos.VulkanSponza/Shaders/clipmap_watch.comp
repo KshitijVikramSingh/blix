@@ -13,6 +13,9 @@ layout(set = 0, binding = 0) uniform ClipmapWatch {
     vec4 uOrigin1;
     vec4 uOrigin2;
     vec4 uOrigin3;
+    vec4 uSurfaceGrid;
+    vec4 uSurfaceDims;
+    vec4 uSurfaceAtlas;
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uClipmapIrradiance;
@@ -27,6 +30,9 @@ layout(std430, set = 0, binding = 5) writeonly buffer WatchOut { vec4 answers[];
 #define BLIX_CLIPMAP_DEPTH_FILTERED(p) textureLod(uClipmapDepth, (p) / vec2(textureSize(uClipmapDepth, 0)), 0.0)
 #define BLIX_CLIPMAP_STATE(s) states[s]
 #include "probe_clipmap.glsl"
+layout(std430, set = 0, binding = 6) readonly buffer SurfaceIndex { uint surfaceIndex[]; };
+#define BLIX_SURFACE_INDEX(i) surfaceIndex[i]
+#include "probe_surface.glsl"
 
 void main() {
     uint i = gl_GlobalInvocationID.x;
@@ -40,6 +46,15 @@ void main() {
     c.origin[2] = ivec3(u.uOrigin2.xyz);
     c.origin[3] = ivec3(u.uOrigin3.xyz);
     bool found;
-    vec4 field = blix_clipmapSample(c, points[2u * i].xyz, normalize(points[2u * i + 1u].xyz), found);
+    BlixSurfaceGrid sg;
+    sg.minCell = ivec3(u.uSurfaceGrid.xyz);
+    sg.spacing = u.uSurfaceGrid.w;
+    sg.dims = ivec3(u.uSurfaceDims.xyz);
+    sg.firstSlot = int(u.uSurfaceDims.w);
+    sg.tileRow0 = int(u.uSurfaceAtlas.x);
+    sg.columns = int(u.uSurfaceAtlas.y);
+    sg.enabled = u.uSurfaceAtlas.w > 0.5;
+    // What is shaded: the surface probes where they answer, the clipmap where not.
+    vec4 field = blix_worldSample(sg, c, points[2u * i].xyz, normalize(points[2u * i + 1u].xyz), found);
     answers[i] = vec4(field.rgb, found ? 1.0 : 0.0);
 }

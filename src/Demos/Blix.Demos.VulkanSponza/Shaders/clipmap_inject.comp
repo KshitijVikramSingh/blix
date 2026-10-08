@@ -42,6 +42,12 @@ layout(set = 0, binding = 0) uniform ClipmapInject {
     vec4 uSunDirection;    // xyz the direction the sun travels
     vec4 uSunIrradiance;   // rgb measured irradiance, w 1 when the sky irradiance cube is valid
     vec4 uFrame;           // x frame counter, y bounce strength, z sky strength, w depth lobe exponent
+    // Stage 4g-ix, the world-anchored surface probes (probe_surface.glsl): x y z the index's lowest cell, w spacing;
+    // the index's dims and the first surface slot; x the atlas row where surface tiles start, y tiles across,
+    // z how many surface slots, w 1 when they are on.
+    vec4 uSurfaceGrid;
+    vec4 uSurfaceDims;
+    vec4 uSurfaceAtlas;
     vec4 uGuide;           // x 1: half of each solve's rays guided by the probe's radiance bins (--clipmap-guide), y the
                            // bins' floor, as a share of their mean luminance
     vec4 uFallback;        // x the sky visibility taken at a hit no probe answers for, y the sky's mip for a ray
@@ -116,6 +122,21 @@ layout(std430, set = 0, binding = 10) readonly buffer ClipmapSeen { uint seen[];
 #define BLIX_CLIPMAP_DEPTH(t) imageLoad(uClipmapDepth, t)
 #define BLIX_CLIPMAP_STATE(s) states[s]
 #include "probe_clipmap.glsl"
+layout(std430, set = 0, binding = 12) readonly buffer SurfaceIndex { uint surfaceIndex[]; };
+#define BLIX_SURFACE_INDEX(i) surfaceIndex[i]
+#include "probe_surface.glsl"
+
+BlixSurfaceGrid surfaceGrid() {
+    BlixSurfaceGrid s;
+    s.minCell = ivec3(u.uSurfaceGrid.xyz);
+    s.spacing = u.uSurfaceGrid.w;
+    s.dims = ivec3(u.uSurfaceDims.xyz);
+    s.firstSlot = int(u.uSurfaceDims.w);
+    s.tileRow0 = int(u.uSurfaceAtlas.x);
+    s.columns = int(u.uSurfaceAtlas.y);
+    s.enabled = u.uSurfaceAtlas.w > 0.5;
+    return s;
+}
 
 // Guided sampling (stage 4g-iv). In bounce-lit enclosures a probe's light arrives through a few sunlit patches and
 // saturated curtains that only a handful of 64 uniform rays hit, so neighbouring probes catch different numbers of
@@ -194,7 +215,9 @@ void main() {
     // Bucket counts after the cursor (visible first, then young), then each bucket's list, every slot's worth.
     uint bucketAt = cursorAt + 1u;
     uint bucketListAt = bucketAt + uint(CLIPMAP_BUCKETS);
-    uint total = uint(perLevel * BLIX_CLIPMAP_LEVELS);
+    // Every slot: the clipmap's, then the surface probes' (which never scroll, and join the visible buckets).
+    uint clipSlots = uint(perLevel * BLIX_CLIPMAP_LEVELS);
+    uint total = clipSlots + uint(u.uSurfaceAtlas.z);
     if (mode == 0) {
         if (gl_GlobalInvocationID.x == 0u) {
             // Last frame's round-robin share, from last frame's counts, before they are cleared.
@@ -204,7 +227,7 @@ void main() {
             for (int b = CLIPMAP_VISIBLE_BUCKETS; b < CLIPMAP_BUCKETS; ++b) young += queue[bucketAt + uint(b)];
             uint used = min(uint(u.uParams.w), unsolved + min(queue[7], uint(u.uDynamicQueue.y))
                 + min(visible, uint(u.uFallback.w)) + young);
-            queue[cursorAt] = (queue[cursorAt] + uint(u.uParams.w) - used) % total;
+            queue[cursorAt] = (queue[cursorAt] + uint(u.uParams.w) - used) % clipSlots;
             for (int i = 0; i < 8; ++i) queue[i] = 0u;
             for (int b = 0; b < CLIPMAP_BUCKETS; ++b) queue[bucketAt + uint(b)] = 0u;
         }
@@ -213,7 +236,23 @@ void main() {
 
     if (mode == 1) {
         int g = int(gl_GlobalInvocationID.x);
-        if (g >= perLevel * BLIX_CLIPMAP_LEVELS) return;
+        if (uint(g) >= total) return;
+        if (uint(g) >= clipSlots) {
+            // A surface probe: allocated by clipmap_mark.comp where a surface is seen; its cell is its own for good.
+            // Unsolved, it is a visible probe with no solves (it was allocated because it is seen); then as any.
+            uvec4 state = states[g];
+            if ((state.w & BLIX_SURFACE_ALLOCATED) == 0u) return;
+            uint solves = (state.w & BLIX_CLIPMAP_SOLVED) != 0u ? (state.w >> 8) & 0xFFu : 0u;
+            bool visible = solves < 255u && seen[g] + 2u > uint(u.uFrame.x);
+            int b = -1;
+            if (visible) b = min(findMSB(max(solves, 1u)), CLIPMAP_VISIBLE_BUCKETS - 1);
+            else if (solves < uint(u.uFallback.z)) b = CLIPMAP_VISIBLE_BUCKETS + min(findMSB(max(solves, 1u)), CLIPMAP_YOUNG_BUCKETS - 1);
+            if (b >= 0) {
+                uint k = atomicAdd(queue[bucketAt + uint(b)], 1u);
+                queue[bucketListAt + uint(b) * total + k] = uint(g);
+            }
+            return;
+        }
         int level = g / perLevel;
         int index = g % perLevel;
         ivec3 slot = ivec3(index % c.dims.x, (index / c.dims.x) % c.dims.y, index / (c.dims.x * c.dims.y));
@@ -267,8 +306,9 @@ void main() {
             else k -= count;
         }
         if (chosen < 0) {
-            // The budget the queues left over sweeps every probe in turn, from the cursor.
-            chosen = int((queue[cursorAt] + uint(k)) % total);
+            // The budget the queues left over sweeps every clipmap probe in turn, from the cursor (surface probes come
+            // only through the queues: an unallocated surface slot has no cell to solve).
+            chosen = int((queue[cursorAt] + uint(k)) % clipSlots);
         }
         sProbe = chosen;
         sBackfaces = 0u;
@@ -277,12 +317,16 @@ void main() {
     }
     barrier();
     int g = sProbe;
-    int level = g / perLevel;
+    BlixSurfaceGrid sg = surfaceGrid();
+    bool surfaceProbe = uint(g) >= clipSlots;
+    // A surface probe is level 0's spacing at its own world cell; a clipmap probe is where its level's block puts it.
+    int level = surfaceProbe ? 0 : g / perLevel;
     int index = g % perLevel;
     ivec3 slot = ivec3(index % c.dims.x, (index / c.dims.x) % c.dims.y, index / (c.dims.x * c.dims.y));
-    ivec3 cell = blix_clipmapCellInSlot(c, level, slot);
+    ivec3 cell = surfaceProbe ? ivec3(states[g].xyz) : blix_clipmapCellInSlot(c, level, slot);
     vec3 origin = blix_clipmapProbePosition(c, level, cell);
     float spacing = blix_clipmapSpacing(c, level);
+    ivec2 probeTile = surfaceProbe ? blix_surfaceTileOrigin(sg, g - int(clipSlots)) : blix_clipmapTileOrigin(c, level, slot);
     // As far as a ray can usefully report a distance: well past the level's block.
     float farDistance = spacing * float(max(c.dims.x, max(c.dims.y, c.dims.z))) * 2.0;
 
@@ -290,7 +334,7 @@ void main() {
     uint stateWord = states[g].w;
     // Guide only from this cell's own history (a re-pointed slot's bins belong to another cell).
     bool guide = u.uGuide.x > 0.5 && (stateWord & BLIX_CLIPMAP_SOLVED) != 0u && ((stateWord >> 8) & 0xFFu) > 0u;
-    ivec2 radianceTile = blix_clipmapTileOrigin(c, level, slot);
+    ivec2 radianceTile = probeTile;
     if (lane < 36u) {
         vec4 bin = guide ? imageLoad(uClipmapRadiance, radianceTile + ivec2(int(lane) % 6, int(lane) / 6)) : vec4(1.0);
         sBinQ[lane] = bin.a > 0.5 ? dot(bin.rgb, vec3(0.2126, 0.7152, 0.0722)) : -1.0;
@@ -380,7 +424,7 @@ void main() {
         // What the clipmap knows arrives at the hit, from earlier solves: all the indirect light, sky included. Where
         // no probe answers (start-up, or past the coarsest level) it adds nothing, so a wrong start is dark.
         bool known;
-        vec4 field = blix_clipmapSample(c, hitPos, n, known);
+        vec4 field = blix_worldSample(sg, c, hitPos, n, known);
         atomicAdd(queue[4], 1u);
         if (!known) atomicAdd(queue[5], 1u);
         vec3 indirect = known ? field.rgb * u.uFrame.y : vec3(0.0);
@@ -460,7 +504,7 @@ void main() {
     // blend for them.
     uint dependentNow = u.uDynamicMin.w > 0.5 ? sDependentRays : 0u;
     float geometryConverge = dependentNow > 0u ? max(converge, 0.25) : converge;
-    ivec2 tile = blix_clipmapTileOrigin(c, level, slot);
+    ivec2 tile = probeTile;
     ivec2 texel = ivec2(int(lane) % 8, int(lane) / 8);
     ivec2 src = blix_octBorderSource(texel, 8);
     int interior = (src.y - 1) * 6 + (src.x - 1);
@@ -480,7 +524,7 @@ void main() {
         // it moves (uDynamicQueue.w).
         uint dependentRays = dependentNow;
         if (sAnyDependent != 0u) atomicAdd(queue[6], 1u);
-        states[g] = uvec4(uvec3(cell), BLIX_CLIPMAP_SOLVED | (buried ? BLIX_CLIPMAP_BURIED : 0u)
+        states[g] = uvec4(uvec3(cell), BLIX_CLIPMAP_SOLVED | (buried ? BLIX_CLIPMAP_BURIED : 0u) | (surfaceProbe ? BLIX_SURFACE_ALLOCATED : 0u)
             | (min(solves + 1u, 255u) << 8) | (dependentRays << CLIPMAP_DEPENDENT_SHIFT));
     }
 }

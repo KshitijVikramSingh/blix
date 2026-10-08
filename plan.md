@@ -486,6 +486,21 @@ exactly where the world has changed.
      Cornell point error 0.171 -> 0.207, energy +3.8% (more of the coarser, wronger level in every answer). So the
      light moves because the levels hold different answers; blending and reach only move where it shows. What fixes
      it is resolution where the image looks, not a cleverer camera-centred box.
+   4g-ix stage A DONE (off by default, `--surface-probes N`, `--surface-radius R` 40 m): world-anchored surface probes
+     (Blix.Shaders/probe_surface.glsl). Level 0 fixed in the world: a probe at (cell + 0.5) x 0.5 m, its cell never
+     re-pointed, so a surface keeps its probes wherever the camera stands. Slots after the clipmap's in the same state
+     buffer, stamps and buckets (visible-first, guided rays and 1/n carry over), tiles below the clipmap's in the same
+     atlases; clipmap_mark.comp allocates the eight cells around each seen surface point (compare-and-swap on a dense
+     index over the scene's bounds, 793 KB for Sponza) and stops stamping the clipmap's probes where surface probes
+     answer; the incident pass, the watch and probe rays' hits read surface probes first, the clipmap where none.
+     Measured: walking (--watch) spread / range / step 6.7 / 16 / 8.2% -> 0.0% (the probes behind the watched points
+     had 71-123 solves: converged, so stable); GI gate Cornell point error 0.171 -> 0.081 (target 0.10 MET), median
+     1.03 -> 0.997, energy 0.98; thin-wall leak 0.09 -> 0.068; Sponza orbit total |err| 0.00118 -> 0.00109, as
+     shaded 0.00048 -> 0.00051 (15k probes allocated by the orbit, median 19 solves at 1500: still converging).
+     Bistro: the pool FILLS (no eviction) and allocation starves (14k of 85k solved, median 2): no gain, and the
+     dense index is 62 MB there. Frame time inconclusive (off 55 / 68, on 70 / 63 ms: inside this laptop's drift).
+     Next, stage B: a lifecycle -- reclaim slots unseen for long (free list; the state holds the cell, so the index
+     entry can be cleared), so a pool follows the camera; then a hash for the index (Bistro, the city).
    Open, measured:
      FOG made the stability instrument unrepeatable: it is on by default and reads wall time (time.Total) for its
        density drift and sample jitter, so the same build, pose and flags gave 45k / 62k / 102k presented pixels

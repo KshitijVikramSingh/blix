@@ -62,6 +62,7 @@ internal sealed partial class SponzaLoop
     {
         var origins = clipmap!.Origins;
         var screen = ScreenProbeIncidentInputs(frameWidth, frameHeight);
+        var surface = SurfaceUniforms(ClipmapLevels * clipmap.ProbesPerLevel);
         graph.Pass(incidentPassHandle, scope => fullscreen.Draw(
             scope, incidentClipmapPipeline,
             new[]
@@ -86,8 +87,11 @@ internal sealed partial class SponzaLoop
                 new("uOrigin3", new Vector4Uniform(new Vector4(origins[3].X, origins[3].Y, origins[3].Z, 0f))),
                 new("uScreen", new Vector4Uniform(screen.Screen)),
                 new("uFrameSize", new Vector4Uniform(screen.FrameSize)),
+                new("uSurfaceGrid", new Vector4Uniform(surface.Grid)),
+                new("uSurfaceDims", new Vector4Uniform(surface.Dims)),
+                new("uSurfaceAtlas", new Vector4Uniform(surface.Atlas)),
             },
-            buffers: new[] { new ShaderBufferBinding("ClipmapState", clipmapState), new ShaderBufferBinding("ScreenProbeTiles", screen.Tiles), new ShaderBufferBinding("ScreenProbes", screen.Probes) }));
+            buffers: new[] { new ShaderBufferBinding("ClipmapState", clipmapState), new ShaderBufferBinding("ScreenProbeTiles", screen.Tiles), new ShaderBufferBinding("ScreenProbes", screen.Probes), new ShaderBufferBinding("SurfaceIndex", surfaceIndex) }));
     }
 
     private const int ClipmapLevels = 4;
@@ -137,25 +141,30 @@ internal sealed partial class SponzaLoop
         clipmap = clipmapBlendOverride >= 0f
             ? new ProbeClipmap(ClipmapLevels, ClipmapDims, clipmapSpacing, clipmapBlendOverride)
             : new ProbeClipmap(ClipmapLevels, ClipmapDims, clipmapSpacing);
-        clipmapIrradiance = Own(device.CreateStorageTexture2D(clipmap.AtlasWidth, clipmap.AtlasHeight, TextureFormat.Rgba16F,
+        // The surface probes' tiles sit below the clipmap's in the same atlases (stage 4g-ix).
+        var atlasHeight = CreateSurfaceProbes(clipmap.AtlasHeight, clipmap.AtlasWidth);
+        clipmapIrradiance = Own(device.CreateStorageTexture2D(clipmap.AtlasWidth, atlasHeight, TextureFormat.Rgba16F,
             SamplerDescription.LinearClamp, "sponza.clipmap.irradiance"));
-        clipmapDepth = Own(device.CreateStorageTexture2D(clipmap.AtlasWidth, clipmap.AtlasHeight, TextureFormat.Rgba16F,
+        clipmapDepth = Own(device.CreateStorageTexture2D(clipmap.AtlasWidth, atlasHeight, TextureFormat.Rgba16F,
             SamplerDescription.LinearClamp, "sponza.clipmap.depth"));
-        clipmapRadiance = Own(device.CreateStorageTexture2D(clipmap.AtlasWidth, clipmap.AtlasHeight, TextureFormat.Rgba16F,
+        clipmapRadiance = Own(device.CreateStorageTexture2D(clipmap.AtlasWidth, atlasHeight, TextureFormat.Rgba16F,
             SamplerDescription.LinearClamp, "sponza.clipmap.radiance"));
-        clipmapStatic = Own(device.CreateStorageTexture2D(clipmap.AtlasWidth, clipmap.AtlasHeight, TextureFormat.Rgba16F,
+        clipmapStatic = Own(device.CreateStorageTexture2D(clipmap.AtlasWidth, atlasHeight, TextureFormat.Rgba16F,
             SamplerDescription.LinearClamp, "sponza.clipmap.static"));
-        clipmapDynamic = Own(device.CreateStorageTexture2D(clipmap.AtlasWidth, clipmap.AtlasHeight, TextureFormat.Rgba16F,
+        clipmapDynamic = Own(device.CreateStorageTexture2D(clipmap.AtlasWidth, atlasHeight, TextureFormat.Rgba16F,
             SamplerDescription.LinearClamp, "sponza.clipmap.dynamic"));
         var slots = ClipmapLevels * clipmap.ProbesPerLevel;
-        // Every slot starts holding a cell no block contains, unsolved: the first scan re-points and queues all of them.
-        var initial = new uint[slots * 4];
+        var total = slots + surfaceCapacity;
+        // Every clipmap slot starts holding a cell no block contains, unsolved: the first scan re-points and queues all of
+        // them. Surface slots start empty (not ALLOCATED) until clipmap_mark.comp allocates them.
+        var initial = new uint[total * 4];
         for (var i = 0; i < slots; i++) { initial[i * 4] = 0x80000000u; initial[i * 4 + 1] = 0x80000000u; initial[i * 4 + 2] = 0x80000000u; }
-        clipmapState = Own(device.CreateGpuBuffer(slots * 16, MemoryMarshal.AsBytes(initial.AsSpan()), "sponza.clipmap.state"));
+        clipmapState = Own(device.CreateGpuBuffer(total * 16, MemoryMarshal.AsBytes(initial.AsSpan()), "sponza.clipmap.state"));
         // Counters, the per-level unsolved queues, the dependent queue (stage 4f), the cursor, and the buckets' counts and
-        // lists: visible probes by solves (4g-iii), then young ones off screen (4g-ii).
-        clipmapQueue = Own(device.CreateGpuBuffer((8 + 2 * slots + 1 + ClipmapBuckets * (1 + slots)) * 4, name: "sponza.clipmap.queue"));
-        clipmapSeen = Own(device.CreateGpuBuffer(slots * 4, new byte[slots * 4], "sponza.clipmap.seen"));
+        // lists (every slot's worth, surface slots included): visible probes by solves (4g-iii), then young ones off
+        // screen (4g-ii).
+        clipmapQueue = Own(device.CreateGpuBuffer((8 + 2 * slots + 1 + ClipmapBuckets * (1 + total)) * 4, name: "sponza.clipmap.queue"));
+        clipmapSeen = Own(device.CreateGpuBuffer(total * 4, new byte[total * 4], "sponza.clipmap.seen"));
         // The lit pass's glass reads the clipmap: swap its placeholders for the real thing.
         if (passBindings is not null)
         {
@@ -201,7 +210,9 @@ internal sealed partial class SponzaLoop
         var buffers = rayBlockBuffers
             .Append(new ShaderBufferBinding("ClipmapState", clipmapState))
             .Append(new ShaderBufferBinding("ClipmapQueue", clipmapQueue))
-            .Append(new ShaderBufferBinding("ClipmapSeen", clipmapSeen)).ToArray();
+            .Append(new ShaderBufferBinding("ClipmapSeen", clipmapSeen))
+            .Append(new ShaderBufferBinding("SurfaceIndex", surfaceIndex)).ToArray();
+        var surface = SurfaceUniforms(slots);
         DispatchCommand Phase(int mode, int groups) => new(clipmapPipeline, groups, 1, 1, new ShaderUniform[]
         {
             new("uDims", new Vector4Uniform(new Vector4(ClipmapDims.X, ClipmapDims.Y, ClipmapDims.Z, clipmapSpacing))),
@@ -214,6 +225,9 @@ internal sealed partial class SponzaLoop
             new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 1f))),
             new("uFrame", new Vector4Uniform(new Vector4(clipmapFrame, clipmapNoBounce ? 0f : 1f, 1f, ClipmapDepthLobe))),
             // y: the prefiltered sky's mip a probe ray reads, about a ray's 1/64 of the sphere (a ~15 degree cone).
+            new("uSurfaceGrid", new Vector4Uniform(surface.Grid)),
+            new("uSurfaceDims", new Vector4Uniform(surface.Dims)),
+            new("uSurfaceAtlas", new Vector4Uniform(surface.Atlas)),
             new("uGuide", new Vector4Uniform(new Vector4(clipmapGuide ? 1f : 0f, clipmapGuideFloor, 0f, 0f))),
             new("uFallback", new Vector4Uniform(new Vector4(clipmapUnknownSky, MathF.Min(1.5f, Math.Max(0, iblPrefilterMips - 1)), clipmapYoung, MathF.Floor(clipmapBudget * clipmapVisibleShare)))),
             new("uDynamicMin", new Vector4Uniform(dynamicReach ? new Vector4(moverReach.Min, 1f) : Vector4.Zero)),
@@ -222,7 +236,7 @@ internal sealed partial class SponzaLoop
             new("uCascadeVP", new Matrix4x4ArrayUniform(cascadeViewProj)),
         }, textures, Buffers: buffers);
         graph.Dispatch(clipmapPassHandle, Phase(0, 1));
-        graph.Dispatch(clipmapPassHandle, Phase(1, (slots + 63) / 64));
+        graph.Dispatch(clipmapPassHandle, Phase(1, (slots + surfaceCapacity + 63) / 64));
         graph.Dispatch(clipmapPassHandle, Phase(2, clipmapBudget));
         clipmapFrame++;
     }
@@ -230,8 +244,9 @@ internal sealed partial class SponzaLoop
     // Stamps the probes this frame's image reads (clipmap_mark.comp), for the next solve's visible queue.
     private void RecordClipmapMark(Matrix4x4 invProjection, Matrix4x4 invView, int width, int height)
     {
-        if (clipmap is null || clipmapVisibleShare <= 0f) return;
+        if (clipmap is null || (clipmapVisibleShare <= 0f && !SurfaceProbesOn)) return;
         var origins = clipmap.Origins;
+        var surface = SurfaceUniforms(ClipmapLevels * clipmap.ProbesPerLevel);
         var groups = (((width + ClipmapMarkStride - 1) / ClipmapMarkStride + 7) / 8, ((height + ClipmapMarkStride - 1) / ClipmapMarkStride + 7) / 8);
         graph.Dispatch(clipmapMarkPassHandle, new DispatchCommand(clipmapMarkPipeline, groups.Item1, groups.Item2, 1, new ShaderUniform[]
         {
@@ -244,11 +259,21 @@ internal sealed partial class SponzaLoop
             new("uOrigin1", new Vector4Uniform(new Vector4(origins[1].X, origins[1].Y, origins[1].Z, 0f))),
             new("uOrigin2", new Vector4Uniform(new Vector4(origins[2].X, origins[2].Y, origins[2].Z, 0f))),
             new("uOrigin3", new Vector4Uniform(new Vector4(origins[3].X, origins[3].Y, origins[3].Z, 0f))),
+            new("uSurfaceGrid", new Vector4Uniform(surface.Grid)),
+            new("uSurfaceDims", new Vector4Uniform(surface.Dims)),
+            new("uSurfaceAtlas", new Vector4Uniform(surface.Atlas)),
+            new("uSurfaceCamera", new Vector4Uniform(new Vector4(cameraPosition, surfaceRadius))),
         }, new[]
         {
             new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
             new ShaderTextureBinding("uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
-        }, Buffers: new[] { new ShaderBufferBinding("ClipmapSeen", clipmapSeen) }));
+        }, Buffers: new[]
+        {
+            new ShaderBufferBinding("ClipmapSeen", clipmapSeen),
+            new ShaderBufferBinding("ClipmapState", clipmapState),
+            new ShaderBufferBinding("SurfaceIndex", surfaceIndex),
+            new ShaderBufferBinding("SurfaceAlloc", surfaceAlloc),
+        }));
     }
 
     // At the shot: every slot's state against the C# contract (the scan re-points each one to the cell its level's
@@ -257,7 +282,7 @@ internal sealed partial class SponzaLoop
     {
         if (clipmap is null || clipmapFrame == 0) return;
         var slots = ClipmapLevels * clipmap.ProbesPerLevel;
-        var words = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(clipmapState, 0, slots * 16).AsSpan()).ToArray();
+        var words = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(clipmapState, 0, (slots + surfaceCapacity) * 16).AsSpan()).ToArray();
         var mismatched = 0;
         var solved = new int[ClipmapLevels];
         var buried = new int[ClipmapLevels];
@@ -282,7 +307,8 @@ internal sealed partial class SponzaLoop
         }
         var bucketCounts = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(clipmapQueue, (8 + 2 * slots + 1) * 4, ClipmapBuckets * 4).AsSpan()).ToArray();
         // The visible probes' own solves (what the image is made of), from the stamps.
-        var seenStamps = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(clipmapSeen, 0, slots * 4).AsSpan()).ToArray();
+        var seenStamps = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(clipmapSeen, 0, (slots + surfaceCapacity) * 4).AsSpan()).ToArray();
+        WriteSurfaceCensus(words, seenStamps, slots);
         var visibleSolves = new List<uint>();
         for (var g = 0; g < slots; g++)
             if (seenStamps[g] + 2 > clipmapFrame && (words[g * 4 + 3] & 1u) != 0) visibleSolves.Add((words[g * 4 + 3] >> 8) & 0xFFu);

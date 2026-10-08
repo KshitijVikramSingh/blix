@@ -75,6 +75,7 @@ internal sealed partial class SponzaLoop
     {
         if (watchCount == 0 || clipmap is null) return;
         var origins = clipmap.Origins;
+        var surface = SurfaceUniforms(ClipmapLevels * clipmap.ProbesPerLevel);
         graph.Dispatch(clipmapWatchPassHandle, new DispatchCommand(clipmapWatchPipeline, (watchCount + 63) / 64, 1, 1, new ShaderUniform[]
         {
             new("uDims", new Vector4Uniform(new Vector4(ClipmapDims.X, ClipmapDims.Y, ClipmapDims.Z, clipmapSpacing))),
@@ -83,6 +84,9 @@ internal sealed partial class SponzaLoop
             new("uOrigin1", new Vector4Uniform(new Vector4(origins[1].X, origins[1].Y, origins[1].Z, 0f))),
             new("uOrigin2", new Vector4Uniform(new Vector4(origins[2].X, origins[2].Y, origins[2].Z, 0f))),
             new("uOrigin3", new Vector4Uniform(new Vector4(origins[3].X, origins[3].Y, origins[3].Z, 0f))),
+            new("uSurfaceGrid", new Vector4Uniform(surface.Grid)),
+            new("uSurfaceDims", new Vector4Uniform(surface.Dims)),
+            new("uSurfaceAtlas", new Vector4Uniform(surface.Atlas)),
         }, new[]
         {
             new ShaderTextureBinding("uClipmapIrradiance", clipmapIrradiance),
@@ -92,6 +96,7 @@ internal sealed partial class SponzaLoop
             new ShaderBufferBinding("ClipmapState", clipmapState),
             new ShaderBufferBinding("WatchPoints", watchPoints),
             new ShaderBufferBinding("WatchOut", watchOut),
+            new ShaderBufferBinding("SurfaceIndex", surfaceIndex),
         }));
     }
 
@@ -113,6 +118,7 @@ internal sealed partial class SponzaLoop
     private void WriteWatch()
     {
         if (watchSeries.Count < 2) return;
+        WriteWatchedProbes();
         var walkEnd = walkTo is not null ? walkAt + walkFrames : WatchStart;
         // Two frames in: the frame that picks the points reads a buffer nothing has written yet.
         var first = WatchStart + 2;
@@ -135,9 +141,43 @@ internal sealed partial class SponzaLoop
                 step.Add(Enumerable.Range(1, v.Length - 1).Max(k => Math.Abs(v[k] - v[k - 1])) / mean);
             }
             if (spread.Count == 0) continue;
-            string Q(List<double> x) { x.Sort(); return string.Create(CultureInfo.InvariantCulture, $"median {100 * x[x.Count / 2]:0.0}%, p90 {100 * x[x.Count * 9 / 10]:0.0}%"); }
+            var firstMean = frames[0].Where(v => !float.IsNaN(v)).DefaultIfEmpty(0f).Average();
+            var lastMean = frames[^1].Where(v => !float.IsNaN(v)).DefaultIfEmpty(0f).Average();
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] watch, {name}: mean light over the points {firstMean:0.0000} at its first frame, {lastMean:0.0000} at its last"));
+            string Q(List<double> x) { x.Sort(); return string.Create(CultureInfo.InvariantCulture, $"median {100 * x[x.Count / 2]:0.00}%, p90 {100 * x[x.Count * 9 / 10]:0.00}%"); }
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] watch, {name} ({frames.Length} frames, {spread.Count} points): spread (std/mean) {Q(spread)}; range {Q(range)}; largest step {Q(step)}"));
         }
+    }
+
+    // The surface probes behind the watched points: how many exist, their solves, and whether the image stamped them
+    // lately -- what a series that does or does not move is made of.
+    private void WriteWatchedProbes()
+    {
+        if (!SurfaceProbesOn || watchCount == 0 || clipmap is null) return;
+        var cells = (int)((long)surfaceDims.X * surfaceDims.Y * surfaceDims.Z);
+        var index = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(surfaceIndex, 0, cells * 4).AsSpan()).ToArray();
+        var clipSlots = ClipmapLevels * clipmap.ProbesPerLevel;
+        var states = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(clipmapState, 0, (clipSlots + surfaceCapacity) * 16).AsSpan()).ToArray();
+        var seenAll = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(clipmapSeen, 0, (clipSlots + surfaceCapacity) * 4).AsSpan()).ToArray();
+        var points = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(watchPoints, 0, watchCount * 32).AsSpan()).ToArray();
+        var solves = new List<uint>();
+        int missing = 0, stale = 0;
+        for (var i = 0; i < watchCount; i++)
+        {
+            var p = new Vector3(points[2 * i].X, points[2 * i].Y, points[2 * i].Z) + new Vector3(points[2 * i + 1].X, points[2 * i + 1].Y, points[2 * i + 1].Z) * (0.25f * clipmapSpacing);
+            var g = p / clipmapSpacing - new Vector3(0.5f);
+            var cell = new Int3((int)MathF.Floor(g.X), (int)MathF.Floor(g.Y), (int)MathF.Floor(g.Z));
+            var c = new Int3(cell.X - surfaceMinCell.X, cell.Y - surfaceMinCell.Y, cell.Z - surfaceMinCell.Z);
+            if (c.X < 0 || c.Y < 0 || c.Z < 0 || c.X >= surfaceDims.X || c.Y >= surfaceDims.Y || c.Z >= surfaceDims.Z) { missing++; continue; }
+            var v = index[(c.Z * surfaceDims.Y + c.Y) * surfaceDims.X + c.X];
+            if (v == 0 || v >= 0xFFFFFFFEu) { missing++; continue; }
+            var slot = clipSlots + (int)(v - 1);
+            solves.Add((states[slot * 4 + 3] >> 8) & 0xFFu);
+            if (seenAll[slot] + 2 <= clipmapFrame) stale++;
+        }
+        solves.Sort();
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[VulkanSponza] watch, the probes behind the points (one corner each): {solves.Count} found, {missing} missing; solves median {(solves.Count > 0 ? solves[solves.Count / 2] : 0)}, min {(solves.Count > 0 ? solves[0] : 0)}, max {(solves.Count > 0 ? solves[^1] : 0)}; not stamped in the last two frames {stale}; clipmap frame {clipmapFrame}."));
     }
 }
