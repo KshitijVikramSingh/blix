@@ -400,10 +400,19 @@ exactly where the world has changed.
      dependents take the rest) -- convergence speed, not staleness. (Default-swing mover numbers are a different
      protocol from 4f's: ring -27% with screen probes already at 408934b. Not a regression.)
    Open, measured:
-     foliage EDGES are now the largest share of what moves (presented median 2.9-3.5%, 67-71% of edge pixels over
-       2%, a quarter to a third of all unstable pixels), and the clipmap does not move them. Suspect, unverified:
-       TAA's key test -- jitter alternates leaf and background at an edge, so the key changes every frame and
-       history may be dropped every frame.
+     FOG made the stability instrument unrepeatable: it is on by default and reads wall time (time.Total) for its
+       density drift and sample jitter, so the same build, pose and flags gave 45k / 62k / 102k presented pixels
+       over 2% (darkest decile 1.05-3.62%) while the incident light matched to 0.01%. With `--no-fog` two repeats
+       agree (49.8k / 49.2k, decile 1 0.91 / 0.91%): measure stability with --no-fog. Re-checked 4g-i at the user's
+       pose, fog off: old 25% -> 1/n, pixels over 2% 110k -> 50k, darkest decile 2.48 -> 0.91%. The fog's own
+       movement is part of what the user saw in dark areas (fog on, decile 1 at 1-3.6% against 0.9% off): open.
+     foliage EDGES (presented median 2.9-3.9%, about 70% over 2%): NOT dropped history. TAA's key test is already
+       skipped where either key is alpha-tested (4f), and `--stability` now reports each class's mean TAA count:
+       edges ~27 of 32, still surfaces ~31; `--taa-no-key` and a wider clip (`--taa-gamma 2`) leave the count and
+       the edges' flicker where they were. It is the average of a pixel that alternates leaf and background:
+       `--taa-accumulate` 32 / 64 / 128 takes edges 3.9 -> 2.6 -> 1.7% (pixels over 2% 49.8k -> 35.1k -> 27.6k),
+       but the presented image's error against the 120-frame average rises 1.3 -> 2.3 -> 4.1% (bias): history
+       precision (16-bit at 1/128 weights) or still-converging light, unexamined. A lever with a cost, not taken.
      mid-brightness surfaces in the gallery (deciles 6-9, presented 1.9-3.7% median) while the incident light
        there moves under 1%: shading under jitter (texture / specular detail), not GI.
      the clipmap's DYNAMIC part keeps its short blend while the mover holds still (noise near the reach for as

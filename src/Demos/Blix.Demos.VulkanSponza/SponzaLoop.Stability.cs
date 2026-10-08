@@ -23,6 +23,9 @@ internal sealed partial class SponzaLoop
     // Per grid pixel: in how many of the K frames the pre-pass saw an alpha-tested surface there (the key's top bit).
     // Every frame: solid foliage; some: a foliage edge, where TAA's jitter alternates leaf and background.
     private int[]? stabilityAlphaFrames;
+    // Per grid pixel: TAA's accumulated count (frames of history it blends), summed over the K frames. Whether a class
+    // settles depends on whether its history is kept: a pixel whose history is clipped every frame stays near 4.
+    private long[]? stabilityTaaCount;
     private const int StabilityStride = 4;
 
     // Called each frame before the shot: reads what the last completed frame left in both targets.
@@ -77,6 +80,18 @@ internal sealed partial class SponzaLoop
                 var ky = Math.Min(kh - 1, y * StabilityStride * kh / sh);
                 var key = BitConverter.ToUInt32(keys, (ky * kw + kx) * 4);
                 if ((key & 0x80000000u) != 0) stabilityAlphaFrames[y * gw + x]++;
+            }
+        }
+        if (SurfaceTargets && render.Taa > 0f)
+        {
+            var counts = device.ReadTexture(graph.GetColorTexture(taaCountHandles[taaWrite]), out var cw, out var ch, out _);
+            stabilityTaaCount ??= new long[gw * gh];
+            for (var y = 0; y < gh; y++)
+            for (var x = 0; x < gw; x++)
+            {
+                var cx = Math.Min(cw - 1, x * StabilityStride * cw / sw);
+                var cy = Math.Min(ch - 1, y * StabilityStride * ch / sh);
+                stabilityTaaCount[y * gw + x] += BitConverter.ToUInt32(counts, (cy * cw + cx) * 4);
             }
         }
         stabilityIncident.Add(inc);
@@ -241,8 +256,11 @@ internal sealed partial class SponzaLoop
             var over = members.Count(v => v > 0.02);
             var bright = Enumerable.Range(0, n).Where(i => classOf[i] == c).Average(i => brightness[i]);
             var label = c == 11 ? "foliage, solid" : c == 10 ? "foliage, edge" : $"decile {c + 1,2} (lum {bright:0.000})";
+            var taaCount = stabilityTaaCount is { } tc
+                ? string.Create(Inv, $"  TAA count mean {Enumerable.Range(0, n).Where(i => classOf[i] == c).Average(i => (double)tc[i] / frames.Count),5:0.0}")
+                : "";
             Console.WriteLine(string.Create(Inv,
-                $"    {label,-24} {100.0 * members.Count / total,5:0.0}% of pixels  median {100 * members[members.Count / 2],6:0.00}%  p90 {100 * members[members.Count * 9 / 10],6:0.00}%  over 2%: {100.0 * over / members.Count,5:0.0}% of class, {100.0 * over / Math.Max(1, totalOver),5:0.0}% of all"));
+                $"    {label,-24} {100.0 * members.Count / total,5:0.0}% of pixels  median {100 * members[members.Count / 2],6:0.00}%  p90 {100 * members[members.Count * 9 / 10],6:0.00}%  over 2%: {100.0 * over / members.Count,5:0.0}% of class, {100.0 * over / Math.Max(1, totalOver),5:0.0}% of all{taaCount}"));
         }
     }
 }
