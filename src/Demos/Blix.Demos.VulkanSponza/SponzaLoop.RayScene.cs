@@ -91,9 +91,10 @@ internal sealed partial class SponzaLoop
     private Ray[] rayCheckRays = Array.Empty<Ray>();
     private float[] rayCheckTMax = Array.Empty<float>();
     private const int RayCheckCount = 65536;
-    // --ray-bench <mixed|probe|camera>: closest hit only, on a batch shaped like one use (null: --ray-check's mix
-    // with any-hit too). probe: 2,048 points on a grid through the scene, 32 directions each, as GI probes cast;
-    // camera: the start view's primary rays.
+    // --ray-bench <mixed|probe|camera|surface>: closest hit only, on a batch shaped like one use (null: --ray-check's
+    // mix with any-hit too). probe: 2,048 points on a grid through the scene, 32 directions each, as GI probes cast;
+    // camera: the start view's primary rays; surface: 2,048 camera-visible surface points, lifted as screen probes
+    // lift them, 32 hemisphere directions each.
     private string? rayBench;
     // --ray-probe <ray> <placement> <triangle>: also run that ray against that triangle alone on the GPU.
     private (int Ray, int Instance, int Triangle)? rayCheckProbe;
@@ -168,9 +169,35 @@ internal sealed partial class SponzaLoop
         {
             var origin = InBox();
             var direction = Direction();
-            if (rayBench is "probe" or "camera")
+            if (rayBench is "probe" or "camera" or "surface")
             {
-                if (rayBench == "probe")
+                if (rayBench == "surface")
+                {
+                    // As screen probes cast: 64 x 32 camera-visible points over the view, each lifted off its surface
+                    // along the geometric normal (1 cm + 0.1% of the depth) and casting 32 directions uniform over its
+                    // hemisphere. The grid-point batch starts in open air; these start inside the geometry's detail.
+                    var point = i / 32;
+                    var ndcP = new Vector2((point % 64 + 0.5f) / 64f * 2f - 1f, (point / 64 + 0.5f) / 32f * 2f - 1f);
+                    var farP = Vector4.Transform(new Vector4(ndcP, 1f, 1f), invViewProj);
+                    var view = Vector3.Normalize(new Vector3(farP.X, farP.Y, farP.Z) / farP.W - cameraPosition);
+                    origin = cameraPosition;
+                    var normal = -view;
+                    if (rayQueries.Closest(new Ray(cameraPosition, view)) is { } seen)
+                    {
+                        var inst = instances[seen.Instance];
+                        var idx = inst.Mesh.Indices;
+                        var a = Vector3.Transform(inst.Mesh.Positions[idx[seen.Triangle * 3]], inst.World);
+                        var b = Vector3.Transform(inst.Mesh.Positions[idx[seen.Triangle * 3 + 1]], inst.World);
+                        var c = Vector3.Transform(inst.Mesh.Positions[idx[seen.Triangle * 3 + 2]], inst.World);
+                        normal = Vector3.Normalize(Vector3.Cross(b - a, c - a));
+                        if (Vector3.Dot(normal, view) > 0f) normal = -normal;
+                        var depth = seen.T * Vector3.Dot(view, cameraForward);
+                        origin = cameraPosition + view * seen.T + normal * (0.01f + 0.001f * depth);
+                    }
+                    direction = Direction();
+                    if (Vector3.Dot(direction, normal) < 0f) direction = -direction;
+                }
+                else if (rayBench == "probe")
                 {
                     // 16 x 8 x 16 grid points, cell centres, each casting 32 random directions.
                     var cell = i / 32;

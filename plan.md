@@ -437,7 +437,20 @@ F. *The frame audit* (opened 2026-10-07: "a lot of pure performance on the table
      path for its storage images (probe_clipmap.glsl's optional BLIX_CLIPMAP_*_FILTERED). Interleaved A/B
      builds: incident 12.6 / 12.2 -> 9.8 / 9.3 ms; accuracy and stability unchanged. (Timing drifts a lot
      within a session -- the probe pass read 22 then 38-40 ms an hour apart -- so only interleaved arms count.)
-   Next in F5: traversal itself (a wider BVH, compressed nodes, ray order: engine work in Blix.Geometry's
+   Traversal, T0 (GPU ray bench, closest hit, with counting): grid points in open air, Sponza 14.7 M rays/s, 45
+     nodes / 3.5 entries / 5 triangles a ray; a NEW `--ray-bench surface` batch (camera-visible surface points,
+     lifted as screen probes lift them, 32 hemisphere directions): 5.4 M rays/s, 106 nodes / 7.0 entries / 12.6
+     triangles (Bistro 6.5 M, 100 / 1.7 / 40.7). Screen probes trace near the SURFACE rate (~77k rays in ~18 ms of
+     traversal): the kernel was never the problem. Split anyway (place / trace / integrate, three passes, one body
+     screen_probe_kernel.glsl): interleaved, fused 23.9 / 26.7 ms vs split 26.5 / 22.1 -- no gain, kept for the
+     per-stage timing that found this and the reduction no longer in one lane. Coarser ray geometry (T2 as a plain
+     LOD, `--ray-lod-error`): 8.0 -> 6.5 -> 4.6 M triangles at 2 / 5 / 10 cm changed nothing (5.6 / 5.3 / 5.1 M
+     rays/s, ~105 nodes) and moved the image (rest median 1.0 / 1.8%). The cost is the hierarchies a surface ray
+     enters (7 overlapping regions, each descended from its root) and overlap inside each (Bistro's long thin
+     triangles). T1 proposed: regions that do not overlap (triangles clipped at the cells, referenced from both),
+     then spatial splits (SBVH) in each hierarchy; first the coverage hash must key on a stable triangle id, not a
+     leaf position, or a duplicated alpha triangle flips its coin twice.
+   Next in F5 after that: traversal layout (a wider BVH, compressed nodes, ray order: engine work in Blix.Geometry's
      packing and ray_query.glsl, every ray consumer gains), then the raster side (lit 15-22, pre-pass 9-12,
      late 4-6 ms), the pyramids' passes, barriers around buffer dispatches, CPU allocations. Old list: the clipmap's incident pass (11.6-12.4 ms: three clipmap
      samples a pixel for the gradient, up to 8 screen probes), screen-probe register pressure (the second

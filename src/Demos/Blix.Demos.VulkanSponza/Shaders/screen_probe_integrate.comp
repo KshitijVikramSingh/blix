@@ -1,0 +1,5 @@
+#version 450
+
+// Screen probes, stage integrate (screen_probe_kernel.glsl).
+#define SCREEN_PROBE_INTEGRATE
+#include "screen_probe_kernel.glsl"

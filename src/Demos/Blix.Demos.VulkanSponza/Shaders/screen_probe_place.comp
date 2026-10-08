@@ -1,0 +1,5 @@
+#version 450
+
+// Screen probes, stage place (screen_probe_kernel.glsl).
+#define SCREEN_PROBE_PLACE
+#include "screen_probe_kernel.glsl"

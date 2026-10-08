@@ -41,9 +41,15 @@ internal sealed partial class SponzaLoop
     private float screenProbeHistory = 256f;
     // --screen-probe-ablate N: drop parts of the trace to attribute its cost (screen_probe.comp, uParams.w).
     private int screenProbeAblate;
-    private ShaderInterface screenProbeInterface = null!;
-    private PassHandle screenProbePassHandle;
-    private PipelineHandle screenProbePipeline;
+    // place (one workgroup a tile), trace (one thread a ray), integrate (one thread a probe slot).
+    private static readonly string[] ScreenProbeStages = { "place", "trace", "integrate" };
+    private readonly ShaderInterface[] screenProbeInterfaces = new ShaderInterface[3];
+    private readonly PassHandle[] screenProbePassHandles = new PassHandle[3];
+    private readonly PipelineHandle[] screenProbePipelines = new PipelineHandle[3];
+    // Between the stages: a placement record per slot, and every ray's answer (slots x passes stride x 32).
+    private GpuBufferHandle screenProbePlacements;
+    private GpuBufferHandle screenProbeRays;
+    private int ScreenProbePassStride => (int)Math.Max(1f, Math.Max(freshPasses, dependentPasses));
     // Ping-ponged: this frame's tile headers and probe pool, and last frame's for each probe's past.
     private readonly GpuBufferHandle[] screenProbeBuffers = new GpuBufferHandle[2];
     private readonly GpuBufferHandle[] screenProbeTileBuffers = new GpuBufferHandle[2];
@@ -119,6 +125,9 @@ internal sealed partial class SponzaLoop
             screenProbeTiles = tiles;
             screenProbeFiltered = Own(device.CreateGpuBuffer(tiles.Item1 * tiles.Item2 * ScreenProbeLayers * ScreenProbeBytes, name: "sponza.screen-probes.filtered"));
             if (screenProbeStats.Equals(default(GpuBufferHandle))) screenProbeStats = Own(device.CreateGpuBuffer(64, name: "sponza.screen-probe-stats"));
+            var slots = tiles.Item1 * tiles.Item2 * ScreenProbeLayers;
+            screenProbePlacements = Own(device.CreateGpuBuffer(slots * 48, name: "sponza.screen-probes.placements"));
+            screenProbeRays = Own(device.CreateGpuBuffer(slots * ScreenProbePassStride * 32 * 16, name: "sponza.screen-probes.rays"));
             screenProbeHistoryValid = false;
         }
         if (postLoadFrames == screenProbeResetAt) screenProbeHistoryValid = false;
@@ -134,8 +143,7 @@ internal sealed partial class SponzaLoop
         Matrix4x4.Invert(cameraView, out var invView);
         var origins = clipmap!.Origins;
         var count = tiles.Item1 * tiles.Item2 * ScreenProbeLayers;
-        graph.Dispatch(screenProbePassHandle, new DispatchCommand(screenProbePipeline, (count + ScreenProbesPerGroup - 1) / ScreenProbesPerGroup, 1, 1,
-            new ShaderUniform[]
+        var uniforms = new ShaderUniform[]
             {
                 new("uInvProjection", new Matrix4x4Uniform(invProj)),
                 new("uInvView", new Matrix4x4Uniform(invView)),
@@ -158,10 +166,10 @@ internal sealed partial class SponzaLoop
                 new("uDynamicMin", new Vector4Uniform(MoverActive && moverMoved && !noDependency ? new Vector4(DependencyBox.Min, 1f) : Vector4.Zero)),
                 new("uDynamicMax", new Vector4Uniform(new Vector4(MoverActive ? DependencyBox.Max : Vector3.Zero, dynamicHistory))),
                 new("uFresh", new Vector4Uniform(new Vector4(freshPasses, freshFrames, probeLayers < 2 ? 1f : 0f, dependentPasses))),
-                new("uLayers", new Vector4Uniform(new Vector4(probeLayerKeys ? 1f : 0f, 0f, 0f, 0f))),
-            },
-            new[]
-            {
+                new("uLayers", new Vector4Uniform(new Vector4(probeLayerKeys ? 1f : 0f, ScreenProbePassStride, 0f, 0f))),
+            };
+        var textures = new[]
+        {
                 new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
                 new ShaderTextureBinding("uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
                 new ShaderTextureBinding("uClipmapIrradiance", clipmapIrradiance),
@@ -173,14 +181,26 @@ internal sealed partial class SponzaLoop
                 new ShaderTextureBinding("uCascadeShadowMaps[0]", graph.GetDepthTexture(cascadeHandles[0])),
                 new ShaderTextureBinding("uCascadeShadowMaps[1]", graph.GetDepthTexture(cascadeHandles[1])),
                 new ShaderTextureBinding("uCascadeShadowMaps[2]", graph.GetDepthTexture(cascadeHandles[2])),
-            },
-            Buffers: rayBlockBuffers
+        };
+        var buffers = rayBlockBuffers
                 .Append(new ShaderBufferBinding("ClipmapState", clipmapState))
                 .Append(new ShaderBufferBinding("ScreenProbeTilesPrevious", previousTiles))
                 .Append(new ShaderBufferBinding("ScreenProbesPrevious", previous))
                 .Append(new ShaderBufferBinding("ScreenProbeTilesCurrent", currentTiles))
                 .Append(new ShaderBufferBinding("ScreenProbesCurrent", current))
-                .Append(new ShaderBufferBinding("ScreenProbeStats", screenProbeStats)).ToArray()));
+                .Append(new ShaderBufferBinding("ScreenProbeStats", screenProbeStats))
+            .Append(new ShaderBufferBinding("ScreenProbePlacements", screenProbePlacements))
+            .Append(new ShaderBufferBinding("ScreenProbeRays", screenProbeRays)).ToArray();
+        // Each stage binds what its interface declares (the compiler may drop what a stage never reads).
+        var groups = new[] { tiles.Item1 * tiles.Item2, (count * 32 + 63) / 64, (count + 63) / 64 };
+        for (var stage = 0; stage < ScreenProbeStages.Length; stage++)
+        {
+            var declared = screenProbeInterfaces[stage].Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
+            bool Declares(string name) => declared.Contains(name) || declared.Contains(name.Split('[')[0]);
+            graph.Dispatch(screenProbePassHandles[stage], new DispatchCommand(screenProbePipelines[stage], groups[stage], 1, 1,
+                uniforms, textures.Where(t => Declares(t.Name)).ToArray(),
+                Buffers: buffers.Where(b => Declares(b.Name)).ToArray()));
+        }
         graph.Dispatch(screenProbeFilterPassHandle, new DispatchCommand(screenProbeFilterPipeline, (count + 63) / 64, 1, 1,
             new ShaderUniform[]
             {

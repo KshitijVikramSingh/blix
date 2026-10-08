@@ -129,7 +129,7 @@ internal sealed partial class SponzaLoop
         rayCheck = args.Flag("ray-check");
         if (args.String("ray-bench") is { } bench)
         {
-            if (bench is not ("mixed" or "probe" or "camera")) throw new AppArgsException($"--ray-bench takes mixed, probe or camera, not '{bench}'.");
+            if (bench is not ("mixed" or "probe" or "camera" or "surface")) throw new AppArgsException($"--ray-bench takes mixed, probe, camera or surface, not '{bench}'.");
             rayBench = bench;
             rayCheck = true;
         }
@@ -538,14 +538,18 @@ internal sealed partial class SponzaLoop
         // clipmap's atlases, device-owned rather than graph resources, so declaration order carries that dependency.
         // Screen probes read this frame's depth and normals and write buffers the incident pass reads; declared
         // between them, and fenced like every pass that binds GPU buffers.
-        screenProbeInterface = Reflect("screen_probe.comp");
-        var screenProbeBuilder = graph.ComputePass("screen-probes")
-            .Read(SampleableSceneDepth)
-            .Read(SampleablePrepassNormal);
-        if (SurfaceTargets) screenProbeBuilder = screenProbeBuilder.Read(surfaceKeyHandle).Read(velocityHandle);
-        if (MotionTarget) screenProbeBuilder = screenProbeBuilder.Read(motionHandle);
-        for (var c = 0; c < CascadeCount; c++) screenProbeBuilder = screenProbeBuilder.Read(cascadeHandles[c]);
-        screenProbePassHandle = screenProbeBuilder.Shader(screenProbeInterface).Handle;
+        // Three stages (place, trace, integrate: screen_probe_kernel.glsl), each its own pass so each is timed.
+        for (var stage = 0; stage < ScreenProbeStages.Length; stage++)
+        {
+            screenProbeInterfaces[stage] = Reflect($"screen_probe_{ScreenProbeStages[stage]}.comp");
+            var builder = graph.ComputePass($"screen-probe-{ScreenProbeStages[stage]}")
+                .Read(SampleableSceneDepth)
+                .Read(SampleablePrepassNormal);
+            if (SurfaceTargets) builder = builder.Read(surfaceKeyHandle).Read(velocityHandle);
+            if (MotionTarget) builder = builder.Read(motionHandle);
+            for (var c = 0; c < CascadeCount; c++) builder = builder.Read(cascadeHandles[c]);
+            screenProbePassHandles[stage] = builder.Shader(screenProbeInterfaces[stage]).Handle;
+        }
         screenProbeFilterInterface = Reflect("screen_probe_filter.comp");
         screenProbeFilterPassHandle = graph.ComputePass("screen-probe-filter").Shader(screenProbeFilterInterface).Handle;
 
@@ -802,9 +806,12 @@ internal sealed partial class SponzaLoop
         var clipmapSpv = File.ReadAllBytes(Path.Combine(shaderDir, "clipmap_inject.comp.spv"));
         clipmapPipeline = Own(device.CreateComputePipeline(
             Own(device.CreateComputeShaderProgramFromSpv(clipmapSpv, clipmapInterface, "clipmap_inject")), "clipmap_inject"));
-        var screenProbeSpv = File.ReadAllBytes(Path.Combine(shaderDir, "screen_probe.comp.spv"));
-        screenProbePipeline = Own(device.CreateComputePipeline(
-            Own(device.CreateComputeShaderProgramFromSpv(screenProbeSpv, screenProbeInterface, "screen_probe")), "screen_probe"));
+        for (var stage = 0; stage < ScreenProbeStages.Length; stage++)
+        {
+            var name = $"screen_probe_{ScreenProbeStages[stage]}";
+            screenProbePipelines[stage] = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
+                File.ReadAllBytes(Path.Combine(shaderDir, name + ".comp.spv")), screenProbeInterfaces[stage], name)), name));
+        }
         var screenProbeFilterSpv = File.ReadAllBytes(Path.Combine(shaderDir, "screen_probe_filter.comp.spv"));
         screenProbeFilterPipeline = Own(device.CreateComputePipeline(
             Own(device.CreateComputeShaderProgramFromSpv(screenProbeFilterSpv, screenProbeFilterInterface, "screen_probe_filter")), "screen_probe_filter"));
