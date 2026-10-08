@@ -310,19 +310,29 @@ internal sealed partial class SponzaLoop
     private void DrawSceneGroup(
         RenderPassBuilder scope, int list, OpaqueGroup g, PipelineHandle pipeline,
         IReadOnlyList<ShaderUniform> uniforms, IReadOnlyList<ShaderTextureBinding> textures,
-        MaterialHandle? material, byte[]? pushConstants = null)
+        MaterialHandle? material, byte[]? pushConstants = null, bool litLayout = true)
     {
         var ib = g.IsU32 ? sharedIbU32 : sharedIbU16;
         if (gpuCull)
         {
             scope.DrawIndexedIndirect(sharedVb, ib, pipeline, sceneArgs,
                 (SceneListRecordBase(list) + g.Start * lodSlots) * IndirectDraw.RecordStride, GroupDrawCount(g),
-                uniforms, textures, material, pushConstants, sceneBuffers);
+                uniforms, textures, material, pushConstants, litLayout ? LitSceneBuffers : sceneBuffers);
             return;
         }
         scope.DrawIndexedIndirect(sharedVb, ib, pipeline, SceneListIndirect(list), GroupByteOffset(g), GroupDrawCount(g),
-            uniforms, textures, material, pushConstants, perDrawMaterial: sceneInstances!.Handle);
+            uniforms, textures, material, pushConstants, perDrawMaterial: sceneInstances!.Handle,
+            buffers: litLayout ? LitClipmapBuffer : null);
     }
+
+    // lit.frag declares the clipmap's state (glass reflections read it), and every program built on its interface
+    // (the pre-pass, flat) shares that layout, so all of them bind it; the shadow programs have their own and must
+    // not (a buffer bound by a name the program lacks is an error). Rebuilt when the clipmap is created.
+    private ShaderBufferBinding[]? litSceneBuffers;
+    private ShaderBufferBinding[]? litClipmapBuffer;
+    private ShaderBufferBinding[] LitClipmapBuffer =>
+        litClipmapBuffer ??= new[] { new ShaderBufferBinding("ClipmapState", ClipmapStateOrPlaceholder) };
+    private ShaderBufferBinding[] LitSceneBuffers => litSceneBuffers ??= sceneBuffers.Concat(LitClipmapBuffer).ToArray();
 
     public void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)
     {
@@ -478,6 +488,12 @@ internal sealed partial class SponzaLoop
             new("uViewProjUnjittered", new Matrix4x4Uniform(viewProj)),
             // Last frame's un-jittered camera, or this frame's on the first (zero motion rather than garbage).
             new("uPrevViewProjUnjittered", new Matrix4x4Uniform(velocityPrevValid ? velocityPrevViewProj : viewProj)),
+            // The clipmap, for glass reflections' sky visibility (read only when uIncident.z says it has solved).
+            new("uClipDims",         new Vector4Uniform(new Vector4(ClipmapDims.X, ClipmapDims.Y, ClipmapDims.Z, clipmapSpacing))),
+            new("uClipOrigin0",      new Vector4Uniform(ClipmapOrigin(0) with { W = clipmap?.BlendProbes ?? 0f })),
+            new("uClipOrigin1",      new Vector4Uniform(ClipmapOrigin(1))),
+            new("uClipOrigin2",      new Vector4Uniform(ClipmapOrigin(2))),
+            new("uClipOrigin3",      new Vector4Uniform(ClipmapOrigin(3))),
             // One component per --ab shading mode, live only during that mode's off-phase.
             new("uAbFlags",          new Vector4Uniform(new Vector4(
                 AbOffPhase && abMode == "textures" ? 1f : 0f,
@@ -607,13 +623,13 @@ internal sealed partial class SponzaLoop
                         var rep = opaqueDrawables[g.Start];
                         DrawSceneGroup(scope, cascadeList, g, shadowMaskPipeline,
                             Array.Empty<ShaderUniform>(), rep.ShadowAlbedoBinding, material: null,
-                            pushConstants: RentMaskPush(vp, rep.AlphaCutoff, rep.BaseColorAlpha));
+                            pushConstants: RentMaskPush(vp, rep.AlphaCutoff, rep.BaseColorAlpha), litLayout: false);
                     }
                     else
                     {
                         DrawSceneGroup(scope, cascadeList, g, shadowOpaquePipeline,
                             Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>(), material: null,
-                            pushConstants: cascadeOpaquePush);
+                            pushConstants: cascadeOpaquePush, litLayout: false);
                     }
                 }
             });

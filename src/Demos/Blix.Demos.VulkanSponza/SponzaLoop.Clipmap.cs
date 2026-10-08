@@ -115,6 +115,17 @@ internal sealed partial class SponzaLoop
         clipmapState = Own(device.CreateGpuBuffer(slots * 16, MemoryMarshal.AsBytes(initial.AsSpan()), "sponza.clipmap.state"));
         // Counters, the per-level unsolved queues, and the dependent queue (stage 4f).
         clipmapQueue = Own(device.CreateGpuBuffer((8 + 2 * slots + 1) * 4, name: "sponza.clipmap.queue"));
+        // The lit pass's glass reads the clipmap: swap its placeholders for the real thing.
+        if (passBindings is not null)
+        {
+            for (var i = 0; i < passBindings.Length; i++)
+            {
+                if (passBindings[i].Name == "uClipmapIrradiance") passBindings[i] = new ShaderTextureBinding("uClipmapIrradiance", clipmapIrradiance);
+                else if (passBindings[i].Name == "uClipmapDepth") passBindings[i] = new ShaderTextureBinding("uClipmapDepth", clipmapDepth);
+            }
+        }
+        litSceneBuffers = null;
+        litClipmapBuffer = null;
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] probe clipmap: {ClipmapLevels} levels of {ClipmapDims.X}x{ClipmapDims.Y}x{ClipmapDims.Z} probes, spacing {clipmapSpacing:0.##} m doubling (level {ClipmapLevels - 1} spans {clipmap.Spacing(ClipmapLevels - 1) * ClipmapDims.X:0} m), atlases {clipmap.AtlasWidth}x{clipmap.AtlasHeight}, {clipmapBudget} probes a frame."));
     }

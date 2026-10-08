@@ -86,4 +86,12 @@ layout(set = 0, binding = 0) uniform Frame {
     // jitter.
     mat4  uViewProjUnjittered;
     mat4  uPrevViewProjUnjittered;
+    // The probe clipmap, for the glass reflection's sky visibility (lit.frag): xyz probes per level, w base spacing;
+    // each level's lowest cell (xyz), and in uClipOrigin0.w the blend band (probes). Appended last: skybox.vert reads
+    // fields above by byte offset.
+    vec4  uClipDims;
+    vec4  uClipOrigin0;
+    vec4  uClipOrigin1;
+    vec4  uClipOrigin2;
+    vec4  uClipOrigin3;
 } frame;

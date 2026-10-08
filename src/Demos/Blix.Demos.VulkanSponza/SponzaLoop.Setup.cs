@@ -876,6 +876,9 @@ internal sealed partial class SponzaLoop
                 "uIncidentGradient", graph.GetColorTexture(incidentGradientHandle)),
             new ShaderTextureBinding(
                 "uPrepassNormalViz", graph.GetColorTexture(SampleablePrepassNormal)),
+            // Placeholders until CreateClipmap puts the atlases here (a hole is a device loss; uIncident.z gates the read).
+            new ShaderTextureBinding("uClipmapIrradiance", clipmap is not null ? clipmapIrradiance : brdfLutTexture),
+            new ShaderTextureBinding("uClipmapDepth", clipmap is not null ? clipmapDepth : brdfLutTexture),
         };
 
         // The one binding that is not constant: the grid is re-created when the framebuffer changes size.

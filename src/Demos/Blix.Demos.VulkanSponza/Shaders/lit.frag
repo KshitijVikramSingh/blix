@@ -108,6 +108,19 @@ layout(set = 1, binding = 18) uniform texture2D uPrepassNormalViz;
 //@sampler LinearClamp
 layout(set = 1, binding = 19) uniform sampler uLinearClamp;
 
+// The probe clipmap itself, for the one surface the incident field cannot answer: a glass pane, absent from the
+// pre-pass, so the field at its pixel is the surface behind it. Its reflection asks the clipmap how much sky R sees
+// from the pane (frame.uClip*). Bound to a placeholder until the clipmap exists; uIncident.z gates the read.
+layout(set = 1, binding = 11) uniform texture2D uClipmapIrradiance;
+layout(set = 1, binding = 12) uniform texture2D uClipmapDepth;
+layout(std430, set = 1, binding = 13) readonly buffer ClipmapState { uvec4 clipmapStates[]; };
+#define BLIX_CLIPMAP_IRRADIANCE(t) texelFetch(sampler2D(uClipmapIrradiance, uLinearClamp), t, 0)
+#define BLIX_CLIPMAP_DEPTH(t) texelFetch(sampler2D(uClipmapDepth, uLinearClamp), t, 0)
+#define BLIX_CLIPMAP_IRRADIANCE_FILTERED(p) textureLod(sampler2D(uClipmapIrradiance, uLinearClamp), (p) / vec2(textureSize(sampler2D(uClipmapIrradiance, uLinearClamp), 0)), 0.0)
+#define BLIX_CLIPMAP_DEPTH_FILTERED(p) textureLod(sampler2D(uClipmapDepth, uLinearClamp), (p) / vec2(textureSize(sampler2D(uClipmapDepth, uLinearClamp), 0)), 0.0)
+#define BLIX_CLIPMAP_STATE(s) clipmapStates[s]
+#include "probe_clipmap.glsl"
+
 layout(set = 2, binding = 0) uniform Material {
     vec4 uBaseColorFactor;
     vec4 uEmissiveFactor;
@@ -288,17 +301,32 @@ void main() {
     float transmission = mat.uMaterialParams2.x;
     if (transmission > 0.0) {
         float lod = roughness * (frame.uEnvMipCount - 1.0);
-        // Unoccluded. Panes are absent from the pre-pass, so the incident field (a screen-space read of the
-        // surface in front) has nothing to say about them; the baked volume that used to occlude this
-        // along R is retired.
-        vec3 envRefl = textureLod(samplerCube(uPrefilteredEnv, uLinearClamp), R, lod).rgb;
+        // Occluded like every other indirect term, along R rather than N: a reflection gathers from where it
+        // points, and a pane deep inside a room points at a wall. Panes are absent from the pre-pass, so the
+        // incident field (the surface behind) cannot say; the clipmap's sky visibility at the pane, facing R, can.
+        // Unoccluded only before the clipmap's first solve, or past its coarsest level.
+        float glassSky = 1.0;
+        if (frame.uIncident.z > 0.5 && frame.uIncident.x > 0.5) {
+            BlixClipmap c;
+            c.dims = ivec3(frame.uClipDims.xyz);
+            c.baseSpacing = frame.uClipDims.w;
+            c.blendProbes = frame.uClipOrigin0.w;
+            c.origin[0] = ivec3(frame.uClipOrigin0.xyz);
+            c.origin[1] = ivec3(frame.uClipOrigin1.xyz);
+            c.origin[2] = ivec3(frame.uClipOrigin2.xyz);
+            c.origin[3] = ivec3(frame.uClipOrigin3.xyz);
+            bool found;
+            vec4 field = blix_clipmapSample(c, vWorldPos, R, found);
+            if (found) glassSky = field.a;
+        }
+        vec3 envRefl = textureLod(samplerCube(uPrefilteredEnv, uLinearClamp), R, lod).rgb * glassSky;
         float fresnel = 0.04 + 0.96 * pow(clamp(1.0 - NdotV, 0.0, 1.0), 5.0);
         // No opacity floor: this branch models Fresnel reflection over the background, without
         // refraction or absorption. Clean head-on glass is therefore nearly transparent.
         float glassAlpha = mix(albedo4.a, fresnel, transmission);
         // Handle diagnostics before the early return so transmissive surfaces remain inspectable.
         if (frame.uVizChannel > 0.5) {
-            float vis = 1.0;
+            float vis = glassSky;
             vec3 c = frame.uVizChannel < 1.5 ? vizGeometricN * 0.5 + 0.5 :
                      frame.uVizChannel < 2.5 ? N * 0.5 + 0.5 :
                      frame.uVizChannel < 7.5 ? vec3(vis) : vec3(vis);

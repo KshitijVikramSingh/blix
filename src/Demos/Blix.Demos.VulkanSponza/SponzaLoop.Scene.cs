@@ -502,6 +502,7 @@ internal sealed partial class SponzaLoop
         // mover (4e-vi) writes a moved row's old matrix here before its new one goes in.
         scenePreviousTransformBuffer = Own(device.CreateGpuBuffer(Math.Max(1, sceneTransforms.Count) * 64,
             MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(sceneTransforms)), "sponza.scene.previous-transforms"));
+        litSceneBuffers = null;
         sceneBuffers = new ShaderBufferBinding[]
         {
             new("SceneTransforms", sceneTransformBuffer), new("SceneVisible", sceneVisible),
