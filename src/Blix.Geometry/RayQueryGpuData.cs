@@ -78,7 +78,7 @@ public sealed class RayQueryGpuData
         foreach (var (bvh, triangleBase) in distinct)
         {
             if (bvh.TriangleCount == 0) continue;
-            var coverage = new byte[bvh.TriangleCount];
+            var coverage = new byte[bvh.ReferenceCount];
             var solid = true;
             for (var k = 0; k < coverage.Length; k++)
             {
@@ -184,7 +184,7 @@ public sealed class RayQueryGpuData
             var triangleBase = (int)triangleBases[bvh];
             if (entry.IsRegion)
             {
-                for (var pos = 0; pos < bvh.TriangleCount; pos++)
+                for (var pos = 0; pos < bvh.ReferenceCount; pos++)
                 {
                     var placement = entry.OwnerPlacement![bvh.Order[pos]];
                     var triangle = entry.OwnerTriangle![bvh.Order[pos]] & ~RayQueryScene.MirroredOwner;
@@ -197,7 +197,7 @@ public sealed class RayQueryGpuData
                 if (!shared.TryGetValue(bvh, out var rows))
                 {
                     rows = new int[bvh.TriangleCount];
-                    for (var pos = 0; pos < bvh.TriangleCount; pos++) rows[bvh.Order[pos]] = triangleBase + pos;
+                    for (var pos = 0; pos < bvh.ReferenceCount; pos++) rows[bvh.Order[pos]] = triangleBase + pos;
                     shared[bvh] = rows;
                 }
                 rowsByPlacement[entry.Placement] = rows;

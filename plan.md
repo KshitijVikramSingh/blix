@@ -450,6 +450,18 @@ F. *The frame audit* (opened 2026-10-07: "a lot of pure performance on the table
      triangles). T1 proposed: regions that do not overlap (triangles clipped at the cells, referenced from both),
      then spatial splits (SBVH) in each hierarchy; first the coverage hash must key on a stable triangle id, not a
      leaf position, or a duplicated alpha triangle flips its coin twice.
+   T1 DONE (d87f5ce, b19f939, this): (1) a partly covered triangle's coin is keyed on the triangle (placement,
+     mesh index), not where a hierarchy lists it; (2) region cells hold references -- a straddling triangle in
+     both halves, each copy's box clipped -- so regions stop overlapping: Sponza surface rays 5.4 -> 7.3 M/s,
+     entries 7.0 -> 2.2, nodes 106 -> 73, +1.3% references; (3) spatial splits in each hierarchy (simplified
+     SBVH: cost by box-against-slab binning, the exact polygon clip for the references a cut splits; only where
+     the object split's children overlap by > 1e-3 of the root's area; references capped at +30%, a cut taken
+     only if the budget covers every reference it crosses): Bistro surface rays 6.2 -> 10.2-10.8 M/s, nodes 87
+     -> 57, triangles 35 -> 20; Sponza nodes 73 -> 64, rate within its scatter. Bistro's screen-probe trace,
+     interleaved: 26.5 / 18.2 -> 17.5 / 14.8 ms (the clipmap 7.0 / 5.0 -> 5.2 / 4.4). Cost: the ray scene's
+     build at load, Sponza 7.4 -> 12-19 s (exact clipping in the binning was 60 s): the case for building the
+     hierarchies once, in the cook. GPU against CPU unchanged: the same 3 / 6 rays disagree, as before T1
+     (long-distance and edge-midpoint hits; to examine). Tests BV.6 restated, BV.8 new.
    Next in F5 after that: traversal layout (a wider BVH, compressed nodes, ray order: engine work in Blix.Geometry's
      packing and ray_query.glsl, every ray consumer gains), then the raster side (lit 15-22, pre-pass 9-12,
      late 4-6 ms), the pyramids' passes, barriers around buffer dispatches, CPU allocations. Old list: the clipmap's incident pass (11.6-12.4 ms: three clipmap

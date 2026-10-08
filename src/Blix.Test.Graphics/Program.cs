@@ -6512,6 +6512,60 @@ static ShaderInterface MinimalShader() => new(new[]
         t.ExpectTrue("BV.5b moving out of its reach, or moving a placement declared without one, is refused", outside && unreached);
     }
 
+    // Spatial splits (traversal T1): a hierarchy that may list a triangle on both sides of a cut answers exactly as the
+    // plain one, ray for ray, on a soup of long axis-aligned slivers (where it matters); it does split, and its depth
+    // still fits the traversal stack. Its own generator, so the sections after it see the scenes they always did.
+    {
+        var own = new Random(8128);
+        Vector3 Within(float r) => new((float)own.NextDouble() * 2f * r - r, (float)own.NextDouble() * 2f * r - r, (float)own.NextDouble() * 2f * r - r);
+        var points = new List<Vector3>();
+        for (var i = 0; i < 3000; i++)
+        {
+            // Long slivers along an axis, as architecture's are (facades, cornices, floor strips): where a box cut to a
+            // slab is as tight as the clipped triangle, which is what the builder's cost estimate takes.
+            var centre = Within(10f);
+            var axis = i % 3;
+            var length = 2f + (float)own.NextDouble() * 6f;
+            var along = axis == 0 ? new Vector3(length, 0f, 0f) : axis == 1 ? new Vector3(0f, length, 0f) : new Vector3(0f, 0f, length);
+            points.Add(centre - along); points.Add(centre + along); points.Add(centre + Within(0.1f));
+        }
+        var positions = points.ToArray();
+        var indices = Enumerable.Range(0, positions.Length).Select(i => (uint)i).ToArray();
+        var plain = TriangleBvh.Build(positions, indices);
+        // A low overlap threshold, so slivers this size are split (the default spares overlaps this small).
+        var spatial = TriangleBvh.BuildSpatial(positions, indices, null, overlapThreshold: 1e-5f);
+        int disagree = 0, hits = 0;
+        for (var k = 0; k < 4000; k++)
+        {
+            var ray = new ShearedRay(Within(14f), Vector3.Normalize(Within(1f) + new Vector3(1e-3f)));
+            var a = plain.Closest(ray, 0f, float.PositiveInfinity, out var ta, out var tria, out _, out _);
+            var b = spatial.Closest(ray, 0f, float.PositiveInfinity, out var tb, out var trib, out _, out _);
+            if (a != b || (a && (ta != tb || (tria != trib && ta != tb)))) disagree++;
+            if (a) hits++;
+            if (plain.Any(ray, 0f, 20f) != spatial.Any(ray, 0f, 20f)) disagree++;
+        }
+        var maxDepth = 0;
+        var walk = new Stack<(int Node, int Depth)>();
+        walk.Push((0, 1));
+        while (walk.Count > 0)
+        {
+            var (node, depth) = walk.Pop();
+            maxDepth = Math.Max(maxDepth, depth);
+            var nd = spatial.Nodes[node];
+            if (nd.IsLeaf) continue;
+            walk.Push(((int)nd.Index, depth + 1));
+            walk.Push(((int)nd.Index + 1, depth + 1));
+        }
+        t.Expect("BV.8 spatial splits answer as the plain hierarchy, closest and any, ray for ray", disagree == 0 && hits > 500,
+            $"{disagree} of 8000 disagree, {hits} hit");
+        t.Expect("BV.8 they split: some triangles referenced twice, within the budget", spatial.ReferenceCount > spatial.TriangleCount
+            && spatial.ReferenceCount <= spatial.TriangleCount * (1f + TriangleBvh.SpatialSplitBudget) + 1,
+            $"{spatial.ReferenceCount} references for {spatial.TriangleCount} triangles");
+        t.Expect("BV.8 and the depth still fits the 64-entry traversal stack", maxDepth < 64, $"depth {maxDepth}");
+        t.Expect("BV.8 and the SAH cost falls", BvhBuilder.SahCost(spatial.Nodes) < BvhBuilder.SahCost(plain.Nodes),
+            $"{BvhBuilder.SahCost(spatial.Nodes):0.0} against {BvhBuilder.SahCost(plain.Nodes):0.0}");
+    }
+
     // The packed form ray_query.glsl reads, walked on the CPU the way the shader walks it: top leaves naming entries,
     // rebased node, triangle and vertex indices, owners resolving a region's hit, a shared mesh packed once, an empty
     // mesh a dead leaf. It must give RayQueryScene's answer to the bit, so a packing fault is found here, without a device.
