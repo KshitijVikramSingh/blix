@@ -192,6 +192,22 @@ public sealed class TriangleBvh
         return new TriangleBvh(positions, indices, nodes, order);
     }
 
+    /// <summary>As above, over the boxes the caller gives each triangle rather than its vertices' bounds.</summary>
+    /// <remarks>
+    /// A triangle clipped to a cell of space (<see cref="RayQueryScene"/>'s regions) is bounded by the part of it
+    /// inside the cell, so the hierarchy's boxes, and its root's, do not reach into the next cell. A triangle is
+    /// still tested whole: a hit outside its box is a real hit, and the cell beside holds the rest of it.
+    /// </remarks>
+    public static TriangleBvh Build(Vector3[] positions, uint[] indices, Bounds3[] boxes)
+    {
+        ArgumentNullException.ThrowIfNull(positions);
+        ArgumentNullException.ThrowIfNull(indices);
+        ArgumentNullException.ThrowIfNull(boxes);
+        if (boxes.Length * 3 != indices.Length) throw new ArgumentException($"{boxes.Length} boxes for {indices.Length / 3} triangles.", nameof(boxes));
+        var (nodes, order) = BvhBuilder.Build(boxes, MaxLeafSize);
+        return new TriangleBvh(positions, indices, nodes, order);
+    }
+
     /// <summary>The nearest hit in (tMin, tMax), front to back: the nearer child first, and nothing past the best so far.</summary>
     public bool Closest(in ShearedRay ray, float tMin, float tMax, out float t, out int triangle, out Vector2 barycentrics, out bool frontFace) =>
         Closest(ray, tMin, tMax, default, out t, out triangle, out barycentrics, out frontFace);

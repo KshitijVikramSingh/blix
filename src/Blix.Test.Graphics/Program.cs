@@ -6578,10 +6578,17 @@ static ShaderInterface MinimalShader() => new(new[]
             if (want.HasValue) hits++;
         }
         t.Expect("BV.6 the packed form, walked as the shader walks it, gives RayQueryScene's answer to the bit on all 3000 rays", mismatches == 0, $"{mismatches} disagree, {hits} hit");
-        var distinctVertices = scene.Instances.Where(p => p.Mesh.TriangleCount > 0).Select(p => p.Mesh).Distinct(ReferenceEqualityComparer.Instance)
-            .Cast<RayMesh>().Sum(m => m.Positions.Length);
-        t.Expect("BV.6 every mesh's vertices are packed once, a shared mesh's included, plus one for the empty mesh",
-            packed.Positions.Length == distinctVertices + 1 && scene.RegionCount >= 2, $"{packed.Positions.Length} packed, {distinctVertices} distinct, {scene.RegionCount} regions");
+        // A shared (instanced) mesh's vertices are packed once however many placements use it. A merged mesh's are all
+        // there too, a few more than once: a triangle straddling a region cut is referenced from both cells (traversal
+        // T1), and each cell keeps its own copy of the vertices it uses.
+        var uses = scene.Instances.Where(p => p.Mesh.TriangleCount > 0).GroupBy(p => p.Mesh, ReferenceEqualityComparer.Instance)
+            .Select(g => (Mesh: (RayMesh)g.Key!, Count: g.Count())).ToArray();
+        var sharedVertices = uses.Where(u => u.Count > 1).Sum(u => u.Mesh.Positions.Length);
+        var mergedVertices = uses.Where(u => u.Count == 1).Sum(u => u.Mesh.Positions.Length);
+        var regionVertices = packed.Positions.Length - 1 - sharedVertices;
+        t.Expect("BV.6 a shared mesh's vertices are packed once; merged meshes' all, a few twice where a region cut splits a triangle; one for the empty mesh",
+            regionVertices >= mergedVertices && regionVertices <= mergedVertices * 5 / 4 && scene.RegionCount >= 2,
+            $"{packed.Positions.Length} packed: {sharedVertices} shared, {regionVertices} in regions against {mergedVertices} merged, {scene.RegionCount} regions");
     }
 
     // Partly covered triangles (an alpha-tested material's): met by chance, the same chance on both sides.

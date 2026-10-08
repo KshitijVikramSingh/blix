@@ -179,35 +179,77 @@ public sealed class RayQueryScene
             centres[k] = (p[idx[t * 3]] + p[idx[t * 3 + 1]] + p[idx[t * 3 + 2]]) / 3f;
         });
 
-        var regions = new List<int[]>();
-        var pending = new Stack<int[]>();
-        if (centres.Length > 0) pending.Push(Enumerable.Range(0, centres.Length).ToArray());
+        // A triangle's three world corners.
+        (Vector3 A, Vector3 B, Vector3 C) Corners(int k)
+        {
+            var p = worldPositions[triPlacement[k]];
+            var idx = all[triPlacement[k]].Mesh.Indices;
+            var t = triIndex[k];
+            return (p[idx[t * 3]], p[idx[t * 3 + 1]], p[idx[t * 3 + 2]]);
+        }
+
+        // Cells hold REFERENCES, each a triangle and its box within the cell (traversal T1). A cut at the middle of
+        // the references' centres sends a triangle that straddles it to both halves, each copy's box the part of the
+        // triangle inside that half (clipped as a polygon), so neighbouring cells do not overlap: a ray leaving a
+        // surface used to enter ~7 regions in Sponza (their boxes reaching into each other wherever a triangle
+        // crossed the cut), each descended from its root. A triangle is still tested whole, so its every hit is real
+        // and either copy gives the same one. A cut that would leave a half holding everything stops cutting.
+        var regions = new List<(int[] Refs, Bounds3[] Boxes)>();
+        var pending = new Stack<(int[] Refs, Bounds3[] Boxes, Bounds3 Cell)>();
+        if (centres.Length > 0)
+        {
+            var allRefs = Enumerable.Range(0, centres.Length).ToArray();
+            var allBoxes = new Bounds3[centres.Length];
+            var sceneLo = new Vector3(float.MaxValue);
+            var sceneHi = new Vector3(float.MinValue);
+            for (var k = 0; k < allBoxes.Length; k++)
+            {
+                var (a, b, c) = Corners(k);
+                allBoxes[k] = new Bounds3(Vector3.Min(a, Vector3.Min(b, c)), Vector3.Max(a, Vector3.Max(b, c)));
+                sceneLo = Vector3.Min(sceneLo, allBoxes[k].Min);
+                sceneHi = Vector3.Max(sceneHi, allBoxes[k].Max);
+            }
+            pending.Push((allRefs, allBoxes, new Bounds3(sceneLo, sceneHi)));
+        }
         while (pending.Count > 0)
         {
-            var cell = pending.Pop();
-            if (cell.Length <= regionTriangles) { regions.Add(cell); continue; }
+            var (refs, refBoxes, cell) = pending.Pop();
+            if (refs.Length <= regionTriangles) { regions.Add((refs, refBoxes)); continue; }
             var lo = new Vector3(float.MaxValue);
             var hi = new Vector3(float.MinValue);
-            foreach (var k in cell) { lo = Vector3.Min(lo, centres[k]); hi = Vector3.Max(hi, centres[k]); }
+            foreach (var b in refBoxes) { var c = (b.Min + b.Max) * 0.5f; lo = Vector3.Min(lo, c); hi = Vector3.Max(hi, c); }
             var span = hi - lo;
             var axis = span.X >= span.Y && span.X >= span.Z ? 0 : span.Y >= span.Z ? 1 : 2;
             var middle = BvhBuilder.Component(lo + hi, axis) * 0.5f;
-            var left = cell.Where(k => BvhBuilder.Component(centres[k], axis) < middle).ToArray();
-            var right = cell.Where(k => BvhBuilder.Component(centres[k], axis) >= middle).ToArray();
-            if (left.Length == 0 || right.Length == 0)
+            var leftCell = new Bounds3(cell.Min, WithComponent(cell.Max, axis, middle));
+            var rightCell = new Bounds3(WithComponent(cell.Min, axis, middle), cell.Max);
+            var leftRefs = new List<int>(); var leftBoxes = new List<Bounds3>();
+            var rightRefs = new List<int>(); var rightBoxes = new List<Bounds3>();
+            for (var j = 0; j < refs.Length; j++)
             {
-                // Every centre on one side of the middle (they coincide): halve by count instead.
-                left = cell[..(cell.Length / 2)];
-                right = cell[(cell.Length / 2)..];
+                var b = refBoxes[j];
+                if (BvhBuilder.Component(b.Max, axis) <= middle) { leftRefs.Add(refs[j]); leftBoxes.Add(b); continue; }
+                if (BvhBuilder.Component(b.Min, axis) >= middle) { rightRefs.Add(refs[j]); rightBoxes.Add(b); continue; }
+                var (ta, tb, tc) = Corners(refs[j]);
+                if (ClippedBounds(ta, tb, tc, Intersect(b, leftCell)) is { } l) { leftRefs.Add(refs[j]); leftBoxes.Add(l); }
+                if (ClippedBounds(ta, tb, tc, Intersect(b, rightCell)) is { } r) { rightRefs.Add(refs[j]); rightBoxes.Add(r); }
             }
-            pending.Push(right);
-            pending.Push(left);
+            if (leftRefs.Count == 0 || rightRefs.Count == 0 || leftRefs.Count == refs.Length || rightRefs.Count == refs.Length)
+            {
+                // No cut separates them (centres coincide, or everything straddles): halve by count, boxes unclipped.
+                var half = refs.Length / 2;
+                pending.Push((refs[half..], refBoxes[half..], cell));
+                pending.Push((refs[..half], refBoxes[..half], cell));
+                continue;
+            }
+            pending.Push((rightRefs.ToArray(), rightBoxes.ToArray(), rightCell));
+            pending.Push((leftRefs.ToArray(), leftBoxes.ToArray(), leftCell));
         }
 
         var regionEntries = new Entry[regions.Count];
         Parallel.For(0, regions.Count, r =>
         {
-            var cell = regions[r];
+            var (cell, cellBoxes) = regions[r];
             var positions = new List<Vector3>();
             var uvs = new List<Vector2>();
             var indices = new uint[cell.Length * 3];
@@ -241,7 +283,7 @@ public sealed class RayQueryScene
                 ownerPlacement[n] = i;
                 ownerTriangle[n] = mirrored ? tri | MirroredOwner : tri;
             }
-            regionEntries[r] = new Entry(TriangleBvh.Build(positions.ToArray(), indices), Matrix4x4.Identity, -1, ownerPlacement, ownerTriangle, uvs.ToArray());
+            regionEntries[r] = new Entry(TriangleBvh.Build(positions.ToArray(), indices, cellBoxes), Matrix4x4.Identity, -1, ownerPlacement, ownerTriangle, uvs.ToArray());
         });
 
         var meshBvhs = new Dictionary<RayMesh, TriangleBvh>(ReferenceEqualityComparer.Instance);
@@ -359,6 +401,46 @@ public sealed class RayQueryScene
     private ShearedRay Local(in Ray ray, int entry) => entries[entry].IsRegion
         ? new ShearedRay(ray.Origin, ray.Direction)
         : new ShearedRay(Vector3.Transform(ray.Origin, entries[entry].WorldToLocal), Vector3.TransformNormal(ray.Direction, entries[entry].WorldToLocal));
+
+    private static Vector3 WithComponent(Vector3 v, int axis, float value) =>
+        axis == 0 ? new Vector3(value, v.Y, v.Z) : axis == 1 ? new Vector3(v.X, value, v.Z) : new Vector3(v.X, v.Y, value);
+
+    private static Bounds3 Intersect(Bounds3 a, Bounds3 b) => new(Vector3.Max(a.Min, b.Min), Vector3.Min(a.Max, b.Max));
+
+    // The bounds of the part of a triangle inside a box (Sutherland-Hodgman against its six planes), padded by a hair
+    // of the box's size so two halves of a cut leave no seam a ray could slip through; null when none of it is inside.
+    private static Bounds3? ClippedBounds(Vector3 a, Vector3 b, Vector3 c, Bounds3 box)
+    {
+        if (box.Min.X > box.Max.X || box.Min.Y > box.Max.Y || box.Min.Z > box.Max.Z) return null;
+        Span<Vector3> poly = stackalloc Vector3[9];
+        Span<Vector3> next = stackalloc Vector3[9];
+        poly[0] = a; poly[1] = b; poly[2] = c;
+        var count = 3;
+        for (var plane = 0; plane < 6 && count > 0; plane++)
+        {
+            var axis = plane % 3;
+            var keepBelow = plane >= 3;
+            var bound = BvhBuilder.Component(keepBelow ? box.Max : box.Min, axis);
+            var outCount = 0;
+            for (var i = 0; i < count; i++)
+            {
+                var p = poly[i];
+                var q = poly[(i + 1) % count];
+                var dp = keepBelow ? bound - BvhBuilder.Component(p, axis) : BvhBuilder.Component(p, axis) - bound;
+                var dq = keepBelow ? bound - BvhBuilder.Component(q, axis) : BvhBuilder.Component(q, axis) - bound;
+                if (dp >= 0f) next[outCount++] = p;
+                if ((dp >= 0f) != (dq >= 0f)) next[outCount++] = p + (q - p) * (dp / (dp - dq));
+            }
+            count = outCount;
+            next[..count].CopyTo(poly);
+        }
+        if (count == 0) return null;
+        var lo = poly[0];
+        var hi = poly[0];
+        for (var i = 1; i < count; i++) { lo = Vector3.Min(lo, poly[i]); hi = Vector3.Max(hi, poly[i]); }
+        var pad = (box.Max - box.Min) * 1e-5f + new Vector3(1e-6f);
+        return Intersect(new Bounds3(lo - pad, hi + pad), new Bounds3(Vector3.Min(a, Vector3.Min(b, c)), Vector3.Max(a, Vector3.Max(b, c))));
+    }
 
     private static Bounds3 Union(Bounds3 a, Bounds3 b) => new(Vector3.Min(a.Min, b.Min), Vector3.Max(a.Max, b.Max));
 
