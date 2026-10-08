@@ -322,7 +322,15 @@ internal sealed partial class SponzaLoop
             var gpuAny = (words[o + 3] & 4u) != 0;
             var cpu = rayQueries.Closest(rayCheckRays[i], 0f, rayCheckTMax[i], (uint)i);
             if (rayBench is null && gpuAny != rayQueries.Any(rayCheckRays[i], 0f, rayCheckTMax[i], (uint)i)) anyMismatch++;
-            if (gpuHit != cpu.HasValue) { hitMismatch++; continue; }
+            if (gpuHit != cpu.HasValue)
+            {
+                // The first few, in full: which side met what, so a disagreement can be told apart from a tie.
+                if (hitMismatch < 4)
+                    Console.WriteLine(string.Create(Inv,
+                        $"[VulkanSponza] ray check, hit/miss differ (ray {i}): CPU {(cpu is { } ch ? $"t {ch.T} placement {ch.Instance} triangle {ch.Triangle}" : "miss")}; GPU {(gpuHit ? $"t {BitConverter.UInt32BitsToSingle(words[o])} words {words[o + 1]} {words[o + 2]}" : "miss")}; CPU without coverage {(rayQueries.Closest(rayCheckRays[i], 0f, rayCheckTMax[i], (uint)i + 1u) is { } alt ? $"(other seed) t {alt.T} placement {alt.Instance} triangle {alt.Triangle}" : "(other seed) miss")}"));
+                hitMismatch++;
+                continue;
+            }
             if (cpu is not { } c) continue;
             hits++;
             var t = BitConverter.UInt32BitsToSingle(words[o]);

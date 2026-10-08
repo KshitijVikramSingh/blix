@@ -6629,7 +6629,9 @@ static ShaderInterface MinimalShader() => new(new[]
                         var at = (int)row * 4;
                         var p0 = packed.Positions[packed.Triangles[at]]; var p1 = packed.Positions[packed.Triangles[at + 1]]; var p2 = packed.Positions[packed.Triangles[at + 2]];
                         if (RayTests.Triangle(local, new Vector3(p0.X, p0.Y, p0.Z), new Vector3(p1.X, p1.Y, p1.Z), new Vector3(p2.X, p2.Y, p2.Z), 0f, t, out var th, out _, out _)
-                            && RayTests.Covered((byte)(surfaces[row] >> 24), seed, node.Index, row - inst.TriangleBase))
+                            && RayTests.Covered((byte)(surfaces[row] >> 24), seed,
+                                inst.Placement != RayQueryGpuData.RegionPlacement ? inst.Placement : packed.Owners[packed.Triangles[at + 3] * 2],
+                                inst.Placement != RayQueryGpuData.RegionPlacement ? packed.Triangles[at + 3] : packed.Owners[packed.Triangles[at + 3] * 2 + 1] & 0x7FFFFFFFu))
                         {
                             t = th;
                             bestEntry = (int)node.Index;

@@ -305,7 +305,7 @@ public sealed class RayQueryScene
             for (var k = 0; k < node.Count; k++)
             {
                 var e = Order[node.Index + k];
-                if (!entries[e].Bvh.Closest(Local(ray, e), tMin, t, new RayCoverageKey(seed, (uint)e), out var th, out var tri, out var bc, out var front)) continue;
+                if (!entries[e].Bvh.Closest(Local(ray, e), tMin, t, CoverageKey(seed, e), out var th, out var tri, out var bc, out var front)) continue;
                 t = th;
                 bestEntry = e;
                 bestTriangle = tri;
@@ -346,11 +346,15 @@ public sealed class RayQueryScene
             for (var k = 0; k < node.Count; k++)
             {
                 var e = Order[node.Index + k];
-                if (entries[e].Bvh.Any(Local(ray, e), tMin, tMax, new RayCoverageKey(seed, (uint)e))) return true;
+                if (entries[e].Bvh.Any(Local(ray, e), tMin, tMax, CoverageKey(seed, e))) return true;
             }
         }
         return false;
     }
+
+    private RayCoverageKey CoverageKey(uint seed, int entry) => entries[entry].IsRegion
+        ? new RayCoverageKey(seed, 0, entries[entry].OwnerPlacement, entries[entry].OwnerTriangle)
+        : new RayCoverageKey(seed, (uint)entries[entry].Placement);
 
     private ShearedRay Local(in Ray ray, int entry) => entries[entry].IsRegion
         ? new ShearedRay(ray.Origin, ray.Direction)

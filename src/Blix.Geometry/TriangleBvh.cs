@@ -38,23 +38,31 @@ public readonly struct ShearedRay
     }
 }
 
-/// <summary>What makes a ray's chance of meeting a partly covered triangle its own: a seed the caller gives the ray, and the top-level entry.</summary>
-public readonly record struct RayCoverageKey(uint Seed, uint Entry);
+/// <summary>
+/// What makes a ray's chance of meeting a partly covered triangle its own: a seed the caller gives the ray, and the
+/// triangle's identity in the scene -- the placement it belongs to and its index in that placement's mesh. For an
+/// instanced hierarchy that is <paramref name="Placement"/> and the triangle's own index; a region's triangles carry
+/// theirs (<paramref name="OwnerPlacement"/>, <paramref name="OwnerTriangle"/>, mirror bit masked). Keyed on the
+/// triangle, not on where a hierarchy happens to list it, so a triangle referenced twice (split across cells or
+/// nodes) flips one coin, not two.
+/// </summary>
+public readonly record struct RayCoverageKey(uint Seed, uint Placement, int[]? OwnerPlacement = null, int[]? OwnerTriangle = null);
 
 /// <summary>The ray tests a traversal is built from, written once for the CPU and mirrored by the GPU's.</summary>
 public static class RayTests
 {
     /// <summary>Whether a ray meets a triangle with this much coverage: always at 255, never at 0, else by an integer hash.</summary>
     /// <remarks>
-    /// The hash (PCG's output function, twice) of the seed, the entry and the triangle's leaf position, its top byte
-    /// against the coverage byte: integer arithmetic only, so ray_query.glsl gets the same answer bit for bit. Over many
-    /// rays a triangle is met in proportion to how much of it the material's alpha keeps.
+    /// The hash (PCG's output function, twice) of the seed and the triangle's identity (its placement and its index in
+    /// that placement's mesh), its top byte against the coverage byte: integer arithmetic only, so ray_query.glsl gets
+    /// the same answer bit for bit. Over many rays a triangle is met in proportion to how much of it the material's
+    /// alpha keeps.
     /// </remarks>
-    public static bool Covered(byte coverage, uint seed, uint entry, uint leafPosition)
+    public static bool Covered(byte coverage, uint seed, uint placement, uint triangle)
     {
         if (coverage == 255) return true;
         if (coverage == 0) return false;
-        return (Pcg(seed + Pcg(entry * 0x9E3779B9u + leafPosition)) >> 24) < coverage;
+        return (Pcg(seed + Pcg(placement * 0x9E3779B9u + triangle)) >> 24) < coverage;
     }
 
     /// <summary>PCG's output permutation as a hash (Jarzynski and Olano, "Hash Functions for GPU Rendering", 2020).</summary>
@@ -261,8 +269,14 @@ public sealed class TriangleBvh
         return false;
     }
 
-    private bool Covered(RayCoverageKey key, uint leafPosition) =>
-        Coverage is not { } coverage || RayTests.Covered(coverage[leafPosition], key.Seed, key.Entry, leafPosition);
+    private bool Covered(RayCoverageKey key, uint leafPosition)
+    {
+        if (Coverage is not { } coverage) return true;
+        var triangle = Order[leafPosition];
+        return key.OwnerPlacement is { } owners
+            ? RayTests.Covered(coverage[leafPosition], key.Seed, (uint)owners[triangle], (uint)(key.OwnerTriangle![triangle] & 0x7FFFFFFF))
+            : RayTests.Covered(coverage[leafPosition], key.Seed, key.Placement, (uint)triangle);
+    }
 
     /// <summary>One triangle by index, through the same test the traversal uses.</summary>
     public bool Hit(in ShearedRay ray, int triangle, float tMin, float tMax, out float t, out Vector2 barycentrics, out bool frontFace) =>

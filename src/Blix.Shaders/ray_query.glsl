@@ -66,11 +66,21 @@ uint blix_pcg(uint v) {
     return (word >> 22u) ^ word;
 }
 
-bool blix_covered(uint row, uint seed, uint entry, uint leafPosition) {
+// The coin is keyed on the triangle's identity in the scene (its placement and its index in that placement's mesh),
+// so a triangle referenced twice flips one coin: an instance's is its placement and the triangle's own index (the
+// triangle record's w); a region's comes from the owner row (w), mirror bit masked. Solid rows never ask.
+bool blix_covered(uint row, uint seed, uint entryIndex, uint record) {
     uint coverage = blix_surfaces[row] >> 24u;
     if (coverage == 255u) return true;
     if (coverage == 0u) return false;
-    return (blix_pcg(seed + blix_pcg(entry * 0x9E3779B9u + leafPosition)) >> 24u) < coverage;
+    uint placement = blix_instances[entryIndex].info.y;
+    uint triangle = record;
+    if (placement == 0xFFFFFFFFu) {
+        uvec2 owner = blix_owners[record];
+        placement = owner.x;
+        triangle = owner.y & 0x7FFFFFFFu;
+    }
+    return (blix_pcg(seed + blix_pcg(placement * 0x9E3779B9u + triangle)) >> 24u) < coverage;
 }
 
 struct BlixRayHit {
@@ -170,7 +180,7 @@ bool blix_traceMesh(BlixShearedRay r, uint root, float tMin, inout float tMax, u
                 float th; vec2 bc; bool front;
                 if (blix_rayTriangle(r, blix_positions[tri.x].xyz, blix_positions[tri.y].xyz, blix_positions[tri.z].xyz,
                                      tMin, tMax, th, bc, front)
-                    && blix_covered(node.index + k, seed, entryIndex, node.index + k - triangleBase)) {
+                    && blix_covered(node.index + k, seed, entryIndex, tri.w)) {
                     tMax = th;
                     triangle = tri.w;
                     barycentrics = bc;
@@ -214,7 +224,7 @@ bool blix_anyInMesh(BlixShearedRay r, uint root, float tMin, float tMax, uint se
             float th; vec2 bc; bool front;
             if (blix_rayTriangle(r, blix_positions[tri.x].xyz, blix_positions[tri.y].xyz, blix_positions[tri.z].xyz,
                                  tMin, tMax, th, bc, front)
-                && blix_covered(node.index + k, seed, entryIndex, node.index + k - triangleBase)) return true;
+                && blix_covered(node.index + k, seed, entryIndex, tri.w)) return true;
         }
     }
     return false;
