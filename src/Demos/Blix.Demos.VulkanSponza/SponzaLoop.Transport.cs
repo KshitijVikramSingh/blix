@@ -29,6 +29,8 @@ internal sealed partial class SponzaLoop
 {
     private Vector2? sunOverrideDegrees;
     private bool transportSpike;
+    // The CPU evaluation at the reference's points runs with --transport only (minutes on Sponza).
+    private bool transportEvaluateAtShot;
     private float transportSpacing = 0.25f;
     private int transportRays = 512;
     private int transportVisRes = 32;
@@ -45,8 +47,10 @@ internal sealed partial class SponzaLoop
 
     private void ReadTransportArgs(AppArgs args)
     {
-        transportGpu = args.Flag("transport-gpu");
+        ReadTexelArgs(args);
+        transportGpu = args.Flag("transport-gpu") || transportTexels;
         transportSpike = args.Flag("transport") || transportGpu;
+        transportEvaluateAtShot = args.Flag("transport");
         if (args.Float("transport-spacing") is { } s) transportSpacing = Math.Clamp(s, 0.02f, 4f);
         if (args.Int("transport-rays") is { } r) transportRays = Math.Clamp(r, 16, 8192);
         if (args.Int("transport-vis") is { } v) transportVisRes = Math.Clamp(v, 4, 256);
@@ -144,7 +148,7 @@ internal sealed partial class SponzaLoop
 
     private void WriteTransportSpike()
     {
-        if (!transportSpike) return;
+        if (!transportEvaluateAtShot) return;
         if (!transportCooked) CookTransport();
         transportEvaluate?.Invoke();
     }
@@ -586,6 +590,7 @@ internal sealed partial class SponzaLoop
             + $"cooked in {cookSeconds:0.0} s (patches {cookPatches:0.0} s), solved {iterations} bounces in {solveSeconds * 1000:0} ms."));
 
         UploadCookedPatches(pos, nrm, incident, 2f * transportSpacing);
+        CookTexels(scene, Tri, (i, t) => (surfaces[data.RowOf(i, t)] >> 24) < 255u);
 
         // ---- At the reference's points --------------------------------------------------------------------------
         transportEvaluate = () => {

@@ -1,0 +1,108 @@
+#version 450
+// Texels' gather (texel.glsl): one workgroup a queued texel, one thread a ray. RAYS cosine-weighted directions from the
+// texel (stratified, rotated afresh each pass); a hit's light is its albedo times its own direct sun (the shadow
+// cascades where they cover it, a shadow ray beyond) and its nearest cooked patch's indirect light, over pi; a miss
+// the sky. The pass's irradiance estimate (pi x the mean radiance) is averaged into the texel at 1/n over rays, to the
+// target (texel_mark.comp stops queueing it there): a still sun settles once and then nothing is traced.
+//
+// The queue is texel_mark.comp's: three lists (no rays yet, few, the rest), taken in that order up to the budget.
+// Workgroup 0 also zeroes the other parity's counts for the next frame's mark.
+
+#define RAYS 32
+#define PI 3.14159265359
+layout(local_size_x = RAYS) in;
+
+layout(set = 0, binding = 0) uniform TexelGather {
+    vec4 uTexelGrid;      // xyz the cells' origin, w the spacing
+    vec4 uTexelParams;    // x hash capacity, y list capacity (the budget), z target rays, w the frame
+    vec4 uSunDirection;   // xyz the direction the sun travels
+    vec4 uSunIrradiance;  // rgb
+    vec4 uSky;            // x sky strength, y the sky's mip for a ray
+    mat4 uCascadeVP[3];
+    vec4 uCookedGrid;
+    vec4 uCookedDims;
+} u;
+
+layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
+layout(set = 0, binding = 2) uniform sampler2D uCascadeShadowMaps[3];
+#include "shadow.glsl"
+layout(std430, set = 0, binding = 3) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 4) buffer TexelLight { vec4 texelLight[]; };
+layout(std430, set = 0, binding = 5) buffer TexelQueue { uint texelQueue[]; };
+
+#define COOKED_BINDING 6
+#define COOKED_GRID u.uCookedGrid
+#define COOKED_DIMS u.uCookedDims
+#include "cooked_patches.glsl"
+
+#define BLIX_RAY_SET 0
+#define BLIX_RAY_BINDING 13
+#include "ray_query.glsl"
+
+shared vec3 sRadiance[RAYS];
+
+void main() {
+    uint group = gl_WorkGroupID.x;
+    uint frame = uint(u.uTexelParams.w);
+    uint parity = frame & 1u;
+    uint capacity = uint(u.uTexelParams.y);
+    if (group == 0u && gl_LocalInvocationID.x < 4u) texelQueue[(parity ^ 1u) * 4u + gl_LocalInvocationID.x] = 0u;
+    // Which texel: the lists in order, each clamped to what it holds.
+    int id = -1;
+    uint i = group;
+    for (uint list = 0u; list < 3u && id < 0; ++list) {
+        uint count = min(texelQueue[parity * 4u + list], capacity);
+        if (i < count) id = int(texelQueue[8u + list * capacity + i]);
+        else i -= count;
+    }
+    if (id < 0) return;   // the whole workgroup: id is uniform across it
+
+    vec3 position = texels[2 * id].xyz;
+    vec3 n = texels[2 * id + 1].xyz;
+    uint ray = gl_LocalInvocationID.x;
+    float rays = texelLight[id].w;
+    uint pass = uint(rays) / uint(RAYS);
+    uint seed = blix_pcg(uint(id) * 9781u + pass * 0x632BE5ABu + ray * 2654435761u);
+    uint setSeed = blix_pcg(uint(id) * 9781u + pass * 0x632BE5ABu);
+    float rotation = float(blix_pcg(setSeed) & 0xFFFFu) / 65536.0;
+    float jitter = float(blix_pcg(seed) & 0xFFFFu) / 65536.0;
+    // Cosine-weighted: a stratified disc (radius sqrt of the ray's band) lifted to the hemisphere.
+    float r = sqrt((float(ray) + jitter) / float(RAYS));
+    float phi = 2.0 * PI * fract(float(ray) * 0.618034 + rotation);
+    vec3 t = normalize(abs(n.y) < 0.999 ? cross(vec3(0.0, 1.0, 0.0), n) : cross(vec3(1.0, 0.0, 0.0), n));
+    vec3 b = cross(n, t);
+    vec3 dir = normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + n * sqrt(max(0.0, 1.0 - r * r)));
+    vec3 origin = position + n * 0.01;
+
+    vec3 radiance;
+    BlixRayHit hit;
+    if (blix_traceClosest(origin, dir, 0.0, uintBitsToFloat(0x7F800000u), seed, hit)) {
+        vec3 hn = dot(hit.normal, dir) > 0.0 ? -hit.normal : hit.normal;
+        vec3 hitPos = origin + dir * hit.t;
+        vec3 toSun = -normalize(u.uSunDirection.xyz);
+        float ndotl = max(dot(hn, toSun), 0.0);
+        float sun = 0.0;
+        if (ndotl > 0.0) {
+            int cascade = -1;
+            float lit = blix_sun_shadow_cascaded_hard(
+                uCascadeShadowMaps[0], uCascadeShadowMaps[1], uCascadeShadowMaps[2],
+                u.uCascadeVP[0], u.uCascadeVP[1], u.uCascadeVP[2], hitPos + hn * 0.01, ndotl, cascade);
+            if (cascade < 0) lit = blix_traceAny(hitPos + hn * 0.01, toSun, 0.0, uintBitsToFloat(0x7F800000u), blix_pcg(seed ^ 0x5bd1e995u)) ? 0.0 : 1.0;
+            sun = ndotl * lit;
+        }
+        bool found;
+        vec3 indirect = cookedIndirect(hitPos, hn, found);
+        radiance = hit.albedo * (u.uSunIrradiance.rgb * sun + indirect) / PI;
+    } else {
+        radiance = textureLod(uSkyRadiance, dir, u.uSky.y).rgb * u.uSky.x;
+    }
+    sRadiance[ray] = radiance;
+    barrier();
+    if (ray != 0u) return;
+    vec3 sum = vec3(0.0);
+    for (int k = 0; k < RAYS; ++k) sum += sRadiance[k];
+    vec3 estimate = PI * sum / float(RAYS);
+    float total = rays + float(RAYS);
+    vec4 old = texelLight[id];
+    texelLight[id] = vec4(mix(old.rgb, estimate, float(RAYS) / total), total);
+}

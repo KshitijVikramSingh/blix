@@ -63,6 +63,7 @@ internal sealed partial class SponzaLoop
         var origins = clipmap!.Origins;
         var screen = ScreenProbeIncidentInputs(frameWidth, frameHeight);
         var surface = SurfaceUniforms(ClipmapLevels * clipmap.ProbesPerLevel);
+        var texel = TexelIncidentInputs();
         graph.Pass(incidentPassHandle, scope => fullscreen.Draw(
             scope, incidentClipmapPipeline,
             new[]
@@ -90,8 +91,10 @@ internal sealed partial class SponzaLoop
                 new("uSurfaceGrid", new Vector4Uniform(surface.Grid)),
                 new("uSurfaceDims", new Vector4Uniform(surface.Dims)),
                 new("uSurfaceAtlas", new Vector4Uniform(surface.Atlas)),
+                new("uTexelGrid", new Vector4Uniform(texel.Grid)),
+                new("uTexelParams", new Vector4Uniform(texel.Params)),
             },
-            buffers: new[] { new ShaderBufferBinding("ClipmapState", clipmapState), new ShaderBufferBinding("ScreenProbeTiles", screen.Tiles), new ShaderBufferBinding("ScreenProbes", screen.Probes), new ShaderBufferBinding("SurfaceIndex", surfaceIndex) }));
+            buffers: new[] { new ShaderBufferBinding("ClipmapState", clipmapState), new ShaderBufferBinding("ScreenProbeTiles", screen.Tiles), new ShaderBufferBinding("ScreenProbes", screen.Probes), new ShaderBufferBinding("SurfaceIndex", surfaceIndex) }.Concat(texel.Buffers).ToArray()));
     }
 
     private const int ClipmapLevels = 4;

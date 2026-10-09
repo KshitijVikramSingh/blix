@@ -597,6 +597,15 @@ internal sealed partial class SponzaLoop
             for (var c = 0; c < CascadeCount; c++) builder = builder.Read(cascadeHandles[c]);
             screenProbePassHandles[stage] = builder.Shader(screenProbeInterfaces[stage]).Handle;
         }
+        texelMarkInterface = Reflect("texel_mark.comp");
+        texelMarkPassHandle = graph.ComputePass("texel-mark").Shader(texelMarkInterface)
+            .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
+        texelGatherInterface = Reflect("texel_gather.comp");
+        {
+            var builder = graph.ComputePass("texel-gather");
+            for (var c = 0; c < CascadeCount; c++) builder = builder.Read(cascadeHandles[c]);
+            texelGatherPassHandle = builder.Shader(texelGatherInterface).Handle;
+        }
         screenProbeFilterInterface = Reflect("screen_probe_filter.comp");
         screenProbeFilterPassHandle = graph.ComputePass("screen-probe-filter").Shader(screenProbeFilterInterface).Handle;
 
@@ -857,6 +866,10 @@ internal sealed partial class SponzaLoop
             File.ReadAllBytes(Path.Combine(shaderDir, "clipmap_watch.comp.spv")), clipmapWatchInterface, "clipmap_watch")), "clipmap_watch"));
         surfaceReclaimPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "surface_reclaim.comp.spv")), surfaceReclaimInterface, "surface_reclaim")), "surface_reclaim"));
+        texelMarkPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
+            File.ReadAllBytes(Path.Combine(shaderDir, "texel_mark.comp.spv")), texelMarkInterface, "texel_mark")), "texel_mark"));
+        texelGatherPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
+            File.ReadAllBytes(Path.Combine(shaderDir, "texel_gather.comp.spv")), texelGatherInterface, "texel_gather")), "texel_gather"));
         clipmapMarkPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "clipmap_mark.comp.spv")), clipmapMarkInterface, "clipmap_mark")), "clipmap_mark"));
         for (var stage = 0; stage < ScreenProbeStages.Length; stage++)

@@ -131,7 +131,7 @@ internal sealed partial class SponzaLoop
     private int GroupDrawCount(OpaqueGroup g) => g.Count * lodSlots;
 
     // --ab lod reaches every camera and cascade selection through this. A zero budget is full detail.
-    private float LodErrorPixelsNow => abMode == "lod" ? LodArmPixels : render.LodErrorPixels;
+    private float LodErrorPixelsNow => abMode == "lod" ? LodArmPixels : lodPixelsOverride >= 0f ? lodPixelsOverride : render.LodErrorPixels;
 
     // The lists a frame culls, each its own indirect records and run of the visible list: the camera's
     // over the opaque placements (shared by the depth pre-pass and the lit pass), one per cascade over
@@ -835,6 +835,7 @@ internal sealed partial class SponzaLoop
                 RecordSurfaceReclaim();
                 RecordClipmapMark(incidentInvProj, incidentInvView, frame.Width, frame.Height);
                 RecordScreenProbes(frame.Width, frame.Height);
+                RecordTexels(incidentInvProj, incidentInvView, frame.Width, frame.Height);
                 RecordIncidentClipmap(incidentInvProj, incidentInvView, frame.Width, frame.Height, frame.Width, frame.Height);
             }
             // Before the clipmap's first solve there is nothing to read, and the lit pass does not (uIncident.z is 0
@@ -929,6 +930,7 @@ internal sealed partial class SponzaLoop
             WriteRayCheck();
             WriteClipmapCheck();
             WriteScreenProbeCheck();
+            WriteTexelCensus();
             WriteRayView(Path.ChangeExtension(path, null));
             if (probeReference)
             {

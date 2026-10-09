@@ -721,8 +721,18 @@ F. *The frame audit* (opened 2026-10-07: "a lot of pure performance on the table
      (fresh traces from the patch's position with the point's normal, and the reverse) put it on POSITION.
      Fine texels on the point's own plane that gather the cooked light: 2.5 cm 10.8% (= the floor), 5 cm 13.5%,
      10 cm 14.5%, 20 cm 22.4%; at 30-90 degrees off the nearest patch, interp 49% -> 5 cm 14%. So two scales: patches
-     at 0.25 m carry transport (what a ray reads), a surface cache at ~5 cm is what a pixel reads. Next: how the
-     texels' gather is kept current as the sun moves (cooked texel couplings vs a progressive GPU re-gather).
+     at 0.25 m carry transport (what a ray reads), a surface cache at ~5 cm is what a pixel reads.
+     TEXELS on the GPU (`--transport-texels`, SponzaLoop.Texels.cs, Shaders/texel*.glsl; option B, chosen with the
+     user: a progressive GPU re-gather, not cooked texel couplings): a texel per 5 cm cell x face-normal bin, cooked
+     (Sponza 6.8M kept, 594 MB, ~90 s); texel_mark queues what the image reads (young first), texel_gather traces 32
+     rays a texel reading the cooked patch light + the hit's own cascade sun, to 1024 rays, then stops. Cornell field
+     15.9 -> 1.46%; Sponza hall arch 42.2% (clipmap) -> 15.7% (CPU emulation 13.5%). Three fixes on the way, each found
+     by an instrument: the buried cull dropped visible texels (one-sided geometry; now 15 of 16 back faces); the
+     pre-pass normal is the VERTEX normal, so the pre-pass now writes the FACE's bins in its w; octahedral 4x4 bins had
+     their boundaries ON the axes (floors, walls) -- 27 component-rounded bins put axes at bin centres. The user booted
+     it: "clearly WINNING", a clean 30 fps once settled (~frame 2400), "jittery and noisy in a few very specific ways".
+     Open: the cost (~+15 ms on the hall in single runs; paired A/B not yet run), the sun moving (re-gather on change),
+     the noise the user saw, and cleanup of the screen-probe hookup.
 
 Known instrument gap: a Sponza `--shot` raises 9 validation errors on `main` as well (a storage image
 copied to a buffer without transfer-source usage, in the shot's readback). Not this arc's, and not fixed.

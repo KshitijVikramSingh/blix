@@ -320,39 +320,10 @@ void main() {
 #endif
 
 #ifdef SCREEN_PROBE_TRACE
-// Cooked light transport (stage 5a): patches (position, normal, the indirect irradiance their solve left them -- sky,
-// bounce, and the first bounce of direct sun through sunlets), found through a grid of cells (CSR: each cell's first
-// entry and the patch ids). A hit takes its OWN direct sun from the cascades and the rest from its nearest patch
-// facing the same way -- what the CPU spike measured at 5.6% on Sponza's hall (the final gather, exact sun at hits).
-layout(std430, set = 0, binding = 25) readonly buffer CookedPatches { vec4 cookedPatch[]; };   // 3 a patch: pos, normal, indirect
-layout(std430, set = 0, binding = 26) readonly buffer CookedCells { uint cookedCellStart[]; };
-layout(std430, set = 0, binding = 27) readonly buffer CookedIds { uint cookedId[]; };
-
-vec3 cookedIndirect(vec3 p, vec3 n, out bool found) {
-    found = false;
-    if (u.uCookedDims.w < 0.5) return vec3(0.0);
-    ivec3 dims = ivec3(u.uCookedDims.xyz);
-    ivec3 c = ivec3(floor((p - u.uCookedGrid.xyz) / u.uCookedGrid.w));
-    float bestD = 1e30;
-    int best = -1;
-    for (int dz = -1; dz <= 1; ++dz)
-    for (int dy = -1; dy <= 1; ++dy)
-    for (int dx = -1; dx <= 1; ++dx) {
-        ivec3 cc = c + ivec3(dx, dy, dz);
-        if (any(lessThan(cc, ivec3(0))) || any(greaterThanEqual(cc, dims))) continue;
-        int cell = (cc.z * dims.y + cc.y) * dims.x + cc.x;
-        for (uint k = cookedCellStart[cell]; k < cookedCellStart[cell + 1]; ++k) {
-            int j = int(cookedId[k]);
-            if (dot(cookedPatch[3 * j + 1].xyz, n) < 0.5) continue;
-            vec3 d = cookedPatch[3 * j].xyz - p;
-            float d2 = dot(d, d);
-            if (d2 < bestD) { bestD = d2; best = j; }
-        }
-    }
-    if (best < 0) return vec3(0.0);
-    found = true;
-    return cookedPatch[3 * best + 2].rgb;
-}
+#define COOKED_BINDING 25
+#define COOKED_GRID u.uCookedGrid
+#define COOKED_DIMS u.uCookedDims
+#include "cooked_patches.glsl"
 
 // ---- trace: one thread a ray, for every pass its probe traces ----------------------------------------------------
 // A hit is lit by the sun (the shadow cascades where they cover it, a shadow ray beyond) and by the clipmap's

@@ -36,6 +36,8 @@ layout(set = 0, binding = 0) uniform IncidentClipmap {
     vec4 uSurfaceGrid;   // the surface probes (probe_surface.glsl, stage 4g-ix): lowest cell xyz, spacing w
     vec4 uSurfaceDims;   // dims xyz, first slot w
     vec4 uSurfaceAtlas;  // tile row, tiles across, slots, w 1 when on
+    vec4 uTexelGrid;     // the texels (texel.glsl, stage 5a): the cells' origin xyz, spacing w
+    vec4 uTexelParams;   // x hash capacity, y 1 when on, z the rays at which a texel's answer is trusted whole
 } g;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -103,6 +105,40 @@ float clipLiftKnob, clipVisibilityKnob;
 layout(std430, set = 0, binding = 9) readonly buffer SurfaceIndex { uint surfaceIndex[]; };
 #define BLIX_SURFACE_INDEX(i) surfaceIndex[i]
 #include "probe_surface.glsl"
+layout(std430, set = 0, binding = 10) readonly buffer TexelHash { uvec4 texelHash[]; };
+layout(std430, set = 0, binding = 11) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 12) readonly buffer TexelLight { vec4 texelLight[]; };
+#define TEXEL_HASH(i) texelHash[i]
+#define TEXEL_POSITION(i) texels[2 * (i)]
+#define TEXEL_NORMAL(i) texels[2 * (i) + 1]
+#include "texel.glsl"
+
+// The texels' answer: their irradiance, weighted trilinearly and by how many rays each has; confidence the mean of
+// those rays against the trust threshold. False where none of the eight has rays (foliage has no texels; a texel not
+// yet gathered has none), and the field above stands.
+bool texelsAt(vec3 worldPos, vec3 n, float faceBin, out vec3 irradiance, out float confidence) {
+    TexelGrid tg;
+    tg.minCorner = g.uTexelGrid.xyz;
+    tg.spacing = g.uTexelGrid.w;
+    tg.capacity = uint(g.uTexelParams.x);
+    int ids[TEXEL_CANDIDATES];
+    float weights[TEXEL_CANDIDATES];
+    texelsAround(tg, worldPos, n, faceBin, ids, weights);
+    vec3 sum = vec3(0.0);
+    float weight = 0.0, raysWeighted = 0.0, located = 0.0;
+    for (int i = 0; i < TEXEL_CANDIDATES; ++i) {
+        if (ids[i] < 0) continue;
+        located += weights[i];
+        vec4 light = texelLight[ids[i]];
+        if (light.w <= 0.0) continue;
+        sum += weights[i] * light.rgb;
+        weight += weights[i];
+        raysWeighted += weights[i] * min(light.w / g.uTexelParams.z, 1.0);
+    }
+    irradiance = weight > 1e-6 ? sum / weight : vec3(0.0);
+    confidence = located > 1e-6 ? raysWeighted / located : 0.0;
+    return weight > 1e-6;
+}
 
 void main() {
     clipLiftKnob = g.uClipParams.z;
@@ -162,6 +198,9 @@ void main() {
     if (surfaceWeight > 0.0) outIncident = found ? mix(outIncident, surfaceField, surfaceConfidence) : surfaceField;
     vec3 gathered;
     float confidence;
+    if (g.uTexelParams.y > 0.5 && g.uClipParams.y < 0.5 && texelsAt(worldPos, N, texelFetch(uPrepassNormal, ivec2(vUv * vec2(textureSize(uPrepassNormal, 0))), 0).w, gathered, confidence)) {
+        outIncident.rgb = mix(outIncident.rgb, gathered, confidence);
+    }
     if (g.uScreen.x > 0.5 && screenProbesAt(worldPos, N, viewDepth, gathered, confidence)) {
         outIncident.rgb = mix(outIncident.rgb, gathered, confidence);
     }
