@@ -32,7 +32,19 @@ internal sealed partial class SponzaLoop
     private int texelCount, texelCapacity;
     private Vector4 texelGrid;
     private uint texelFrame;
-    private GpuBufferHandle texelHashBuffer, texelBuffer, texelLightBuffer, texelStampBuffer, texelQueueBuffer, texelProbeBuffer;
+    private GpuBufferHandle texelHashBuffer, texelBuffer, texelLightBuffer, texelStampBuffer, texelQueueBuffer, texelProbeBuffer, texelEpochBuffer, texelPriorBuffer;
+    // Following the sun: the cook's solve for another sun (SponzaLoop.Transport.cs), the sun it last solved for, the
+    // solve in flight, and the texels' epoch -- bumped when new patch light lands; a texel from an older epoch is
+    // queued again and keeps its old estimate as one pass's worth.
+    private Func<Vector3, Vector3, Vector3[]>? transportRelight;
+    private (Vector3 ToSun, Vector3 Irradiance) transportRelightSun;
+    private Task<Vector3[]>? relightTask;
+    private (Vector3 ToSun, Vector3 Irradiance) relightTaskSun;
+    private Stopwatch? relightClock;
+    private Vector4[]? cookedPacked;
+    private uint texelEpoch;
+    private readonly List<(GpuBufferHandle Buffer, uint Frame)> retiredBuffers = new();
+    private (int Frame, Vector2 Degrees)? sunChange;
     private ShaderInterface texelMarkInterface = null!, texelGatherInterface = null!;
     private PassHandle texelMarkPassHandle, texelGatherPassHandle;
     private PipelineHandle texelMarkPipeline, texelGatherPipeline;
@@ -179,13 +191,59 @@ internal sealed partial class SponzaLoop
         texelLightBuffer = Own(device.CreateGpuBuffer(texelCount * 16, new byte[texelCount * 16], "sponza.texels.light"));
         texelStampBuffer = Own(device.CreateGpuBuffer(texelCount * 4, MemoryMarshal.AsBytes(stamps.AsSpan()), "sponza.texels.stamp"));
         texelQueueBuffer = Own(device.CreateGpuBuffer(queueWords * 4, new byte[queueWords * 4], "sponza.texels.queue"));
+        texelPriorBuffer = Own(device.CreateGpuBuffer(texelCount * 16, new byte[texelCount * 16], "sponza.texels.prior"));
+        texelEpochBuffer = Own(device.CreateGpuBuffer(texelCount * 4, new byte[texelCount * 4], "sponza.texels.epoch"));
         texelProbeBuffer = Own(device.CreateGpuBuffer(24 * 24 * 48, new byte[24 * 24 * 48], "sponza.texels.probe"));
         texelGrid = new Vector4(min, s);
         texelsUploaded = true;
-        var mb = (table.Length * 4L + texels.Length * 16L + texelCount * 20L) / 1048576.0;
+        var mb = (table.Length * 4L + texels.Length * 16L + texelCount * 40L) / 1048576.0;
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] texels: {samples:N0} surface samples at {sample * 100:0.#} cm -> {placed:N0} texels at {s * 100:0.#} cm, {texelCount:N0} kept (the rest inside a solid); hash {texelCapacity:N0} slots (longest probe {longestProbe}); {mb:0.0} MB; cooked in {clock.Elapsed.TotalSeconds:0.0} s."));
         if (longestProbe >= 64) Console.WriteLine("[VulkanSponza] texels: WARNING a hash probe run exceeds the shaders' 64 (TEXEL_PROBES): some texels cannot be found.");
+    }
+
+    // Each frame (with the cooked patches on the GPU): when the sun has turned more than a quarter degree (or changed
+    // strength) from the one last solved, solve for it in the background; when that lands, upload the patches' new
+    // light and bump the texels' epoch. A sun that keeps moving is chased one solve at a time.
+    private void FollowSun()
+    {
+        if (sunChange is { } change && postLoadFrames == change.Frame)
+        {
+            sunYaw = change.Degrees.X * MathF.PI / 180f;
+            sunPitch = change.Degrees.Y * MathF.PI / 180f;
+            UpdateSunDirection();
+            Console.WriteLine($"[VulkanSponza] sun turned by --sun-change at frame {postLoadFrames}: {sunDirection}");
+        }
+        for (var i = retiredBuffers.Count - 1; i >= 0; i--)
+        {
+            if (texelFrame - retiredBuffers[i].Frame < 4u) continue;
+            device.DestroyGpuBuffer(retiredBuffers[i].Buffer);
+            ownedGpuBuffers.Remove(retiredBuffers[i].Buffer);
+            retiredBuffers.RemoveAt(i);
+        }
+        if (transportRelight is null || cookedPacked is null) return;
+        if (relightTask is { IsCompleted: true } done)
+        {
+            var incident = done.Result;
+            for (var i = 0; i < incident.Length; i++) cookedPacked[3 * i + 2] = new Vector4(incident[i], 0f);
+            retiredBuffers.Add((cookedPatchBuffer, texelFrame));
+            cookedPatchBuffer = Own(device.CreateGpuBuffer(cookedPacked.Length * 16, MemoryMarshal.AsBytes(cookedPacked.AsSpan()), "sponza.cooked.patches"));
+            transportRelightSun = relightTaskSun;
+            texelEpoch++;
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza] transport: patch light re-solved for the sun in {relightClock!.Elapsed.TotalSeconds:0.0} s; texels re-gather (epoch {texelEpoch})."));
+            relightTask = null;
+        }
+        if (relightTask is not null) return;
+        var toSun = -Vector3.Normalize(sunDirection);
+        var irradiance = EffectiveSunIrradiance;
+        var turned = MathF.Acos(Math.Clamp(Vector3.Dot(toSun, transportRelightSun.ToSun), -1f, 1f)) * 180f / MathF.PI;
+        var changed = Vector3.Distance(irradiance, transportRelightSun.Irradiance) > 1e-3f * MathF.Max(1f, transportRelightSun.Irradiance.Length());
+        if (turned < 0.25f && !changed) return;
+        relightTaskSun = (toSun, irradiance);
+        relightClock = Stopwatch.StartNew();
+        var relight = transportRelight;
+        relightTask = Task.Run(() => relight(toSun, irradiance));
     }
 
     private void EnsureTexelPlaceholders()
@@ -194,6 +252,7 @@ internal sealed partial class SponzaLoop
         texelHashBuffer = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.texels.hash.none"));
         texelBuffer = Own(device.CreateGpuBuffer(32, new byte[32], "sponza.texels.none"));
         texelLightBuffer = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.texels.light.none"));
+        texelPriorBuffer = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.texels.prior.none"));
     }
 
     // What the incident pass binds and reads: the texels, or placeholders with the switch off.
@@ -205,12 +264,14 @@ internal sealed partial class SponzaLoop
             new ShaderBufferBinding("TexelHash", texelHashBuffer),
             new ShaderBufferBinding("Texels", texelBuffer),
             new ShaderBufferBinding("TexelLight", texelLightBuffer),
+            new ShaderBufferBinding("TexelPrior", texelPriorBuffer),
         });
     }
 
     private void RecordTexels(Matrix4x4 invProjection, Matrix4x4 invView, int width, int height)
     {
         if (!texelsUploaded || rayBlockBuffers.Length == 0) return;
+        FollowSun();
         var texelParams = new Vector4(texelCapacity, texelBudget, texelTarget, texelFrame);
         var groups = (((width + TexelMarkStride - 1) / TexelMarkStride + 7) / 8, ((height + TexelMarkStride - 1) / TexelMarkStride + 7) / 8);
         graph.Dispatch(texelMarkPassHandle, new DispatchCommand(texelMarkPipeline, groups.Item1, groups.Item2, 1,
@@ -219,7 +280,7 @@ internal sealed partial class SponzaLoop
                 new("uInvProjection", new Matrix4x4Uniform(invProjection)),
                 new("uInvView", new Matrix4x4Uniform(invView)),
                 new("uTarget", new Vector4Uniform(new Vector4(width, height, TexelMarkStride, 0f))),
-                new("uOffset", new Vector4Uniform(new Vector4(texelFrame % 4, (texelFrame / 4) % 4, 0f, 0f))),
+                new("uOffset", new Vector4Uniform(new Vector4(texelFrame % 4, (texelFrame / 4) % 4, texelEpoch, 0f))),
                 new("uTexelGrid", new Vector4Uniform(texelGrid)),
                 new("uTexelParams", new Vector4Uniform(texelParams)),
             },
@@ -236,6 +297,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("TexelStamp", texelStampBuffer),
                 new ShaderBufferBinding("TexelQueue", texelQueueBuffer),
                 new ShaderBufferBinding("TexelProbe", texelProbeBuffer),
+                new ShaderBufferBinding("TexelEpoch", texelEpochBuffer),
             }));
         // Probe mode every frame (576 threads): the census reads the latest.
         {
@@ -245,7 +307,7 @@ internal sealed partial class SponzaLoop
                     new("uInvProjection", new Matrix4x4Uniform(invProjection)),
                     new("uInvView", new Matrix4x4Uniform(invView)),
                     new("uTarget", new Vector4Uniform(new Vector4(width, height, 1f, 1f))),
-                    new("uOffset", new Vector4Uniform(Vector4.Zero)),
+                    new("uOffset", new Vector4Uniform(new Vector4(0f, 0f, texelEpoch, 0f))),
                     new("uTexelGrid", new Vector4Uniform(texelGrid)),
                     new("uTexelParams", new Vector4Uniform(texelParams)),
                 },
@@ -262,12 +324,15 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("TexelStamp", texelStampBuffer),
                     new ShaderBufferBinding("TexelQueue", texelQueueBuffer),
                     new ShaderBufferBinding("TexelProbe", texelProbeBuffer),
+                    new ShaderBufferBinding("TexelEpoch", texelEpochBuffer),
                 }));
         }
         var gatherBuffers = rayBlockBuffers
             .Append(new ShaderBufferBinding("Texels", texelBuffer))
             .Append(new ShaderBufferBinding("TexelLight", texelLightBuffer))
             .Append(new ShaderBufferBinding("TexelQueue", texelQueueBuffer))
+            .Append(new ShaderBufferBinding("TexelEpoch", texelEpochBuffer))
+            .Append(new ShaderBufferBinding("TexelPrior", texelPriorBuffer))
             .Concat(CookedBuffers()).ToArray();
         var declared = texelGatherInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
         graph.Dispatch(texelGatherPassHandle, new DispatchCommand(texelGatherPipeline, texelBudget, 1, 1,
@@ -278,7 +343,7 @@ internal sealed partial class SponzaLoop
                 new("uSunDirection", new Vector4Uniform(new Vector4(sunDirection, 0f))),
                 new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 1f))),
                 // A ray's sky as the screen probes take it: strength 1, a little blurred (one mip).
-                new("uSky", new Vector4Uniform(new Vector4(1f, 1f, 0f, 0f))),
+                new("uSky", new Vector4Uniform(new Vector4(1f, 1f, texelEpoch, 0f))),
                 new("uCascadeVP", new Matrix4x4ArrayUniform(cascadeViewProj)),
                 new("uCookedGrid", new Vector4Uniform(cookedGrid)),
                 new("uCookedDims", new Vector4Uniform(cookedDims)),

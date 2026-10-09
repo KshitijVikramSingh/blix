@@ -108,6 +108,8 @@ layout(std430, set = 0, binding = 9) readonly buffer SurfaceIndex { uint surface
 layout(std430, set = 0, binding = 10) readonly buffer TexelHash { uvec4 texelHash[]; };
 layout(std430, set = 0, binding = 11) readonly buffer Texels { vec4 texels[]; };
 layout(std430, set = 0, binding = 12) readonly buffer TexelLight { vec4 texelLight[]; };
+// A texel's old light while its gather for a new sun is young (texel_gather.comp): blended out over 256 rays.
+layout(std430, set = 0, binding = 13) readonly buffer TexelPrior { vec4 texelPrior[]; };
 #define TEXEL_HASH(i) texelHash[i]
 #define TEXEL_POSITION(i) texels[2 * (i)]
 #define TEXEL_NORMAL(i) texels[2 * (i) + 1]
@@ -130,10 +132,12 @@ bool texelsAt(vec3 worldPos, vec3 n, float faceBin, out vec3 irradiance, out flo
         if (ids[i] < 0) continue;
         located += weights[i];
         vec4 light = texelLight[ids[i]];
-        if (light.w <= 0.0) continue;
-        sum += weights[i] * light.rgb;
+        vec4 prior = texelPrior[ids[i]];
+        if (light.w <= 0.0 && prior.w <= 0.0) continue;
+        vec3 value = prior.w > 0.0 ? mix(prior.rgb, light.rgb, min(light.w / 256.0, 1.0)) : light.rgb;
+        sum += weights[i] * value;
         weight += weights[i];
-        raysWeighted += weights[i] * min(light.w / g.uTexelParams.z, 1.0);
+        raysWeighted += weights[i] * (prior.w > 0.0 ? 1.0 : min(light.w / g.uTexelParams.z, 1.0));
     }
     irradiance = weight > 1e-6 ? sum / weight : vec3(0.0);
     confidence = located > 1e-6 ? raysWeighted / located : 0.0;

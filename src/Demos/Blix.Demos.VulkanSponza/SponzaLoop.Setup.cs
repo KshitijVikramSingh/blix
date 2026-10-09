@@ -115,6 +115,9 @@ internal sealed partial class SponzaLoop
         // cascade fit handles the vertical-light up-vector degeneracy.
         if (args.Flag("sun-overhead")) sunOverhead = true;
         if (args.Values("sun", 2) is [var sy, var sp]) sunOverrideDegrees = new Vector2(float.Parse(sy, System.Globalization.CultureInfo.InvariantCulture), float.Parse(sp, System.Globalization.CultureInfo.InvariantCulture));
+        // --sun-change F yaw pitch: turn the sun at post-load frame F (degrees, as --sun) -- what following the sun is
+        // measured against (SponzaLoop.Texels.cs, FollowSun).
+        if (args.Values("sun-change", 3) is [var cf, var cy, var cp]) sunChange = (int.Parse(cf, System.Globalization.CultureInfo.InvariantCulture), new Vector2(float.Parse(cy, System.Globalization.CultureInfo.InvariantCulture), float.Parse(cp, System.Globalization.CultureInfo.InvariantCulture)));
         // GPU isolation submits and waits per pass. It attributes real tile execution but removes
         // overlap, so isolated pass times are not additive components of the normal frame.
         if (args.Flag("gpu-isolate")) host.Timing.IsolatePasses = true;

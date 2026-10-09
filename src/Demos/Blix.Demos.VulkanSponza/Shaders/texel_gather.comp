@@ -3,7 +3,9 @@
 // texel (stratified, rotated afresh each pass); a hit's light is its albedo times its own direct sun (the shadow
 // cascades where they cover it, a shadow ray beyond) and its nearest cooked patch's indirect light, over pi; a miss
 // the sky. The pass's irradiance estimate (pi x the mean radiance) is averaged into the texel at 1/n over rays, to the
-// target (texel_mark.comp stops queueing it there): a still sun settles once and then nothing is traced.
+// target (texel_mark.comp stops queueing it there): a still sun settles once and then nothing is traced. When the
+// patch light is re-solved for a new sun the epoch moves on, and a texel from before gathers afresh, its old light
+// shown meanwhile as a prior (TexelPrior).
 //
 // The queue is texel_mark.comp's: three lists (no rays yet, few, the rest), taken in that order up to the budget.
 // Workgroup 0 also zeroes the other parity's counts for the next frame's mark.
@@ -17,7 +19,7 @@ layout(set = 0, binding = 0) uniform TexelGather {
     vec4 uTexelParams;    // x hash capacity, y list capacity (the budget), z target rays, w the frame
     vec4 uSunDirection;   // xyz the direction the sun travels
     vec4 uSunIrradiance;  // rgb
-    vec4 uSky;            // x sky strength, y the sky's mip for a ray
+    vec4 uSky;            // x sky strength, y the sky's mip for a ray, z the texels' epoch
     mat4 uCascadeVP[3];
     vec4 uCookedGrid;
     vec4 uCookedDims;
@@ -29,6 +31,13 @@ layout(set = 0, binding = 2) uniform sampler2D uCascadeShadowMaps[3];
 layout(std430, set = 0, binding = 3) readonly buffer Texels { vec4 texels[]; };
 layout(std430, set = 0, binding = 4) buffer TexelLight { vec4 texelLight[]; };
 layout(std430, set = 0, binding = 5) buffer TexelQueue { uint texelQueue[]; };
+// The patch light a texel's rays were read from: a texel from an older epoch keeps its estimate as one pass's worth.
+layout(std430, set = 0, binding = 9) buffer TexelEpoch { uint texelEpoch[]; };
+// A stale texel's old light (rgb, w 1 while it stands): what the incident pass shows while the new gather is young,
+// blended out over its first TEXEL_PRIOR_RAYS rays and then dropped. Keeping it as one pass's worth in the running
+// mean instead left 3% of the old sun's light in for good (Cornell, after a turn: +3.1% energy).
+layout(std430, set = 0, binding = 10) buffer TexelPrior { vec4 texelPrior[]; };
+#define TEXEL_PRIOR_RAYS 256.0
 
 #define COOKED_BINDING 6
 #define COOKED_GRID u.uCookedGrid
@@ -61,6 +70,9 @@ void main() {
     vec3 n = texels[2 * id + 1].xyz;
     uint ray = gl_LocalInvocationID.x;
     float rays = texelLight[id].w;
+    uint epoch = uint(u.uSky.z);
+    bool stale = texelEpoch[id] != epoch;
+    if (stale) rays = 0.0;
     uint pass = uint(rays) / uint(RAYS);
     uint seed = blix_pcg(uint(id) * 9781u + pass * 0x632BE5ABu + ray * 2654435761u);
     uint setSeed = blix_pcg(uint(id) * 9781u + pass * 0x632BE5ABu);
@@ -104,5 +116,12 @@ void main() {
     vec3 estimate = PI * sum / float(RAYS);
     float total = rays + float(RAYS);
     vec4 old = texelLight[id];
+    if (stale) {
+        // Only a texel that had light keeps it as the prior; it starts its own gather from nothing.
+        if (old.w > 0.0) texelPrior[id] = vec4(old.rgb, 1.0);
+        texelEpoch[id] = epoch;
+        old = vec4(0.0);
+    }
     texelLight[id] = vec4(mix(old.rgb, estimate, float(RAYS) / total), total);
+    if (total >= TEXEL_PRIOR_RAYS) texelPrior[id] = vec4(0.0);
 }

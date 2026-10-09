@@ -17,7 +17,7 @@ layout(set = 0, binding = 0) uniform TexelMark {
     vec4 uTarget;       // xy the depth target's pixels, z the pixel stride, w 1: probe mode (below)
     vec4 uTexelGrid;    // xyz the cells' origin, w the spacing
     vec4 uTexelParams;  // x hash capacity, y list capacity (the gather's budget), z target rays, w the frame
-    vec4 uOffset;       // xy this frame's pixel within each stride block
+    vec4 uOffset;       // xy this frame's pixel within each stride block, z the texels' epoch (the patch light's)
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -32,6 +32,8 @@ layout(std430, set = 0, binding = 7) buffer TexelQueue { uint texelQueue[]; };
 // incident pass makes it -- world position and the pre-pass's w; texels found, their weight, the shading bin; the
 // irradiance they give and the weight that has rays.
 layout(std430, set = 0, binding = 8) buffer TexelProbe { vec4 texelProbe[]; };
+// The patch light each texel's rays were read from (SponzaLoop.Texels.cs, FollowSun): an older one queues it again.
+layout(std430, set = 0, binding = 9) readonly buffer TexelEpoch { uint texelEpoch[]; };
 
 #define TEXEL_HASH(i) texelHash[i]
 #define TEXEL_POSITION(i) texels[2 * (i)]
@@ -90,8 +92,9 @@ void main() {
         uint id = uint(ids[i]);
         if (atomicExchange(texelStamp[id], frame) == frame) continue;
         float rays = texelLight[id].w;
-        if (rays >= target) continue;
-        uint list = rays <= 0.0 ? 0u : rays < target / 8.0 ? 1u : 2u;
+        bool stale = texelEpoch[id] != uint(u.uOffset.z);
+        if (rays >= target && !stale) continue;
+        uint list = rays <= 0.0 ? 0u : (stale || rays < target / 8.0) ? 1u : 2u;
         uint slot = atomicAdd(texelQueue[parity * 4u + list], 1u);
         if (slot < capacity) texelQueue[8u + list * capacity + slot] = id;
     }

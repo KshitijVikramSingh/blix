@@ -138,6 +138,7 @@ internal sealed partial class SponzaLoop
             packed[3 * i + 2] = new Vector4(incident[i], 0f);
         }
         cookedPatchBuffer = Own(device.CreateGpuBuffer(packed.Length * 16, MemoryMarshal.AsBytes(packed.AsSpan()), "sponza.cooked.patches"));
+        cookedPacked = packed;
         cookedCellBuffer = Own(device.CreateGpuBuffer(start.Length * 4, MemoryMarshal.AsBytes(start.AsSpan()), "sponza.cooked.cells"));
         cookedIdBuffer = Own(device.CreateGpuBuffer(Math.Max(1, ids.Length) * 4, MemoryMarshal.AsBytes(ids.AsSpan()), "sponza.cooked.ids"));
         cookedGrid = new Vector4(min, cell);
@@ -490,10 +491,10 @@ internal sealed partial class SponzaLoop
                 acc += SkyRadiance(OctDecode(new Vector2((b % TransportSkyRes + (sx + 0.5f) / 4f) / TransportSkyRes, (b / TransportSkyRes + (sy + 0.5f) / 4f) / TransportSkyRes) * 2f - Vector2.One));
             return acc / 16f;
         }).ToArray();
-        float SunVisibility(int i)
+        float SunVisibility(int i, Vector3 toSunDir)
         {
             // Bilinear over the four bins around the sun's direction.
-            var uv = (OctEncode(toSun) * 0.5f + new Vector2(0.5f)) * transportVisRes - new Vector2(0.5f);
+            var uv = (OctEncode(toSunDir) * 0.5f + new Vector2(0.5f)) * transportVisRes - new Vector2(0.5f);
             var x0 = (int)MathF.Floor(uv.X); var y0 = (int)MathF.Floor(uv.Y);
             var fx = uv.X - x0; var fy = uv.Y - y0;
             float Bit(int x, int y)
@@ -508,7 +509,7 @@ internal sealed partial class SponzaLoop
         var skyIn = new Vector3[patches];
         for (var i = 0; i < patches; i++)
         {
-            directSun[i] = sunIrr * MathF.Max(Vector3.Dot(nrm[i], toSun), 0f) * SunVisibility(i);
+            directSun[i] = sunIrr * MathF.Max(Vector3.Dot(nrm[i], toSun), 0f) * SunVisibility(i, toSun);
             var s = Vector3.Zero;
             for (var b = 0; b < skyDirs.Length; b++) s += skyDirs[b] * sky[i * skyDirs.Length + b];
             skyIn[i] = s * MathF.PI;
@@ -521,7 +522,7 @@ internal sealed partial class SponzaLoop
                 if (Vector3.Dot(nrm[i], toSun) <= 0f) continue;
                 sunward++;
                 var exact = scene.Any(new Ray(pos[i] + nrm[i] * 1e-3f, toSun), 0f, float.PositiveInfinity, (uint)(i + 17)) ? 0f : 1f;
-                var mapped = SunVisibility(i);
+                var mapped = SunVisibility(i, toSun);
                 absDiff += MathF.Abs(mapped - exact);
                 if (MathF.Abs(mapped - exact) > 0.5f) disagree++;
             }
@@ -589,6 +590,51 @@ internal sealed partial class SponzaLoop
             + $"sunlets {sunlets:N0} at {transportSunlet * 100:0} cm {sunlets * 36L / 1048576.0:0.0} + their couplings {sunletNonzero:N0} {sunletNonzero * 8 / 1048576.0:0.0}); "
             + $"cooked in {cookSeconds:0.0} s (patches {cookPatches:0.0} s), solved {iterations} bounces in {solveSeconds * 1000:0} ms."));
 
+        // The same solve for another sun (SponzaLoop.Texels.cs, FollowSun): only the sun's terms change -- its direct
+        // light at patches (sun map) or sunlets (an exact ray each), and the bounces after. The couplings, sky bins and
+        // sunlets are the cook's. Warm-started from the last answer. Off the frame thread: Sponza's ~9M sunlet rays and
+        // 48 bounces take seconds.
+        var lastIncident = (Vector3[])incident.Clone();
+        transportRelight = (toSunNew, sunIrrNew) =>
+        {
+            var direct = new Vector3[patches];
+            var first = new Vector3[patches];
+            if (useSunlets)
+            {
+                var sOut = new Vector3[sunlets];
+                Parallel.For(0, sunlets, s =>
+                {
+                    var ndl = Vector3.Dot(sunletNrm[s], toSunNew);
+                    if (ndl > 0f && !scene.Any(new Ray(sunletPos[s] + sunletNrm[s] * 1e-3f, toSunNew), 0f, float.PositiveInfinity, (uint)(s + 3)))
+                        sOut[s] = sunletAlbedo[s] * sunIrrNew * ndl / MathF.PI;
+                });
+                Parallel.For(0, patches, i =>
+                {
+                    var h = Vector3.Zero;
+                    foreach (var (to, w) in sunletCouplings[i]) h += sOut[to] * w;
+                    first[i] = h * MathF.PI;
+                });
+            }
+            else
+            {
+                for (var i = 0; i < patches; i++) direct[i] = sunIrrNew * MathF.Max(Vector3.Dot(nrm[i], toSunNew), 0f) * SunVisibility(i, toSunNew);
+            }
+            var inc = (Vector3[])lastIncident.Clone();
+            var outg = new Vector3[patches];
+            for (var it = 0; it < iterations; it++)
+            {
+                for (var i = 0; i < patches; i++) outg[i] = albedo[i] * (inc[i] + direct[i]) / MathF.PI;
+                Parallel.For(0, patches, i =>
+                {
+                    var h = Vector3.Zero;
+                    foreach (var (to, w) in couplings[i]) h += outg[to] * w;
+                    inc[i] = skyIn[i] + first[i] + h * MathF.PI;
+                });
+            }
+            lastIncident = inc;
+            return inc;
+        };
+        transportRelightSun = (toSun, sunIrr);
         UploadCookedPatches(pos, nrm, incident, 2f * transportSpacing);
         CookTexels(scene, Tri, (i, t) => (surfaces[data.RowOf(i, t)] >> 24) < 255u);
 
