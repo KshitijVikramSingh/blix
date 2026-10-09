@@ -44,6 +44,8 @@ internal sealed partial class SponzaLoop
     // edges) without a patch on their own surface within 15 cm: interp 36% there against 13% where one was.
     private bool transportCharts;
     private const int TransportSkyRes = 16;
+    private const int TransportGuideRes = 8;
+    private const int TransportGuideBins = TransportGuideRes * TransportGuideRes;
 
     private void ReadTransportArgs(AppArgs args)
     {
@@ -109,6 +111,15 @@ internal sealed partial class SponzaLoop
     {
         if (!transportGpu || transportCooked || !fullyLoaded || !raySurfacesBaked || postLoadFrames < 2) return;
         CookTransport();
+    }
+
+    private GpuBufferHandle cookedGuideBuffer;
+
+    private void UploadCookedGuides(float[] cdf)
+    {
+        if (!transportGpu) return;
+        if (!cookedGuideBuffer.Equals(default(GpuBufferHandle))) RetireGpuBuffer(cookedGuideBuffer);
+        cookedGuideBuffer = Own(device.CreateGpuBuffer(cdf.Length * 4, MemoryMarshal.AsBytes(cdf.AsSpan()), "sponza.cooked.guides"));
     }
 
     private void UploadCookedPatches(List<Vector3> pos, List<Vector3> nrm, Vector3[] incident, float cell)
@@ -590,6 +601,48 @@ internal sealed partial class SponzaLoop
             + $"sunlets {sunlets:N0} at {transportSunlet * 100:0} cm {sunlets * 36L / 1048576.0:0.0} + their couplings {sunletNonzero:N0} {sunletNonzero * 8 / 1048576.0:0.0}); "
             + $"cooked in {cookSeconds:0.0} s (patches {cookPatches:0.0} s), solved {iterations} bounces in {solveSeconds * 1000:0} ms."));
 
+        // Guides (texel_gather.comp): per patch, where its light comes from -- an 8x8 octahedral histogram over world
+        // directions of (cosine-weighted ray fraction x radiance) from its couplings (the patches it sees, by their
+        // light), its sunlet couplings (their sun) and its sky bins, as a CDF. A texel samples half its rays from its
+        // nearest patch's: a bounce-lit balcony's light comes from a few bright patches cosine rays mostly miss.
+        static float Lum3(Vector3 v) => 0.2126f * v.X + 0.7152f * v.Y + 0.0722f * v.Z;
+        float[] BuildGuides(Vector3[] outg, Vector3[] sOut)
+        {
+            var cdf = new float[patches * TransportGuideBins];
+            Parallel.For(0, patches, i =>
+            {
+                var h = new float[TransportGuideBins];
+                foreach (var (to, w) in couplings[i])
+                {
+                    var d = pos[to] - pos[i];
+                    if (d.LengthSquared() > 1e-8f) h[OctBin(Vector3.Normalize(d), TransportGuideRes)] += w * Lum3(outg[to]);
+                }
+                if (sOut.Length > 0)
+                    foreach (var (to, w) in sunletCouplings[i])
+                    {
+                        var d = sunletPos[to] - pos[i];
+                        if (d.LengthSquared() > 1e-8f) h[OctBin(Vector3.Normalize(d), TransportGuideRes)] += w * Lum3(sOut[to]);
+                    }
+                for (var b = 0; b < skyDirs.Length; b++)
+                {
+                    var f = sky[i * skyDirs.Length + b];
+                    if (f <= 0f) continue;
+                    var uv = new Vector2((b % TransportSkyRes + 0.5f) / TransportSkyRes, (b / TransportSkyRes + 0.5f) / TransportSkyRes) * 2f - Vector2.One;
+                    h[OctBin(OctDecode(uv), TransportGuideRes)] += f * Lum3(skyDirs[b]);
+                }
+                var total = 0f;
+                for (var b = 0; b < TransportGuideBins; b++) total += h[b];
+                var acc = 0f;
+                for (var b = 0; b < TransportGuideBins; b++)
+                {
+                    acc += total > 0f ? h[b] / total : 1f / TransportGuideBins;
+                    cdf[i * TransportGuideBins + b] = acc;
+                }
+                cdf[i * TransportGuideBins + TransportGuideBins - 1] = 1f;
+            });
+            return cdf;
+        }
+
         // The same solve for another sun (SponzaLoop.Texels.cs, FollowSun): only the sun's terms change -- its direct
         // light at patches (sun map) or sunlets (an exact ray each), and the bounces after. The couplings, sky bins and
         // sunlets are the cook's. Warm-started from the last answer. Off the frame thread: Sponza's ~9M sunlet rays and
@@ -599,9 +652,9 @@ internal sealed partial class SponzaLoop
         {
             var direct = new Vector3[patches];
             var first = new Vector3[patches];
+            var sOut = new Vector3[useSunlets ? sunlets : 0];
             if (useSunlets)
             {
-                var sOut = new Vector3[sunlets];
                 Parallel.For(0, sunlets, s =>
                 {
                     var ndl = Vector3.Dot(sunletNrm[s], toSunNew);
@@ -632,10 +685,11 @@ internal sealed partial class SponzaLoop
                 });
             }
             lastIncident = inc;
-            return inc;
+            return (inc, BuildGuides(outg, sOut));
         };
         transportRelightSun = (toSun, sunIrr);
-        UploadCookedPatches(pos, nrm, incident, 2f * transportSpacing);
+        UploadCookedPatches(pos, nrm, incident, transportSpacing);
+        UploadCookedGuides(BuildGuides(outgoing, sunletOut));
         CookTexels(scene, Tri, (i, t) => (surfaces[data.RowOf(i, t)] >> 24) < 255u);
 
         // ---- At the reference's points --------------------------------------------------------------------------

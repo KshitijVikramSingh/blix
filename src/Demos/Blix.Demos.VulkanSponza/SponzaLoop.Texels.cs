@@ -20,8 +20,17 @@ internal sealed partial class SponzaLoop
     private float texelSpacing = 0.05f;
     // --texel-budget N: texels gathered a frame (one pass of 32 rays each); --texel-rays N: the rays a texel stops at;
     // --texel-trust N: the rays at which its answer replaces the clipmap's whole (fewer: blended by the fraction).
-    private int texelBudget = 4096;
-    private int texelTarget = 1024;
+    private int texelBudget = 2048;
+    private int texelTarget = 512;
+    // --texel-max-rays N / --texel-noise T: past --texel-rays, a texel keeps gathering until the standard error of its
+    // mean is under T of its value, or it reaches N (texel.glsl, texelSettled). Fixed at 1024 rays, the bounce-lit
+    // balconies read "pointillist" to the user.
+    private int texelMaxRays = 16384;
+    // 5%: at 2%, after 5,000 frames on Sponza's hall 106k of the 240k texels the image read were still short of it.
+    private float texelNoise = 0.05f;
+    // --texel-filter 0|1: the spatial filter over neighbouring texels, in texel space (texel_gather.comp).
+    private bool texelFilter = true;
+    private const float TexelNoiseFloor = 1e-4f;
     private float texelTrust = 64f;
     // One pixel in each 4 x 4 block queues the texels it reads, a different one each frame (all sixteen every 16
     // frames): a texel is 5 cm, many pixels share one up close, and a converged view queues nothing anyway. At every
@@ -32,13 +41,13 @@ internal sealed partial class SponzaLoop
     private int texelCount, texelCapacity;
     private Vector4 texelGrid;
     private uint texelFrame;
-    private GpuBufferHandle texelHashBuffer, texelBuffer, texelLightBuffer, texelStampBuffer, texelQueueBuffer, texelProbeBuffer, texelEpochBuffer, texelPriorBuffer;
+    private GpuBufferHandle texelHashBuffer, texelBuffer, texelLightBuffer, texelStampBuffer, texelQueueBuffer, texelProbeBuffer, texelEpochBuffer, texelPriorBuffer, texelMomentBuffer, texelFilteredBuffer;
     // Following the sun: the cook's solve for another sun (SponzaLoop.Transport.cs), the sun it last solved for, the
     // solve in flight, and the texels' epoch -- bumped when new patch light lands; a texel from an older epoch is
     // queued again and keeps its old estimate as one pass's worth.
-    private Func<Vector3, Vector3, Vector3[]>? transportRelight;
+    private Func<Vector3, Vector3, (Vector3[] Incident, float[] Guides)>? transportRelight;
     private (Vector3 ToSun, Vector3 Irradiance) transportRelightSun;
-    private Task<Vector3[]>? relightTask;
+    private Task<(Vector3[] Incident, float[] Guides)>? relightTask;
     private (Vector3 ToSun, Vector3 Irradiance) relightTaskSun;
     private Stopwatch? relightClock;
     private Vector4[]? cookedPacked;
@@ -55,6 +64,9 @@ internal sealed partial class SponzaLoop
         if (args.Float("transport-texel") is { } s) texelSpacing = Math.Clamp(s, 0.01f, 1f);
         if (args.Int("texel-budget") is { } b) texelBudget = Math.Clamp(b, 64, 1 << 20);
         if (args.Int("texel-rays") is { } r) texelTarget = Math.Clamp(r, 32, 1 << 16);
+        if (args.Int("texel-max-rays") is { } mr) texelMaxRays = Math.Clamp(mr, texelTarget, 1 << 20);
+        if (args.Float("texel-noise") is { } tn) texelNoise = Math.Max(0f, tn);
+        if (args.Int("texel-filter") is { } tf) texelFilter = tf != 0;
         if (args.Float("texel-trust") is { } t) texelTrust = Math.Max(1f, t);
         // --lod-pixels E: the LOD error budget (0: full detail everywhere) -- the [Tune] field is not reachable from the
         // command line. The texels are cooked from the full-detail ray scene; LOD'd raster puts faces elsewhere.
@@ -185,18 +197,20 @@ internal sealed partial class SponzaLoop
         }
         var stamps = new uint[texelCount];
         Array.Fill(stamps, 0xFFFFFFFFu);
-        var queueWords = 8 + 3 * texelBudget;
+        var queueWords = 8 + 4 * texelBudget;
         texelHashBuffer = Own(device.CreateGpuBuffer(table.Length * 4, MemoryMarshal.AsBytes(table.AsSpan()), "sponza.texels.hash"));
         texelBuffer = Own(device.CreateGpuBuffer(texels.Length * 16, MemoryMarshal.AsBytes(texels.AsSpan()), "sponza.texels"));
         texelLightBuffer = Own(device.CreateGpuBuffer(texelCount * 16, new byte[texelCount * 16], "sponza.texels.light"));
         texelStampBuffer = Own(device.CreateGpuBuffer(texelCount * 4, MemoryMarshal.AsBytes(stamps.AsSpan()), "sponza.texels.stamp"));
         texelQueueBuffer = Own(device.CreateGpuBuffer(queueWords * 4, new byte[queueWords * 4], "sponza.texels.queue"));
         texelPriorBuffer = Own(device.CreateGpuBuffer(texelCount * 16, new byte[texelCount * 16], "sponza.texels.prior"));
+        texelFilteredBuffer = Own(device.CreateGpuBuffer(texelCount * 16, new byte[texelCount * 16], "sponza.texels.filtered"));
+        texelMomentBuffer = Own(device.CreateGpuBuffer(texelCount * 4, new byte[texelCount * 4], "sponza.texels.moment"));
         texelEpochBuffer = Own(device.CreateGpuBuffer(texelCount * 4, new byte[texelCount * 4], "sponza.texels.epoch"));
         texelProbeBuffer = Own(device.CreateGpuBuffer(24 * 24 * 48, new byte[24 * 24 * 48], "sponza.texels.probe"));
         texelGrid = new Vector4(min, s);
         texelsUploaded = true;
-        var mb = (table.Length * 4L + texels.Length * 16L + texelCount * 40L) / 1048576.0;
+        var mb = (table.Length * 4L + texels.Length * 16L + texelCount * 60L) / 1048576.0;
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] texels: {samples:N0} surface samples at {sample * 100:0.#} cm -> {placed:N0} texels at {s * 100:0.#} cm, {texelCount:N0} kept (the rest inside a solid); hash {texelCapacity:N0} slots (longest probe {longestProbe}); {mb:0.0} MB; cooked in {clock.Elapsed.TotalSeconds:0.0} s."));
         if (longestProbe >= 64) Console.WriteLine("[VulkanSponza] texels: WARNING a hash probe run exceeds the shaders' 64 (TEXEL_PROBES): some texels cannot be found.");
@@ -224,9 +238,10 @@ internal sealed partial class SponzaLoop
         if (transportRelight is null || cookedPacked is null) return;
         if (relightTask is { IsCompleted: true } done)
         {
-            var incident = done.Result;
+            var (incident, guides) = done.Result;
+            UploadCookedGuides(guides);
             for (var i = 0; i < incident.Length; i++) cookedPacked[3 * i + 2] = new Vector4(incident[i], 0f);
-            retiredBuffers.Add((cookedPatchBuffer, texelFrame));
+            RetireGpuBuffer(cookedPatchBuffer);
             cookedPatchBuffer = Own(device.CreateGpuBuffer(cookedPacked.Length * 16, MemoryMarshal.AsBytes(cookedPacked.AsSpan()), "sponza.cooked.patches"));
             transportRelightSun = relightTaskSun;
             texelEpoch++;
@@ -246,6 +261,9 @@ internal sealed partial class SponzaLoop
         relightTask = Task.Run(() => relight(toSun, irradiance));
     }
 
+    // A buffer a frame in flight may still read: destroyed four frames on (FollowSun).
+    private void RetireGpuBuffer(GpuBufferHandle buffer) => retiredBuffers.Add((buffer, texelFrame));
+
     private void EnsureTexelPlaceholders()
     {
         if (!texelHashBuffer.Equals(default(GpuBufferHandle))) return;
@@ -253,18 +271,20 @@ internal sealed partial class SponzaLoop
         texelBuffer = Own(device.CreateGpuBuffer(32, new byte[32], "sponza.texels.none"));
         texelLightBuffer = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.texels.light.none"));
         texelPriorBuffer = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.texels.prior.none"));
+        texelFilteredBuffer = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.texels.filtered.none"));
     }
 
     // What the incident pass binds and reads: the texels, or placeholders with the switch off.
     private (Vector4 Grid, Vector4 Params, ShaderBufferBinding[] Buffers) TexelIncidentInputs()
     {
         EnsureTexelPlaceholders();
-        return (texelGrid, new Vector4(texelsUploaded ? texelCapacity : 1, texelsUploaded ? 1f : 0f, texelTrust, 0f), new[]
+        return (texelGrid, new Vector4(texelsUploaded ? texelCapacity : 1, texelsUploaded ? 1f : 0f, texelTrust, texelFilter ? 1f : 0f), new[]
         {
             new ShaderBufferBinding("TexelHash", texelHashBuffer),
             new ShaderBufferBinding("Texels", texelBuffer),
             new ShaderBufferBinding("TexelLight", texelLightBuffer),
             new ShaderBufferBinding("TexelPrior", texelPriorBuffer),
+            new ShaderBufferBinding("TexelFiltered", texelFilteredBuffer),
         });
     }
 
@@ -281,6 +301,7 @@ internal sealed partial class SponzaLoop
                 new("uInvView", new Matrix4x4Uniform(invView)),
                 new("uTarget", new Vector4Uniform(new Vector4(width, height, TexelMarkStride, 0f))),
                 new("uOffset", new Vector4Uniform(new Vector4(texelFrame % 4, (texelFrame / 4) % 4, texelEpoch, 0f))),
+                new("uNoise", new Vector4Uniform(new Vector4(texelMaxRays, texelNoise, TexelNoiseFloor, 0f))),
                 new("uTexelGrid", new Vector4Uniform(texelGrid)),
                 new("uTexelParams", new Vector4Uniform(texelParams)),
             },
@@ -298,6 +319,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("TexelQueue", texelQueueBuffer),
                 new ShaderBufferBinding("TexelProbe", texelProbeBuffer),
                 new ShaderBufferBinding("TexelEpoch", texelEpochBuffer),
+                new ShaderBufferBinding("TexelMoment", texelMomentBuffer),
             }));
         // Probe mode every frame (576 threads): the census reads the latest.
         {
@@ -308,6 +330,7 @@ internal sealed partial class SponzaLoop
                     new("uInvView", new Matrix4x4Uniform(invView)),
                     new("uTarget", new Vector4Uniform(new Vector4(width, height, 1f, 1f))),
                     new("uOffset", new Vector4Uniform(new Vector4(0f, 0f, texelEpoch, 0f))),
+                    new("uNoise", new Vector4Uniform(new Vector4(texelMaxRays, texelNoise, TexelNoiseFloor, 0f))),
                     new("uTexelGrid", new Vector4Uniform(texelGrid)),
                     new("uTexelParams", new Vector4Uniform(texelParams)),
                 },
@@ -325,6 +348,7 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("TexelQueue", texelQueueBuffer),
                     new ShaderBufferBinding("TexelProbe", texelProbeBuffer),
                     new ShaderBufferBinding("TexelEpoch", texelEpochBuffer),
+                    new ShaderBufferBinding("TexelMoment", texelMomentBuffer),
                 }));
         }
         var gatherBuffers = rayBlockBuffers
@@ -333,6 +357,10 @@ internal sealed partial class SponzaLoop
             .Append(new ShaderBufferBinding("TexelQueue", texelQueueBuffer))
             .Append(new ShaderBufferBinding("TexelEpoch", texelEpochBuffer))
             .Append(new ShaderBufferBinding("TexelPrior", texelPriorBuffer))
+            .Append(new ShaderBufferBinding("TexelMoment", texelMomentBuffer))
+            .Append(new ShaderBufferBinding("CookedGuides", cookedGuideBuffer))
+            .Append(new ShaderBufferBinding("TexelHash", texelHashBuffer))
+            .Append(new ShaderBufferBinding("TexelFiltered", texelFilteredBuffer))
             .Concat(CookedBuffers()).ToArray();
         var declared = texelGatherInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
         graph.Dispatch(texelGatherPassHandle, new DispatchCommand(texelGatherPipeline, texelBudget, 1, 1,
@@ -343,7 +371,7 @@ internal sealed partial class SponzaLoop
                 new("uSunDirection", new Vector4Uniform(new Vector4(sunDirection, 0f))),
                 new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 1f))),
                 // A ray's sky as the screen probes take it: strength 1, a little blurred (one mip).
-                new("uSky", new Vector4Uniform(new Vector4(1f, 1f, texelEpoch, 0f))),
+                new("uSky", new Vector4Uniform(new Vector4(1f, 1f, texelEpoch, texelFilter ? 1f : 0f))),
                 new("uCascadeVP", new Matrix4x4ArrayUniform(cascadeViewProj)),
                 new("uCookedGrid", new Vector4Uniform(cookedGrid)),
                 new("uCookedDims", new Vector4Uniform(cookedDims)),
@@ -398,6 +426,7 @@ internal sealed partial class SponzaLoop
         var queue = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(texelQueueBuffer, 0, 32).AsSpan()).ToArray();
         var last = texelFrame - 1;
         int seen = 0, none = 0, partial = 0, done = 0, everTraced = 0;
+        var rayBins = new int[6];   // under 512, 512-1023, 1024-2047, 2048-4095, 4096-8191, 8192+
         for (var i = 0; i < texelCount; i++)
         {
             if (light[i].W > 0f) everTraced++;
@@ -407,8 +436,9 @@ internal sealed partial class SponzaLoop
             if (light[i].W <= 0f) none++;
             else if (light[i].W < texelTarget) partial++;
             else done++;
+            if (light[i].W > 0f) rayBins[Math.Min(5, (int)MathF.Log2(MathF.Max(1f, light[i].W / 512f)) + (light[i].W >= 512f ? 1 : 0))]++;
         }
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[VulkanSponza] texels after {texelFrame} frames: the image read {seen:N0} (in its last 16 frames: the mark rotates over a 4 x 4 block) -- {done:N0} at the target ({texelTarget} rays), {partial:N0} under it, {none:N0} with none; {everTraced:N0} of {texelCount:N0} ever traced. Queued (both parities) {queue[0]:N0}/{queue[1]:N0}/{queue[2]:N0} and {queue[4]:N0}/{queue[5]:N0}/{queue[6]:N0} (none / few / rest; budget {texelBudget:N0})."));
+            $"[VulkanSponza] texels after {texelFrame} frames: the image read {seen:N0} (in its last 16 frames: the mark rotates over a 4 x 4 block) -- {done:N0} past the minimum ({texelTarget} rays; rays held: <512 {rayBins[0]:N0}, 512+ {rayBins[1]:N0}, 1k+ {rayBins[2]:N0}, 2k+ {rayBins[3]:N0}, 4k+ {rayBins[4]:N0}, 8k+ {rayBins[5]:N0}), {partial:N0} under it, {none:N0} with none; {everTraced:N0} of {texelCount:N0} ever traced. Queued (both parities) {queue[0]:N0}/{queue[1]:N0}/{queue[2]:N0}/{queue[3]:N0} and {queue[4]:N0}/{queue[5]:N0}/{queue[6]:N0}/{queue[7]:N0} (none / few / under the minimum / settling; budget {texelBudget:N0})."));
     }
 }

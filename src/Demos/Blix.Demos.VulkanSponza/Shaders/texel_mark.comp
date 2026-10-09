@@ -3,8 +3,8 @@
 // (uOffset picks which, rotating over frames), the eight
 // texels the incident pass weighs there. Each is stamped with the frame (first stamp this frame wins), and if it has
 // fewer rays than the target it is queued for the gather, in one of three lists by how many it has: none, under an
-// eighth of the target, the rest -- the gather takes them in that order, so what a new view shows first converges
-// first. Lists hold uParams.y entries each; the counts keep counting past that (the census reads them).
+// eighth of the minimum, under the minimum, settling (texelSettled) -- the gather takes them in that order, so what a
+// new view shows first converges first, and a texel refining toward many rays never starves one that has few. Lists hold uParams.y entries each; the counts keep counting past that (the census reads them).
 //
 // Counts are double-buffered by frame parity: this frame's mark adds to set (frame & 1), the gather reads it and zeroes
 // the other set for the next frame's mark.
@@ -18,6 +18,7 @@ layout(set = 0, binding = 0) uniform TexelMark {
     vec4 uTexelGrid;    // xyz the cells' origin, w the spacing
     vec4 uTexelParams;  // x hash capacity, y list capacity (the gather's budget), z target rays, w the frame
     vec4 uOffset;       // xy this frame's pixel within each stride block, z the texels' epoch (the patch light's)
+    vec4 uNoise;        // texelSettled: x the most rays, y the standard error tolerated (relative), z its floor
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -26,7 +27,7 @@ layout(std430, set = 0, binding = 3) readonly buffer TexelHash { uvec4 texelHash
 layout(std430, set = 0, binding = 4) readonly buffer Texels { vec4 texels[]; };
 layout(std430, set = 0, binding = 5) readonly buffer TexelLight { vec4 texelLight[]; };
 layout(std430, set = 0, binding = 6) buffer TexelStamp { uint texelStamp[]; };
-// [parity * 4 + list] the counts; the lists after them at 8 + list * capacity.
+// [parity * 4 + list] the counts; the four lists after them at 8 + list * capacity.
 layout(std430, set = 0, binding = 7) buffer TexelQueue { uint texelQueue[]; };
 // Probe mode (uTarget.w 1, a 24 x 24 dispatch of one thread a point): the lookup at the reference's pixels, as the
 // incident pass makes it -- world position and the pre-pass's w; texels found, their weight, the shading bin; the
@@ -34,6 +35,7 @@ layout(std430, set = 0, binding = 7) buffer TexelQueue { uint texelQueue[]; };
 layout(std430, set = 0, binding = 8) buffer TexelProbe { vec4 texelProbe[]; };
 // The patch light each texel's rays were read from (SponzaLoop.Texels.cs, FollowSun): an older one queues it again.
 layout(std430, set = 0, binding = 9) readonly buffer TexelEpoch { uint texelEpoch[]; };
+layout(std430, set = 0, binding = 10) readonly buffer TexelMoment { float texelMoment[]; };
 
 #define TEXEL_HASH(i) texelHash[i]
 #define TEXEL_POSITION(i) texels[2 * (i)]
@@ -91,10 +93,12 @@ void main() {
         if (ids[i] < 0) continue;
         uint id = uint(ids[i]);
         if (atomicExchange(texelStamp[id], frame) == frame) continue;
-        float rays = texelLight[id].w;
+        vec4 light = texelLight[id];
+        float rays = light.w;
         bool stale = texelEpoch[id] != uint(u.uOffset.z);
-        if (rays >= target && !stale) continue;
-        uint list = rays <= 0.0 ? 0u : (stale || rays < target / 8.0) ? 1u : 2u;
+        if (!stale && texelSettled(light, texelMoment[id], u.uNoise, target)) continue;
+        // Need first: none yet, few, under the minimum, then settling toward the noise target.
+        uint list = rays <= 0.0 ? 0u : (stale || rays < target / 8.0) ? 1u : rays < target ? 2u : 3u;
         uint slot = atomicAdd(texelQueue[parity * 4u + list], 1u);
         if (slot < capacity) texelQueue[8u + list * capacity + slot] = id;
     }

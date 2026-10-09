@@ -7,7 +7,8 @@
 // patch light is re-solved for a new sun the epoch moves on, and a texel from before gathers afresh, its old light
 // shown meanwhile as a prior (TexelPrior).
 //
-// The queue is texel_mark.comp's: three lists (no rays yet, few, the rest), taken in that order up to the budget.
+// The queue is texel_mark.comp's: four lists (no rays yet, few, under the minimum, settling), in that order up to
+// the budget.
 // Workgroup 0 also zeroes the other parity's counts for the next frame's mark.
 
 #define RAYS 32
@@ -19,7 +20,7 @@ layout(set = 0, binding = 0) uniform TexelGather {
     vec4 uTexelParams;    // x hash capacity, y list capacity (the budget), z target rays, w the frame
     vec4 uSunDirection;   // xyz the direction the sun travels
     vec4 uSunIrradiance;  // rgb
-    vec4 uSky;            // x sky strength, y the sky's mip for a ray, z the texels' epoch
+    vec4 uSky;            // x sky strength, y the sky's mip for a ray, z the texels' epoch, w 1: the spatial filter
     mat4 uCascadeVP[3];
     vec4 uCookedGrid;
     vec4 uCookedDims;
@@ -38,6 +39,27 @@ layout(std430, set = 0, binding = 9) buffer TexelEpoch { uint texelEpoch[]; };
 // mean instead left 3% of the old sun's light in for good (Cornell, after a turn: +3.1% energy).
 layout(std430, set = 0, binding = 10) buffer TexelPrior { vec4 texelPrior[]; };
 #define TEXEL_PRIOR_RAYS 256.0
+// The running mean of each pass's luminance squared: with the mean, how much passes disagree (texel.glsl,
+// texelSettled decides from it how many rays the texel gets).
+layout(std430, set = 0, binding = 11) buffer TexelMoment { float texelMoment[]; };
+// Guides (SponzaLoop.Transport.cs, BuildGuides): per patch, a CDF over an 8x8 octahedral map of world directions of
+// where its light comes from. Half of each pass's rays sample the texel's nearest patch's; the other half are cosine
+// as before, and every ray is weighted by the mixture's density (the balance heuristic): unbiased whatever the guide.
+layout(std430, set = 0, binding = 12) readonly buffer CookedGuides { float cookedGuide[]; };
+#define GUIDE_RES 8
+#define GUIDE_BINS 64
+// The spatial filter, in texel space (--texel-filter): once a texel's pass lands, the 27 texels around its cell on
+// its own surface (its bin, its plane), weighted by distance (sigma one cell), by rays, and by how near each one's
+// light is to its own -- one more than ~half again brighter or darker is an edge (a shadow's, a corner's), not noise,
+// and drops out -- averaged into TexelFiltered, which the incident pass reads. Per pixel each frame the same filter
+// cost ~18 ms on Sponza's hall; here a frame's queue is 27 lookups each. (The user: bounce-lit balconies looked "a
+// pointillist painting" -- each texel's own gather is noisy there at the rays a frame budget reaches.)
+layout(std430, set = 0, binding = 20) readonly buffer TexelHash { uvec4 texelHash[]; };
+layout(std430, set = 0, binding = 21) buffer TexelFiltered { vec4 texelFiltered[]; };
+#define TEXEL_HASH(i) texelHash[i]
+#define TEXEL_POSITION(i) texels[2 * (i)]
+#define TEXEL_NORMAL(i) texels[2 * (i) + 1]
+#include "texel.glsl"
 
 #define COOKED_BINDING 6
 #define COOKED_GRID u.uCookedGrid
@@ -49,6 +71,43 @@ layout(std430, set = 0, binding = 10) buffer TexelPrior { vec4 texelPrior[]; };
 #include "ray_query.glsl"
 
 shared vec3 sRadiance[RAYS];
+shared int sGuide;
+shared vec4 sNew;
+shared vec4 sNeighbour[RAYS];
+
+vec2 guideOctEncode(vec3 d) {
+    d /= abs(d.x) + abs(d.y) + abs(d.z);
+    if (d.z >= 0.0) return d.xy;
+    return vec2((1.0 - abs(d.y)) * (d.x >= 0.0 ? 1.0 : -1.0), (1.0 - abs(d.x)) * (d.y >= 0.0 ? 1.0 : -1.0));
+}
+
+vec3 guideOctDecodeRaw(vec2 uv) {   // the octahedron's point (|x|+|y|+|z| = 1), not normalised
+    vec3 d = vec3(uv, 1.0 - abs(uv.x) - abs(uv.y));
+    if (d.z < 0.0) { float x = d.x; d.x = (1.0 - abs(d.y)) * (x >= 0.0 ? 1.0 : -1.0); d.y = (1.0 - abs(x)) * (d.y >= 0.0 ? 1.0 : -1.0); }
+    return d;
+}
+
+int guideBin(vec3 d) {
+    ivec2 b = clamp(ivec2((guideOctEncode(d) * 0.5 + 0.5) * float(GUIDE_RES)), ivec2(0), ivec2(GUIDE_RES - 1));
+    return b.y * GUIDE_RES + b.x;
+}
+
+// The guide's density over solid angle at d: its bin's probability, uniform over the bin in the octahedral square
+// (area 4 / 64: 16 p over the square), times dA/domega = |p|^3 for the octahedron point p = d / |d|_1, and
+// |p| = 1 / |d|_1. (Multiplying by |d|_1^3 instead read Cornell's energy at 0.20.)
+float guidePdf(int patchIndex, vec3 d) {
+    int b = guideBin(d);
+    float p = cookedGuide[patchIndex * GUIDE_BINS + b] - (b > 0 ? cookedGuide[patchIndex * GUIDE_BINS + b - 1] : 0.0);
+    float l1 = abs(d.x) + abs(d.y) + abs(d.z);
+    return p * 16.0 / (l1 * l1 * l1);
+}
+
+vec3 guideSample(int patchIndex, float u0, float u1, float u2) {
+    int lo = 0, hi = GUIDE_BINS - 1;
+    while (lo < hi) { int mid = (lo + hi) / 2; if (cookedGuide[patchIndex * GUIDE_BINS + mid] < u0) lo = mid + 1; else hi = mid; }
+    vec2 uv = (vec2(lo % GUIDE_RES, lo / GUIDE_RES) + vec2(u1, u2)) / float(GUIDE_RES) * 2.0 - 1.0;
+    return normalize(guideOctDecodeRaw(uv));
+}
 
 void main() {
     uint group = gl_WorkGroupID.x;
@@ -59,7 +118,7 @@ void main() {
     // Which texel: the lists in order, each clamped to what it holds.
     int id = -1;
     uint i = group;
-    for (uint list = 0u; list < 3u && id < 0; ++list) {
+    for (uint list = 0u; list < 4u && id < 0; ++list) {
         uint count = min(texelQueue[parity * 4u + list], capacity);
         if (i < count) id = int(texelQueue[8u + list * capacity + i]);
         else i -= count;
@@ -69,6 +128,9 @@ void main() {
     vec3 position = texels[2 * id].xyz;
     vec3 n = texels[2 * id + 1].xyz;
     uint ray = gl_LocalInvocationID.x;
+    if (ray == 0u) sGuide = cookedNearest(position, n);
+    barrier();
+    int guide = sGuide;
     float rays = texelLight[id].w;
     uint epoch = uint(u.uSky.z);
     bool stale = texelEpoch[id] != epoch;
@@ -78,12 +140,27 @@ void main() {
     uint setSeed = blix_pcg(uint(id) * 9781u + pass * 0x632BE5ABu);
     float rotation = float(blix_pcg(setSeed) & 0xFFFFu) / 65536.0;
     float jitter = float(blix_pcg(seed) & 0xFFFFu) / 65536.0;
-    // Cosine-weighted: a stratified disc (radius sqrt of the ray's band) lifted to the hemisphere.
-    float r = sqrt((float(ray) + jitter) / float(RAYS));
-    float phi = 2.0 * PI * fract(float(ray) * 0.618034 + rotation);
-    vec3 t = normalize(abs(n.y) < 0.999 ? cross(vec3(0.0, 1.0, 0.0), n) : cross(vec3(1.0, 0.0, 0.0), n));
-    vec3 b = cross(n, t);
-    vec3 dir = normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + n * sqrt(max(0.0, 1.0 - r * r)));
+    // Half the rays cosine-weighted (a stratified disc, radius sqrt of the ray's band, lifted to the hemisphere), half
+    // from the guide; without a patch nearby all cosine.
+    const uint halfRays = uint(RAYS) / 2u;
+    bool guided = guide >= 0 && ray >= halfRays;
+    float cosineCount = guide >= 0 ? float(halfRays) : float(RAYS);
+    uint stratum = guide >= 0 ? ray % halfRays : ray;
+    vec3 dir;
+    if (guided) {
+        uint s1 = blix_pcg(seed ^ 0x9E3779B9u), s2 = blix_pcg(s1);
+        dir = guideSample(guide, (float(stratum) + jitter) / float(halfRays), float(s1 & 0xFFFFu) / 65536.0, float(s2 & 0xFFFFu) / 65536.0);
+    } else {
+        float r = sqrt((float(stratum) + jitter) / cosineCount);
+        float phi = 2.0 * PI * fract(float(stratum) * 0.618034 + rotation);
+        vec3 t = normalize(abs(n.y) < 0.999 ? cross(vec3(0.0, 1.0, 0.0), n) : cross(vec3(1.0, 0.0, 0.0), n));
+        vec3 b = cross(n, t);
+        dir = normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + n * sqrt(max(0.0, 1.0 - r * r)));
+    }
+    float cosTheta = dot(dir, n);
+    // The mixture's density (the counts' shares of each technique's), and this ray's weight on irradiance.
+    float mixturePdf = guide >= 0 ? 0.5 * max(cosTheta, 0.0) / PI + 0.5 * guidePdf(guide, dir) : max(cosTheta, 0.0) / PI;
+    float rayWeight = cosTheta > 0.0 && mixturePdf > 0.0 ? cosTheta / mixturePdf : 0.0;
     vec3 origin = position + n * 0.01;
 
     vec3 radiance;
@@ -108,20 +185,58 @@ void main() {
     } else {
         radiance = textureLod(uSkyRadiance, dir, u.uSky.y).rgb * u.uSky.x;
     }
-    sRadiance[ray] = radiance;
+    sRadiance[ray] = radiance * rayWeight;
+    barrier();
+    if (ray == 0u) {
+        vec3 sum = vec3(0.0);
+        for (int k = 0; k < RAYS; ++k) sum += sRadiance[k];
+        vec3 estimate = sum / float(RAYS);
+        float total = rays + float(RAYS);
+        vec4 old = texelLight[id];
+        if (stale) {
+            // Only a texel that had light keeps it as the prior; it starts its own gather from nothing.
+            if (old.w > 0.0) texelPrior[id] = vec4(old.rgb, 1.0);
+            texelEpoch[id] = epoch;
+            old = vec4(0.0);
+        }
+        sNew = vec4(mix(old.rgb, estimate, float(RAYS) / total), total);
+        texelLight[id] = sNew;
+        float lum = dot(estimate, vec3(0.2126, 0.7152, 0.0722));
+        texelMoment[id] = mix(stale ? 0.0 : texelMoment[id], lum * lum, float(RAYS) / total);
+        if (total >= TEXEL_PRIOR_RAYS) texelPrior[id] = vec4(0.0);
+    }
+    barrier();
+    if (u.uSky.w < 0.5) {
+        if (ray == 0u) texelFiltered[id] = sNew;
+        return;
+    }
+    const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
+    vec3 centreValue = sNew.rgb;
+    float centre = dot(centreValue, luma);
+    sNeighbour[ray] = vec4(0.0);
+    if (ray < 27u) {
+        TexelGrid tg;
+        tg.minCorner = u.uTexelGrid.xyz;
+        tg.spacing = u.uTexelGrid.w;
+        tg.capacity = uint(u.uTexelParams.x);
+        ivec3 cell = ivec3(floor((position - tg.minCorner) / tg.spacing)) + ivec3(int(ray) % 3, (int(ray) / 3) % 3, int(ray) / 9) - 1;
+        int other = ray == 13u ? id : texelFind(tg, cell, texelBin(n));
+        if (other >= 0) {
+            vec3 tn = TEXEL_NORMAL(other).xyz;
+            vec3 tp = TEXEL_POSITION(other).xyz;
+            vec4 light = other == id ? sNew : texelLight[other];
+            if (dot(tn, n) > 0.0 && abs(dot(n, tp - position)) <= tg.spacing && light.w > 0.0) {
+                vec3 dp = (tp - position) / tg.spacing;
+                float edge = (dot(light.rgb, luma) - centre) / (0.5 * centre + 1e-5);
+                float f = dot(tn, n);
+                float w = exp(-0.5 * dot(dp, dp)) * exp(-edge * edge) * f * f * f * f * min(light.w / 64.0, 1.0);
+                sNeighbour[ray] = vec4(w * light.rgb, w);
+            }
+        }
+    }
     barrier();
     if (ray != 0u) return;
-    vec3 sum = vec3(0.0);
-    for (int k = 0; k < RAYS; ++k) sum += sRadiance[k];
-    vec3 estimate = PI * sum / float(RAYS);
-    float total = rays + float(RAYS);
-    vec4 old = texelLight[id];
-    if (stale) {
-        // Only a texel that had light keeps it as the prior; it starts its own gather from nothing.
-        if (old.w > 0.0) texelPrior[id] = vec4(old.rgb, 1.0);
-        texelEpoch[id] = epoch;
-        old = vec4(0.0);
-    }
-    texelLight[id] = vec4(mix(old.rgb, estimate, float(RAYS) / total), total);
-    if (total >= TEXEL_PRIOR_RAYS) texelPrior[id] = vec4(0.0);
+    vec4 acc = vec4(0.0);
+    for (int k = 0; k < 27; ++k) acc += sNeighbour[k];
+    texelFiltered[id] = acc.w > 1e-6 ? vec4(acc.rgb / acc.w, 1.0) : sNew;
 }

@@ -37,7 +37,8 @@ layout(set = 0, binding = 0) uniform IncidentClipmap {
     vec4 uSurfaceDims;   // dims xyz, first slot w
     vec4 uSurfaceAtlas;  // tile row, tiles across, slots, w 1 when on
     vec4 uTexelGrid;     // the texels (texel.glsl, stage 5a): the cells' origin xyz, spacing w
-    vec4 uTexelParams;   // x hash capacity, y 1 when on, z the rays at which a texel's answer is trusted whole
+    vec4 uTexelParams;   // x hash capacity, y 1 when on, z the rays at which a texel's answer is trusted whole, w 1:
+                         // read the spatially filtered light (texel_gather.comp)
 } g;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -110,6 +111,7 @@ layout(std430, set = 0, binding = 11) readonly buffer Texels { vec4 texels[]; };
 layout(std430, set = 0, binding = 12) readonly buffer TexelLight { vec4 texelLight[]; };
 // A texel's old light while its gather for a new sun is young (texel_gather.comp): blended out over 256 rays.
 layout(std430, set = 0, binding = 13) readonly buffer TexelPrior { vec4 texelPrior[]; };
+layout(std430, set = 0, binding = 14) readonly buffer TexelFiltered { vec4 texelFiltered[]; };
 #define TEXEL_HASH(i) texelHash[i]
 #define TEXEL_POSITION(i) texels[2 * (i)]
 #define TEXEL_NORMAL(i) texels[2 * (i) + 1]
@@ -134,7 +136,9 @@ bool texelsAt(vec3 worldPos, vec3 n, float faceBin, out vec3 irradiance, out flo
         vec4 light = texelLight[ids[i]];
         vec4 prior = texelPrior[ids[i]];
         if (light.w <= 0.0 && prior.w <= 0.0) continue;
-        vec3 value = prior.w > 0.0 ? mix(prior.rgb, light.rgb, min(light.w / 256.0, 1.0)) : light.rgb;
+        // With the spatial filter (texel_gather.comp) its filtered light, else its own.
+        vec3 own = g.uTexelParams.w > 0.5 && texelFiltered[ids[i]].w > 0.0 ? texelFiltered[ids[i]].rgb : light.rgb;
+        vec3 value = prior.w > 0.0 ? mix(prior.rgb, own, min(light.w / 256.0, 1.0)) : own;
         sum += weights[i] * value;
         weight += weights[i];
         raysWeighted += weights[i] * (prior.w > 0.0 ? 1.0 : min(light.w / g.uTexelParams.z, 1.0));

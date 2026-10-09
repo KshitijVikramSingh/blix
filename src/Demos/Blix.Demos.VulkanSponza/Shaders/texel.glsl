@@ -101,4 +101,18 @@ void texelsAround(TexelGrid g, vec3 p, vec3 n, float faceBin, out int ids[TEXEL_
     }
 }
 
+// Whether a texel has rays enough (adaptive, texel_mark.comp): at least minRays; then until the standard error of
+// its mean -- from how its 32-ray passes disagree (m2: the running mean of each pass's luminance squared) -- is under
+// tol of its value (or of floorAbs, for the near-black), or it reaches maxRays. A fixed 1024 left bounce-lit corners
+// pointillist: their light comes from small bright patches a ray either finds or misses, so they need many times the
+// rays a sunlit wall does.
+bool texelSettled(vec4 light, float m2, vec4 noise, float minRays) {
+    if (light.w < minRays) return false;
+    if (light.w >= noise.x) return true;
+    float mean = dot(light.rgb, vec3(0.2126, 0.7152, 0.0722));
+    float variance = max(m2 - mean * mean, 0.0);
+    float standardError = sqrt(variance / (light.w / 32.0));
+    return standardError <= noise.y * max(mean, noise.z);
+}
+
 #endif

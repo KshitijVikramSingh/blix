@@ -11,16 +11,21 @@ layout(std430, set = 0, binding = COOKED_BINDING) readonly buffer CookedPatches 
 layout(std430, set = 0, binding = COOKED_BINDING + 1) readonly buffer CookedCells { uint cookedCellStart[]; };
 layout(std430, set = 0, binding = COOKED_BINDING + 2) readonly buffer CookedIds { uint cookedId[]; };
 
-vec3 cookedIndirect(vec3 p, vec3 n, out bool found) {
-    found = false;
-    if (COOKED_DIMS.w < 0.5) return vec3(0.0);
+// The nearest patch facing the way n does (dot >= 0.5), or -1.
+int cookedNearest(vec3 p, vec3 n) {
+    if (COOKED_DIMS.w < 0.5) return -1;
     ivec3 dims = ivec3(COOKED_DIMS.xyz);
     ivec3 c = ivec3(floor((p - COOKED_GRID.xyz) / COOKED_GRID.w));
     float bestD = 1e30;
     int best = -1;
-    for (int dz = -1; dz <= 1; ++dz)
-    for (int dy = -1; dy <= 1; ++dy)
-    for (int dx = -1; dx <= 1; ++dx) {
+    // Cells are the patch spacing: the 27 around the hit hold the nearest facing patch nearly always; the ring
+    // beyond (radius 2) only when they do not. At twice the spacing every hit read hundreds of patches, and the texel
+    // gather ran at ~4 M rays/s on Sponza.
+    for (int radius = 1; radius <= 2 && best < 0; ++radius)
+    for (int dz = -radius; dz <= radius; ++dz)
+    for (int dy = -radius; dy <= radius; ++dy)
+    for (int dx = -radius; dx <= radius; ++dx) {
+        if (radius == 2 && max(abs(dx), max(abs(dy), abs(dz))) < 2) continue;
         ivec3 cc = c + ivec3(dx, dy, dz);
         if (any(lessThan(cc, ivec3(0))) || any(greaterThanEqual(cc, dims))) continue;
         int cell = (cc.z * dims.y + cc.y) * dims.x + cc.x;
@@ -32,8 +37,12 @@ vec3 cookedIndirect(vec3 p, vec3 n, out bool found) {
             if (d2 < bestD) { bestD = d2; best = j; }
         }
     }
-    if (best < 0) return vec3(0.0);
-    found = true;
-    return cookedPatch[3 * best + 2].rgb;
+    return best;
+}
+
+vec3 cookedIndirect(vec3 p, vec3 n, out bool found) {
+    int best = cookedNearest(p, n);
+    found = best >= 0;
+    return found ? cookedPatch[3 * best + 2].rgb : vec3(0.0);
 }
 #endif
