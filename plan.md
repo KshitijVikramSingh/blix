@@ -631,8 +631,41 @@ F. *The frame audit* (opened 2026-10-07: "a lot of pure performance on the table
      samples a pixel for the gradient, up to 8 screen probes), screen-probe register pressure (the second
      layer's 16-point candidate arrays in every lane) and lane-0 SH reduction, the pyramids, barriers around
      buffer dispatches, CPU allocations.
-5. *PRT baked by the cook*: per-region probe transfer, relit by the sun at runtime: the static base and
-   warm start of 4.
+5. *Cooked light transport* (opened 2026-10-09; replaces "PRT baked by the cook"). Most of a world is static, and
+   its transport -- where light can go from where -- is a fact of its geometry; the runtime GI of 4 spent its whole
+   budget re-discovering it (the variance floors, Bistro's starvation, the walking change, the bounce trap all trace to
+   that). So: assemble the world, place its sources, COOK representations that can be evaluated against those sources,
+   and RECOMPUTE lighting at runtime. Sponza and Bistro are experiments in GI ideas, not the engine's lighting
+   infrastructure: nothing here keeps a fallback for them.
+   The invariant: everything cooked is a function of static geometry, where static sources are, and (later) where
+   dynamic things may move -- never of intensity, colour, time, albedo or emission. Free at runtime: a source's
+   intensity and colour over time, a global source's direction over time, sky radiance, surfaces' albedo and emission,
+   dynamic objects. A re-cook (region-local): moving a static source, editing static geometry.
+   First-class: SOURCES -- global (sun, moon, sky: direction / radiance a function of time) and placed (point, spot,
+   area, emissive geometry: fixed where, intensity a function of time) -- and TIME, a clock that drives them (the
+   engine's time layers, §J). Nothing assumes a source is slow; slowness only buys amortisation.
+   Representations (each an optional section a game picks; memory-heavy first, cook-time LOD later):
+     R1 patches: position, normal, area, provenance (placement x primitive: the 4e SurfaceKey).
+     R2 couplings: a sparse patch -> patch matrix of form factor x static visibility (pure geometry); and a cooked
+        probe set with probe -> patch couplings, for what the cook does not contain (dynamic receivers).
+     R3 source couplings: placed sources -> the patches they reach, with weight; global sources -> each patch's
+        visibility over directions (an octahedral map: the sun at any angle is a lookup).
+     R4 (next) dynamic geometry changes TRANSPORT, not light: couplings that dynamic geometry can cross are re-weighted
+        by its live visibility and the scene relit through them -- so the dynamic layer never subtracts light. How
+        "where it can move" is known is open (the user has a thought to take up after R1-R3; no reach declarations
+        to begin with).
+     R5 (later) specular: per reflection texel, which patch it sees, and depth.  R6 (later) near-field: bent normals /
+        occlusion cones at texture resolution for static geometry (GTAO for dynamic only).
+   Runtime: light patches from R3 x sources; step bounce through R2 (albedo applied here); gather what is on screen.
+   No random rays at runtime for static transport.
+   Fed in: geometry = the region's placements; placed sources from glTF (KHR_lights_punctual) and the region
+   description; global sources named in the region description and bound by the runtime to its own clock. Ids are
+   (region, index) from the start; the first spike is one region a scene.
+   The file (.blixlight-like) waits until a representation proves itself: the spike cooks in memory, with the inputs
+   and outputs a file would have.
+   5a (now): R1 + R2 + R3 for global sources, cooked on the CPU against the ray scene, solved for a sun angle, judged
+   at the path-trace reference's own points on the Cornell box (exact energy expected), with a sun sweep (several
+   angles, the path trace at each); then memory and cook time on Sponza. 5b: R4.
 
 Known instrument gap: a Sponza `--shot` raises 9 validation errors on `main` as well (a storage image
 copied to a buffer without transfer-source usage, in the shot's readback). Not this arc's, and not fixed.
