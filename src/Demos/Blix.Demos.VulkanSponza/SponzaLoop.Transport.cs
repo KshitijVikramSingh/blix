@@ -95,9 +95,12 @@ internal sealed partial class SponzaLoop
                 var cross = Vector3.Cross(b - a, c - a);
                 var area = cross.Length() * 0.5f;
                 if (area <= 0f) continue;
-                // A cutout triangle is there for the share of rays its coverage coin lets meet it: so many patches.
-                var coverage = (surfaces[data.RowOf(i, t)] >> 24) / 255f;
-                var expected = area * coverage / patchArea;
+                // Patches are sized for architecture, no smaller: a cutout triangle (foliage -- its coverage byte under
+                // 255) gets none. Leaves are far finer than a patch, and lighting them with patches is what made the
+                // tree's dark inner leaves borrow its sunlit outer ones (the orbit's points, 2.7x bright in the darkest
+                // quarter). They stay occluders in the cook (the coverage coin); lighting them is another representation's.
+                if ((surfaces[data.RowOf(i, t)] >> 24) < 255u) continue;
+                var expected = area / patchArea;
                 var count = (int)expected + (rng.NextDouble() < expected - (int)expected ? 1 : 0);
                 var front = Vector3.Normalize(cross);
                 var alb = Albedo(i, t);
@@ -189,6 +192,8 @@ internal sealed partial class SponzaLoop
         var visWords = (transportVisRes * transportVisRes + 63) / 64;
         var sunVis = new ulong[patches * visWords];
         long dropped = 0;
+        long foliageHits = 0;
+        bool Cutout(RayHit h) => (surfaces[data.RowOf(h.Instance, h.Triangle)] >> 24) < 255u;
         Parallel.For(0, patches, i =>
         {
             var r = new Random(1000 + i);
@@ -201,6 +206,8 @@ internal sealed partial class SponzaLoop
                 var d = CosineHemisphereCpu(n, r);
                 if (scene.Closest(new Ray(p, d), 0f, float.PositiveInfinity, (uint)r.Next()) is { } h)
                 {
+                    // A leaf has no patch: what it would bounce is not represented yet (absorbed, and counted).
+                    if (Cutout(h)) { Interlocked.Increment(ref foliageHits); continue; }
                     var hp = p + d * h.T;
                     var j = Nearest(hp, HitNormal(h, d));
                     if (j < 0) { lost++; continue; }
@@ -228,8 +235,16 @@ internal sealed partial class SponzaLoop
         // ---- Runtime (the CPU, for the spike): light by the sun and the sky, then bounce ---------------------------
         var toSun = -Vector3.Normalize(sunDirection);
         var sunIrr = EffectiveSunIrradiance;
+        // Each bin's radiance is the sky's mean over the bin (a 4x4 grid inside it), not its centre's: an HDR sky has
+        // bright regions much smaller than a 16x16 bin.
         var skyDirs = Enumerable.Range(0, TransportSkyRes * TransportSkyRes).Select(b =>
-            SkyRadiance(OctDecode(new Vector2((b % TransportSkyRes + 0.5f) / TransportSkyRes, (b / TransportSkyRes + 0.5f) / TransportSkyRes) * 2f - Vector2.One))).ToArray();
+        {
+            var acc = Vector3.Zero;
+            for (var sy = 0; sy < 4; sy++)
+            for (var sx = 0; sx < 4; sx++)
+                acc += SkyRadiance(OctDecode(new Vector2((b % TransportSkyRes + (sx + 0.5f) / 4f) / TransportSkyRes, (b / TransportSkyRes + (sy + 0.5f) / 4f) / TransportSkyRes) * 2f - Vector2.One));
+            return acc / 16f;
+        }).ToArray();
         float SunVisibility(int i)
         {
             // Bilinear over the four bins around the sun's direction.
@@ -282,9 +297,29 @@ internal sealed partial class SponzaLoop
             });
         }
         var solveSeconds = clock.Elapsed.TotalSeconds - cookSeconds;
+        // The same solve with one source at a time (it is linear): the sun's bounce and the sky's, held against the
+        // reference's own split.
+        Vector3[] SolveOutgoing(bool sun, bool skyOn)
+        {
+            var inc = skyOn ? (Vector3[])skyIn.Clone() : new Vector3[patches];
+            var outg = new Vector3[patches];
+            for (var it = 0; it < iterations; it++)
+            {
+                for (var i = 0; i < patches; i++) outg[i] = albedo[i] * (inc[i] + (sun ? directSun[i] : Vector3.Zero)) / MathF.PI;
+                Parallel.For(0, patches, i =>
+                {
+                    var h = Vector3.Zero;
+                    foreach (var (to, w) in couplings[i]) h += outg[to] * w;
+                    inc[i] = (skyOn ? skyIn[i] : Vector3.Zero) + h * MathF.PI;
+                });
+            }
+            return outg;
+        }
+        var outgoingSun = SolveOutgoing(true, false);
+        var outgoingSky = SolveOutgoing(false, true);
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] transport spike: {patches:N0} patches at {transportSpacing:0.###} m, {nonzero:N0} couplings ({nonzero / (double)Math.Max(1, patches):0.0} a patch), "
-            + $"{dropped / (double)Math.Max(1, (long)patches * transportRays) * 100:0.00}% of rays found no patch; {bytes / 1048576.0:0.0} MB "
+            + $"{dropped / (double)Math.Max(1, (long)patches * transportRays) * 100:0.00}% of rays found no patch, {foliageHits / (double)Math.Max(1, (long)patches * transportRays) * 100:0.00}% met foliage (absorbed); {bytes / 1048576.0:0.0} MB "
             + $"(couplings {nonzero * 8 / 1048576.0:0.0}, sky bins {sky.LongLength * 4 / 1048576.0:0.0}, sun visibility {sunVis.LongLength * 8 / 1048576.0:0.0}); "
             + $"cooked in {cookSeconds:0.0} s (patches {cookPatches:0.0} s), solved {iterations} bounces in {solveSeconds * 1000:0} ms."));
 
@@ -378,21 +413,33 @@ internal sealed partial class SponzaLoop
             }
             var inverse = wI > 0f ? Lum(sumI / wI) : double.NaN;
             // Final gather: rays from x reading the patches' solved light (and the sky).
+            // Also by source (sun bounce; sky bounce + direct sky), and with the EXACT sun at each hit point: the hit's own
+            // albedo x (its own sun visibility, one ray + the patches' indirect light there) -- is the sun's point
+            // sampling at patch centres what the error is?
             var r = new Random(4242 + k);
-            var g = Vector3.Zero;
+            var g = Vector3.Zero; var gSun = Vector3.Zero; var gSky = Vector3.Zero; var gExact = Vector3.Zero;
             var gatherRays = transportGatherRays;
             for (var j = 0; j < gatherRays; j++)
             {
                 var d = CosineHemisphereCpu(n, r);
                 if (scene.Closest(new Ray(x, d), 0f, float.PositiveInfinity, (uint)r.Next()) is { } h)
                 {
-                    var p = Nearest(x + d * h.T, HitNormal(h, d));
-                    if (p >= 0) g += outgoing[p];
+                    if (Cutout(h)) continue;
+                    var hn = HitNormal(h, d);
+                    var hp = x + d * h.T;
+                    var p = Nearest(hp, hn);
+                    if (p >= 0) { g += outgoing[p]; gSun += outgoingSun[p]; gSky += outgoingSky[p]; }
+                    var ndl = Vector3.Dot(hn, toSun);
+                    var sunAt = ndl > 0f && !scene.Any(new Ray(hp + hn * 1e-3f, toSun), 0f, float.PositiveInfinity, (uint)r.Next()) ? sunIrr * ndl : Vector3.Zero;
+                    gExact += Albedo(h.Instance, h.Triangle) * (sunAt + (p >= 0 ? incident[p] : Vector3.Zero)) / MathF.PI;
                 }
-                else g += SkyRadiance(d);
+                else { var sk = SkyRadiance(d); g += sk; gSky += sk; gExact += sk; }
             }
             var gather = Lum(g * (MathF.PI / gatherRays));
-            lines.Add(string.Create(CultureInfo.InvariantCulture, $"    transport at {px / iw:0.0000},{py / ih:0.0000} interp {interp:0.00000} gather {gather:0.00000} plane {plane:0.00000} inverse {inverse:0.00000} linear {mls:0.00000}"));
+            var gatherSun = Lum(gSun * (MathF.PI / gatherRays));
+            var gatherSky = Lum(gSky * (MathF.PI / gatherRays));
+            var gatherExact = Lum(gExact * (MathF.PI / gatherRays));
+            lines.Add(string.Create(CultureInfo.InvariantCulture, $"    transport at {px / iw:0.0000},{py / ih:0.0000} interp {interp:0.00000} gather {gather:0.00000} plane {plane:0.00000} inverse {inverse:0.00000} linear {mls:0.00000} cutout {(Cutout(hit) ? 1 : 0)} gsun {gatherSun:0.00000} gsky {gatherSky:0.00000} gexact {gatherExact:0.00000}"));
         });
         foreach (var line in lines.OrderBy(l => l, StringComparer.Ordinal)) Console.WriteLine(line);
     }

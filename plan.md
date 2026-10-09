@@ -690,6 +690,16 @@ F. *The frame audit* (opened 2026-10-07: "a lot of pure performance on the table
      patches (p90 16x). Open: reconstruction by surface identity (patches carry provenance), the sky bins'
      point-sampled radiance against an HDR sky, finer spacing, and the reference's own floor in Sponza's dim interior.
      Then the runtime on the GPU, then R4 (5b).
+     Sponza, continued. The orbit's points were the cypress (it frames the foliage): dark inner leaves borrowing sunlit
+     outer ones, 2.7x in the darkest quarter. Per the user: patches are sized for architecture, no less; foliage gets
+     none (coverage < 255: an occluder in the cook, absorbed when hit -- 1% of cooked rays; lighting it is another
+     representation's). Measured on architecture, poses with their own references: the hall (floor 3.5% at 16k paths)
+     energy 1.00-1.04 but per-point 18-22%; the arcade (very dark, floor unmeasured) 1.54x. Resolution is NOT the lever
+     here: 0.125 m (668k patches, 2.5 GB, cooked 618 s) moved the hall only 17.8 -> 16.9% (gather). Split by source
+     (the solve is linear): sky bounce + direct sky 12.5%, energy 1.00; SUN bounce 23.9%, p90 2.59. A gather taking the
+     EXACT sun at each hit point (one shadow ray) instead of the patch's: 17.5 -> 10.6%, p90 2.05 -> 1.20. The sun's
+     first bounce is sampled at patch centres, and sunlight changes at shadow edges and across faces finer than any
+     patch. So direct light from global sources must be resolved finer than transport: the design question now.
 
 Known instrument gap: a Sponza `--shot` raises 9 validation errors on `main` as well (a storage image
 copied to a buffer without transfer-source usage, in the shot's readback). Not this arc's, and not fixed.
