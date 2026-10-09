@@ -700,6 +700,18 @@ F. *The frame audit* (opened 2026-10-07: "a lot of pure performance on the table
      EXACT sun at each hit point (one shadow ray) instead of the patch's: 17.5 -> 10.6%, p90 2.05 -> 1.20. The sun's
      first bounce is sampled at patch centres, and sunlight changes at shadow edges and across faces finer than any
      patch. So direct light from global sources must be resolved finer than transport: the design question now.
+     SUNLETS (`--transport-sunlet S`, 0.04 default): where cooked rays hit architecture, a cell of S metres x a coarse
+     normal bin keeps position, normal, albedo; patches couple to sunlets for the FIRST bounce of direct light (lit at
+     runtime: an exact ray here, the shadow maps on the GPU -- so the sun's dynamic occluders come with it), and to
+     patches for everything after; a ray finding no patch facing its way takes the nearest facing either way. Emulated
+     first (the gather's hits snapped to 2 / 5 / 10 cm), then cooked: final gather on the hall (floor 3.5%) 13.4% ->
+     2 cm 5.7%, 4 cm 5.65%, 8 cm 7.1%; Cornell 1.54 -> 1.04%. 4 cm = 2 cm at half the sunlets (9M vs 24M): the default.
+     Sponza memory 512 MB -> 1.46 GB (sunlets 308 MB, their couplings 628), cook 214 s. Sizes go by powers of two so
+     sunlets can be a hierarchy (cook-time LOD, streaming, adaptive density).
+     The new bottleneck is reconstruction: what a renderer READS at a shading point from nearby patches stays 19-28% on
+     Sponza (linear fit 18.7%, interpolation 27.5%, p10 ~0.43) while the gather is 5.7% -- in detailed architecture the
+     patches nearest a point see different light than the point (flutes, mouldings). On Cornell's flat walls it cost
+     ~1 point. Next: what the renderer reads (receivers), a design question.
 
 Known instrument gap: a Sponza `--shot` raises 9 validation errors on `main` as well (a storage image
 copied to a buffer without transfer-source usage, in the shot's readback). Not this arc's, and not fixed.

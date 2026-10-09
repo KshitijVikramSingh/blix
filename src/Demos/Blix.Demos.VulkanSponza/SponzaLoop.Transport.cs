@@ -32,6 +32,9 @@ internal sealed partial class SponzaLoop
     private int transportRays = 512;
     private int transportVisRes = 32;
     private int transportGatherRays = 1024;
+    // --transport-sunlet S: the first bounce of direct sun resolved at sunlets of S metres (0: at patch centres, as
+    // before). Measured (emulated, Sponza's hall): patch centres 13.4%, sunlets 2 / 5 / 10 cm 5.7 / 6.5 / 8.3%.
+    private float transportSunlet = 0.04f;
     private const int TransportSkyRes = 16;
 
     private void ReadTransportArgs(AppArgs args)
@@ -41,6 +44,7 @@ internal sealed partial class SponzaLoop
         if (args.Int("transport-rays") is { } r) transportRays = Math.Clamp(r, 16, 8192);
         if (args.Int("transport-vis") is { } v) transportVisRes = Math.Clamp(v, 4, 256);
         if (args.Int("transport-gather") is { } gr) transportGatherRays = Math.Clamp(gr, 16, 1 << 16);
+        if (args.Float("transport-sunlet") is { } sl) transportSunlet = Math.Max(0f, sl);
     }
 
     // OctEncode is SponzaLoop.ClipmapTwin's (the same mapping as Blix.Shaders/octahedral.glsl).
@@ -178,6 +182,23 @@ internal sealed partial class SponzaLoop
             }
             return best;
         }
+        // When no patch near a hit faces its way (2.4% of Sponza's rays), the nearest facing either way rather than none:
+        // dropping the ray dropped its light (energy -4%).
+        int NearestAny(Vector3 p, Vector3 n)
+        {
+            var j = Nearest(p, n);
+            if (j >= 0) return j;
+            var (kx, ky, kz) = Key(p);
+            var best = -1; var bestD = float.MaxValue;
+            for (var dz = -1; dz <= 1; dz++)
+            for (var dy = -1; dy <= 1; dy++)
+            for (var dx = -1; dx <= 1; dx++)
+            {
+                if (!grid.TryGetValue((kx + dx, ky + dy, kz + dz), out var list)) continue;
+                foreach (var c in list) { var d = Vector3.DistanceSquared(pos[c], p); if (d < bestD) { bestD = d; best = c; } }
+            }
+            return best;
+        }
         Vector3 HitNormal(RayHit h, Vector3 dir)
         {
             var (a, b, c) = Tri(h.Instance, h.Triangle);
@@ -193,6 +214,27 @@ internal sealed partial class SponzaLoop
         var sunVis = new ulong[patches * visWords];
         long dropped = 0;
         long foliageHits = 0;
+        // Sunlets: where cooked rays hit architecture, a cell of transportSunlet metres AND a coarse normal bin (so a
+        // corner's two walls, or a sheet's two sides, never share one) -- position, normal and albedo of its first hit.
+        // A patch's first bounce of direct light is read through them; everything after through the patch couplings.
+        var useSunlets = transportSunlet > 0f;
+        var sunletIndex = new ConcurrentDictionary<(int, int, int, int), int>();
+        var sunletPos = new List<Vector3>(); var sunletNrm = new List<Vector3>(); var sunletAlbedo = new List<Vector3>();
+        var sunletLock = new object();
+        int SunletOf(Vector3 hp, Vector3 hn, Vector3 alb)
+        {
+            var key = ((int)MathF.Floor(hp.X / transportSunlet), (int)MathF.Floor(hp.Y / transportSunlet), (int)MathF.Floor(hp.Z / transportSunlet), OctBin(hn, 4));
+            if (sunletIndex.TryGetValue(key, out var found)) return found;
+            lock (sunletLock)
+            {
+                if (sunletIndex.TryGetValue(key, out found)) return found;
+                var id = sunletPos.Count;
+                sunletPos.Add(hp); sunletNrm.Add(hn); sunletAlbedo.Add(alb);
+                sunletIndex[key] = id;
+                return id;
+            }
+        }
+        var sunletCouplings = new (int To, float W)[patches][];
         bool Cutout(RayHit h) => (surfaces[data.RowOf(h.Instance, h.Triangle)] >> 24) < 255u;
         Parallel.For(0, patches, i =>
         {
@@ -200,6 +242,7 @@ internal sealed partial class SponzaLoop
             var p = pos[i] + nrm[i] * 1e-3f;
             var n = nrm[i];
             var acc = new Dictionary<int, int>();
+            var accSun = new Dictionary<int, int>();
             var lost = 0;
             for (var k = 0; k < transportRays; k++)
             {
@@ -209,7 +252,13 @@ internal sealed partial class SponzaLoop
                     // A leaf has no patch: what it would bounce is not represented yet (absorbed, and counted).
                     if (Cutout(h)) { Interlocked.Increment(ref foliageHits); continue; }
                     var hp = p + d * h.T;
-                    var j = Nearest(hp, HitNormal(h, d));
+                    var hn = HitNormal(h, d);
+                    if (useSunlets)
+                    {
+                        var sl = SunletOf(hp, hn, Albedo(h.Instance, h.Triangle));
+                        accSun[sl] = accSun.GetValueOrDefault(sl) + 1;
+                    }
+                    var j = useSunlets ? NearestAny(hp, hn) : Nearest(hp, hn);
                     if (j < 0) { lost++; continue; }
                     acc[j] = acc.GetValueOrDefault(j) + 1;
                 }
@@ -219,6 +268,7 @@ internal sealed partial class SponzaLoop
                 }
             }
             couplings[i] = acc.Select(e => (e.Key, e.Value / (float)transportRays)).ToArray();
+            sunletCouplings[i] = accSun.Select(e => (e.Key, e.Value / (float)transportRays)).ToArray();
             Interlocked.Add(ref dropped, lost);
             for (var b = 0; b < transportVisRes * transportVisRes; b++)
             {
@@ -230,7 +280,9 @@ internal sealed partial class SponzaLoop
         });
         var cookSeconds = clock.Elapsed.TotalSeconds;
         long nonzero = couplings.Sum(c => (long)c.Length);
-        var bytes = patches * (12L + 12 + 8) + nonzero * 8 + sky.LongLength * 4 + sunVis.LongLength * 8;
+        long sunletNonzero = sunletCouplings.Sum(c => (long)(c?.Length ?? 0));
+        var sunlets = sunletPos.Count;
+        var bytes = patches * (12L + 12 + 8) + nonzero * 8 + sky.LongLength * 4 + sunVis.LongLength * 8 + sunlets * 36L + sunletNonzero * 8;
 
         // ---- Runtime (the CPU, for the spike): light by the sun and the sky, then bounce ---------------------------
         var toSun = -Vector3.Normalize(sunDirection);
@@ -283,17 +335,37 @@ internal sealed partial class SponzaLoop
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] transport spike: sun map against an exact ray from each of {sunward:N0} sunward patches: {100.0 * disagree / Math.Max(1, sunward):0.00}% disagree, mean |difference| {absDiff / Math.Max(1, sunward):0.0000}."));
         }
+        // Each sunlet's direct sun at runtime (an exact ray here; the shadow maps on the GPU), and the first bounce it
+        // sends every patch that saw it: fixed for this sun, so added outside the bounce iteration.
+        var firstBounce = new Vector3[patches];
+        var sunletOut = new Vector3[sunlets];
+        if (useSunlets)
+        {
+            Parallel.For(0, sunlets, s =>
+            {
+                var ndl = Vector3.Dot(sunletNrm[s], toSun);
+                if (ndl > 0f && !scene.Any(new Ray(sunletPos[s] + sunletNrm[s] * 1e-3f, toSun), 0f, float.PositiveInfinity, (uint)(s + 3)))
+                    sunletOut[s] = sunletAlbedo[s] * sunIrr * ndl / MathF.PI;
+            });
+            Parallel.For(0, patches, i =>
+            {
+                var h = Vector3.Zero;
+                foreach (var (to, w) in sunletCouplings[i]) h += sunletOut[to] * w;
+                firstBounce[i] = h * MathF.PI;
+            });
+        }
         var incident = (Vector3[])skyIn.Clone();       // indirect irradiance arriving (no direct sun)
         var outgoing = new Vector3[patches];
         const int iterations = 48;
         for (var it = 0; it < iterations; it++)
         {
-            for (var i = 0; i < patches; i++) outgoing[i] = albedo[i] * (incident[i] + directSun[i]) / MathF.PI;
+            // With sunlets, a patch passes on only what it RECEIVED (its own direct sun reached others through sunlets).
+            for (var i = 0; i < patches; i++) outgoing[i] = albedo[i] * (incident[i] + (useSunlets ? Vector3.Zero : directSun[i])) / MathF.PI;
             Parallel.For(0, patches, i =>
             {
                 var h = Vector3.Zero;
                 foreach (var (to, w) in couplings[i]) h += outgoing[to] * w;
-                incident[i] = skyIn[i] + h * MathF.PI;
+                incident[i] = skyIn[i] + firstBounce[i] + h * MathF.PI;
             });
         }
         var solveSeconds = clock.Elapsed.TotalSeconds - cookSeconds;
@@ -305,12 +377,12 @@ internal sealed partial class SponzaLoop
             var outg = new Vector3[patches];
             for (var it = 0; it < iterations; it++)
             {
-                for (var i = 0; i < patches; i++) outg[i] = albedo[i] * (inc[i] + (sun ? directSun[i] : Vector3.Zero)) / MathF.PI;
+                for (var i = 0; i < patches; i++) outg[i] = albedo[i] * (inc[i] + (sun && !useSunlets ? directSun[i] : Vector3.Zero)) / MathF.PI;
                 Parallel.For(0, patches, i =>
                 {
                     var h = Vector3.Zero;
                     foreach (var (to, w) in couplings[i]) h += outg[to] * w;
-                    inc[i] = (skyOn ? skyIn[i] : Vector3.Zero) + h * MathF.PI;
+                    inc[i] = (skyOn ? skyIn[i] : Vector3.Zero) + (sun && useSunlets ? firstBounce[i] : Vector3.Zero) + h * MathF.PI;
                 });
             }
             return outg;
@@ -320,7 +392,8 @@ internal sealed partial class SponzaLoop
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] transport spike: {patches:N0} patches at {transportSpacing:0.###} m, {nonzero:N0} couplings ({nonzero / (double)Math.Max(1, patches):0.0} a patch), "
             + $"{dropped / (double)Math.Max(1, (long)patches * transportRays) * 100:0.00}% of rays found no patch, {foliageHits / (double)Math.Max(1, (long)patches * transportRays) * 100:0.00}% met foliage (absorbed); {bytes / 1048576.0:0.0} MB "
-            + $"(couplings {nonzero * 8 / 1048576.0:0.0}, sky bins {sky.LongLength * 4 / 1048576.0:0.0}, sun visibility {sunVis.LongLength * 8 / 1048576.0:0.0}); "
+            + $"(couplings {nonzero * 8 / 1048576.0:0.0}, sky bins {sky.LongLength * 4 / 1048576.0:0.0}, sun visibility {sunVis.LongLength * 8 / 1048576.0:0.0}, "
+            + $"sunlets {sunlets:N0} at {transportSunlet * 100:0} cm {sunlets * 36L / 1048576.0:0.0} + their couplings {sunletNonzero:N0} {sunletNonzero * 8 / 1048576.0:0.0}); "
             + $"cooked in {cookSeconds:0.0} s (patches {cookPatches:0.0} s), solved {iterations} bounces in {solveSeconds * 1000:0} ms."));
 
         // ---- At the reference's points --------------------------------------------------------------------------
@@ -418,6 +491,10 @@ internal sealed partial class SponzaLoop
             // sampling at patch centres what the error is?
             var r = new Random(4242 + k);
             var g = Vector3.Zero; var gSun = Vector3.Zero; var gSky = Vector3.Zero; var gExact = Vector3.Zero;
+            // Sunlets of a given size, emulated: the exact-sun lookup at the hit snapped to a grid of that size (the cell's
+            // centre, projected back onto the hit's surface plane) -- how fine do they need to be?
+            float[] snapSizes = { 0.02f, 0.05f, 0.10f };
+            var gSnap = new Vector3[snapSizes.Length];
             var gatherRays = transportGatherRays;
             for (var j = 0; j < gatherRays; j++)
             {
@@ -429,17 +506,40 @@ internal sealed partial class SponzaLoop
                     var hp = x + d * h.T;
                     var p = Nearest(hp, hn);
                     if (p >= 0) { g += outgoing[p]; gSun += outgoingSun[p]; gSky += outgoingSky[p]; }
+                    if (useSunlets)
+                    {
+                        // The hit's own direct sun, through its sunlet (exact where no cooked ray recorded one).
+                        var key = ((int)MathF.Floor(hp.X / transportSunlet), (int)MathF.Floor(hp.Y / transportSunlet), (int)MathF.Floor(hp.Z / transportSunlet), OctBin(hn, 4));
+                        Vector3 ls;
+                        if (sunletIndex.TryGetValue(key, out var sid)) ls = sunletOut[sid];
+                        else
+                        {
+                            var nd = Vector3.Dot(hn, toSun);
+                            ls = nd > 0f && !scene.Any(new Ray(hp + hn * 1e-3f, toSun), 0f, float.PositiveInfinity, (uint)r.Next()) ? Albedo(h.Instance, h.Triangle) * sunIrr * nd / MathF.PI : Vector3.Zero;
+                        }
+                        g += ls; gSun += ls;
+                    }
                     var ndl = Vector3.Dot(hn, toSun);
                     var sunAt = ndl > 0f && !scene.Any(new Ray(hp + hn * 1e-3f, toSun), 0f, float.PositiveInfinity, (uint)r.Next()) ? sunIrr * ndl : Vector3.Zero;
-                    gExact += Albedo(h.Instance, h.Triangle) * (sunAt + (p >= 0 ? incident[p] : Vector3.Zero)) / MathF.PI;
+                    var hitAlbedo = Albedo(h.Instance, h.Triangle);
+                    var indirectThere = p >= 0 ? incident[p] : Vector3.Zero;
+                    gExact += hitAlbedo * (sunAt + indirectThere) / MathF.PI;
+                    for (var q = 0; q < snapSizes.Length; q++)
+                    {
+                        var sz = snapSizes[q];
+                        var centre = new Vector3(MathF.Floor(hp.X / sz) + 0.5f, MathF.Floor(hp.Y / sz) + 0.5f, MathF.Floor(hp.Z / sz) + 0.5f) * sz;
+                        var onPlane = centre - hn * Vector3.Dot(hn, centre - hp);
+                        var sunSnap = ndl > 0f && !scene.Any(new Ray(onPlane + hn * 1e-3f, toSun), 0f, float.PositiveInfinity, (uint)r.Next()) ? sunIrr * ndl : Vector3.Zero;
+                        gSnap[q] += hitAlbedo * (sunSnap + indirectThere) / MathF.PI;
+                    }
                 }
-                else { var sk = SkyRadiance(d); g += sk; gSky += sk; gExact += sk; }
+                else { var sk = SkyRadiance(d); g += sk; gSky += sk; gExact += sk; for (var q = 0; q < gSnap.Length; q++) gSnap[q] += sk; }
             }
             var gather = Lum(g * (MathF.PI / gatherRays));
             var gatherSun = Lum(gSun * (MathF.PI / gatherRays));
             var gatherSky = Lum(gSky * (MathF.PI / gatherRays));
             var gatherExact = Lum(gExact * (MathF.PI / gatherRays));
-            lines.Add(string.Create(CultureInfo.InvariantCulture, $"    transport at {px / iw:0.0000},{py / ih:0.0000} interp {interp:0.00000} gather {gather:0.00000} plane {plane:0.00000} inverse {inverse:0.00000} linear {mls:0.00000} cutout {(Cutout(hit) ? 1 : 0)} gsun {gatherSun:0.00000} gsky {gatherSky:0.00000} gexact {gatherExact:0.00000}"));
+            lines.Add(string.Create(CultureInfo.InvariantCulture, $"    transport at {px / iw:0.0000},{py / ih:0.0000} interp {interp:0.00000} gather {gather:0.00000} plane {plane:0.00000} inverse {inverse:0.00000} linear {mls:0.00000} cutout {(Cutout(hit) ? 1 : 0)} gsun {gatherSun:0.00000} gsky {gatherSky:0.00000} gexact {gatherExact:0.00000} g2cm {Lum(gSnap[0] * (MathF.PI / gatherRays)):0.00000} g5cm {Lum(gSnap[1] * (MathF.PI / gatherRays)):0.00000} g10cm {Lum(gSnap[2] * (MathF.PI / gatherRays)):0.00000}"));
         });
         foreach (var line in lines.OrderBy(l => l, StringComparer.Ordinal)) Console.WriteLine(line);
     }
