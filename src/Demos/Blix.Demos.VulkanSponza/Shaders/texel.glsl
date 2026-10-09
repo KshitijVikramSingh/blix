@@ -10,7 +10,8 @@
 // corner's two walls, or a sheet's two sides, never share a texel; the pre-pass writes each pixel's face bins.
 //
 // The includer defines TEXEL_HASH(i) (the hash table's slot i: uvec4 key x, key y, texel index, unused) and
-// TEXEL_POSITION(i) / TEXEL_NORMAL(i) (a texel's vec4s: xyz its position; xyz its mean face normal).
+// TEXEL_POSITION(i) / TEXEL_NORMAL(i) (a texel's vec4s: xyz its position, w its surface samples; xyz its mean face
+// normal).
 #ifndef TEXEL_GLSL
 #define TEXEL_GLSL
 
@@ -93,7 +94,13 @@ void texelsAround(TexelGrid g, vec3 p, vec3 n, float faceBin, out int ids[TEXEL_
             vec3 tn = TEXEL_NORMAL(id).xyz;
             float facing = dot(tn, n);
             if (facing <= 0.0 || abs(dot(tn, TEXEL_POSITION(id).xyz - p)) > g.spacing) continue;
-            float w = (o.x == 1 ? t.x : 1.0 - t.x) * (o.y == 1 ? t.y : 1.0 - t.y) * (o.z == 1 ? t.z : 1.0 - t.z);
+            // By distance to the texel's own centre (the centroid of its surface in the cell), not the cell grid's
+            // trilinear share, and by its area there (its samples, four for a cell a flat face crosses whole): a cell
+            // that catches only a sliver of a wall at an inside corner holds a texel lit like the corner, and at full
+            // trilinear weight it dotted the Cornell box's corners at every cell.
+            vec4 tp = TEXEL_POSITION(id);
+            vec3 dp = (tp.xyz - p) / g.spacing;
+            float w = exp(-dot(dp, dp) / (2.0 * 0.36)) * min(tp.w / 4.0, 1.0);
             float f2 = facing * facing;
             ids[slot] = id;
             weights[slot] = w * f2 * f2;

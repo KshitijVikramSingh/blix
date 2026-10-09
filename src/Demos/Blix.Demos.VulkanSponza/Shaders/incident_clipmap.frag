@@ -39,7 +39,10 @@ layout(set = 0, binding = 0) uniform IncidentClipmap {
     vec4 uTexelGrid;     // the texels (texel.glsl, stage 5a): the cells' origin xyz, spacing w
     vec4 uTexelParams;   // x hash capacity, y 1 when on, z the rays at which a texel's answer is trusted whole, w 1:
                          // read the spatially filtered light (texel_gather.comp)
-    vec4 uReference;     // the reference view (reference_trace.comp): x 1 when shown, yz its pixels (half the frame's)
+    vec4 uTexelDebug;    // x the texel frame (the debug view's stamp test)
+    vec4 uReference;     // the reference view (reference_trace.comp): x 1 when shown, yz its pixels (half the frame's);
+                         // w 1: the texel debug view (--texel-debug: r the texels' confidence, g 1 where any was found,
+                         // b 1 where the lookup found none)
 } g;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -114,6 +117,9 @@ layout(std430, set = 0, binding = 12) readonly buffer TexelLight { vec4 texelLig
 layout(std430, set = 0, binding = 13) readonly buffer TexelPrior { vec4 texelPrior[]; };
 layout(std430, set = 0, binding = 14) readonly buffer TexelFiltered { vec4 texelFiltered[]; };
 layout(std430, set = 0, binding = 15) readonly buffer ReferenceAccum { vec4 referenceAccum[]; };
+layout(std430, set = 0, binding = 16) readonly buffer TexelBlend { vec4 texelBlend[]; };
+layout(std430, set = 0, binding = 17) readonly buffer TexelStamp { uint texelStamp[]; };
+float debugStamped, debugLit;
 #define TEXEL_HASH(i) texelHash[i]
 #define TEXEL_POSITION(i) texels[2 * (i)]
 #define TEXEL_NORMAL(i) texels[2 * (i) + 1]
@@ -132,14 +138,21 @@ bool texelsAt(vec3 worldPos, vec3 n, float faceBin, out vec3 irradiance, out flo
     texelsAround(tg, worldPos, n, faceBin, ids, weights);
     vec3 sum = vec3(0.0);
     float weight = 0.0, raysWeighted = 0.0, located = 0.0;
+    float count = 0.0;
+    debugStamped = 0.0; debugLit = 0.0;
     for (int i = 0; i < TEXEL_CANDIDATES; ++i) {
         if (ids[i] < 0) continue;
         located += weights[i];
+        count += 1.0;
+        if (uint(g.uTexelDebug.x) - texelStamp[ids[i]] < 32u) debugStamped += 1.0;
+        if (texelLight[ids[i]].w > 0.0) debugLit += 1.0;
         vec4 light = texelLight[ids[i]];
         vec4 prior = texelPrior[ids[i]];
         if (light.w <= 0.0 && prior.w <= 0.0) continue;
-        // With the spatial filter (texel_gather.comp) its filtered light, else its own.
-        vec3 own = g.uTexelParams.w > 0.5 && texelFiltered[ids[i]].w > 0.0 ? texelFiltered[ids[i]].rgb : light.rgb;
+        // What texel_gather.comp left it (the occlusion estimate and the gathered light blended), spatially filtered
+        // by texel_filter.comp (or not, --texel-filter 0).
+        vec3 own = g.uTexelParams.w > 0.5 && texelFiltered[ids[i]].w > 0.0 ? texelFiltered[ids[i]].rgb
+            : texelBlend[ids[i]].w > 0.0 ? texelBlend[ids[i]].rgb : light.rgb;
         vec3 value = prior.w > 0.0 ? mix(prior.rgb, own, min(light.w / 256.0, 1.0)) : own;
         sum += weights[i] * value;
         weight += weights[i];
@@ -147,22 +160,26 @@ bool texelsAt(vec3 worldPos, vec3 n, float faceBin, out vec3 irradiance, out flo
     }
     irradiance = weight > 1e-6 ? sum / weight : vec3(0.0);
     confidence = located > 1e-6 ? raysWeighted / located : 0.0;
+    debugStamped /= max(count, 1.0); debugLit /= max(count, 1.0);
     return weight > 1e-6;
 }
 
 void main() {
     clipLiftKnob = g.uClipParams.z;
     clipVisibilityKnob = g.uClipParams.w;
-    float raw = texture(uSceneDepth, vUv).r;
+    // Exact fetches, as texel_mark.comp reads them: the texels a pixel weighs must be the ones the mark queued for it.
+    ivec2 pixel = clamp(ivec2(vUv * vec2(textureSize(uSceneDepth, 0))), ivec2(0), textureSize(uSceneDepth, 0) - 1);
+    float raw = texelFetch(uSceneDepth, pixel, 0).r;
     if (raw >= 1.0 - 1e-6) {
         outIncident = vec4(0.0, 0.0, 0.0, 1.0);
         outIncidentGradient = vec4(0.0);
         return;
     }
-    vec4 view = g.uInvProjection * vec4(vUv * 2.0 - 1.0, raw, 1.0);
+    vec2 pixelUv = (vec2(pixel) + 0.5) / vec2(textureSize(uSceneDepth, 0));
+    vec4 view = g.uInvProjection * vec4(pixelUv * 2.0 - 1.0, raw, 1.0);
     vec3 worldPos = (g.uInvView * vec4(view.xyz / view.w, 1.0)).xyz;
     float viewDepth = abs(view.z / view.w);
-    vec4 nSample = texture(uPrepassNormal, vUv);
+    vec4 nSample = texelFetch(uPrepassNormal, pixel, 0);
     vec3 N = dot(nSample.xyz, nSample.xyz) > 1e-6
         ? normalize(nSample.xyz)
         : normalize((g.uInvView * vec4(0.0, 0.0, 1.0, 0.0)).xyz);
@@ -208,8 +225,16 @@ void main() {
     if (surfaceWeight > 0.0) outIncident = found ? mix(outIncident, surfaceField, surfaceConfidence) : surfaceField;
     vec3 gathered;
     float confidence;
-    if (g.uTexelParams.y > 0.5 && g.uClipParams.y < 0.5 && texelsAt(worldPos, N, texelFetch(uPrepassNormal, ivec2(vUv * vec2(textureSize(uPrepassNormal, 0))), 0).w, gathered, confidence)) {
+    bool texelFound = false;
+    if (g.uTexelParams.y > 0.5 && g.uClipParams.y < 0.5 && texelsAt(worldPos, N, nSample.w, gathered, confidence)) {
         outIncident.rgb = mix(outIncident.rgb, gathered, confidence);
+        texelFound = true;
+    }
+    if (g.uReference.w > 0.5) {
+        // r confidence, g the share of the texels read the mark stamped in the last 32 frames, b the share with rays.
+        outIncident = vec4(texelFound ? confidence : 0.0, debugStamped, debugLit, 1.0);
+        outIncidentGradient = vec4(0.0);
+        return;
     }
     if (g.uScreen.x > 0.5 && screenProbesAt(worldPos, N, viewDepth, gathered, confidence)) {
         outIncident.rgb = mix(outIncident.rgb, gathered, confidence);

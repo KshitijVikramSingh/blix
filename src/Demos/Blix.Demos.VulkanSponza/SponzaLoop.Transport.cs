@@ -123,7 +123,7 @@ internal sealed partial class SponzaLoop
         cookedGuideBuffer = Own(device.CreateGpuBuffer(cdf.Length * 4, MemoryMarshal.AsBytes(cdf.AsSpan()), "sponza.cooked.guides"));
     }
 
-    private void UploadCookedPatches(List<Vector3> pos, List<Vector3> nrm, Vector3[] incident, float cell)
+    private void UploadCookedPatches(List<Vector3> pos, List<Vector3> nrm, Vector3[] incident, float[] openness, float cell)
     {
         if (!transportGpu) return;
         var min = sceneBoundsMin - new Vector3(cell);
@@ -146,7 +146,7 @@ internal sealed partial class SponzaLoop
         for (var i = 0; i < pos.Count; i++)
         {
             packed[3 * i] = new Vector4(pos[i], 0f);
-            packed[3 * i + 1] = new Vector4(nrm[i], 0f);
+            packed[3 * i + 1] = new Vector4(nrm[i], openness[i]);
             packed[3 * i + 2] = new Vector4(incident[i], 0f);
         }
         cookedPatchBuffer = Own(device.CreateGpuBuffer(packed.Length * 16, MemoryMarshal.AsBytes(packed.AsSpan()), "sponza.cooked.patches"));
@@ -689,7 +689,21 @@ internal sealed partial class SponzaLoop
             return (inc, BuildGuides(outg, sOut));
         };
         transportRelightSun = (toSun, sunIrr);
-        UploadCookedPatches(pos, nrm, incident, transportSpacing);
+        // Each patch's openness: the fraction of its cosine rays that meet nothing within TexelOpenReach -- what a texel's
+        // own openness is held against (texel_gather.comp): the patches' light, scaled by how much more or less open
+        // the texel is than the patches around it.
+        var openness = new float[patches];
+        if (transportGpu)
+            Parallel.For(0, patches, i =>
+            {
+                var r = new Random(6151 + i);
+                var free = 0;
+                const int tests = 256;
+                for (var t = 0; t < tests; t++)
+                    if (!scene.Any(new Ray(pos[i] + nrm[i] * 0.01f, CosineHemisphereCpu(nrm[i], r)), 0f, TexelOpenReach, (uint)r.Next())) free++;
+                openness[i] = free / (float)tests;
+            });
+        UploadCookedPatches(pos, nrm, incident, openness, transportSpacing);
         UploadCookedGuides(BuildGuides(outgoing, sunletOut));
         CookTexels(scene, Tri, (i, t) => (surfaces[data.RowOf(i, t)] >> 24) < 255u);
 
@@ -759,6 +773,42 @@ internal sealed partial class SponzaLoop
         // Near/far split: R per arm; a patch's FAR light (rays beyond R from its centre) is what a cook would store, one
         // colour a patch per R. Cached across points, since neighbouring points share patches.
         float[] splitR = { 0f, 0.25f, 1.0f };
+        // Far maps (the rethink after texels settled too slowly): per patch, the RADIANCE arriving from beyond R by
+        // direction (octahedral bins), from its own rays; a point traces rays and takes, for each that runs past R,
+        // its patch's map in that direction -- its own near occluders decide what gets through, the map what arrives.
+        float[] mapR = { 0.5f, 1.0f };
+        int[] mapRes = { 8, 16 };
+        const int mapRays = 4096;
+        var farMaps = new ConcurrentDictionary<int, Vector3[][]>();
+        Vector3[][] FarMap(int j) => farMaps.GetOrAdd(j, jj =>
+        {
+            var rr = new Random(4049 + jj);
+            var maps = new Vector3[mapR.Length * mapRes.Length][];
+            var counts = new int[maps.Length][];
+            var all = new Vector3[maps.Length]; var allCount = new int[maps.Length];
+            for (var q = 0; q < maps.Length; q++) { var bins = mapRes[q % mapRes.Length] * mapRes[q % mapRes.Length]; maps[q] = new Vector3[bins]; counts[q] = new int[bins]; }
+            for (var t = 0; t < mapRays; t++)
+            {
+                var d = CosineHemisphereCpu(nrm[jj], rr);
+                var (c, len) = HitLight(pos[jj] + nrm[jj] * 0.01f, d, rr);
+                for (var ri = 0; ri < mapR.Length; ri++)
+                {
+                    if (len < mapR[ri]) continue;
+                    for (var ci = 0; ci < mapRes.Length; ci++)
+                    {
+                        var q = ri * mapRes.Length + ci;
+                        var b = OctBin(d, mapRes[ci]);
+                        maps[q][b] += c; counts[q][b]++; all[q] += c; allCount[q]++;
+                    }
+                }
+            }
+            for (var q = 0; q < maps.Length; q++)
+            {
+                var mean = allCount[q] > 0 ? all[q] / allCount[q] : Vector3.Zero;
+                for (var b = 0; b < maps[q].Length; b++) maps[q][b] = counts[q][b] > 0 ? maps[q][b] / counts[q][b] : mean;
+            }
+            return maps;
+        });
         const int farRays = 256;
         var farOf = new ConcurrentDictionary<int, Vector3[]>();
         Vector3[] FarOf(int j) => farOf.GetOrAdd(j, jj =>
@@ -960,6 +1010,75 @@ internal sealed partial class SponzaLoop
             // Ray-count sweep (the first N of the same rays) and the near/far split: near rays from x at full count and at
             // each N, plus the far part interpolated from the patches.
             var extra = new StringBuilder();
+            // Occlusion ratio (no light rays): the patches' interpolated light, scaled by how open x is within R
+            // against how open its patches are -- cosine rays that meet nothing within R. Local occluders are what
+            // patches cannot know (the swap test put the error on position); openness is a 0/1 average, quick to settle.
+            {
+                float[] aoR = { 0.25f, 0.5f, 1.0f };
+                float Open(Vector3 o, Vector3 nn, float reach, int rays, Random rr)
+                {
+                    var free = 0;
+                    for (var t = 0; t < rays; t++)
+                        if (!scene.Any(new Ray(o, CosineHemisphereCpu(nn, rr)), 0f, reach, (uint)rr.Next())) free++;
+                    return free / (float)rays;
+                }
+                var rx = new Random(919 + k);
+                foreach (var aoReach in aoR)
+                {
+                    // The patches' weighted openness, with the same weights as interp.
+                    var wOpen = 0f; var wSum = 0f;
+                    for (var dz = -1; dz <= 1; dz++)
+                    for (var dy = -1; dy <= 1; dy++)
+                    for (var dx = -1; dx <= 1; dx++)
+                    {
+                        if (!grid.TryGetValue((kx + dx, ky + dy, kz + dz), out var list)) continue;
+                        foreach (var j in list)
+                        {
+                            var facing = Vector3.Dot(nrm[j], n);
+                            if (facing < 0.5f) continue;
+                            var w = facing * facing * MathF.Exp(-Vector3.DistanceSquared(pos[j], x) / (transportSpacing * transportSpacing));
+                            if (w < 1e-3f) continue;
+                            wOpen += w * Open(pos[j] + nrm[j] * 0.01f, nrm[j], aoReach, 256, new Random(511 + j));
+                            wSum += w;
+                        }
+                    }
+                    var patchOpen = wSum > 0f ? wOpen / wSum : 0f;
+                    foreach (var rays in new[] { 64, 1024 })
+                    {
+                        var open = Open(x, n, aoReach, rays, rx);
+                        var ratio = patchOpen > 1e-3f ? open / patchOpen : 1f;
+                        extra.Append(CultureInfo.InvariantCulture, $" ao{(int)MathF.Round(aoReach * 100)}n{rays} {(double.IsNaN(interp) ? double.NaN : interp * ratio):0.00000}");
+                    }
+                }
+            }
+            {
+                var jm = Nearest(x, n);
+                if (jm >= 0)
+                {
+                    var maps = FarMap(jm);
+                    var rr = new Random(733 + k);
+                    int[] ns = { 32, 128, 1024 };
+                    var acc = new Vector3[maps.Length];
+                    for (var t = 0; t < 1024; t++)
+                    {
+                        var d = CosineHemisphereCpu(n, rr);
+                        var (c, len) = HitLight(x, d, rr);
+                        for (var ri = 0; ri < mapR.Length; ri++)
+                        for (var ci = 0; ci < mapRes.Length; ci++)
+                        {
+                            var q = ri * mapRes.Length + ci;
+                            acc[q] += len < mapR[ri] ? c : maps[q][OctBin(d, mapRes[ci])];
+                        }
+                        if (Array.IndexOf(ns, t + 1) is var at && at >= 0)
+                            for (var ri = 0; ri < mapR.Length; ri++)
+                            for (var ci = 0; ci < mapRes.Length; ci++)
+                            {
+                                var q = ri * mapRes.Length + ci;
+                                extra.Append(CultureInfo.InvariantCulture, $" far{(int)MathF.Round(mapR[ri] * 100)}r{mapRes[ci]}n{t + 1} {Lum(acc[q] * (MathF.PI / (t + 1))):0.00000}");
+                            }
+                    }
+                }
+            }
             // Fine texels, emulated: the gather from x snapped to a grid of S metres (the cell's centre projected onto x's
             // plane) -- how fine must a surface cache be that reads the cooked light at its own position and normal?
             foreach (var sz in new[] { 0.025f, 0.05f, 0.10f, 0.20f })

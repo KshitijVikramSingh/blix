@@ -444,10 +444,12 @@ internal sealed partial class SponzaLoop
             // Use the post-load clock so streaming duration cannot change a capture's jitter phase.
             var jx = (Halton(postLoadFrames, 2) - 0.5f) * 2f / frame.Width;
             var jy = (Halton(postLoadFrames, 3) - 0.5f) * 2f / frame.Height;
-            viewProjJittered = viewProj * Matrix4x4.CreateTranslation(jx, jy, 0f);
+            cameraJitter = Matrix4x4.CreateTranslation(jx, jy, 0f);
+            viewProjJittered = viewProj * cameraJitter;
         }
         else
         {
+            cameraJitter = Matrix4x4.Identity;
             viewProjJittered = viewProj;
         }
 
@@ -483,7 +485,7 @@ internal sealed partial class SponzaLoop
             // --sky-no-sample turn both off).
             new("uIncident",         new Vector4Uniform(new Vector4(
                 skyVisibilityEnabled && !skipSkySample ? 1f : 0f,
-                0f,
+                IncidentHoldsOcclusion ? 1f : 0f,
                 IncidentFieldNow ? 1f : 0f,
                 0f))),
             new("uIncidentGradient", new Vector4Uniform(new Vector4(incidentNormalBias, incidentGradientClamp, 0f, 0f))),
@@ -830,7 +832,12 @@ internal sealed partial class SponzaLoop
         {
             if (ClipmapActive)
             {
-                Matrix4x4.Invert(cameraProjection, out var incidentInvProj);
+                // The JITTERED projection: what the depth these passes read was rasterized with. Reconstructing with the
+                // unjittered one put each point up to a pixel's footprint off its surface -- far off on a face seen
+                // edge-on -- and the texel mark, visiting a pixel every 16th frame in step with the Halton x jitter
+                // (base 2: frame mod 16 sets it), never queued the texels other jitters land on: on the Cornell boxes'
+                // side faces half the texels pixels read had never been traced (texel debug view).
+                Matrix4x4.Invert(cameraProjection * cameraJitter, out var incidentInvProj);
                 Matrix4x4.Invert(cameraView, out var incidentInvView);
                 RecordSurfaceReclaim();
                 RecordClipmapMark(incidentInvProj, incidentInvView, frame.Width, frame.Height);

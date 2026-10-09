@@ -20,8 +20,9 @@ layout(set = 0, binding = 0) uniform TexelGather {
     vec4 uTexelParams;    // x hash capacity, y list capacity (the budget), z target rays, w the frame
     vec4 uSunDirection;   // xyz the direction the sun travels
     vec4 uSunIrradiance;  // rgb
-    vec4 uSky;            // x sky strength, y the sky's mip for a ray, z the texels' epoch, w 1: the spatial filter
+    vec4 uSky;            // x sky strength, y the sky's mip for a ray, z the texels' epoch
     mat4 uCascadeVP[3];
+    vec4 uOpen;           // x the occlusion estimate's reach (m), y its relative error (the blend's), z 1: blend at all
     vec4 uCookedGrid;
     vec4 uCookedDims;
 } u;
@@ -48,18 +49,12 @@ layout(std430, set = 0, binding = 11) buffer TexelMoment { float texelMoment[]; 
 layout(std430, set = 0, binding = 12) readonly buffer CookedGuides { float cookedGuide[]; };
 #define GUIDE_RES 8
 #define GUIDE_BINS 64
-// The spatial filter, in texel space (--texel-filter): once a texel's pass lands, the 27 texels around its cell on
-// its own surface (its bin, its plane), weighted by distance (sigma one cell), by rays, and by how near each one's
-// light is to its own -- one more than ~half again brighter or darker is an edge (a shadow's, a corner's), not noise,
-// and drops out -- averaged into TexelFiltered, which the incident pass reads. Per pixel each frame the same filter
-// cost ~18 ms on Sponza's hall; here a frame's queue is 27 lookups each. (The user: bounce-lit balconies looked "a
-// pointillist painting" -- each texel's own gather is noisy there at the rays a frame budget reaches.)
-layout(std430, set = 0, binding = 20) readonly buffer TexelHash { uvec4 texelHash[]; };
-layout(std430, set = 0, binding = 21) buffer TexelFiltered { vec4 texelFiltered[]; };
-#define TEXEL_HASH(i) texelHash[i]
-#define TEXEL_POSITION(i) texels[2 * (i)]
-#define TEXEL_NORMAL(i) texels[2 * (i) + 1]
-#include "texel.glsl"
+// The occlusion estimate: a texel's openness (x the fraction of its cosine rays that met nothing within uOpen.x, y how
+// many) -- the cosine half of every pass measures it -- and the estimate it gives: the patches' interpolated light x
+// its openness over theirs. Smooth from the first pass (no light is sampled), ~18% off on Sponza's hall; the gathered
+// light is unbiased but noisy. TexelBlend is the two by inverse variance: what the filter and the incident pass read.
+layout(std430, set = 0, binding = 22) buffer TexelOpen { vec4 texelOpen[]; };
+layout(std430, set = 0, binding = 23) buffer TexelBlend { vec4 texelBlend[]; };
 
 #define COOKED_BINDING 6
 #define COOKED_GRID u.uCookedGrid
@@ -72,8 +67,7 @@ layout(std430, set = 0, binding = 21) buffer TexelFiltered { vec4 texelFiltered[
 
 shared vec3 sRadiance[RAYS];
 shared int sGuide;
-shared vec4 sNew;
-shared vec4 sNeighbour[RAYS];
+shared float sOpen[RAYS];
 
 vec2 guideOctEncode(vec3 d) {
     d /= abs(d.x) + abs(d.y) + abs(d.z);
@@ -165,7 +159,10 @@ void main() {
 
     vec3 radiance;
     BlixRayHit hit;
-    if (blix_traceClosest(origin, dir, 0.0, uintBitsToFloat(0x7F800000u), seed, hit)) {
+    bool hitSomething = blix_traceClosest(origin, dir, 0.0, uintBitsToFloat(0x7F800000u), seed, hit);
+    // Openness, from the cosine-distributed rays only (-1: a guided ray says nothing about it).
+    sOpen[ray] = guided ? -1.0 : (hitSomething && hit.t < u.uOpen.x ? 0.0 : 1.0);
+    if (hitSomething) {
         vec3 hn = dot(hit.normal, dir) > 0.0 ? -hit.normal : hit.normal;
         vec3 hitPos = origin + dir * hit.t;
         vec3 toSun = -normalize(u.uSunDirection.xyz);
@@ -199,44 +196,37 @@ void main() {
             texelEpoch[id] = epoch;
             old = vec4(0.0);
         }
-        sNew = vec4(mix(old.rgb, estimate, float(RAYS) / total), total);
-        texelLight[id] = sNew;
-        float lum = dot(estimate, vec3(0.2126, 0.7152, 0.0722));
-        texelMoment[id] = mix(stale ? 0.0 : texelMoment[id], lum * lum, float(RAYS) / total);
+        vec4 gathered = vec4(mix(old.rgb, estimate, float(RAYS) / total), total);
+        texelLight[id] = gathered;
+        const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
+        float lum = dot(estimate, luma);
+        float m2 = mix(stale ? 0.0 : texelMoment[id], lum * lum, float(RAYS) / total);
+        texelMoment[id] = m2;
         if (total >= TEXEL_PRIOR_RAYS) texelPrior[id] = vec4(0.0);
-    }
-    barrier();
-    if (u.uSky.w < 0.5) {
-        if (ray == 0u) texelFiltered[id] = sNew;
-        return;
-    }
-    const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
-    vec3 centreValue = sNew.rgb;
-    float centre = dot(centreValue, luma);
-    sNeighbour[ray] = vec4(0.0);
-    if (ray < 27u) {
-        TexelGrid tg;
-        tg.minCorner = u.uTexelGrid.xyz;
-        tg.spacing = u.uTexelGrid.w;
-        tg.capacity = uint(u.uTexelParams.x);
-        ivec3 cell = ivec3(floor((position - tg.minCorner) / tg.spacing)) + ivec3(int(ray) % 3, (int(ray) / 3) % 3, int(ray) / 9) - 1;
-        int other = ray == 13u ? id : texelFind(tg, cell, texelBin(n));
-        if (other >= 0) {
-            vec3 tn = TEXEL_NORMAL(other).xyz;
-            vec3 tp = TEXEL_POSITION(other).xyz;
-            vec4 light = other == id ? sNew : texelLight[other];
-            if (dot(tn, n) > 0.0 && abs(dot(n, tp - position)) <= tg.spacing && light.w > 0.0) {
-                vec3 dp = (tp - position) / tg.spacing;
-                float edge = (dot(light.rgb, luma) - centre) / (0.5 * centre + 1e-5);
-                float f = dot(tn, n);
-                float w = exp(-0.5 * dot(dp, dp)) * exp(-edge * edge) * f * f * f * f * min(light.w / 64.0, 1.0);
-                sNeighbour[ray] = vec4(w * light.rgb, w);
+        // Openness this pass, into its running mean.
+        float freeRays = 0.0, cosineRays = 0.0;
+        for (int k = 0; k < RAYS; ++k) if (sOpen[k] >= 0.0) { cosineRays += 1.0; freeRays += sOpen[k]; }
+        vec4 open = texelOpen[id];
+        float openCount = open.y + cosineRays;
+        float openness = openCount > 0.0 ? (open.x * open.y + freeRays) / openCount : 0.0;
+        texelOpen[id] = vec4(openness, openCount, 0.0, 0.0);
+        vec4 value = gathered;
+        if (u.uOpen.z > 0.5) {
+            float wsum;
+            vec4 interp = cookedInterp(position, n, wsum);
+            if (wsum > 1e-6) {
+                vec3 occlusion = interp.a > 1e-3 ? interp.rgb * (openness / interp.a) : interp.rgb;
+                // The gathered mean's variance: its passes' spread over their count, with one pseudo-pass of 100%
+                // spread so a texel of one or two passes does not claim certainty it has not earned.
+                float mean = dot(gathered.rgb, luma);
+                float passes = total / float(RAYS);
+                float variance = (max(m2 - mean * mean, 0.0) * passes + mean * mean) / (passes * (passes + 1.0));
+                float occlusionError = u.uOpen.y * dot(occlusion, luma);
+                float wGathered = 1.0 / (variance + 1e-12);
+                float wOcclusion = 1.0 / (occlusionError * occlusionError + 1e-12);
+                value = vec4((wGathered * gathered.rgb + wOcclusion * occlusion) / (wGathered + wOcclusion), total);
             }
         }
+        texelBlend[id] = value;
     }
-    barrier();
-    if (ray != 0u) return;
-    vec4 acc = vec4(0.0);
-    for (int k = 0; k < 27; ++k) acc += sNeighbour[k];
-    texelFiltered[id] = acc.w > 1e-6 ? vec4(acc.rgb / acc.w, 1.0) : sNew;
 }

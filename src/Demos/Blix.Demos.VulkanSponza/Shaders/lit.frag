@@ -559,7 +559,7 @@ void main() {
             incident *= clamp(1.0 + dot(gradient, nLow - vizGeometricN) / lum, 1.0 - range, 1.0 + range);
         }
         vizBounceRaw = incident;
-        bounce = incident * albedo * (1.0 - metallic) * ao * visibility;
+        bounce = incident * albedo * (1.0 - metallic) * ao * (frame.uIncident.y > 0.5 ? 1.0 : visibility);
     }
 
     // Sheen's own prefiltered environment, at the sheen roughness rather than the base one, times

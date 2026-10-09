@@ -1,0 +1,71 @@
+#version 450
+// The texels' spatial filter (--texel-filter): for each texel the image read this frame (texel_mark.comp lists them
+// as it stamps them), the 27 texels around its cell on its own surface (its bin, its plane), weighted by distance
+// (sigma one cell), by rays, and by how near each one's light is to its own -- one more than ~half again brighter or
+// darker is an edge (a shadow's, a corner's), not noise, and drops out -- into TexelFiltered, which the incident pass
+// reads. Every frame a texel is seen, not when it is gathered: filtered once at its last gather, a texel that settled
+// early froze its noisy young neighbours' average, and the Cornell boxes' faces showed it as stripes a texel wide.
+// (Per pixel each frame the same filter cost ~18 ms on Sponza's hall.)
+
+layout(local_size_x = 32) in;
+
+layout(set = 0, binding = 0) uniform TexelFilter {
+    vec4 uTexelGrid;      // xyz the cells' origin, w the spacing
+    vec4 uTexelParams;    // x hash capacity, y the list's capacity, z the trust rays, w the frame
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer TexelHash { uvec4 texelHash[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 3) readonly buffer TexelBlend { vec4 texelBlend[]; };
+layout(std430, set = 0, binding = 4) buffer TexelFiltered { vec4 texelFiltered[]; };
+// [parity] the counts (this frame's mark adds to set frame & 1; this pass zeroes the other), the list after them.
+layout(std430, set = 0, binding = 5) buffer TexelFilterList { uint texelFilterList[]; };
+
+#define TEXEL_HASH(i) texelHash[i]
+#define TEXEL_POSITION(i) texels[2 * (i)]
+#define TEXEL_NORMAL(i) texels[2 * (i) + 1]
+#include "texel.glsl"
+
+shared vec4 sNeighbour[32];
+
+void main() {
+    uint group = gl_WorkGroupID.x;
+    uint lane = gl_LocalInvocationID.x;
+    uint parity = uint(u.uTexelParams.w) & 1u;
+    uint capacity = uint(u.uTexelParams.y);
+    if (group == 0u && lane == 0u) texelFilterList[parity ^ 1u] = 0u;
+    if (group >= min(texelFilterList[parity], capacity)) return;
+    int id = int(texelFilterList[2u + group]);
+    vec4 own = texelBlend[id];
+    if (own.w <= 0.0) return;
+    vec3 position = TEXEL_POSITION(id).xyz;
+    vec3 n = TEXEL_NORMAL(id).xyz;
+    const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
+    float centre = dot(own.rgb, luma);
+    sNeighbour[lane] = vec4(0.0);
+    if (lane < 27u) {
+        TexelGrid tg;
+        tg.minCorner = u.uTexelGrid.xyz;
+        tg.spacing = u.uTexelGrid.w;
+        tg.capacity = uint(u.uTexelParams.x);
+        ivec3 cell = ivec3(floor((position - tg.minCorner) / tg.spacing)) + ivec3(int(lane) % 3, (int(lane) / 3) % 3, int(lane) / 9) - 1;
+        int other = lane == 13u ? id : texelFind(tg, cell, texelBin(n));
+        if (other >= 0) {
+            vec3 tn = TEXEL_NORMAL(other).xyz;
+            vec3 tp = TEXEL_POSITION(other).xyz;
+            vec4 light = texelBlend[other];
+            if (dot(tn, n) > 0.0 && abs(dot(n, tp - position)) <= tg.spacing && light.w > 0.0) {
+                vec3 dp = (tp - position) / tg.spacing;
+                float edge = (dot(light.rgb, luma) - centre) / (0.5 * centre + 1e-5);
+                float f = dot(tn, n);
+                float w = exp(-0.5 * dot(dp, dp)) * exp(-edge * edge) * f * f * f * f * min(light.w / u.uTexelParams.z, 1.0);
+                sNeighbour[lane] = vec4(w * light.rgb, w);
+            }
+        }
+    }
+    barrier();
+    if (lane != 0u) return;
+    vec4 acc = vec4(0.0);
+    for (int k = 0; k < 27; ++k) acc += sNeighbour[k];
+    texelFiltered[id] = acc.w > 1e-6 ? vec4(acc.rgb / acc.w, 1.0) : own;
+}

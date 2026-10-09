@@ -162,6 +162,8 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private float taaRelax = 3f;
     private GpuBufferHandle taaStats;
     private Matrix4x4 viewProjJittered = Matrix4x4.Identity;
+    // This frame's TAA jitter, a clip-space translation (identity without TAA): viewProjJittered = viewProj x it.
+    private Matrix4x4 cameraJitter = Matrix4x4.Identity;
     private GraphResourceHandle hdrMsaaHandle;   // MSAA colour the lit pass renders into
     private GraphResourceHandle depthHandle;     // MSAA depth (matches hdrMsaa)
     // Single-sample is the performance-research default. --msaa2/--msaa4 restore alpha-to-coverage

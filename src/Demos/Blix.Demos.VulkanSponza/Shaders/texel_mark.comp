@@ -18,7 +18,8 @@ layout(set = 0, binding = 0) uniform TexelMark {
     vec4 uTexelGrid;    // xyz the cells' origin, w the spacing
     vec4 uTexelParams;  // x hash capacity, y list capacity (the gather's budget), z target rays, w the frame
     vec4 uOffset;       // xy this frame's pixel within each stride block, z the texels' epoch (the patch light's)
-    vec4 uNoise;        // texelSettled: x the most rays, y the standard error tolerated (relative), z its floor
+    vec4 uNoise;        // texelSettled: x the most rays, y the standard error tolerated (relative), z its floor; w the
+                        // filter list's capacity
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -36,6 +37,8 @@ layout(std430, set = 0, binding = 8) buffer TexelProbe { vec4 texelProbe[]; };
 // The patch light each texel's rays were read from (SponzaLoop.Texels.cs, FollowSun): an older one queues it again.
 layout(std430, set = 0, binding = 9) readonly buffer TexelEpoch { uint texelEpoch[]; };
 layout(std430, set = 0, binding = 10) readonly buffer TexelMoment { float texelMoment[]; };
+// The texels the image reads this frame, for texel_filter.comp: [parity] counts, then the list (uNoise.w long).
+layout(std430, set = 0, binding = 11) buffer TexelFilterList { uint texelFilterList[]; };
 
 #define TEXEL_HASH(i) texelHash[i]
 #define TEXEL_POSITION(i) texels[2 * (i)]
@@ -93,6 +96,8 @@ void main() {
         if (ids[i] < 0) continue;
         uint id = uint(ids[i]);
         if (atomicExchange(texelStamp[id], frame) == frame) continue;
+        uint filterSlot = atomicAdd(texelFilterList[parity], 1u);
+        if (filterSlot < uint(u.uNoise.w)) texelFilterList[2u + filterSlot] = id;
         vec4 light = texelLight[id];
         float rays = light.w;
         bool stale = texelEpoch[id] != uint(u.uOffset.z);

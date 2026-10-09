@@ -606,6 +606,8 @@ internal sealed partial class SponzaLoop
         referenceInterface = Reflect("reference_trace.comp");
         referencePassHandle = graph.ComputePass("reference-trace").Shader(referenceInterface)
             .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
+        texelFilterInterface = Reflect("texel_filter.comp");
+        texelFilterPassHandle = graph.ComputePass("texel-filter").Shader(texelFilterInterface).Handle;
         texelGatherInterface = Reflect("texel_gather.comp");
         {
             var builder = graph.ComputePass("texel-gather");
@@ -874,6 +876,8 @@ internal sealed partial class SponzaLoop
             File.ReadAllBytes(Path.Combine(shaderDir, "surface_reclaim.comp.spv")), surfaceReclaimInterface, "surface_reclaim")), "surface_reclaim"));
         referencePipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "reference_trace.comp.spv")), referenceInterface, "reference_trace")), "reference_trace"));
+        texelFilterPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
+            File.ReadAllBytes(Path.Combine(shaderDir, "texel_filter.comp.spv")), texelFilterInterface, "texel_filter")), "texel_filter"));
         texelMarkPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "texel_mark.comp.spv")), texelMarkInterface, "texel_mark")), "texel_mark"));
         texelGatherPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(

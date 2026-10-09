@@ -40,6 +40,35 @@ int cookedNearest(vec3 p, vec3 n) {
     return best;
 }
 
+// The patches' light interpolated at p (facing within 60 degrees, Gaussian in distance over one spacing): rgb the
+// indirect irradiance, a their openness (normal.w, SponzaLoop.Transport.cs) with the same weights; weight their sum.
+vec4 cookedInterp(vec3 p, vec3 n, out float weight) {
+    weight = 0.0;
+    if (COOKED_DIMS.w < 0.5) return vec4(0.0);
+    ivec3 dims = ivec3(COOKED_DIMS.xyz);
+    float spacing = COOKED_GRID.w;
+    ivec3 c = ivec3(floor((p - COOKED_GRID.xyz) / spacing));
+    vec4 sum = vec4(0.0);
+    for (int dz = -1; dz <= 1; ++dz)
+    for (int dy = -1; dy <= 1; ++dy)
+    for (int dx = -1; dx <= 1; ++dx) {
+        ivec3 cc = c + ivec3(dx, dy, dz);
+        if (any(lessThan(cc, ivec3(0))) || any(greaterThanEqual(cc, dims))) continue;
+        int cell = (cc.z * dims.y + cc.y) * dims.x + cc.x;
+        for (uint k = cookedCellStart[cell]; k < cookedCellStart[cell + 1]; ++k) {
+            int j = int(cookedId[k]);
+            vec4 pn = cookedPatch[3 * j + 1];
+            float facing = dot(pn.xyz, n);
+            if (facing < 0.5) continue;
+            vec3 d = cookedPatch[3 * j].xyz - p;
+            float w = facing * facing * exp(-dot(d, d) / (spacing * spacing));
+            sum += w * vec4(cookedPatch[3 * j + 2].rgb, pn.w);
+            weight += w;
+        }
+    }
+    return weight > 1e-6 ? sum / weight : vec4(0.0);
+}
+
 vec3 cookedIndirect(vec3 p, vec3 n, out bool found) {
     int best = cookedNearest(p, n);
     found = best >= 0;
