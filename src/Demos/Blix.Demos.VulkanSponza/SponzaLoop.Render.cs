@@ -935,6 +935,7 @@ internal sealed partial class SponzaLoop
                 WriteSkyConsistency();
                 WriteSurfaceReference(grid: 24, paths: 1024, bounces: refBounces);
             }
+            WriteTransportSpike();
             WriteFrameStats();
             host.RequestClose();
         }

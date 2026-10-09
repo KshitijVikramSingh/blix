@@ -109,6 +109,7 @@ internal sealed partial class SponzaLoop
         // --sun-overhead maximizes directly lit courtyard area when isolating base lighting. The
         // cascade fit handles the vertical-light up-vector degeneracy.
         if (args.Flag("sun-overhead")) sunOverhead = true;
+        if (args.Values("sun", 2) is [var sy, var sp]) sunOverrideDegrees = new Vector2(float.Parse(sy, System.Globalization.CultureInfo.InvariantCulture), float.Parse(sp, System.Globalization.CultureInfo.InvariantCulture));
         // GPU isolation submits and waits per pass. It attributes real tile execution but removes
         // overlap, so isolated pass times are not additive components of the normal frame.
         if (args.Flag("gpu-isolate")) host.Timing.IsolatePasses = true;
@@ -248,6 +249,7 @@ internal sealed partial class SponzaLoop
         ReadWalkArgs(args);
         ReadWatchArgs(args);
         ReadSurfaceArgs(args);
+        ReadTransportArgs(args);
         // --cam x,y,z,yaw,pitch — a reproducible viewpoint. Without it every capture and every
         // census speaks only for wherever the camera happens to start, which for a question like
         // "how much of this scene is occluded" is the difference between a measurement and an
@@ -292,6 +294,15 @@ internal sealed partial class SponzaLoop
             return;
         }
         LoadIbl(assetsRoot);
+        // --sun yaw,pitch (degrees; pitch negative, below the horizon of travel): a fixed sun for a measurement -- the
+        // transport spike's sun sweep holds one cook against the path trace at several angles (stage 5a).
+        if (sunOverrideDegrees is { } sunDeg)
+        {
+            sunYaw = sunDeg.X * MathF.PI / 180f;
+            sunPitch = sunDeg.Y * MathF.PI / 180f;
+            UpdateSunDirection();
+            Console.WriteLine($"[VulkanSponza]   sun set by --sun: {sunDirection}");
+        }
 
         // --- Render graph ------------------------------------------------
         graph = new RenderGraph(device);

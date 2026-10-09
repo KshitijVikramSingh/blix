@@ -663,9 +663,21 @@ F. *The frame audit* (opened 2026-10-07: "a lot of pure performance on the table
    (region, index) from the start; the first spike is one region a scene.
    The file (.blixlight-like) waits until a representation proves itself: the spike cooks in memory, with the inputs
    and outputs a file would have.
-   5a (now): R1 + R2 + R3 for global sources, cooked on the CPU against the ray scene, solved for a sun angle, judged
-   at the path-trace reference's own points on the Cornell box (exact energy expected), with a sun sweep (several
-   angles, the path trace at each); then memory and cook time on Sponza. 5b: R4.
+   5a spike DONE (SponzaLoop.Transport.cs, `--transport` with `--probe-reference`; `--sun yaw pitch` fixes the sun):
+     R1 patches by area (0.25 m), R2 couplings from 512 cosine rays a patch (a hit couples to the nearest patch facing
+     the same way), R3 sky as 16x16 octahedral bins of the escaped share and the sun as a 32x32 octahedral visibility
+     map a patch; CPU solve (48 bounces, albedo at runtime); judged at the reference's points, interpolated from
+     nearby patches and by a final gather (diagnostic: what the representation knows).
+     Cornell box (7,631 patches, 937k couplings, 15.8 MB, cooked 1.2 s, solved 146 ms), six sun angles from one cook's
+     design, error against the path trace: shipped field 0.137-0.183 (energy 0.97-1.16); transport interpolated
+     0.069-0.108 (energy 0.99-1.05); final gather 0.039-0.067. No runtime rays.
+     Sponza (189,751 patches -- ~11,900 m2 of surface --, 29M couplings, 436 MB: couplings 222, sky bins 185, sun 23;
+     cooked 132 s, solved 2.7 s on the CPU): median ratio field 2.69 -> interpolated 1.39 -> final gather 1.07, but
+     means 2.6-3.3x high from a bright tail (p90 2.8-16). Suspects: 13.8% of cooked rays find no patch (one-sided thin
+     surfaces -- curtains -- and alpha foliage get patches on triangle fronts only; Cornell 1.5%), and the sun map's
+     32x32 bins (~5.6 degrees, one point a 0.25 m patch) where Sponza's sun comes through narrow openings.
+     Next: Sponza's tail (two-sided and cutout patches; sun visibility per patch area, finer near the sun's range),
+     the runtime on the GPU (solve + gather, on screen), then R4 (5b).
 
 Known instrument gap: a Sponza `--shot` raises 9 validation errors on `main` as well (a storage image
 copied to a buffer without transfer-source usage, in the shot's readback). Not this arc's, and not fixed.
