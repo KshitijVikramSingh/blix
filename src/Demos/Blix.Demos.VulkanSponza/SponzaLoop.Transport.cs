@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Numerics;
 using System.Runtime.InteropServices;
+using System.Text;
 using Blix.Core;
 using Blix.Geometry;
 using Blix.Graphics;
@@ -35,6 +36,11 @@ internal sealed partial class SponzaLoop
     // --transport-sunlet S: the first bounce of direct sun resolved at sunlets of S metres (0: at patch centres, as
     // before). Measured (emulated, Sponza's hall): patch centres 13.4%, sunlets 2 / 5 / 10 cm 5.7 / 6.5 / 8.3%.
     private float transportSunlet = 0.04f;
+    // --transport-charts: patches carry surface identity. Triangles joined across shared edges into charts (adjacent
+    // normals within ~25 degrees); every chart gets at least one patch, and a point -- or a cooked ray's hit -- reads
+    // only its own chart's patches. Uniform area sampling left 40% of the hall's visible points (mouldings, fluting,
+    // edges) without a patch on their own surface within 15 cm: interp 36% there against 13% where one was.
+    private bool transportCharts;
     private const int TransportSkyRes = 16;
 
     private void ReadTransportArgs(AppArgs args)
@@ -46,6 +52,7 @@ internal sealed partial class SponzaLoop
         if (args.Int("transport-vis") is { } v) transportVisRes = Math.Clamp(v, 4, 256);
         if (args.Int("transport-gather") is { } gr) transportGatherRays = Math.Clamp(gr, 16, 1 << 16);
         if (args.Float("transport-sunlet") is { } sl) transportSunlet = Math.Max(0f, sl);
+        transportCharts = args.Flag("transport-charts");
     }
 
     // OctEncode is SponzaLoop.ClipmapTwin's (the same mapping as Blix.Shaders/octahedral.glsl).
@@ -164,11 +171,65 @@ internal sealed partial class SponzaLoop
                     Vector3.Transform(m.Positions[m.Indices[triangle * 3 + 2]], inst.World));
         }
 
+        // ---- Charts: surface identity ------------------------------------------------------------------------------
+        // Per instance, triangles sharing an edge (positions welded at 0.1 mm) whose normals agree within ~25 degrees.
+        var chartOf = new int[scene.Instances.Count][];
+        var charts = 0;
+        for (var i = 0; i < scene.Instances.Count; i++)
+        {
+            var m = scene.Instances[i].Mesh;
+            var tris = m.Indices.Length / 3;
+            var parent = new int[tris];
+            for (var t = 0; t < tris; t++) parent[t] = t;
+            int Find(int x) { while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
+            var normals = new Vector3[tris];
+            var weld = new Dictionary<(long, long, long), int>();
+            var corner = new int[tris * 3];
+            for (var t = 0; t < tris; t++)
+            {
+                var (a, b, c) = Tri(i, t);
+                var cr = Vector3.Cross(b - a, c - a);
+                normals[t] = cr.LengthSquared() > 0f ? Vector3.Normalize(cr) : Vector3.Zero;
+                Vector3[] v = { a, b, c };
+                for (var q = 0; q < 3; q++)
+                {
+                    var key = ((long)MathF.Round(v[q].X * 1e4f), (long)MathF.Round(v[q].Y * 1e4f), (long)MathF.Round(v[q].Z * 1e4f));
+                    if (!weld.TryGetValue(key, out var id)) weld[key] = id = weld.Count;
+                    corner[t * 3 + q] = id;
+                }
+            }
+            var edges = new Dictionary<(int, int), int>();
+            for (var t = 0; t < tris; t++)
+            for (var q = 0; q < 3; q++)
+            {
+                int va = corner[t * 3 + q], vb = corner[t * 3 + (q + 1) % 3];
+                if (va == vb) continue;
+                var key = (Math.Min(va, vb), Math.Max(va, vb));
+                if (edges.TryGetValue(key, out var other))
+                {
+                    if (MathF.Abs(Vector3.Dot(normals[t], normals[other])) >= 0.9f) parent[Find(t)] = Find(other);
+                }
+                else edges[key] = t;
+            }
+            var local = new Dictionary<int, int>();
+            chartOf[i] = new int[tris];
+            for (var t = 0; t < tris; t++)
+            {
+                var root = Find(t);
+                if (!local.TryGetValue(root, out var id)) local[root] = id = charts + local.Count;
+                chartOf[i][t] = id;
+            }
+            charts += local.Count;
+        }
+
         // ---- R1: patches ------------------------------------------------------------------------------------------
         var patchArea = transportSpacing * transportSpacing;
         var pos = new List<Vector3>();
         var nrm = new List<Vector3>();
         var albedo = new List<Vector3>();
+        var patchChart = new List<int>();
+        var chartPlaced = new bool[charts];
+        var chartLargest = new (int Instance, int Triangle, float Area)[charts];
         var rng = new Random(5);
         for (var i = 0; i < scene.Instances.Count; i++)
         {
@@ -184,6 +245,8 @@ internal sealed partial class SponzaLoop
                 // tree's dark inner leaves borrow its sunlit outer ones (the orbit's points, 2.7x bright in the darkest
                 // quarter). They stay occluders in the cook (the coverage coin); lighting them is another representation's.
                 if ((surfaces[data.RowOf(i, t)] >> 24) < 255u) continue;
+                var ch = chartOf[i][t];
+                if (area > chartLargest[ch].Area) chartLargest[ch] = (i, t, area);
                 var expected = area / patchArea;
                 var count = (int)expected + (rng.NextDouble() < expected - (int)expected ? 1 : 0);
                 var front = Vector3.Normalize(cross);
@@ -207,10 +270,32 @@ internal sealed partial class SponzaLoop
                         pos.Add(at);
                         nrm.Add(side == 0 ? front : -front);
                         albedo.Add(alb);
+                        patchChart.Add(ch);
                     }
+                    chartPlaced[ch] = true;
                 }
             }
         }
+        // Every chart at least one patch (both sides), at its largest triangle's centroid -- a moulding smaller than a
+        // patch's area still has its own light, instead of borrowing the wall's beside it.
+        var forced = 0;
+        if (transportCharts)
+            for (var ch = 0; ch < charts; ch++)
+            {
+                if (chartPlaced[ch] || chartLargest[ch].Area <= 0f) continue;
+                var (ci, ct, _) = chartLargest[ch];
+                var (a, b, c) = Tri(ci, ct);
+                var front = Vector3.Normalize(Vector3.Cross(b - a, c - a));
+                var alb = Albedo(ci, ct);
+                for (var side = 0; side < 2; side++)
+                {
+                    pos.Add((a + b + c) / 3f);
+                    nrm.Add(side == 0 ? front : -front);
+                    albedo.Add(alb);
+                    patchChart.Add(ch);
+                }
+                forced++;
+            }
         // Drop sides inside something: a patch whose rays mostly meet back faces sits in a solid (a probe's "buried").
         {
             var keep = new bool[pos.Count];
@@ -226,10 +311,10 @@ internal sealed partial class SponzaLoop
                 }
                 keep[i] = back * 2 < tests;
             });
-            var p2 = new List<Vector3>(); var n2 = new List<Vector3>(); var a2 = new List<Vector3>();
-            for (var i = 0; i < pos.Count; i++) if (keep[i]) { p2.Add(pos[i]); n2.Add(nrm[i]); a2.Add(albedo[i]); }
-            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] transport spike: {pos.Count:N0} patch sides placed, {p2.Count:N0} kept (the rest inside a solid)."));
-            pos = p2; nrm = n2; albedo = a2;
+            var p2 = new List<Vector3>(); var n2 = new List<Vector3>(); var a2 = new List<Vector3>(); var c2 = new List<int>();
+            for (var i = 0; i < pos.Count; i++) if (keep[i]) { p2.Add(pos[i]); n2.Add(nrm[i]); a2.Add(albedo[i]); c2.Add(patchChart[i]); }
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] transport spike: {pos.Count:N0} patch sides placed, {p2.Count:N0} kept (the rest inside a solid); {charts:N0} charts, {forced:N0} given a patch of their own{(transportCharts ? "" : " (off)")}."));
+            pos = p2; nrm = n2; albedo = a2; patchChart = c2;
         }
         var patches = pos.Count;
         // A hash grid over the patches: a ray's hit finds the nearest patch facing the way the hit surface faces.
@@ -278,6 +363,30 @@ internal sealed partial class SponzaLoop
                 foreach (var c in list) { var d = Vector3.DistanceSquared(pos[c], p); if (d < bestD) { bestD = d; best = c; } }
             }
             return best;
+        }
+        // A hit's patch on its own chart (with --transport-charts): the nearest facing it there; else as before.
+        int NearestOwn(Vector3 p, Vector3 n, RayHit h, bool any)
+        {
+            if (transportCharts)
+            {
+                var ch = chartOf[h.Instance][h.Triangle];
+                var (kx, ky, kz) = Key(p);
+                var best = -1; var bestD = float.MaxValue;
+                for (var dz = -1; dz <= 1; dz++)
+                for (var dy = -1; dy <= 1; dy++)
+                for (var dx = -1; dx <= 1; dx++)
+                {
+                    if (!grid.TryGetValue((kx + dx, ky + dy, kz + dz), out var list)) continue;
+                    foreach (var j in list)
+                    {
+                        if (patchChart[j] != ch || Vector3.Dot(nrm[j], n) <= 0f) continue;
+                        var d = Vector3.DistanceSquared(pos[j], p);
+                        if (d < bestD) { bestD = d; best = j; }
+                    }
+                }
+                if (best >= 0) return best;
+            }
+            return any ? NearestAny(p, n) : Nearest(p, n);
         }
         Vector3 HitNormal(RayHit h, Vector3 dir)
         {
@@ -338,7 +447,7 @@ internal sealed partial class SponzaLoop
                         var sl = SunletOf(hp, hn, Albedo(h.Instance, h.Triangle));
                         accSun[sl] = accSun.GetValueOrDefault(sl) + 1;
                     }
-                    var j = useSunlets ? NearestAny(hp, hn) : Nearest(hp, hn);
+                    var j = NearestOwn(hp, hn, h, useSunlets);
                     if (j < 0) { lost++; continue; }
                     acc[j] = acc.GetValueOrDefault(j) + 1;
                 }
@@ -489,6 +598,75 @@ internal sealed partial class SponzaLoop
             return new Ray(cameraPosition, Vector3.Normalize(new Vector3(far.X, far.Y, far.Z) / far.W - cameraPosition));
         }
         static double Lum(Vector3 v) => 0.2126 * v.X + 0.7152 * v.Y + 0.0722 * v.Z;
+        // One ray's light read from the cooked representation (a hit's patch light + its sunlet; the sky on a miss), and
+        // how far it went -- the near/far split below adds these up on either side of a distance R.
+        (Vector3 C, float T) HitLight(Vector3 o, Vector3 d, Random rr)
+        {
+            if (scene.Closest(new Ray(o, d), 0f, float.PositiveInfinity, (uint)rr.Next()) is not { } h) return (SkyRadiance(d), float.PositiveInfinity);
+            if (Cutout(h)) return (Vector3.Zero, h.T);
+            var hn = HitNormal(h, d);
+            var hp = o + d * h.T;
+            var p = NearestOwn(hp, hn, h, false);
+            var c = p >= 0 ? outgoing[p] : Vector3.Zero;
+            if (useSunlets)
+            {
+                var key = ((int)MathF.Floor(hp.X / transportSunlet), (int)MathF.Floor(hp.Y / transportSunlet), (int)MathF.Floor(hp.Z / transportSunlet), OctBin(hn, 4));
+                if (sunletIndex.TryGetValue(key, out var sid)) c += sunletOut[sid];
+                else
+                {
+                    var nd = Vector3.Dot(hn, toSun);
+                    if (nd > 0f && !scene.Any(new Ray(hp + hn * 1e-3f, toSun), 0f, float.PositiveInfinity, (uint)rr.Next())) c += Albedo(h.Instance, h.Triangle) * sunIrr * nd / MathF.PI;
+                }
+            }
+            return (c, h.T);
+        }
+        // Directional patches: incident radiance projected to SH L2 per patch (fresh cosine rays from its centre, read
+        // through the cooked light), so a point evaluates irradiance at ITS normal -- a patch's one irradiance is for
+        // its own normal, and 60% of the hall's points are on curved or tilted surfaces where no nearby patch shares it.
+        static float[] ShBasis(Vector3 d) => new[] { 0.282095f, 0.488603f * d.Y, 0.488603f * d.Z, 0.488603f * d.X,
+            1.092548f * d.X * d.Y, 1.092548f * d.Y * d.Z, 0.315392f * (3f * d.Z * d.Z - 1f), 1.092548f * d.X * d.Z, 0.546274f * (d.X * d.X - d.Y * d.Y) };
+        const int shRays = 1024;
+        var shOf = new ConcurrentDictionary<int, Vector3[]>();
+        Vector3[] ShOf(int j) => shOf.GetOrAdd(j, jj =>
+        {
+            var rr = new Random(1777 + jj);
+            var c = new Vector3[9];
+            for (var t = 0; t < shRays; t++)
+            {
+                var d = CosineHemisphereCpu(nrm[jj], rr);
+                var cos = MathF.Max(Vector3.Dot(d, nrm[jj]), 1e-3f);
+                var L = HitLight(pos[jj] + nrm[jj] * 0.01f, d, rr).C * (MathF.PI / (cos * shRays));
+                var y = ShBasis(d);
+                for (var q = 0; q < 9; q++) c[q] += L * y[q];
+            }
+            return c;
+        });
+        // Irradiance at normal n from the SH (clamped-cosine convolution: pi, 2pi/3, pi/4), L1 or L2.
+        static Vector3 ShIrradiance(Vector3[] c, Vector3 n, bool l2)
+        {
+            var y = ShBasis(n);
+            var e = c[0] * (MathF.PI * y[0]);
+            for (var q = 1; q < 4; q++) e += c[q] * (2f * MathF.PI / 3f * y[q]);
+            if (l2) for (var q = 4; q < 9; q++) e += c[q] * (MathF.PI / 4f * y[q]);
+            return Vector3.Max(e, Vector3.Zero);
+        }
+        // Near/far split: R per arm; a patch's FAR light (rays beyond R from its centre) is what a cook would store, one
+        // colour a patch per R. Cached across points, since neighbouring points share patches.
+        float[] splitR = { 0f, 0.25f, 1.0f };
+        const int farRays = 256;
+        var farOf = new ConcurrentDictionary<int, Vector3[]>();
+        Vector3[] FarOf(int j) => farOf.GetOrAdd(j, jj =>
+        {
+            var rr = new Random(977 + jj);
+            var acc = new Vector3[splitR.Length];
+            for (var t = 0; t < farRays; t++)
+            {
+                var (c, len) = HitLight(pos[jj] + nrm[jj] * 0.01f, CosineHemisphereCpu(nrm[jj], rr), rr);
+                for (var q = 0; q < splitR.Length; q++) if (len >= splitR[q]) acc[q] += c;
+            }
+            for (var q = 0; q < splitR.Length; q++) acc[q] *= MathF.PI / farRays;
+            return acc;
+        });
         const int refGrid = 24;
         var lines = new ConcurrentBag<string>();
         Parallel.For(0, refGrid * refGrid, k =>
@@ -516,6 +694,46 @@ internal sealed partial class SponzaLoop
                 }
             }
             var interp = wsum > 0f ? Lum(sum / wsum) : double.NaN;
+            // The far part interpolated as interp is (facing patches near x, by closeness).
+            var farX = new Vector3[splitR.Length]; var farW = 0f;
+            var dNear = float.PositiveInfinity; var dPlane = float.PositiveInfinity;
+            // Own chart only: the patches of the surface x is on (both reconstruction and the far part of the split).
+            var hc = chartOf[hit.Instance][hit.Triangle];
+            var ownSum = Vector3.Zero; var ownW = 0f; var ownFar = new Vector3[splitR.Length]; var dOwn = float.PositiveInfinity;
+            for (var dz = -1; dz <= 1; dz++)
+            for (var dy = -1; dy <= 1; dy++)
+            for (var dx = -1; dx <= 1; dx++)
+            {
+                if (!grid.TryGetValue((kx + dx, ky + dy, kz + dz), out var list)) continue;
+                foreach (var j in list)
+                {
+                    if (patchChart[j] != hc || Vector3.Dot(nrm[j], n) <= 0f) continue;
+                    var d2 = Vector3.DistanceSquared(pos[j], x);
+                    dOwn = MathF.Min(dOwn, MathF.Sqrt(d2));
+                    var w = MathF.Max(MathF.Exp(-d2 / (transportSpacing * transportSpacing)), 1e-6f);
+                    ownSum += incident[j] * w; ownW += w;
+                    var f = FarOf(j);
+                    for (var q = 0; q < splitR.Length; q++) ownFar[q] += f[q] * w;
+                }
+            }
+            for (var dz = -1; dz <= 1; dz++)
+            for (var dy = -1; dy <= 1; dy++)
+            for (var dx = -1; dx <= 1; dx++)
+            {
+                if (!grid.TryGetValue((kx + dx, ky + dy, kz + dz), out var list)) continue;
+                foreach (var j in list)
+                {
+                    var facing = Vector3.Dot(nrm[j], n);
+                    if (facing < 0.5f) continue;
+                    var w = facing * facing * MathF.Exp(-Vector3.DistanceSquared(pos[j], x) / (transportSpacing * transportSpacing));
+                    dNear = MathF.Min(dNear, Vector3.Distance(pos[j], x));
+                    if (facing > 0.95f && MathF.Abs(Vector3.Dot(n, pos[j] - x + n * 0.01f)) < 0.02f) dPlane = MathF.Min(dPlane, Vector3.Distance(pos[j], x));
+                    if (w < 1e-3f) continue;
+                    var f = FarOf(j);
+                    for (var q = 0; q < splitR.Length; q++) farX[q] += f[q] * w;
+                    farW += w;
+                }
+            }
             // Same plane only (a patch on another wall, even a near one, is another surface): facing within ~18 degrees
             // and within 2 cm of the point's plane; weighted by closeness as above, and by inverse distance.
             var sumP = Vector3.Zero; var wP = 0f; var sumI = Vector3.Zero; var wI = 0f;
@@ -579,15 +797,19 @@ internal sealed partial class SponzaLoop
             float[] snapSizes = { 0.02f, 0.05f, 0.10f };
             var gSnap = new Vector3[snapSizes.Length];
             var gatherRays = transportGatherRays;
+            int[] counts = { 16, 64, 256 };
+            var partial = new Vector3[counts.Length]; var near = new Vector3[splitR.Length]; var nearAt = new Vector3[counts.Length, splitR.Length];
             for (var j = 0; j < gatherRays; j++)
             {
                 var d = CosineHemisphereCpu(n, r);
+                var gBefore = g; var rayT = float.PositiveInfinity;
                 if (scene.Closest(new Ray(x, d), 0f, float.PositiveInfinity, (uint)r.Next()) is { } h)
                 {
-                    if (Cutout(h)) continue;
+                    rayT = h.T;
+                    if (Cutout(h)) { RecordRay(j); continue; }
                     var hn = HitNormal(h, d);
                     var hp = x + d * h.T;
-                    var p = Nearest(hp, hn);
+                    var p = NearestOwn(hp, hn, h, false);
                     if (p >= 0) { g += outgoing[p]; gSun += outgoingSun[p]; gSky += outgoingSky[p]; }
                     if (useSunlets)
                     {
@@ -617,12 +839,95 @@ internal sealed partial class SponzaLoop
                     }
                 }
                 else { var sk = SkyRadiance(d); g += sk; gSky += sk; gExact += sk; for (var q = 0; q < gSnap.Length; q++) gSnap[q] += sk; }
+                RecordRay(j);
+                void RecordRay(int jj)
+                {
+                    var c = g - gBefore;
+                    for (var q = 0; q < splitR.Length; q++) if (rayT < splitR[q]) near[q] += c;
+                    for (var q = 0; q < counts.Length; q++) if (jj + 1 == counts[q]) { partial[q] = g; for (var u = 0; u < splitR.Length; u++) nearAt[q, u] = near[u]; }
+                }
             }
             var gather = Lum(g * (MathF.PI / gatherRays));
             var gatherSun = Lum(gSun * (MathF.PI / gatherRays));
             var gatherSky = Lum(gSky * (MathF.PI / gatherRays));
             var gatherExact = Lum(gExact * (MathF.PI / gatherRays));
-            lines.Add(string.Create(CultureInfo.InvariantCulture, $"    transport at {px / iw:0.0000},{py / ih:0.0000} interp {interp:0.00000} gather {gather:0.00000} plane {plane:0.00000} inverse {inverse:0.00000} linear {mls:0.00000} cutout {(Cutout(hit) ? 1 : 0)} gsun {gatherSun:0.00000} gsky {gatherSky:0.00000} gexact {gatherExact:0.00000} g2cm {Lum(gSnap[0] * (MathF.PI / gatherRays)):0.00000} g5cm {Lum(gSnap[1] * (MathF.PI / gatherRays)):0.00000} g10cm {Lum(gSnap[2] * (MathF.PI / gatherRays)):0.00000}"));
+            // Ray-count sweep (the first N of the same rays) and the near/far split: near rays from x at full count and at
+            // each N, plus the far part interpolated from the patches.
+            var extra = new StringBuilder();
+            // Fine texels, emulated: the gather from x snapped to a grid of S metres (the cell's centre projected onto x's
+            // plane) -- how fine must a surface cache be that reads the cooked light at its own position and normal?
+            foreach (var sz in new[] { 0.025f, 0.05f, 0.10f, 0.20f })
+            {
+                var centre = new Vector3(MathF.Floor(x.X / sz) + 0.5f, MathF.Floor(x.Y / sz) + 0.5f, MathF.Floor(x.Z / sz) + 0.5f) * sz;
+                var xs = centre - n * Vector3.Dot(n, centre - x);
+                var rr = new Random(53 + k);
+                var acc = Vector3.Zero;
+                const int texelRays = 1024;
+                for (var t = 0; t < texelRays; t++) acc += HitLight(xs, CosineHemisphereCpu(n, rr), rr).C;
+                extra.Append(CultureInfo.InvariantCulture, $" texel{(int)MathF.Round(sz * 1000)} {Lum(acc * (MathF.PI / texelRays)):0.00000}");
+            }
+            // SH patches interpolated as interp is, each evaluated at x's normal; and the nearest one alone.
+            {
+                Vector3 s1 = Vector3.Zero, s2 = Vector3.Zero; var sw = 0f;
+                for (var dz = -1; dz <= 1; dz++)
+                for (var dy = -1; dy <= 1; dy++)
+                for (var dx = -1; dx <= 1; dx++)
+                {
+                    if (!grid.TryGetValue((kx + dx, ky + dy, kz + dz), out var list)) continue;
+                    foreach (var j in list)
+                    {
+                        var facing = Vector3.Dot(nrm[j], n);
+                        if (facing < 0.5f) continue;
+                        var w = facing * facing * MathF.Exp(-Vector3.DistanceSquared(pos[j], x) / (transportSpacing * transportSpacing));
+                        if (w < 1e-3f) continue;
+                        var c = ShOf(j);
+                        s1 += ShIrradiance(c, n, false) * w; s2 += ShIrradiance(c, n, true) * w; sw += w;
+                    }
+                }
+                var jn = Nearest(x, n);
+                extra.Append(CultureInfo.InvariantCulture, $" shl1 {(sw > 0f ? Lum(s1 / sw) : double.NaN):0.00000} shl2 {(sw > 0f ? Lum(s2 / sw) : double.NaN):0.00000}");
+                extra.Append(CultureInfo.InvariantCulture, $" nearl1 {(jn >= 0 ? Lum(ShIrradiance(ShOf(jn), n, false)) : double.NaN):0.00000} nearl2 {(jn >= 0 ? Lum(ShIrradiance(ShOf(jn), n, true)) : double.NaN):0.00000}");
+            }
+            // Position or normal? The nearest facing patch's light traced fresh from ITS position with x's normal, and
+            // from x with ITS normal -- whichever of the two keeps the error is what the reconstruction misses.
+            {
+                var jn = Nearest(x, n);
+                var swapPos = double.NaN; var swapNrm = double.NaN; var angle = double.NaN; var dist = double.NaN;
+                if (jn >= 0)
+                {
+                    var rr = new Random(31 + k);
+                    Vector3 a1 = Vector3.Zero, a2 = Vector3.Zero;
+                    const int swapRays = 1024;
+                    for (var t = 0; t < swapRays; t++)
+                    {
+                        a1 += HitLight(pos[jn] + n * 0.01f, CosineHemisphereCpu(n, rr), rr).C;
+                        a2 += HitLight(x, CosineHemisphereCpu(nrm[jn], rr), rr).C;
+                    }
+                    swapPos = Lum(a1 * (MathF.PI / swapRays)); swapNrm = Lum(a2 * (MathF.PI / swapRays));
+                    angle = MathF.Acos(Math.Clamp(Vector3.Dot(nrm[jn], n), -1f, 1f)) * 180f / MathF.PI;
+                    dist = Vector3.Distance(pos[jn], x);
+                }
+                extra.Append(CultureInfo.InvariantCulture, $" atpatchpos {swapPos:0.00000} patchnormal {swapNrm:0.00000} nearestinc {(jn >= 0 ? Lum(incident[jn]) : double.NaN):0.00000} nangle {angle:0.0} ndist {dist:0.000}");
+            }
+            extra.Append(CultureInfo.InvariantCulture, $" dnear {(float.IsFinite(dNear) ? dNear : 9f):0.000} dplane {(float.IsFinite(dPlane) ? dPlane : 9f):0.000} wsum {wsum:0.0000} down {(float.IsFinite(dOwn) ? dOwn : 9f):0.000}");
+            extra.Append(CultureInfo.InvariantCulture, $" own {(ownW > 0f ? Lum(ownSum / ownW) : double.NaN):0.00000}");
+            for (var u = 0; u < splitR.Length; u++)
+            {
+                var tag = (int)MathF.Round(splitR[u] * 100);
+                extra.Append(CultureInfo.InvariantCulture, $" ownsplit{tag} {(ownW > 0f ? Lum(near[u] * (MathF.PI / gatherRays) + ownFar[u] / ownW) : double.NaN):0.00000}");
+                if (gatherRays >= 16) extra.Append(CultureInfo.InvariantCulture, $" ownsplit{tag}n16 {(ownW > 0f ? Lum(nearAt[0, u] * (MathF.PI / 16) + ownFar[u] / ownW) : double.NaN):0.00000}");
+            }
+            for (var q = 0; q < counts.Length; q++)
+                if (counts[q] <= gatherRays) extra.Append(CultureInfo.InvariantCulture, $" g{counts[q]} {Lum(partial[q] * (MathF.PI / counts[q])):0.00000}");
+            for (var u = 0; u < splitR.Length; u++)
+            {
+                var farPart = farW > 0f ? farX[u] / farW : Vector3.Zero;
+                var tag = (int)MathF.Round(splitR[u] * 100);
+                extra.Append(CultureInfo.InvariantCulture, $" split{tag} {(farW > 0f ? Lum(near[u] * (MathF.PI / gatherRays) + farPart) : double.NaN):0.00000}");
+                for (var q = 0; q < counts.Length; q++)
+                    if (counts[q] <= gatherRays && farW > 0f) extra.Append(CultureInfo.InvariantCulture, $" split{tag}n{counts[q]} {Lum(nearAt[q, u] * (MathF.PI / counts[q]) + farPart):0.00000}");
+            }
+            lines.Add(string.Create(CultureInfo.InvariantCulture, $"    transport at {px / iw:0.0000},{py / ih:0.0000} interp {interp:0.00000} gather {gather:0.00000} plane {plane:0.00000} inverse {inverse:0.00000} linear {mls:0.00000} cutout {(Cutout(hit) ? 1 : 0)} gsun {gatherSun:0.00000} gsky {gatherSky:0.00000} gexact {gatherExact:0.00000} g2cm {Lum(gSnap[0] * (MathF.PI / gatherRays)):0.00000} g5cm {Lum(gSnap[1] * (MathF.PI / gatherRays)):0.00000} g10cm {Lum(gSnap[2] * (MathF.PI / gatherRays)):0.00000}{extra}"));
         });
         foreach (var line in lines.OrderBy(l => l, StringComparer.Ordinal)) Console.WriteLine(line);
         };

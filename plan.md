@@ -711,7 +711,18 @@ F. *The frame audit* (opened 2026-10-07: "a lot of pure performance on the table
      The new bottleneck is reconstruction: what a renderer READS at a shading point from nearby patches stays 19-28% on
      Sponza (linear fit 18.7%, interpolation 27.5%, p10 ~0.43) while the gather is 5.7% -- in detailed architecture the
      patches nearest a point see different light than the point (flutes, mouldings). On Cornell's flat walls it cost
-     ~1 point. Next: what the renderer reads (receivers), a design question.
+     ~1 point.
+     RECEIVERS, measured (hall, 1024-ray gather floor 10.7%; all CPU, `--transport` diagnostics): screen probes whose hits
+     read cooked patches (`--transport-gpu`, the GPU prototype) 26.1 -> 24.4% -- the probes' own placement dominates, so
+     they are dropped for cooked scenes. Rejected, each measured: a near/far split (rays under R from the point, the
+     far part per patch; 28% at every R -- the far light a point gets depends on its own near occluders); surface charts
+     (every edge-connected surface its own patches: 21.6% for 4.3 GB and a 31-min cook; Sponza is 759k charts);
+     4096 cook rays (27.0 vs 27.2% -- not noise); SH L1/L2 per patch at the point's normal (26.7%). The swap test
+     (fresh traces from the patch's position with the point's normal, and the reverse) put it on POSITION.
+     Fine texels on the point's own plane that gather the cooked light: 2.5 cm 10.8% (= the floor), 5 cm 13.5%,
+     10 cm 14.5%, 20 cm 22.4%; at 30-90 degrees off the nearest patch, interp 49% -> 5 cm 14%. So two scales: patches
+     at 0.25 m carry transport (what a ray reads), a surface cache at ~5 cm is what a pixel reads. Next: how the
+     texels' gather is kept current as the sun moves (cooked texel couplings vs a progressive GPU re-gather).
 
 Known instrument gap: a Sponza `--shot` raises 9 validation errors on `main` as well (a storage image
 copied to a buffer without transfer-source usage, in the shot's readback). Not this arc's, and not fixed.
