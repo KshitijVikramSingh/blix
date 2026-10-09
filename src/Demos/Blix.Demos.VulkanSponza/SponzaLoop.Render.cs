@@ -705,6 +705,7 @@ internal sealed partial class SponzaLoop
         // blinking in and out as you turn. Half a metre of slack costs a fraction of a percent of
         // the rejections and removes the whole class.
         RecordRaySurfaceBake();
+        CookTransportWhenReady();
         RecordClipmap();
         PickWatchPoints();
         RecordClipmapWatch();

@@ -167,6 +167,8 @@ internal sealed partial class SponzaLoop
                 new("uDynamicMax", new Vector4Uniform(new Vector4(MoverActive ? DependencyBox.Max : Vector3.Zero, dynamicHistory))),
                 new("uFresh", new Vector4Uniform(new Vector4(freshPasses, freshFrames, probeLayers < 2 ? 1f : 0f, dependentPasses))),
                 new("uLayers", new Vector4Uniform(new Vector4(probeLayerKeys ? 1f : 0f, ScreenProbePassStride, 0f, 0f))),
+                new("uCookedGrid", new Vector4Uniform(cookedGrid)),
+                new("uCookedDims", new Vector4Uniform(cookedDims)),
             };
         var textures = new[]
         {
@@ -190,7 +192,8 @@ internal sealed partial class SponzaLoop
                 .Append(new ShaderBufferBinding("ScreenProbesCurrent", current))
                 .Append(new ShaderBufferBinding("ScreenProbeStats", screenProbeStats))
             .Append(new ShaderBufferBinding("ScreenProbePlacements", screenProbePlacements))
-            .Append(new ShaderBufferBinding("ScreenProbeRays", screenProbeRays)).ToArray();
+            .Append(new ShaderBufferBinding("ScreenProbeRays", screenProbeRays))
+            .Concat(CookedBuffers()).ToArray();
         // Each stage binds what its interface declares (the compiler may drop what a stage never reads).
         var groups = new[] { tiles.Item1 * tiles.Item2, (count * 32 + 63) / 64, (count + 63) / 64 };
         for (var stage = 0; stage < ScreenProbeStages.Length; stage++)

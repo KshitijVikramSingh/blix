@@ -39,7 +39,8 @@ internal sealed partial class SponzaLoop
 
     private void ReadTransportArgs(AppArgs args)
     {
-        transportSpike = args.Flag("transport");
+        transportGpu = args.Flag("transport-gpu");
+        transportSpike = args.Flag("transport") || transportGpu;
         if (args.Float("transport-spacing") is { } s) transportSpacing = Math.Clamp(s, 0.02f, 4f);
         if (args.Int("transport-rays") is { } r) transportRays = Math.Clamp(r, 16, 8192);
         if (args.Int("transport-vis") is { } v) transportVisRes = Math.Clamp(v, 4, 256);
@@ -63,9 +64,88 @@ internal sealed partial class SponzaLoop
         return y * res + x;
     }
 
+    // The cook and the solve run once (at load with --transport-gpu, else at the shot); evaluating at the reference's
+    // points is kept as a closure over what they produced, run at the shot.
+    private Action? transportEvaluate;
+    private bool transportCooked;
+
+    // --transport-gpu (stage 5a, the GPU prototype): cook at load, upload the patches and their solved indirect light,
+    // and let screen probes' hits read them (Shaders/screen_probe_kernel.glsl, cookedIndirect).
+    private bool transportGpu;
+    private GpuBufferHandle cookedPatchBuffer, cookedCellBuffer, cookedIdBuffer;
+    private Vector4 cookedGrid, cookedDims;
+
+    private void EnsureCookedPlaceholders()
+    {
+        if (!cookedPatchBuffer.Equals(default(GpuBufferHandle))) return;
+        cookedPatchBuffer = Own(device.CreateGpuBuffer(48, new byte[48], "sponza.cooked.patches.none"));
+        cookedCellBuffer = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.cooked.cells.none"));
+        cookedIdBuffer = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.cooked.ids.none"));
+    }
+
+    // The screen probes' bindings for the cooked patches (placeholders until the cook lands).
+    private IEnumerable<ShaderBufferBinding> CookedBuffers()
+    {
+        EnsureCookedPlaceholders();
+        yield return new ShaderBufferBinding("CookedPatches", cookedPatchBuffer);
+        yield return new ShaderBufferBinding("CookedCells", cookedCellBuffer);
+        yield return new ShaderBufferBinding("CookedIds", cookedIdBuffer);
+    }
+
+    // Called each frame: with --transport-gpu, cook once the ray scene and its surfaces are ready (synchronous: seconds
+    // for the Cornell box, minutes for Sponza, the window frozen meanwhile -- a prototype).
+    private void CookTransportWhenReady()
+    {
+        if (!transportGpu || transportCooked || !fullyLoaded || !raySurfacesBaked || postLoadFrames < 2) return;
+        CookTransport();
+    }
+
+    private void UploadCookedPatches(List<Vector3> pos, List<Vector3> nrm, Vector3[] incident, float cell)
+    {
+        if (!transportGpu) return;
+        var min = sceneBoundsMin - new Vector3(cell);
+        var span = sceneBoundsSpan + new Vector3(2f * cell);
+        var dims = new Int3((int)MathF.Ceiling(span.X / cell) + 1, (int)MathF.Ceiling(span.Y / cell) + 1, (int)MathF.Ceiling(span.Z / cell) + 1);
+        var cells = dims.X * dims.Y * dims.Z;
+        int CellOf(Vector3 p)
+        {
+            var c = (p - min) / cell;
+            var x = Math.Clamp((int)MathF.Floor(c.X), 0, dims.X - 1); var y = Math.Clamp((int)MathF.Floor(c.Y), 0, dims.Y - 1); var z = Math.Clamp((int)MathF.Floor(c.Z), 0, dims.Z - 1);
+            return (z * dims.Y + y) * dims.X + x;
+        }
+        var start = new uint[cells + 1];
+        for (var i = 0; i < pos.Count; i++) start[CellOf(pos[i]) + 1]++;
+        for (var c = 0; c < cells; c++) start[c + 1] += start[c];
+        var fill = (uint[])start.Clone();
+        var ids = new uint[pos.Count];
+        for (var i = 0; i < pos.Count; i++) ids[fill[CellOf(pos[i])]++] = (uint)i;
+        var packed = new Vector4[pos.Count * 3];
+        for (var i = 0; i < pos.Count; i++)
+        {
+            packed[3 * i] = new Vector4(pos[i], 0f);
+            packed[3 * i + 1] = new Vector4(nrm[i], 0f);
+            packed[3 * i + 2] = new Vector4(incident[i], 0f);
+        }
+        cookedPatchBuffer = Own(device.CreateGpuBuffer(packed.Length * 16, MemoryMarshal.AsBytes(packed.AsSpan()), "sponza.cooked.patches"));
+        cookedCellBuffer = Own(device.CreateGpuBuffer(start.Length * 4, MemoryMarshal.AsBytes(start.AsSpan()), "sponza.cooked.cells"));
+        cookedIdBuffer = Own(device.CreateGpuBuffer(Math.Max(1, ids.Length) * 4, MemoryMarshal.AsBytes(ids.AsSpan()), "sponza.cooked.ids"));
+        cookedGrid = new Vector4(min, cell);
+        cookedDims = new Vector4(dims.X, dims.Y, dims.Z, 1f);
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[VulkanSponza] transport GPU: {pos.Count:N0} patches uploaded ({packed.Length * 16 / 1048576.0:0.0} MB), grid {dims.X}x{dims.Y}x{dims.Z} at {cell:0.##} m; screen probes' hits read them."));
+    }
+
     private void WriteTransportSpike()
     {
-        if (!transportSpike || rayQueries is not { } scene || rayGpuData is not { } data) return;
+        if (!transportSpike) return;
+        if (!transportCooked) CookTransport();
+        transportEvaluate?.Invoke();
+    }
+
+    private void CookTransport()
+    {
+        if (transportCooked || rayQueries is not { } scene || rayGpuData is not { } data) return;
+        transportCooked = true;
         var clock = Stopwatch.StartNew();
         var surfaces = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(raySurfaces, 0, data.RowPlacements.Length * 4).AsSpan()).ToArray();
         data.ApplyCoverage(surfaces);
@@ -396,7 +476,10 @@ internal sealed partial class SponzaLoop
             + $"sunlets {sunlets:N0} at {transportSunlet * 100:0} cm {sunlets * 36L / 1048576.0:0.0} + their couplings {sunletNonzero:N0} {sunletNonzero * 8 / 1048576.0:0.0}); "
             + $"cooked in {cookSeconds:0.0} s (patches {cookPatches:0.0} s), solved {iterations} bounces in {solveSeconds * 1000:0} ms."));
 
+        UploadCookedPatches(pos, nrm, incident, 2f * transportSpacing);
+
         // ---- At the reference's points --------------------------------------------------------------------------
+        transportEvaluate = () => {
         var incidentTex = device.ReadTexture(graph.GetColorTexture(incidentHandle), out var iw, out var ih, out _);
         Matrix4x4.Invert(viewProj, out var invViewProj);
         Ray CameraRay(float px, float py)
@@ -542,5 +625,6 @@ internal sealed partial class SponzaLoop
             lines.Add(string.Create(CultureInfo.InvariantCulture, $"    transport at {px / iw:0.0000},{py / ih:0.0000} interp {interp:0.00000} gather {gather:0.00000} plane {plane:0.00000} inverse {inverse:0.00000} linear {mls:0.00000} cutout {(Cutout(hit) ? 1 : 0)} gsun {gatherSun:0.00000} gsky {gatherSky:0.00000} gexact {gatherExact:0.00000} g2cm {Lum(gSnap[0] * (MathF.PI / gatherRays)):0.00000} g5cm {Lum(gSnap[1] * (MathF.PI / gatherRays)):0.00000} g10cm {Lum(gSnap[2] * (MathF.PI / gatherRays)):0.00000}"));
         });
         foreach (var line in lines.OrderBy(l => l, StringComparer.Ordinal)) Console.WriteLine(line);
+        };
     }
 }

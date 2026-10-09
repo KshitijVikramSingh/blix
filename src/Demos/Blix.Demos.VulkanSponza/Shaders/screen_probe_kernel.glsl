@@ -94,6 +94,10 @@ layout(set = 0, binding = 0) uniform ScreenProbes {
     vec4 uFresh;
     vec4 uLayers;          // x 1: a different SurfaceKey alone opens a second layer, as before (--probe-layer-keys);
                            // y the most passes any probe traces this frame: the stride of a slot's rays
+    // Stage 5a, the GPU prototype (--transport-gpu): the cooked patches -- their grid (lowest corner xyz, cell size w)
+    // and its dims (xyz; w 1 when they are uploaded). A hit's indirect light is its nearest facing patch's.
+    vec4 uCookedGrid;
+    vec4 uCookedDims;
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -316,6 +320,40 @@ void main() {
 #endif
 
 #ifdef SCREEN_PROBE_TRACE
+// Cooked light transport (stage 5a): patches (position, normal, the indirect irradiance their solve left them -- sky,
+// bounce, and the first bounce of direct sun through sunlets), found through a grid of cells (CSR: each cell's first
+// entry and the patch ids). A hit takes its OWN direct sun from the cascades and the rest from its nearest patch
+// facing the same way -- what the CPU spike measured at 5.6% on Sponza's hall (the final gather, exact sun at hits).
+layout(std430, set = 0, binding = 25) readonly buffer CookedPatches { vec4 cookedPatch[]; };   // 3 a patch: pos, normal, indirect
+layout(std430, set = 0, binding = 26) readonly buffer CookedCells { uint cookedCellStart[]; };
+layout(std430, set = 0, binding = 27) readonly buffer CookedIds { uint cookedId[]; };
+
+vec3 cookedIndirect(vec3 p, vec3 n, out bool found) {
+    found = false;
+    if (u.uCookedDims.w < 0.5) return vec3(0.0);
+    ivec3 dims = ivec3(u.uCookedDims.xyz);
+    ivec3 c = ivec3(floor((p - u.uCookedGrid.xyz) / u.uCookedGrid.w));
+    float bestD = 1e30;
+    int best = -1;
+    for (int dz = -1; dz <= 1; ++dz)
+    for (int dy = -1; dy <= 1; ++dy)
+    for (int dx = -1; dx <= 1; ++dx) {
+        ivec3 cc = c + ivec3(dx, dy, dz);
+        if (any(lessThan(cc, ivec3(0))) || any(greaterThanEqual(cc, dims))) continue;
+        int cell = (cc.z * dims.y + cc.y) * dims.x + cc.x;
+        for (uint k = cookedCellStart[cell]; k < cookedCellStart[cell + 1]; ++k) {
+            int j = int(cookedId[k]);
+            if (dot(cookedPatch[3 * j + 1].xyz, n) < 0.5) continue;
+            vec3 d = cookedPatch[3 * j].xyz - p;
+            float d2 = dot(d, d);
+            if (d2 < bestD) { bestD = d2; best = j; }
+        }
+    }
+    if (best < 0) return vec3(0.0);
+    found = true;
+    return cookedPatch[3 * best + 2].rgb;
+}
+
 // ---- trace: one thread a ray, for every pass its probe traces ----------------------------------------------------
 // A hit is lit by the sun (the shadow cascades where they cover it, a shadow ray beyond) and by the clipmap's
 // irradiance at the hit, re-radiated in its albedo; an escape brings the disc-free sky. Short rays (--probe-ray-
@@ -365,7 +403,10 @@ void main() {
             }
             bool known = false;
             vec4 field = vec4(0.0);
-            if ((ablate & 2) == 0) field = blix_clipmapSample(clipmap(), hitPos, hn, known);
+            bool cooked = false;
+            vec3 cookedLight = cookedIndirect(hitPos, hn, cooked);
+            if (cooked) { field = vec4(cookedLight, 1.0); known = true; }
+            else if ((ablate & 2) == 0) field = blix_clipmapSample(clipmap(), hitPos, hn, known);
             radiance = hit.albedo * (u.uSunIrradiance.rgb * sun + (known ? field.rgb : vec3(0.0))) / PI;
         } else if (u.uParams2.w > 0.0) {
             bool known;
