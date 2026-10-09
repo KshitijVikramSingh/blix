@@ -31,6 +31,7 @@ internal sealed partial class SponzaLoop
     private float transportSpacing = 0.25f;
     private int transportRays = 512;
     private int transportVisRes = 32;
+    private int transportGatherRays = 1024;
     private const int TransportSkyRes = 16;
 
     private void ReadTransportArgs(AppArgs args)
@@ -38,7 +39,8 @@ internal sealed partial class SponzaLoop
         transportSpike = args.Flag("transport");
         if (args.Float("transport-spacing") is { } s) transportSpacing = Math.Clamp(s, 0.02f, 4f);
         if (args.Int("transport-rays") is { } r) transportRays = Math.Clamp(r, 16, 8192);
-        if (args.Int("transport-vis") is { } v) transportVisRes = Math.Clamp(v, 4, 128);
+        if (args.Int("transport-vis") is { } v) transportVisRes = Math.Clamp(v, 4, 256);
+        if (args.Int("transport-gather") is { } gr) transportGatherRays = Math.Clamp(gr, 16, 1 << 16);
     }
 
     // OctEncode is SponzaLoop.ClipmapTwin's (the same mapping as Blix.Shaders/octahedral.glsl).
@@ -93,24 +95,59 @@ internal sealed partial class SponzaLoop
                 var cross = Vector3.Cross(b - a, c - a);
                 var area = cross.Length() * 0.5f;
                 if (area <= 0f) continue;
-                var expected = area / patchArea;
+                // A cutout triangle is there for the share of rays its coverage coin lets meet it: so many patches.
+                var coverage = (surfaces[data.RowOf(i, t)] >> 24) / 255f;
+                var expected = area * coverage / patchArea;
                 var count = (int)expected + (rng.NextDouble() < expected - (int)expected ? 1 : 0);
-                var n = Vector3.Normalize(cross);
+                var front = Vector3.Normalize(cross);
                 var alb = Albedo(i, t);
+                // Stratified, not uniform: the R2 low-discrepancy sequence from a random start, folded into the triangle.
+                // Uniform random placement clustered some patches and left holes between others, which the
+                // interpolation then read across (and a hit found no patch near it: 5.25% of rays at 0.125 m).
+                var u0 = (float)rng.NextDouble();
+                var v0 = (float)rng.NextDouble();
                 for (var k = 0; k < count; k++)
                 {
-                    var u = (float)rng.NextDouble();
-                    var v = (float)rng.NextDouble();
+                    var u = (u0 + k * 0.7548777f) % 1f;
+                    var v = (v0 + k * 0.5698403f) % 1f;
                     if (u + v > 1f) { u = 1f - u; v = 1f - v; }
-                    pos.Add(a + (b - a) * u + (c - a) * v);
-                    nrm.Add(n);
-                    albedo.Add(alb);
+                    // Both sides are candidates: a thin sheet (a curtain, a leaf) is lit and seen from both, and a hit on
+                    // its back must find a patch there (13.8% of Sponza's rays found none when only fronts had them).
+                    // A side inside something -- the inner face of a wall slab -- is dropped below.
+                    var at = a + (b - a) * u + (c - a) * v;
+                    for (var side = 0; side < 2; side++)
+                    {
+                        pos.Add(at);
+                        nrm.Add(side == 0 ? front : -front);
+                        albedo.Add(alb);
+                    }
                 }
             }
         }
+        // Drop sides inside something: a patch whose rays mostly meet back faces sits in a solid (a probe's "buried").
+        {
+            var keep = new bool[pos.Count];
+            Parallel.For(0, pos.Count, i =>
+            {
+                var r = new Random(77 + i);
+                var back = 0;
+                const int tests = 16;
+                for (var k = 0; k < tests; k++)
+                {
+                    var d = CosineHemisphereCpu(nrm[i], r);
+                    if (scene.Closest(new Ray(pos[i] + nrm[i] * 1e-3f, d), 0f, float.PositiveInfinity, (uint)r.Next()) is { } h && !h.FrontFace) back++;
+                }
+                keep[i] = back * 2 < tests;
+            });
+            var p2 = new List<Vector3>(); var n2 = new List<Vector3>(); var a2 = new List<Vector3>();
+            for (var i = 0; i < pos.Count; i++) if (keep[i]) { p2.Add(pos[i]); n2.Add(nrm[i]); a2.Add(albedo[i]); }
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] transport spike: {pos.Count:N0} patch sides placed, {p2.Count:N0} kept (the rest inside a solid)."));
+            pos = p2; nrm = n2; albedo = a2;
+        }
         var patches = pos.Count;
         // A hash grid over the patches: a ray's hit finds the nearest patch facing the way the hit surface faces.
-        var cell = transportSpacing;
+        // Cells twice the spacing, so the 3x3x3 search reaches past any gap between neighbouring patches.
+        var cell = 2f * transportSpacing;
         var grid = new Dictionary<(int, int, int), List<int>>();
         (int, int, int) Key(Vector3 p) => ((int)MathF.Floor(p.X / cell), (int)MathF.Floor(p.Y / cell), (int)MathF.Floor(p.Z / cell));
         for (var i = 0; i < patches; i++)
@@ -216,6 +253,21 @@ internal sealed partial class SponzaLoop
             for (var b = 0; b < skyDirs.Length; b++) s += skyDirs[b] * sky[i * skyDirs.Length + b];
             skyIn[i] = s * MathF.PI;
         }
+        // How well the sun map stands in for an exact ray toward this sun: over sunward patches, how often they disagree.
+        {
+            long sunward = 0, disagree = 0; double absDiff = 0;
+            for (var i = 0; i < patches; i++)
+            {
+                if (Vector3.Dot(nrm[i], toSun) <= 0f) continue;
+                sunward++;
+                var exact = scene.Any(new Ray(pos[i] + nrm[i] * 1e-3f, toSun), 0f, float.PositiveInfinity, (uint)(i + 17)) ? 0f : 1f;
+                var mapped = SunVisibility(i);
+                absDiff += MathF.Abs(mapped - exact);
+                if (MathF.Abs(mapped - exact) > 0.5f) disagree++;
+            }
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza] transport spike: sun map against an exact ray from each of {sunward:N0} sunward patches: {100.0 * disagree / Math.Max(1, sunward):0.00}% disagree, mean |difference| {absDiff / Math.Max(1, sunward):0.0000}."));
+        }
         var incident = (Vector3[])skyIn.Clone();       // indirect irradiance arriving (no direct sun)
         var outgoing = new Vector3[patches];
         const int iterations = 48;
@@ -268,15 +320,67 @@ internal sealed partial class SponzaLoop
                 {
                     var facing = Vector3.Dot(nrm[j], n);
                     if (facing < 0.5f) continue;
-                    var w = facing * facing * MathF.Exp(-Vector3.DistanceSquared(pos[j], x) / (cell * cell));
+                    var w = facing * facing * MathF.Exp(-Vector3.DistanceSquared(pos[j], x) / (transportSpacing * transportSpacing));
                     sum += incident[j] * w; wsum += w;
                 }
             }
             var interp = wsum > 0f ? Lum(sum / wsum) : double.NaN;
+            // Same plane only (a patch on another wall, even a near one, is another surface): facing within ~18 degrees
+            // and within 2 cm of the point's plane; weighted by closeness as above, and by inverse distance.
+            var sumP = Vector3.Zero; var wP = 0f; var sumI = Vector3.Zero; var wI = 0f;
+            for (var dz = -2; dz <= 2; dz++)
+            for (var dy = -2; dy <= 2; dy++)
+            for (var dx = -2; dx <= 2; dx++)
+            {
+                if (!grid.TryGetValue((kx + dx, ky + dy, kz + dz), out var list)) continue;
+                foreach (var j in list)
+                {
+                    if (Vector3.Dot(nrm[j], n) < 0.95f || MathF.Abs(Vector3.Dot(n, pos[j] - x + n * 0.01f)) > 0.02f) continue;
+                    var d2 = Vector3.DistanceSquared(pos[j], x);
+                    var wp = MathF.Exp(-d2 / (transportSpacing * transportSpacing));
+                    sumP += incident[j] * wp; wP += wp;
+                    var wi = 1f / (d2 + 1e-4f);
+                    sumI += incident[j] * wi; wI += wi;
+                }
+            }
+            var plane = wP > 0f ? Lum(sumP / wP) : double.NaN;
+            // A linear fit over the same plane's patches (moving least squares): H(x) = a + b.u + c.v in the plane's
+            // own coordinates, Gaussian-weighted -- an average flattens a gradient, a plane through the patches keeps it.
+            var mls = double.NaN;
+            {
+                var tu = Vector3.Normalize(Vector3.Cross(MathF.Abs(n.Y) < 0.9f ? Vector3.UnitY : Vector3.UnitX, n));
+                var tv = Vector3.Cross(n, tu);
+                double s00 = 0, s01 = 0, s02 = 0, s11 = 0, s12 = 0, s22 = 0, b0 = 0, b1 = 0, b2 = 0;
+                var count = 0;
+                for (var dz = -2; dz <= 2; dz++)
+                for (var dy = -2; dy <= 2; dy++)
+                for (var dx = -2; dx <= 2; dx++)
+                {
+                    if (!grid.TryGetValue((kx + dx, ky + dy, kz + dz), out var list)) continue;
+                    foreach (var j in list)
+                    {
+                        if (Vector3.Dot(nrm[j], n) < 0.95f || MathF.Abs(Vector3.Dot(n, pos[j] - x + n * 0.01f)) > 0.02f) continue;
+                        var dv = pos[j] - x;
+                        var d2 = dv.LengthSquared();
+                        if (d2 > 9f * transportSpacing * transportSpacing) continue;
+                        double w = MathF.Exp(-d2 / (2f * transportSpacing * transportSpacing));
+                        double u = Vector3.Dot(dv, tu), v = Vector3.Dot(dv, tv), h = Lum(incident[j]);
+                        s00 += w; s01 += w * u; s02 += w * v; s11 += w * u * u; s12 += w * u * v; s22 += w * v * v;
+                        b0 += w * h; b1 += w * h * u; b2 += w * h * v;
+                        count++;
+                    }
+                }
+                // Solve the 3x3 normal equations by Cramer's rule; fall back to the weighted mean when it is singular.
+                var det = s00 * (s11 * s22 - s12 * s12) - s01 * (s01 * s22 - s12 * s02) + s02 * (s01 * s12 - s11 * s02);
+                if (count >= 4 && Math.Abs(det) > 1e-12 * Math.Pow(s00, 3))
+                    mls = (b0 * (s11 * s22 - s12 * s12) - s01 * (b1 * s22 - s12 * b2) + s02 * (b1 * s12 - s11 * b2)) / det;
+                else if (s00 > 0) mls = b0 / s00;
+            }
+            var inverse = wI > 0f ? Lum(sumI / wI) : double.NaN;
             // Final gather: rays from x reading the patches' solved light (and the sky).
             var r = new Random(4242 + k);
             var g = Vector3.Zero;
-            const int gatherRays = 1024;
+            var gatherRays = transportGatherRays;
             for (var j = 0; j < gatherRays; j++)
             {
                 var d = CosineHemisphereCpu(n, r);
@@ -288,7 +392,7 @@ internal sealed partial class SponzaLoop
                 else g += SkyRadiance(d);
             }
             var gather = Lum(g * (MathF.PI / gatherRays));
-            lines.Add(string.Create(CultureInfo.InvariantCulture, $"    transport at {px / iw:0.0000},{py / ih:0.0000} interp {interp:0.00000} gather {gather:0.00000}"));
+            lines.Add(string.Create(CultureInfo.InvariantCulture, $"    transport at {px / iw:0.0000},{py / ih:0.0000} interp {interp:0.00000} gather {gather:0.00000} plane {plane:0.00000} inverse {inverse:0.00000} linear {mls:0.00000}"));
         });
         foreach (var line in lines.OrderBy(l => l, StringComparer.Ordinal)) Console.WriteLine(line);
     }

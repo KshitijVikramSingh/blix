@@ -676,8 +676,20 @@ F. *The frame audit* (opened 2026-10-07: "a lot of pure performance on the table
      means 2.6-3.3x high from a bright tail (p90 2.8-16). Suspects: 13.8% of cooked rays find no patch (one-sided thin
      surfaces -- curtains -- and alpha foliage get patches on triangle fronts only; Cornell 1.5%), and the sun map's
      32x32 bins (~5.6 degrees, one point a 0.25 m patch) where Sponza's sun comes through narrow openings.
-     Next: Sponza's tail (two-sided and cutout patches; sun visibility per patch area, finer near the sun's range),
-     the runtime on the GPU (solve + gather, on screen), then R4 (5b).
+     Toward 1-2% (the user's bar for static scenes). The reference first: it path-traced 3 bounces (the transport solves
+     all), so the transport's "+2-5% energy" was the reference's; `--ref-bounces 16 --ref-paths N --ref-seed S` now,
+     floor = two seeds (4,096 paths: 2.3%; 32,768: 0.89%). Then, Cornell against the 32k reference: more rays a patch
+     barely moved it (7.2 -> 6.8%); spacing did (0.25 -> 0.125 m: 6.8 -> 3.0%); stratified placement (R2 sequence) and
+     two-sided patches with a buried filter (a side whose rays mostly meet back faces is inside a solid; coverage-scaled
+     counts on cutouts) took lost rays to 0.01%. Cornell at 0.125 m, 4,096 rays: linear fit (MLS over same-plane
+     patches) 1.03%, interpolated 1.30%, final gather 1.24%, energy 0.997, against a 0.89% floor -- the bar is MET
+     (219 MB, cooked 28 s, CPU solve 835 ms; the sun map disagrees with exact rays on 1.07% of sunward patches).
+     Sponza at 0.25 m, 1,024 rays: lost rays 13.8 -> 2.1%; final gather energy 3.3 -> 1.29x, median 1.19, error 2.79 ->
+     0.43 (534 MB, 172k patches, cooked 172 s). Its reconstruction fails on its geometry: the same-plane fit answers
+     only 346 of 540 points (columns, mouldings, foliage), the plain interpolation borrows neighbouring surfaces'
+     patches (p90 16x). Open: reconstruction by surface identity (patches carry provenance), the sky bins'
+     point-sampled radiance against an HDR sky, finer spacing, and the reference's own floor in Sponza's dim interior.
+     Then the runtime on the GPU, then R4 (5b).
 
 Known instrument gap: a Sponza `--shot` raises 9 validation errors on `main` as well (a storage image
 copied to a buffer without transfer-source usage, in the shot's readback). Not this arc's, and not fixed.

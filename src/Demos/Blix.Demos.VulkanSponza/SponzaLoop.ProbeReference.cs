@@ -578,7 +578,7 @@ internal sealed partial class SponzaLoop
             var n = Normal(hit);
             if (Vector3.Dot(n, ray.Direction) > 0f) n = -n;
             var x = ray.PointAt(hit.T) + n * 0.01f;
-            var rng = new Random(777 + k);
+            var rng = new Random(777 + k + refSeed * 100003);
             var acc = Vector3.Zero;
             var skyAcc = Vector3.Zero;
             var directAcc = Vector3.Zero;

@@ -68,7 +68,12 @@ internal sealed partial class SponzaLoop
         if (args.String("probe") is { } probe) probeName = probe;
         // Zero isolates sky-fed transport from the direct-sun source for probe censuses.
         if (args.Float("sun-strength") is { } ss) sunStrength = MathF.Max(0f, ss);
-        if (args.Int("ref-bounces") is { } rb) refBounces = Math.Clamp(rb, 1, 8);
+        // --ref-bounces N: the path trace's bounces (3; the transport solves all of them, so judging it needs enough
+        // that the rest is negligible -- 0.73^16 is under 1%). --ref-paths N (1024) and --ref-seed S (0): the reference's
+        // own noise, measured by two seeds.
+        if (args.Int("ref-bounces") is { } rb) refBounces = Math.Clamp(rb, 1, 64);
+        if (args.Int("ref-paths") is { } rp) refPaths = Math.Clamp(rp, 16, 1 << 20);
+        if (args.Int("ref-seed") is { } rs) refSeed = rs;
         if (args.String("shadow-maps") is { } shadowMaps)
         {
             var sm = shadowMaps.Split(',');

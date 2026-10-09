@@ -933,7 +933,7 @@ internal sealed partial class SponzaLoop
             {
                 WriteSkyVisibilityReference(samples: 200, rays: 2048);
                 WriteSkyConsistency();
-                WriteSurfaceReference(grid: 24, paths: 1024, bounces: refBounces);
+                WriteSurfaceReference(grid: 24, paths: refPaths, bounces: refBounces);
             }
             WriteTransportSpike();
             WriteFrameStats();
