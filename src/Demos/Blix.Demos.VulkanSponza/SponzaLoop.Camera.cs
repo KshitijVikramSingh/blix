@@ -140,5 +140,6 @@ internal sealed partial class SponzaLoop
     {
         // The mouse, the cursor capture and the wheel are the camera controller's (Drive, in OnUpdate).
         if (input[Key.Escape].Pressed) host.RequestClose();
+        ToggleReference(input);
     }
 }

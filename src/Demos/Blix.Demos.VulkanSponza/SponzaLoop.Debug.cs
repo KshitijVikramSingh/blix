@@ -57,6 +57,7 @@ internal sealed partial class SponzaLoop
         camera.DescribeDefaultKeys(debug);
         debug.Keys.Describe("Arrows", "look around");
         debug.Keys.Describe(Key.Escape, "quit");
+        debug.Keys.Describe(Key.G, "reference view (path-traced indirect light) on/off");
 
         // Read-only values run even with the overlay hidden so F12 captures remain self-describing.
         // Controls and gizmos stop here because they are interactive or feed the debug-line pass.
@@ -160,6 +161,7 @@ internal sealed partial class SponzaLoop
     // calls — which is what makes it safe to run with the overlay hidden.
     private void ReportValues(DebugContext debug)
     {
+        ReportReference(debug);
         using (debug.Scope("Sun"))
         {
             debug.Values.Value("sun-irradiance",

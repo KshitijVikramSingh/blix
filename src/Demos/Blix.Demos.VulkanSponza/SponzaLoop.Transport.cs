@@ -50,6 +50,7 @@ internal sealed partial class SponzaLoop
     private void ReadTransportArgs(AppArgs args)
     {
         ReadTexelArgs(args);
+        ReadReferenceArgs(args);
         transportGpu = args.Flag("transport-gpu") || transportTexels;
         transportSpike = args.Flag("transport") || transportGpu;
         transportEvaluateAtShot = args.Flag("transport");

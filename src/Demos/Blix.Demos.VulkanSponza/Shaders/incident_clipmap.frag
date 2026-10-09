@@ -39,6 +39,7 @@ layout(set = 0, binding = 0) uniform IncidentClipmap {
     vec4 uTexelGrid;     // the texels (texel.glsl, stage 5a): the cells' origin xyz, spacing w
     vec4 uTexelParams;   // x hash capacity, y 1 when on, z the rays at which a texel's answer is trusted whole, w 1:
                          // read the spatially filtered light (texel_gather.comp)
+    vec4 uReference;     // the reference view (reference_trace.comp): x 1 when shown, yz its pixels (half the frame's)
 } g;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -112,6 +113,7 @@ layout(std430, set = 0, binding = 12) readonly buffer TexelLight { vec4 texelLig
 // A texel's old light while its gather for a new sun is young (texel_gather.comp): blended out over 256 rays.
 layout(std430, set = 0, binding = 13) readonly buffer TexelPrior { vec4 texelPrior[]; };
 layout(std430, set = 0, binding = 14) readonly buffer TexelFiltered { vec4 texelFiltered[]; };
+layout(std430, set = 0, binding = 15) readonly buffer ReferenceAccum { vec4 referenceAccum[]; };
 #define TEXEL_HASH(i) texelHash[i]
 #define TEXEL_POSITION(i) texels[2 * (i)]
 #define TEXEL_NORMAL(i) texels[2 * (i) + 1]
@@ -211,6 +213,13 @@ void main() {
     }
     if (g.uScreen.x > 0.5 && screenProbesAt(worldPos, N, viewDepth, gathered, confidence)) {
         outIncident.rgb = mix(outIncident.rgb, gathered, confidence);
+    }
+    // The reference view: the path-traced indirect light in place of every answer above (the gradient below still
+    // carries it to the normal map, relative).
+    if (g.uReference.x > 0.5) {
+        ivec2 rp = min(ivec2(vUv * g.uReference.yz), ivec2(g.uReference.yz) - 1);
+        vec4 acc = referenceAccum[rp.y * int(g.uReference.y) + rp.x];
+        if (acc.w > 0.0) outIncident.rgb = acc.rgb / acc.w;
     }
     outIncidentGradient = vec4(0.0);
     const vec3 luma = vec3(0.2126, 0.7152, 0.0722);

@@ -836,6 +836,7 @@ internal sealed partial class SponzaLoop
                 RecordClipmapMark(incidentInvProj, incidentInvView, frame.Width, frame.Height);
                 RecordScreenProbes(frame.Width, frame.Height);
                 RecordTexels(incidentInvProj, incidentInvView, frame.Width, frame.Height);
+                RecordReference(incidentInvProj, incidentInvView, frame.Width, frame.Height);
                 RecordIncidentClipmap(incidentInvProj, incidentInvView, frame.Width, frame.Height, frame.Width, frame.Height);
             }
             // Before the clipmap's first solve there is nothing to read, and the lit pass does not (uIncident.z is 0
