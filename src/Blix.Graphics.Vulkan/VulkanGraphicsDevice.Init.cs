@@ -160,9 +160,19 @@ public sealed partial class VulkanGraphicsDevice
         using var extNames = new Utf8ArrayPin(extensions);
         using var layerNames = new Utf8ArrayPin(validationEnabled ? ValidationLayers : Array.Empty<string>());
 
+        // VK_EXT_metal_objects asks for this on the instance before the device's MTLDevice may be exported
+        // (VulkanGraphicsDevice.MetalObjects). It is a device extension, so whether it is there is only known
+        // after the instance exists; the struct is chained on macOS, where MoltenVK is the only driver.
+        var metalDeviceExport = new ExportMetalObjectCreateInfoEXT
+        {
+            SType = StructureType.ExportMetalObjectCreateInfoExt,
+            ExportObjectType = ExportMetalObjectTypeFlagsEXT.ExportMetalObjectTypeMetalDeviceBitExt,
+        };
+
         var createInfo = new InstanceCreateInfo
         {
             SType = StructureType.InstanceCreateInfo,
+            PNext = RuntimeInformation.IsOSPlatform(OSPlatform.OSX) ? &metalDeviceExport : null,
             PApplicationInfo = &appInfo,
             EnabledExtensionCount = (uint)extensions.Count,
             PpEnabledExtensionNames = extNames.Ptr,
@@ -295,11 +305,8 @@ public sealed partial class VulkanGraphicsDevice
         foreach (var ext in exts)
         {
             var name = Marshal.PtrToStringUTF8((nint)ext.ExtensionName);
-            if (name == "VK_KHR_portability_subset")
-            {
-                PortabilitySubsetRequired = true;
-                break;
-            }
+            if (name == "VK_KHR_portability_subset") PortabilitySubsetRequired = true;
+            else if (name == MetalObjectsExtension) MetalObjectsEnabled = true;
         }
 
         if (!TryFindGraphicsAndPresentQueueFamily(PhysicalDevice, out var qf))
@@ -346,6 +353,7 @@ public sealed partial class VulkanGraphicsDevice
 
         var deviceExts = new List<string> { "VK_KHR_swapchain" };
         if (PortabilitySubsetRequired) deviceExts.Add("VK_KHR_portability_subset");
+        if (MetalObjectsEnabled) deviceExts.Add(MetalObjectsExtension);
         using var extNames = new Utf8ArrayPin(deviceExts);
 
         // Enable anisotropic filtering when the device offers it. Without it,
@@ -402,9 +410,24 @@ public sealed partial class VulkanGraphicsDevice
         // firstInstance). Validation cannot read an indirect buffer, so a missing feature is silent: the
         // application checks Features instead.
         var firstInstance = supportedFeatures.DrawIndirectFirstInstance;
+
+        // Timeline semaphores, only beside VK_EXT_metal_objects: the frame timeline that orders native Metal work
+        // (RenderGraph.External) against the frame is one, exported as an MTLSharedEvent. Without it, Metal objects
+        // can still be exported but no Metal pass can run inside a frame, so the feature is not offered.
+        var supported12 = new PhysicalDeviceVulkan12Features { SType = StructureType.PhysicalDeviceVulkan12Features };
+        var supported2 = new PhysicalDeviceFeatures2 { SType = StructureType.PhysicalDeviceFeatures2, PNext = &supported12 };
+        Vk.GetPhysicalDeviceFeatures2(PhysicalDevice, &supported2);
+        var frameTimelineWanted = MetalObjectsEnabled && supported12.TimelineSemaphore;
+        var enable12 = new PhysicalDeviceVulkan12Features
+        {
+            SType = StructureType.PhysicalDeviceVulkan12Features,
+            TimelineSemaphore = frameTimelineWanted,
+        };
+
         Features = (MultiDrawIndirectSupported ? GraphicsFeatures.MultiDrawIndirect : GraphicsFeatures.None)
             | (firstInstance ? GraphicsFeatures.DrawIndirectFirstInstance : GraphicsFeatures.None)
-            | (FragmentStoresSupported ? GraphicsFeatures.FragmentStoresAndAtomics : GraphicsFeatures.None);
+            | (FragmentStoresSupported ? GraphicsFeatures.FragmentStoresAndAtomics : GraphicsFeatures.None)
+            | (frameTimelineWanted ? GraphicsFeatures.MetalObjects : GraphicsFeatures.None);
         var features = new PhysicalDeviceFeatures
         {
             SamplerAnisotropy = AnisotropySupported,
@@ -415,6 +438,7 @@ public sealed partial class VulkanGraphicsDevice
         var ci = new DeviceCreateInfo
         {
             SType = StructureType.DeviceCreateInfo,
+            PNext = frameTimelineWanted ? &enable12 : null,
             QueueCreateInfoCount = 1,
             PQueueCreateInfos = &queueInfo,
             EnabledExtensionCount = (uint)deviceExts.Count,
@@ -429,6 +453,7 @@ public sealed partial class VulkanGraphicsDevice
 
         Vk.GetDeviceQueue(Device, GraphicsQueueFamily, 0, out var queue);
         GraphicsQueue = queue;
+        if (frameTimelineWanted) CreateFrameTimeline();
     }
 
     private unsafe void PopulateInfo()
@@ -541,6 +566,7 @@ public sealed partial class VulkanGraphicsDevice
     {
         if (Vk is null) return;
         DestroySwapchain();
+        DestroyFrameTimeline();
         if (Device.Handle != 0) Vk.DestroyDevice(Device, null);
         if (Surface.Handle != 0 && KhrSurface is not null)
         {

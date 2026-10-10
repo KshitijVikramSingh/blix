@@ -63,7 +63,7 @@ internal static class RenderGraphValidation
         }
         foreach (var pass in graph.ComputePasses.Values)
         {
-            if (pass.Shader is null)
+            if (pass.Shader is null && !pass.External)
             {
                 throw new InvalidOperationException(
                     $"ComputePass '{pass.Name}' has no Shader declared. Declare its shader interface via .Shader(...).");

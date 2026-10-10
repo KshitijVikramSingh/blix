@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <!-- Hardware ray tracing on Apple GPUs, beside the Vulkan renderer rather than inside it.
+
+       A native Metal pass (native/blix_hwx.mm) builds acceleration structures over the packed ray scene
+       (Blix.Geometry's RayQueryGpuData) and traces with Metal's intersector, on memory the Vulkan device allocated:
+       the device exports its MTLDevice and each GPU buffer's MTLBuffer (IGraphicsDevice.ExportMetalDevice and
+       ExportMetalBuffer, under GraphicsFeatures.MetalObjects). It takes the device as any library does, through
+       IGraphicsDevice; it does not know which backend is behind it.
+
+       An opt-in project, so that the engine itself still has no clang++ build step: an application that wants
+       hardware rays references this, and one that does not never builds a line of Objective-C. -->
+
+  <ItemGroup>
+    <ProjectReference Include="..\Blix.Geometry\Blix.Geometry.csproj" />
+    <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <BlixHwxSrc>$(MSBuildProjectDirectory)/native/blix_hwx.mm</BlixHwxSrc>
+    <BlixHwxLib>$(MSBuildProjectDirectory)/obj/native/libblix_hwx.dylib</BlixHwxLib>
+  </PropertyGroup>
+
+  <!-- macOS only: Metal is the point. Elsewhere nothing is built, and MetalRayTracer.TryCreate says why. -->
+  <Target Name="BuildBlixHwx" BeforeTargets="StageBlixHwx" Condition="$([MSBuild]::IsOSPlatform(OSX))"
+          Inputs="$(BlixHwxSrc)" Outputs="$(BlixHwxLib)">
+    <MakeDir Directories="$(MSBuildProjectDirectory)/obj/native" />
+    <Message Text="Building libblix_hwx.dylib (clang++, Objective-C++)" Importance="high" />
+    <Exec Command="clang++ -O2 -std=c++17 -fobjc-arc -dynamiclib &quot;$(BlixHwxSrc)&quot; -o &quot;$(BlixHwxLib)&quot; -framework Metal -framework Foundation" />
+  </Target>
+
+  <!-- ContentWithTargetPath crosses a ProjectReference, so the dylib lands beside every consumer's assembly. -->
+  <Target Name="StageBlixHwx" BeforeTargets="AssignTargetPaths">
+    <ItemGroup>
+      <ContentWithTargetPath Include="$(BlixHwxLib)" Condition="Exists('$(BlixHwxLib)')"
+                             TargetPath="libblix_hwx.dylib" CopyToOutputDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
+
+</Project>

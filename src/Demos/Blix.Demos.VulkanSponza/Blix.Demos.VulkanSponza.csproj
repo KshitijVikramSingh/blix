@@ -13,6 +13,8 @@
     <ProjectReference Include="..\..\Blix.Geometry\Blix.Geometry.csproj" />
     <ProjectReference Include="..\..\Blix.Graphics\Blix.Graphics.csproj" />
     <ProjectReference Include="..\..\Blix.Graphics.Images\Blix.Graphics.Images.csproj" />
+    <!-- The ray check and bench on Apple's ray tracing hardware, ray-backend hw or both (SponzaLoop.HardwareRays). -->
+    <ProjectReference Include="..\..\Blix.Graphics.MetalHWX\Blix.Graphics.MetalHWX.csproj" />
     <ProjectReference Include="..\..\Blix.Render\Blix.Render.csproj" />
     <ProjectReference Include="..\..\Blix.Runtime.Silk\Blix.Runtime.Silk.csproj" />
     <ProjectReference Include="..\..\Blix.Tools.Shader\Blix.Tools.Shader.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" Private="false" />
@@ -61,6 +63,7 @@
     <GlslShader Include="Shaders\mover_rays.comp" />
     <GlslShader Include="Shaders\scene_occlusion.comp" />
     <GlslShader Include="Shaders\ray_check.comp" />
+    <GlslShader Include="Shaders\rt_shadow_rays.comp" />
     <GlslShader Include="Shaders\ray_view.comp" />
     <GlslShader Include="Shaders\ray_surface_bake.comp" />
     <GlslShader Include="Shaders\clipmap_inject.comp" />

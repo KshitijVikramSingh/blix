@@ -142,6 +142,21 @@ internal sealed partial class SponzaLoop
             rayBench = bench;
             rayCheck = true;
         }
+        if (args.Int("ray-bench-repeat") is { } repeat)
+        {
+            if (repeat < 1) throw new AppArgsException($"--ray-bench-repeat takes a count of at least 1, not {repeat}.");
+            rayBenchRepeat = repeat;
+        }
+        // --ray-backend sw|hw|both: who answers the ray check or bench at the shot: the software traversal
+        // (ray_query.glsl, every frame, the default), Metal's hardware intersector (SponzaLoop.HardwareRays), or both.
+        if (args.String("ray-backend") is { } backend)
+        {
+            if (backend is not ("sw" or "hw" or "both")) throw new AppArgsException($"--ray-backend takes sw, hw or both, not '{backend}'.");
+            rayBackend = backend;
+            rayCheck = true;
+        }
+        // --rt-shadows: the lit pass's sun shadows traced on Apple's ray tracing hardware (SponzaLoop.RtShadows).
+        rtShadows = args.Flag("rt-shadows");
         // --ray-view: trace the camera's view and hold it against the raster at the shot (it brings the ray check with it).
         rayView = args.Flag("ray-view");
         rayCheck |= rayView;
@@ -244,6 +259,8 @@ internal sealed partial class SponzaLoop
             rayCheckProbe = (int.Parse(probeRay, CultureInfo.InvariantCulture), int.Parse(probeInstance, CultureInfo.InvariantCulture),
                 int.Parse(probeTriangle, CultureInfo.InvariantCulture));
         }
+        // The probe's answer is written after the batch's last ray, where a tiled batch puts another copy.
+        if (rayCheckProbe is not null && rayBenchRepeat > 1) throw new AppArgsException("--ray-probe reads a single batch; it does not combine with --ray-bench-repeat.");
         // --no-occlusion: the GPU cull without its two-phase occlusion test (scene_occlusion.comp), for the A/B.
         occlusionCull = gpuCull && !args.Flag("no-occlusion");
         // --occlusion-cut: every frame is a camera cut. The early list draws nothing, so the late list carries
@@ -268,6 +285,8 @@ internal sealed partial class SponzaLoop
         {
             abMode = ab;
             abFlat = abMode == "flat";
+            // rtshadow: ray-traced sun shadows (ON) against the cascades (OFF), which needs the traced path built.
+            if (abMode == "rtshadow") rtShadows = true;
         }
         if (args.Float("ao-debug") is { } aoDebugValue) aoDebug = aoDebugValue;
         if (args.Float("viz") is { } vizValue) vizChannel = vizValue;
@@ -625,6 +644,12 @@ internal sealed partial class SponzaLoop
         screenProbeFilterInterface = Reflect("screen_probe_filter.comp");
         screenProbeFilterPassHandle = graph.ComputePass("screen-probe-filter").Shader(screenProbeFilterInterface).Handle;
 
+        // --rt-shadows: the shadow rays from the pre-pass, then the Metal pass that traces them, both before the lit pass.
+        rtShadowRaysInterface = Reflect("rt_shadow_rays.comp");
+        rtShadowRaysPassHandle = graph.ComputePass("rt-shadow-rays").Shader(rtShadowRaysInterface)
+            .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
+        rtShadowTracePassHandle = graph.ExternalPass("rt-shadow-trace");
+
         {
             var incidentBuilder = graph.GraphicsPass("incident-light")
                 .Target(incidentHandle, LoadOp.Clear, StoreOp.Store)
@@ -879,6 +904,8 @@ internal sealed partial class SponzaLoop
         var rayViewSpv = File.ReadAllBytes(Path.Combine(shaderDir, "ray_view.comp.spv"));
         rayViewPipeline = Own(device.CreateComputePipeline(
             Own(device.CreateComputeShaderProgramFromSpv(rayViewSpv, rayViewInterface, "ray_view")), "ray_view"));
+        rtShadowRaysPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
+            File.ReadAllBytes(Path.Combine(shaderDir, "rt_shadow_rays.comp.spv")), rtShadowRaysInterface, "rt_shadow_rays")), "rt_shadow_rays"));
         var clipmapSpv = File.ReadAllBytes(Path.Combine(shaderDir, "clipmap_inject.comp.spv"));
         clipmapPipeline = Own(device.CreateComputePipeline(
             Own(device.CreateComputeShaderProgramFromSpv(clipmapSpv, clipmapInterface, "clipmap_inject")), "clipmap_inject"));

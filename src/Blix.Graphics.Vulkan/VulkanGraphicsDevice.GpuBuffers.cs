@@ -32,9 +32,18 @@ public sealed partial class VulkanGraphicsDevice
         VkBuffer buffer;
         ThrowIfNotSuccess(Vk.CreateBuffer(Device, in ci, null, &buffer), $"vkCreateBuffer({label})");
         Vk.GetBufferMemoryRequirements(Device, buffer, out var req);
+        // Exportable as an MTLBuffer wherever the device can export at all: a GPU buffer is what a native Metal
+        // pass reads and writes beside Vulkan (VulkanGraphicsDevice.MetalObjects), and the request has to be
+        // made when the memory is allocated, not when the buffer is exported.
+        var metalExport = new ExportMetalObjectCreateInfoEXT
+        {
+            SType = StructureType.ExportMetalObjectCreateInfoExt,
+            ExportObjectType = ExportMetalObjectTypeFlagsEXT.ExportMetalObjectTypeMetalBufferBitExt,
+        };
         var ai = new MemoryAllocateInfo
         {
             SType = StructureType.MemoryAllocateInfo,
+            PNext = MetalObjectsEnabled ? &metalExport : null,
             AllocationSize = req.Size,
             MemoryTypeIndex = FindMemoryTypeIndex(req.MemoryTypeBits, MemoryPropertyFlags.DeviceLocalBit),
         };

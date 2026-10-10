@@ -94,6 +94,10 @@ internal sealed partial class SponzaLoop
     private Ray[] rayCheckRays = Array.Empty<Ray>();
     private float[] rayCheckTMax = Array.Empty<float>();
     private const int RayCheckCount = 65536;
+    // --ray-bench-repeat K: the batch traced K times over in one dispatch (the same rays, each copy its own seeds), so
+    // a timing is of a dispatch big enough to be steady. The CPU holds the first copy, as it holds a single batch.
+    private int rayBenchRepeat = 1;
+    private int RayCheckDispatchCount => RayCheckCount * rayBenchRepeat;
     // --ray-bench <mixed|probe|camera|surface>: closest hit only, on a batch shaped like one use (null: --ray-check's
     // mix with any-hit too). probe: 2,048 points on a grid through the scene, 32 directions each, as GI probes cast;
     // camera: the start view's primary rays; surface: 2,048 camera-visible surface points, lifted as screen probes
@@ -247,8 +251,9 @@ internal sealed partial class SponzaLoop
             packed[i * 2] = new Vector4(origin, 0f);
             packed[i * 2 + 1] = new Vector4(direction, tMax);
         }
+        if (rayBenchRepeat > 1) packed = Enumerable.Repeat(packed, rayBenchRepeat).SelectMany(p => p).ToArray();
         var raysBuffer = Own(device.CreateGpuBuffer(packed.Length * 16, MemoryMarshal.AsBytes(packed.AsSpan()), "sponza.ray-check.rays"));
-        rayCheckHits = Own(device.CreateGpuBuffer(RayCheckCount * 48 + 80, name: "sponza.ray-check.hits"));
+        rayCheckHits = Own(device.CreateGpuBuffer(RayCheckDispatchCount * 48 + 80, name: "sponza.ray-check.hits"));
         buffers.Add(new ShaderBufferBinding("RayCheckRays", raysBuffer));
         buffers.Add(new ShaderBufferBinding("RayCheckHits", rayCheckHits));
         rayCheckBuffers = buffers.ToArray();
@@ -261,7 +266,7 @@ internal sealed partial class SponzaLoop
             }
         }
         Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] ray check: {RayCheckCount:N0} {rayBench ?? "check"} rays."));
+            $"[VulkanSponza] ray check: {RayCheckCount:N0} {rayBench ?? "check"} rays{(rayBenchRepeat > 1 ? string.Create(Inv, $", traced {rayBenchRepeat} times over ({RayCheckDispatchCount:N0} a dispatch)") : "")}."));
     }
 
     // Once, on the first frame every texture is resident: one dispatch per material into the surfaces block, declared
@@ -287,10 +292,10 @@ internal sealed partial class SponzaLoop
     private void RecordRayCheck()
     {
         if (rayCheckBuffers.Length == 0 || !fullyLoaded) return;
-        graph.Dispatch(rayCheckPassHandle, new DispatchCommand(rayCheckPipeline, (RayCheckCount + 63) / 64, 1, 1,
+        graph.Dispatch(rayCheckPassHandle, new DispatchCommand(rayCheckPipeline, (RayCheckDispatchCount + 63) / 64, 1, 1,
             new ShaderUniform[]
             {
-                new("uCount", new Vector4Uniform(new Vector4(RayCheckCount, rayBench is null ? 0f : 1f, 0f, 0f))),
+                new("uCount", new Vector4Uniform(new Vector4(RayCheckDispatchCount, rayBench is null ? 0f : 1f, 0f, 0f))),
                 new("uProbe", new Vector4Uniform(rayCheckProbe is { } p && rayProbeEntry >= 0 ? new Vector4(p.Ray + 1, rayProbeEntry, p.Triangle, 0f) : Vector4.Zero)),
             },
             Array.Empty<ShaderTextureBinding>(), Buffers: rayCheckBuffers));
@@ -303,21 +308,88 @@ internal sealed partial class SponzaLoop
     {
         if (rayCheckBuffers.Length == 0 || rayQueries is null) return;
         // The baked coverage, back to the CPU hierarchies, so the oracle meets the same partly covered triangles.
+        uint[]? surfaceWords = null;
         if (rayGpuData is { } gpuData)
         {
-            var surfaceWords = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(raySurfaces, 0, gpuData.RowPlacements.Length * 4).AsSpan()).ToArray();
+            surfaceWords = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(raySurfaces, 0, gpuData.RowPlacements.Length * 4).AsSpan()).ToArray();
             gpuData.ApplyCoverage(surfaceWords);
             var partly = surfaceWords.Count(w => (w >> 24) is > 0 and < 255);
             var none = surfaceWords.Count(w => w >> 24 == 0);
             Console.WriteLine(string.Create(Inv, $"[VulkanSponza] ray surfaces: {partly:N0} triangles partly covered, {none:N0} not at all, of {surfaceWords.Length:N0}."));
         }
+        if (rayBackend == "hw")
+        {
+            WriteHardwareRayCheck(surfaceWords);
+            return;
+        }
         var bytes = device.ReadGpuBuffer(rayCheckHits, 0, RayCheckCount * 48 + 80);
         var words = MemoryMarshal.Cast<byte, uint>(bytes.AsSpan()).ToArray();
+        var hits = CompareRayCheck(null, words);
+        // What a closest-hit trace did per ray: nodes popped (both levels), placements entered, triangles tested.
+        var nodes = new long[RayCheckCount];
+        var entered = new long[RayCheckCount];
+        var tested = new long[RayCheckCount];
+        for (var i = 0; i < RayCheckCount; i++)
+        {
+            nodes[i] = words[i * 12 + 6];
+            entered[i] = words[i * 12 + 3] >> 8;
+            tested[i] = words[i * 12 + 7];
+        }
+        string Spread(long[] v)
+        {
+            var sorted = v.OrderBy(x => x).ToArray();
+            return string.Create(Inv, $"mean {v.Average():0.0}, median {sorted[sorted.Length / 2]}, p95 {sorted[(int)(sorted.Length * 0.95)]}, max {sorted[^1]}");
+        }
+        Console.WriteLine(string.Create(Inv,
+            $"[VulkanSponza] ray work per {rayBench ?? "check"} ray, closest hit: nodes {Spread(nodes)}; placements entered {Spread(entered)}; triangles tested {Spread(tested)}; {100.0 * hits / RayCheckCount:0.0}% hit."));
+        if (host.Timing.GpuPassTotals.TryGetValue("ray-check", out var pass) && pass.Samples > 0)
+        {
+            var traced = rayBench is null ? 2 * RayCheckDispatchCount : RayCheckDispatchCount;
+            Console.WriteLine(string.Create(Inv,
+                $"[VulkanSponza] ray {(rayBench is null ? "check" : "bench")}: {pass.MeanMs:0.000} ms per dispatch over {pass.Samples} frames, {traced / pass.MeanMs / 1000.0:0.0} M rays/s{(rayBench is null ? " (closest and any)" : " (closest)")}."));
+        }
+
+        if (rayCheckProbe is { } probe && rayProbeEntry >= 0)
+        {
+            var w = RayCheckCount * 12;
+            var inst = rayQueries.Instances[probe.Instance];
+            Matrix4x4.Invert(inst.World, out var inv);
+            var ray = rayCheckRays[probe.Ray];
+            var local = new ShearedRay(Vector3.Transform(ray.Origin, inv), Vector3.TransformNormal(ray.Direction, inv));
+            var cpuHit = inst.Mesh.Hit(local, probe.Triangle, 0f, rayCheckTMax[probe.Ray], out var ct, out var cb, out _);
+            float F(int k) => BitConverter.UInt32BitsToSingle(words[w + k]);
+            var m = inst.Mesh;
+            Vector3 P(int k) => m.Positions[m.Indices[probe.Triangle * 3 + k]];
+            float C(Vector3 v, int axis) => axis == 0 ? v.X : axis == 1 ? v.Y : v.Z;
+            var a = P(0) - local.Origin; var b = P(1) - local.Origin; var c = P(2) - local.Origin;
+            float ax = C(a, local.Kx) - local.Sx * C(a, local.Kz), ay = C(a, local.Ky) - local.Sy * C(a, local.Kz);
+            float bx = C(b, local.Kx) - local.Sx * C(b, local.Kz), by = C(b, local.Ky) - local.Sy * C(b, local.Kz);
+            float cx = C(c, local.Kx) - local.Sx * C(c, local.Kz), cy = C(c, local.Ky) - local.Sy * C(c, local.Kz);
+            var k = words[w + 7];
+            Console.WriteLine(string.Create(Inv,
+                $"[VulkanSponza] ray probe, GPU: u {F(4):R} v {F(5):R} w {F(6):R} k ({k & 15},{(k >> 4) & 15},{(k >> 8) & 15}) shear ({F(8):R}, {F(9):R}, {F(10):R}) origin ({F(12):R}, {F(13):R}, {F(14):R}) direction ({F(16):R}, {F(17):R}, {F(18):R})"));
+            Console.WriteLine(string.Create(Inv,
+                $"[VulkanSponza] ray probe, CPU: u {cx * by - cy * bx:R} v {ax * cy - ay * cx:R} w {bx * ay - by * ax:R} k ({local.Kx},{local.Ky},{local.Kz}) shear ({local.Sx:R}, {local.Sy:R}, {local.Sz:R}) origin ({local.Origin.X:R}, {local.Origin.Y:R}, {local.Origin.Z:R}) direction ({local.Direction.X:R}, {local.Direction.Y:R}, {local.Direction.Z:R})"));
+            Console.WriteLine(string.Create(Inv,
+                $"[VulkanSponza] ray probe: ray {probe.Ray} against placement {probe.Instance} triangle {probe.Triangle} alone: GPU found it {(words[w] & 1u) != 0}, hit {(words[w] & 2u) != 0} at t {BitConverter.UInt32BitsToSingle(words[w + 1]):0.######} bary ({BitConverter.UInt32BitsToSingle(words[w + 2]):0.####}, {BitConverter.UInt32BitsToSingle(words[w + 3]):0.####}); CPU hit {cpuHit} at t {ct:0.######} bary {cb}."));
+        }
+        if (rayBackend == "both") WriteHardwareRayCheck(surfaceWords);
+    }
+
+    // One backend's answers (ray_check.comp's records) against the CPU's, ray for ray: the same hit or miss, the same
+    // placement and triangle, and how far the distance and barycentrics are apart (the GPU may fuse a multiply-add the
+    // CPU rounds twice, so they need not match to the bit). Null backend: the software traversal, reported untagged.
+    // Returns how many rays both hit.
+    private int CompareRayCheck(string? backend, uint[] words)
+    {
+        var tag = backend is null ? "" : $" ({backend})";
         int hits = 0, hitMismatch = 0, anyMismatch = 0, sameTriangle = 0, otherTriangle = 0, otherTriangleSameT = 0, faceMismatch = 0;
         double maxRelT = 0, maxBary = 0, maxNormal = 0;
         var relBuckets = new int[4];   // same triangle, relative distance error above 1e-6, 1e-5, 1e-4, 1e-3
         var worst = -1;
         var worstOther = -1;
+        // The check batch's ray classes (BuildRayCheck): random, aimed inside a triangle, at a vertex, at an edge's middle.
+        var mismatchByClass = new int[4];
         for (var i = 0; i < RayCheckCount; i++)
         {
             var o = i * 12;
@@ -330,8 +402,9 @@ internal sealed partial class SponzaLoop
                 // The first few, in full: which side met what, so a disagreement can be told apart from a tie.
                 if (hitMismatch < 4)
                     Console.WriteLine(string.Create(Inv,
-                        $"[VulkanSponza] ray check, hit/miss differ (ray {i}): CPU {(cpu is { } ch ? $"t {ch.T} placement {ch.Instance} triangle {ch.Triangle}" : "miss")}; GPU {(gpuHit ? $"t {BitConverter.UInt32BitsToSingle(words[o])} words {words[o + 1]} {words[o + 2]}" : "miss")}; CPU without coverage {(rayQueries.Closest(rayCheckRays[i], 0f, rayCheckTMax[i], (uint)i + 1u) is { } alt ? $"(other seed) t {alt.T} placement {alt.Instance} triangle {alt.Triangle}" : "(other seed) miss")}"));
+                        $"[VulkanSponza] ray check{tag}, hit/miss differ (ray {i}): CPU {(cpu is { } ch ? $"t {ch.T} placement {ch.Instance} triangle {ch.Triangle}" : "miss")}; GPU {(gpuHit ? $"t {BitConverter.UInt32BitsToSingle(words[o])} words {words[o + 1]} {words[o + 2]}" : "miss")}; CPU without coverage {(rayQueries.Closest(rayCheckRays[i], 0f, rayCheckTMax[i], (uint)i + 1u) is { } alt ? $"(other seed) t {alt.T} placement {alt.Instance} triangle {alt.Triangle}" : "(other seed) miss")}"));
                 hitMismatch++;
+                mismatchByClass[i % 2 == 0 ? 0 : (i / 2) % 2 == 0 ? 1 : (i / 4) % 2 == 0 ? 2 : 3]++;
                 continue;
             }
             if (cpu is not { } c) continue;
@@ -369,57 +442,12 @@ internal sealed partial class SponzaLoop
             }
         }
         Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] ray check, GPU against CPU over {RayCheckCount:N0} rays ({hits:N0} hit): hit/miss differ on {hitMismatch}, any-hit on {anyMismatch}; same placement and triangle on {sameTriangle:N0}, another on {otherTriangle} ({otherTriangleSameT} of them at the same distance); distance within {maxRelT:0.0e0} relative, barycentrics within {maxBary:0.0e0}, facing differs on {faceMismatch}, normals within {maxNormal:0.0e0}."));
+            $"[VulkanSponza] ray check{tag}, GPU against CPU over {RayCheckCount:N0} rays ({hits:N0} hit): hit/miss differ on {hitMismatch}, any-hit on {anyMismatch}; same placement and triangle on {sameTriangle:N0}, another on {otherTriangle} ({otherTriangleSameT} of them at the same distance); distance within {maxRelT:0.0e0} relative, barycentrics within {maxBary:0.0e0}, facing differs on {faceMismatch}, normals within {maxNormal:0.0e0}."));
         Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] ray check: same-triangle distance error, relative to the coordinates' scale, above 1e-6 / 1e-5 / 1e-4 / 1e-3 on {relBuckets[0]} / {relBuckets[1]} / {relBuckets[2]} / {relBuckets[3]} rays."));
-        // What a closest-hit trace did per ray: nodes popped (both levels), placements entered, triangles tested.
-        var nodes = new long[RayCheckCount];
-        var entered = new long[RayCheckCount];
-        var tested = new long[RayCheckCount];
-        for (var i = 0; i < RayCheckCount; i++)
-        {
-            nodes[i] = words[i * 12 + 6];
-            entered[i] = words[i * 12 + 3] >> 8;
-            tested[i] = words[i * 12 + 7];
-        }
-        string Spread(long[] v)
-        {
-            var sorted = v.OrderBy(x => x).ToArray();
-            return string.Create(Inv, $"mean {v.Average():0.0}, median {sorted[sorted.Length / 2]}, p95 {sorted[(int)(sorted.Length * 0.95)]}, max {sorted[^1]}");
-        }
-        Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] ray work per {rayBench ?? "check"} ray, closest hit: nodes {Spread(nodes)}; placements entered {Spread(entered)}; triangles tested {Spread(tested)}; {100.0 * hits / RayCheckCount:0.0}% hit."));
-        if (host.Timing.GpuPassTotals.TryGetValue("ray-check", out var pass) && pass.Samples > 0)
-        {
-            var traced = rayBench is null ? 2 * RayCheckCount : RayCheckCount;
+            $"[VulkanSponza] ray check{tag}: same-triangle distance error, relative to the coordinates' scale, above 1e-6 / 1e-5 / 1e-4 / 1e-3 on {relBuckets[0]} / {relBuckets[1]} / {relBuckets[2]} / {relBuckets[3]} rays."));
+        if (backend is not null && rayBench is null)
             Console.WriteLine(string.Create(Inv,
-                $"[VulkanSponza] ray {(rayBench is null ? "check" : "bench")}: {pass.MeanMs:0.000} ms per dispatch over {pass.Samples} frames, {traced / pass.MeanMs / 1000.0:0.0} M rays/s{(rayBench is null ? " (closest and any)" : " (closest)")}."));
-        }
-
-        if (rayCheckProbe is { } probe && rayProbeEntry >= 0)
-        {
-            var w = RayCheckCount * 12;
-            var inst = rayQueries.Instances[probe.Instance];
-            Matrix4x4.Invert(inst.World, out var inv);
-            var ray = rayCheckRays[probe.Ray];
-            var local = new ShearedRay(Vector3.Transform(ray.Origin, inv), Vector3.TransformNormal(ray.Direction, inv));
-            var cpuHit = inst.Mesh.Hit(local, probe.Triangle, 0f, rayCheckTMax[probe.Ray], out var ct, out var cb, out _);
-            float F(int k) => BitConverter.UInt32BitsToSingle(words[w + k]);
-            var m = inst.Mesh;
-            Vector3 P(int k) => m.Positions[m.Indices[probe.Triangle * 3 + k]];
-            float C(Vector3 v, int axis) => axis == 0 ? v.X : axis == 1 ? v.Y : v.Z;
-            var a = P(0) - local.Origin; var b = P(1) - local.Origin; var c = P(2) - local.Origin;
-            float ax = C(a, local.Kx) - local.Sx * C(a, local.Kz), ay = C(a, local.Ky) - local.Sy * C(a, local.Kz);
-            float bx = C(b, local.Kx) - local.Sx * C(b, local.Kz), by = C(b, local.Ky) - local.Sy * C(b, local.Kz);
-            float cx = C(c, local.Kx) - local.Sx * C(c, local.Kz), cy = C(c, local.Ky) - local.Sy * C(c, local.Kz);
-            var k = words[w + 7];
-            Console.WriteLine(string.Create(Inv,
-                $"[VulkanSponza] ray probe, GPU: u {F(4):R} v {F(5):R} w {F(6):R} k ({k & 15},{(k >> 4) & 15},{(k >> 8) & 15}) shear ({F(8):R}, {F(9):R}, {F(10):R}) origin ({F(12):R}, {F(13):R}, {F(14):R}) direction ({F(16):R}, {F(17):R}, {F(18):R})"));
-            Console.WriteLine(string.Create(Inv,
-                $"[VulkanSponza] ray probe, CPU: u {cx * by - cy * bx:R} v {ax * cy - ay * cx:R} w {bx * ay - by * ax:R} k ({local.Kx},{local.Ky},{local.Kz}) shear ({local.Sx:R}, {local.Sy:R}, {local.Sz:R}) origin ({local.Origin.X:R}, {local.Origin.Y:R}, {local.Origin.Z:R}) direction ({local.Direction.X:R}, {local.Direction.Y:R}, {local.Direction.Z:R})"));
-            Console.WriteLine(string.Create(Inv,
-                $"[VulkanSponza] ray probe: ray {probe.Ray} against placement {probe.Instance} triangle {probe.Triangle} alone: GPU found it {(words[w] & 1u) != 0}, hit {(words[w] & 2u) != 0} at t {BitConverter.UInt32BitsToSingle(words[w + 1]):0.######} bary ({BitConverter.UInt32BitsToSingle(words[w + 2]):0.####}, {BitConverter.UInt32BitsToSingle(words[w + 3]):0.####}); CPU hit {cpuHit} at t {ct:0.######} bary {cb}."));
-        }
+                $"[VulkanSponza] ray check{tag}: hit/miss differ by ray class: random {mismatchByClass[0]}, aimed inside a triangle {mismatchByClass[1]}, at a vertex {mismatchByClass[2]}, at an edge's middle {mismatchByClass[3]}."));
         foreach (var (label, i) in new[] { ("worst same-triangle", worst), ("a different triangle at another distance", worstOther) })
         {
             if (i < 0) continue;
@@ -430,8 +458,9 @@ internal sealed partial class SponzaLoop
             var p0 = m.Positions[m.Indices[c.Triangle * 3]]; var p1 = m.Positions[m.Indices[c.Triangle * 3 + 1]]; var p2 = m.Positions[m.Indices[c.Triangle * 3 + 2]];
             var area = Vector3.Cross(p1 - p0, p2 - p0).Length() * 0.5f;
             Console.WriteLine(string.Create(Inv,
-                $"[VulkanSponza] ray check, {label} (ray {i}): CPU t {c.T:0.######} placement {c.Instance} triangle {c.Triangle} bary {c.Barycentrics}; GPU t {BitConverter.UInt32BitsToSingle(words[o]):0.######} placement {(int)words[o + 4]} triangle {(int)words[o + 5]} bary ({BitConverter.UInt32BitsToSingle(words[o + 1]):0.####}, {BitConverter.UInt32BitsToSingle(words[o + 2]):0.####}); triangle area {area:0.######} m², placement scale det {inst.World.GetDeterminant():0.###}, direction {rayCheckRays[i].Direction}."));
+                $"[VulkanSponza] ray check{tag}, {label} (ray {i}): CPU t {c.T:0.######} placement {c.Instance} triangle {c.Triangle} bary {c.Barycentrics}; GPU t {BitConverter.UInt32BitsToSingle(words[o]):0.######} placement {(int)words[o + 4]} triangle {(int)words[o + 5]} bary ({BitConverter.UInt32BitsToSingle(words[o + 1]):0.####}, {BitConverter.UInt32BitsToSingle(words[o + 2]):0.####}); triangle area {area:0.######} m², placement scale det {inst.World.GetDeterminant():0.###}, direction {rayCheckRays[i].Direction}."));
         }
+        return hits;
     }
 
     // --ray-view. The camera's view traced through the same scene (ray_view.comp), half resolution, beside the

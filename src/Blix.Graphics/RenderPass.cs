@@ -27,4 +27,9 @@ public sealed record RenderPassDescription(
     // Compute pass: the attachment outputs of earlier graphics passes it samples (RenderGraph.ComputeAttachmentReads).
     // The backend orders each explicitly (attachment write -> compute read) before the first dispatch, instead of
     // relying on the producer's subpass dependency to have named the compute stage.
-    IReadOnlyList<TextureHandle>? AttachmentReads = null);
+    IReadOnlyList<TextureHandle>? AttachmentReads = null,
+
+    // Native Metal work in place of dispatches (RenderGraph.External): the device splits the frame's submission
+    // here and calls this with the timeline values to wait for and signal (ExternalWorkSync). Set on a Compute pass
+    // with no commands.
+    Action<ExternalWorkSync>? External = null);

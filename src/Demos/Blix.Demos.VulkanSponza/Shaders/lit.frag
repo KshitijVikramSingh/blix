@@ -114,6 +114,10 @@ layout(set = 1, binding = 19) uniform sampler uLinearClamp;
 layout(set = 1, binding = 11) uniform texture2D uClipmapIrradiance;
 layout(set = 1, binding = 12) uniform texture2D uClipmapDepth;
 layout(std430, set = 1, binding = 13) readonly buffer ClipmapState { uvec4 clipmapStates[]; };
+// --rt-shadows: the sun's visibility at this frame's pixels, traced on Apple's ray tracing hardware
+// (SponzaLoop.RtShadows): a header (width, height, 1 while live), then one word per pixel, nonzero where the sun is
+// blocked. A placeholder of zeros otherwise, and the cascades answer as before.
+layout(std430, set = 1, binding = 21) readonly buffer RtShadowMask { uvec4 rtShadowHeader; uint rtShadowOccluded[]; };
 #define BLIX_CLIPMAP_IRRADIANCE(t) texelFetch(sampler2D(uClipmapIrradiance, uLinearClamp), t, 0)
 #define BLIX_CLIPMAP_DEPTH(t) texelFetch(sampler2D(uClipmapDepth, uLinearClamp), t, 0)
 #define BLIX_CLIPMAP_IRRADIANCE_FILTERED(p) textureLod(sampler2D(uClipmapIrradiance, uLinearClamp), (p) / vec2(textureSize(sampler2D(uClipmapIrradiance, uLinearClamp), 0)), 0.0)
@@ -387,7 +391,12 @@ void main() {
     // outside the cascades because no lookup was requested.
     float backNdotL = max(dot(-N, L), 0.0);
     float shadowNeed = max(NdotL, mat.uMaterialParams2.z > 0.0 ? backNdotL : 0.0);
-    if (frame.uShadowStrength > 0.0 && shadowNeed > 0.0) {
+    if (frame.uShadowStrength > 0.0 && shadowNeed > 0.0 && rtShadowHeader.z != 0u) {
+        uvec2 px = uvec2(gl_FragCoord.xy);
+        bool inside = px.x < rtShadowHeader.x && px.y < rtShadowHeader.y;
+        sunShadow = inside && rtShadowOccluded[px.y * rtShadowHeader.x + px.x] != 0u ? 0.0 : 1.0;
+        sunShadow = mix(1.0, sunShadow, frame.uShadowStrength);
+    } else if (frame.uShadowStrength > 0.0 && shadowNeed > 0.0) {
         sunShadow = blix_sun_shadow_cascaded(
             uCascadeShadowMaps[0], uCascadeShadowMaps[1], uCascadeShadowMaps[2], uLinearClamp,
             frame.uCascadeViewProj[0], frame.uCascadeViewProj[1], frame.uCascadeViewProj[2],

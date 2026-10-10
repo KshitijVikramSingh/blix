@@ -1,0 +1,38 @@
+#version 450
+
+// --rt-shadows: one sun shadow ray per pixel, from the pre-pass's depth and normal, for the Metal shadow pass that
+// follows (SponzaLoop.RtShadows). Each origin is a vec4: the surface point at the pixel's centre, lifted off the
+// surface along its shading normal, and how far its ray goes toward the sun; 0 where the pixel has no surface.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform RtShadowRays {
+    mat4 uInvViewProj;   // inverse of the jittered view-projection the pre-pass drew with
+    vec4 uSize;          // xy: pixels
+    vec4 uCamera;        // xyz: position
+    vec4 uSun;           // xyz: toward the sun, unit; w: how far a ray goes
+} u;
+
+layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
+layout(set = 0, binding = 2) uniform sampler2D uPrepassNormal;
+layout(std430, set = 0, binding = 3) writeonly buffer RtShadowOrigins { vec4 origins[]; };
+
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (p.x >= uint(u.uSize.x) || p.y >= uint(u.uSize.y)) return;
+    uint index = p.y * uint(u.uSize.x) + p.x;
+    float raw = texelFetch(uSceneDepth, ivec2(p), 0).r;
+    vec4 nSample = texelFetch(uPrepassNormal, ivec2(p), 0);
+    if (raw >= 1.0 - 1e-6 || dot(nSample.xyz, nSample.xyz) < 1e-6) {
+        origins[index] = vec4(0.0);
+        return;
+    }
+    vec2 ndc = (vec2(p) + 0.5) / u.uSize.xy * 2.0 - 1.0;
+    vec4 world = u.uInvViewProj * vec4(ndc, raw, 1.0);
+    vec3 position = world.xyz / world.w;
+    // The pre-pass normal faces the camera (lit.frag's back-face convention). The lift grows with distance, as depth
+    // precision shrinks: 1 cm plus 0.1% of the distance, which is what the surface batch's probes use.
+    vec3 n = normalize(nSample.xyz);
+    float lift = 0.01 + 0.001 * length(position - u.uCamera.xyz);
+    origins[index] = vec4(position + n * lift, u.uSun.w);
+}
