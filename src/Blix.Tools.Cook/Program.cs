@@ -434,7 +434,7 @@ public static partial class Program
     Console.WriteLine("    sky <dir-or-blixmesh> [--out <file>] [--occupancy N] [--probes N]");
     Console.WriteLine("                            [--rays N] [--albedo N]");
     Console.WriteLine("                             bake scene sky visibility from cooked meshes");
-    Console.WriteLine("    lightmap <dir-or-blixmesh> [--texels-per-metre N] [--padding N] [--only <substring>]");
+    Console.WriteLine("    lightmap <dir-or-blixmesh> [--texel-cm 4] [--density pattern=cm,...] [--only S]");
     Console.WriteLine("                             unwrap a scene's meshes for lightmaps (xatlas) and report the unwrap");
     Console.WriteLine();
     Console.WriteLine("    mesh/textures/probe --out <dir>");

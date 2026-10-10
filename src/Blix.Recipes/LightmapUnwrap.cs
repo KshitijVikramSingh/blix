@@ -22,7 +22,8 @@ public static unsafe class LightmapUnwrap
         int Charts, int[] ChartTypes, int Atlases, int Width, int Height, float Utilization);
 
     /// <summary>Unwraps one mesh. <paramref name="padding"/> texels between charts (bilinear lookups need at least one).</summary>
-    public static Result Unwrap(Vector3[] positions, uint[] indices, float texelsPerUnit, int padding = 2, int maxResolution = 8192)
+    /// <param name="maxCost">xatlas's chart cost limit (0: its default, 2): higher grows larger charts -- fewer seams, more stretch.</param>
+    public static Result Unwrap(Vector3[] positions, uint[] indices, float texelsPerUnit, int padding = 2, int maxResolution = 8192, float maxCost = 0f)
     {
         if (!XatlasNative.Available)
             throw new InvalidOperationException($"The xatlas native ({XatlasNative.FileName}) is missing: the BuildXatlas target in Blix.Recipes.csproj did not produce it.");
@@ -46,6 +47,7 @@ public static unsafe class LightmapUnwrap
                 XatlasNative.xatlasAddMeshJoin(atlas);
                 XatlasNative.ChartOptions chart;
                 XatlasNative.xatlasChartOptionsInit(&chart);
+                if (maxCost > 0f) chart.MaxCost = maxCost;
                 XatlasNative.PackOptions pack;
                 XatlasNative.xatlasPackOptionsInit(&pack);
                 pack.TexelsPerUnit = texelsPerUnit;

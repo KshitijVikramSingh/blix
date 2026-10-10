@@ -7,7 +7,7 @@ using Blix.Recipes;
 
 namespace Blix.Tools.Cook;
 
-// blix cook lightmap <dir-of-blixmesh> [--texels-per-metre N] [--padding N] [--only <substring>]
+// blix cook lightmap <dir-of-blixmesh> [--texel-cm 4] [--density "pattern=cm,..."] [--padding N] [--only <substring>]
 //
 // Stage 5 (lightmaps), step 1: unwrap every primitive a scene draws with xatlas and say how good the unwrap is -- it
 // writes nothing yet. Per pack (the top directory under <dir>: Sponza's main_sponza, curtains, ivy, trees):
@@ -20,8 +20,25 @@ public static partial class Program
 {
     static int CookLightmap(AppArgs args)
     {
-        var texelsPerMetre = args.Float("texels-per-metre", 20f);
+        // A 4 cm base (--texel-cm), and per-material overrides (--density "curtain=2,wall=8": a pattern matched, case
+        // insensitive, against the material's name, then the pack's -- the first that matches sets that primitive's
+        // texel in cm). Powers of two of the base line up with the atlas's mips (4 / 8 / 16 / 32 cm); density is
+        // per surface, since atlas space is not what limits it: Sponza at 5 cm was ~6 M texels in all.
+        var baseCm = args.Float("texel-cm", 4f);
+        var texelsPerMetre = 100f / baseCm;
+        var overrides = new List<(string Pattern, float Cm)>();
+        if (args.String("density") is { } spec)
+            foreach (var part in spec.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                var eq = part.IndexOf('=');
+                if (eq <= 0 || !float.TryParse(part[(eq + 1)..], NumberStyles.Float, CultureInfo.InvariantCulture, out var cm) || cm <= 0f)
+                { Console.Error.WriteLine($"--density: '{part}' is not pattern=cm"); return 2; }
+                overrides.Add((part[..eq], cm));
+            }
+        var densityUse = new SortedDictionary<float, (int Primitives, double Area)>();
         var padding = args.Int("padding", 2);
+        // --max-cost C: xatlas's chart cost limit (default 2): higher, larger charts -- fewer seams to lock, more stretch.
+        var maxCost = args.Float("max-cost", 0f);
         var only = args.String("only");
         // --lod-test: per primitive, today's LOD chain against one simplified with every chart border locked (the split
         // mesh, simplified with LockBorder: a simplified triangle then never crosses a chart). Positions only and no
@@ -32,10 +49,10 @@ public static partial class Program
         var lodBase = new long[lodRatios.Length]; var lodSeam = new long[lodRatios.Length]; long lodFull = 0;
         var lodErrBase = new List<double>[lodRatios.Length]; var lodErrSeam = new List<double>[lodRatios.Length];
         for (var l = 0; l < lodRatios.Length; l++) { lodErrBase[l] = new List<double>(); lodErrSeam[l] = new List<double>(); }
-        if (args.Positionals is not [var root]) { Console.Error.WriteLine("Usage: blix cook lightmap <dir> [--texels-per-metre N]"); return 2; }
+        if (args.Positionals is not [var root]) { Console.Error.WriteLine("Usage: blix cook lightmap <dir> [--texel-cm 4] [--density pattern=cm,...]"); return 2; }
         var meshes = Directory.Exists(root) ? Directory.GetFiles(root, "*.blixmesh", SearchOption.AllDirectories) : new[] { root };
         if (meshes.Length == 0) { Console.Error.WriteLine($"No .blixmesh under {root}."); return 2; }
-        Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"Unwrapping {meshes.Length} cooked mesh file(s) at {texelsPerMetre} texels/m ({100f / texelsPerMetre:0.#} cm), padding {padding}"));
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"Unwrapping {meshes.Length} cooked mesh file(s) at a {baseCm} cm base{(overrides.Count > 0 ? ", " + string.Join(", ", overrides.Select(o => $"{o.Pattern} {o.Cm} cm")) : "")}, padding {padding}"));
         var clock = Stopwatch.StartNew();
         var groups = new SortedDictionary<string, Stats>(StringComparer.Ordinal);
         var worst = new List<(string Name, double Stretch90, int Charts, int Triangles, double LodMixed)>();
@@ -78,8 +95,13 @@ public static partial class Program
                 }
                 var indices = lods[0];
                 if (indices.Length < 3) continue;
+                var materialName = prim.MaterialIndex >= 0 && prim.MaterialIndex < file.MaterialTable.Count ? file.MaterialTable[prim.MaterialIndex].Name : "";
+                var cmHere = baseCm;
+                foreach (var (pattern, cm) in overrides)
+                    if (materialName.Contains(pattern, StringComparison.OrdinalIgnoreCase) || group.Contains(pattern, StringComparison.OrdinalIgnoreCase)) { cmHere = cm; break; }
+                var tpm = 100f / cmHere;
                 LightmapUnwrap.Result r;
-                try { r = LightmapUnwrap.Unwrap(positions, indices, texelsPerMetre, padding); }
+                try { r = LightmapUnwrap.Unwrap(positions, indices, tpm, padding, maxCost: maxCost); }
                 catch (InvalidOperationException ex) { Console.WriteLine($"  {rel} #{primIndex}: {ex.Message}"); g.Failed++; continue; }
                 var tris = indices.Length / 3;
                 g.Primitives++; g.Instances += instances; g.Triangles += tris; g.InVertices += vertexCount; g.OutVertices += r.Uv.Length;
@@ -109,13 +131,15 @@ public static partial class Program
                     double tr = aa + cc, det = Math.Sqrt(Math.Max(0, (aa - cc) * (aa - cc) + 4 * bb * bb));
                     double s1 = Math.Sqrt(Math.Max(0, (tr + det) / 2)), s2 = Math.Sqrt(Math.Max(0, (tr - det) / 2));
                     var ratio = s2 > 1e-9 ? s1 / s2 : 1e9;
-                    var density = s1 * s2 / (texelsPerMetre * texelsPerMetre);
+                    var density = s1 * s2 / (tpm * tpm);
                     stretches.Add((a3, ratio, density));
                     area += a3;
                 }
                 g.Area += area * instances;
                 foreach (var s in stretches) { g.StretchSamples.Add((s.Area * instances, s.Ratio)); g.DensitySamples.Add((s.Area * instances, s.Density)); }
-                g.TexelsNeeded += area * instances * texelsPerMetre * texelsPerMetre / Math.Max(0.05f, r.Utilization);
+                g.TexelsNeeded += area * instances * tpm * tpm / Math.Max(0.05f, r.Utilization);
+                var du = densityUse.GetValueOrDefault(cmHere);
+                densityUse[cmHere] = (du.Primitives + 1, du.Area + area * instances);
                 // LOD: an input vertex is in every chart one of its output copies is in; a simplified triangle has one
                 // UV only if its three corners share a chart.
                 var chartsOf = new Dictionary<int, HashSet<int>>();
@@ -160,7 +184,7 @@ public static partial class Program
                 primIndex++;
             }
         }
-        Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"Unwrapped in {clock.Elapsed.TotalSeconds:0.0} s."));
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"Unwrapped in {clock.Elapsed.TotalSeconds:0.0} s; by texel size: {string.Join(", ", densityUse.Select(d => $"{d.Key} cm {d.Value.Primitives:N0} primitives {d.Value.Area:N0} m2"))}."));
         foreach (var (name, g) in groups)
         {
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
@@ -170,7 +194,7 @@ public static partial class Program
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"    conformal stretch (scale ratio, area-weighted): median {WeightedPercentile(g.StretchSamples, 0.5):0.00}, p90 {WeightedPercentile(g.StretchSamples, 0.9):0.00}, p99 {WeightedPercentile(g.StretchSamples, 0.99):0.00}; density vs asked: p10 {WeightedPercentile(g.DensitySamples, 0.1):0.00}, median {WeightedPercentile(g.DensitySamples, 0.5):0.00}, p90 {WeightedPercentile(g.DensitySamples, 0.9):0.00}"));
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                $"    atlas texels for every instance at this density (by packing utilization): {g.TexelsNeeded / 1e6:0.0} M (~{Math.Sqrt(g.TexelsNeeded):0} squared)"));
+                $"    atlas texels for every instance at its density (by packing utilization): {g.TexelsNeeded / 1e6:0.0} M (~{Math.Sqrt(g.TexelsNeeded):0} squared)"));
             for (var l = 0; l < g.LodMixed.Count; l++)
                 Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                     $"    LOD {l + 1}: {g.LodMixed[l]:N0} of {g.LodTotal[l]:N0} simplified triangles have corners in no common chart ({100.0 * g.LodMixed[l] / Math.Max(1, g.LodTotal[l]):0.0}%)"));
