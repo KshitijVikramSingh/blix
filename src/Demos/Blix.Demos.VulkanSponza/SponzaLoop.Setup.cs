@@ -158,6 +158,14 @@ internal sealed partial class SponzaLoop
         }
         // --rt-shadows: the lit pass's sun shadows traced on Apple's ray tracing hardware (SponzaLoop.RtShadows).
         rtShadows = args.Flag("rt-shadows");
+        // --rt-no-overlap: no join, so the frame waits for the trace right after it (the overlap's control).
+        rtNoOverlap = args.Flag("rt-no-overlap");
+        // --rt-shadow-scale N: trace one pixel in N x N (1 or 2); lit.frag upsamples by depth.
+        if (args.Int("rt-shadow-scale") is { } rtScale)
+        {
+            if (rtScale is not (1 or 2)) throw new AppArgsException($"--rt-shadow-scale takes 1 or 2, not {rtScale}.");
+            rtShadowScale = rtScale;
+        }
         // --ray-view: trace the camera's view and hold it against the raster at the shot (it brings the ray check with it).
         rayView = args.Flag("ray-view");
         rayCheck |= rayView;
@@ -575,6 +583,14 @@ internal sealed partial class SponzaLoop
         rayViewInterface = Reflect("ray_view.comp");
         rayViewPassHandle = graph.ComputePass("ray-view").Shader(rayViewInterface).Read(SampleableSceneDepth).Handle;
 
+        // --rt-shadows: the shadow rays as soon as the pre-pass has the depth and normals they start from, and the Metal
+        // pass that traces them; the lit pass joins it (rt-shadow-join, below). Everything between (Hi-Z, GTAO, the
+        // clipmap's marks, the incident light) reads none of it, so it runs while the rays are traced.
+        rtShadowRaysInterface = Reflect("rt_shadow_rays.comp");
+        rtShadowRaysPassHandle = graph.ComputePass("rt-shadow-rays").Shader(rtShadowRaysInterface)
+            .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
+        rtShadowTracePassHandle = graph.ExternalPass("rt-shadow-trace");
+
         // The Hi-Z pyramid, immediately after the pre-pass that resolves the depth it reduces.
         // Level 0 is half the framebuffer — the same grid GTAO already works on, so its consumers
         // need no extra rescaling — and each level halves again.
@@ -671,12 +687,6 @@ internal sealed partial class SponzaLoop
         screenProbeFilterInterface = Reflect("screen_probe_filter.comp");
         screenProbeFilterPassHandle = graph.ComputePass("screen-probe-filter").Shader(screenProbeFilterInterface).Handle;
 
-        // --rt-shadows: the shadow rays from the pre-pass, then the Metal pass that traces them, both before the lit pass.
-        rtShadowRaysInterface = Reflect("rt_shadow_rays.comp");
-        rtShadowRaysPassHandle = graph.ComputePass("rt-shadow-rays").Shader(rtShadowRaysInterface)
-            .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
-        rtShadowTracePassHandle = graph.ExternalPass("rt-shadow-trace");
-
         {
             var incidentBuilder = graph.GraphicsPass("incident-light")
                 .Target(incidentHandle, LoadOp.Clear, StoreOp.Store)
@@ -689,6 +699,9 @@ internal sealed partial class SponzaLoop
             incidentPassHandle = incidentBuilder.Shader(incidentClipmapInterface).Handle;
         }
 
+
+        // The traced shadows are needed from here on.
+        if (!rtNoOverlap) graph.ExternalJoin(rtShadowTracePassHandle, "rt-shadow-join");
 
         // At one sample there is nothing to resolve, and asking for a resolve anyway is invalid —
         // so the single-sample path renders straight into the target present reads.

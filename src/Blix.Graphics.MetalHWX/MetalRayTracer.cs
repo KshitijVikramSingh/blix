@@ -188,8 +188,10 @@ public sealed class MetalRayTracer : IDisposable
     /// before the pass, traces one ray per origin toward <paramref name="towardLight"/>, and signals the rest of the
     /// frame on. Returns without waiting.
     /// </summary>
-    /// <param name="origins">float4 per ray: where it starts, and how far it goes (0 or less: no ray, reported unoccluded).</param>
-    /// <param name="occluded">uint per ray from <paramref name="occludedOffset"/> bytes: 1 where something is in the way.</param>
+    /// <param name="origins">float4 per ray: where it starts, and how far it goes; 0: no ray, reported unoccluded; below 0:
+    /// no ray, reported occluded.</param>
+    /// <param name="occluded">uint per ray from <paramref name="occludedOffset"/> bytes: its top bit set where something is in
+    /// the way and cleared where nothing is; the other 31 bits are the caller's, kept.</param>
     /// <param name="seedBase">Ray i's coverage seed is this plus i; vary it per frame for the partly covered to dither over time.</param>
     /// <remarks>
     /// Never throws for a bad argument: the frame waits for the signal, so the work is skipped, the signal still sent,

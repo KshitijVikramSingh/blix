@@ -163,6 +163,26 @@ public sealed partial class RenderGraph : IDisposable
         return new PassHandle(id);
     }
 
+    /// <summary>
+    /// Where the work of an external pass is first needed: passes declared between the two run alongside the Metal
+    /// work instead of after it, and everything declared after the join waits for it. Without a join, the frame waits
+    /// right after the external pass. Declared after the external pass, at most one per external pass.
+    /// </summary>
+    public PassHandle ExternalJoin(PassHandle externalPass, string name)
+    {
+        EnsureNotCompiled(nameof(ExternalJoin));
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        if (!ComputePasses.TryGetValue(externalPass.Id, out var external) || !external.External)
+            throw new InvalidOperationException($"RenderGraph.ExternalJoin names pass {externalPass.Id}, which is not an external pass.");
+        if (external.Join != 0)
+            throw new InvalidOperationException($"external pass '{external.Name}' already has a join.");
+        var id = nextId++;
+        ComputePasses[id] = new ComputePassEntry { Handle = new PassHandle(id), Name = name, External = true, JoinOf = externalPass.Id };
+        PassOrder.Add(id);
+        external.Join = id;
+        return new PassHandle(id);
+    }
+
     // --- Compile + Execute -------------------------------------------------
 
     // Validates → allocates backend resources → infers barriers → freezes.
@@ -375,7 +395,7 @@ public sealed partial class RenderGraph : IDisposable
     {
         ArgumentNullException.ThrowIfNull(encode);
         if (!IsCompiled) throw new InvalidOperationException("RenderGraph.External called before Compile.");
-        if (!ComputePasses.TryGetValue(handle.Id, out var entry) || !entry.External)
+        if (!ComputePasses.TryGetValue(handle.Id, out var entry) || !entry.External || entry.JoinOf != 0)
             throw new InvalidOperationException($"RenderGraph.External targets pass {handle.Id}, which is not an external pass. Declare it with graph.ExternalPass(...).");
         if (!recordedExternal.TryAdd(handle.Id, encode))
             throw new InvalidOperationException($"external pass '{entry.Name}' already has work this frame; it takes one piece a frame.");
@@ -400,7 +420,13 @@ public sealed partial class RenderGraph : IDisposable
             {
                 if (recordedExternal.TryGetValue(passId, out var external))
                 {
-                    commandList.ExternalPass(cpass.Name, external);
+                    commandList.ExternalPass(cpass.Name, external, joinLater: cpass.Join != 0);
+                    continue;
+                }
+                // A join emits only when its external pass has work this frame.
+                if (cpass.JoinOf != 0)
+                {
+                    if (recordedExternal.ContainsKey(cpass.JoinOf)) commandList.ExternalJoin(cpass.Name, ComputePasses[cpass.JoinOf].Name);
                     continue;
                 }
                 if (recordedDispatches.TryGetValue(passId, out var dispatches))
@@ -527,4 +553,10 @@ internal sealed class ComputePassEntry
 
     /// <summary>Declared with RenderGraph.ExternalPass: native Metal work, no shader and no dispatches.</summary>
     public bool External { get; init; }
+
+    /// <summary>Declared with RenderGraph.ExternalJoin: the external pass (its id) whose work the passes after this wait for.</summary>
+    public int JoinOf { get; init; }
+
+    /// <summary>For an external pass: its join, when one was declared.</summary>
+    public int Join { get; set; }
 }

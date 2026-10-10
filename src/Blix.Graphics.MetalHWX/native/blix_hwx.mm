@@ -99,8 +99,10 @@ struct Params { uint count; uint seedBase; uint closestOnly; uint pad; };
 
 struct ShadowParams { float4 direction; uint count; uint seedBase; uint pad0; uint pad1; };
 
-// Sun shadows: one ray per origin, every one toward the same direction. An origin is (position, tMax); tMax <= 0
-// means no ray (sky, or nothing to shade). Writes 1 where anything, met as coverage allows, is in the way.
+// Sun shadows: one ray per origin, every one toward the same direction. An origin is (position, tMax); tMax 0 means
+// no ray and unoccluded (sky, nothing to shade), tMax < 0 no ray and occluded (the caller already knows: a surface
+// facing away). Sets the top bit of the ray's word where anything, met as coverage allows, is in the way, and clears it
+// where nothing is, leaving the rest of the word (the caller's) as it was.
 kernel void blix_shadow(device const float4* origins [[buffer(0)]],
                         device uint* occluded [[buffer(1)]],
                         instance_acceleration_structure tlas [[buffer(2)]],
@@ -110,13 +112,14 @@ kernel void blix_shadow(device const float4* origins [[buffer(0)]],
 {
     if (i >= p.count) return;
     float4 o = origins[i];
-    if (!(o.w > 0.0f)) { occluded[i] = 0u; return; }
+    uint keep = occluded[i] & 0x7FFFFFFFu;
+    if (!(o.w > 0.0f)) { occluded[i] = keep | (o.w < 0.0f ? 0x80000000u : 0u); return; }
     uint seed = p.seedBase + i;
     intersector<triangle_data, instancing> isect;
     isect.assume_geometry_type(geometry_type::triangle);
     isect.accept_any_intersection(true);
     auto res = isect.intersect(ray(o.xyz, p.direction.xyz, 0.0f, o.w), tlas, 0xFFu, table, seed);
-    occluded[i] = res.type != intersection_type::none ? 1u : 0u;
+    occluded[i] = keep | (res.type != intersection_type::none ? 0x80000000u : 0u);
 }
 
 // ray_check.comp's contract: each ray two float4s (origin, tMin; direction, tMax), its seed seedBase + its index;

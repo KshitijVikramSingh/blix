@@ -114,10 +114,38 @@ layout(set = 1, binding = 19) uniform sampler uLinearClamp;
 layout(set = 1, binding = 11) uniform texture2D uClipmapIrradiance;
 layout(set = 1, binding = 12) uniform texture2D uClipmapDepth;
 layout(std430, set = 1, binding = 13) readonly buffer ClipmapState { uvec4 clipmapStates[]; };
-// --rt-shadows: the sun's visibility at this frame's pixels, traced on Apple's ray tracing hardware
-// (SponzaLoop.RtShadows): a header (width, height, 1 while live), then one word per pixel, nonzero where the sun is
-// blocked. A placeholder of zeros otherwise, and the cascades answer as before.
-layout(std430, set = 1, binding = 21) readonly buffer RtShadowMask { uvec4 rtShadowHeader; uint rtShadowOccluded[]; };
+// --rt-shadows: the sun's visibility traced on Apple's ray tracing hardware (SponzaLoop.RtShadows): a header (traced
+// width, height, 1 while live, full pixels per traced pixel), then one word per traced pixel: the top bit set where the
+// sun is blocked, the rest the traced surface's distance from the camera (float bits). A placeholder of zeros
+// otherwise, and the cascades answer as before.
+layout(std430, set = 1, binding = 21) readonly buffer RtShadowMask { uvec4 rtShadowHeader; uint rtShadowWords[]; };
+
+// The traced visibility at this fragment. At half resolution: the four traced pixels around it, bilinear weights
+// times how close each traced surface's distance is to this fragment's, so a shadow does not bleed across a depth
+// edge; where none is close, the closest alone.
+float rtSunVisibility(vec2 fragCoord, float distance) {
+    uvec2 size = rtShadowHeader.xy;
+    if (rtShadowHeader.w <= 1u) {
+        uvec2 px = uvec2(fragCoord);
+        return px.x < size.x && px.y < size.y && (rtShadowWords[px.y * size.x + px.x] & 0x80000000u) != 0u ? 0.0 : 1.0;
+    }
+    vec2 f = fragCoord / float(rtShadowHeader.w) - 0.5;
+    ivec2 base = ivec2(floor(f));
+    vec2 t = f - vec2(base);
+    float sum = 0.0, weight = 0.0, nearest = 1e30, nearestVisibility = 1.0;
+    for (int k = 0; k < 4; ++k) {
+        ivec2 o = ivec2(k & 1, k >> 1);
+        ivec2 q = clamp(base + o, ivec2(0), ivec2(size) - 1);
+        uint word = rtShadowWords[uint(q.y) * size.x + uint(q.x)];
+        float visibility = (word & 0x80000000u) != 0u ? 0.0 : 1.0;
+        float gap = abs(uintBitsToFloat(word & 0x7FFFFFFFu) - distance);
+        float w = (o.x == 1 ? t.x : 1.0 - t.x) * (o.y == 1 ? t.y : 1.0 - t.y) * exp(-gap / (0.02 * distance + 0.01));
+        sum += w * visibility;
+        weight += w;
+        if (gap < nearest) { nearest = gap; nearestVisibility = visibility; }
+    }
+    return weight > 1e-4 ? sum / weight : nearestVisibility;
+}
 #define BLIX_CLIPMAP_IRRADIANCE(t) texelFetch(sampler2D(uClipmapIrradiance, uLinearClamp), t, 0)
 #define BLIX_CLIPMAP_DEPTH(t) texelFetch(sampler2D(uClipmapDepth, uLinearClamp), t, 0)
 #define BLIX_CLIPMAP_IRRADIANCE_FILTERED(p) textureLod(sampler2D(uClipmapIrradiance, uLinearClamp), (p) / vec2(textureSize(sampler2D(uClipmapIrradiance, uLinearClamp), 0)), 0.0)
@@ -402,9 +430,7 @@ void main() {
     float backNdotL = max(dot(-N, L), 0.0);
     float shadowNeed = max(NdotL, mat.uMaterialParams2.z > 0.0 ? backNdotL : 0.0);
     if (frame.uShadowStrength > 0.0 && shadowNeed > 0.0 && rtShadowHeader.z != 0u) {
-        uvec2 px = uvec2(gl_FragCoord.xy);
-        bool inside = px.x < rtShadowHeader.x && px.y < rtShadowHeader.y;
-        sunShadow = inside && rtShadowOccluded[px.y * rtShadowHeader.x + px.x] != 0u ? 0.0 : 1.0;
+        sunShadow = rtSunVisibility(gl_FragCoord.xy, length(vWorldPos - frame.uCameraPos));
         sunShadow = mix(1.0, sunShadow, frame.uShadowStrength);
     } else if (frame.uShadowStrength > 0.0 && shadowNeed > 0.0) {
         sunShadow = blix_sun_shadow_cascaded(

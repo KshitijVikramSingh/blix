@@ -14,12 +14,19 @@ namespace Blix.Demos.VulkanSponza;
 //                                    frame timeline (RenderGraph.External)
 //   lit-scene                        reads the mask for the direct sun instead of the cascades
 //
+// The trace runs alongside the passes declared between it and rt-shadow-join (RenderGraph.ExternalJoin), and the
+// ray generation skips surfaces facing away from the sun (in their own shadow). --rt-shadow-scale 2 traces one pixel
+// of each 2x2 block (a different one each frame) and lit.frag upsamples by depth.
+//
 // The cascades still render: fog, the clipmap's injection, the texels and the incident pass read them. Until the
 // acceleration structures exist (built once, after the surface bake has given coverage) the cascades shade as before.
 // Origins and masks are one per frame slot, written in the slot's frame and read in it, so the slot's fence orders reuse.
 internal sealed partial class SponzaLoop
 {
     private bool rtShadows;
+    private bool rtNoOverlap;
+    // Full pixels per traced pixel, each way: 1 traces every pixel, 2 a quarter of them.
+    private int rtShadowScale = 1;
     private ShaderInterface rtShadowRaysInterface = null!;
     private PassHandle rtShadowRaysPassHandle, rtShadowTracePassHandle;
     private PipelineHandle rtShadowRaysPipeline;
@@ -28,7 +35,9 @@ internal sealed partial class SponzaLoop
     private bool frameTracerFailed;
     private GpuBufferHandle[] rtShadowOrigins = Array.Empty<GpuBufferHandle>();
     private GpuBufferHandle[] rtShadowMasks = Array.Empty<GpuBufferHandle>();
+    // The frame's size the buffers were made for, and the traced grid in it.
     private (int Width, int Height) rtShadowSize;
+    private (int Width, int Height) rtShadowTraced;
     private GpuBufferHandle rtShadowPlaceholder;
     // The mask the lit pass binds this frame: a slot's, or the placeholder of zeros (the cascades shade).
     private GpuBufferHandle rtShadowBound;
@@ -75,12 +84,15 @@ internal sealed partial class SponzaLoop
             foreach (var b in rtShadowOrigins) device.DestroyGpuBuffer(b);
             foreach (var b in rtShadowMasks) device.DestroyGpuBuffer(b);
             var slots = device.MaxFramesInFlightCount;
-            var header = MemoryMarshal.AsBytes(new uint[] { (uint)width, (uint)height, 1u, 0u }.AsSpan()).ToArray();
+            var traced = ((width + rtShadowScale - 1) / rtShadowScale, (height + rtShadowScale - 1) / rtShadowScale);
+            var header = MemoryMarshal.AsBytes(new uint[] { (uint)traced.Item1, (uint)traced.Item2, 1u, (uint)rtShadowScale }.AsSpan()).ToArray();
+            var tracedCount = traced.Item1 * traced.Item2;
             rtShadowOrigins = Enumerable.Range(0, slots)
-                .Select(s => Own(device.CreateGpuBuffer(width * height * 16, name: $"sponza.rt-shadow.origins{s}"))).ToArray();
+                .Select(s => Own(device.CreateGpuBuffer(tracedCount * 16, name: $"sponza.rt-shadow.origins{s}"))).ToArray();
             rtShadowMasks = Enumerable.Range(0, slots)
-                .Select(s => Own(device.CreateGpuBuffer(16 + width * height * 4, header, $"sponza.rt-shadow.mask{s}"))).ToArray();
+                .Select(s => Own(device.CreateGpuBuffer(16 + tracedCount * 4, header, $"sponza.rt-shadow.mask{s}"))).ToArray();
             rtShadowSize = (width, height);
+            rtShadowTraced = traced;
         }
 
         var slot = device.CurrentFrameSlot;
@@ -90,24 +102,29 @@ internal sealed partial class SponzaLoop
         var bounds = rayQueries.Nodes[0].Bounds;
         var reach = (bounds.Max - bounds.Min).Length();
         Matrix4x4.Invert(viewProjJittered, out var invViewProj);
-        graph.Dispatch(rtShadowRaysPassHandle, new DispatchCommand(rtShadowRaysPipeline, (width + 7) / 8, (height + 7) / 8, 1,
+        var (tracedWidth, tracedHeight) = rtShadowTraced;
+        // Which pixel of its block each traced pixel reads: all four in turn at half resolution, so TAA sees them all.
+        var block = rtShadowScale > 1 ? (int)(rtShadowFrame % 4) : 0;
+        var sample = new Vector2(block & 1, block >> 1);
+        graph.Dispatch(rtShadowRaysPassHandle, new DispatchCommand(rtShadowRaysPipeline, (tracedWidth + 7) / 8, (tracedHeight + 7) / 8, 1,
             new ShaderUniform[]
             {
                 new("uInvViewProj", new Matrix4x4Uniform(invViewProj)),
-                new("uSize", new Vector4Uniform(new Vector4(width, height, 0f, 0f))),
+                new("uSize", new Vector4Uniform(new Vector4(tracedWidth, tracedHeight, rtShadowScale, 0f))),
                 new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, 0f))),
                 new("uSun", new Vector4Uniform(new Vector4(towardSun, reach))),
+                new("uSample", new Vector4Uniform(new Vector4(sample, width, height))),
             },
             new[]
             {
                 new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
                 new ShaderTextureBinding("uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
             },
-            Buffers: new[] { new ShaderBufferBinding("RtShadowOrigins", origins) }));
+            Buffers: new[] { new ShaderBufferBinding("RtShadowOrigins", origins), new ShaderBufferBinding("RtShadowMask", mask) }));
 
         // A new coin per frame for the partly covered (foliage), so TAA averages their shadows instead of freezing one draw.
         var tracer = frameTracer!;
-        var count = width * height;
+        var count = tracedWidth * tracedHeight;
         var seed = unchecked(rtShadowFrame++ * 0x9E3779B9u);
         graph.External(rtShadowTracePassHandle, sync => tracer.EncodeShadow(sync, origins, mask, 16, count, towardSun, seed));
         rtShadowFrames++;
@@ -145,8 +162,18 @@ internal sealed partial class SponzaLoop
     {
         if (frameTracer is null || !rtShadows) return;
         var stats = frameTracer.ShadowStats;
-        var rays = (long)rtShadowSize.Width * rtShadowSize.Height;
+        var rays = (long)rtShadowTraced.Width * rtShadowTraced.Height;
+        // What the last frame's rays were: traced, skipped as facing away, or no surface.
+        var words = MemoryMarshal.Cast<byte, float>(device.ReadGpuBuffer(rtShadowOrigins[device.CurrentFrameSlot], 0, (int)rays * 16).AsSpan());
+        long traced = 0, facingAway = 0;
+        for (var i = 3; i < words.Length; i += 4)
+        {
+            if (words[i] > 0f) traced++;
+            else if (words[i] < 0f) facingAway++;
+        }
         Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] rt shadows: {stats.Dispatches:N0} frames traced ({rtShadowFrames:N0} recorded), {rtShadowSize.Width}x{rtShadowSize.Height} = {rays:N0} rays a frame; Metal GPU {stats.MeanGpuMs:0.000} ms mean, {stats.LastGpuMs:0.000} ms last, {rays / Math.Max(stats.MeanGpuMs, 1e-6) / 1000.0:0.0} M rays/s; {stats.Failures} failed."));
+            $"[VulkanSponza] rt shadows, last frame's pixels: {100.0 * traced / rays:0.0}% traced, {100.0 * facingAway / rays:0.0}% facing away from the sun (not traced), {100.0 * (rays - traced - facingAway) / rays:0.0}% no surface."));
+        Console.WriteLine(string.Create(Inv,
+            $"[VulkanSponza] rt shadows: {stats.Dispatches:N0} frames traced ({rtShadowFrames:N0} recorded), {rtShadowTraced.Width}x{rtShadowTraced.Height} = {rays:N0} rays a frame for {rtShadowSize.Width}x{rtShadowSize.Height}{(rtShadowScale > 1 ? " (upsampled by depth)" : "")}; Metal GPU {stats.MeanGpuMs:0.000} ms mean, {stats.LastGpuMs:0.000} ms last, {rays / Math.Max(stats.MeanGpuMs, 1e-6) / 1000.0:0.0} M rays/s; {stats.Failures} failed."));
     }
 }
