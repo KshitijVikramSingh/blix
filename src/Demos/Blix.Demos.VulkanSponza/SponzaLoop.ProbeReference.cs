@@ -682,7 +682,9 @@ internal sealed partial class SponzaLoop
             // against the three references summed (sun bounce at this run's sun, sky bounce, direct sky).
             var fieldTotal = r.Bounce;
             var refTotal = r.BounceRef + r.SkyBounceRef + r.DirectRef;
-            Console.WriteLine(string.Create(Inv, $"    surface  at {r.Px:0.0000},{r.Py:0.0000} gtao {r.Gtao:0.000} level {r.Level:0.00} dist {r.Distance:0.0}  bounce {r.Bounce:0.00000} ref {r.BounceRef:0.00000}  sky {r.Sky:0.0000} ref {r.SkyRef:0.0000}  skybounce ref {r.SkyBounceRef:0.00000}  direct {r.DirectModel:0.00000} truev {r.DirectModelTrueV:0.00000} ref {r.DirectRef:0.00000}  total {fieldTotal:0.00000} ref {refTotal:0.00000}"));
+            // Beside --gpu-reference this is the cross-check, not the gate's judge: relabelled so gate.py reads only one.
+            cpuSurfaceReference[(int)(r.Px * grid) + (int)(r.Py * grid) * grid] = refTotal;
+            Console.WriteLine(string.Create(Inv, $"    {(gpuReference ? "cpu-surface at" : "surface  at")} {r.Px:0.0000},{r.Py:0.0000} gtao {r.Gtao:0.000} level {r.Level:0.00} dist {r.Distance:0.0}  bounce {r.Bounce:0.00000} ref {r.BounceRef:0.00000}  sky {r.Sky:0.0000} ref {r.SkyRef:0.0000}  skybounce ref {r.SkyBounceRef:0.00000}  direct {r.DirectModel:0.00000} truev {r.DirectModelTrueV:0.00000} ref {r.DirectRef:0.00000}  total {fieldTotal:0.00000} ref {refTotal:0.00000}"));
         }
         var skyRatios = used.Where(r => r.SkyRef > 0.02).Select(r => r.Sky / r.SkyRef).OrderBy(v => v).ToArray();
         if (skyRatios.Length > 0)

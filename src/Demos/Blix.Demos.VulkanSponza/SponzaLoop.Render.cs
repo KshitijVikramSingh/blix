@@ -845,6 +845,7 @@ internal sealed partial class SponzaLoop
                 RecordScreenProbes(frame.Width, frame.Height);
                 RecordTexels(incidentInvProj, incidentInvView, frame.Width, frame.Height);
                 RecordReference(incidentInvProj, incidentInvView, frame.Width, frame.Height);
+                RecordGpuReference();
                 RecordIncidentClipmap(incidentInvProj, incidentInvView, frame.Width, frame.Height, frame.Width, frame.Height);
             }
             // Before the clipmap's first solve there is nothing to read, and the lit pass does not (uIncident.z is 0
@@ -948,6 +949,7 @@ internal sealed partial class SponzaLoop
                 WriteSkyConsistency();
                 WriteSurfaceReference(grid: 24, paths: refPaths, bounces: refBounces);
             }
+            WriteGpuSurfaceReference();
             WriteTransportSpike();
             WriteFrameStats();
             host.RequestClose();

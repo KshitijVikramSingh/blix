@@ -792,6 +792,36 @@ F. *The frame audit* (opened 2026-10-07: "a lot of pure performance on the table
      Ray queries, cook and runtime, go through RayQueryScene (CPU) and ray_query.glsl (GPU) ONLY: the user's hardware
      BVH / Metal acceleration-structure spike lands beneath those two in a couple of days. Nothing here calls a
      traversal any other way, and cook-time capture is written so a GPU (hardware) trace can replace the CPU one.
+     The level-0 runtime lookup is written and PARKED (branch transfer-level0-parked, unbuilt) until the weights are
+     trained on hardware-ray references (below).
+   HARDWARE RAYS (the next arc, agreed with the user 2026-10-11). The user's metal spike (`--ray-backend both`, its own
+     check): 147.8 M rays/s (Metal acceleration structures) against 15.6 M (ray_query.glsl in software) and ~1 M on 10
+     CPU cores; 6 of 65,536 hit/miss differences, all at vertices and edge middles; Sponza's structures 460 MB compacted,
+     built in ~0.75 s. What it does NOT change: pixels do not trace -- one ray a pixel at 2880x1620 is ~32 ms even so.
+     Rays go to SHARED things (references, the cook, probes, the atlas); pixels look up. In order:
+     (1) REFERENCES on hardware: the path-traced reference (reference_trace.comp) and every cook-time capture, through
+         ray_query.glsl, 10x faster with no change of design -- truth at any camera in a minute. The transfer fit then
+         trains on real multi-bounce references over many suns and sky alone, not on the texel bake (512 rays over
+         cooked transport), which is what its 2.5-3.5% was measured against.
+     (2) The COOK on the GPU: transport couplings, the buried tests, sunlets, region dumps, the light bake -- CPU work
+         at ~1 M rays/s today -- as kernels through ray_query.glsl. RayQueryScene stays the CPU oracle that checks them.
+     (3) DYNAMIC lighting: every visible probe re-solved every frame (~1-2 ms) -- a moving sun, a switched light, a
+         moving object within a frame or two, without the epoch / background re-solve; the probes' own bounce is the
+         multi-bounce, so the CPU transport may leave the runtime. The surface transfer atlas stays the cooked
+         geometric layer (weights from references); its near-field term may become a few amortised runtime rays per
+         texel (dynamic geometry). Exact probe visibility becomes affordable (cooked masks or amortised rays).
+     (4) Optional: contact shadows / AO / sun-shadow refinement at quarter resolution with temporal accumulation.
+     (5) LOD error 0 as Sponza's default (the user: the frame rate barely moves), the LOD 0 frame lookups skipped at 0
+         (~4-6 ms); the LOD machinery stays for larger scenes.
+     Audit (2026-10-11): nothing walks a hierarchy outside the two interfaces but ray_check.comp's single-triangle
+     diagnosis, which is the software path's own checker. GPU, all through ray_query.glsl: reference_trace (the
+     reference view), texel_gather (texels, the light bake), clipmap_inject (probes), screen_probe_kernel (off),
+     mover_rays / ray_view (diagnostics), incident_clipmap (exact visibility), ray_check (the oracle). CPU, ~45 sites,
+     all through RayQueryScene -- to port, in order: ProbeReference.cs (the gate's judge: CPU path-traced surface and
+     sky-visibility references) onto one GPU path tracer shared with reference_trace.comp, the CPU one kept as a
+     low-sample cross-check; Transport.cs (couplings ~1k rays a patch, 32x32 sun maps a patch, sunlets per sun,
+     openness: ~400 M rays on Sponza); the hashed cook's and the atlas's buried tests (~200 M). The ray check and
+     bench, picking, SurfaceCheck / Watch / TexelInspect stay CPU.
 
 Known instrument gap: a Sponza `--shot` raises 9 validation errors on `main` as well (a storage image
 copied to a buffer without transfer-source usage, in the shot's readback). Not this arc's, and not fixed.

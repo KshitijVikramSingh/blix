@@ -258,6 +258,9 @@ internal sealed partial class SponzaLoop
         // the whole frame: the case history cannot help, and the proof that the late list is complete.
         occlusionCut = args.Flag("occlusion-cut");
         if (args.Flag("probe-reference")) probeReference = true;
+        // --gpu-reference: the gate's surface reference path-traced on the GPU (SponzaLoop.GpuReference.cs).
+        gpuReference = args.Flag("gpu-reference");
+        if (args.Int("gpu-ref-paths") is { } grp) gpuReferencePathsWanted = Math.Clamp(grp, 256, 1 << 22);
         if (args.Int("fog-slices") is { } fs) froxelGridZ = Math.Clamp(fs, 8, 128);
         // --orbit: drive the camera on a fixed path so a measurement is of the renderer rather than
         // of one photograph of it. Ignores --cam, which is the still counterpart.
@@ -620,6 +623,8 @@ internal sealed partial class SponzaLoop
             texelMarkPassHandle = markBuilder.Shader(texelMarkInterface).Handle;
         }
         referenceInterface = Reflect("reference_trace.comp");
+        gpuReferenceInterface = Reflect("reference_points.comp");
+        gpuReferencePassHandle = graph.ComputePass("reference-points").Shader(gpuReferenceInterface).Handle;
         referencePassHandle = graph.ComputePass("reference-trace").Shader(referenceInterface)
             .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
         texelFilterInterface = Reflect("texel_filter.comp");
@@ -896,6 +901,8 @@ internal sealed partial class SponzaLoop
             File.ReadAllBytes(Path.Combine(shaderDir, "clipmap_watch.comp.spv")), clipmapWatchInterface, "clipmap_watch")), "clipmap_watch"));
         surfaceReclaimPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "surface_reclaim.comp.spv")), surfaceReclaimInterface, "surface_reclaim")), "surface_reclaim"));
+        gpuReferencePipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
+            File.ReadAllBytes(Path.Combine(shaderDir, "reference_points.comp.spv")), gpuReferenceInterface, "reference_points")), "reference_points"));
         referencePipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "reference_trace.comp.spv")), referenceInterface, "reference_trace")), "reference_trace"));
         texelFilterPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(

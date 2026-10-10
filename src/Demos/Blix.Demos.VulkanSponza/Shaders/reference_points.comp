@@ -1,0 +1,48 @@
+#version 450
+// The gate's points path-traced on the GPU (--gpu-reference, SponzaLoop.GpuReference.cs): the surface points the CPU
+// reference picks (SponzaLoop.ProbeReference, WriteSurfaceReference: a grid of camera pixels off depth edges), each
+// accumulating paths over the frames before the shot. One workgroup a point, 64 threads, uParams.z paths a thread a
+// dispatch; the path is reference_path.glsl's, the reference view's own. Each point's sum of pi x radiance and its count
+// add up in ReferencePointAccum.
+
+#define PI 3.14159265359
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform ReferencePoints {
+    vec4 uSunDirection;    // xyz the direction the sun travels
+    vec4 uSunIrradiance;   // rgb
+    vec4 uParams;          // x the dispatch (seed), y bounces, z paths a thread, w the point count
+} u;
+
+layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
+// Two vec4s a point: its position (xyz), then its normal (xyz).
+layout(std430, set = 0, binding = 2) readonly buffer ReferencePointList { vec4 points[]; };
+layout(std430, set = 0, binding = 3) buffer ReferencePointAccum { vec4 accum[]; };
+
+#define BLIX_RAY_SET 0
+#define BLIX_RAY_BINDING 13
+#include "ray_query.glsl"
+#include "reference_path.glsl"
+
+shared vec3 sSum[64];
+
+void main() {
+    uint point = gl_WorkGroupID.x;
+    uint lane = gl_LocalInvocationID.x;
+    if (point >= uint(u.uParams.w)) return;   // uniform across the workgroup
+    vec3 origin = points[2u * point].xyz;
+    vec3 n = normalize(points[2u * point + 1u].xyz);
+    vec3 toSun = -normalize(u.uSunDirection.xyz);
+    int bounces = int(u.uParams.y + 0.5);
+    int paths = int(u.uParams.z + 0.5);
+    uint seed = blix_pcg(point * 9781u + lane * 2654435761u + uint(u.uParams.x) * 0x632BE5ABu);
+    vec3 sum = vec3(0.0);
+    for (int i = 0; i < paths; ++i) sum += referencePath(origin, n, bounces, toSun, u.uSunIrradiance.rgb, seed);
+    sSum[lane] = sum;
+    barrier();
+    if (lane == 0u) {
+        vec3 total = vec3(0.0);
+        for (int k = 0; k < 64; ++k) total += sSum[k];
+        accum[point] += vec4(PI * total, float(64 * paths));
+    }
+}
