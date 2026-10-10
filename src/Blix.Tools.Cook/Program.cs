@@ -20,7 +20,7 @@ namespace Blix.Tools.Cook;
 /// Mesh, texture, probe, asset-tree, and sky verbs carry traversal, packaging, or scene policy that
 /// deliberately does not belong in a one-file recipe.
 /// </remarks>
-public static class Program
+public static partial class Program
 {
     public static int Main(string[] args) => BlixApps.Main(args);
 
@@ -46,6 +46,7 @@ public static class Program
             "asset" => CookAsset(args),
             "project" => CookProject(args),
             "sky" => CookSky(args),
+            "lightmap" => CookLightmap(args),
             "list" => ListRecipes(args),
             "run" => RunRecipe(args),
             "status" => Status(args),
@@ -433,6 +434,8 @@ public static class Program
     Console.WriteLine("    sky <dir-or-blixmesh> [--out <file>] [--occupancy N] [--probes N]");
     Console.WriteLine("                            [--rays N] [--albedo N]");
     Console.WriteLine("                             bake scene sky visibility from cooked meshes");
+    Console.WriteLine("    lightmap <dir-or-blixmesh> [--texels-per-metre N] [--padding N] [--only <substring>]");
+    Console.WriteLine("                             unwrap a scene's meshes for lightmaps (xatlas) and report the unwrap");
     Console.WriteLine();
     Console.WriteLine("    mesh/textures/probe --out <dir>");
     Console.WriteLine("                             write cooked output into a separate tree, mirroring");

@@ -76,6 +76,7 @@
     <MeshoptSrc>$(MSBuildProjectDirectory)/../../third_party/meshoptimizer/src</MeshoptSrc>
     <Bc7Src>$(MSBuildProjectDirectory)/../../third_party/bc7enc</Bc7Src>
     <MikkSrc>$(MSBuildProjectDirectory)/../../third_party/mikktspace</MikkSrc>
+    <XatlasSrc>$(MSBuildProjectDirectory)/../../third_party/xatlas</XatlasSrc>
     <BlixNativeDir>$(MSBuildProjectDirectory)/obj/native/</BlixNativeDir>
   </PropertyGroup>
 
@@ -107,6 +108,7 @@
     <BlixMeshoptLib>$(BlixNativeDir)$(BlixLibPrefix)meshoptimizer$(BlixLibExt)</BlixMeshoptLib>
     <BlixBc7Lib>$(BlixNativeDir)$(BlixLibPrefix)blix_bc7$(BlixLibExt)</BlixBc7Lib>
     <BlixMikkLib>$(BlixNativeDir)$(BlixLibPrefix)blix_mikk$(BlixLibExt)</BlixMikkLib>
+    <BlixXatlasLib>$(BlixNativeDir)$(BlixLibPrefix)blix_xatlas$(BlixLibExt)</BlixXatlasLib>
   </PropertyGroup>
 
   <ItemGroup>
@@ -161,6 +163,22 @@
              Text="Could not build the MikkTSpace native. Cooking a mesh that needs generated tangents will fail with a message naming this target." />
   </Target>
 
+  <!-- xatlas (lightmap unwrapping), through its own C API: XATLAS_C_API compiles it in, XATLAS_EXPORT_API exports
+       it. No fallback: a lightmap needs an unwrap, so a missing library refuses that cook (XatlasNative says
+       which file) and nothing else. -->
+  <Target Name="BuildXatlas" BeforeTargets="StageBlixNatives"
+          Inputs="$(XatlasSrc)/xatlas.cpp;$(XatlasSrc)/xatlas.h;$(XatlasSrc)/xatlas_c.h"
+          Outputs="$(BlixXatlasLib)">
+    <MakeDir Directories="$(BlixNativeDir)" />
+    <Message Text="Building $(BlixLibPrefix)blix_xatlas$(BlixLibExt) (clang++)" Importance="high" />
+    <Exec Command="clang++ -O2 -std=c++17 -DXATLAS_C_API=1 -DXATLAS_EXPORT_API=1 $(BlixSharedFlag) $(BlixPicFlag) &quot;$(XatlasSrc)/xatlas.cpp&quot; -o &quot;$(BlixXatlasLib)&quot; -lpthread"
+          ContinueOnError="true">
+      <Output TaskParameter="ExitCode" PropertyName="BlixXatlasExit" />
+    </Exec>
+    <Warning Condition="'$(BlixXatlasExit)' != '0'"
+             Text="Could not build the xatlas native. Cooking a lightmap unwrap will fail with a message naming this target." />
+  </Target>
+
   <!-- ContentWithTargetPath is the item MSBuild carries across a ProjectReference, so
        this is what puts the dylibs beside every consumer's assembly rather than only
        beside this one. -->
@@ -177,6 +195,10 @@
       <ContentWithTargetPath Include="$(BlixMikkLib)"
                              Condition="Exists('$(BlixMikkLib)')"
                              TargetPath="$(BlixLibPrefix)blix_mikk$(BlixLibExt)"
+                             CopyToOutputDirectory="PreserveNewest" />
+      <ContentWithTargetPath Include="$(BlixXatlasLib)"
+                             Condition="Exists('$(BlixXatlasLib)')"
+                             TargetPath="$(BlixLibPrefix)blix_xatlas$(BlixLibExt)"
                              CopyToOutputDirectory="PreserveNewest" />
     </ItemGroup>
   </Target>

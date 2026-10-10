@@ -10,6 +10,7 @@ and does not replace those terms.
 | --- | --- | --- |
 | `bc7enc` / `rgbcx` by Richard Geldreich, Jr. | MIT or public domain, at the recipient's option | [`third_party/bc7enc/LICENSE`](third_party/bc7enc/LICENSE) |
 | `meshoptimizer` by Arseny Kapoulkine | MIT | [`third_party/meshoptimizer/LICENSE.md`](third_party/meshoptimizer/LICENSE.md) |
+| `xatlas` by Jonathan Young (from thekla_atlas, Thekla Inc. and NVIDIA) | MIT | [`third_party/xatlas/LICENSE`](third_party/xatlas/LICENSE) |
 
 ## Direct package dependencies
 
