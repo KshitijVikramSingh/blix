@@ -47,6 +47,10 @@ layout(set = 0, binding = 0) uniform IncidentClipmap {
     vec4 uReference;     // the reference view (reference_trace.comp): x 1 when shown, yz its pixels (half the frame's);
                          // w 1: the texel debug view (--texel-debug: r the texels' confidence, g 1 where any was found,
                          // b 1 where the lookup found none)
+    vec4 uClipExact;     // x 1: whether a point sees each probe, TRACED (--clipmap-exact-visibility): the ceiling a
+                         // cooked per-texel mask could reach, in place of the Chebyshev estimate; y / z DDGI's surface
+                         // bias, along the normal / toward the viewer, in probe spacings (--clipmap-normal-bias /
+                         // --clipmap-view-bias; both 0: the default lift); w 1: probes relocated (--clipmap-relocate)
 } g;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -112,6 +116,32 @@ bool screenProbesAt(vec3 worldPos, vec3 n, float viewDepth, out vec3 irradiance,
 float clipLiftKnob, clipVisibilityKnob;
 #define BLIX_CLIPMAP_LIFT(spacing) (clipLiftKnob > 0.0 ? clipLiftKnob : 0.25 * (spacing))
 #define BLIX_CLIPMAP_VISIBILITY(c) (clipVisibilityKnob > 0.0 ? pow(max(c, 0.0), clipVisibilityKnob) : (c) * (c) * (c))
+// --clipmap-exact-visibility: a ray from the surface point to each probe decides whether it counts (the library's
+// BLIX_CLIPMAP_PROBE_VISIBILITY). Eight rays a level a pixel: an experiment's price, not a renderer's.
+#define BLIX_RAY_SET 0
+#define BLIX_RAY_BINDING 24
+#include "ray_query.glsl"
+float clipExactKnob;
+uint clipExactSeed;
+float clipmapTracedVisibility(vec3 world, vec3 n, vec3 probe) {
+    vec3 o = world + n * 0.01;
+    vec3 d = probe - o;
+    float len = length(d);
+    if (len < 1e-4) return 1.0;
+    clipExactSeed = blix_pcg(clipExactSeed);
+    return blix_traceAny(o, d / len, 0.0, len, clipExactSeed) ? 0.0 : 1.0;
+}
+#define BLIX_CLIPMAP_PROBE_VISIBILITY(world, n, probe) (clipExactKnob > 0.5 ? clipmapTracedVisibility(world, n, probe) : -1.0)
+// --clipmap-relocate: each probe where clipmap_inject.comp moved it (its offset from the cell's centre, by slot).
+layout(std430, set = 0, binding = 32) readonly buffer ClipmapOffsets { vec4 clipmapOffsets[]; };
+float clipRelocate;
+#define BLIX_CLIPMAP_PROBE_OFFSET(s) (clipRelocate > 0.5 ? clipmapOffsets[s].xyz : vec3(0.0))
+// DDGI's surface bias (--clipmap-normal-bias, --clipmap-view-bias): toward the viewer is the side of a wall the pixel is
+// seen from. clipViewDir, the point to the camera, is set in main.
+float clipNormalBias, clipViewBias;
+vec3 clipViewDir;
+#define BLIX_CLIPMAP_BIAS(world, n, spacing) (clipNormalBias > 0.0 || clipViewBias > 0.0 \
+    ? ((n) * clipNormalBias + clipViewDir * clipViewBias) * (spacing) : (n) * BLIX_CLIPMAP_LIFT(spacing))
 #include "probe_clipmap.glsl"
 layout(std430, set = 0, binding = 9) readonly buffer SurfaceIndex { uint surfaceIndex[]; };
 #define BLIX_SURFACE_INDEX(i) surfaceIndex[i]
@@ -234,6 +264,9 @@ bool texelsAt(vec3 worldPos, vec3 n, float faceBin, float viewDepth, out vec3 ir
 void main() {
     clipLiftKnob = g.uClipParams.z;
     clipVisibilityKnob = g.uClipParams.w;
+    clipExactKnob = g.uClipExact.x;
+    clipRelocate = g.uClipExact.w;
+    clipExactSeed = blix_pcg(uint(gl_FragCoord.x) * 7919u + uint(gl_FragCoord.y) * 104729u);
     // Exact fetches, as texel_mark.comp reads them: the texels a pixel weighs must be the ones the mark queued for it.
     ivec2 pixel = clamp(ivec2(vUv * vec2(textureSize(uSceneDepth, 0))), ivec2(0), textureSize(uSceneDepth, 0) - 1);
     float raw = texelFetch(uSceneDepth, pixel, 0).r;
@@ -245,6 +278,9 @@ void main() {
     vec2 pixelUv = (vec2(pixel) + 0.5) / vec2(textureSize(uSceneDepth, 0));
     vec4 view = g.uInvProjection * vec4(pixelUv * 2.0 - 1.0, raw, 1.0);
     vec3 worldPos = (g.uInvView * vec4(view.xyz / view.w, 1.0)).xyz;
+    clipNormalBias = g.uClipExact.y;
+    clipViewBias = g.uClipExact.z;
+    clipViewDir = normalize((g.uInvView * vec4(0.0, 0.0, 0.0, 1.0)).xyz - worldPos);
     float viewDepth = abs(view.z / view.w);
     vec4 nSample = texelFetch(uPrepassNormal, pixel, 0);
     vec3 N = dot(nSample.xyz, nSample.xyz) > 1e-6

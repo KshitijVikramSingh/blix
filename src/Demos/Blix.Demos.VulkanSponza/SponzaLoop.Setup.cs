@@ -220,6 +220,14 @@ internal sealed partial class SponzaLoop
         if (args.Float("clipmap-blend") is { } cb)
             clipmapBlendOverride = Math.Clamp(cb, 0f, (Math.Min(ClipmapDims.X, Math.Min(ClipmapDims.Y, ClipmapDims.Z)) - 1) / 2f - 0.01f);
         if (args.Float("clipmap-visibility-power") is { } vp) clipmapVisibilityPower = Math.Max(0f, vp);
+        // --clipmap-exact-visibility: each probe's visibility traced from the point (incident_clipmap.frag), the ceiling
+        // for a cooked mask; costly.
+        clipmapExactVisibility = args.Flag("clipmap-exact-visibility");
+        // --clipmap-normal-bias / --clipmap-view-bias: DDGI's surface bias, in probe spacings (both 0: the default lift).
+        if (args.Float("clipmap-normal-bias") is { } cnb) clipmapNormalBias = Math.Max(0f, cnb);
+        if (args.Float("clipmap-view-bias") is { } cvb) clipmapViewBias = Math.Max(0f, cvb);
+        // --clipmap-relocate: DDGI's probe relocation (clipmap_inject.comp), off walls and out of solids.
+        clipmapRelocate = args.Flag("clipmap-relocate");
         if (args.Float("clipmap-guide") is { } cg) { clipmapGuide = cg > 0f; clipmapGuideFloor = Math.Clamp(cg, 0.01f, 10f); }
         // --surface-check: hold the pre-pass's SurfaceKey and velocity against CPU rays at the shot (stage 4e-iv).
         surfaceCheck = args.Flag("surface-check");

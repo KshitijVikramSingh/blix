@@ -93,9 +93,25 @@ int blix_clipmapLocate(BlixClipmap c, vec3 world, out float blend) {
 #ifndef BLIX_CLIPMAP_LIFT
 #define BLIX_CLIPMAP_LIFT(spacing) (0.25 * (spacing))
 #endif
+// Where the lookup samples from: the surface point moved off it. DDGI's surface bias moves it along the normal AND
+// toward the viewer -- the side of a thin wall the viewer is on -- so a point by a wall interpolates the probes on
+// its own side. The default is the normal lift alone.
+#ifndef BLIX_CLIPMAP_BIAS
+#define BLIX_CLIPMAP_BIAS(world, n, spacing) ((n) * BLIX_CLIPMAP_LIFT(spacing))
+#endif
+// Where a probe actually is: its cell's centre plus an offset by global slot (DDGI's relocation: off walls and out of
+// solids, so a point by a wall keeps probes it can see). The trilinear weights stay on the grid; direction, distance and
+// visibility use this. Zero by default.
+#ifndef BLIX_CLIPMAP_PROBE_OFFSET
+#define BLIX_CLIPMAP_PROBE_OFFSET(globalSlot) vec3(0.0)
+#endif
 #ifndef BLIX_CLIPMAP_VISIBILITY
 #define BLIX_CLIPMAP_VISIBILITY(c) ((c) * (c) * (c))
 #endif
+// Where the caller knows whether a surface point sees a probe (a traced ray, a cooked mask), it may say so:
+//   BLIX_CLIPMAP_PROBE_VISIBILITY(vec3 from, vec3 n, vec3 probe) -> float: 1 sees it, 0 does not, negative unknown
+// (from: the biased lookup point, as the Chebyshev test also measures from it)
+// An answer replaces the Chebyshev estimate from the probe's depth moments (which is what it estimates); unknown keeps it.
 #define BLIX_CLIPMAP_SOLVED 1u
 #define BLIX_CLIPMAP_BURIED 2u
 
@@ -129,7 +145,7 @@ vec4 blix_clipmapTileSample(ivec2 tile, vec3 dir, bool depth) {
 // and is solved and not buried. weight is what survived (0: nothing could answer).
 vec4 blix_clipmapLevelSample(BlixClipmap c, int level, vec3 world, vec3 n, out float weight) {
     float spacing = blix_clipmapSpacing(c, level);
-    vec3 p = world + n * BLIX_CLIPMAP_LIFT(spacing);       // lifted off the surface, a quarter cell
+    vec3 p = world + BLIX_CLIPMAP_BIAS(world, n, spacing);       // off the surface (a quarter cell along n by default)
     vec3 g = p / spacing - 0.5;
     ivec3 base = ivec3(floor(g));
     vec3 frac = g - vec3(base);
@@ -139,20 +155,27 @@ vec4 blix_clipmapLevelSample(BlixClipmap c, int level, vec3 world, vec3 n, out f
         ivec3 offset = ivec3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
         ivec3 cell = base + offset;
         ivec3 slot = blix_clipmapSlot(c, cell);
-        uvec4 state = BLIX_CLIPMAP_STATE(level * c.dims.x * c.dims.y * c.dims.z + blix_clipmapSlotIndex(c, slot));
+        int globalSlot = level * c.dims.x * c.dims.y * c.dims.z + blix_clipmapSlotIndex(c, slot);
+        uvec4 state = BLIX_CLIPMAP_STATE(globalSlot);
         if ((state.w & BLIX_CLIPMAP_SOLVED) == 0u || (state.w & BLIX_CLIPMAP_BURIED) != 0u
             || ivec3(state.xyz) != cell) continue;
         vec3 t = mix(1.0 - frac, frac, vec3(offset));
         float w = t.x * t.y * t.z;
-        vec3 toProbe = blix_clipmapProbePosition(c, level, cell) - p;
+        vec3 probePosition = blix_clipmapProbePosition(c, level, cell) + BLIX_CLIPMAP_PROBE_OFFSET(globalSlot);
+        vec3 toProbe = probePosition - p;
         float dist = length(toProbe);
         vec3 dir = dist > 1e-5 ? toProbe / dist : n;
         float facing = dot(dir, n) * 0.5 + 0.5;
         w *= facing * facing;
         if (w <= 1e-6) continue;
         ivec2 tile = blix_clipmapTileOrigin(c, level, slot);
-        vec2 moments = blix_clipmapTileSample(tile, -dir, true).rg;
-        if (dist > moments.x) {
+        float known = -1.0;
+#ifdef BLIX_CLIPMAP_PROBE_VISIBILITY
+        known = BLIX_CLIPMAP_PROBE_VISIBILITY(p, n, probePosition);
+#endif
+        if (known >= 0.0) w *= known;
+        vec2 moments = known >= 0.0 ? vec2(0.0) : blix_clipmapTileSample(tile, -dir, true).rg;
+        if (known < 0.0 && dist > moments.x) {
             float variance = max(moments.y, 1e-5);
             float d = dist - moments.x;
             float chebyshev = variance / (variance + d * d);
@@ -196,7 +219,7 @@ float blix_clipmapSolvesAt(BlixClipmap c, vec3 world, vec3 n, out int answeredBy
     if (first < 0) return 0.0;
     for (int level = first; level < BLIX_CLIPMAP_LEVELS; ++level) {
         float spacing = blix_clipmapSpacing(c, level);
-        vec3 p = world + n * BLIX_CLIPMAP_LIFT(spacing);
+        vec3 p = world + BLIX_CLIPMAP_BIAS(world, n, spacing);
         vec3 g = p / spacing - 0.5;
         ivec3 base = ivec3(floor(g));
         vec3 frac = g - vec3(base);
@@ -205,12 +228,14 @@ float blix_clipmapSolvesAt(BlixClipmap c, vec3 world, vec3 n, out int answeredBy
             ivec3 offset = ivec3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
             ivec3 cell = base + offset;
             ivec3 slot = blix_clipmapSlot(c, cell);
-            uvec4 state = BLIX_CLIPMAP_STATE(level * c.dims.x * c.dims.y * c.dims.z + blix_clipmapSlotIndex(c, slot));
+            int globalSlot = level * c.dims.x * c.dims.y * c.dims.z + blix_clipmapSlotIndex(c, slot);
+            uvec4 state = BLIX_CLIPMAP_STATE(globalSlot);
             if ((state.w & BLIX_CLIPMAP_SOLVED) == 0u || (state.w & BLIX_CLIPMAP_BURIED) != 0u
                 || ivec3(state.xyz) != cell) continue;
             vec3 t = mix(1.0 - frac, frac, vec3(offset));
             float w = t.x * t.y * t.z;
-            vec3 toProbe = blix_clipmapProbePosition(c, level, cell) - p;
+            vec3 probePosition = blix_clipmapProbePosition(c, level, cell) + BLIX_CLIPMAP_PROBE_OFFSET(globalSlot);
+            vec3 toProbe = probePosition - p;
             float dist = length(toProbe);
             vec3 dir = dist > 1e-5 ? toProbe / dist : n;
             float facing = dot(dir, n) * 0.5 + 0.5;
@@ -238,7 +263,7 @@ float blix_clipmapSolvesAt(BlixClipmap c, vec3 world, vec3 n, out int answeredBy
 vec4 blix_clipmapLevelSampleDirs(BlixClipmap c, int level, vec3 world, vec3 n, vec3 d1, vec3 d2,
                                  out float weight, out vec3 e1, out vec3 e2) {
     float spacing = blix_clipmapSpacing(c, level);
-    vec3 p = world + n * BLIX_CLIPMAP_LIFT(spacing);
+    vec3 p = world + BLIX_CLIPMAP_BIAS(world, n, spacing);
     vec3 g = p / spacing - 0.5;
     ivec3 base = ivec3(floor(g));
     vec3 frac = g - vec3(base);
@@ -249,20 +274,27 @@ vec4 blix_clipmapLevelSampleDirs(BlixClipmap c, int level, vec3 world, vec3 n, v
         ivec3 offset = ivec3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
         ivec3 cell = base + offset;
         ivec3 slot = blix_clipmapSlot(c, cell);
-        uvec4 state = BLIX_CLIPMAP_STATE(level * c.dims.x * c.dims.y * c.dims.z + blix_clipmapSlotIndex(c, slot));
+        int globalSlot = level * c.dims.x * c.dims.y * c.dims.z + blix_clipmapSlotIndex(c, slot);
+        uvec4 state = BLIX_CLIPMAP_STATE(globalSlot);
         if ((state.w & BLIX_CLIPMAP_SOLVED) == 0u || (state.w & BLIX_CLIPMAP_BURIED) != 0u
             || ivec3(state.xyz) != cell) continue;
         vec3 t = mix(1.0 - frac, frac, vec3(offset));
         float w = t.x * t.y * t.z;
-        vec3 toProbe = blix_clipmapProbePosition(c, level, cell) - p;
+        vec3 probePosition = blix_clipmapProbePosition(c, level, cell) + BLIX_CLIPMAP_PROBE_OFFSET(globalSlot);
+        vec3 toProbe = probePosition - p;
         float dist = length(toProbe);
         vec3 dir = dist > 1e-5 ? toProbe / dist : n;
         float facing = dot(dir, n) * 0.5 + 0.5;
         w *= facing * facing;
         if (w <= 1e-6) continue;
         ivec2 tile = blix_clipmapTileOrigin(c, level, slot);
-        vec2 moments = blix_clipmapTileSample(tile, -dir, true).rg;
-        if (dist > moments.x) {
+        float known = -1.0;
+#ifdef BLIX_CLIPMAP_PROBE_VISIBILITY
+        known = BLIX_CLIPMAP_PROBE_VISIBILITY(p, n, probePosition);
+#endif
+        if (known >= 0.0) w *= known;
+        vec2 moments = known >= 0.0 ? vec2(0.0) : blix_clipmapTileSample(tile, -dir, true).rg;
+        if (known < 0.0 && dist > moments.x) {
             float variance = max(moments.y, 1e-5);
             float d = dist - moments.x;
             float chebyshev = variance / (variance + d * d);

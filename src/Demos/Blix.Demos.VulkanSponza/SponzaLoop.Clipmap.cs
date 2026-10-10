@@ -95,11 +95,15 @@ internal sealed partial class SponzaLoop
                 new("uTexelGrid", new Vector4Uniform(texel.Grid)),
                 new("uTexelParams", new Vector4Uniform(texel.Params)),
                 new("uReference", new Vector4Uniform(reference.Params)),
+                new("uClipExact", new Vector4Uniform(new Vector4(clipmapExactVisibility ? 1f : 0f, clipmapNormalBias, clipmapViewBias, clipmapRelocate ? 1f : 0f))),
                 new("uTexelDebug", new Vector4Uniform(new Vector4(texelFrame, 0f, 0f, 0f))),
                 new("uLightmap", new Vector4Uniform(LightmapUniform)),
                 new("uTexelLevels", new Vector4Uniform(TexelLevelsUniform(frameHeight))),
             }.Concat(TexelSunUniforms()).ToArray(),
-            buffers: new[] { new ShaderBufferBinding("ClipmapState", clipmapState), new ShaderBufferBinding("ScreenProbeTiles", screen.Tiles), new ShaderBufferBinding("ScreenProbes", screen.Probes), new ShaderBufferBinding("SurfaceIndex", surfaceIndex) }.Concat(texel.Buffers).Append(reference.Buffer).Append(new ShaderBufferBinding("LightmapIndexMap", LightmapIndexMap())).ToArray()));
+            buffers: new[] { new ShaderBufferBinding("ClipmapState", clipmapState), new ShaderBufferBinding("ScreenProbeTiles", screen.Tiles), new ShaderBufferBinding("ScreenProbes", screen.Probes), new ShaderBufferBinding("SurfaceIndex", surfaceIndex) }.Concat(texel.Buffers).Append(reference.Buffer).Append(new ShaderBufferBinding("LightmapIndexMap", LightmapIndexMap()))
+                // The ray scene, for --clipmap-exact-visibility, and the probes' offsets, for --clipmap-relocate
+                // (declared always; read only then).
+                .Concat(rayBlockBuffers).Append(new ShaderBufferBinding("ClipmapOffsets", clipmapOffsets)).ToArray()));
     }
 
     private const int ClipmapLevels = 4;
@@ -120,6 +124,10 @@ internal sealed partial class SponzaLoop
     private bool clipmapNoBounce;
     private float clipmapLift;
     private float clipmapVisibilityPower;
+    private bool clipmapExactVisibility;
+    private float clipmapNormalBias, clipmapViewBias;
+    private bool clipmapRelocate;
+    private GpuBufferHandle clipmapOffsets;
     // The blend band between levels, in probes, as every reader takes it (the overlay's slider; -1: the clipmap's own).
     // Under 7.5: the band must fit inside a level 16 probes tall.
     private float clipmapBlendOverride = -1f;
@@ -168,6 +176,8 @@ internal sealed partial class SponzaLoop
         var initial = new uint[total * 4];
         for (var i = 0; i < slots; i++) { initial[i * 4] = 0x80000000u; initial[i * 4 + 1] = 0x80000000u; initial[i * 4 + 2] = 0x80000000u; }
         clipmapState = Own(device.CreateGpuBuffer(total * 16, MemoryMarshal.AsBytes(initial.AsSpan()), "sponza.clipmap.state"));
+        // Each slot's probe offset from its cell's centre (--clipmap-relocate, clipmap_inject.comp), zero to begin.
+        clipmapOffsets = Own(device.CreateGpuBuffer(total * 16, new byte[total * 16], "sponza.clipmap.offsets"));
         // Counters, the per-level unsolved queues, the dependent queue (stage 4f), the cursor, and the buckets' counts and
         // lists (every slot's worth, surface slots included): visible probes by solves (4g-iii), then young ones off
         // screen (4g-ii).
@@ -217,6 +227,7 @@ internal sealed partial class SponzaLoop
         var dynamicActive = dynamicReach && moverMoved;
         var buffers = rayBlockBuffers
             .Append(new ShaderBufferBinding("ClipmapState", clipmapState))
+            .Append(new ShaderBufferBinding("ClipmapOffsets", clipmapOffsets))
             .Append(new ShaderBufferBinding("ClipmapQueue", clipmapQueue))
             .Append(new ShaderBufferBinding("ClipmapSeen", clipmapSeen))
             .Append(new ShaderBufferBinding("SurfaceIndex", surfaceIndex)).ToArray();
@@ -232,6 +243,7 @@ internal sealed partial class SponzaLoop
             new("uSunDirection", new Vector4Uniform(new Vector4(sunDirection, 0f))),
             new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 1f))),
             new("uFrame", new Vector4Uniform(new Vector4(clipmapFrame, clipmapNoBounce ? 0f : 1f, 1f, ClipmapDepthLobe))),
+            new("uExact", new Vector4Uniform(new Vector4(clipmapExactVisibility ? 1f : 0f, clipmapNormalBias, clipmapViewBias, clipmapRelocate ? 1f : 0f))),
             // y: the prefiltered sky's mip a probe ray reads, about a ray's 1/64 of the sphere (a ~15 degree cone).
             new("uSurfaceGrid", new Vector4Uniform(surface.Grid)),
             new("uSurfaceDims", new Vector4Uniform(surface.Dims)),
