@@ -54,6 +54,7 @@ internal sealed partial class SponzaLoop
         transportGpu = args.Flag("transport-gpu") || transportTexels;
         transportSpike = args.Flag("transport") || transportGpu;
         transportEvaluateAtShot = args.Flag("transport");
+        transportWait = args.Flag("transport-wait");
         if (args.Float("transport-spacing") is { } s) transportSpacing = Math.Clamp(s, 0.02f, 4f);
         if (args.Int("transport-rays") is { } r) transportRays = Math.Clamp(r, 16, 8192);
         if (args.Int("transport-vis") is { } v) transportVisRes = Math.Clamp(v, 4, 256);
@@ -106,12 +107,43 @@ internal sealed partial class SponzaLoop
         yield return new ShaderBufferBinding("CookedIds", cookedIdBuffer);
     }
 
-    // Called each frame: with --transport-gpu, cook once the ray scene and its surfaces are ready (synchronous: seconds
-    // for the Cornell box, minutes for Sponza, the window frozen meanwhile -- a prototype).
+    // Called each frame: with --transport-gpu, cook once the ray scene and its surfaces are ready -- in the background
+    // (the user: "can we stream / not hang after the textures load"): the frame goes on with the clipmap meanwhile, and
+    // what the cook leaves for the GPU (OnMain) runs here once it is done. --transport-wait cooks on the frame thread,
+    // as before, so a measurement's frames count from when texels exist.
     private void CookTransportWhenReady()
     {
+        if (transportCookTask is { IsCompleted: true } task)
+        {
+            if (task.Exception is { } e) Console.WriteLine($"[VulkanSponza] transport: the background cook failed: {e.GetBaseException()}");
+            while (transportOnMain.TryDequeue(out var action)) action();
+            transportCookAsync = false;
+            transportCookTask = null;
+            Console.WriteLine($"[VulkanSponza] transport: the background cook landed at post-load frame {postLoadFrames}.");
+        }
         if (!transportGpu || transportCooked || !fullyLoaded || !raySurfacesBaked || postLoadFrames < 2) return;
-        CookTransport();
+        if (transportWait || transportEvaluateAtShot || rayQueries is not { } scene || rayGpuData is not { } data)
+        {
+            CookTransport();
+            return;
+        }
+        transportCooked = true;
+        var surfaces = ReadRaySurfaces(data);
+        transportCookAsync = true;
+        Console.WriteLine($"[VulkanSponza] transport: cooking in the background from post-load frame {postLoadFrames}.");
+        transportCookTask = Task.Run(() => CookTransportFrom(scene, data, surfaces));
+    }
+
+    private Task? transportCookTask;
+    private bool transportCookAsync;
+    private bool transportWait;
+    private readonly ConcurrentQueue<Action> transportOnMain = new();
+
+    // GPU work the cook leaves: run now on the frame thread, or queued for it when the cook runs in the background.
+    private void OnMain(Action action)
+    {
+        if (transportCookAsync) transportOnMain.Enqueue(action);
+        else action();
     }
 
     private GpuBufferHandle cookedGuideBuffer;
@@ -162,6 +194,8 @@ internal sealed partial class SponzaLoop
     private void WriteTransportSpike()
     {
         if (!transportEvaluateAtShot) return;
+        transportCookTask?.Wait();
+        CookTransportWhenReady();
         if (!transportCooked) CookTransport();
         transportEvaluate?.Invoke();
     }
@@ -170,8 +204,15 @@ internal sealed partial class SponzaLoop
     {
         if (transportCooked || rayQueries is not { } scene || rayGpuData is not { } data) return;
         transportCooked = true;
+        CookTransportFrom(scene, data, ReadRaySurfaces(data));
+    }
+
+    private uint[] ReadRaySurfaces(RayQueryGpuData data) =>
+        MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(raySurfaces, 0, data.RowPlacements.Length * 4).AsSpan()).ToArray();
+
+    private void CookTransportFrom(RayQueryScene scene, RayQueryGpuData data, uint[] surfaces)
+    {
         var clock = Stopwatch.StartNew();
-        var surfaces = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(raySurfaces, 0, data.RowPlacements.Length * 4).AsSpan()).ToArray();
         data.ApplyCoverage(surfaces);
         Vector3 Albedo(int placement, int triangle)
         {
@@ -188,10 +229,23 @@ internal sealed partial class SponzaLoop
                     Vector3.Transform(m.Positions[m.Indices[triangle * 3 + 2]], inst.World));
         }
 
+        // The cook's cache (SponzaLoop.TransportCache.cs): a run whose inputs match reads what the cook would make. The
+        // CPU evaluation (--transport) reads the cook's internals as well, so it always cooks.
+        var cacheKey = TransportCacheKey();
+        var cached = transportEvaluateAtShot ? null : LoadTransportCache(cacheKey);
+
         // ---- Charts: surface identity ------------------------------------------------------------------------------
         // Per instance, triangles sharing an edge (positions welded at 0.1 mm) whose normals agree within ~25 degrees.
         var chartOf = new int[scene.Instances.Count][];
         var charts = 0;
+        // Only when something reads them (--transport-charts, or the evaluation): Sponza is 759k charts.
+        var computeCharts = transportCharts || transportEvaluateAtShot;
+        if (!computeCharts)
+        {
+            for (var i = 0; i < scene.Instances.Count; i++) chartOf[i] = new int[scene.Instances[i].Mesh.Indices.Length / 3];
+            charts = 1;
+        }
+        else
         for (var i = 0; i < scene.Instances.Count; i++)
         {
             var m = scene.Instances[i].Mesh;
@@ -247,6 +301,8 @@ internal sealed partial class SponzaLoop
         var patchChart = new List<int>();
         var chartPlaced = new bool[charts];
         var chartLargest = new (int Instance, int Triangle, float Area)[charts];
+        if (cached is null)
+        {
         var rng = new Random(5);
         for (var i = 0; i < scene.Instances.Count; i++)
         {
@@ -332,6 +388,12 @@ internal sealed partial class SponzaLoop
             for (var i = 0; i < pos.Count; i++) if (keep[i]) { p2.Add(pos[i]); n2.Add(nrm[i]); a2.Add(albedo[i]); c2.Add(patchChart[i]); }
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] transport spike: {pos.Count:N0} patch sides placed, {p2.Count:N0} kept (the rest inside a solid); {charts:N0} charts, {forced:N0} given a patch of their own{(transportCharts ? "" : " (off)")}."));
             pos = p2; nrm = n2; albedo = a2; patchChart = c2;
+        }
+        }
+        else
+        {
+            pos = cached.Pos.ToList(); nrm = cached.Nrm.ToList(); albedo = cached.Albedo.ToList();
+            patchChart = new List<int>(new int[pos.Count]);
         }
         var patches = pos.Count;
         // A hash grid over the patches: a ray's hit finds the nearest patch facing the way the hit surface faces.
@@ -442,6 +504,12 @@ internal sealed partial class SponzaLoop
         }
         var sunletCouplings = new (int To, float W)[patches][];
         bool Cutout(RayHit h) => (surfaces[data.RowOf(h.Instance, h.Triangle)] >> 24) < 255u;
+        if (cached is not null)
+        {
+            couplings = cached.Couplings; sunletCouplings = cached.SunletCouplings; sky = cached.Sky; sunVis = cached.SunVis;
+            sunletPos.AddRange(cached.SunletPos); sunletNrm.AddRange(cached.SunletNrm); sunletAlbedo.AddRange(cached.SunletAlbedo);
+        }
+        else
         Parallel.For(0, patches, i =>
         {
             var r = new Random(1000 + i);
@@ -527,6 +595,8 @@ internal sealed partial class SponzaLoop
             skyIn[i] = s * MathF.PI;
         }
         // How well the sun map stands in for an exact ray toward this sun: over sunward patches, how often they disagree.
+        // (A diagnostic: with the evaluation only.)
+        if (transportEvaluateAtShot)
         {
             long sunward = 0, disagree = 0; double absDiff = 0;
             for (var i = 0; i < patches; i++)
@@ -693,7 +763,8 @@ internal sealed partial class SponzaLoop
         // own openness is held against (texel_gather.comp): the patches' light, scaled by how much more or less open
         // the texel is than the patches around it.
         var openness = new float[patches];
-        if (transportGpu)
+        if (cached is not null) openness = cached.Openness;
+        else if (transportGpu)
             Parallel.For(0, patches, i =>
             {
                 var r = new Random(6151 + i);
@@ -703,9 +774,28 @@ internal sealed partial class SponzaLoop
                     if (!scene.Any(new Ray(pos[i] + nrm[i] * 0.01f, CosineHemisphereCpu(nrm[i], r)), 0f, TexelOpenReach, (uint)r.Next())) free++;
                 openness[i] = free / (float)tests;
             });
-        UploadCookedPatches(pos, nrm, incident, openness, transportSpacing);
-        UploadCookedGuides(BuildGuides(outgoing, sunletOut));
-        CookTexels(scene, Tri, (i, t) => (surfaces[data.RowOf(i, t)] >> 24) < 255u);
+        var guides = BuildGuides(outgoing, sunletOut);
+        OnMain(() =>
+        {
+            UploadCookedPatches(pos, nrm, incident, openness, transportSpacing);
+            UploadCookedGuides(guides);
+        });
+        TexelBake? texelBake;
+        if (cached?.Texels is { } cachedTexels)
+        {
+            OnMain(() => UploadTexels(cachedTexels));
+            texelBake = cachedTexels;
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] texels: {cachedTexels.Count:N0} from the cache."));
+        }
+        else texelBake = CookTexels(scene, Tri, (i, t) => (surfaces[data.RowOf(i, t)] >> 24) < 255u);
+        if (transportGpu && (cached is null || (transportTexels && cached.Texels is null)))
+            SaveTransportCache(cacheKey, new TransportCache
+            {
+                Pos = pos.ToArray(), Nrm = nrm.ToArray(), Albedo = albedo.ToArray(), Openness = openness,
+                Couplings = couplings, SunletCouplings = sunletCouplings,
+                SunletPos = sunletPos.ToArray(), SunletNrm = sunletNrm.ToArray(), SunletAlbedo = sunletAlbedo.ToArray(),
+                Sky = sky, SunVis = sunVis, Texels = texelBake,
+            });
 
         // ---- At the reference's points --------------------------------------------------------------------------
         transportEvaluate = () => {

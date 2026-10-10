@@ -302,6 +302,7 @@ internal sealed partial class SponzaLoop
             return;
         }
         LoadIbl(assetsRoot);
+        sceneAssetsRoot = assetsRoot;
         // --sun yaw,pitch (degrees; pitch negative, below the horizon of travel): a fixed sun for a measurement -- the
         // transport spike's sun sweep holds one cook against the path trace at several angles (stage 5a).
         if (sunOverrideDegrees is { } sunDeg)

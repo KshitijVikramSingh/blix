@@ -22,6 +22,14 @@ internal sealed partial class SponzaLoop
     // --texel-budget N: texels gathered a frame (one pass of 32 rays each); --texel-rays N: the rays a texel stops at;
     // --texel-trust N: the rays at which its answer replaces the clipmap's whole (fewer: blended by the fraction).
     private int texelBudget = 2048;
+    // --texel-levels N: texels at N sizes, each twice the last (5 / 10 / 20 cm); --texel-pixels P: a pixel reads the
+    // level whose texel spans about P pixels at its depth, and the coarser ones fill in until it has rays (texel.glsl).
+    // A view used to need every surface it showed traced at 5 cm before it settled: ~240k texels on Sponza's hall at
+    // 2,048 a frame, the camera "a really slow eraser" (the user), and the frame paying for detail it could not show.
+    private int texelLevels = 3;
+    // 24: at 8, at this window's resolution a texel of 5 cm still spanned 8 pixels out to ~10 m -- most of Sponza's
+    // hall asked for the finest level, and the coarse ones added work instead of replacing it (settling slower, 88 ms).
+    private float texelPixels = 24f;
     // The occlusion estimate's reach (texel_gather.comp): openness counts cosine rays that meet nothing within it. CPU,
     // Sponza's hall: the patches' light x the texel's openness over its patches' at 1 m read 18.6% (energy 0.99) from 64
     // rays, as from 1024 -- against interp 27.4% and a 256-ray gather 18.5%; 0.5 m 19.0%, 0.25 m 20.4%.
@@ -41,7 +49,10 @@ internal sealed partial class SponzaLoop
     // (texel_filter.comp).
     private bool texelFilter = true;
     private const float TexelNoiseFloor = 1e-4f;
-    private float texelTrust = 64f;
+    // 32 -- one pass: the blend (texel_gather.comp) already weighs a young gather's noise against the occlusion
+    // estimate, so a texel's answer is whole from its first pass. At 64 a pixel showed the clipmap for two passes, and
+    // the clipmap reads ~30% bright on Sponza's hall: every view arrived +20% and faded down ("a slow eraser").
+    private float texelTrust = 32f;
     // One pixel in each 4 x 4 block queues the texels it reads, a different one each frame (all sixteen every 16
     // frames): a texel is 5 cm, many pixels share one up close, and a converged view queues nothing anyway. At every
     // second pixel each frame the mark cost ~3 ms on Sponza's hall.
@@ -81,6 +92,8 @@ internal sealed partial class SponzaLoop
         if (args.Float("texel-noise") is { } tn) texelNoise = Math.Max(0f, tn);
         if (args.Int("texel-filter") is { } tf) texelFilter = tf != 0;
         if (args.Int("texel-blend") is { } tb) texelBlend = tb != 0;
+        if (args.Int("texel-levels") is { } tl) texelLevels = Math.Clamp(tl, 1, 5);
+        if (args.Float("texel-pixels") is { } tp) texelPixels = Math.Max(0.5f, tp);
         if (args.Float("texel-occlusion-error") is { } toe) texelOcclusionError = Math.Max(1e-3f, toe);
         if (args.Float("texel-trust") is { } t) texelTrust = Math.Max(1f, t);
         // --lod-pixels E: the LOD error budget (0: full detail everywhere) -- the [Tune] field is not reachable from the
@@ -89,7 +102,7 @@ internal sealed partial class SponzaLoop
     }
 
     // The texels' 64-bit key, as texel.glsl packs it: x | y << 16 in the low word, z | bin << 16 in the high.
-    private static (uint Lo, uint Hi) TexelKey(int x, int y, int z, int bin) => ((uint)x | ((uint)y << 16), (uint)z | ((uint)bin << 16));
+    private static (uint Lo, uint Hi) TexelKey(int x, int y, int z, int bin, int level) => ((uint)x | ((uint)y << 16), (uint)z | ((uint)bin << 16) | ((uint)level << 21));
 
     // texel_bin.glsl's texelBin: each component x 1.5 rounded to -1/0/1 (26 directions, axis and 45-degree normals at
     // bins' centres).
@@ -119,9 +132,9 @@ internal sealed partial class SponzaLoop
     // "most of 8" (the patches' rule), 34 of the 576 hall reference points met a culled texel the camera sees --
     // Sponza's one-sided geometry shows its back to many visible surfaces. A texel never seen is never traced (only
     // what the image reads is queued), so a kept buried one costs memory alone.
-    private void CookTexels(RayQueryScene scene, Func<int, int, (Vector3 A, Vector3 B, Vector3 C)> tri, Func<int, int, bool> cutout)
+    private TexelBake? CookTexels(RayQueryScene scene, Func<int, int, (Vector3 A, Vector3 B, Vector3 C)> tri, Func<int, int, bool> cutout)
     {
-        if (!transportTexels) return;
+        if (!transportTexels) return null;
         var clock = Stopwatch.StartNew();
         var s = texelSpacing;
         var min = sceneBoundsMin - new Vector3(2f * s);
@@ -161,8 +174,6 @@ internal sealed partial class SponzaLoop
                     var v = (v0 + k * 0.5698403f) % 1f;
                     if (u + v > 1f) { u = 1f - u; v = 1f - v; }
                     var at = a + (b - a) * u + (c - a) * v;
-                    var cell = (at - min) / s;
-                    int cx = (int)MathF.Floor(cell.X), cy = (int)MathF.Floor(cell.Y), cz = (int)MathF.Floor(cell.Z);
                     for (var side = 0; side < 2; side++)
                     {
                         var n = side == 0 ? front : -front;
@@ -171,9 +182,15 @@ internal sealed partial class SponzaLoop
                             mineHidden++;
                             continue;
                         }
-                        var packed = (ulong)(uint)cx | ((ulong)(uint)cy << 16) | ((ulong)(uint)cz << 32) | ((ulong)(uint)TexelBin(n) << 48);
-                        var e = local.GetValueOrDefault(packed);
-                        local[packed] = (e.Pos + at, e.Nrm + n, e.Hits + 1);
+                        // Every level from the same sample: a coarse texel is the union of the fine ones it nests.
+                        for (var level = 0; level < texelLevels; level++)
+                        {
+                            var cell = (at - min) / (s * (1 << level));
+                            int cx = (int)MathF.Floor(cell.X), cy = (int)MathF.Floor(cell.Y), cz = (int)MathF.Floor(cell.Z);
+                            var packed = (ulong)(uint)cx | ((ulong)(uint)cy << 16) | ((ulong)(uint)cz << 32) | ((ulong)(uint)TexelBin(n) << 48) | ((ulong)(uint)level << 56);
+                            var e = local.GetValueOrDefault(packed);
+                            local[packed] = (e.Pos + at, e.Nrm + n, e.Hits + 1);
+                        }
                     }
                     mine++;
                 }
@@ -198,7 +215,7 @@ internal sealed partial class SponzaLoop
         {
             var e = merged[key];
             sumPos.Add(e.Pos); sumNrm.Add(e.Nrm); hits.Add(e.Hits);
-            keys.Add(TexelKey((int)(key & 0xFFFF), (int)((key >> 16) & 0xFFFF), (int)((key >> 32) & 0xFFFF), (int)(key >> 48)));
+            keys.Add(TexelKey((int)(key & 0xFFFF), (int)((key >> 16) & 0xFFFF), (int)((key >> 32) & 0xFFFF), (int)((key >> 48) & 0xFF), (int)(key >> 56)));
         }
         var placed = sumPos.Count;
         var pos = new Vector3[placed];
@@ -230,7 +247,7 @@ internal sealed partial class SponzaLoop
         {
             var i = kept[j];
             texels[2 * j] = new Vector4(pos[i], hits[i]);   // w: its surface samples (texel.glsl weighs by area)
-            texels[2 * j + 1] = new Vector4(nrm[i], 0f);
+            texels[2 * j + 1] = new Vector4(nrm[i], keys[i].Hi >> 21);   // w: its level
             var (lo, hi) = keys[i];
             var slot = TexelHash(lo, hi) & (uint)(texelCapacity - 1);
             var probe = 0;
@@ -238,11 +255,30 @@ internal sealed partial class SponzaLoop
             longestProbe = Math.Max(longestProbe, probe);
             table[slot * 4] = lo; table[slot * 4 + 1] = hi; table[slot * 4 + 2] = (uint)j; table[slot * 4 + 3] = 0;
         }
+        var bake = new TexelBake(table, texels, texelCount, texelCapacity, new Vector4(min, s));
+        OnMain(() => UploadTexels(bake));
+        var mb = (table.Length * 4L + texels.Length * 16L + texelCount * 92L) / 1048576.0;
+        var perLevel = new int[texelLevels];
+        foreach (var i in kept) perLevel[keys[i].Hi >> 21]++;
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[VulkanSponza] texels: {samples:N0} surface samples at {sample * 100:0.#} cm ({hidden:N0} sides inside a solid dropped) -> {placed:N0} texels at {s * 100:0.#} cm and {texelLevels - 1} coarser level(s), {texelCount:N0} kept (the rest inside a solid; by level {string.Join(" / ", perLevel.Select(c => c.ToString("N0", CultureInfo.InvariantCulture)))}); hash {texelCapacity:N0} slots (longest probe {longestProbe}); {mb:0.0} MB; cooked in {clock.Elapsed.TotalSeconds:0.0} s."));
+        if (longestProbe >= 64) Console.WriteLine("[VulkanSponza] texels: WARNING a hash probe run exceeds the shaders' 64 (TEXEL_PROBES): some texels cannot be found.");
+        return bake;
+    }
+
+    // What the texel cook makes (and the transport cache keeps): the hash table, the texels (position + samples,
+    // normal + level), their count, the table's slots, and the grid (finest cells' origin xyz, spacing w).
+    internal sealed record TexelBake(uint[] Table, Vector4[] Texels, int Count, int Capacity, Vector4 Grid);
+
+    private void UploadTexels(TexelBake bake)
+    {
+        texelCount = bake.Count;
+        texelCapacity = bake.Capacity;
         var stamps = new uint[texelCount];
         Array.Fill(stamps, 0xFFFFFFFFu);
         var queueWords = 8 + 4 * texelBudget;
-        texelHashBuffer = Own(device.CreateGpuBuffer(table.Length * 4, MemoryMarshal.AsBytes(table.AsSpan()), "sponza.texels.hash"));
-        texelBuffer = Own(device.CreateGpuBuffer(texels.Length * 16, MemoryMarshal.AsBytes(texels.AsSpan()), "sponza.texels"));
+        texelHashBuffer = Own(device.CreateGpuBuffer(bake.Table.Length * 4, MemoryMarshal.AsBytes(bake.Table.AsSpan()), "sponza.texels.hash"));
+        texelBuffer = Own(device.CreateGpuBuffer(bake.Texels.Length * 16, MemoryMarshal.AsBytes(bake.Texels.AsSpan()), "sponza.texels"));
         texelLightBuffer = Own(device.CreateGpuBuffer(texelCount * 16, new byte[texelCount * 16], "sponza.texels.light"));
         texelStampBuffer = Own(device.CreateGpuBuffer(texelCount * 4, MemoryMarshal.AsBytes(stamps.AsSpan()), "sponza.texels.stamp"));
         texelQueueBuffer = Own(device.CreateGpuBuffer(queueWords * 4, new byte[queueWords * 4], "sponza.texels.queue"));
@@ -254,12 +290,8 @@ internal sealed partial class SponzaLoop
         texelMomentBuffer = Own(device.CreateGpuBuffer(texelCount * 4, new byte[texelCount * 4], "sponza.texels.moment"));
         texelEpochBuffer = Own(device.CreateGpuBuffer(texelCount * 4, new byte[texelCount * 4], "sponza.texels.epoch"));
         texelProbeBuffer = Own(device.CreateGpuBuffer(24 * 24 * 48, new byte[24 * 24 * 48], "sponza.texels.probe"));
-        texelGrid = new Vector4(min, s);
+        texelGrid = bake.Grid;
         texelsUploaded = true;
-        var mb = (table.Length * 4L + texels.Length * 16L + texelCount * 92L) / 1048576.0;
-        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[VulkanSponza] texels: {samples:N0} surface samples at {sample * 100:0.#} cm ({hidden:N0} sides inside a solid dropped) -> {placed:N0} texels at {s * 100:0.#} cm, {texelCount:N0} kept (the rest inside a solid); hash {texelCapacity:N0} slots (longest probe {longestProbe}); {mb:0.0} MB; cooked in {clock.Elapsed.TotalSeconds:0.0} s."));
-        if (longestProbe >= 64) Console.WriteLine("[VulkanSponza] texels: WARNING a hash probe run exceeds the shaders' 64 (TEXEL_PROBES): some texels cannot be found.");
     }
 
     // Each frame (with the cooked patches on the GPU): when the sun has turned more than a quarter degree (or changed
@@ -318,6 +350,11 @@ internal sealed partial class SponzaLoop
         return ((frame % 16u) * ((h & 7u) * 2u + 1u) + (h >> 8)) % 16u;
     }
 
+    // texel.glsl's texelLevelFor: levels, a pixel's width at unit depth (|M22| may carry a Y flip), the pixels a texel
+    // should span.
+    private Vector4 TexelLevelsUniform(int frameHeight) =>
+        new(texelLevels, 2f / (MathF.Abs(cameraProjection.M22) * Math.Max(1, frameHeight)), texelPixels, 0f);
+
     // A buffer a frame in flight may still read: destroyed four frames on (FollowSun).
     private void RetireGpuBuffer(GpuBufferHandle buffer) => retiredBuffers.Add((buffer, texelFrame));
 
@@ -362,6 +399,7 @@ internal sealed partial class SponzaLoop
                 new("uTarget", new Vector4Uniform(new Vector4(width, height, TexelMarkStride, 0f))),
                 new("uOffset", new Vector4Uniform(new Vector4(MarkOffset(texelFrame) % 4, MarkOffset(texelFrame) / 4, texelEpoch, 0f))),
                 new("uNoise", new Vector4Uniform(new Vector4(texelMaxRays, texelNoise, TexelNoiseFloor, TexelFilterCapacity))),
+                new("uTexelLevels", new Vector4Uniform(TexelLevelsUniform(height))),
                 new("uTexelGrid", new Vector4Uniform(texelGrid)),
                 new("uTexelParams", new Vector4Uniform(texelParams)),
             },
@@ -392,6 +430,7 @@ internal sealed partial class SponzaLoop
                     new("uTarget", new Vector4Uniform(new Vector4(width, height, 1f, 1f))),
                     new("uOffset", new Vector4Uniform(new Vector4(0f, 0f, texelEpoch, 0f))),
                     new("uNoise", new Vector4Uniform(new Vector4(texelMaxRays, texelNoise, TexelNoiseFloor, TexelFilterCapacity))),
+                new("uTexelLevels", new Vector4Uniform(TexelLevelsUniform(height))),
                     new("uTexelGrid", new Vector4Uniform(texelGrid)),
                     new("uTexelParams", new Vector4Uniform(texelParams)),
                 },

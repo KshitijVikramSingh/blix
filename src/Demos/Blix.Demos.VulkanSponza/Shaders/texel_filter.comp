@@ -44,10 +44,12 @@ void main() {
     float centre = dot(own.rgb, luma);
     sNeighbour[lane] = vec4(0.0);
     if (lane < 27u) {
-        TexelGrid tg;
-        tg.minCorner = u.uTexelGrid.xyz;
-        tg.spacing = u.uTexelGrid.w;
-        tg.capacity = uint(u.uTexelParams.x);
+        TexelGrid finestGrid;
+        finestGrid.minCorner = u.uTexelGrid.xyz;
+        finestGrid.spacing = u.uTexelGrid.w;
+        finestGrid.capacity = uint(u.uTexelParams.x);
+        finestGrid.level = 0u;
+        TexelGrid tg = texelLevelGrid(finestGrid, uint(TEXEL_NORMAL(id).w + 0.5));
         ivec3 cell = ivec3(floor((position - tg.minCorner) / tg.spacing)) + ivec3(int(lane) % 3, (int(lane) / 3) % 3, int(lane) / 9) - 1;
         int other = lane == 13u ? id : texelFind(tg, cell, texelBin(n));
         if (other >= 0) {

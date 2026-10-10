@@ -11,7 +11,7 @@
 //
 // The includer defines TEXEL_HASH(i) (the hash table's slot i: uvec4 key x, key y, texel index, unused) and
 // TEXEL_POSITION(i) / TEXEL_NORMAL(i) (a texel's vec4s: xyz its position, w its surface samples; xyz its mean face
-// normal).
+// normal, w its level).
 #ifndef TEXEL_GLSL
 #define TEXEL_GLSL
 
@@ -20,14 +20,23 @@
 
 struct TexelGrid {
     vec3 minCorner;   // the cells' origin (cell = floor((p - minCorner) / spacing))
-    float spacing;
+    float spacing;    // this level's: the finest's x 2^level
     uint capacity;    // hash slots, a power of two
+    uint level;       // 0 the finest; each level's cells are twice the last's, nested (SponzaLoop.Texels.cs)
 };
+
+// The grid of another level: the same origin, cells 2^level times the finest's.
+TexelGrid texelLevelGrid(TexelGrid finest, uint level) {
+    TexelGrid g = finest;
+    g.spacing = finest.spacing * float(1u << level);
+    g.level = level;
+    return g;
+}
 
 #include "texel_bin.glsl"
 
-uvec2 texelKey(ivec3 cell, uint bin) {
-    return uvec2(uint(cell.x) | (uint(cell.y) << 16), uint(cell.z) | (bin << 16));
+uvec2 texelKey(ivec3 cell, uint bin, uint level) {
+    return uvec2(uint(cell.x) | (uint(cell.y) << 16), uint(cell.z) | (bin << 16) | (level << 21));
 }
 
 // The same mix as the cook's (TexelHash in SponzaLoop.Texels.cs).
@@ -42,7 +51,7 @@ uint texelMix(uvec2 k) {
 
 int texelFind(TexelGrid g, ivec3 cell, uint bin) {
     if (any(lessThan(cell, ivec3(0))) || any(greaterThan(cell, ivec3(65535)))) return -1;
-    uvec2 key = texelKey(cell, bin);
+    uvec2 key = texelKey(cell, bin, g.level);
     uint slot = texelMix(key) & (g.capacity - 1u);
     for (int i = 0; i < TEXEL_PROBES; ++i) {
         uvec4 e = TEXEL_HASH(slot);
@@ -51,6 +60,13 @@ int texelFind(TexelGrid g, ivec3 cell, uint bin) {
         slot = (slot + 1u) & (g.capacity - 1u);
     }
     return -1;
+}
+
+// The level a pixel reads (fractional: it blends with the next coarser): the one whose texel spans about levels.z
+// pixels at viewDepth, from levels.y the pixel's width at unit depth; levels.x levels in all.
+float texelLevelFor(float viewDepth, vec4 levels, float finestSpacing) {
+    float want = levels.z * viewDepth * levels.y;
+    return clamp(log2(max(want / finestSpacing, 1e-6)), 0.0, levels.x - 1.0);
 }
 
 // The texels a point reads: the eight cells around it (trilinear), in its face's bin, or without one in each of up
@@ -100,7 +116,7 @@ void texelsAround(TexelGrid g, vec3 p, vec3 n, float faceBin, out int ids[TEXEL_
             // trilinear weight it dotted the Cornell box's corners at every cell.
             vec4 tp = TEXEL_POSITION(id);
             vec3 dp = (tp.xyz - p) / g.spacing;
-            float w = exp(-dot(dp, dp) / (2.0 * 0.36)) * min(tp.w / 4.0, 1.0);
+            float w = exp(-dot(dp, dp) / (2.0 * 0.36)) * min(tp.w / (4.0 * float(1u << (2u * g.level))), 1.0);
             float f2 = facing * facing;
             ids[slot] = id;
             weights[slot] = w * f2 * f2;

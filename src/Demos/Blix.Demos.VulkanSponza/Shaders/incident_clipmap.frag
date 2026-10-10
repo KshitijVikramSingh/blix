@@ -40,6 +40,7 @@ layout(set = 0, binding = 0) uniform IncidentClipmap {
     vec4 uTexelParams;   // x hash capacity, y 1 when on, z the rays at which a texel's answer is trusted whole, w 1:
                          // read the spatially filtered light (texel_gather.comp)
     vec4 uTexelDebug;    // x the texel frame (the debug view's stamp test)
+    vec4 uTexelLevels;   // x levels, y a pixel's width at unit depth, z the pixels a texel should span (texelLevelFor)
     vec4 uReference;     // the reference view (reference_trace.comp): x 1 when shown, yz its pixels (half the frame's);
                          // w 1: the texel debug view (--texel-debug: r the texels' confidence, g 1 where any was found,
                          // b 1 where the lookup found none)
@@ -125,14 +126,16 @@ float debugStamped, debugLit;
 #define TEXEL_NORMAL(i) texels[2 * (i) + 1]
 #include "texel.glsl"
 
-// The texels' answer: their irradiance, weighted trilinearly and by how many rays each has; confidence the mean of
-// those rays against the trust threshold. False where none of the eight has rays (foliage has no texels; a texel not
+// One level's texels: their irradiance, weighted by distance and area and by how many rays each has; confidence the
+// mean of those rays against the trust threshold. False where none of the eight has rays (foliage has no texels; a texel not
 // yet gathered has none), and the field above stands.
-bool texelsAt(vec3 worldPos, vec3 n, float faceBin, out vec3 irradiance, out float confidence) {
-    TexelGrid tg;
-    tg.minCorner = g.uTexelGrid.xyz;
-    tg.spacing = g.uTexelGrid.w;
-    tg.capacity = uint(g.uTexelParams.x);
+bool texelsAtLevel(vec3 worldPos, vec3 n, float faceBin, uint level, out vec3 irradiance, out float confidence) {
+    TexelGrid finest;
+    finest.minCorner = g.uTexelGrid.xyz;
+    finest.spacing = g.uTexelGrid.w;
+    finest.capacity = uint(g.uTexelParams.x);
+    finest.level = 0u;
+    TexelGrid tg = texelLevelGrid(finest, level);
     int ids[TEXEL_CANDIDATES];
     float weights[TEXEL_CANDIDATES];
     texelsAround(tg, worldPos, n, faceBin, ids, weights);
@@ -162,6 +165,33 @@ bool texelsAt(vec3 worldPos, vec3 n, float faceBin, out vec3 irradiance, out flo
     confidence = located > 1e-6 ? raysWeighted / located : 0.0;
     debugStamped /= max(count, 1.0); debugLit /= max(count, 1.0);
     return weight > 1e-6;
+}
+
+// The texels' answer over levels (texel.glsl, texelLevelFor): from the coarser of the pixel's two down, each finer
+// level taking over by its confidence -- the pixel's own level by its share of the blend with the next (the fraction
+// of its level), so a level changes smoothly across depth. A new view shows the coarse texels' light within frames
+// (there are few of them) and the fine ones fill in where they have rays.
+bool texelsAt(vec3 worldPos, vec3 n, float faceBin, float viewDepth, out vec3 irradiance, out float confidence) {
+    float levelWanted = texelLevelFor(viewDepth, g.uTexelLevels, g.uTexelGrid.w);
+    int finest = int(floor(levelWanted));
+    float fraction = levelWanted - float(finest);
+    int coarsest = min(finest + 1, int(g.uTexelLevels.x) - 1);
+    irradiance = vec3(0.0);
+    confidence = 0.0;
+    bool any = false;
+    float stampedSum = 0.0, litSum = 0.0;
+    for (int level = coarsest; level >= finest; --level) {
+        vec3 value;
+        float c;
+        if (!texelsAtLevel(worldPos, n, faceBin, uint(level), value, c)) continue;
+        if (level == finest) { stampedSum = debugStamped; litSum = debugLit; }
+        float take = level == finest && finest < coarsest ? c * (1.0 - fraction) : c;
+        if (!any) { irradiance = value; confidence = c; any = true; take = 1.0; }
+        irradiance = mix(irradiance, value, take);
+        confidence = confidence + (1.0 - confidence) * c;
+    }
+    debugStamped = stampedSum; debugLit = litSum;
+    return any;
 }
 
 void main() {
@@ -226,7 +256,7 @@ void main() {
     vec3 gathered;
     float confidence;
     bool texelFound = false;
-    if (g.uTexelParams.y > 0.5 && g.uClipParams.y < 0.5 && texelsAt(worldPos, N, nSample.w, gathered, confidence)) {
+    if (g.uTexelParams.y > 0.5 && g.uClipParams.y < 0.5 && texelsAt(worldPos, N, nSample.w, viewDepth, gathered, confidence)) {
         outIncident.rgb = mix(outIncident.rgb, gathered, confidence);
         texelFound = true;
     }

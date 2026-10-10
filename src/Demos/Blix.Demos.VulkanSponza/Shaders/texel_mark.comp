@@ -20,6 +20,7 @@ layout(set = 0, binding = 0) uniform TexelMark {
     vec4 uOffset;       // xy this frame's pixel within each stride block, z the texels' epoch (the patch light's)
     vec4 uNoise;        // texelSettled: x the most rays, y the standard error tolerated (relative), z its floor; w the
                         // filter list's capacity
+    vec4 uTexelLevels;  // x levels, y a pixel's width at unit depth, z the pixels a texel should span (texelLevelFor)
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -70,10 +71,11 @@ void main() {
     g.minCorner = u.uTexelGrid.xyz;
     g.spacing = u.uTexelGrid.w;
     g.capacity = uint(u.uTexelParams.x);
+    g.level = 0u;
     int ids[TEXEL_CANDIDATES];
     float weights[TEXEL_CANDIDATES];
-    texelsAround(g, world, n, nSample.w, ids, weights);
     if (probe) {
+        texelsAround(g, world, n, nSample.w, ids, weights);
         float found = 0.0, weight = 0.0, lit = 0.0;
         vec3 sum = vec3(0.0);
         for (int i = 0; i < TEXEL_CANDIDATES; ++i) {
@@ -92,6 +94,13 @@ void main() {
     uint parity = frame & 1u;
     uint capacity = uint(u.uTexelParams.y);
     float target = u.uTexelParams.z;
+    // The pixel's level and the next coarser (which fills in while it has few rays, and which it blends into across
+    // depth: incident_clipmap.frag). Three levels tripled the lookups (+33 ms on Sponza) for no faster settling.
+    float viewDepth = abs(view.z / view.w);
+    int finest = int(floor(texelLevelFor(viewDepth, u.uTexelLevels, g.spacing)));
+    int coarsest = min(finest + 1, int(u.uTexelLevels.x) - 1);
+    for (int level = finest; level <= coarsest; ++level) {
+    texelsAround(texelLevelGrid(g, uint(level)), world, n, nSample.w, ids, weights);
     for (int i = 0; i < TEXEL_CANDIDATES; ++i) {
         if (ids[i] < 0) continue;
         uint id = uint(ids[i]);
@@ -102,9 +111,11 @@ void main() {
         float rays = light.w;
         bool stale = texelEpoch[id] != uint(u.uOffset.z);
         if (!stale && texelSettled(light, texelMoment[id], u.uNoise, target)) continue;
-        // Need first: none yet, few, under the minimum, then settling toward the noise target.
-        uint list = rays <= 0.0 ? 0u : (stale || rays < target / 8.0) ? 1u : rays < target ? 2u : 3u;
+        // Need first: none yet, few, under the minimum, then settling toward the noise target. A coarse texel short
+        // of the minimum goes first whatever it holds: there are few of them, and they are what a new view shows.
+        uint list = rays <= 0.0 || (level > finest && rays < target) ? 0u : (stale || rays < target / 8.0) ? 1u : rays < target ? 2u : 3u;
         uint slot = atomicAdd(texelQueue[parity * 4u + list], 1u);
         if (slot < capacity) texelQueue[8u + list * capacity + slot] = id;
+    }
     }
 }
