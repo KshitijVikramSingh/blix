@@ -13,7 +13,8 @@ internal sealed partial class SponzaLoop
 {
     private RayQueryScene? rayQueries;
     // Per ray-scene placement (the transform table's order): the material a surface bake reads.
-    private readonly record struct RayMaterial(TextureHandle Albedo, Vector4 BaseColor, float AlphaCutoff);
+    // Clear: authored transmission (the panes): no coverage, rays pass (ray_surface_bake.comp).
+    private readonly record struct RayMaterial(TextureHandle Albedo, Vector4 BaseColor, float AlphaCutoff, bool Clear);
     private readonly List<RayMaterial> rayPlacementMaterials = new();
     // Per placement (the ray scene's order): whether its surface is in the lightmap atlas (--lightmap). The hashed
     // texels leave those out when the atlas's texels serve them (SponzaLoop.Lightmap.cs).
@@ -275,7 +276,7 @@ internal sealed partial class SponzaLoop
                 new ShaderUniform[]
                 {
                     new("uBaseColor", new Vector4Uniform(material.BaseColor)),
-                    new("uParams", new Vector4Uniform(new Vector4(first, count, material.AlphaCutoff, 0f))),
+                    new("uParams", new Vector4Uniform(new Vector4(first, count, material.AlphaCutoff, material.Clear ? 1f : 0f))),
                 },
                 new[] { new ShaderTextureBinding("uAlbedo", material.Albedo) },
                 Buffers: raySurfaceBakeBuffers));

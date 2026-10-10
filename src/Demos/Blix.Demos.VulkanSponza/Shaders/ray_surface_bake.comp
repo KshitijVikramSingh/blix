@@ -8,13 +8,15 @@
 // Sixteen points spread evenly over the triangle by area (a 4x4 stratified grid through the square-root warp),
 // each sampled at the mip whose texels are its share of the triangle's texture footprint, so the mean is the
 // triangle's and not one texel's. Coverage is the share of those points whose alpha (times the factor's) passes the
-// material's cutoff; a material without a cutoff is solid.
+// material's cutoff; a material without a cutoff is solid. A clear one (KHR_materials_transmission: the glass panes)
+// is not there at all: nothing models a ray refracting through it, and met as solid it sealed every glazed window, its
+// inside lit as a dark box (the GI rendered it black) and nothing behind a pane lit through it.
 
 layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) uniform Bake {
     vec4 uBaseColor;   // the material's base colour factor, linear rgb and alpha
-    vec4 uParams;      // x first entry in BakeRows, y how many, z alpha cutoff (0: opaque)
+    vec4 uParams;      // x first entry in BakeRows, y how many, z alpha cutoff (0: opaque), w 1: clear (coverage 0)
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uAlbedo;
@@ -52,6 +54,6 @@ void main() {
         kept += (u.uParams.z <= 0.0 || texel.a * u.uBaseColor.a >= u.uParams.z) ? 1.0 : 0.0;
     }
     vec3 albedo = sum / 16.0 * u.uBaseColor.rgb;
-    float coverage = u.uParams.z <= 0.0 ? 1.0 : kept / 16.0;
+    float coverage = u.uParams.w > 0.5 ? 0.0 : u.uParams.z <= 0.0 ? 1.0 : kept / 16.0;
     surfaces[row] = packUnorm4x8(vec4(encodeSrgb(albedo), coverage));
 }
