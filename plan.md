@@ -731,8 +731,18 @@ F. *The frame audit* (opened 2026-10-07: "a lot of pure performance on the table
      pre-pass normal is the VERTEX normal, so the pre-pass now writes the FACE's bins in its w; octahedral 4x4 bins had
      their boundaries ON the axes (floors, walls) -- 27 component-rounded bins put axes at bin centres. The user booted
      it: "clearly WINNING", a clean 30 fps once settled (~frame 2400), "jittery and noisy in a few very specific ways".
-     Open: the cost (~+15 ms on the hall in single runs; paired A/B not yet run), the sun moving (re-gather on change),
-     the noise the user saw, and cleanup of the screen-probe hookup.
+     Since: sun follows (background re-solve + epoch re-gather; Cornell turned 0.94% vs 0.93% cooked there); adaptive
+     rays by measured noise, guided rays (per-patch 8x8 light maps), an occlusion estimate (patch light x the texel's
+     openness within 1 m over its patches') blended with the gather by inverse variance, a per-frame spatial filter,
+     jitter-exact reconstruction, hidden surface samples dropped, GTAO off over texels; GPU reference view (G).
+     Cornell vs the reference, whole image: median 0.97%, p99 7.7% (reference vs reference 0.64%, 5.8%). Rejected on
+     the way, measured: far maps (short rays + per-patch distant radiance: as noisy per ray as full rays, biased).
+     The user on Sponza: "really great when the rays have accumulated", but the camera "a really slow eraser" and poor
+     fps -- "we're pushing a lot of unnecessarily high-res details around by choice".
+     Open, in order: (1) instruments on Sponza -- whole-image error against the reference view, steady-state cost per
+     pass, settle time after a move; (2) texel resolution by need (screen footprint, a coarse-to-fine hierarchy) so a
+     view settles in frames and distant surfaces stop costing 5 cm work; (3) cleanup -- screen-probe hookup, the CPU
+     diagnostics in SponzaLoop.Transport.cs; (4) sub-texel contact (corner lines) and the remaining noise.
 
 Known instrument gap: a Sponza `--shot` raises 9 validation errors on `main` as well (a storage image
 copied to a buffer without transfer-source usage, in the shot's readback). Not this arc's, and not fixed.
