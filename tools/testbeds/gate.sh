@@ -4,8 +4,11 @@
 #   BLIX_TESTBED_ASSETS  the cooked scenes (tools/testbeds/setup.sh makes them; this runs it when they are missing).
 #
 # Three headed runs at 960x540 (a window opens and closes each time): the Cornell box from outside the open front,
-# then the thin-wall scene from inside its sealed room and from the open one. Each converges 1500 frames and runs
-# --probe-reference; tools/testbeds/gate.py turns the logs into the verdict (targets and ratchets: see there).
+# then the thin-wall scene from inside its sealed room and from the open one. Each converges 1500 frames; the judge is
+# the GPU path-traced reference at 16,384 paths a point (--gpu-reference, reference_points.comp; the CPU's 1,024 a point
+# were a suspect for the run-to-run noise); tools/testbeds/gate.py turns the logs into the verdict (targets and ratchets: see
+# there). BLIX_GATE_CPU_REFERENCE=1 also runs the CPU reference (--probe-reference) as a cross-check: its lines are
+# relabelled, so the verdict stays the GPU's, and each log ends with the two held against each other.
 # Exit 0 when every ratchet holds. Logs stay in the directory printed at the end.
 #
 # Usage: tools/testbeds/gate.sh [extra demo flags...]   e.g. --clipmap-guide 0 to price a change against the bars
@@ -25,9 +28,11 @@ done
 LOGS="$(mktemp -d "${TMPDIR:-/tmp}/blix-gi-gate.XXXXXX")"
 export BLIX_CONFIG=Release BLIX_DIAG=off
 build=(--build)
+reference=(--gpu-reference --gpu-ref-paths 16384)
+if [[ "${BLIX_GATE_CPU_REFERENCE:-0}" == 1 ]]; then reference+=(--probe-reference); fi
 run() {
     local name=$1; shift
-    "$REPO/blix" run ${build[@]+"${build[@]}"} Blix.Demos.VulkanSponza "$@" --no-fog --win=960 540 --probe-reference \
+    "$REPO/blix" run ${build[@]+"${build[@]}"} Blix.Demos.VulkanSponza "$@" --no-fog --win=960 540 "${reference[@]}" \
         --shot-frames=1500 --shot="$LOGS/$name.png" > "$LOGS/$name.log" 2>&1 || {
         echo "gate: the $name run failed; its log is $LOGS/$name.log" >&2
         tail -5 "$LOGS/$name.log" >&2
