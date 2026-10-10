@@ -780,23 +780,31 @@ internal sealed partial class SponzaLoop
             UploadCookedPatches(pos, nrm, incident, openness, transportSpacing);
             UploadCookedGuides(guides);
         });
-        // --lightmap: the lightmap atlas's texels serve the surfaces in the atlas (SponzaLoop.Lightmap.cs), and the hashed
-        // texels everything else (the foliage the cook leaves out). Null when the atlas asks for more than the budget:
-        // the hashed texels then serve every surface.
-        var lightmapBake = lightmapEnabled && transportTexels && lightmapSources.Count > 0 ? BakeLightmapTexels() : null;
+        // --lightmap: the lightmap atlas's texels are the finest level of the surfaces in the atlas (SponzaLoop.Lightmap.cs),
+        // the hashed cells their coarser levels and every level of everything else (the foliage the cook leaves out). Null
+        // when the atlas asks for more than the budget: the hashed texels then serve every surface at every level.
+        var lightmapBake = lightmapEnabled && transportTexels && lightmapSources.Count > 0 ? BakeLightmapTexels(scene, cacheKey) : null;
         TexelBake? texelBake;
         if (cached?.Texels is { } cachedTexels)
         {
             texelBake = cachedTexels;
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] texels: {cachedTexels.Count:N0} from the cache."));
         }
-        else texelBake = CookTexels(scene, Tri, (i, t) =>
-        {
-            var row = data.RowOf(i, t);
-            return (surfaces[row] >> 24) < 255u || (lightmapBake is not null && rayPlacementLightmapped[(int)data.RowPlacements[row]]);
-        });
+        else texelBake = CookTexels(scene, Tri, (i, t) => (surfaces[data.RowOf(i, t)] >> 24) < 255u,
+            (i, t) => lightmapBake is not null && rayPlacementLightmapped[(int)data.RowPlacements[data.RowOf(i, t)]] ? 1 : 0);
         if (texelBake is { } hashed)
-            OnMain(() => { if (lightmapBake is { } atlas) UploadLightmapTexels(hashed, atlas); else UploadTexels(hashed); });
+        {
+            // The baked light (SponzaLoop.LightBake.cs), read here off the frame thread; without it, the bake begins
+            // once the texels are up, toward the same file.
+            var texelTotal = hashed.Count + (lightmapBake?.Count ?? 0);
+            var lightPath = lightBakeOff ? null : LightBakePathFor(cacheKey, transportRelightSun);
+            var light = lightPath is null || transferDumpPath is not null ? null : ReadLightBake(lightPath, texelTotal);
+            OnMain(() =>
+            {
+                if (lightmapBake is { } atlas) UploadLightmapTexels(hashed, atlas, light, lightPath);
+                else UploadTexels(hashed, light, lightPath);
+            });
+        }
         if (transportGpu && (cached is null || (transportTexels && cached.Texels is null)))
             SaveTransportCache(cacheKey, new TransportCache
             {

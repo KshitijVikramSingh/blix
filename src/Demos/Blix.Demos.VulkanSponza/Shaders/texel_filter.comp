@@ -67,7 +67,7 @@ void main() {
                 uint o = TEXEL_INDEX_MAP(at.y * int(u.uLightmap.y) + at.x);
                 if (o != 0xFFFFFFFFu) {
                     if (TEXEL_POSITION(o).w < 0.0 && dot(TEXEL_NORMAL(o).xyz, n) < 0.0) o += 1u;
-                    other = int(o);
+                    if (abs(TEXEL_POSITION(o).w) >= 2.0) other = int(o);
                 }
             }
         } else {

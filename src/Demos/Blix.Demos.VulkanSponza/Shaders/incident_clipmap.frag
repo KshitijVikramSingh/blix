@@ -160,8 +160,8 @@ float debugStamped, debugLit;
 layout(set = 0, binding = 19) uniform usampler2D uLightmapTexel;
 layout(std430, set = 0, binding = 20) readonly buffer LightmapIndexMap { uint lightmapIndexMap[]; };
 #define TEXEL_INDEX_MAP(i) lightmapIndexMap[i]
-// This pixel's packed atlas texel (main sets it): not 0, the atlas's texels serve it; 0 (no lightmap, or a surface the
-// atlas leaves out), the hashed ones.
+// This pixel's packed atlas texel (main sets it): not 0, the atlas's texels are its level 0 and the hashed cells its
+// coarser levels; 0 (no lightmap, or a surface the atlas leaves out), the hashed cells at every level.
 uint pixelLightmapTexel;
 #define TEXEL_HASH(i) texelHash[i]
 #define TEXEL_POSITION(i) texels[2 * (i)]
@@ -193,7 +193,7 @@ bool texelsAtLevel(vec3 worldPos, vec3 n, float faceBin, uint level, out vec3 ir
     int ids[TEXEL_CANDIDATES];
     float weights[TEXEL_CANDIDATES];
     vec2 atlasTexel;
-    if (texelLightmapUnpack(pixelLightmapTexel, atlasTexel)) {
+    if (level == 0u && texelLightmapUnpack(pixelLightmapTexel, atlasTexel)) {
         // Lightmap texels: the four bilinear atlas texels at the pixel's lightmap coordinate.
         for (int i = 0; i < TEXEL_CANDIDATES; ++i) { ids[i] = -1; weights[i] = 0.0; }
         int lm[4];
@@ -235,8 +235,6 @@ bool texelsAtLevel(vec3 worldPos, vec3 n, float faceBin, uint level, out vec3 ir
 // of its level), so a level changes smoothly across depth. A new view shows the coarse texels' light within frames
 // (there are few of them) and the fine ones fill in where they have rays.
 bool texelsAt(vec3 worldPos, vec3 n, float faceBin, float viewDepth, out vec3 irradiance, out float confidence) {
-    // The lightmap's texels have no levels (its mips are a later question): one lookup.
-    if (pixelLightmapTexel != 0u) return texelsAtLevel(worldPos, n, faceBin, 0u, irradiance, confidence);
     float levelWanted = texelLevelFor(viewDepth, g.uTexelLevels, g.uTexelGrid.w, texelSunlit(worldPos, n));
     int finest = int(floor(levelWanted));
     float fraction = levelWanted - float(finest);

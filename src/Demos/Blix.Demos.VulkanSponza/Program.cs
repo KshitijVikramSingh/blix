@@ -229,8 +229,10 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // Only screen probes (and --surface-check) read world motion; elsewhere the full-resolution Rgba16F target was
     // written by both pre-passes and loaded again by the late one for nothing. The shaders still write it: with no
     // attachment there the writes are dropped, as under MSAA.
-    // With --lightmap as well: the lightmap texel target follows the motion target at location 4, so it is on too.
-    private bool MotionTarget => SurfaceTargets && (screenProbesEnabled || surfaceCheck || lightmapEnabled);
+    private bool MotionTarget => SurfaceTargets && (screenProbesEnabled || surfaceCheck);
+    // The lightmap texel target (R32Uint) sits at location 3, before the motion target's 4: on with --lightmap, and with
+    // the motion target (which needs a location 3 to sit behind; the shaders write it, nothing reads it there).
+    private bool LightmapTexelTarget => SurfaceTargets && (lightmapEnabled || MotionTarget);
     private bool SurfaceTargets => MsaaSamples == 1;
     // The surface-key target as the previous frame left it (copied at the end of each frame), and TAA's per-pixel
     // accumulated count, ping-ponged with its colour (R32Uint: an integer, read at the nearest pixel).

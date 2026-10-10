@@ -120,6 +120,7 @@ layout(std430, set = 1, binding = 13) readonly buffer ClipmapState { uvec4 clipm
 #define BLIX_CLIPMAP_DEPTH_FILTERED(p) textureLod(sampler2D(uClipmapDepth, uLinearClamp), (p) / vec2(textureSize(sampler2D(uClipmapDepth, uLinearClamp), 0)), 0.0)
 #define BLIX_CLIPMAP_STATE(s) clipmapStates[s]
 #include "probe_clipmap.glsl"
+#include "lightmap_frame.glsl"
 
 layout(set = 2, binding = 0) uniform Material {
     vec4 uBaseColorFactor;
@@ -290,11 +291,20 @@ void main() {
     // leaf cards, curtains) lights from the inside. Single-sided geometry is
     // back-face culled, so the flip is a no-op there.
     vec3 N = normalize(vNormalWorld);
+    vec3 tangentWorld = vTangentWorld;
+    float tangentSign = vTangentSign;
+    // --lightmap: LOD 0's normal and tangent through the atlas (lightmap_frame.glsl), so a coarse LOD lights and
+    // normal-maps as the full surface does. The pre-pass wrote the same normal, which the incident field read.
+    {
+        vec3 lodZeroN;
+        vec4 lodZeroT;
+        if (lightmapShadingFrame(vLightmapTexel, lodZeroN, lodZeroT)) { N = lodZeroN; tangentWorld = lodZeroT.xyz; tangentSign = lodZeroT.w; }
+    }
     if (!gl_FrontFacing) N = -N;
     // Build TBN from the authored glTF tangent. Gram-Schmidt removes interpolation drift and
     // TANGENT.w supplies bitangent handedness, including mirrored UVs.
-    vec3 T = normalize(vTangentWorld - N * dot(N, vTangentWorld));
-    vec3 B = cross(N, T) * vTangentSign;
+    vec3 T = normalize(tangentWorld - N * dot(N, tangentWorld));
+    vec3 B = cross(N, T) * tangentSign;
     // Reconstruct Z from XY. Cooked normals are BC5 (2-channel RG, blue
     // dropped), so the sampled .z is meaningless — derive it from the
     // unit-length constraint. This is also correct for RGBA8 normal maps

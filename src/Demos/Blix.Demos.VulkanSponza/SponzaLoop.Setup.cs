@@ -491,8 +491,8 @@ internal sealed partial class SponzaLoop
         {
             surfaceKeyHandle = graph.ColorTarget("surface-key", TextureFormat.R32Uint, fullSize);
             velocityHandle = graph.ColorTarget("velocity", TextureFormat.Rg16F, fullSize);
+            if (LightmapTexelTarget) lightmapTexelHandle = graph.ColorTarget("lightmap-texel", TextureFormat.R32Uint, fullSize);
             if (MotionTarget) motionHandle = graph.ColorTarget("world-motion", TextureFormat.Rgba16F, fullSize);
-            if (lightmapEnabled) lightmapTexelHandle = graph.ColorTarget("lightmap-texel", TextureFormat.R32Uint, fullSize);
         }
         var prepassBuilder = graph.GraphicsPass("depth-prepass")
             .Target(prepassNormalHandle, LoadOp.Clear, StoreOp.Store)
@@ -502,8 +502,8 @@ internal sealed partial class SponzaLoop
         {
             prepassBuilder = prepassBuilder.Target(surfaceKeyHandle, LoadOp.Clear, StoreOp.Store)
                 .Target(velocityHandle, LoadOp.Clear, StoreOp.Store);
+            if (LightmapTexelTarget) prepassBuilder = prepassBuilder.Target(lightmapTexelHandle, LoadOp.Clear, StoreOp.Store);
             if (MotionTarget) prepassBuilder = prepassBuilder.Target(motionHandle, LoadOp.Clear, StoreOp.Store);
-            if (lightmapEnabled) prepassBuilder = prepassBuilder.Target(lightmapTexelHandle, LoadOp.Clear, StoreOp.Store);
         }
         // Same rule as the depth: at one sample the target IS what a reader wants, and asking for
         // a resolve anyway is invalid.
@@ -540,8 +540,8 @@ internal sealed partial class SponzaLoop
         {
             lateBuilder = lateBuilder.Target(surfaceKeyHandle, LoadOp.Load, StoreOp.Store)
                 .Target(velocityHandle, LoadOp.Load, StoreOp.Store);
+            if (LightmapTexelTarget) lateBuilder = lateBuilder.Target(lightmapTexelHandle, LoadOp.Load, StoreOp.Store);
             if (MotionTarget) lateBuilder = lateBuilder.Target(motionHandle, LoadOp.Load, StoreOp.Store);
-            if (lightmapEnabled) lateBuilder = lateBuilder.Target(lightmapTexelHandle, LoadOp.Load, StoreOp.Store);
         }
         if (MsaaSamples > 1) lateBuilder = lateBuilder.ResolveColor(prepassNormalResolveHandle).ResolveDepth(depthResolveHandle);
         latePrepassHandle = lateBuilder.Handle;
@@ -624,6 +624,8 @@ internal sealed partial class SponzaLoop
             .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
         texelFilterInterface = Reflect("texel_filter.comp");
         texelFilterPassHandle = graph.ComputePass("texel-filter").Shader(texelFilterInterface).Handle;
+        lightBakeInterface = Reflect("texel_bake.comp");
+        lightBakePassHandle = graph.ComputePass("light-bake").Shader(lightBakeInterface).Handle;
         texelGatherInterface = Reflect("texel_gather.comp");
         {
             var builder = graph.ComputePass("texel-gather");
@@ -900,6 +902,8 @@ internal sealed partial class SponzaLoop
             File.ReadAllBytes(Path.Combine(shaderDir, "texel_filter.comp.spv")), texelFilterInterface, "texel_filter")), "texel_filter"));
         texelMarkPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "texel_mark.comp.spv")), texelMarkInterface, "texel_mark")), "texel_mark"));
+        lightBakePipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
+            File.ReadAllBytes(Path.Combine(shaderDir, "texel_bake.comp.spv")), lightBakeInterface, "texel_bake")), "texel_bake"));
         texelGatherPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "texel_gather.comp.spv")), texelGatherInterface, "texel_gather")), "texel_gather"));
         clipmapMarkPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
@@ -1202,7 +1206,7 @@ internal sealed partial class SponzaLoop
 
     // The pre-pass's targets: the normal, and under single sampling the surface key, the velocity and the world motion
     // (stage 4e).
-    // One per pre-pass colour target: normal; surface key and velocity; world motion; and with --lightmap the lightmap
-    // texel (a fifth the pipelines did not count at first: nothing was written to it).
-    private BlendState[] PrepassBlends() => Enumerable.Repeat(BlendState.Disabled, !SurfaceTargets ? 1 : (MotionTarget ? 4 : 3) + (lightmapEnabled ? 1 : 0)).ToArray();
+    // One per pre-pass colour target: normal; surface key and velocity; the lightmap texel; world motion (a target the
+    // pipelines once did not count had nothing written to it).
+    private BlendState[] PrepassBlends() => Enumerable.Repeat(BlendState.Disabled, !SurfaceTargets ? 1 : 3 + (LightmapTexelTarget ? 1 : 0) + (MotionTarget ? 1 : 0)).ToArray();
 }

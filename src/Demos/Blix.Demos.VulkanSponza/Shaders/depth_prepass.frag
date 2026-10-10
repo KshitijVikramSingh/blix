@@ -16,6 +16,7 @@ layout(location = 2) in vec3 vWorldPos;
 
 layout(location = 0) out vec4 outNormal;
 #include "texel_bin.glsl"
+#include "lightmap_frame.glsl"
 layout(location = 6) flat in uint vSurfaceKey;
 layout(location = 7) in vec4 vClipNow;
 layout(location = 8) in vec4 vClipPrev;
@@ -24,16 +25,20 @@ layout(location = 9) in vec3 vWorldMotion;
 // then). Single-sample passes only carry these targets; under MSAA the writes have nowhere to go and are dropped.
 layout(location = 1) out uint outSurfaceKey;
 layout(location = 2) out vec2 outVelocity;
-layout(location = 3) out vec4 outMotion;
+layout(location = 4) out vec4 outMotion;
 // --lightmap: the atlas texel, packed as texel.glsl's texelLightmapUnpack reads it: u and v in eighths of a texel, 16
 // bits each (an atlas up to 8192 wide); 0 where the primitive has no lightmap (its vertices' texel is 0).
 layout(location = 10) in vec2 vLightmapTexel;
-layout(location = 4) out uint outLightmapTexel;
+layout(location = 3) out uint outLightmapTexel;
 
 void main() {
     // Match lit.frag's back-face convention; depth alone cannot recover the facing hemisphere of a
     // two-sided sheet.
     vec3 n = normalize(vNormalWorld);
+    // --lightmap: LOD 0's normal through the atlas (lightmap_frame.glsl), as lit.frag shades with it.
+    vec3 lodZeroN;
+    vec4 lodZeroT;
+    if (lightmapShadingFrame(vLightmapTexel, lodZeroN, lodZeroT)) n = lodZeroN;
     vec3 shading = gl_FrontFacing ? n : -n;
     // w: the texel bins (texel_bin.glsl, texelFaceBins) of this pixel's FACE normal -- the plane of the triangle, from the world
     // position's screen derivatives (one triangle's within a quad), turned to the shading normal's side. The texels

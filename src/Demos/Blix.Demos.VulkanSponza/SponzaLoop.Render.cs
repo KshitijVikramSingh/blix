@@ -330,8 +330,9 @@ internal sealed partial class SponzaLoop
     // not (a buffer bound by a name the program lacks is an error). Rebuilt when the clipmap is created.
     private ShaderBufferBinding[]? litSceneBuffers;
     private ShaderBufferBinding[]? litClipmapBuffer;
+    // And the lightmap's index map and LOD 0 frames (lightmap_frame.glsl), placeholders until the bake lands.
     private ShaderBufferBinding[] LitClipmapBuffer =>
-        litClipmapBuffer ??= new[] { new ShaderBufferBinding("ClipmapState", ClipmapStateOrPlaceholder) };
+        litClipmapBuffer ??= new[] { new ShaderBufferBinding("ClipmapState", ClipmapStateOrPlaceholder) }.Concat(LitLightmapBuffers()).ToArray();
     private ShaderBufferBinding[] LitSceneBuffers => litSceneBuffers ??= sceneBuffers.Concat(LitClipmapBuffer).ToArray();
 
     public void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)

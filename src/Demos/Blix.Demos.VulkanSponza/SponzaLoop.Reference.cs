@@ -45,6 +45,13 @@ internal sealed partial class SponzaLoop
         // --lightmap: draw with each pack's lightmap unwrap (blix cook lightmap --write): its split vertices and LOD
         // chains, and every vertex's atlas texel (the lightmap debug view shows the parameterization).
         lightmapEnabled = args.Flag("lightmap");
+        // --lightmap-keep-buried: gather the atlas texels inside a solid too (SponzaLoop.Lightmap.cs), for A/B.
+        lightmapKeepBuried = args.Flag("lightmap-keep-buried");
+        if (args.Int("lightmap-backface") is { } bf) lightmapBackface = Math.Clamp(bf, 1, 16);
+        // --no-lightmap-frames: the drawn LOD's own normals, not LOD 0's through the atlas (lightmap_frame.glsl), for A/B.
+        lightmapNoFrames = args.Flag("no-lightmap-frames");
+        // --transfer-dump <file>: the surface transfer atlas's fit data at this camera and sun (SponzaLoop.TransferFit.cs).
+        transferDumpPath = args.String("transfer-dump");
         if (args.Int("texel-gtao") is { } tg) texelGtao = tg != 0;
         // --gi-reference-seed N: start the paths' random sequence elsewhere -- two references that differ only in it
         // differ only by their noise (the floor any comparison against one can resolve).

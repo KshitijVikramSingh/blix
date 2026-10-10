@@ -95,6 +95,7 @@ internal sealed partial class SponzaLoop
     private void ReadTexelArgs(AppArgs args)
     {
         transportTexels = args.Flag("transport-texels");
+        ReadLightBakeArgs(args);
         if (args.Float("transport-texel") is { } s) texelSpacing = Math.Clamp(s, 0.01f, 1f);
         if (args.Int("texel-budget") is { } b) texelBudget = Math.Clamp(b, 64, 1 << 20);
         if (args.Int("texel-rays") is { } r) texelTarget = Math.Clamp(r, 32, 1 << 16);
@@ -144,7 +145,10 @@ internal sealed partial class SponzaLoop
     // "most of 8" (the patches' rule), 34 of the 576 hall reference points met a culled texel the camera sees --
     // Sponza's one-sided geometry shows its back to many visible surfaces. A texel never seen is never traced (only
     // what the image reads is queued), so a kept buried one costs memory alone.
-    private TexelBake? CookTexels(RayQueryScene scene, Func<int, int, (Vector3 A, Vector3 B, Vector3 C)> tri, Func<int, int, bool> cutout)
+    // firstLevel: the finest level a triangle gets (0 when null): --lightmap's surfaces start at 1, the atlas being
+    // their level 0 (texel.glsl).
+    private TexelBake? CookTexels(RayQueryScene scene, Func<int, int, (Vector3 A, Vector3 B, Vector3 C)> tri, Func<int, int, bool> cutout,
+        Func<int, int, int>? firstLevel = null)
     {
         if (!transportTexels) return null;
         var clock = Stopwatch.StartNew();
@@ -170,6 +174,7 @@ internal sealed partial class SponzaLoop
             (ti, _, local) =>
             {
                 var (i, t) = triangleList[ti];
+                var firstLevelHere = firstLevel?.Invoke(i, t) ?? 0;
                 var (a, b, c) = tri(i, t);
                 var cross = Vector3.Cross(b - a, c - a);
                 var area = cross.Length() * 0.5f;
@@ -195,7 +200,7 @@ internal sealed partial class SponzaLoop
                             continue;
                         }
                         // Every level from the same sample: a coarse texel is the union of the fine ones it nests.
-                        for (var level = 0; level < texelLevels; level++)
+                        for (var level = firstLevelHere; level < texelLevels; level++)
                         {
                             var cell = (at - min) / (s * (1 << level));
                             int cx = (int)MathF.Floor(cell.X), cy = (int)MathF.Floor(cell.Y), cz = (int)MathF.Floor(cell.Z);
@@ -281,7 +286,9 @@ internal sealed partial class SponzaLoop
     // normal + level), their count, the table's slots, and the grid (finest cells' origin xyz, spacing w).
     internal sealed record TexelBake(uint[] Table, Vector4[] Texels, int Count, int Capacity, Vector4 Grid);
 
-    private void UploadTexels(TexelBake bake)
+    // light: the baked light (SponzaLoop.LightBake.cs), or null -- the texels start from nothing, and with bakePath the
+    // bake begins (firstAtlas: where the lightmap's records start, the count without them).
+    private void UploadTexels(TexelBake bake, TexelLightState? light = null, string? bakePath = null, int firstAtlas = -1)
     {
         texelCount = bake.Count;
         texelCapacity = bake.Capacity;
@@ -289,22 +296,27 @@ internal sealed partial class SponzaLoop
         _ = checked(bake.Texels.Length * 16 + texelCount * 16);
         var stamps = new uint[texelCount];
         Array.Fill(stamps, 0xFFFFFFFFu);
-        var queueWords = 8 + 4 * texelBudget;
+        var queueWords = 8 + 4 * Math.Max(texelBudget, lightBakeBudget);
         texelHashBuffer = Own(device.CreateGpuBuffer(bake.Table.Length * 4, MemoryMarshal.AsBytes(bake.Table.AsSpan()), "sponza.texels.hash"));
         texelBuffer = Own(device.CreateGpuBuffer(bake.Texels.Length * 16, MemoryMarshal.AsBytes(bake.Texels.AsSpan()), "sponza.texels"));
-        texelLightBuffer = Own(device.CreateGpuBuffer(texelCount * 16, new byte[texelCount * 16], "sponza.texels.light"));
+        texelLightBuffer = Own(device.CreateGpuBuffer(texelCount * 16, light is null ? new byte[texelCount * 16] : MemoryMarshal.AsBytes(light.Light.AsSpan()), "sponza.texels.light"));
         texelStampBuffer = Own(device.CreateGpuBuffer(texelCount * 4, MemoryMarshal.AsBytes(stamps.AsSpan()), "sponza.texels.stamp"));
         texelQueueBuffer = Own(device.CreateGpuBuffer(queueWords * 4, new byte[queueWords * 4], "sponza.texels.queue"));
         texelPriorBuffer = Own(device.CreateGpuBuffer(texelCount * 16, new byte[texelCount * 16], "sponza.texels.prior"));
         texelFilteredBuffer = Own(device.CreateGpuBuffer(texelCount * 16, new byte[texelCount * 16], "sponza.texels.filtered"));
         texelFilterListBuffer = Own(device.CreateGpuBuffer((2 + TexelFilterCapacity) * 4, new byte[(2 + TexelFilterCapacity) * 4], "sponza.texels.filter-list"));
-        texelOpenBuffer = Own(device.CreateGpuBuffer(texelCount * 16, new byte[texelCount * 16], "sponza.texels.open"));
-        texelBlendBuffer = Own(device.CreateGpuBuffer(texelCount * 16, new byte[texelCount * 16], "sponza.texels.blend"));
-        texelMomentBuffer = Own(device.CreateGpuBuffer(texelCount * 4, new byte[texelCount * 4], "sponza.texels.moment"));
+        texelOpenBuffer = Own(device.CreateGpuBuffer(texelCount * 16, light is null ? new byte[texelCount * 16] : MemoryMarshal.AsBytes(light.Open.AsSpan()), "sponza.texels.open"));
+        texelBlendBuffer = Own(device.CreateGpuBuffer(texelCount * 16, light is null ? new byte[texelCount * 16] : MemoryMarshal.AsBytes(light.Blend.AsSpan()), "sponza.texels.blend"));
+        texelMomentBuffer = Own(device.CreateGpuBuffer(texelCount * 4, light is null ? new byte[texelCount * 4] : MemoryMarshal.AsBytes(light.Moment.AsSpan()), "sponza.texels.moment"));
         texelEpochBuffer = Own(device.CreateGpuBuffer(texelCount * 4, new byte[texelCount * 4], "sponza.texels.epoch"));
         texelProbeBuffer = Own(device.CreateGpuBuffer(24 * 24 * 48, new byte[24 * 24 * 48], "sponza.texels.probe"));
         texelGrid = bake.Grid;
         texelsUploaded = true;
+        if (light is null && bakePath is not null)
+        {
+            lightBakePath = bakePath;
+            BeginLightBake(bake.Texels, texelCount, firstAtlas < 0 ? texelCount : firstAtlas);
+        }
     }
 
     // Each frame (with the cooked patches on the GPU): when the sun has turned more than a quarter degree (or changed
@@ -336,6 +348,7 @@ internal sealed partial class SponzaLoop
             cookedPatchBuffer = Own(device.CreateGpuBuffer(cookedPacked.Length * 16, MemoryMarshal.AsBytes(cookedPacked.AsSpan()), "sponza.cooked.patches"));
             transportRelightSun = relightTaskSun;
             texelEpoch++;
+            AbortLightBake("the sun turned");
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] transport: patch light re-solved for the sun in {relightClock!.Elapsed.TotalSeconds:0.0} s; texels re-gather (epoch {texelEpoch})."));
             relightTask = null;
@@ -416,8 +429,14 @@ internal sealed partial class SponzaLoop
     {
         if (!texelsUploaded || rayBlockBuffers.Length == 0) return;
         FollowSun();
+        SaveLightBakeWhenDone();
+        TransferDumpWhenDone();
         var texelParams = new Vector4(texelCapacity, texelBudget, texelTarget, texelFrame);
+        // While the light bakes (SponzaLoop.LightBake.cs) its slice takes the queue the mark would fill, at its budget.
+        var baking = lightBakeActive;
+        var gatherBudget = baking ? RecordLightBake() : texelBudget;
         var groups = (((width + TexelMarkStride - 1) / TexelMarkStride + 7) / 8, ((height + TexelMarkStride - 1) / TexelMarkStride + 7) / 8);
+        if (!baking)
         graph.Dispatch(texelMarkPassHandle, new DispatchCommand(texelMarkPipeline, groups.Item1, groups.Item2, 1,
             new ShaderUniform[]
             {
@@ -496,11 +515,11 @@ internal sealed partial class SponzaLoop
             .Append(new ShaderBufferBinding("TexelBlend", texelBlendBuffer))
             .Concat(CookedBuffers()).ToArray();
         var declared = texelGatherInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
-        graph.Dispatch(texelGatherPassHandle, new DispatchCommand(texelGatherPipeline, texelBudget, 1, 1,
+        graph.Dispatch(texelGatherPassHandle, new DispatchCommand(texelGatherPipeline, gatherBudget, 1, 1,
             new ShaderUniform[]
             {
                 new("uTexelGrid", new Vector4Uniform(texelGrid)),
-                new("uTexelParams", new Vector4Uniform(texelParams)),
+                new("uTexelParams", new Vector4Uniform(texelParams with { Y = gatherBudget })),
                 new("uSunDirection", new Vector4Uniform(new Vector4(sunDirection, 0f))),
                 new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 1f))),
                 // A ray's sky as the screen probes take it: strength 1, a little blurred (one mip).

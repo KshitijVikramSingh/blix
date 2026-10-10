@@ -369,7 +369,7 @@ internal sealed partial class SponzaLoop
                 // primitives were once left out here, and had no records at all.
                 var lod0 = ordered[i].Lods[0].Indices32 ?? ordered[i].Lods[0].Indices16?.Select(x => (uint)x).ToArray();
                 if (lod0 is not null)
-                    lightmapSources.Add((ordered[i].Name, ordered[i].VertexBytes, sharedLayout.Stride, VertexSemantics.Of(sharedLayout)?.Normal ?? -1, lod0, ordered[i].Worlds[0], t,
+                    lightmapSources.Add((ordered[i].Name, ordered[i].VertexBytes, sharedLayout.Stride, VertexSemantics.Of(sharedLayout)?.Normal ?? -1, VertexSemantics.Of(sharedLayout)?.Tangent ?? -1, lod0, ordered[i].Worlds[0], t,
                         ordered[i].Pipeline == opaqueDoubleSidedPipeline || ordered[i].Pipeline == blendDoubleSidedPipeline));
             }
             sceneLightmapTexels = Own(device.CreateGpuBuffer(texels.Length * 8, MemoryMarshal.AsBytes(texels.AsSpan()), "sponza.scene.lightmap-texels"));

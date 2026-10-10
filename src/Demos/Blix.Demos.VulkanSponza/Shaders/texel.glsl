@@ -168,6 +168,8 @@ void texelsAroundLightmap(vec2 texel, vec3 n, ivec2 atlasSize, out int ids[4], o
         // A double-sided surface's texel is a pair (position w < 0): the front's record, then the back's. The side
         // a pixel shows is the one its normal agrees with.
         if (TEXEL_POSITION(id).w < 0.0 && dot(TEXEL_NORMAL(id).xyz, n) < 0.0) id += 1u;
+        // |w| 1: buried in a solid (the bake's test), never gathered; its neighbours answer.
+        if (abs(TEXEL_POSITION(id).w) < 2.0) continue;
         ids[i] = int(id);
         weights[i] = (o.x == 1 ? t.x : 1.0 - t.x) * (o.y == 1 ? t.y : 1.0 - t.y);
     }

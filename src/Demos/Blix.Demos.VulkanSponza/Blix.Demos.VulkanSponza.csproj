@@ -68,6 +68,7 @@
     <GlslShader Include="Shaders\clipmap_watch.comp" />
     <GlslShader Include="Shaders\surface_reclaim.comp" />
     <GlslShader Include="Shaders\texel_mark.comp" />
+    <GlslShader Include="Shaders\texel_bake.comp" />
     <GlslShader Include="Shaders\texel_gather.comp" />
     <GlslShader Include="Shaders\texel_filter.comp" />
     <GlslShader Include="Shaders\reference_trace.comp" />
