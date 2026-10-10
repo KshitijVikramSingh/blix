@@ -16,6 +16,7 @@ internal sealed partial class SponzaLoop
     private bool referenceAvailable;
     // --texel-debug: the incident pass writes where texels answer instead of light (incident_clipmap.frag).
     private bool texelDebug;
+    private bool lightmapEnabled;
     // --texel-gtao 1: darken texels' light by GTAO as well. Off by default: texels resolve occlusion to 5 cm
     // themselves, and on top of them GTAO darkened corners twice -- the Cornell box's presented image against the
     // reference read mean error 1.53%, p99 19.4%, 2.86% of pixels over 10% with it; 0.64%, 7.4%, 0.57% without.
@@ -41,6 +42,9 @@ internal sealed partial class SponzaLoop
         referenceAvailable = true;
         if (args.Int("gi-reference-bounces") is { } b) referenceBounces = Math.Clamp(b, 1, 32);
         texelDebug = args.Flag("texel-debug");
+        // --lightmap: draw with each pack's lightmap unwrap (blix cook lightmap --write): its split vertices and LOD
+        // chains, and every vertex's atlas texel (the lightmap debug view shows the parameterization).
+        lightmapEnabled = args.Flag("lightmap");
         if (args.Int("texel-gtao") is { } tg) texelGtao = tg != 0;
         // --gi-reference-seed N: start the paths' random sequence elsewhere -- two references that differ only in it
         // differ only by their noise (the floor any comparison against one can resolve).

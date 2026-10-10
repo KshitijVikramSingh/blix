@@ -453,6 +453,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
         "Pre-pass normal (what the incident field reads)",
         "Clipmap: solves behind the light (red 1, orange 2-3, yellow 4-7, green 8-31, blue 32+)",
         "Clipmap: answering level (white 0, green 1, blue 2, magenta 3)",
+        "Lightmap texels (--lightmap: a checker of one texel, tinted by atlas block; magenta where none)",
     };
 
     // --ao-fullres: run ambient visibility at framebuffer resolution instead of half. Half res is
@@ -723,7 +724,10 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
         PlacementInstance[] Instances,
         Blix.Assets.PrimitiveSource? Source,
         // The material's base colour factor (linear rgb, alpha): what a ray's surface bake multiplies the texture by.
-        Vector4 BaseColor);
+        Vector4 BaseColor,
+        // With --lightmap: each vertex's texel in the scene's lightmap atlas (the vertices and LODs are then the
+        // lightmap file's split ones). Null: no lightmap for this primitive.
+        Vector2[]? LightmapTexels = null);
 
     /// <summary>One placement of a unique primitive: which drawable, its row in the transform table, and its world AABB.</summary>
     /// <remarks>
@@ -734,7 +738,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private readonly record struct Placement(int Drawable, int Transform, Bounds3 Bounds);
 
     /// <summary>A unique cooked primitive, in mesh space, with every world it is placed at and which instance each is.</summary>
-    private sealed record PlacedPrimitive(ModelData.Primitive Primitive, Matrix4x4[] Worlds, PlacementInstance[] Instances);
+    private sealed record PlacedPrimitive(ModelData.Primitive Primitive, Matrix4x4[] Worlds, PlacementInstance[] Instances, Vector2[]? LightmapTexels = null);
 
     /// <summary>Which instance a world is: the pack, the node that draws it, and which of that node's draws.</summary>
     /// <remarks>
@@ -815,7 +819,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private PipelineHandle occlusionPipeline;
     private PassHandle latePrepassHandle;
     private GpuBufferHandle cullPlacements, cullDrawables, cullLods, cullState, cullCursor, sceneArgs, sceneVisible, sceneTransformBuffer,
-        sceneSurfaceKeyBuffer, scenePreviousTransformBuffer;
+        sceneSurfaceKeyBuffer, scenePreviousTransformBuffer, sceneLightmapTexels;
     private ShaderBufferBinding[] cullBuffers = System.Array.Empty<ShaderBufferBinding>();
     private ShaderBufferBinding[] sceneBuffers = System.Array.Empty<ShaderBufferBinding>();
     // A Selection-panel margin edit not yet sent: (global placement index + 1, value), carried by the

@@ -10,6 +10,8 @@
 //              every cooked chunk of one surface (stage 4e).
 //   binding 4  every placement's previous world matrix, by the same row: where it stood last frame (equal to
 //              binding 0 for anything that has not moved), for the pre-pass's velocity.
+//   binding 5  every VERTEX's lightmap texel, in the shared vertex buffer's order (--lightmap; zero where a
+//              primitive has none): read by gl_VertexIndex, which includes the draw's base vertex.
 //
 // Every vertex shader that draws scene geometry declares exactly this, so the one set-3 material
 // binds to all of their pipelines (an identical set layout is what makes that legal).
@@ -22,7 +24,10 @@ layout(std430, set = 3, binding = 1) readonly buffer SceneVisible { uint visible
 layout(std430, set = 3, binding = 3) readonly buffer SceneSurfaceKeys { uint surfaceKeyOf[]; };
 layout(std430, set = 3, binding = 4) readonly buffer ScenePreviousTransforms { mat4 previousTransforms[]; };
 
+layout(std430, set = 3, binding = 5) readonly buffer SceneLightmapTexels { vec2 lightmapTexelOf[]; };
+
 mat4 instanceWorld() { return transforms[visible[gl_InstanceIndex]]; }
+vec2 vertexLightmapTexel() { return lightmapTexelOf[gl_VertexIndex]; }
 uint instanceSurfaceKey() { return surfaceKeyOf[visible[gl_InstanceIndex]]; }
 mat4 instancePreviousWorld() { return previousTransforms[visible[gl_InstanceIndex]]; }
 

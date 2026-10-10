@@ -987,7 +987,7 @@ internal sealed partial class SponzaLoop
         meshLoad.Start(() =>
         {
             var prims = new List<PlacedPrimitive>();
-            foreach (var (name, primitives) in ParsePacksParallel(packsToParse, flatten))
+            foreach (var (name, primitives) in ParsePacksParallel(packsToParse, flatten, lightmapEnabled))
             {
                 prims.AddRange(primitives);
                 Console.WriteLine(

@@ -157,6 +157,21 @@ layout(location = 1) in vec2 vUv;
 layout(location = 2) in vec3 vWorldPos;
 layout(location = 3) in vec3 vTangentWorld;   // world-space tangent (forwarded glTF TANGENT.xyz)
 layout(location = 4) in float vTangentSign;   // glTF TANGENT.w handedness
+layout(location = 10) in vec2 vLightmapTexel; // --lightmap: the lightmap atlas texel (lit.vert, instances.glsl)
+
+// Viz 25, the lightmap's parameterization: a checker one texel wide, tinted per 64-texel block of the atlas -- seams
+// show where the tint or the checker breaks, stretch where the cells are not square, density by their size on
+// screen. Magenta where a primitive has no lightmap (no texel at all).
+vec3 vizLightmap(vec2 t) {
+    if (dot(t, t) < 1e-6) return vec3(1.0, 0.0, 1.0);
+    ivec2 c = ivec2(floor(t));
+    float check = ((c.x + c.y) & 1) == 0 ? 0.55 : 0.9;
+    ivec2 block = c / 64;
+    uint h = uint(block.x) * 73856093u ^ uint(block.y) * 19349663u;
+    h ^= h >> 13;
+    vec3 tint = vec3(float(h & 255u), float((h >> 8) & 255u), float((h >> 16) & 255u)) / 255.0 * 0.6 + 0.4;
+    return tint * check;
+}
 
 layout(location = 0) out vec4 outColor;
 
@@ -635,6 +650,7 @@ void main() {
             // orange 2-3, yellow 4-7, green 8-31, blue 32+; black where none answers), 24 which level answers
             // (white 0 at 0.5 m, green 1, blue 2, magenta 3; dimmed while the clipmap has not solved).
             frame.uVizChannel > 22.5 && frame.uVizChannel < 24.5 ? vizClipmap(vWorldPos, vizGeometricN, frame.uVizChannel < 23.5) :
+            frame.uVizChannel > 24.5 && frame.uVizChannel < 25.5 ? vizLightmap(vLightmapTexel) :
             // 21 is unused (the retired volume's leak metric); black.
                                        vec3(0.0);
         // Straight out, no exposure and no tonemap — these are directions and flags, and a film

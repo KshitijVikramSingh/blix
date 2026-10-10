@@ -17,7 +17,7 @@ internal sealed partial class SponzaLoop
     // lit TBN: each unique primitive once, in mesh space, with every world the scene places it at (or,
     // under --flatten, every placement baked into its own primitive). Returns pack order (main first).
     private static List<(string Name, PlacedPrimitive[] Primitives)> ParsePacksParallel(
-        List<(string Name, string Path)> packs, bool flatten)
+        List<(string Name, string Path)> packs, bool flatten, bool lightmap = false)
     {
         var parsed = new (string Name, PlacedPrimitive[] Primitives)?[packs.Count];
         System.Threading.Tasks.Parallel.For(0, packs.Count, i =>
@@ -26,7 +26,11 @@ internal sealed partial class SponzaLoop
             try
             {
                 var model = ModelData.Load(p.Path, new ModelNeeds(Tangents: true, Skinned: false));
-                parsed[i] = (p.Name, flatten ? Flattened(model, i) : Placed(model, i));
+                // --lightmap: the unwrap beside the mesh (blix cook lightmap --write), if there is one.
+                var lightmapPath = Path.ChangeExtension(p.Path, ".blixlightmap");
+                var lightmapFile = lightmap && !flatten && File.Exists(lightmapPath) ? LightmapFile.Read(lightmapPath) : null;
+                if (lightmap && lightmapFile is null) Console.WriteLine($"[VulkanSponza] {p.Name}: no {Path.GetFileName(lightmapPath)} (blix cook lightmap --write); drawn without a lightmap.");
+                parsed[i] = (p.Name, flatten ? Flattened(model, i) : Placed(model, i, lightmapFile));
             }
             catch (Exception ex)
             {
@@ -46,8 +50,9 @@ internal sealed partial class SponzaLoop
     // mesh is drawn at its bind pose, unmoved, as Flattened draws it.
     // Each world keeps which instance it is (pack, node, which of the node's draws): merging worlds per mesh is
     // how the scene draws a mesh once for all its placements, and it must not also merge their identities.
-    private static PlacedPrimitive[] Placed(ModelData model, int pack)
+    private static PlacedPrimitive[] Placed(ModelData model, int pack, LightmapFile? lightmap = null)
     {
+        var unwraps = lightmap?.Entries.ToDictionary(e => (e.Mesh, e.Primitive));
         var worlds = new Dictionary<int, List<Matrix4x4>>();
         var instances = new Dictionary<int, List<PlacementInstance>>();
         var order = new List<int>();
@@ -71,8 +76,25 @@ internal sealed partial class SponzaLoop
         }
 
         return order
-            .SelectMany(mesh => model.Meshes[mesh].Primitives.Select(p => new PlacedPrimitive(p, worlds[mesh].ToArray(), instances[mesh].ToArray())))
+            .SelectMany(mesh => model.Meshes[mesh].Primitives.Select((p, pi) =>
+                unwraps is not null && unwraps.TryGetValue((mesh, pi), out var unwrap)
+                    ? WithLightmap(p, unwrap, worlds[mesh].ToArray(), instances[mesh].ToArray())
+                    : new PlacedPrimitive(p, worlds[mesh].ToArray(), instances[mesh].ToArray())))
             .ToArray();
+    }
+
+    // A primitive as its lightmap unwrap has it: the vertices the seams split (each the mesh vertex it copies), the
+    // LOD chain over them (chart borders locked), and each vertex's atlas texel.
+    private static PlacedPrimitive WithLightmap(ModelData.Primitive p, LightmapFile.Entry unwrap, Matrix4x4[] worlds, PlacementInstance[] instances)
+    {
+        var mesh = p.Mesh;
+        var stride = mesh.Layout.Stride;
+        var bytes = new byte[unwrap.Xref.Length * stride];
+        for (var v = 0; v < unwrap.Xref.Length; v++)
+            Buffer.BlockCopy(mesh.VertexBytes, unwrap.Xref[v] * stride, bytes, v * stride, stride);
+        var lods = unwrap.Lods.Select(l => new MeshLod(null, l.Indices, l.Error)).ToArray();
+        var split = mesh with { VertexBytes = bytes, Indices = Array.Empty<ushort>(), Indices32 = unwrap.Lods[0].Indices, Lods = lods };
+        return new PlacedPrimitive(p with { Mesh = split }, worlds, instances, unwrap.Texels);
     }
 
     // A mesh-space box carried to world space: the AABB of its eight transformed corners.
@@ -297,7 +319,7 @@ internal sealed partial class SponzaLoop
                 albedo, alphaCutoff, baseColorAlpha,
                 new[] { new ShaderTextureBinding("uAlbedo", albedo) }, isBlend,
                 string.IsNullOrEmpty(mesh.Name) ? "primitive" : mesh.Name, placed.Worlds, placed.Instances, prim.Source,
-                pm?.BaseColorFactor ?? Vector4.One));
+                pm?.BaseColorFactor ?? Vector4.One, placed.LightmapTexels));
         }
     }
 
@@ -329,6 +351,23 @@ internal sealed partial class SponzaLoop
         sharedVb = bundle.Vertices;
         sharedIbU16 = bundle.Indices16;
         sharedIbU32 = bundle.Indices32;
+        // Each vertex's lightmap texel, in the shared vertex buffer's order (each drawable's at its BaseVertex): the
+        // vertex shaders read it by gl_VertexIndex, which includes the base vertex (instances.glsl). Zero where a
+        // primitive has none (the lightmap debug view shows those magenta).
+        {
+            var vertexTotal = ordered.Count == 0 ? 0 : bundle.Meshes[^1].BaseVertex + ordered[^1].VertexCount;
+            var texels = new Vector2[Math.Max(1, vertexTotal)];
+            var withLightmap = 0;
+            for (var i = 0; i < ordered.Count; i++)
+            {
+                if (ordered[i].LightmapTexels is not { } t) continue;
+                Array.Copy(t, 0, texels, bundle.Meshes[i].BaseVertex, Math.Min(t.Length, ordered[i].VertexCount));
+                withLightmap++;
+            }
+            sceneLightmapTexels = Own(device.CreateGpuBuffer(texels.Length * 8, MemoryMarshal.AsBytes(texels.AsSpan()), "sponza.scene.lightmap-texels"));
+            if (lightmapEnabled)
+                Console.WriteLine($"[VulkanSponza] lightmap: {withLightmap} of {ordered.Count} drawables carry atlas texels ({vertexTotal:N0} vertices).");
+        }
 
         // Attach material/pipeline/etc. to each bundled geometry sub-range; split back into the opaque +
         // blend buckets (bundle order == ordered order). Each drawable's placements follow as one
@@ -508,6 +547,7 @@ internal sealed partial class SponzaLoop
         {
             new("SceneTransforms", sceneTransformBuffer), new("SceneVisible", sceneVisible),
             new("SceneSurfaceKeys", sceneSurfaceKeyBuffer), new("ScenePreviousTransforms", scenePreviousTransformBuffer),
+            new("SceneLightmapTexels", sceneLightmapTexels),
         };
         Console.WriteLine(
             $"[VulkanSponza] GPU cull: {placementCount} placements, {drawableCount} drawables x {lodSlots} levels, "

@@ -7,7 +7,7 @@ using Blix.Recipes;
 
 namespace Blix.Tools.Cook;
 
-// blix cook lightmap <dir-of-blixmesh> [--texel-cm 4] [--density "pattern=cm,..."] [--padding N] [--only <substring>]
+// blix cook lightmap <dir-of-blixmesh> [--texel-cm 4] [--density "pattern=cm,..."] [--padding N] [--only <substring>] [--write]
 //
 // Stage 5 (lightmaps), step 1: unwrap every primitive a scene draws with xatlas and say how good the unwrap is -- it
 // writes nothing yet. Per pack (the top directory under <dir>: Sponza's main_sponza, curtains, ivy, trees):
@@ -45,6 +45,13 @@ public static partial class Program
         // pruning in BOTH arms (on the split mesh each chart is its own component, and pruning would delete charts):
         // what seam-locking costs, at the same ratios (MeshRecipe.LodRatios), in triangles reached and world error.
         var lodTest = args.Flag("lod-test");
+        // --write: the lightmap files, one .blixlightmap beside each .blixmesh (LightmapFile, Blix.Assets). Each
+        // primitive keeps its own unwrap; the unwraps are packed as rectangles into ONE scene atlas, and each file
+        // holds its primitives' split vertices (the input vertex each copies), their atlas texel coordinates, and
+        // their LOD chains simplified over the split mesh with every chart border locked -- so a simplified triangle
+        // never straddles charts (coarsest level's error ~2x on cloth; accepted, it is far away).
+        var write = args.Flag("write");
+        var written = new List<(string MeshPath, int Mesh, int Primitive, LightmapUnwrap.Result Unwrap, List<(uint[] Indices, float Error)> Lods)>();
         float[] lodRatios = { 0.5f, 0.25f, 0.125f };
         var lodBase = new long[lodRatios.Length]; var lodSeam = new long[lodRatios.Length]; long lodFull = 0;
         var lodErrBase = new List<double>[lodRatios.Length]; var lodErrSeam = new List<double>[lodRatios.Length];
@@ -72,6 +79,9 @@ public static partial class Program
                 drawn[prim] = (world, 1);
                 order.Add(prim);
             }
+            var where = new Dictionary<BlixMeshPrimitive, (int Mesh, int Primitive)>(ReferenceEqualityComparer.Instance);
+            for (var mi = 0; mi < file.Meshes.Count; mi++)
+                for (var pi = 0; pi < file.Meshes[mi].Primitives.Count; pi++) where[file.Meshes[mi].Primitives[pi]] = (mi, pi);
             var primIndex = 0;
             foreach (var prim in order)
             {
@@ -179,6 +189,11 @@ public static partial class Program
                         lodErrBase[l].Add(eb * scaleBase); lodErrSeam[l].Add(es * scaleSeam);
                     }
                 }
+                if (write)
+                {
+                    if (instances > 1) Console.WriteLine($"  {rel} #{primIndex}: drawn {instances} times; every instance shares one atlas region (per-instance regions are not written yet).");
+                    written.Add((path, where[prim].Mesh, where[prim].Primitive, r, SeamLockedLods(r, positions, bytes, stride)));
+                }
                 var p90 = WeightedPercentile(stretches.Select(s => (s.Area, s.Ratio)).ToList(), 0.9);
                 worst.Add(($"{rel} #{primIndex}", p90, r.Charts, tris, mixedWorst));
                 primIndex++;
@@ -207,10 +222,95 @@ public static partial class Program
                 Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                     $"    ratio {lodRatios[l]}: today {lodBase[l]:N0} triangles ({100.0 * lodBase[l] / lodFull:0.0}%), seam-locked {lodSeam[l]:N0} ({100.0 * lodSeam[l] / lodFull:0.0}%); world error per primitive median {1000 * Pct(lodErrBase[l], 0.5):0.00} -> {1000 * Pct(lodErrSeam[l], 0.5):0.00} mm, p90 {1000 * Pct(lodErrBase[l], 0.9):0.00} -> {1000 * Pct(lodErrSeam[l], 0.9):0.00} mm"));
         }
+        if (write && written.Count > 0) WriteLightmaps(written, baseCm, padding);
         Console.WriteLine("  worst primitives by conformal stretch p90:");
         foreach (var w in worst.OrderByDescending(w => w.Stretch90).Take(10))
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {w.Name}: p90 {w.Stretch90:0.00}, {w.Charts:N0} charts over {w.Triangles:N0} triangles, LOD mixed up to {100 * w.LodMixed:0.0}%"));
         return 0;
+    }
+
+    // The split mesh's LOD chain, as MeshRecipe makes today's (its ratios; positions plus normals and UV0 as weighted
+    // attributes) but over the split vertices with LockBorder -- a chart border is a mesh border there -- and no
+    // pruning (each chart is its own component). Errors in world units, as the runtime selects by.
+    static List<(uint[] Indices, float Error)> SeamLockedLods(LightmapUnwrap.Result r, Vector3[] positions, byte[] bytes, int stride)
+    {
+        var n = r.Xref.Length;
+        var flat = new float[n * 3];
+        for (var v = 0; v < n; v++) { var q = positions[r.Xref[v]]; flat[3 * v] = q.X; flat[3 * v + 1] = q.Y; flat[3 * v + 2] = q.Z; }
+        var lods = new List<(uint[], float)> { (r.Indices, 0f) };
+        // Normals at 12 and UV0 at 40 on the 48-byte static layout; other layouts simplify by position alone.
+        float[]? attributes = null;
+        if (stride == 48)
+        {
+            attributes = new float[n * 5];
+            for (var v = 0; v < n; v++)
+            {
+                var o = r.Xref[v] * stride;
+                for (var c = 0; c < 3; c++) attributes[5 * v + c] = BitConverter.ToSingle(bytes, o + 12 + 4 * c);
+                attributes[5 * v + 3] = BitConverter.ToSingle(bytes, o + 40);
+                attributes[5 * v + 4] = BitConverter.ToSingle(bytes, o + 44);
+            }
+        }
+        var scale = MeshoptNative.SimplifyScale(flat, n, 3);
+        var previous = r.Indices.Length;
+        foreach (var ratio in new[] { 0.5f, 0.25f, 0.125f })
+        {
+            var reduced = attributes is not null
+                ? MeshoptNative.SimplifyWithAttributes(r.Indices, flat, n, 3, attributes, 5, new[] { 0.5f, 0.5f, 0.5f, 1f, 1f }, ratio, 1f, MeshoptNative.Options.LockBorder, out var e)
+                : MeshoptNative.Simplify(r.Indices, flat, n, 3, ratio, 1f, MeshoptNative.Options.LockBorder, out e);
+            if (reduced.Length < 3 || reduced.Length >= previous) break;
+            previous = reduced.Length;
+            lods.Add((reduced, e * scale));
+        }
+        return lods;
+    }
+
+    // Every primitive's own atlas (W x H texels) as one rectangle, shelf-packed (tallest first) into a square
+    // power-of-two scene atlas; each file then gets its primitives with texel coordinates in that atlas.
+    static void WriteLightmaps(List<(string MeshPath, int Mesh, int Primitive, LightmapUnwrap.Result Unwrap, List<(uint[] Indices, float Error)> Lods)> items, float baseCm, int padding)
+    {
+        long area = items.Sum(i => (long)(i.Unwrap.Width + padding) * (i.Unwrap.Height + padding));
+        var size = 1024;
+        while ((long)size * size < area * 1.15) size *= 2;
+        int[] Shelve(int width, out bool fits)
+        {
+            var offsets = new int[items.Count * 2];
+            int x = 0, y = 0, shelf = 0;
+            fits = true;
+            foreach (var i in Enumerable.Range(0, items.Count).OrderByDescending(i => items[i].Unwrap.Height))
+            {
+                int w = items[i].Unwrap.Width + padding, h = items[i].Unwrap.Height + padding;
+                if (x + w > width) { x = 0; y += shelf; shelf = 0; }
+                offsets[2 * i] = x; offsets[2 * i + 1] = y;
+                x += w; shelf = Math.Max(shelf, h);
+                if (w > width || y + shelf > width) fits = false;
+            }
+            return offsets;
+        }
+        int[] placed;
+        while (true)
+        {
+            placed = Shelve(size, out var fits);
+            if (fits) break;
+            size *= 2;
+        }
+        foreach (var file in items.GroupBy(i => i.MeshPath))
+        {
+            var entries = new List<LightmapFile.Entry>();
+            foreach (var item in file)
+            {
+                var k = items.IndexOf(item);
+                var r = item.Unwrap;
+                var offset = new Vector2(placed[2 * k], placed[2 * k + 1]);
+                var texels = r.Uv.Select(uv => offset + uv * new Vector2(r.Width, r.Height)).ToArray();
+                entries.Add(new LightmapFile.Entry(item.Mesh, item.Primitive, r.Xref, texels,
+                    item.Lods.Select(l => new LightmapFile.Lod(l.Indices, l.Error)).ToArray()));
+            }
+            var outPath = Path.ChangeExtension(file.Key, ".blixlightmap");
+            LightmapFile.Write(outPath, new LightmapFile(size, size, baseCm, entries));
+        }
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"  wrote {items.GroupBy(i => i.MeshPath).Count()} .blixlightmap file(s): one {size} x {size} scene atlas ({100.0 * area / ((double)size * size):0}% of it primitives' own atlases), {items.Count:N0} primitives."));
     }
 
     sealed class Stats
