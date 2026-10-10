@@ -600,28 +600,16 @@ public sealed partial class VulkanGraphicsDevice
     // buffer for the next pass. Safe to reuse the buffer because the fence has signalled — and that
     // same wait is what gives the next submission visibility of this one's writes, which is what
     // makes splitting one buffer into many correct rather than merely plausible.
-    private unsafe void FlushIsolatedPass(CommandBuffer cmd, string passName, ref bool first, Semaphore imageAvail)
+    private unsafe void FlushIsolatedPass(CommandBuffer cmd, string passName, ref bool first, Semaphore imageAvail, ref ulong timelineWait)
     {
         ThrowIfNotSuccess(Vk.EndCommandBuffer(cmd), "vkEndCommandBuffer(isolate)");
         var local = cmd;
-        var sem = imageAvail;
-        var waitStage = PipelineStageFlags.ColorAttachmentOutputBit;
         var fence = isolationFence;
         ThrowIfNotSuccess(Vk.ResetFences(Device, 1, &fence), "vkResetFences(isolate)");
-        var submit = new SubmitInfo
-        {
-            SType = StructureType.SubmitInfo,
-            WaitSemaphoreCount = first ? 1u : 0u,
-            PWaitSemaphores = first ? &sem : null,
-            PWaitDstStageMask = first ? &waitStage : null,
-            CommandBufferCount = 1,
-            PCommandBuffers = &local,
-        };
         var t0 = Stopwatch.GetTimestamp();
-        ThrowIfNotSuccess(Vk.QueueSubmit(GraphicsQueue, 1, in submit, fence), "vkQueueSubmit(isolate)");
+        SubmitFrameBatch(local, ref first, ref timelineWait, imageAvail, signalTimeline: 0, binarySignal: default, fence, "vkQueueSubmit(isolate)");
         ThrowIfNotSuccess(Vk.WaitForFences(Device, 1, &fence, true, ulong.MaxValue), "vkWaitForFences(isolate)");
         var ms = Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
-        first = false;
 
         gpuPassIsolated.TryGetValue(passName, out var acc);
         gpuPassIsolated[passName] = acc + new GpuPassTotal(ms, 1);
@@ -633,6 +621,136 @@ public sealed partial class VulkanGraphicsDevice
             Flags = CommandBufferUsageFlags.OneTimeSubmitBit,
         };
         ThrowIfNotSuccess(Vk.BeginCommandBuffer(local, in bi), "vkBeginCommandBuffer(isolate)");
+    }
+
+    // One submission of the frame's work so far. The first of a frame waits for the acquired image
+    // (imageAvailPending, consumed here); one after an external pass waits for its signal on the frame timeline
+    // (timelineWait, consumed here). It may signal the timeline, the binary render-done semaphore, and a fence.
+    private unsafe void SubmitFrameBatch(CommandBuffer cmd, ref bool imageAvailPending, ref ulong timelineWait, Semaphore imageAvail,
+        ulong signalTimeline, Semaphore binarySignal, Fence fence, string what)
+    {
+        var waits = stackalloc Semaphore[2];
+        var waitStages = stackalloc PipelineStageFlags[2];
+        var waitValues = stackalloc ulong[2];
+        var signals = stackalloc Semaphore[2];
+        var signalValues = stackalloc ulong[2];
+        uint waitCount = 0, signalCount = 0;
+        var timeline = false;
+        if (imageAvailPending)
+        {
+            waits[waitCount] = imageAvail;
+            waitStages[waitCount] = PipelineStageFlags.ColorAttachmentOutputBit;
+            waitValues[waitCount++] = 0;
+            imageAvailPending = false;
+        }
+        if (timelineWait != 0)
+        {
+            waits[waitCount] = frameTimeline;
+            waitStages[waitCount] = PipelineStageFlags.AllCommandsBit;
+            waitValues[waitCount++] = timelineWait;
+            timelineWait = 0;
+            timeline = true;
+        }
+        if (binarySignal.Handle != 0)
+        {
+            signals[signalCount] = binarySignal;
+            signalValues[signalCount++] = 0;
+        }
+        if (signalTimeline != 0)
+        {
+            signals[signalCount] = frameTimeline;
+            signalValues[signalCount++] = signalTimeline;
+            timeline = true;
+        }
+        var timelineInfo = new TimelineSemaphoreSubmitInfo
+        {
+            SType = StructureType.TimelineSemaphoreSubmitInfo,
+            WaitSemaphoreValueCount = waitCount,
+            PWaitSemaphoreValues = waitValues,
+            SignalSemaphoreValueCount = signalCount,
+            PSignalSemaphoreValues = signalValues,
+        };
+        var submit = new SubmitInfo
+        {
+            SType = StructureType.SubmitInfo,
+            PNext = timeline ? &timelineInfo : null,
+            WaitSemaphoreCount = waitCount,
+            PWaitSemaphores = waitCount > 0 ? waits : null,
+            PWaitDstStageMask = waitCount > 0 ? waitStages : null,
+            CommandBufferCount = 1,
+            PCommandBuffers = &cmd,
+            SignalSemaphoreCount = signalCount,
+            PSignalSemaphores = signalCount > 0 ? signals : null,
+        };
+        ThrowIfNotSuccess(Vk.QueueSubmit(GraphicsQueue, 1, in submit, fence), what);
+    }
+
+    // An external pass: the frame so far is submitted signalling the timeline, the pass encodes its Metal work
+    // between that value and the next, and recording continues in a fresh buffer whose submission waits for the
+    // second. Nothing here waits on the CPU (except under isolation, which times the pass the way it times others),
+    // and the frame's fence still covers the Metal work: the last submission cannot start before it has signalled.
+    private unsafe CommandBuffer RunExternalPass(CommandBuffer cmd, RenderPass pass, Action<ExternalWorkSync> encode,
+        ref bool imageAvailPending, ref ulong timelineWait, Semaphore imageAvail)
+    {
+        if (frameTimeline.Handle == 0)
+            throw new InvalidOperationException($"pass '{pass.Name}' is native Metal work, which needs GraphicsFeatures.MetalObjects; this device does not have it.");
+        ThrowIfNotSuccess(Vk.EndCommandBuffer(cmd), "vkEndCommandBuffer(external)");
+        var before = ++frameTimelineValue;
+        var after = ++frameTimelineValue;
+        var fence = gpuPassIsolation ? isolationFence : default;
+        if (gpuPassIsolation) ThrowIfNotSuccess(Vk.ResetFences(Device, 1, &fence), "vkResetFences(external)");
+        SubmitFrameBatch(cmd, ref imageAvailPending, ref timelineWait, imageAvail, signalTimeline: before, binarySignal: default, fence,
+            "vkQueueSubmit(external)");
+        if (gpuPassIsolation) ThrowIfNotSuccess(Vk.WaitForFences(Device, 1, &fence, true, ulong.MaxValue), "vkWaitForFences(external)");
+
+        var t0 = Stopwatch.GetTimestamp();
+        try
+        {
+            encode(new ExternalWorkSync(frameTimelineEvent, before, after));
+        }
+        catch
+        {
+            // The work will never signal, so the host does, once the value it would have waited for is reached
+            // (a timeline only rises: signalling past a value the GPU has yet to signal would be invalid).
+            WaitFrameTimeline(before);
+            var signal = new SemaphoreSignalInfo { SType = StructureType.SemaphoreSignalInfo, Semaphore = frameTimeline, Value = after };
+            Vk.SignalSemaphore(Device, in signal);
+            throw;
+        }
+        if (gpuPassIsolation)
+        {
+            WaitFrameTimeline(after);
+            gpuPassIsolated.TryGetValue(pass.Name, out var acc);
+            gpuPassIsolated[pass.Name] = acc + new GpuPassTotal(Stopwatch.GetElapsedTime(t0).TotalMilliseconds, 1);
+        }
+        timelineWait = after;
+
+        var list = continuationBuffers[currentFrame];
+        if (continuationsUsed[currentFrame] == list.Count)
+        {
+            var ai = new CommandBufferAllocateInfo
+            {
+                SType = StructureType.CommandBufferAllocateInfo,
+                CommandPool = commandPool,
+                Level = CommandBufferLevel.Primary,
+                CommandBufferCount = 1,
+            };
+            CommandBuffer fresh;
+            ThrowIfNotSuccess(Vk.AllocateCommandBuffers(Device, in ai, &fresh), "vkAllocateCommandBuffers(continuation)");
+            list.Add(fresh);
+        }
+        var next = list[continuationsUsed[currentFrame]++];
+        ThrowIfNotSuccess(Vk.ResetCommandBuffer(next, 0), "vkResetCommandBuffer(continuation)");
+        var bi = new CommandBufferBeginInfo { SType = StructureType.CommandBufferBeginInfo, Flags = CommandBufferUsageFlags.OneTimeSubmitBit };
+        ThrowIfNotSuccess(Vk.BeginCommandBuffer(next, in bi), "vkBeginCommandBuffer(continuation)");
+        return next;
+    }
+
+    private unsafe void WaitFrameTimeline(ulong value)
+    {
+        var semaphore = frameTimeline;
+        var wait = new SemaphoreWaitInfo { SType = StructureType.SemaphoreWaitInfo, SemaphoreCount = 1, PSemaphores = &semaphore, PValues = &value };
+        ThrowIfNotSuccess(Vk.WaitSemaphores(Device, in wait, ulong.MaxValue), "vkWaitSemaphores(frame timeline)");
     }
 
     private unsafe void CreateCommandPool()
@@ -648,9 +766,18 @@ public sealed partial class VulkanGraphicsDevice
         commandPool = pool;
     }
 
+    // Command buffers a frame continues in after an external pass split it (RunExternalPass), per frame slot. The
+    // buffer before the split is still pending when recording goes on, so the frame cannot reopen it the way
+    // isolation does. Reused from the next time the slot's fence has signalled; freed with the pool.
+    private List<CommandBuffer>[] continuationBuffers = Array.Empty<List<CommandBuffer>>();
+    private int[] continuationsUsed = Array.Empty<int>();
+
     private unsafe void CreateFrameResources()
     {
         frames = new FrameResources[MaxFramesInFlight];
+        continuationBuffers = new List<CommandBuffer>[MaxFramesInFlight];
+        for (var i = 0; i < MaxFramesInFlight; i++) continuationBuffers[i] = new List<CommandBuffer>();
+        continuationsUsed = new int[MaxFramesInFlight];
 
         var ai = new CommandBufferAllocateInfo
         {
@@ -736,6 +863,8 @@ public sealed partial class VulkanGraphicsDevice
 
         Vk.ResetFences(Device, 1, in f.InFlight);
         Vk.ResetCommandBuffer(f.CommandBuffer, 0);
+        // The fence covers every buffer this slot submitted, continuations included (see RunExternalPass).
+        continuationsUsed[currentFrame] = 0;
         // Fence above guarantees last cycle's transient descriptors are
         // no longer in use — safe to recycle the whole pool.
         ResetTransientDescriptorPool(currentFrame);
@@ -749,19 +878,23 @@ public sealed partial class VulkanGraphicsDevice
             Flags = CommandBufferUsageFlags.OneTimeSubmitBit,
         };
         ThrowIfNotSuccess(Vk.BeginCommandBuffer(f.CommandBuffer, in beginInfo), "vkBeginCommandBuffer");
+        // The buffer being recorded: the frame's own, or the continuation an external pass moved it to.
+        var cmd = f.CommandBuffer;
+        // A frame timeline value the next submission waits for: an external pass's signal.
+        ulong timelineWait = 0;
 
         // vkCmdResetQueryPool must run outside a render pass.
         var slotQueryBase = (uint)(currentFrame * (int)QueriesPerFrameSlot);
         if (timestampsSupported)
         {
-            Vk.CmdResetQueryPool(f.CommandBuffer, gpuTimingPool, slotQueryBase, QueriesPerFrameSlot);
+            Vk.CmdResetQueryPool(cmd, gpuTimingPool, slotQueryBase, QueriesPerFrameSlot);
         }
         var nextQueryIndex = slotQueryBase;
 
         // <b>Before any render pass opens, because a buffer-to-image copy cannot be inside one.</b>
         // This is where a per-frame texture upload belongs: recorded with the frame's own commands
         // instead of submitted on its own and waited for. See QueueTextureUpload.
-        RecordQueuedTextureUploads(f.CommandBuffer);
+        RecordQueuedTextureUploads(cmd);
 
         // One stackalloc shared across passes (CA2014 — no per-iteration
         // alloc). 8 = 7 color + 1 depth; bump for wider MRT passes.
@@ -774,6 +907,15 @@ public sealed partial class VulkanGraphicsDevice
         var isolationFirstSubmit = true;
         foreach (var pass in commandList.Passes)
         {
+            // Native Metal work: the frame splits here (RunExternalPass) and continues in another buffer.
+            if (pass.Description.External is { } external)
+            {
+                currentPassName = pass.Name;
+                CountPass(pass.Name);
+                cmd = RunExternalPass(cmd, pass, external, ref isolationFirstSubmit, ref timelineWait, f.ImageAvailable);
+                continue;
+            }
+
             // Compute pass: dispatch outside any render pass (the prior pass
             // already ended its render pass). No framebuffer and no clears — but timed like every
             // other pass. It was not, and the consequence was concrete: the one dispatch in
@@ -794,13 +936,13 @@ public sealed partial class VulkanGraphicsDevice
                 // ColorAttachmentOutputBit is the render encoder's — same reason, same caveat:
                 // on MoltenVK these bracket the ENCODER, not the shader's execution.
                 if (canTimeCompute)
-                    Vk.CmdWriteTimestamp(f.CommandBuffer, PipelineStageFlags.ComputeShaderBit, gpuTimingPool, cStart);
+                    Vk.CmdWriteTimestamp(cmd, PipelineStageFlags.ComputeShaderBit, gpuTimingPool, cStart);
 
-                TranslateComputePass(f.CommandBuffer, pass, currentFrame);
+                TranslateComputePass(cmd, pass, currentFrame);
 
                 if (canTimeCompute)
                 {
-                    Vk.CmdWriteTimestamp(f.CommandBuffer, PipelineStageFlags.ComputeShaderBit, gpuTimingPool, cEnd);
+                    Vk.CmdWriteTimestamp(cmd, PipelineStageFlags.ComputeShaderBit, gpuTimingPool, cEnd);
                     pendingTimingsPerSlot[currentFrame].Add(new PendingPassTiming
                     {
                         PassName = pass.Name,
@@ -810,7 +952,7 @@ public sealed partial class VulkanGraphicsDevice
                     });
                 }
                 if (gpuPassIsolation)
-                    FlushIsolatedPass(f.CommandBuffer, pass.Name, ref isolationFirstSubmit, f.ImageAvailable);
+                    FlushIsolatedPass(cmd, pass.Name, ref isolationFirstSubmit, f.ImageAvailable, ref timelineWait);
                 continue;
             }
 
@@ -913,29 +1055,29 @@ public sealed partial class VulkanGraphicsDevice
             currentPassName = pass.Name;
             CountPass(pass.Name);
 
-            Vk.CmdBeginRenderPass(f.CommandBuffer, in rpBegin, SubpassContents.Inline);
+            Vk.CmdBeginRenderPass(cmd, in rpBegin, SubpassContents.Inline);
             // Timestamps INSIDE the pass — MoltenVK resolves counter samplers
             // at draw boundaries; ColorAttachmentOutputBit pairs naturally.
             if (canTimePass)
             {
-                Vk.CmdWriteTimestamp(f.CommandBuffer, PipelineStageFlags.ColorAttachmentOutputBit, gpuTimingPool, startIndex);
+                Vk.CmdWriteTimestamp(cmd, PipelineStageFlags.ColorAttachmentOutputBit, gpuTimingPool, startIndex);
             }
 
             // Viewport+scissor match the current target's extent.
             var viewport = new Viewport(0, 0, extentToUse.Width, extentToUse.Height, 0, 1);
-            Vk.CmdSetViewport(f.CommandBuffer, 0, 1, in viewport);
+            Vk.CmdSetViewport(cmd, 0, 1, in viewport);
             var scissor = new Rect2D(new Offset2D(0, 0), extentToUse);
-            Vk.CmdSetScissor(f.CommandBuffer, 0, 1, in scissor);
+            Vk.CmdSetScissor(cmd, 0, 1, in scissor);
 
             foreach (var renderCmd in pass.Commands)
             {
                 if (renderCmd is DrawIndexedCommand d)
                 {
-                    TranslateDrawIndexed(f.CommandBuffer, d, currentFrame);
+                    TranslateDrawIndexed(cmd, d, currentFrame);
                 }
                 else if (renderCmd is DrawIndexedIndirectCommand di)
                 {
-                    TranslateDrawIndexedIndirect(f.CommandBuffer, di, currentFrame);
+                    TranslateDrawIndexedIndirect(cmd, di, currentFrame);
                 }
                 else if (renderCmd is DispatchCommand)
                 {
@@ -946,9 +1088,9 @@ public sealed partial class VulkanGraphicsDevice
 
             if (canTimePass)
             {
-                Vk.CmdWriteTimestamp(f.CommandBuffer, PipelineStageFlags.ColorAttachmentOutputBit, gpuTimingPool, endIndex);
+                Vk.CmdWriteTimestamp(cmd, PipelineStageFlags.ColorAttachmentOutputBit, gpuTimingPool, endIndex);
             }
-            Vk.CmdEndRenderPass(f.CommandBuffer);
+            Vk.CmdEndRenderPass(cmd);
 
             if (canTimePass)
             {
@@ -961,32 +1103,17 @@ public sealed partial class VulkanGraphicsDevice
                 });
             }
             if (gpuPassIsolation)
-                FlushIsolatedPass(f.CommandBuffer, pass.Name, ref isolationFirstSubmit, f.ImageAvailable);
+                FlushIsolatedPass(cmd, pass.Name, ref isolationFirstSubmit, f.ImageAvailable, ref timelineWait);
         }
-        ThrowIfNotSuccess(Vk.EndCommandBuffer(f.CommandBuffer), "vkEndCommandBuffer");
+        ThrowIfNotSuccess(Vk.EndCommandBuffer(cmd), "vkEndCommandBuffer");
         var swSubmit = Stopwatch.GetTimestamp();
         var encodeMs = Stopwatch.GetElapsedTime(swEncode, swSubmit).TotalMilliseconds;
 
         // Always submit, even with zero default-target passes — skipping
         // would strand the acquired imageAvailable semaphore and deadlock
         // the next acquire.
-        var waitStage = PipelineStageFlags.ColorAttachmentOutputBit;
-        var imageAvail = f.ImageAvailable;
         var renderDone = perImageRenderFinished[imageIndex];
-        var cmd = f.CommandBuffer;
-        var waitCount = (gpuPassIsolation && !isolationFirstSubmit) ? 0u : 1u;
-        var submit = new SubmitInfo
-        {
-            SType = StructureType.SubmitInfo,
-            WaitSemaphoreCount = waitCount,
-            PWaitSemaphores = waitCount > 0 ? &imageAvail : null,
-            PWaitDstStageMask = waitCount > 0 ? &waitStage : null,
-            CommandBufferCount = 1,
-            PCommandBuffers = &cmd,
-            SignalSemaphoreCount = 1,
-            PSignalSemaphores = &renderDone,
-        };
-        ThrowIfNotSuccess(Vk.QueueSubmit(GraphicsQueue, 1, in submit, f.InFlight), "vkQueueSubmit");
+        SubmitFrameBatch(cmd, ref isolationFirstSubmit, ref timelineWait, f.ImageAvailable, signalTimeline: 0, renderDone, f.InFlight, "vkQueueSubmit");
 
         var swapchain = Swapchain;
         var present = new PresentInfoKHR
@@ -1111,6 +1238,9 @@ public sealed partial class VulkanGraphicsDevice
             Vk.DestroyFence(Device, isolationFence, null);
             isolationFence = default;
         }
+        // The continuation buffers go with the pool below.
+        continuationBuffers = Array.Empty<List<CommandBuffer>>();
+        continuationsUsed = Array.Empty<int>();
         if (commandPool.Handle != 0)
         {
             Vk.DestroyCommandPool(Device, commandPool, null);

@@ -20,4 +20,9 @@ public enum GraphicsFeatures
 
     /// <summary>Fragment shaders that write storage images or buffers (fragmentStoresAndAtomics).</summary>
     FragmentStoresAndAtomics = 1 << 2,
+
+    /// <summary>The Metal objects behind the device and its GPU buffers can be exported (VK_EXT_metal_objects), for a
+    /// native Metal pass on the same memory: <see cref="IGraphicsDevice.ExportMetalDevice"/>,
+    /// <see cref="IGraphicsDevice.ExportMetalBuffer"/>.</summary>
+    MetalObjects = 1 << 3,
 }

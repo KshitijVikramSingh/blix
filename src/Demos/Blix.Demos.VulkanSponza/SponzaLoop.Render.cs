@@ -330,9 +330,12 @@ internal sealed partial class SponzaLoop
     // not (a buffer bound by a name the program lacks is an error). Rebuilt when the clipmap is created.
     private ShaderBufferBinding[]? litSceneBuffers;
     private ShaderBufferBinding[]? litClipmapBuffer;
-    // And the lightmap's index map and LOD 0 frames (lightmap_frame.glsl), placeholders until the bake lands.
+    // The ray-traced shadow mask rides along (lit.frag declares it); RecordRtShadows drops both lists each frame it
+    // binds a new slot's mask. And the lightmap's index map and LOD 0 frames (lightmap_frame.glsl), placeholders until
+    // the bake lands.
     private ShaderBufferBinding[] LitClipmapBuffer =>
-        litClipmapBuffer ??= new[] { new ShaderBufferBinding("ClipmapState", ClipmapStateOrPlaceholder) }.Concat(LitLightmapBuffers()).ToArray();
+        litClipmapBuffer ??= new[] { new ShaderBufferBinding("ClipmapState", ClipmapStateOrPlaceholder), new ShaderBufferBinding("RtShadowMask", RtShadowMask) }
+            .Concat(LitLightmapBuffers()).ToArray();
     private ShaderBufferBinding[] LitSceneBuffers => litSceneBuffers ??= sceneBuffers.Concat(LitClipmapBuffer).ToArray();
 
     public void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)
@@ -708,6 +711,7 @@ internal sealed partial class SponzaLoop
         // blinking in and out as you turn. Half a metre of slack costs a fraction of a percent of
         // the rejections and removes the whole class.
         RecordRaySurfaceBake();
+        RecordRtShadows(frame.Width, frame.Height);
         CookTransportWhenReady();
         RecordClipmap();
         PickWatchPoints();
@@ -943,6 +947,7 @@ internal sealed partial class SponzaLoop
             WriteTexelCensus();
             WriteTexelInspect();
             WriteRayView(Path.ChangeExtension(path, null));
+            WriteRtShadows();
             if (probeReference)
             {
                 WriteSkyVisibilityReference(samples: 200, rays: 2048);
@@ -1159,6 +1164,7 @@ internal sealed partial class SponzaLoop
         {
             "flat"   => "everything (materials+IBL+shadows+AO)",
             "shadow" => "sun shadows",
+            "rtshadow" => "ray-traced sun shadows (Metal) in place of the cascades in the lit pass",
             "gtao"   => "ambient visibility (GTAO)",
             "prepass"=> "the depth pre-pass",
             "hiz"    => "the Hi-Z pyramid",

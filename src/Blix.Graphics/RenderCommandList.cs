@@ -47,6 +47,24 @@ public sealed class RenderCommandList
 
     public void ComputePass(string name, IReadOnlyList<DispatchCommand> dispatches) => ComputePass(name, dispatches, null);
 
+    /// <summary>Native Metal work at this point of the frame; see <see cref="ExternalWorkSync"/>.</summary>
+    public void ExternalPass(string name, Action<ExternalWorkSync> encode)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        ArgumentNullException.ThrowIfNull(encode);
+        recorder?.OnPassBegin(name);
+        try
+        {
+            var desc = new RenderPassDescription(
+                RenderSurfaceHandle.Default, Array.Empty<GraphicsColor?>(), ClearDepth: false, Compute: true, External: encode);
+            passes.Add(new RenderPass(name, desc, Array.Empty<RenderCommand>()));
+        }
+        finally
+        {
+            recorder?.OnPassEnd();
+        }
+    }
+
     /// <param name="attachmentReads">Render-target outputs the dispatches sample; see RenderPassDescription.AttachmentReads.</param>
     public void ComputePass(string name, IReadOnlyList<DispatchCommand> dispatches, IReadOnlyList<TextureHandle>? attachmentReads)
     {

@@ -48,6 +48,8 @@ public sealed partial class RenderGraph : IDisposable
     // pass declared before a graphics pass that samples its output runs first.
     // A pass's dispatches run in the order they were recorded.
     private readonly Dictionary<int, List<Blix.Graphics.DispatchCommand>> recordedDispatches = new();
+    // Per-frame native Metal work keyed by ComputePass handle (External), run in the pass's place in PassOrder.
+    private readonly Dictionary<int, Action<Blix.Graphics.ExternalWorkSync>> recordedExternal = new();
 
     public RenderGraph(IGraphicsDevice device)
     {
@@ -144,6 +146,21 @@ public sealed partial class RenderGraph : IDisposable
         ComputePasses[id] = entry;
         PassOrder.Add(id);
         return new ComputePassBuilder(this, entry);
+    }
+
+    /// <summary>
+    /// A pass whose work is native Metal rather than Vulkan (<see cref="External"/>, <see cref="ExternalWorkSync"/>):
+    /// placed in declaration order like any pass, with no shader and no dispatches. Needs
+    /// <see cref="GraphicsFeatures.MetalObjects"/> when it has work in a frame.
+    /// </summary>
+    public PassHandle ExternalPass(string name)
+    {
+        EnsureNotCompiled(nameof(ExternalPass));
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        var id = nextId++;
+        ComputePasses[id] = new ComputePassEntry { Handle = new PassHandle(id), Name = name, External = true };
+        PassOrder.Add(id);
+        return new PassHandle(id);
     }
 
     // --- Compile + Execute -------------------------------------------------
@@ -339,12 +356,29 @@ public sealed partial class RenderGraph : IDisposable
             throw new InvalidOperationException(
                 $"RenderGraph.Dispatch targets pass {handle.Id}, which is not a ComputePass. Declare it with graph.ComputePass(...).");
         }
+        if (ComputePasses[handle.Id].External)
+            throw new InvalidOperationException($"pass '{ComputePasses[handle.Id].Name}' is an external pass; its work is recorded with RenderGraph.External, not dispatches.");
         if (!recordedDispatches.TryGetValue(handle.Id, out var list))
         {
             list = new List<Blix.Graphics.DispatchCommand>();
             recordedDispatches[handle.Id] = list;
         }
         list.Add(dispatch);
+    }
+
+    /// <summary>
+    /// This frame's native Metal work for an external pass (<see cref="ExternalPass"/>): everything declared before
+    /// the pass finishes before it, everything after waits for it (<see cref="ExternalWorkSync"/>). One piece a frame;
+    /// a frame that records none skips the pass, and the frame does not split.
+    /// </summary>
+    public void External(PassHandle handle, Action<Blix.Graphics.ExternalWorkSync> encode)
+    {
+        ArgumentNullException.ThrowIfNull(encode);
+        if (!IsCompiled) throw new InvalidOperationException("RenderGraph.External called before Compile.");
+        if (!ComputePasses.TryGetValue(handle.Id, out var entry) || !entry.External)
+            throw new InvalidOperationException($"RenderGraph.External targets pass {handle.Id}, which is not an external pass. Declare it with graph.ExternalPass(...).");
+        if (!recordedExternal.TryAdd(handle.Id, encode))
+            throw new InvalidOperationException($"external pass '{entry.Name}' already has work this frame; it takes one piece a frame.");
     }
 
     public void Execute(Blix.Graphics.RenderCommandList commandList)
@@ -364,6 +398,11 @@ public sealed partial class RenderGraph : IDisposable
             // barriers; a graphics pass declared after it samples the result.
             if (ComputePasses.TryGetValue(passId, out var cpass))
             {
+                if (recordedExternal.TryGetValue(passId, out var external))
+                {
+                    commandList.ExternalPass(cpass.Name, external);
+                    continue;
+                }
                 if (recordedDispatches.TryGetValue(passId, out var dispatches))
                 {
                     var reads = new List<TextureHandle>();
@@ -408,6 +447,7 @@ public sealed partial class RenderGraph : IDisposable
 
         recordedScopes.Clear();
         recordedDispatches.Clear();
+        recordedExternal.Clear();
     }
 
     private void EnsureNotCompiled(string operation)
@@ -484,4 +524,7 @@ internal sealed class ComputePassEntry
     public HashSet<int> HistoryReads { get; } = new();
     public List<TextureView> Writes { get; } = new();
     public ShaderInterface? Shader { get; set; }
+
+    /// <summary>Declared with RenderGraph.ExternalPass: native Metal work, no shader and no dispatches.</summary>
+    public bool External { get; init; }
 }

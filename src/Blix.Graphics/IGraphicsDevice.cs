@@ -47,6 +47,18 @@ public interface IGraphicsDevice : IDisposable
     /// </remarks>
     byte[] ReadGpuBuffer(GpuBufferHandle handle, int offset, int length);
 
+    /// <summary>The MTLDevice this device runs on, as a raw id&lt;MTLDevice&gt;, not retained.</summary>
+    /// <remarks>Only with <see cref="GraphicsFeatures.MetalObjects"/>. It lives as long as this device.</remarks>
+    nint ExportMetalDevice() => throw new NotSupportedException("this device has no Metal objects to export (GraphicsFeatures.MetalObjects).");
+
+    /// <summary>The MTLBuffer behind a GPU buffer, as a raw id&lt;MTLBuffer&gt;, not retained; the GPU buffer starts at its offset 0.</summary>
+    /// <remarks>
+    /// Only with <see cref="GraphicsFeatures.MetalObjects"/>. It lives as long as the GPU buffer, and Metal work on it is
+    /// the caller's to order against this device's: wait for the device (<see cref="WaitIdle"/>) before Metal touches
+    /// what Vulkan wrote, and for the Metal work before this device reads what Metal wrote.
+    /// </remarks>
+    nint ExportMetalBuffer(GpuBufferHandle handle) => throw new NotSupportedException("this device has no Metal objects to export (GraphicsFeatures.MetalObjects).");
+
     GraphicsDeviceDiagnostics DiagnosticsSnapshot { get; }
 
     void SetDefaultRenderSurfaceSize(int width, int height);
