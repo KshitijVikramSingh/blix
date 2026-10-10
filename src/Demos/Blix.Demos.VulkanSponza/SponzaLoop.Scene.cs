@@ -29,6 +29,7 @@ internal sealed partial class SponzaLoop
                 // --lightmap: the unwrap beside the mesh (blix cook lightmap --write), if there is one.
                 var lightmapPath = Path.ChangeExtension(p.Path, ".blixlightmap");
                 var lightmapFile = lightmap && !flatten && File.Exists(lightmapPath) ? LightmapFile.Read(lightmapPath) : null;
+                if (lightmapFile is not null) { lightmapAtlasWidth = lightmapFile.Width; lightmapAtlasHeight = lightmapFile.Height; }
                 if (lightmap && lightmapFile is null) Console.WriteLine($"[VulkanSponza] {p.Name}: no {Path.GetFileName(lightmapPath)} (blix cook lightmap --write); drawn without a lightmap.");
                 parsed[i] = (p.Name, flatten ? Flattened(model, i) : Placed(model, i, lightmapFile));
             }
@@ -363,6 +364,13 @@ internal sealed partial class SponzaLoop
                 if (ordered[i].LightmapTexels is not { } t) continue;
                 Array.Copy(t, 0, texels, bundle.Meshes[i].BaseVertex, Math.Min(t.Length, ordered[i].VertexCount));
                 withLightmap++;
+                // What the lightmap texel bake rasterizes (SponzaLoop.Lightmap.cs): LOD 0, at its first placement
+                // (a lightmapped primitive is drawn once: the cook warns otherwise). Either index width: 16-bit
+                // primitives were once left out here, and had no records at all.
+                var lod0 = ordered[i].Lods[0].Indices32 ?? ordered[i].Lods[0].Indices16?.Select(x => (uint)x).ToArray();
+                if (lod0 is not null)
+                    lightmapSources.Add((ordered[i].Name, ordered[i].VertexBytes, sharedLayout.Stride, VertexSemantics.Of(sharedLayout)?.Normal ?? -1, lod0, ordered[i].Worlds[0], t,
+                        ordered[i].Pipeline == opaqueDoubleSidedPipeline || ordered[i].Pipeline == blendDoubleSidedPipeline));
             }
             sceneLightmapTexels = Own(device.CreateGpuBuffer(texels.Length * 8, MemoryMarshal.AsBytes(texels.AsSpan()), "sponza.scene.lightmap-texels"));
             if (lightmapEnabled)
@@ -395,6 +403,7 @@ internal sealed partial class SponzaLoop
                 sceneTransformInstances.Add(s.Instances[w]);
                 rayInstances.Add(new RayQueryScene.Instance(rayMeshes[i], world));
                 rayPlacementMaterials.Add(new RayMaterial(s.Albedo, s.BaseColor, s.AlphaCutoff));
+                rayPlacementLightmapped.Add(s.LightmapTexels is not null);
                 if (!UniformScale(world)) nonUniform++;
             }
 

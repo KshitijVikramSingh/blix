@@ -12,6 +12,7 @@ layout(local_size_x = 32) in;
 layout(set = 0, binding = 0) uniform TexelFilter {
     vec4 uTexelGrid;      // xyz the cells' origin, w the spacing
     vec4 uTexelParams;    // x hash capacity, y the list's capacity, z the trust rays, w the frame
+    vec4 uLightmap;       // --lightmap: x 1 when the atlas's texels are on, yz the atlas size, w its first record
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer TexelHash { uvec4 texelHash[]; };
@@ -21,6 +22,8 @@ layout(std430, set = 0, binding = 4) buffer TexelFiltered { vec4 texelFiltered[]
 // [parity] the counts (this frame's mark adds to set frame & 1; this pass zeroes the other), the list after them.
 layout(std430, set = 0, binding = 5) buffer TexelFilterList { uint texelFilterList[]; };
 
+layout(std430, set = 0, binding = 6) readonly buffer LightmapIndexMap { uint lightmapIndexMap[]; };
+#define TEXEL_INDEX_MAP(i) lightmapIndexMap[i]
 #define TEXEL_HASH(i) texelHash[i]
 #define TEXEL_POSITION(i) texels[2 * (i)]
 #define TEXEL_NORMAL(i) texels[2 * (i) + 1]
@@ -49,9 +52,29 @@ void main() {
         finestGrid.spacing = u.uTexelGrid.w;
         finestGrid.capacity = uint(u.uTexelParams.x);
         finestGrid.level = 0u;
-        TexelGrid tg = texelLevelGrid(finestGrid, uint(TEXEL_NORMAL(id).w + 0.5));
+        int other;
+        TexelGrid tg = finestGrid;
+        if (u.uLightmap.x > 0.5 && float(id) >= u.uLightmap.w - 0.5) {
+            // Lightmap texels (the records from uLightmap.w on; the hashed ones before): the 3 x 3 atlas texels around this one (its atlas coordinate rides in normal.w), on
+            // this side; the plane test below keeps a chart's neighbours across a seam out. Distances in 4 cm (the
+            // base texel; the cloth's 2 cm texels weigh their neighbours a little wider).
+            tg.spacing = 0.04;
+            uint packedAt = floatBitsToUint(TEXEL_NORMAL(id).w);
+            ivec2 at = ivec2(int(packedAt & 0xFFFFu), int(packedAt >> 16)) + ivec2(int(lane) % 3, int(lane) / 3) - 1;
+            other = -1;
+            if (lane == 4u) other = id;
+            else if (lane < 9u && all(greaterThanEqual(at, ivec2(0))) && all(lessThan(at, ivec2(u.uLightmap.yz)))) {
+                uint o = TEXEL_INDEX_MAP(at.y * int(u.uLightmap.y) + at.x);
+                if (o != 0xFFFFFFFFu) {
+                    if (TEXEL_POSITION(o).w < 0.0 && dot(TEXEL_NORMAL(o).xyz, n) < 0.0) o += 1u;
+                    other = int(o);
+                }
+            }
+        } else {
+        tg = texelLevelGrid(finestGrid, uint(TEXEL_NORMAL(id).w + 0.5));
         ivec3 cell = ivec3(floor((position - tg.minCorner) / tg.spacing)) + ivec3(int(lane) % 3, (int(lane) / 3) % 3, int(lane) / 9) - 1;
-        int other = lane == 13u ? id : texelFind(tg, cell, texelBin(n));
+        other = lane == 13u ? id : texelFind(tg, cell, texelBin(n));
+        }
         if (other >= 0) {
             vec3 tn = TEXEL_NORMAL(other).xyz;
             vec3 tp = TEXEL_POSITION(other).xyz;

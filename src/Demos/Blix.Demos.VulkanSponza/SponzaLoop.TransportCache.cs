@@ -67,11 +67,13 @@ internal sealed partial class SponzaLoop
         }
         sb.Append(CultureInfo.InvariantCulture, $"v{TransportCacheVersion};{scene.Name};");
         sb.Append(CultureInfo.InvariantCulture, $"spacing {transportSpacing};rays {transportRays};vis {transportVisRes};sunlet {transportSunlet};charts {transportCharts};");
-        sb.Append(CultureInfo.InvariantCulture, $"texels {transportTexels};texel {texelSpacing};levels {texelLevels};reach {TexelOpenReach};");
+        sb.Append(CultureInfo.InvariantCulture, $"texels {transportTexels};texel {texelSpacing};levels {texelLevels};reach {TexelOpenReach};lightmap {lightmapEnabled};");
         sb.Append(CultureInfo.InvariantCulture, $"bounds {sceneBoundsMin};{sceneBoundsSpan};");
         if (sceneAssetsRoot is { } root && Directory.Exists(root))
             foreach (var f in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
-                         .Where(f => f.EndsWith(".blixmesh", StringComparison.Ordinal) || f.EndsWith(".blixtex", StringComparison.Ordinal))
+                         .Where(f => f.EndsWith(".blixmesh", StringComparison.Ordinal) || f.EndsWith(".blixtex", StringComparison.Ordinal)
+                                     // With --lightmap the hashed texels leave out what the atlas covers: its files decide them.
+                                     || (lightmapEnabled && f.EndsWith(".blixlightmap", StringComparison.Ordinal)))
                          .OrderBy(f => f, StringComparer.Ordinal))
             {
                 var info = new FileInfo(f);

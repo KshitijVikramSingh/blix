@@ -268,7 +268,6 @@ internal sealed partial class SponzaLoop
             table[slot * 4] = lo; table[slot * 4 + 1] = hi; table[slot * 4 + 2] = (uint)j; table[slot * 4 + 3] = 0;
         }
         var bake = new TexelBake(table, texels, texelCount, texelCapacity, new Vector4(min, s));
-        OnMain(() => UploadTexels(bake));
         var mb = (table.Length * 4L + texels.Length * 16L + texelCount * 92L) / 1048576.0;
         var perLevel = new int[texelLevels];
         foreach (var i in kept) perLevel[keys[i].Hi >> 21]++;
@@ -286,6 +285,8 @@ internal sealed partial class SponzaLoop
     {
         texelCount = bake.Count;
         texelCapacity = bake.Capacity;
+        // Every size below is int bytes: past 2 GB a buffer's size wraps negative. Refuse loudly instead.
+        _ = checked(bake.Texels.Length * 16 + texelCount * 16);
         var stamps = new uint[texelCount];
         Array.Fill(stamps, 0xFFFFFFFFu);
         var queueWords = 8 + 4 * texelBudget;
@@ -428,12 +429,13 @@ internal sealed partial class SponzaLoop
                 new("uTexelLevels", new Vector4Uniform(TexelLevelsUniform(height))),
                 new("uTexelGrid", new Vector4Uniform(texelGrid)),
                 new("uTexelParams", new Vector4Uniform(texelParams)),
-            },
+                new("uLightmap", new Vector4Uniform(LightmapUniform)),
+            }.Concat(TexelSunUniforms()).ToArray(),
             new[]
             {
                 new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
                 new ShaderTextureBinding("uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
-            }.Concat(TexelCascadeTextures()).ToArray(),
+            }.Concat(TexelCascadeTextures()).Append(LightmapTexelTexture()).ToArray(),
             Buffers: new[]
             {
                 new ShaderBufferBinding("TexelHash", texelHashBuffer),
@@ -445,6 +447,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("TexelEpoch", texelEpochBuffer),
                 new ShaderBufferBinding("TexelMoment", texelMomentBuffer),
                 new ShaderBufferBinding("TexelFilterList", texelFilterListBuffer),
+                new ShaderBufferBinding("LightmapIndexMap", LightmapIndexMap()),
             }));
         // Probe mode every frame (576 threads): the census reads the latest.
         {
@@ -459,12 +462,12 @@ internal sealed partial class SponzaLoop
                 new("uTexelLevels", new Vector4Uniform(TexelLevelsUniform(height))),
                     new("uTexelGrid", new Vector4Uniform(texelGrid)),
                     new("uTexelParams", new Vector4Uniform(texelParams)),
-                }.Concat(TexelSunUniforms()).ToArray(),
+                }.Concat(TexelSunUniforms()).Append(new ShaderUniform("uLightmap", new Vector4Uniform(LightmapUniform))).ToArray(),
                 new[]
                 {
                     new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
                     new ShaderTextureBinding("uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
-                }.Concat(TexelCascadeTextures()).ToArray(),
+                }.Concat(TexelCascadeTextures()).Append(LightmapTexelTexture()).ToArray(),
                 Buffers: new[]
                 {
                     new ShaderBufferBinding("TexelHash", texelHashBuffer),
@@ -476,6 +479,7 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("TexelEpoch", texelEpochBuffer),
                     new ShaderBufferBinding("TexelMoment", texelMomentBuffer),
                 new ShaderBufferBinding("TexelFilterList", texelFilterListBuffer),
+                    new ShaderBufferBinding("LightmapIndexMap", LightmapIndexMap()),
                 }));
         }
         var gatherBuffers = rayBlockBuffers
@@ -520,6 +524,7 @@ internal sealed partial class SponzaLoop
                 {
                     new("uTexelGrid", new Vector4Uniform(texelGrid)),
                     new("uTexelParams", new Vector4Uniform(new Vector4(texelCapacity, TexelFilterCapacity, texelTrust, texelFrame))),
+                    new("uLightmap", new Vector4Uniform(LightmapUniform)),
                 },
                 Array.Empty<ShaderTextureBinding>(),
                 Buffers: new[]
@@ -529,6 +534,7 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("TexelBlend", texelBlendBuffer),
                     new ShaderBufferBinding("TexelFiltered", texelFilteredBuffer),
                     new ShaderBufferBinding("TexelFilterList", texelFilterListBuffer),
+                    new ShaderBufferBinding("LightmapIndexMap", LightmapIndexMap()),
                 }));
         texelFrame++;
     }
@@ -572,13 +578,17 @@ internal sealed partial class SponzaLoop
         var queue = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(texelQueueBuffer, 0, 32).AsSpan()).ToArray();
         var last = texelFrame - 1;
         int seen = 0, none = 0, partial = 0, done = 0, everTraced = 0;
+        // --lightmap: the same split by kind (the hashed records, then the atlas's from lightmapFirstRecord).
+        int seenAtlas = 0, tracedAtlas = 0;
         var rayBins = new int[6];   // under 512, 512-1023, 1024-2047, 2048-4095, 4096-8191, 8192+
         for (var i = 0; i < texelCount; i++)
         {
             if (light[i].W > 0f) everTraced++;
+            if (lightmapTexels && i >= lightmapFirstRecord && light[i].W > 0f) tracedAtlas++;
             // Stamped in the last 16 frames: the mark visits each pixel once in 16, and the readback may land early.
             if (stamps[i] == 0xFFFFFFFFu || last - stamps[i] > 15u) continue;
             seen++;
+            if (lightmapTexels && i >= lightmapFirstRecord) seenAtlas++;
             if (light[i].W <= 0f) none++;
             else if (light[i].W < texelTarget) partial++;
             else done++;
@@ -586,5 +596,8 @@ internal sealed partial class SponzaLoop
         }
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] texels after {texelFrame} frames: the image read {seen:N0} (in its last 16 frames: the mark rotates over a 4 x 4 block) -- {done:N0} past the minimum ({texelTarget} rays; rays held: <512 {rayBins[0]:N0}, 512+ {rayBins[1]:N0}, 1k+ {rayBins[2]:N0}, 2k+ {rayBins[3]:N0}, 4k+ {rayBins[4]:N0}, 8k+ {rayBins[5]:N0}), {partial:N0} under it, {none:N0} with none; {everTraced:N0} of {texelCount:N0} ever traced. Queued (both parities) {queue[0]:N0}/{queue[1]:N0}/{queue[2]:N0}/{queue[3]:N0} and {queue[4]:N0}/{queue[5]:N0}/{queue[6]:N0}/{queue[7]:N0} (none / few / under the minimum / settling; budget {texelBudget:N0})."));
+        if (lightmapTexels)
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza] texels by kind: hashed read {seen - seenAtlas:N0}, traced {everTraced - tracedAtlas:N0} of {lightmapFirstRecord:N0}; lightmap read {seenAtlas:N0}, traced {tracedAtlas:N0} of {texelCount - lightmapFirstRecord:N0}."));
     }
 }

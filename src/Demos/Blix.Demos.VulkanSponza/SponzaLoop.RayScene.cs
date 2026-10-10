@@ -15,6 +15,9 @@ internal sealed partial class SponzaLoop
     // Per ray-scene placement (the transform table's order): the material a surface bake reads.
     private readonly record struct RayMaterial(TextureHandle Albedo, Vector4 BaseColor, float AlphaCutoff);
     private readonly List<RayMaterial> rayPlacementMaterials = new();
+    // Per placement (the ray scene's order): whether its surface is in the lightmap atlas (--lightmap). The hashed
+    // texels leave those out when the atlas's texels serve them (SponzaLoop.Lightmap.cs).
+    private readonly List<bool> rayPlacementLightmapped = new();
     private RayQueryGpuData? rayGpuData;
     private GpuBufferHandle raySurfaces;
     // One bake dispatch per material: its albedo, factor and cutoff, and its run of triangle rows in BakeRows.

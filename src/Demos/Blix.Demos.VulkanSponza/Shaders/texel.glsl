@@ -141,4 +141,38 @@ bool texelSettled(vec4 light, float m2, vec4 noise, float minRays) {
     return standardError <= noise.y * max(mean, noise.z);
 }
 
+#ifdef TEXEL_INDEX_MAP
+// ---- Lightmap addressing (--lightmap): a pixel with an atlas texel reads the atlas's texels, not hashed cells --------
+// The pre-pass writes each pixel's atlas texel packed (depth_prepass.frag): u and v in eighths of a texel, 16 bits each,
+// 0 where the surface has none. TEXEL_INDEX_MAP(i) (the includer's) is the atlas's map from texel (y * width + x) to its
+// record, 0xFFFFFFFF where no surface covers it.
+bool texelLightmapUnpack(uint packedTexel, out vec2 texel) {
+    texel = vec2(float(packedTexel & 0xFFFFu), float(packedTexel >> 16)) / 8.0;
+    return packedTexel != 0u;
+}
+
+// The four texels a bilinear lookup at `texel` reads (atlas units: texel centres at +0.5), with their weights, on the
+// side `n` faces; -1 where the atlas has nothing (outside every chart, between charts).
+void texelsAroundLightmap(vec2 texel, vec3 n, ivec2 atlasSize, out int ids[4], out float weights[4]) {
+    vec2 f = texel - 0.5;
+    ivec2 base = ivec2(floor(f));
+    vec2 t = f - vec2(base);
+    for (int i = 0; i < 4; ++i) {
+        ivec2 o = ivec2(i & 1, i >> 1);
+        ivec2 at = base + o;
+        ids[i] = -1;
+        weights[i] = 0.0;
+        if (any(lessThan(at, ivec2(0))) || any(greaterThanEqual(at, atlasSize))) continue;
+        uint id = TEXEL_INDEX_MAP(at.y * atlasSize.x + at.x);
+        if (id == 0xFFFFFFFFu) continue;
+        // A double-sided surface's texel is a pair (position w < 0): the front's record, then the back's. The side
+        // a pixel shows is the one its normal agrees with.
+        if (TEXEL_POSITION(id).w < 0.0 && dot(TEXEL_NORMAL(id).xyz, n) < 0.0) id += 1u;
+        ids[i] = int(id);
+        weights[i] = (o.x == 1 ? t.x : 1.0 - t.x) * (o.y == 1 ? t.y : 1.0 - t.y);
+    }
+}
+
+#endif // TEXEL_INDEX_MAP
+
 #endif

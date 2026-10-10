@@ -7,7 +7,7 @@ using Blix.Recipes;
 
 namespace Blix.Tools.Cook;
 
-// blix cook lightmap <dir-of-blixmesh> [--texel-cm 4] [--density "pattern=cm,..."] [--padding N] [--only <substring>] [--write]
+// blix cook lightmap <dir-of-blixmesh> [--texel-cm 4] [--density "pattern=cm|off,..."] [--padding N] [--only <substring>] [--write]
 //
 // Stage 5 (lightmaps), step 1: unwrap every primitive a scene draws with xatlas and say how good the unwrap is -- it
 // writes nothing yet. Per pack (the top directory under <dir>: Sponza's main_sponza, curtains, ivy, trees):
@@ -24,6 +24,9 @@ public static partial class Program
         // insensitive, against the material's name, then the pack's -- the first that matches sets that primitive's
         // texel in cm). Powers of two of the base line up with the atlas's mips (4 / 8 / 16 / 32 cm); density is
         // per surface, since atlas space is not what limits it: Sponza at 5 cm was ~6 M texels in all.
+        // "pattern=off" leaves those primitives out of the atlas: foliage (Sponza's trees and ivy) unwraps into charts
+        // of a few triangles each (5.5 a chart on the trees), so its leaves are barely bigger than their own gutter.
+        // Left out, they are what they were before lightmaps: the hashed texels' (or the probes', for cut-out leaves).
         var baseCm = args.Float("texel-cm", 4f);
         var texelsPerMetre = 100f / baseCm;
         var overrides = new List<(string Pattern, float Cm)>();
@@ -31,9 +34,12 @@ public static partial class Program
             foreach (var part in spec.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
             {
                 var eq = part.IndexOf('=');
-                if (eq <= 0 || !float.TryParse(part[(eq + 1)..], NumberStyles.Float, CultureInfo.InvariantCulture, out var cm) || cm <= 0f)
-                { Console.Error.WriteLine($"--density: '{part}' is not pattern=cm"); return 2; }
-                overrides.Add((part[..eq], cm));
+                // off: 0 cm, no lightmap.
+                var value = eq > 0 ? part[(eq + 1)..] : "";
+                var off = value.Equals("off", StringComparison.OrdinalIgnoreCase);
+                if (eq <= 0 || (!off && (!float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var cm) || cm <= 0f)))
+                { Console.Error.WriteLine($"--density: '{part}' is not pattern=cm or pattern=off"); return 2; }
+                overrides.Add((part[..eq], off ? 0f : float.Parse(value, CultureInfo.InvariantCulture)));
             }
         var densityUse = new SortedDictionary<float, (int Primitives, double Area)>();
         var padding = args.Int("padding", 2);
@@ -59,7 +65,7 @@ public static partial class Program
         if (args.Positionals is not [var root]) { Console.Error.WriteLine("Usage: blix cook lightmap <dir> [--texel-cm 4] [--density pattern=cm,...]"); return 2; }
         var meshes = Directory.Exists(root) ? Directory.GetFiles(root, "*.blixmesh", SearchOption.AllDirectories) : new[] { root };
         if (meshes.Length == 0) { Console.Error.WriteLine($"No .blixmesh under {root}."); return 2; }
-        Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"Unwrapping {meshes.Length} cooked mesh file(s) at a {baseCm} cm base{(overrides.Count > 0 ? ", " + string.Join(", ", overrides.Select(o => $"{o.Pattern} {o.Cm} cm")) : "")}, padding {padding}"));
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"Unwrapping {meshes.Length} cooked mesh file(s) at a {baseCm} cm base{(overrides.Count > 0 ? ", " + string.Join(", ", overrides.Select(o => o.Cm > 0f ? $"{o.Pattern} {o.Cm} cm" : $"{o.Pattern} off")) : "")}, padding {padding}"));
         var clock = Stopwatch.StartNew();
         var groups = new SortedDictionary<string, Stats>(StringComparer.Ordinal);
         var worst = new List<(string Name, double Stretch90, int Charts, int Triangles, double LodMixed)>();
@@ -109,6 +115,7 @@ public static partial class Program
                 var cmHere = baseCm;
                 foreach (var (pattern, cm) in overrides)
                     if (materialName.Contains(pattern, StringComparison.OrdinalIgnoreCase) || group.Contains(pattern, StringComparison.OrdinalIgnoreCase)) { cmHere = cm; break; }
+                if (cmHere <= 0f) { g.LeftOut++; g.LeftOutTriangles += indices.Length / 3; continue; }
                 var tpm = 100f / cmHere;
                 LightmapUnwrap.Result r;
                 try { r = LightmapUnwrap.Unwrap(positions, indices, tpm, padding, maxCost: maxCost); }
@@ -202,6 +209,10 @@ public static partial class Program
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"Unwrapped in {clock.Elapsed.TotalSeconds:0.0} s; by texel size: {string.Join(", ", densityUse.Select(d => $"{d.Key} cm {d.Value.Primitives:N0} primitives {d.Value.Area:N0} m2"))}."));
         foreach (var (name, g) in groups)
         {
+            if (g.LeftOut > 0)
+                Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                    $"  {name}: {g.LeftOut:N0} primitives ({g.LeftOutTriangles:N0} triangles) left out of the atlas (off)"));
+            if (g.Primitives == 0 && g.Failed == 0) continue;
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"  {name}: {g.Primitives:N0} primitives ({g.Instances:N0} drawn, {g.Failed} failed), {g.Triangles:N0} triangles, {g.Area:N0} m2 drawn"));
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
@@ -223,6 +234,16 @@ public static partial class Program
                     $"    ratio {lodRatios[l]}: today {lodBase[l]:N0} triangles ({100.0 * lodBase[l] / lodFull:0.0}%), seam-locked {lodSeam[l]:N0} ({100.0 * lodSeam[l] / lodFull:0.0}%); world error per primitive median {1000 * Pct(lodErrBase[l], 0.5):0.00} -> {1000 * Pct(lodErrSeam[l], 0.5):0.00} mm, p90 {1000 * Pct(lodErrBase[l], 0.9):0.00} -> {1000 * Pct(lodErrSeam[l], 0.9):0.00} mm"));
         }
         if (write && written.Count > 0) WriteLightmaps(written, baseCm, padding);
+        // A mesh with no primitive in this atlas keeps no lightmap: one left from an earlier cook names texels in an
+        // atlas that is no longer there (and its size would be read as the scene's).
+        if (write)
+            foreach (var path in meshes.Where(m => only is null || m.Contains(only, StringComparison.Ordinal)))
+            {
+                var stale = Path.ChangeExtension(path, ".blixlightmap");
+                if (written.Any(w => w.MeshPath == path) || !File.Exists(stale)) continue;
+                File.Delete(stale);
+                Console.WriteLine($"  removed {Path.GetRelativePath(Directory.Exists(root) ? root : Path.GetDirectoryName(root)!, stale)}: none of its primitives is in the atlas.");
+            }
         Console.WriteLine("  worst primitives by conformal stretch p90:");
         foreach (var w in worst.OrderByDescending(w => w.Stretch90).Take(10))
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {w.Name}: p90 {w.Stretch90:0.00}, {w.Charts:N0} charts over {w.Triangles:N0} triangles, LOD mixed up to {100 * w.LodMixed:0.0}%"));
@@ -315,7 +336,8 @@ public static partial class Program
 
     sealed class Stats
     {
-        public int Primitives, Instances, Failed, Charts;
+        public int Primitives, Instances, Failed, Charts, LeftOut;
+        public long LeftOutTriangles;
         public long Triangles, InVertices, OutVertices;
         public double Area, TexelsNeeded;
         public readonly int[] ChartTypes = new int[5];

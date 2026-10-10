@@ -40,6 +40,7 @@ layout(set = 0, binding = 0) uniform IncidentClipmap {
     vec4 uTexelParams;   // x hash capacity, y 1 when on, z the rays at which a texel's answer is trusted whole, w 1:
                          // read the spatially filtered light (texel_gather.comp)
     vec4 uTexelDebug;    // x the texel frame (the debug view's stamp test)
+    vec4 uLightmap;      // --lightmap: x 1 when the atlas's texels are on (texel.glsl), yz the atlas size, w its first record
     vec4 uTexelLevels;   // x levels, y a pixel's width at unit depth, z / w the pixels a texel should span in sun / in shade
     vec4 uTexelSun;      // xyz the direction the sun travels (texelLevelFor's sunlit)
     mat4 uTexelCascadeVP[3];
@@ -125,6 +126,13 @@ layout(std430, set = 0, binding = 15) readonly buffer ReferenceAccum { vec4 refe
 layout(std430, set = 0, binding = 16) readonly buffer TexelBlend { vec4 texelBlend[]; };
 layout(std430, set = 0, binding = 17) readonly buffer TexelStamp { uint texelStamp[]; };
 float debugStamped, debugLit;
+// --lightmap: the pre-pass's packed atlas texel and the atlas's map from texel to record (texel.glsl).
+layout(set = 0, binding = 19) uniform usampler2D uLightmapTexel;
+layout(std430, set = 0, binding = 20) readonly buffer LightmapIndexMap { uint lightmapIndexMap[]; };
+#define TEXEL_INDEX_MAP(i) lightmapIndexMap[i]
+// This pixel's packed atlas texel (main sets it): not 0, the atlas's texels serve it; 0 (no lightmap, or a surface the
+// atlas leaves out), the hashed ones.
+uint pixelLightmapTexel;
 #define TEXEL_HASH(i) texelHash[i]
 #define TEXEL_POSITION(i) texels[2 * (i)]
 #define TEXEL_NORMAL(i) texels[2 * (i) + 1]
@@ -154,6 +162,15 @@ bool texelsAtLevel(vec3 worldPos, vec3 n, float faceBin, uint level, out vec3 ir
     TexelGrid tg = texelLevelGrid(finest, level);
     int ids[TEXEL_CANDIDATES];
     float weights[TEXEL_CANDIDATES];
+    vec2 atlasTexel;
+    if (texelLightmapUnpack(pixelLightmapTexel, atlasTexel)) {
+        // Lightmap texels: the four bilinear atlas texels at the pixel's lightmap coordinate.
+        for (int i = 0; i < TEXEL_CANDIDATES; ++i) { ids[i] = -1; weights[i] = 0.0; }
+        int lm[4];
+        float lw[4];
+        texelsAroundLightmap(atlasTexel, n, ivec2(g.uLightmap.yz), lm, lw);
+        for (int i = 0; i < 4; ++i) { ids[i] = lm[i]; weights[i] = lw[i]; }
+    } else
     texelsAround(tg, worldPos, n, faceBin, ids, weights);
     vec3 sum = vec3(0.0);
     float weight = 0.0, raysWeighted = 0.0, located = 0.0;
@@ -188,6 +205,8 @@ bool texelsAtLevel(vec3 worldPos, vec3 n, float faceBin, uint level, out vec3 ir
 // of its level), so a level changes smoothly across depth. A new view shows the coarse texels' light within frames
 // (there are few of them) and the fine ones fill in where they have rays.
 bool texelsAt(vec3 worldPos, vec3 n, float faceBin, float viewDepth, out vec3 irradiance, out float confidence) {
+    // The lightmap's texels have no levels (its mips are a later question): one lookup.
+    if (pixelLightmapTexel != 0u) return texelsAtLevel(worldPos, n, faceBin, 0u, irradiance, confidence);
     float levelWanted = texelLevelFor(viewDepth, g.uTexelLevels, g.uTexelGrid.w, texelSunlit(worldPos, n));
     int finest = int(floor(levelWanted));
     float fraction = levelWanted - float(finest);
@@ -274,6 +293,7 @@ void main() {
     vec3 gathered;
     float confidence;
     bool texelFound = false;
+    pixelLightmapTexel = g.uLightmap.x > 0.5 ? texelFetch(uLightmapTexel, pixel, 0).r : 0u;
     if (g.uTexelParams.y > 0.5 && g.uClipParams.y < 0.5 && texelsAt(worldPos, N, nSample.w, viewDepth, gathered, confidence)) {
         outIncident.rgb = mix(outIncident.rgb, gathered, confidence);
         texelFound = true;

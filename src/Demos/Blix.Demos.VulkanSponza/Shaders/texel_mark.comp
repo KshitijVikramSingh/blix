@@ -22,6 +22,7 @@ layout(set = 0, binding = 0) uniform TexelMark {
                         // filter list's capacity
     vec4 uTexelLevels;  // x levels, y a pixel's width at unit depth, z / w the pixels a texel should span in sun / in shade
     vec4 uTexelSun;     // xyz the direction the sun travels (texelLevelFor's sunlit)
+    vec4 uLightmap;     // --lightmap: x 1 when the atlas's texels are on (texel.glsl), yz the atlas size, w its first record
     mat4 uTexelCascadeVP[3];
 } u;
 
@@ -45,6 +46,10 @@ layout(std430, set = 0, binding = 10) readonly buffer TexelMoment { float texelM
 // The texels the image reads this frame, for texel_filter.comp: [parity] counts, then the list (uNoise.w long).
 layout(std430, set = 0, binding = 11) buffer TexelFilterList { uint texelFilterList[]; };
 
+// --lightmap: the pre-pass's packed atlas texel, and the atlas's map from texel to record (texel.glsl).
+layout(set = 0, binding = 13) uniform usampler2D uLightmapTexel;
+layout(std430, set = 0, binding = 14) readonly buffer LightmapIndexMap { uint lightmapIndexMap[]; };
+#define TEXEL_INDEX_MAP(i) lightmapIndexMap[i]
 #define TEXEL_HASH(i) texelHash[i]
 #define TEXEL_POSITION(i) texels[2 * (i)]
 #define TEXEL_NORMAL(i) texels[2 * (i) + 1]
@@ -115,7 +120,18 @@ void main() {
     float viewDepth = abs(view.z / view.w);
     int finest = int(floor(texelLevelFor(viewDepth, u.uTexelLevels, g.spacing, texelSunlit(world, n))));
     int coarsest = min(finest + 1, int(u.uTexelLevels.x) - 1);
+    // Lightmap texels: the four the pixel's atlas texel reads, once (the atlas has no levels; its mips are a later
+    // question). A pixel without one (a surface the atlas leaves out) marks the hashed texels as without a lightmap.
+    vec2 atlasTexel = vec2(0.0);
+    bool lightmap = u.uLightmap.x > 0.5 && texelLightmapUnpack(texelFetch(uLightmapTexel, at, 0).r, atlasTexel);
+    if (lightmap) coarsest = finest;
     for (int level = finest; level <= coarsest; ++level) {
+    if (lightmap) {
+        int lm[4];
+        float lw[4];
+        texelsAroundLightmap(atlasTexel, n, ivec2(u.uLightmap.yz), lm, lw);
+        for (int i = 0; i < TEXEL_CANDIDATES; ++i) { ids[i] = i < 4 ? lm[i] : -1; weights[i] = i < 4 ? lw[i] : 0.0; }
+    } else
     texelsAround(texelLevelGrid(g, uint(level)), world, n, nSample.w, ids, weights);
     for (int i = 0; i < TEXEL_CANDIDATES; ++i) {
         if (ids[i] < 0) continue;

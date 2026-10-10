@@ -484,6 +484,7 @@ internal sealed partial class SponzaLoop
             surfaceKeyHandle = graph.ColorTarget("surface-key", TextureFormat.R32Uint, fullSize);
             velocityHandle = graph.ColorTarget("velocity", TextureFormat.Rg16F, fullSize);
             if (MotionTarget) motionHandle = graph.ColorTarget("world-motion", TextureFormat.Rgba16F, fullSize);
+            if (lightmapEnabled) lightmapTexelHandle = graph.ColorTarget("lightmap-texel", TextureFormat.R32Uint, fullSize);
         }
         var prepassBuilder = graph.GraphicsPass("depth-prepass")
             .Target(prepassNormalHandle, LoadOp.Clear, StoreOp.Store)
@@ -494,6 +495,7 @@ internal sealed partial class SponzaLoop
             prepassBuilder = prepassBuilder.Target(surfaceKeyHandle, LoadOp.Clear, StoreOp.Store)
                 .Target(velocityHandle, LoadOp.Clear, StoreOp.Store);
             if (MotionTarget) prepassBuilder = prepassBuilder.Target(motionHandle, LoadOp.Clear, StoreOp.Store);
+            if (lightmapEnabled) prepassBuilder = prepassBuilder.Target(lightmapTexelHandle, LoadOp.Clear, StoreOp.Store);
         }
         // Same rule as the depth: at one sample the target IS what a reader wants, and asking for
         // a resolve anyway is invalid.
@@ -531,6 +533,7 @@ internal sealed partial class SponzaLoop
             lateBuilder = lateBuilder.Target(surfaceKeyHandle, LoadOp.Load, StoreOp.Store)
                 .Target(velocityHandle, LoadOp.Load, StoreOp.Store);
             if (MotionTarget) lateBuilder = lateBuilder.Target(motionHandle, LoadOp.Load, StoreOp.Store);
+            if (lightmapEnabled) lateBuilder = lateBuilder.Target(lightmapTexelHandle, LoadOp.Load, StoreOp.Store);
         }
         if (MsaaSamples > 1) lateBuilder = lateBuilder.ResolveColor(prepassNormalResolveHandle).ResolveDepth(depthResolveHandle);
         latePrepassHandle = lateBuilder.Handle;
@@ -605,6 +608,7 @@ internal sealed partial class SponzaLoop
         {
             var markBuilder = graph.ComputePass("texel-mark").Read(SampleableSceneDepth).Read(SampleablePrepassNormal);
             for (var c = 0; c < CascadeCount; c++) markBuilder = markBuilder.Read(cascadeHandles[c]);
+            markBuilder = markBuilder.Read(lightmapEnabled ? lightmapTexelHandle : surfaceKeyHandle);
             texelMarkPassHandle = markBuilder.Shader(texelMarkInterface).Handle;
         }
         referenceInterface = Reflect("reference_trace.comp");
@@ -629,6 +633,7 @@ internal sealed partial class SponzaLoop
                 .Read(SampleablePrepassNormal);
             // The cascades: the texel level rule asks whether a pixel has direct sun (texelSunlit).
             for (var c = 0; c < CascadeCount; c++) incidentBuilder = incidentBuilder.Read(cascadeHandles[c]);
+            incidentBuilder = incidentBuilder.Read(lightmapEnabled ? lightmapTexelHandle : surfaceKeyHandle);
             incidentPassHandle = incidentBuilder.Shader(incidentClipmapInterface).Handle;
         }
 
@@ -1189,5 +1194,7 @@ internal sealed partial class SponzaLoop
 
     // The pre-pass's targets: the normal, and under single sampling the surface key, the velocity and the world motion
     // (stage 4e).
-    private BlendState[] PrepassBlends() => Enumerable.Repeat(BlendState.Disabled, !SurfaceTargets ? 1 : MotionTarget ? 4 : 3).ToArray();
+    // One per pre-pass colour target: normal; surface key and velocity; world motion; and with --lightmap the lightmap
+    // texel (a fifth the pipelines did not count at first: nothing was written to it).
+    private BlendState[] PrepassBlends() => Enumerable.Repeat(BlendState.Disabled, !SurfaceTargets ? 1 : (MotionTarget ? 4 : 3) + (lightmapEnabled ? 1 : 0)).ToArray();
 }

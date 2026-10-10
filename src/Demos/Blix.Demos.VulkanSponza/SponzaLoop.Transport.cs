@@ -780,14 +780,23 @@ internal sealed partial class SponzaLoop
             UploadCookedPatches(pos, nrm, incident, openness, transportSpacing);
             UploadCookedGuides(guides);
         });
+        // --lightmap: the lightmap atlas's texels serve the surfaces in the atlas (SponzaLoop.Lightmap.cs), and the hashed
+        // texels everything else (the foliage the cook leaves out). Null when the atlas asks for more than the budget:
+        // the hashed texels then serve every surface.
+        var lightmapBake = lightmapEnabled && transportTexels && lightmapSources.Count > 0 ? BakeLightmapTexels() : null;
         TexelBake? texelBake;
         if (cached?.Texels is { } cachedTexels)
         {
-            OnMain(() => UploadTexels(cachedTexels));
             texelBake = cachedTexels;
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] texels: {cachedTexels.Count:N0} from the cache."));
         }
-        else texelBake = CookTexels(scene, Tri, (i, t) => (surfaces[data.RowOf(i, t)] >> 24) < 255u);
+        else texelBake = CookTexels(scene, Tri, (i, t) =>
+        {
+            var row = data.RowOf(i, t);
+            return (surfaces[row] >> 24) < 255u || (lightmapBake is not null && rayPlacementLightmapped[(int)data.RowPlacements[row]]);
+        });
+        if (texelBake is { } hashed)
+            OnMain(() => { if (lightmapBake is { } atlas) UploadLightmapTexels(hashed, atlas); else UploadTexels(hashed); });
         if (transportGpu && (cached is null || (transportTexels && cached.Texels is null)))
             SaveTransportCache(cacheKey, new TransportCache
             {

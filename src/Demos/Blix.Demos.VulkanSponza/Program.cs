@@ -212,6 +212,8 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // The interpolated world normal, written by the depth pre-pass. What the incident field used
     // to infer from the depth buffer, and could not for foliage, two-sided cloth or silhouettes.
     private GraphResourceHandle prepassNormalHandle;
+    // --lightmap: each pixel's lightmap atlas texel, packed (depth_prepass.frag, texel.glsl texelLightmapUnpack).
+    private GraphResourceHandle lightmapTexelHandle;
     private GraphResourceHandle prepassNormalResolveHandle;
     /// <summary>The normal target a reader should sample: resolved under MSAA, direct at one sample.</summary>
     // Stage 4e: the pre-pass's surface identity and motion. SurfaceKey (R32Uint): the surface each pixel shows (the
@@ -227,7 +229,8 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // Only screen probes (and --surface-check) read world motion; elsewhere the full-resolution Rgba16F target was
     // written by both pre-passes and loaded again by the late one for nothing. The shaders still write it: with no
     // attachment there the writes are dropped, as under MSAA.
-    private bool MotionTarget => SurfaceTargets && (screenProbesEnabled || surfaceCheck);
+    // With --lightmap as well: the lightmap texel target follows the motion target at location 4, so it is on too.
+    private bool MotionTarget => SurfaceTargets && (screenProbesEnabled || surfaceCheck || lightmapEnabled);
     private bool SurfaceTargets => MsaaSamples == 1;
     // The surface-key target as the previous frame left it (copied at the end of each frame), and TAA's per-pixel
     // accumulated count, ping-ponged with its colour (R32Uint: an integer, read at the nearest pixel).

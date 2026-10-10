@@ -25,6 +25,10 @@ layout(location = 9) in vec3 vWorldMotion;
 layout(location = 1) out uint outSurfaceKey;
 layout(location = 2) out vec2 outVelocity;
 layout(location = 3) out vec4 outMotion;
+// --lightmap: the atlas texel, packed as texel.glsl's texelLightmapUnpack reads it: u and v in eighths of a texel, 16
+// bits each (an atlas up to 8192 wide); 0 where the primitive has no lightmap (its vertices' texel is 0).
+layout(location = 10) in vec2 vLightmapTexel;
+layout(location = 4) out uint outLightmapTexel;
 
 void main() {
     // Match lit.frag's back-face convention; depth alone cannot recover the facing hemisphere of a
@@ -41,4 +45,6 @@ void main() {
     outSurfaceKey = vSurfaceKey;
     outVelocity = (vClipNow.xy / vClipNow.w - vClipPrev.xy / vClipPrev.w) * 0.5;
     outMotion = vec4(vWorldMotion, 0.0);
+    uvec2 eighths = uvec2(clamp(vLightmapTexel * 8.0, vec2(0.0), vec2(65535.0)));
+    outLightmapTexel = dot(vLightmapTexel, vLightmapTexel) > 1e-6 ? (eighths.x | (eighths.y << 16)) : 0u;
 }
