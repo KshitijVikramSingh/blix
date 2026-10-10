@@ -41,19 +41,25 @@ internal sealed partial class SponzaLoop
         sb.Append(CultureInfo.InvariantCulture, $"instances {traced.Instances.Count};");
         using (var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
         {
+            // One buffer, reused: a stackalloc inside these loops is not released until the method returns, and over
+            // Sponza's instances and sampled positions it overflowed the background cook's stack.
+            var buffer = new float[18];
             foreach (var inst in traced.Instances)
             {
                 var m = inst.World;
-                Span<float> world = stackalloc float[16] { m.M11, m.M12, m.M13, m.M14, m.M21, m.M22, m.M23, m.M24, m.M31, m.M32, m.M33, m.M34, m.M41, m.M42, m.M43, m.M44 };
-                sha.AppendData(MemoryMarshal.AsBytes(world));
-                Span<int> counts = stackalloc int[2] { inst.Mesh.Indices.Length, inst.Mesh.Positions.Length };
-                sha.AppendData(MemoryMarshal.AsBytes(counts));
+                buffer[0] = m.M11; buffer[1] = m.M12; buffer[2] = m.M13; buffer[3] = m.M14;
+                buffer[4] = m.M21; buffer[5] = m.M22; buffer[6] = m.M23; buffer[7] = m.M24;
+                buffer[8] = m.M31; buffer[9] = m.M32; buffer[10] = m.M33; buffer[11] = m.M34;
+                buffer[12] = m.M41; buffer[13] = m.M42; buffer[14] = m.M43; buffer[15] = m.M44;
+                buffer[16] = BitConverter.Int32BitsToSingle(inst.Mesh.Indices.Length);
+                buffer[17] = BitConverter.Int32BitsToSingle(inst.Mesh.Positions.Length);
+                sha.AppendData(MemoryMarshal.AsBytes(buffer.AsSpan()));
                 var positions = inst.Mesh.Positions;
                 for (var i = 0; i < positions.Length; i += Math.Max(1, positions.Length / 16))
                 {
                     var p = positions[i];
-                    Span<float> xyz = stackalloc float[3] { p.X, p.Y, p.Z };
-                    sha.AppendData(MemoryMarshal.AsBytes(xyz));
+                    buffer[0] = p.X; buffer[1] = p.Y; buffer[2] = p.Z;
+                    sha.AppendData(MemoryMarshal.AsBytes(buffer.AsSpan(0, 3)));
                 }
             }
             sha.AppendData(MemoryMarshal.AsBytes(surfaces.AsSpan()));

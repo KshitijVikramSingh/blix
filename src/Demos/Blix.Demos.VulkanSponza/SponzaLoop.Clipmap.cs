@@ -74,7 +74,7 @@ internal sealed partial class SponzaLoop
                 new ShaderTextureBinding("uClipmapIrradiance", clipmapIrradiance),
                 new ShaderTextureBinding("uClipmapDepth", clipmapDepth),
                 new ShaderTextureBinding("uIrradiance", irradianceCubeTexture),
-            },
+            }.Concat(TexelCascadeTextures()).ToArray(),
             pushConstants: null,
             uniforms: new ShaderUniform[]
             {
@@ -97,7 +97,7 @@ internal sealed partial class SponzaLoop
                 new("uReference", new Vector4Uniform(reference.Params)),
                 new("uTexelDebug", new Vector4Uniform(new Vector4(texelFrame, 0f, 0f, 0f))),
                 new("uTexelLevels", new Vector4Uniform(TexelLevelsUniform(frameHeight))),
-            },
+            }.Concat(TexelSunUniforms()).ToArray(),
             buffers: new[] { new ShaderBufferBinding("ClipmapState", clipmapState), new ShaderBufferBinding("ScreenProbeTiles", screen.Tiles), new ShaderBufferBinding("ScreenProbes", screen.Probes), new ShaderBufferBinding("SurfaceIndex", surfaceIndex) }.Concat(texel.Buffers).Append(reference.Buffer).ToArray()));
     }
 

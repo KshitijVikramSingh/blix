@@ -20,11 +20,15 @@ layout(set = 0, binding = 0) uniform TexelMark {
     vec4 uOffset;       // xy this frame's pixel within each stride block, z the texels' epoch (the patch light's)
     vec4 uNoise;        // texelSettled: x the most rays, y the standard error tolerated (relative), z its floor; w the
                         // filter list's capacity
-    vec4 uTexelLevels;  // x levels, y a pixel's width at unit depth, z the pixels a texel should span (texelLevelFor)
+    vec4 uTexelLevels;  // x levels, y a pixel's width at unit depth, z / w the pixels a texel should span in sun / in shade
+    vec4 uTexelSun;     // xyz the direction the sun travels (texelLevelFor's sunlit)
+    mat4 uTexelCascadeVP[3];
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
 layout(set = 0, binding = 2) uniform sampler2D uPrepassNormal;
+layout(set = 0, binding = 12) uniform sampler2D uTexelCascadeMaps[3];
+#include "shadow.glsl"
 layout(std430, set = 0, binding = 3) readonly buffer TexelHash { uvec4 texelHash[]; };
 layout(std430, set = 0, binding = 4) readonly buffer Texels { vec4 texels[]; };
 layout(std430, set = 0, binding = 5) readonly buffer TexelLight { vec4 texelLight[]; };
@@ -45,6 +49,18 @@ layout(std430, set = 0, binding = 11) buffer TexelFilterList { uint texelFilterL
 #define TEXEL_POSITION(i) texels[2 * (i)]
 #define TEXEL_NORMAL(i) texels[2 * (i) + 1]
 #include "texel.glsl"
+
+// The pixel's own direct sun, 0-1, for its texel level (texelLevelFor): facing away, or shadowed in the cascades, is
+// shade; past the cascades, sun (far, where coarse texels are all a pixel can hold anyway).
+float texelSunlit(vec3 world, vec3 n) {
+    vec3 toSun = -normalize(u.uTexelSun.xyz);
+    float ndotl = dot(n, toSun);
+    if (ndotl <= 0.0) return 0.0;
+    int cascade = -1;
+    float lit = blix_sun_shadow_cascaded_hard(uTexelCascadeMaps[0], uTexelCascadeMaps[1], uTexelCascadeMaps[2],
+        u.uTexelCascadeVP[0], u.uTexelCascadeVP[1], u.uTexelCascadeVP[2], world + n * 0.01, ndotl, cascade);
+    return cascade < 0 ? 1.0 : lit;
+}
 
 void main() {
     bool probe = u.uTarget.w > 0.5;
@@ -97,7 +113,7 @@ void main() {
     // The pixel's level and the next coarser (which fills in while it has few rays, and which it blends into across
     // depth: incident_clipmap.frag). Three levels tripled the lookups (+33 ms on Sponza) for no faster settling.
     float viewDepth = abs(view.z / view.w);
-    int finest = int(floor(texelLevelFor(viewDepth, u.uTexelLevels, g.spacing)));
+    int finest = int(floor(texelLevelFor(viewDepth, u.uTexelLevels, g.spacing, texelSunlit(world, n))));
     int coarsest = min(finest + 1, int(u.uTexelLevels.x) - 1);
     for (int level = finest; level <= coarsest; ++level) {
     texelsAround(texelLevelGrid(g, uint(level)), world, n, nSample.w, ids, weights);

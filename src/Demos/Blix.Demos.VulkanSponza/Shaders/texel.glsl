@@ -62,10 +62,13 @@ int texelFind(TexelGrid g, ivec3 cell, uint bin) {
     return -1;
 }
 
-// The level a pixel reads (fractional: it blends with the next coarser): the one whose texel spans about levels.z
-// pixels at viewDepth, from levels.y the pixel's width at unit depth; levels.x levels in all.
-float texelLevelFor(float viewDepth, vec4 levels, float finestSpacing) {
-    float want = levels.z * viewDepth * levels.y;
+// The level a pixel reads (fractional: it blends with the next coarser): the one whose texel spans about `pixels`
+// pixels at viewDepth, from levels.y the pixel's width at unit depth; levels.x levels in all. `sunlit` (0-1, the
+// pixel's own direct sun) picks between levels.w pixels in shade and levels.z in sun: in sun the direct light and its
+// shadows carry the detail; in shade the bounce light is all there is, and coarse texels there flattened the folds of
+// bounce-lit cloth into blocks (the user: "looses a lot of detail and becomes really choppy").
+float texelLevelFor(float viewDepth, vec4 levels, float finestSpacing, float sunlit) {
+    float want = mix(levels.w, levels.z, clamp(sunlit, 0.0, 1.0)) * viewDepth * levels.y;
     return clamp(log2(max(want / finestSpacing, 1e-6)), 0.0, levels.x - 1.0);
 }
 

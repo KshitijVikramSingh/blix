@@ -40,7 +40,9 @@ layout(set = 0, binding = 0) uniform IncidentClipmap {
     vec4 uTexelParams;   // x hash capacity, y 1 when on, z the rays at which a texel's answer is trusted whole, w 1:
                          // read the spatially filtered light (texel_gather.comp)
     vec4 uTexelDebug;    // x the texel frame (the debug view's stamp test)
-    vec4 uTexelLevels;   // x levels, y a pixel's width at unit depth, z the pixels a texel should span (texelLevelFor)
+    vec4 uTexelLevels;   // x levels, y a pixel's width at unit depth, z / w the pixels a texel should span in sun / in shade
+    vec4 uTexelSun;      // xyz the direction the sun travels (texelLevelFor's sunlit)
+    mat4 uTexelCascadeVP[3];
     vec4 uReference;     // the reference view (reference_trace.comp): x 1 when shown, yz its pixels (half the frame's);
                          // w 1: the texel debug view (--texel-debug: r the texels' confidence, g 1 where any was found,
                          // b 1 where the lookup found none)
@@ -48,6 +50,8 @@ layout(set = 0, binding = 0) uniform IncidentClipmap {
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
 layout(set = 0, binding = 2) uniform sampler2D uPrepassNormal;
+layout(set = 0, binding = 18) uniform sampler2D uTexelCascadeMaps[3];
+#include "shadow.glsl"
 layout(set = 0, binding = 3) uniform sampler2D uClipmapIrradiance;
 layout(set = 0, binding = 4) uniform sampler2D uClipmapDepth;
 layout(std430, set = 0, binding = 5) readonly buffer ClipmapState { uvec4 states[]; };
@@ -126,6 +130,18 @@ float debugStamped, debugLit;
 #define TEXEL_NORMAL(i) texels[2 * (i) + 1]
 #include "texel.glsl"
 
+// The pixel's own direct sun, 0-1, for its texel level (texelLevelFor): facing away, or shadowed in the cascades, is
+// shade; past the cascades, sun (far, where coarse texels are all a pixel can hold anyway).
+float texelSunlit(vec3 world, vec3 n) {
+    vec3 toSun = -normalize(g.uTexelSun.xyz);
+    float ndotl = dot(n, toSun);
+    if (ndotl <= 0.0) return 0.0;
+    int cascade = -1;
+    float lit = blix_sun_shadow_cascaded_hard(uTexelCascadeMaps[0], uTexelCascadeMaps[1], uTexelCascadeMaps[2],
+        g.uTexelCascadeVP[0], g.uTexelCascadeVP[1], g.uTexelCascadeVP[2], world + n * 0.01, ndotl, cascade);
+    return cascade < 0 ? 1.0 : lit;
+}
+
 // One level's texels: their irradiance, weighted by distance and area and by how many rays each has; confidence the
 // mean of those rays against the trust threshold. False where none of the eight has rays (foliage has no texels; a texel not
 // yet gathered has none), and the field above stands.
@@ -172,7 +188,7 @@ bool texelsAtLevel(vec3 worldPos, vec3 n, float faceBin, uint level, out vec3 ir
 // of its level), so a level changes smoothly across depth. A new view shows the coarse texels' light within frames
 // (there are few of them) and the fine ones fill in where they have rays.
 bool texelsAt(vec3 worldPos, vec3 n, float faceBin, float viewDepth, out vec3 irradiance, out float confidence) {
-    float levelWanted = texelLevelFor(viewDepth, g.uTexelLevels, g.uTexelGrid.w);
+    float levelWanted = texelLevelFor(viewDepth, g.uTexelLevels, g.uTexelGrid.w, texelSunlit(worldPos, n));
     int finest = int(floor(levelWanted));
     float fraction = levelWanted - float(finest);
     int coarsest = min(finest + 1, int(g.uTexelLevels.x) - 1);

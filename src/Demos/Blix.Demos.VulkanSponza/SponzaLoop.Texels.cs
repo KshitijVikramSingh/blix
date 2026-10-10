@@ -33,6 +33,9 @@ internal sealed partial class SponzaLoop
     // 24: at 8, at this window's resolution a texel of 5 cm still spanned 8 pixels out to ~10 m -- most of Sponza's
     // hall asked for the finest level, and the coarse ones added work instead of replacing it (settling slower, 88 ms).
     private float texelPixels = 24f;
+    // --texel-shade-pixels P: the same in shade (texelLevelFor) -- finer, since there the bounce light is all a surface
+    // shows.
+    private float texelShadePixels = 6f;
     // --texel-ablate N: drop parts of the gather to attribute its cost (texel_gather.comp, uSky.w).
     private int texelAblate;
     // The occlusion estimate's reach (texel_gather.comp): openness counts cosine rays that meet nothing within it. CPU,
@@ -102,6 +105,7 @@ internal sealed partial class SponzaLoop
         if (args.Int("texel-levels") is { } tl) texelLevels = Math.Clamp(tl, 1, 5);
         if (args.Int("texel-ablate") is { } ta) texelAblate = ta;
         if (args.Float("texel-pixels") is { } tp) texelPixels = Math.Max(0.5f, tp);
+        if (args.Float("texel-shade-pixels") is { } tsp) texelShadePixels = Math.Max(0.5f, tsp);
         if (args.Float("texel-occlusion-error") is { } toe) texelOcclusionError = Math.Max(1e-3f, toe);
         if (args.Float("texel-trust") is { } t) texelTrust = Math.Max(1f, t);
         // --lod-pixels E: the LOD error budget (0: full detail everywhere) -- the [Tune] field is not reachable from the
@@ -361,7 +365,21 @@ internal sealed partial class SponzaLoop
     // texel.glsl's texelLevelFor: levels, a pixel's width at unit depth (|M22| may carry a Y flip), the pixels a texel
     // should span.
     private Vector4 TexelLevelsUniform(int frameHeight) =>
-        new(texelLevels, 2f / (MathF.Abs(cameraProjection.M22) * Math.Max(1, frameHeight)), texelPixels, 0f);
+        new(texelLevels, 2f / (MathF.Abs(cameraProjection.M22) * Math.Max(1, frameHeight)), texelPixels, texelShadePixels);
+
+    // What the level rule's sunlit test reads (texel_mark.comp, incident_clipmap.frag): the sun, the cascades.
+    private IEnumerable<ShaderUniform> TexelSunUniforms() => new ShaderUniform[]
+    {
+        new("uTexelSun", new Vector4Uniform(new Vector4(sunDirection, 0f))),
+        new("uTexelCascadeVP", new Matrix4x4ArrayUniform(cascadeViewProj)),
+    };
+
+    private IEnumerable<ShaderTextureBinding> TexelCascadeTextures() => new[]
+    {
+        new ShaderTextureBinding("uTexelCascadeMaps[0]", graph.GetDepthTexture(cascadeHandles[0])),
+        new ShaderTextureBinding("uTexelCascadeMaps[1]", graph.GetDepthTexture(cascadeHandles[1])),
+        new ShaderTextureBinding("uTexelCascadeMaps[2]", graph.GetDepthTexture(cascadeHandles[2])),
+    };
 
     // A buffer a frame in flight may still read: destroyed four frames on (FollowSun).
     private void RetireGpuBuffer(GpuBufferHandle buffer) => retiredBuffers.Add((buffer, texelFrame));
@@ -415,7 +433,7 @@ internal sealed partial class SponzaLoop
             {
                 new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
                 new ShaderTextureBinding("uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
-            },
+            }.Concat(TexelCascadeTextures()).ToArray(),
             Buffers: new[]
             {
                 new ShaderBufferBinding("TexelHash", texelHashBuffer),
@@ -441,12 +459,12 @@ internal sealed partial class SponzaLoop
                 new("uTexelLevels", new Vector4Uniform(TexelLevelsUniform(height))),
                     new("uTexelGrid", new Vector4Uniform(texelGrid)),
                     new("uTexelParams", new Vector4Uniform(texelParams)),
-                },
+                }.Concat(TexelSunUniforms()).ToArray(),
                 new[]
                 {
                     new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
                     new ShaderTextureBinding("uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
-                },
+                }.Concat(TexelCascadeTextures()).ToArray(),
                 Buffers: new[]
                 {
                     new ShaderBufferBinding("TexelHash", texelHashBuffer),

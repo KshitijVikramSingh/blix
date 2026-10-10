@@ -602,8 +602,11 @@ internal sealed partial class SponzaLoop
             screenProbePassHandles[stage] = builder.Shader(screenProbeInterfaces[stage]).Handle;
         }
         texelMarkInterface = Reflect("texel_mark.comp");
-        texelMarkPassHandle = graph.ComputePass("texel-mark").Shader(texelMarkInterface)
-            .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
+        {
+            var markBuilder = graph.ComputePass("texel-mark").Read(SampleableSceneDepth).Read(SampleablePrepassNormal);
+            for (var c = 0; c < CascadeCount; c++) markBuilder = markBuilder.Read(cascadeHandles[c]);
+            texelMarkPassHandle = markBuilder.Shader(texelMarkInterface).Handle;
+        }
         referenceInterface = Reflect("reference_trace.comp");
         referencePassHandle = graph.ComputePass("reference-trace").Shader(referenceInterface)
             .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
@@ -618,13 +621,16 @@ internal sealed partial class SponzaLoop
         screenProbeFilterInterface = Reflect("screen_probe_filter.comp");
         screenProbeFilterPassHandle = graph.ComputePass("screen-probe-filter").Shader(screenProbeFilterInterface).Handle;
 
-        incidentPassHandle = graph.GraphicsPass("incident-light")
-            .Target(incidentHandle, LoadOp.Clear, StoreOp.Store)
-            .Target(incidentGradientHandle, LoadOp.Clear, StoreOp.Store)
-            .Read(SampleableSceneDepth)
-            .Read(SampleablePrepassNormal)
-            .Shader(incidentClipmapInterface)
-            .Handle;
+        {
+            var incidentBuilder = graph.GraphicsPass("incident-light")
+                .Target(incidentHandle, LoadOp.Clear, StoreOp.Store)
+                .Target(incidentGradientHandle, LoadOp.Clear, StoreOp.Store)
+                .Read(SampleableSceneDepth)
+                .Read(SampleablePrepassNormal);
+            // The cascades: the texel level rule asks whether a pixel has direct sun (texelSunlit).
+            for (var c = 0; c < CascadeCount; c++) incidentBuilder = incidentBuilder.Read(cascadeHandles[c]);
+            incidentPassHandle = incidentBuilder.Shader(incidentClipmapInterface).Handle;
+        }
 
 
         // At one sample there is nothing to resolve, and asking for a resolve anyway is invalid —
