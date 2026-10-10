@@ -136,6 +136,20 @@ if [[ -f "$KLOPPENHEIM" ]]; then
     dotnet "$COOK" probe "$KLOPPENHEIM" --yaw=-31.43 --env-face=1024 --out "$COOKED"
 fi
 
+# <b>The demo's lead sky since stage 5a: kloppenheim turned so its sun runs down the hall.</b> Yaw 90 (along +X,
+# the hall's length) at its own elevation, 74.5 -- only a yaw keeps the photographed horizon level. Under the old
+# lead (Pizzo Pernice, elevation 53) the sun barely cleared the walls and the default view was nearly all shade.
+# --yaw=-143.93: the cook's yaw turns the sun's azimuth the other way (-31.43 put it at -22.5; this, at 90.0).
+# The cook names its output after its input, so the source is copied under the probe's name first.
+if [[ -f "$KLOPPENHEIM" ]]; then
+    echo "── probe  (kloppenheim_05_4k.hdr as kloppenheim_05_4k_sun90, --yaw=-143.93)"
+    SUN90="$(mktemp -d)/kloppenheim_05_4k_sun90.hdr"
+    cp "$KLOPPENHEIM" "$SUN90"
+    dotnet "$COOK" probe "$SUN90" --yaw=-143.93 --env-face=1024
+    mv "${SUN90%.hdr}.blixprobe" "$COOKED/textures/"
+    rm -rf "$(dirname "$SUN90")"
+fi
+
 # <b>The sky-visibility volume, which no script cooked until now.</b> It was baked by hand once and
 # the invocation survived only in a shell history — so nothing re-made it when the bakers changed,
 # and finding out how it had been produced meant matching the shipped dimensions against CookSky's

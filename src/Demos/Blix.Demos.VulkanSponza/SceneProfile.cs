@@ -52,11 +52,13 @@ internal sealed record SceneProfile(
             new("trees", Foliage: true),
         },
         ProbeDirectory: "textures",
-        // Pizzo Pernice is the standard first choice; its detected sun direction and irradiance
-        // independently round-trip to the source HDR within the recorded tolerance.
+        // kloppenheim turned so its sun runs down the hall (yaw 90, elevation 74.5; tools/cook-sponza-modern.sh): under
+        // Pizzo Pernice's (elevation 53) the sun barely clears the hall's walls and the default view was, in the
+        // user's words, "a black mush" -- next to no sunlit floor to bounce from. Pizzo Pernice next: its detected
+        // sun direction and irradiance independently round-trip to the source HDR within the recorded tolerance.
         ProbeCandidates: new[]
         {
-            "pizzo_pernice_puresky_4k.blixprobe", "kloppenheim_05_4k.blixprobe", "autumn_field_4k.blixprobe",
+            "kloppenheim_05_4k_sun90.blixprobe", "pizzo_pernice_puresky_4k.blixprobe", "kloppenheim_05_4k.blixprobe", "autumn_field_4k.blixprobe",
             "rogland_overcast_4k.blixprobe", "sky_hdr.blixprobe",
         },
         FarPlane: 200f,
