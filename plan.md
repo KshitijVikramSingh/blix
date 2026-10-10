@@ -743,6 +743,55 @@ F. *The frame audit* (opened 2026-10-07: "a lot of pure performance on the table
      pass, settle time after a move; (2) texel resolution by need (screen footprint, a coarse-to-fine hierarchy) so a
      view settles in frames and distant surfaces stop costing 5 cm work; (3) cleanup -- screen-probe hookup, the CPU
      diagnostics in SponzaLoop.Transport.cs; (4) sub-texel contact (corner lines) and the remaining noise.
+   LIGHTMAPS (branch bistro; `--lightmap --transport-texels`): `blix cook lightmap` unwraps with xatlas into one scene
+     atlas (`--density "curtain=2,trees=off,ivy=off"`: foliage left out, its 5.5-triangle charts are no smaller than
+     their gutter); the atlas's texels are LEVEL 0 of the surfaces in it, the hashed cells their 10/20 cm levels and
+     every level of what it leaves out. The light is BAKED (SponzaLoop.LightBake.cs: every live texel to 512 rays,
+     ~17 min, saved beside the transport cache by sun) -- gathered as the image read them, views arrived as a
+     patchwork that painted in over minutes. LOD 0's normal and tangent ride the atlas (lightmap_frame.glsl), so a
+     coarse LOD moves the silhouette, not the light. Buried texels: 4 of 16 rays meeting a back face (a baker's
+     backface tolerance; the hashed cook's 15 of 16 left black squares along every joint).
+     Open, in order:
+     (1) GLASS is invisible to rays (coverage 0, ray_surface_bake.comp) -- a stopgap: as a solid it sealed every
+         glazed window (their insides rendered black, nothing lit through a pane). The real thing, decided with the
+         user: TRANSMITTANCE in the ray scene as a mechanism beside coverage (Blix.Geometry and ray_query.glsl): a row
+         carries an rgb transmittance (0 = opaque); traversal passes transmissive triangles, `Closest` returns the
+         first opaque hit with the product of the transmittances in front of it, a shadow query the product or 0;
+         CPU/GPU parity tests extended. Sponza's policy: KHR_materials_transmission's factor x base-colour tint x
+         (1 - ~0.04 Fresnel a face); callers multiply what comes through (the gather's hit and sky, sun rays, the
+         cook's sky and sun visibility). Left out for now: light reflected off glass, angle-dependent Fresnel. Check
+         what geometry stands behind Sponza's panes first: with no room behind, rays through a pane find the sky.
+     (2) Frame cost: ~57-64 ms at the user's camera (2880x1620, Debug) against ~40 ms for probes alone. The incident
+         pass's per-pixel texel lookups (two levels, hash probes, at full Retina resolution) are the suspect; its timer
+         reads ~0, so prove it by ablation. Then one level outside a narrow blend band, and the pass at half
+         resolution. Fog, GTAO and the incident gradient measured at 0-4 ms each.
+     (3) Retire what the baked texels replaced, from the frame and not only behind a switch (the user: "a lot of perf
+         goes towards techniques we aren't really using anymore") -- which ones is the user's call.
+     (4) The curtains' back sides light oddly (the user, headed); winding-vs-vertex-normal mismatch refuted (0.9%).
+   SURFACE TRANSFER ATLAS (next, decided with the user 2026-10-11): the atlas carries TRANSFER, the probes carry LIGHT.
+     Why: the texels as a second copy of the light cost a 20-min bake per sun, 1.6 GB of light state, a patchwork while
+     young and a per-pixel lookup the frame cannot afford; the clipmap is cheap, settles in ~0.5 s and follows the sun,
+     but leaks into enclosed spaces, misses contact shadows and saw-tooths at corners (long-standing). What the clipmap
+     lacks is geometry; what the atlas holds is geometry -- static, so cooked once and never per sun.
+     Per atlas texel (a small volume element around the surface), cooked from ray-traced captures, light-independent:
+       (a) WEIGHTS over its nearby probes (~8, 8 bits each) replacing trilinear x facing x Chebyshev: a probe behind a
+           wall gets 0 (no leak), weights vary continuously over the surface (no per-cell saw-tooth);
+       (b) NEAR-FIELD visibility (bent normal + aperture, or a few directions): the contact shadow 0.5 m probes miss;
+       (c) LOD 0's frame (already there).
+     Runtime: irradiance = sum_k w_k(texel) . probe_k(LOD 0 normal) x near-field; one atlas fetch beside the probe
+     reads already made. A sun change moves the probes in frames and every surface follows; nothing re-bakes.
+     The weights are FITTED, not ruled: per texel a small non-negative least squares makes sum_k w_k . probe_k reproduce
+     the texel's traced irradiance over several lightings (sun angles, sky only) -- it absorbs leaks, contact and the
+     energy question at once. Probes may be baked per sun as well (static scene: tens of thousands, not millions).
+     Experiments before building: EXPRESSIVENESS and GENERALISATION together -- texels within level 0 of one camera,
+     baked under several suns with the probes settled for each; fit on all but one sun, judge on the held-out one,
+     against today's probe blend. Exact visibility (--clipmap-exact-visibility) and relocation (--clipmap-relocate)
+     are the measured alternatives: traced visibility takes the thin-wall leak 0.06-0.10 -> 0.0000 and Cornell error
+     ~0.17 -> ~0.11, at ~5% Cornell energy lost (unexplained); relocation alone ~nothing; DDGI view bias alone hurts
+     Cornell (its camera looks in through the open front). Cornell error is noisy run to run (0.044 and 0.170 baseline).
+     Ray queries, cook and runtime, go through RayQueryScene (CPU) and ray_query.glsl (GPU) ONLY: the user's hardware
+     BVH / Metal acceleration-structure spike lands beneath those two in a couple of days. Nothing here calls a
+     traversal any other way, and cook-time capture is written so a GPU (hardware) trace can replace the CPU one.
 
 Known instrument gap: a Sponza `--shot` raises 9 validation errors on `main` as well (a storage image
 copied to a buffer without transfer-source usage, in the shot's readback). Not this arc's, and not fixed.
