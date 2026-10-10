@@ -940,6 +940,7 @@ internal sealed partial class SponzaLoop
             WriteClipmapCheck();
             WriteScreenProbeCheck();
             WriteTexelCensus();
+            WriteTexelInspect();
             WriteRayView(Path.ChangeExtension(path, null));
             if (probeReference)
             {

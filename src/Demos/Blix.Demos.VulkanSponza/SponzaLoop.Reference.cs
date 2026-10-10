@@ -50,6 +50,9 @@ internal sealed partial class SponzaLoop
         if (args.Int("lightmap-backface") is { } bf) lightmapBackface = Math.Clamp(bf, 1, 16);
         // --no-lightmap-frames: the drawn LOD's own normals, not LOD 0's through the atlas (lightmap_frame.glsl), for A/B.
         lightmapNoFrames = args.Flag("no-lightmap-frames");
+        // --texel-inspect [N | x,y;...]: at the shot, what the darkest-against-their-surroundings pixels (or these, in
+        // frame fractions) read from the atlas (SponzaLoop.TexelInspect.cs).
+        texelInspect = args.String("texel-inspect");
         // --transfer-dump <file>: the surface transfer atlas's fit data at this camera and sun (SponzaLoop.TransferFit.cs).
         transferDumpPath = args.String("transfer-dump");
         if (args.Int("texel-gtao") is { } tg) texelGtao = tg != 0;
