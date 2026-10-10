@@ -3,6 +3,7 @@ using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using Blix.Geometry;
 
 namespace Blix.Demos.VulkanSponza;
 
@@ -15,7 +16,7 @@ namespace Blix.Demos.VulkanSponza;
 internal sealed partial class SponzaLoop
 {
     // Bump when the cook's output changes meaning (a new sampling rule, a new field).
-    private const int TransportCacheVersion = 1;
+    private const int TransportCacheVersion = 2;
     private string? sceneAssetsRoot;
 
     internal sealed class TransportCache
@@ -30,10 +31,34 @@ internal sealed partial class SponzaLoop
         public TexelBake? Texels;
     }
 
-    // Everything the cook reads: the scene's files (path, size, time), the settings it is cooked under, the version.
-    private string TransportCacheKey()
+    // Everything the cook reads: what is TRACED -- every instance's transform, triangle and vertex counts and sampled
+    // positions, and the surface table (albedo, alpha coverage) in full -- the scene's files (path, size, time), the
+    // settings it is cooked under, the version. Hashing the traced scene rather than listing the flags that shape it
+    // (--ray-lod-error, --no-foliage, any to come) keeps an A/B from reading another configuration's cook.
+    private string TransportCacheKey(RayQueryScene traced, uint[] surfaces)
     {
         var sb = new StringBuilder();
+        sb.Append(CultureInfo.InvariantCulture, $"instances {traced.Instances.Count};");
+        using (var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
+        {
+            foreach (var inst in traced.Instances)
+            {
+                var m = inst.World;
+                Span<float> world = stackalloc float[16] { m.M11, m.M12, m.M13, m.M14, m.M21, m.M22, m.M23, m.M24, m.M31, m.M32, m.M33, m.M34, m.M41, m.M42, m.M43, m.M44 };
+                sha.AppendData(MemoryMarshal.AsBytes(world));
+                Span<int> counts = stackalloc int[2] { inst.Mesh.Indices.Length, inst.Mesh.Positions.Length };
+                sha.AppendData(MemoryMarshal.AsBytes(counts));
+                var positions = inst.Mesh.Positions;
+                for (var i = 0; i < positions.Length; i += Math.Max(1, positions.Length / 16))
+                {
+                    var p = positions[i];
+                    Span<float> xyz = stackalloc float[3] { p.X, p.Y, p.Z };
+                    sha.AppendData(MemoryMarshal.AsBytes(xyz));
+                }
+            }
+            sha.AppendData(MemoryMarshal.AsBytes(surfaces.AsSpan()));
+            sb.Append(Convert.ToHexString(sha.GetHashAndReset())).Append(';');
+        }
         sb.Append(CultureInfo.InvariantCulture, $"v{TransportCacheVersion};{scene.Name};");
         sb.Append(CultureInfo.InvariantCulture, $"spacing {transportSpacing};rays {transportRays};vis {transportVisRes};sunlet {transportSunlet};charts {transportCharts};");
         sb.Append(CultureInfo.InvariantCulture, $"texels {transportTexels};texel {texelSpacing};levels {texelLevels};reach {TexelOpenReach};");

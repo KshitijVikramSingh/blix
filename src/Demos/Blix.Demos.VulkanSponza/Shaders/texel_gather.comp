@@ -20,7 +20,9 @@ layout(set = 0, binding = 0) uniform TexelGather {
     vec4 uTexelParams;    // x hash capacity, y list capacity (the budget), z target rays, w the frame
     vec4 uSunDirection;   // xyz the direction the sun travels
     vec4 uSunIrradiance;  // rgb
-    vec4 uSky;            // x sky strength, y the sky's mip for a ray, z the texels' epoch
+    vec4 uSky;            // x sky strength, y the sky's mip for a ray, z the texels' epoch, w a cost-attribution switch
+                          // (--texel-ablate): 1 no shadow ray past the cascades, 2 no cooked light at hits, 4 no guide,
+                          // 8 no trace at all (every ray the sky)
     mat4 uCascadeVP[3];
     vec4 uOpen;           // x the occlusion estimate's reach (m), y its relative error (the blend's), z 1: blend at all
     vec4 uCookedGrid;
@@ -137,6 +139,8 @@ void main() {
     // Half the rays cosine-weighted (a stratified disc, radius sqrt of the ray's band, lifted to the hemisphere), half
     // from the guide; without a patch nearby all cosine.
     const uint halfRays = uint(RAYS) / 2u;
+    int ablate = int(u.uSky.w + 0.5);
+    if ((ablate & 4) != 0) guide = -1;
     bool guided = guide >= 0 && ray >= halfRays;
     float cosineCount = guide >= 0 ? float(halfRays) : float(RAYS);
     uint stratum = guide >= 0 ? ray % halfRays : ray;
@@ -159,7 +163,7 @@ void main() {
 
     vec3 radiance;
     BlixRayHit hit;
-    bool hitSomething = blix_traceClosest(origin, dir, 0.0, uintBitsToFloat(0x7F800000u), seed, hit);
+    bool hitSomething = (ablate & 8) == 0 && blix_traceClosest(origin, dir, 0.0, uintBitsToFloat(0x7F800000u), seed, hit);
     // Openness, from the cosine-distributed rays only (-1: a guided ray says nothing about it).
     sOpen[ray] = guided ? -1.0 : (hitSomething && hit.t < u.uOpen.x ? 0.0 : 1.0);
     if (hitSomething) {
@@ -173,11 +177,11 @@ void main() {
             float lit = blix_sun_shadow_cascaded_hard(
                 uCascadeShadowMaps[0], uCascadeShadowMaps[1], uCascadeShadowMaps[2],
                 u.uCascadeVP[0], u.uCascadeVP[1], u.uCascadeVP[2], hitPos + hn * 0.01, ndotl, cascade);
-            if (cascade < 0) lit = blix_traceAny(hitPos + hn * 0.01, toSun, 0.0, uintBitsToFloat(0x7F800000u), blix_pcg(seed ^ 0x5bd1e995u)) ? 0.0 : 1.0;
+            if (cascade < 0) lit = (ablate & 1) != 0 ? 0.0 : blix_traceAny(hitPos + hn * 0.01, toSun, 0.0, uintBitsToFloat(0x7F800000u), blix_pcg(seed ^ 0x5bd1e995u)) ? 0.0 : 1.0;
             sun = ndotl * lit;
         }
         bool found;
-        vec3 indirect = cookedIndirect(hitPos, hn, found);
+        vec3 indirect = (ablate & 2) != 0 ? vec3(0.0) : cookedIndirect(hitPos, hn, found);
         radiance = hit.albedo * (u.uSunIrradiance.rgb * sun + indirect) / PI;
     } else {
         radiance = textureLod(uSkyRadiance, dir, u.uSky.y).rgb * u.uSky.x;

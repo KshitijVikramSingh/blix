@@ -231,7 +231,7 @@ internal sealed partial class SponzaLoop
 
         // The cook's cache (SponzaLoop.TransportCache.cs): a run whose inputs match reads what the cook would make. The
         // CPU evaluation (--transport) reads the cook's internals as well, so it always cooks.
-        var cacheKey = TransportCacheKey();
+        var cacheKey = TransportCacheKey(scene, surfaces);
         var cached = transportEvaluateAtShot ? null : LoadTransportCache(cacheKey);
 
         // ---- Charts: surface identity ------------------------------------------------------------------------------

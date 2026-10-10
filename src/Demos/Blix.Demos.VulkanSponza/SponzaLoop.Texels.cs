@@ -21,7 +21,10 @@ internal sealed partial class SponzaLoop
     private float texelSpacing = 0.05f;
     // --texel-budget N: texels gathered a frame (one pass of 32 rays each); --texel-rays N: the rays a texel stops at;
     // --texel-trust N: the rays at which its answer replaces the clipmap's whole (fewer: blended by the fraction).
-    private int texelBudget = 2048;
+    // 1024: the gather's cost is the trace (--texel-ablate on Sponza's hall, 65k rays a frame: 10.5 ms all in, 9.8 ms
+    // without its shadow rays, cooked lookups and guide, 0.4 ms without the trace) -- ~8 M rays/s on this GPU. Half the
+    // budget, ~5 ms, and only while a view is still settling (texelMaxRays).
+    private int texelBudget = 1024;
     // --texel-levels N: texels at N sizes, each twice the last (5 / 10 / 20 cm); --texel-pixels P: a pixel reads the
     // level whose texel spans about P pixels at its depth, and the coarser ones fill in until it has rays (texel.glsl).
     // A view used to need every surface it showed traced at 5 cm before it settled: ~240k texels on Sponza's hall at
@@ -30,6 +33,8 @@ internal sealed partial class SponzaLoop
     // 24: at 8, at this window's resolution a texel of 5 cm still spanned 8 pixels out to ~10 m -- most of Sponza's
     // hall asked for the finest level, and the coarse ones added work instead of replacing it (settling slower, 88 ms).
     private float texelPixels = 24f;
+    // --texel-ablate N: drop parts of the gather to attribute its cost (texel_gather.comp, uSky.w).
+    private int texelAblate;
     // The occlusion estimate's reach (texel_gather.comp): openness counts cosine rays that meet nothing within it. CPU,
     // Sponza's hall: the patches' light x the texel's openness over its patches' at 1 m read 18.6% (energy 0.99) from 64
     // rays, as from 1024 -- against interp 27.4% and a 256-ray gather 18.5%; 0.5 m 19.0%, 0.25 m 20.4%.
@@ -42,7 +47,9 @@ internal sealed partial class SponzaLoop
     // --texel-max-rays N / --texel-noise T: past --texel-rays, a texel keeps gathering until the standard error of its
     // mean is under T of its value, or it reaches N (texel.glsl, texelSettled). Fixed at 1024 rays, the bounce-lit
     // balconies read "pointillist" to the user.
-    private int texelMaxRays = 16384;
+    // 2048: at 16384 the noise target kept thousands of texels gathering for good -- the gather never went idle once a
+    // view looked settled (>10 ms a frame on Sponza).
+    private int texelMaxRays = 2048;
     // 5%: at 2%, after 5,000 frames on Sponza's hall 106k of the 240k texels the image read were still short of it.
     private float texelNoise = 0.05f;
     // --texel-filter 0|1: the spatial filter over neighbouring texels, refreshed each frame a texel is seen
@@ -93,6 +100,7 @@ internal sealed partial class SponzaLoop
         if (args.Int("texel-filter") is { } tf) texelFilter = tf != 0;
         if (args.Int("texel-blend") is { } tb) texelBlend = tb != 0;
         if (args.Int("texel-levels") is { } tl) texelLevels = Math.Clamp(tl, 1, 5);
+        if (args.Int("texel-ablate") is { } ta) texelAblate = ta;
         if (args.Float("texel-pixels") is { } tp) texelPixels = Math.Max(0.5f, tp);
         if (args.Float("texel-occlusion-error") is { } toe) texelOcclusionError = Math.Max(1e-3f, toe);
         if (args.Float("texel-trust") is { } t) texelTrust = Math.Max(1f, t);
@@ -474,7 +482,7 @@ internal sealed partial class SponzaLoop
                 new("uSunDirection", new Vector4Uniform(new Vector4(sunDirection, 0f))),
                 new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 1f))),
                 // A ray's sky as the screen probes take it: strength 1, a little blurred (one mip).
-                new("uSky", new Vector4Uniform(new Vector4(1f, 1f, texelEpoch, 0f))),
+                new("uSky", new Vector4Uniform(new Vector4(1f, 1f, texelEpoch, texelAblate))),
                 new("uCascadeVP", new Matrix4x4ArrayUniform(cascadeViewProj)),
                 new("uOpen", new Vector4Uniform(new Vector4(TexelOpenReach, texelOcclusionError, texelBlend ? 1f : 0f, 0f))),
                 new("uCookedGrid", new Vector4Uniform(cookedGrid)),

@@ -186,7 +186,9 @@ bool texelsAt(vec3 worldPos, vec3 n, float faceBin, float viewDepth, out vec3 ir
         if (!texelsAtLevel(worldPos, n, faceBin, uint(level), value, c)) continue;
         if (level == finest) { stampedSum = debugStamped; litSum = debugLit; }
         float take = level == finest && finest < coarsest ? c * (1.0 - fraction) : c;
-        if (!any) { irradiance = value; confidence = c; any = true; take = 1.0; }
+        // The first level found is the answer so far, its confidence its own (accumulating it again here, as this did,
+        // read one level at 0.5 as 0.75 -- and let half-gathered texels push the clipmap out early).
+        if (!any) { irradiance = value; confidence = c; any = true; continue; }
         irradiance = mix(irradiance, value, take);
         confidence = confidence + (1.0 - confidence) * c;
     }
