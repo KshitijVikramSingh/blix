@@ -122,7 +122,10 @@ internal sealed partial class SponzaLoop
         // overlap, so isolated pass times are not additive components of the normal frame.
         if (args.Flag("gpu-isolate")) host.Timing.IsolatePasses = true;
         if (args.Flag("no-caster-cull")) shadowCasterCull = false;
-        offscreenShadowRays = args.Flag("offscreen-shadow-rays");
+        // A transfer capture (--transfer-dump) brings it: its truth takes the sun by rays, and gather rays landing off the
+        // view would read it from cascades whose casters were culled (Sponza: gathered energy 2.37x the traced, 1.02x
+        // with it).
+        offscreenShadowRays = args.Flag("offscreen-shadow-rays") || args.String("transfer-dump") is not null;
         if (args.Flag("no-foliage")) noFoliage = true;
         // --flatten: bake every placement into its own primitive, placed once at identity: the pre-
         // instancing shape through the same draw path, so an A/B isolates instancing alone.
