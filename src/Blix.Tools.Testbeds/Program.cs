@@ -42,6 +42,12 @@ public static class Program
     /// skylight and the open front is a leak. The reflectances are the box's published ones (white 0.73,
     /// red 0.63/0.065/0.05, green 0.14/0.45/0.091), linear, matte. The front (+Z) is open; the camera looks in.
     /// </para>
+    /// <para>
+    /// <c>--panel</c> adds an occluder that moves across the light over surfaces that do not move (plan.md, stage 5:
+    /// what a moved occluder does to cooked transfer): a white panel, 1.2 m by the skylight's width and 5 cm thick,
+    /// hung from the skylight's -X edge. The renderer's <c>--mover panel</c> swings it about that edge, into the
+    /// sun's shaft (a sun travelling +X, as the testbeds' are) and out again.
+    /// </para>
     /// </remarks>
     [BlixApp("cornell", Summary = "write the Cornell box at room scale, sunlit through a skylight, as glTF: a GI correctness scene", Default = true)]
     public static int Cornell(AppArgs args)
@@ -49,6 +55,7 @@ public static class Program
         var output = args.String("out") ?? "cornell.gltf";
         var size = args.Float("size") ?? 6f;          // the inside, cubic
         var skylight = args.Float("skylight") ?? 1.5f; // the square opening in the ceiling
+        var panel = args.Flag("panel");
         if (size < 2f || skylight <= 0f || skylight >= size - 0.5f)
             throw new AppArgsException("--size must be at least 2 m and --skylight between 0 and the size less 0.5 m.");
 
@@ -83,10 +90,16 @@ public static class Program
         scene.AddRigidMesh(mesh, Matrix4x4.Identity);
         scene.AddRigidMesh(tall, Matrix4x4.CreateRotationY(17f * MathF.PI / 180f) * Matrix4x4.CreateTranslation(-0.35f * h, 0f, -0.35f * h));
         scene.AddRigidMesh(shortBlock, Matrix4x4.CreateRotationY(-17f * MathF.PI / 180f) * Matrix4x4.CreateTranslation(0.35f * h, 0f, 0.3f * h));
+        if (panel)
+        {
+            var hanging = new Mesh("skylight_panel");
+            Box(hanging.UsePrimitive(white), new Vector3(-s - 0.025f, size - 1.2f, -s), new Vector3(-s + 0.025f, size, s));
+            scene.AddRigidMesh(hanging, Matrix4x4.Identity);
+        }
 
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!);
         scene.ToGltf2().SaveGLTF(output);
-        Console.WriteLine($"cornell: {size:0.##} m inside, {skylight:0.##} m skylight, 0.2 m slabs -> {output}");
+        Console.WriteLine($"cornell: {size:0.##} m inside, {skylight:0.##} m skylight, 0.2 m slabs{(panel ? ", a hanging panel" : "")} -> {output}");
         return 0;
     }
 

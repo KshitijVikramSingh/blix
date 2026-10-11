@@ -145,6 +145,15 @@ internal sealed record SceneProfile(
         StartPitch: 0f,
         MoveSpeed: 3f);
 
+    /// <summary>The Cornell box with a panel hung from the skylight's edge (<c>blix cornell --panel</c>): with
+    /// <c>--mover panel</c>, an occluder swinging across the light over surfaces that do not move.</summary>
+    public static readonly SceneProfile CornellPanel = Cornell with
+    {
+        Name = "cornell-panel",
+        Title = "Vulkan Cornell box, hanging panel",
+        Packs = new ScenePack[] { new("cornell-panel", Required: true) },
+    };
+
     /// <summary>Two rooms sharing a 0.1 m wall, one open to the sky, one sealed (<c>blix thinwall</c>): a leak scene.</summary>
     /// <remarks>
     /// The truth inside the sealed room (x &gt; 0) is exactly no light, so every bit of indirect light the GI puts
@@ -168,7 +177,7 @@ internal sealed record SceneProfile(
         StartPitch: 0f,
         MoveSpeed: 3f);
 
-    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, ThinWall };
+    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, CornellPanel, ThinWall };
 
     /// <summary>The profile <c>--scene</c> names, Sponza when it names none.</summary>
     public static SceneProfile Named(string? name)
