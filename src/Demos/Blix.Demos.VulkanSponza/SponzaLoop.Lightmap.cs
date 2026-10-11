@@ -315,6 +315,7 @@ internal sealed partial class SponzaLoop
         litClipmapBuffer = null;
         lightmapFirstRecord = first;
         lightmapTexels = true;
+        UploadTransferWeights(first, atlas.Count);
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] texels: {first:N0} hashed (the surfaces the atlas leaves out) and {atlas.Count:N0} lightmap records, one set."));
     }

@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Blix.Geometry;
+using Blix.Graphics;
 
 namespace Blix.Demos.VulkanSponza;
 
@@ -15,11 +16,51 @@ namespace Blix.Demos.VulkanSponza;
 internal sealed partial class SponzaLoop
 {
     private string? transferDumpPath;
+    // --transfer-weights <file> (tools/transfer/fit.py --write): fitted weights over each atlas texel's 8 level-0 probes,
+    // by atlas record (id - lightmapFirstRecord), 8 halves in a uvec4; zero where none was fitted. The incident pass
+    // then answers a pixel whose texel has weights with sum_k w_k . probe_k (incident_clipmap.frag, transferAt) in
+    // place of the probe blend, and reads no texels -- probes and transfer alone.
+    private string? transferWeightsPath;
+    private GpuBufferHandle transferWeightsBuffer;
+    private bool transferWeightsOn;
+
+    private void UploadTransferWeights(int first, int atlasCount)
+    {
+        if (transferWeightsPath is null) return;
+        using var r = new BinaryReader(File.OpenRead(transferWeightsPath));
+        var count = r.ReadInt32();
+        var ids = MemoryMarshal.Cast<byte, uint>(r.ReadBytes(count * 4)).ToArray();
+        var halves = MemoryMarshal.Cast<byte, ushort>(r.ReadBytes(count * 16)).ToArray();
+        var words = new uint[(long)atlasCount * 4];
+        var placed = 0;
+        for (var i = 0; i < count; i++)
+        {
+            var rec = (long)ids[i] - first;
+            if (rec < 0 || rec >= atlasCount) continue;
+            for (var k = 0; k < 4; k++) words[rec * 4 + k] = halves[i * 8 + 2 * k] | ((uint)halves[i * 8 + 2 * k + 1] << 16);
+            placed++;
+        }
+        transferWeightsBuffer = Own(device.CreateGpuBuffer(words.Length * 4, MemoryMarshal.AsBytes(words.AsSpan()), "sponza.transfer.weights"));
+        transferWeightsOn = true;
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[VulkanSponza] transfer weights: {placed:N0} atlas texels of {count:N0} in {Path.GetFileName(transferWeightsPath)}; the incident pass answers them from their probes."));
+    }
+
+    private ShaderBufferBinding TransferWeightsBinding()
+    {
+        if (transferWeightsBuffer.Equals(default(GpuBufferHandle)))
+            transferWeightsBuffer = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.transfer.weights.none"));
+        return new ShaderBufferBinding("TransferWeights", transferWeightsBuffer);
+    }
+
+    // x 1 when the weights are up, y the first atlas record.
+    private Vector4 TransferUniform => new(transferWeightsOn ? 1f : 0f, lightmapFirstRecord, 0f, 0f);
     private bool transferBakeDone;
     private uint transferBakeDoneFrame;
     // Frames after the region's bake before the dump: the probes keep solving meanwhile.
     private const uint TransferSettleFrames = 900;
-    // One texel in this many (by a hash of its record id, so every run picks the same ones): --transfer-stride (4).
+    // One texel in this many (by a hash of its record id, so every run picks the same ones): --transfer-stride (4), 1 for
+    // weights a run will read (--transfer-weights).
     private uint transferSampleStride = 4;
     // A dump row: id, position, normal, gathered light, 8 probes x (valid, trilinear, facing^2, Chebyshev, rgb), traced rgb.
     private const int TransferRowFloats = 1 + 3 + 3 + 3 + 8 * 7 + 3;

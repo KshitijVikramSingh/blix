@@ -51,6 +51,8 @@ layout(set = 0, binding = 0) uniform IncidentClipmap {
                          // cooked per-texel mask could reach, in place of the Chebyshev estimate; y / z DDGI's surface
                          // bias, along the normal / toward the viewer, in probe spacings (--clipmap-normal-bias /
                          // --clipmap-view-bias; both 0: the default lift); w 1: probes relocated (--clipmap-relocate)
+    vec4 uTransfer;      // x 1: fitted transfer weights answer the pixels that have them (--transfer-weights,
+                         // transferAt), texels unread; y the first atlas record
 } g;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -160,6 +162,8 @@ float debugStamped, debugLit;
 layout(set = 0, binding = 19) uniform usampler2D uLightmapTexel;
 layout(std430, set = 0, binding = 20) readonly buffer LightmapIndexMap { uint lightmapIndexMap[]; };
 #define TEXEL_INDEX_MAP(i) lightmapIndexMap[i]
+// --transfer-weights: per atlas record (id - uTransfer.y), fitted weights over its 8 level-0 probes, 8 halves.
+layout(std430, set = 0, binding = 33) readonly buffer TransferWeights { uvec4 transferWeights[]; };
 // This pixel's packed atlas texel (main sets it): not 0, the atlas's texels are its level 0 and the hashed cells its
 // coarser levels; 0 (no lightmap, or a surface the atlas leaves out), the hashed cells at every level.
 uint pixelLightmapTexel;
@@ -259,6 +263,46 @@ bool texelsAt(vec3 worldPos, vec3 n, float faceBin, float viewDepth, out vec3 ir
     return any;
 }
 
+// The surface transfer atlas (plan.md, stage 5): the pixel's nearest atlas texel's fitted weights over the 8 level-0
+// probes around that texel's lookup point (its record's position lifted a quarter cell along its face normal, as the
+// fit had it: SponzaLoop.TransferFit.cs), each probe read at the pixel's normal. False where the texel has no weights,
+// or a probe the fit leaned on is not solved (or is buried) here now: today's blend answers instead.
+bool transferAt(BlixClipmap c, vec3 N, out vec3 irradiance) {
+    irradiance = vec3(0.0);
+    vec2 atlasTexel;
+    if (!texelLightmapUnpack(pixelLightmapTexel, atlasTexel)) return false;
+    ivec2 size = ivec2(g.uLightmap.yz);
+    ivec2 at = ivec2(floor(atlasTexel));
+    if (any(lessThan(at, ivec2(0))) || any(greaterThanEqual(at, size))) return false;
+    uint id = lightmapIndexMap[at.y * size.x + at.x];
+    if (id == 0xFFFFFFFFu) return false;
+    if (TEXEL_POSITION(id).w < 0.0 && dot(TEXEL_NORMAL(id).xyz, N) < 0.0) id += 1u;
+    int rec = int(id) - int(g.uTransfer.y + 0.5);
+    if (rec < 0) return false;
+    uvec4 packed = transferWeights[rec];
+    if (packed == uvec4(0u)) return false;
+    float w[8];
+    vec2 h;
+    h = unpackHalf2x16(packed.x); w[0] = h.x; w[1] = h.y;
+    h = unpackHalf2x16(packed.y); w[2] = h.x; w[3] = h.y;
+    h = unpackHalf2x16(packed.z); w[4] = h.x; w[5] = h.y;
+    h = unpackHalf2x16(packed.w); w[6] = h.x; w[7] = h.y;
+    float spacing = c.baseSpacing;
+    vec3 p = TEXEL_POSITION(id).xyz + normalize(TEXEL_NORMAL(id).xyz) * (0.25 * spacing);
+    ivec3 base = ivec3(floor(p / spacing - 0.5));
+    vec3 sum = vec3(0.0);
+    for (int k = 0; k < 8; ++k) {
+        if (w[k] <= 0.0) continue;
+        ivec3 cell = base + ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1);
+        ivec3 slot = blix_clipmapSlot(c, cell);
+        uvec4 state = BLIX_CLIPMAP_STATE(blix_clipmapSlotIndex(c, slot));
+        if ((state.w & BLIX_CLIPMAP_SOLVED) == 0u || (state.w & BLIX_CLIPMAP_BURIED) != 0u || ivec3(state.xyz) != cell) return false;
+        sum += w[k] * blix_clipmapTileSample(blix_clipmapTileOrigin(c, 0, slot), N, false).rgb;
+    }
+    irradiance = sum;
+    return true;
+}
+
 void main() {
     clipLiftKnob = g.uClipParams.z;
     clipVisibilityKnob = g.uClipParams.w;
@@ -328,7 +372,9 @@ void main() {
     float confidence;
     bool texelFound = false;
     pixelLightmapTexel = g.uLightmap.x > 0.5 ? texelFetch(uLightmapTexel, pixel, 0).r : 0u;
-    if (g.uTexelParams.y > 0.5 && g.uClipParams.y < 0.5 && texelsAt(worldPos, N, nSample.w, viewDepth, gathered, confidence)) {
+    vec3 transferred;
+    if (g.uTransfer.x > 0.5 && g.uClipParams.y < 0.5 && transferAt(c, N, transferred)) outIncident.rgb = transferred;
+    if (g.uTexelParams.y > 0.5 && g.uTransfer.x < 0.5 && g.uClipParams.y < 0.5 && texelsAt(worldPos, N, nSample.w, viewDepth, gathered, confidence)) {
         outIncident.rgb = mix(outIncident.rgb, gathered, confidence);
         texelFound = true;
     }

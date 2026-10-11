@@ -57,6 +57,8 @@ internal sealed partial class SponzaLoop
         transferDumpPath = args.String("transfer-dump");
         if (args.Int("transfer-stride") is { } ts) transferSampleStride = (uint)Math.Max(1, ts);
         if (args.Int("transfer-paths") is { } tp) transferPaths = Math.Clamp(tp, 16, 1 << 20);
+        // --transfer-weights <file>: fitted transfer weights to answer with (SponzaLoop.TransferFit.cs).
+        transferWeightsPath = args.String("transfer-weights");
         if (args.Int("texel-gtao") is { } tg) texelGtao = tg != 0;
         // --gi-reference-seed N: start the paths' random sequence elsewhere -- two references that differ only in it
         // differ only by their noise (the floor any comparison against one can resolve).

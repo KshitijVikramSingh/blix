@@ -2,6 +2,7 @@
 """The surface transfer atlas's first experiment (plan.md, stage 5): fit each texel's weights over its 8 level-0 probes.
 
     tools/transfer/fit.py sunA.bin sunB.bin sunC.bin ...    (VulkanSponza --transfer-dump, one per --sun, same --cam)
+    tools/transfer/fit.py --write weights.bin sunA.bin ...  (fit on every sun; write them for --transfer-weights)
 
 Per texel, truth is its path-traced irradiance (or, in an older dump, its gathered light); a probe's value is its irradiance at the texel's normal. For each sun held
 out in turn, non-negative weights are fitted on the others (each sun's rgb: three equations) and judged on the one left
@@ -79,5 +80,28 @@ def main(paths):
         print(f"  weights: mean sum {w.sum(1).mean():.3f}, mean non-zero {(w > 1e-4).sum(1).mean():.2f} of 8")
 
 
+def write(out, paths):
+    """Fit on every sun and write, per texel, its record id and 8 weights (float16) for --transfer-weights."""
+    runs = [load(p) for p in paths]
+    common = runs[0][0]
+    for ids, _, _ in runs[1:]:
+        common = np.intersect1d(common, ids)
+    A, b = [], []
+    for ids, light, probes in runs:
+        order = np.argsort(ids)
+        pos = order[np.searchsorted(ids[order], common)]
+        A.append(np.transpose(probes[pos][:, :, 4:7], (0, 2, 1)))
+        b.append(light[pos])
+    w = nnls_batch(np.concatenate(A, axis=1), np.concatenate(b, axis=1))
+    with open(out, 'wb') as f:
+        f.write(struct.pack('<i', len(common)))
+        f.write(common.astype('<u4').tobytes())
+        f.write(w.astype('<f2').tobytes())
+    print(f"wrote {len(common):,} texels' weights (fitted on {len(paths)} suns): mean sum {w.sum(1).mean():.3f}, non-zero {(w > 1e-4).sum(1).mean():.2f} of 8 -> {out}")
+
+
 if __name__ == '__main__':
-    main(sys.argv[1:])
+    if sys.argv[1] == '--write':
+        write(sys.argv[2], sys.argv[3:])
+    else:
+        main(sys.argv[1:])

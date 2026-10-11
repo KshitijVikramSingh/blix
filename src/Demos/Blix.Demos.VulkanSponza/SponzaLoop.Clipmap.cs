@@ -96,6 +96,7 @@ internal sealed partial class SponzaLoop
                 new("uTexelParams", new Vector4Uniform(texel.Params)),
                 new("uReference", new Vector4Uniform(reference.Params)),
                 new("uClipExact", new Vector4Uniform(new Vector4(clipmapExactVisibility ? 1f : 0f, clipmapNormalBias, clipmapViewBias, clipmapRelocate ? 1f : 0f))),
+                new("uTransfer", new Vector4Uniform(TransferUniform)),
                 new("uTexelDebug", new Vector4Uniform(new Vector4(texelFrame, 0f, 0f, 0f))),
                 new("uLightmap", new Vector4Uniform(LightmapUniform)),
                 new("uTexelLevels", new Vector4Uniform(TexelLevelsUniform(frameHeight))),
@@ -103,7 +104,8 @@ internal sealed partial class SponzaLoop
             buffers: new[] { new ShaderBufferBinding("ClipmapState", clipmapState), new ShaderBufferBinding("ScreenProbeTiles", screen.Tiles), new ShaderBufferBinding("ScreenProbes", screen.Probes), new ShaderBufferBinding("SurfaceIndex", surfaceIndex) }.Concat(texel.Buffers).Append(reference.Buffer).Append(new ShaderBufferBinding("LightmapIndexMap", LightmapIndexMap()))
                 // The ray scene, for --clipmap-exact-visibility, and the probes' offsets, for --clipmap-relocate
                 // (declared always; read only then).
-                .Concat(rayBlockBuffers).Append(new ShaderBufferBinding("ClipmapOffsets", clipmapOffsets)).ToArray()));
+                .Concat(rayBlockBuffers).Append(new ShaderBufferBinding("ClipmapOffsets", clipmapOffsets))
+                .Append(TransferWeightsBinding()).ToArray()));
     }
 
     private const int ClipmapLevels = 4;
