@@ -72,7 +72,7 @@ layout(set = 0, binding = 0) uniform ClipmapInject {
                            // DDGI's surface bias along the normal / back along the ray, in spacings (0, 0: the lift);
                            // w 1: probes relocate (--clipmap-relocate)
     mat4 uCascadeReceivers;  // where the cascades may answer (cascade_receivers.glsl)
-    vec4 uWave;            // the solve as a wavefront (SponzaLoop.Clipmap, modes 3-5): x 1 when it is, y ray slots per lane
+    vec4 uWave;            // the solve as a wavefront (SponzaLoop.Clipmap, modes 3-6): x 1 when it is, y ray slots per lane
                            // (the most passes a probe takes), z the per-frame base of the batches' coverage seeds
 } u;
 
@@ -130,16 +130,54 @@ layout(std430, set = 0, binding = 10) readonly buffer ClipmapSeen { uint seen[];
 #define BLIX_CLIPMAP_DEPTH(t) imageLoad(uClipmapDepth, t)
 #define BLIX_CLIPMAP_STATE(s) states[s]
 // --clipmap-exact-visibility: as in incident_clipmap.frag, a ray from the hit to each probe it reads decides whether
-// it counts -- so a sealed room's probes stop reading the leak back in through their own bounce.
+// it counts -- so a sealed room's probes stop reading the leak back in through their own bounce. Measured on Cornell
+// (plan.md, stage 5): the interpolated read let the sunlit probe layer outside a 0.2 m wall in, and the room's probes
+// read 1.19 of the truth at a low sun, 1.01 with these rays.
+//
+// On the wavefront (modes 3-6) the rays go through a CLOSEST batch like the rest: mode 4 RECORDS each ray from a hit to
+// a probe its read weighs into the hit's VIS_SLOTS slots (and answers 1 meanwhile: that read is discarded), the batch
+// traces them, and mode 6 REPLAYS the read, finding each probe's answer by its ray's two ends. The replay can visit a
+// probe the record did not -- a level every probe of which turns out hidden hands over to the next -- and that probe
+// keeps the Chebyshev estimate, as an unknown does.
+#define VIS_SLOTS 16u
+layout(std430, set = 0, binding = 31) buffer InjectVisRays { vec4 injectVisRays[]; };          // 2 per ray, as a batch's
+layout(std430, set = 0, binding = 32) readonly buffer InjectVisHits { uvec4 injectVisHits[]; }; // 3 per ray: its answer
 float injectExactKnob;
 uint injectExactSeed;
+int injectVisMode;        // 0 trace here, 1 record, 2 replay
+uint injectVisBase;       // the hit's first slot
+uint injectVisCount;      // slots recorded for this hit
 float injectTracedVisibility(vec3 world, vec3 n, vec3 probe) {
     vec3 o = world + n * 0.01;
     vec3 d = probe - o;
     float len = length(d);
     if (len < 1e-4) return 1.0;
+    if (injectVisMode == 1) {
+        if (injectVisCount >= VIS_SLOTS) return -1.0;
+        uint s = injectVisBase + injectVisCount++;
+        injectVisRays[s * 2u] = vec4(o, 0.0);
+        injectVisRays[s * 2u + 1u] = vec4(d / len, len);
+        return 1.0;
+    }
+    if (injectVisMode == 2) {
+        for (uint k = 0u; k < VIS_SLOTS; ++k) {
+            uint s = injectVisBase + k;
+            vec4 from = injectVisRays[s * 2u], along = injectVisRays[s * 2u + 1u];
+            if (along.w <= 0.0) break;   // past the hit's record
+            if (distance(from.xyz, o) < 1e-4 && distance(from.xyz + along.xyz * along.w, probe) < 1e-3)
+                return (injectVisHits[s * 3u].w & 1u) != 0u ? 0.0 : 1.0;
+        }
+        return -1.0;
+    }
     injectExactSeed = blix_pcg(injectExactSeed);
     return blix_traceAny(o, d / len, 0.0, len, injectExactSeed) ? 0.0 : 1.0;
+}
+// Ends a hit's record: no ray in its remaining slots.
+void injectVisClose(uint base, uint from) {
+    for (uint k = from; k < VIS_SLOTS; ++k) {
+        injectVisRays[(base + k) * 2u] = vec4(0.0);
+        injectVisRays[(base + k) * 2u + 1u] = vec4(0.0);
+    }
 }
 #define BLIX_CLIPMAP_PROBE_VISIBILITY(world, n, probe) (injectExactKnob > 0.5 ? injectTracedVisibility(world, n, probe) : -1.0)
 // --clipmap-relocate (DDGI's relocation): each probe's offset from its cell's centre, by slot, moved after each solve --
@@ -260,6 +298,7 @@ void main() {
     injectViewBias = u.uExact.z;
     injectViewDir = vec3(0.0, 1.0, 0.0);
     injectExactSeed = blix_pcg(gl_GlobalInvocationID.x * 7919u + uint(u.uFrame.x) * 104729u);
+    injectVisMode = 0;
     BlixClipmap c = clipmap();
     int perLevel = c.dims.x * c.dims.y * c.dims.z;
     int mode = int(u.uParams.z + 0.5);
@@ -509,19 +548,47 @@ void main() {
                 }
                 bool known;
                 injectViewDir = -rayDir;
+                injectVisMode = injectExactKnob > 0.5 ? 1 : 0;
+                injectVisBase = rayIndex * VIS_SLOTS;
+                injectVisCount = 0u;
                 vec4 field = blix_worldSample(sg, c, hitPos, n, known);
+                if (injectVisMode == 1) injectVisClose(injectVisBase, injectVisCount);
+                injectVisMode = 0;
                 atomicAdd(queue[4], 1u);
                 if (!known) atomicAdd(queue[5], 1u);
                 light = known ? albedo * field.rgb * u.uFrame.y / PI : vec3(0.0);
             } else {
                 light = textureLod(uSkyRadiance, rayDir, u.uFallback.y).rgb * u.uFrame.z;
                 rayDependent = crossesMovingReach(origin, rayDir, 1e30);
+                if (injectExactKnob > 0.5) injectVisClose(rayIndex * VIS_SLOTS, 0u);
             }
             if (rayDependent) { atomicOr(sAnyDependent, 1u); atomicAdd(sDependentRays, 1u); }
             injectState[rayIndex * 4u + 1u] = vec4(light, rayEscaped);
             injectState[rayIndex * 4u + 2u] = vec4(sunShare, lit);
             injectState[rayIndex * 4u + 3u] = vec4(injectState[rayIndex * 4u + 3u].x, rayFacing, rayDistance, rayDependent ? 1.0 : 0.0);
             injectOrigins[rayIndex] = shadowOrigin;
+            continue;
+        }
+        if (mode == 6) {
+            // The hit's read again, each probe as its traced ray found it (the record above): its light replaces the
+            // provisional one.
+            uvec4 h0 = injectHits[rayIndex * 3u];
+            if ((h0.w & 1u) != 0u) {
+                vec3 rayDir = injectState[rayIndex * 4u].xyz;
+                uvec4 h2 = injectHits[rayIndex * 3u + 2u];
+                vec3 normal = uintBitsToFloat(h2.xyz);
+                vec3 albedo = unpackUnorm4x8(h2.w).rgb;
+                vec3 n = dot(normal, rayDir) > 0.0 ? -normal : normal;
+                vec3 hitPos = origin + rayDir * uintBitsToFloat(h0.x);
+                bool known;
+                injectViewDir = -rayDir;
+                injectVisMode = 2;
+                injectVisBase = rayIndex * VIS_SLOTS;
+                vec4 field = blix_worldSample(sg, c, hitPos, n, known);
+                injectVisMode = 0;
+                vec4 st1 = injectState[rayIndex * 4u + 1u];
+                injectState[rayIndex * 4u + 1u] = vec4(known ? albedo * field.rgb * u.uFrame.y / PI : vec3(0.0), st1.w);
+            }
             continue;
         }
         if (mode == 5) {
@@ -620,9 +687,11 @@ void main() {
             injectRays[rayIndex * 2u] = vec4(origin, 0.0);
             injectRays[rayIndex * 2u + 1u] = vec4(0.0);
             injectOrigins[rayIndex] = vec4(0.0);
+            if (injectExactKnob > 0.5) injectVisClose(rayIndex * VIS_SLOTS, 0u);
         }
         return;
     }
+    if (mode == 6) return;
     if (mode == 4) {
         barrier();
         if (lane == 0u) injectCounters[gl_WorkGroupID.x] = uvec4(sBackfaces, sDependentRays, sAnyDependent, 0u);

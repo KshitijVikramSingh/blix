@@ -504,6 +504,11 @@ internal sealed partial class SponzaLoop
         for (var c = 0; c < CascadeCount; c++) shadeBuilder = shadeBuilder.Read(cascadeHandles[c]);
         clipmapShadePassHandle = shadeBuilder.Handle;
         clipmapShadowBatch = DeclareShadowBatch("clipmap-shadow");
+        // --clipmap-exact-visibility on the wavefront: the hits' rays to their probes, then their reads replayed.
+        clipmapVisibilityBatch = DeclareClosestBatch("clipmap-visibility");
+        var visibilityBuilder = graph.ComputePass("probe-clipmap-visibility").Shader(clipmapInterface);
+        for (var c = 0; c < CascadeCount; c++) visibilityBuilder = visibilityBuilder.Read(cascadeHandles[c]);
+        clipmapVisibilityPassHandle = visibilityBuilder.Handle;
         var resolveBuilder = graph.ComputePass("probe-clipmap-resolve").Shader(clipmapInterface);
         for (var c = 0; c < CascadeCount; c++) resolveBuilder = resolveBuilder.Read(cascadeHandles[c]);
         clipmapResolvePassHandle = resolveBuilder.Handle;

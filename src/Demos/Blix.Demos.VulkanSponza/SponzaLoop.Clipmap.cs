@@ -44,16 +44,34 @@ internal sealed partial class SponzaLoop
     // --clipmap-inline: the inline solve whatever the frame's rays (the A/B).
     private bool clipmapWavefront, clipmapInline;
     private bool ClipmapOnWavefront => !clipmapInline && (clipmapWavefront || FrameRaysOnHardware);
-    private RayBatchPasses clipmapClosestBatch, clipmapShadowBatch;
-    private PassHandle clipmapShadePassHandle, clipmapResolvePassHandle;
+    private RayBatchPasses clipmapClosestBatch, clipmapShadowBatch, clipmapVisibilityBatch;
+    private PassHandle clipmapShadePassHandle, clipmapResolvePassHandle, clipmapVisibilityPassHandle;
+    // With --clipmap-exact-visibility on the wavefront: each hit's rays to the probes its read weighs (16 slots a ray,
+    // clipmap_inject's VIS_SLOTS) through a CLOSEST batch, and the read replayed with their answers (mode 6).
+    private const int ClipmapVisSlots = 16;
+    private bool ClipmapVisOnWavefront => ClipmapOnWavefront && clipmapExactVisibility;
     // The wavefront's buffers, sized for the budget's probes at clipmapYoungRays slots a lane (placeholders while off:
     // the program declares them either way).
     private GpuBufferHandle clipmapWaveRays, clipmapWaveHits, clipmapWaveState, clipmapWaveOrigins, clipmapWaveOccluded, clipmapWaveCounters;
-    private int clipmapWaveRayCount = -1;
+    private GpuBufferHandle clipmapVisRays, clipmapVisHits;
+    private int clipmapWaveRayCount = -1, clipmapVisRayCount = -1;
 
     private void EnsureClipmapWaveBuffers()
     {
         var rays = ClipmapOnWavefront ? clipmapBudget * 64 * clipmapYoungRays : 1;
+        var visRays = ClipmapVisOnWavefront ? rays * ClipmapVisSlots : 1;
+        if (visRays != clipmapVisRayCount)
+        {
+            if (clipmapVisRayCount >= 0)
+            {
+                device.WaitIdle();
+                Disown(clipmapVisRays);
+                Disown(clipmapVisHits);
+            }
+            clipmapVisRays = Own(device.CreateGpuBuffer(visRays * 32, name: "sponza.clipmap.vis-rays"));
+            clipmapVisHits = Own(device.CreateGpuBuffer(visRays * 48, name: "sponza.clipmap.vis-hits"));
+            clipmapVisRayCount = visRays;
+        }
         if (rays == clipmapWaveRayCount) return;
         if (clipmapWaveRayCount >= 0)
         {
@@ -79,6 +97,8 @@ internal sealed partial class SponzaLoop
         yield return new ShaderBufferBinding("InjectShadowOrigins", clipmapWaveOrigins);
         yield return new ShaderBufferBinding("InjectOccluded", clipmapWaveOccluded);
         yield return new ShaderBufferBinding("InjectProbeCounters", clipmapWaveCounters);
+        yield return new ShaderBufferBinding("InjectVisRays", clipmapVisRays);
+        yield return new ShaderBufferBinding("InjectVisHits", clipmapVisHits);
     }
     private GpuBufferHandle clipmapState;
     private GpuBufferHandle clipmapQueue;
@@ -319,6 +339,11 @@ internal sealed partial class SponzaLoop
             RecordClosestBatch(clipmapClosestBatch, clipmapWaveRays, clipmapWaveHits, rayCount, seed);
             graph.Dispatch(clipmapShadePassHandle, Phase(4, clipmapBudget));
             RecordShadowBatch(clipmapShadowBatch, clipmapWaveOrigins, clipmapWaveOccluded, rayCount, -Vector3.Normalize(sunDirection), seed ^ 0x5bd1e995u);
+            if (ClipmapVisOnWavefront)
+            {
+                RecordClosestBatch(clipmapVisibilityBatch, clipmapVisRays, clipmapVisHits, rayCount * ClipmapVisSlots, seed ^ 0x27d4eb2fu);
+                graph.Dispatch(clipmapVisibilityPassHandle, Phase(6, clipmapBudget));
+            }
             graph.Dispatch(clipmapResolvePassHandle, Phase(5, clipmapBudget));
         }
         else
