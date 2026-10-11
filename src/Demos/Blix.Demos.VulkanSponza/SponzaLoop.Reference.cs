@@ -58,8 +58,29 @@ internal sealed partial class SponzaLoop
         if (args.Int("transfer-stride") is { } ts) transferSampleStride = (uint)Math.Max(1, ts);
         if (args.Int("transfer-paths") is { } tp) transferPaths = Math.Clamp(tp, 16, 1 << 20);
         if (args.Int("transfer-lanes") is { } tl) transferLanes = Math.Clamp(tl, 1, 1 << 16);
+        if (args.Int("transfer-probe-solves") is { } tps) transferProbeSolves = Math.Clamp(tps, 0, 255);
+        // --transfer-suns "yaw,pitch;yaw,pitch;...": capture every sun in this one process, --transfer-dump then a
+        // directory (sun_<yaw>_<pitch>.bin in it), the first sun in place of --sun (SponzaLoop.TransferFit.cs).
+        if (args.String("transfer-suns") is { } suns)
+        {
+            if (transferDumpPath is null) throw new AppArgsException("--transfer-suns needs --transfer-dump <directory>.");
+            transferSuns = suns.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(s =>
+            {
+                var p = s.Split(',', StringSplitOptions.TrimEntries);
+                if (p.Length != 2 || !float.TryParse(p[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var yaw)
+                    || !float.TryParse(p[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var pitch))
+                    throw new AppArgsException($"--transfer-suns: '{s}' is not yaw,pitch (degrees, as --sun).");
+                return new Vector2(yaw, pitch);
+            }).ToList();
+            if (transferSuns.Count == 0) throw new AppArgsException("--transfer-suns names no sun.");
+            transferSunsDirectory = transferDumpPath;
+            Directory.CreateDirectory(transferSunsDirectory);
+            sunOverrideDegrees = transferSuns[0];
+            transferDumpPath = TransferSunDumpPath(0);
+        }
         // --transfer-weights <file>: fitted transfer weights to answer with (SponzaLoop.TransferFit.cs).
         transferWeightsPath = args.String("transfer-weights");
+        transferNearest = args.Flag("transfer-nearest");
         if (args.Int("texel-gtao") is { } tg) texelGtao = tg != 0;
         // --gi-reference-seed N: start the paths' random sequence elsewhere -- two references that differ only in it
         // differ only by their noise (the floor any comparison against one can resolve).

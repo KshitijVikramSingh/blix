@@ -324,7 +324,8 @@ internal sealed partial class SponzaLoop
         texelProbeBuffer = Own(device.CreateGpuBuffer(24 * 24 * 48, new byte[24 * 24 * 48], "sponza.texels.probe"));
         texelGrid = bake.Grid;
         texelsUploaded = true;
-        if (light is null && bakePath is not null)
+        // Under --transfer-weights the texels' light is never read (the transfer answers instead), so it is not baked.
+        if (light is null && bakePath is not null && (transferWeightsPath is null || transferDumpPath is not null))
         {
             lightBakePath = bakePath;
             BeginLightBake(bake.Texels, texelCount, firstAtlas < 0 ? texelCount : firstAtlas);

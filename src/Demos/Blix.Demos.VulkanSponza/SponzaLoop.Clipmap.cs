@@ -163,6 +163,8 @@ internal sealed partial class SponzaLoop
                 new("uReference", new Vector4Uniform(reference.Params)),
                 new("uClipExact", new Vector4Uniform(new Vector4(incidentExactVisibility ? 1f : 0f, clipmapNormalBias, clipmapViewBias, clipmapRelocate ? 1f : 0f))),
                 new("uTransfer", new Vector4Uniform(TransferUniform)),
+                new("uTransferStaleMin", new Vector4Uniform(MoverActive ? new Vector4(moverReach.Min - new Vector3(clipmapSpacing), 1f) : Vector4.Zero)),
+                new("uTransferStaleMax", new Vector4Uniform(MoverActive ? new Vector4(moverReach.Max + new Vector3(clipmapSpacing), 0f) : Vector4.Zero)),
                 new("uTexelDebug", new Vector4Uniform(new Vector4(texelFrame, 0f, 0f, 0f))),
                 new("uLightmap", new Vector4Uniform(LightmapUniform)),
                 new("uTexelLevels", new Vector4Uniform(TexelLevelsUniform(frameHeight))),
@@ -193,6 +195,8 @@ internal sealed partial class SponzaLoop
     private float clipmapLift;
     private float clipmapVisibilityPower;
     private bool clipmapExactVisibility, incidentExactVisibility;
+    // Set for one frame: every clipmap probe unsolved, solved afresh (clipmap_inject's uWave.w).
+    private bool clipmapForget;
     private float clipmapNormalBias, clipmapViewBias;
     private bool clipmapRelocate;
     private GpuBufferHandle clipmapOffsets;
@@ -325,10 +329,11 @@ internal sealed partial class SponzaLoop
             new("uDynamicQueue", new Vector4Uniform(new Vector4(clipmapDependentRays, MathF.Floor(clipmapBudget * clipmapDependentShare), clipmapShadowRays ? 1f : 0f, dynamicActive ? 1f : 0f))),
             new("uCascadeVP", new Matrix4x4ArrayUniform(cascadeViewProj)),
             new("uCascadeReceivers", new Matrix4x4Uniform(CascadeReceivers)),
-            new("uWave", new Vector4Uniform(new Vector4(wave ? 1f : 0f, clipmapYoungRays, 0f, 0f))),
+            new("uWave", new Vector4Uniform(new Vector4(wave ? 1f : 0f, clipmapYoungRays, 0f, clipmapForget ? 1f : 0f))),
         }, textures, Buffers: buffers);
         graph.Dispatch(clipmapPassHandle, Phase(0, 1));
         graph.Dispatch(clipmapPassHandle, Phase(1, (slots + surfaceCapacity + 63) / 64));
+        clipmapForget = false;
         if (wave)
         {
             // The solve as a wavefront: rays out, their hits shaded, the hits' sun out, the answers solved. Each batch

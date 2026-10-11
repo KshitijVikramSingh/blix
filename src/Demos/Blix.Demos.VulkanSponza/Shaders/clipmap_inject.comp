@@ -73,7 +73,9 @@ layout(set = 0, binding = 0) uniform ClipmapInject {
                            // w 1: probes relocate (--clipmap-relocate)
     mat4 uCascadeReceivers;  // where the cascades may answer (cascade_receivers.glsl)
     vec4 uWave;            // the solve as a wavefront (SponzaLoop.Clipmap, modes 3-6): x 1 when it is, y ray slots per lane
-                           // (the most passes a probe takes), z the per-frame base of the batches' coverage seeds
+                           // (the most passes a probe takes), z the per-frame base of the batches' coverage seeds;
+                           // w 1: FORGET -- every clipmap probe unsolved this frame, to be solved afresh (a sun the
+                           // transfer capture turned: the 1/n history would hold the last sun for hundreds of solves)
 } u;
 
 layout(set = 0, binding = 1, rgba16f) uniform image2D uClipmapIrradiance;
@@ -354,6 +356,9 @@ void main() {
             state = uvec4(uvec3(expected), 0u);
             states[g] = state;
             clipmapOffsets[g] = vec4(0.0);
+        } else if (u.uWave.w > 0.5) {
+            state = uvec4(state.xyz, 0u);
+            states[g] = state;
         }
         if ((state.w & BLIX_CLIPMAP_SOLVED) == 0u) {
             uint k = atomicAdd(queue[level], 1u);

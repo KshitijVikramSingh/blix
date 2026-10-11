@@ -53,6 +53,8 @@ layout(set = 0, binding = 0) uniform IncidentClipmap {
                          // --clipmap-view-bias; both 0: the default lift); w 1: probes relocated (--clipmap-relocate)
     vec4 uTransfer;      // x 1: fitted transfer weights answer the pixels that have them (--transfer-weights,
                          // transferAt), texels unread; y the first atlas record
+    vec4 uTransferStaleMin; // what moves (--mover), widened by a level-0 cell: a texel inside holds a transfer the mover
+    vec4 uTransferStaleMax; // may have made untrue, and the probes answer it instead; w of the min 1 when there is one
 } g;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -267,16 +269,10 @@ bool texelsAt(vec3 worldPos, vec3 n, float faceBin, float viewDepth, out vec3 ir
 // probes around that texel's lookup point (its record's position lifted a quarter cell along its face normal, as the
 // fit had it: SponzaLoop.TransferFit.cs), each probe read at the pixel's normal. False where the texel has no weights,
 // or a probe the fit leaned on is not solved (or is buried) here now: today's blend answers instead.
-bool transferAt(BlixClipmap c, vec3 N, out vec3 irradiance) {
+// One atlas record's transfer: its weights over its 8 level-0 probes, read at N. False where it has none, where a
+// probe it weighs is not there (unsolved, buried, another cell), or where a mover may have made it untrue.
+bool transferRecord(BlixClipmap c, vec3 N, uint id, out vec3 irradiance) {
     irradiance = vec3(0.0);
-    vec2 atlasTexel;
-    if (!texelLightmapUnpack(pixelLightmapTexel, atlasTexel)) return false;
-    ivec2 size = ivec2(g.uLightmap.yz);
-    ivec2 at = ivec2(floor(atlasTexel));
-    if (any(lessThan(at, ivec2(0))) || any(greaterThanEqual(at, size))) return false;
-    uint id = lightmapIndexMap[at.y * size.x + at.x];
-    if (id == 0xFFFFFFFFu) return false;
-    if (TEXEL_POSITION(id).w < 0.0 && dot(TEXEL_NORMAL(id).xyz, N) < 0.0) id += 1u;
     int rec = int(id) - int(g.uTransfer.y + 0.5);
     if (rec < 0) return false;
     uvec4 packed = transferWeights[rec];
@@ -288,7 +284,13 @@ bool transferAt(BlixClipmap c, vec3 N, out vec3 irradiance) {
     h = unpackHalf2x16(packed.z); w[4] = h.x; w[5] = h.y;
     h = unpackHalf2x16(packed.w); w[6] = h.x; w[7] = h.y;
     float spacing = c.baseSpacing;
-    vec3 p = TEXEL_POSITION(id).xyz + normalize(TEXEL_NORMAL(id).xyz) * (0.25 * spacing);
+    // A mover near the texel: what its transfer encodes -- the geometry within about a probe cell of it -- may have
+    // changed, a curtain across the light over a wall that did not move. It is not corrected by a delta (the probes'
+    // answer and the transfer's estimate the same bounce: adding would count it twice); the probes REPLACE it.
+    vec3 where = TEXEL_POSITION(id).xyz;
+    if (g.uTransferStaleMin.w > 0.5 && all(greaterThanEqual(where, g.uTransferStaleMin.xyz)) && all(lessThanEqual(where, g.uTransferStaleMax.xyz)))
+        return false;
+    vec3 p = where + normalize(TEXEL_NORMAL(id).xyz) * (0.25 * spacing);
     ivec3 base = ivec3(floor(p / spacing - 0.5));
     vec3 sum = vec3(0.0);
     for (int k = 0; k < 8; ++k) {
@@ -300,6 +302,41 @@ bool transferAt(BlixClipmap c, vec3 N, out vec3 irradiance) {
         sum += w[k] * blix_clipmapTileSample(blix_clipmapTileOrigin(c, 0, slot), N, false).rgb;
     }
     irradiance = sum;
+    return true;
+}
+
+// The transfer at the pixel: bilinear over the four atlas texels around its atlas point, each read through its own
+// probes, those that cannot answer (no weights, another face at a chart's edge, stale) left out and the rest
+// renormalised. A texel's transfer is fitted alone, so the nearest one's alone printed the atlas grid as steps
+// (Cornell's room view, the first run on clean probes); uTransfer.z 1 keeps the nearest (--transfer-nearest, the A/B).
+bool transferAt(BlixClipmap c, vec3 N, out vec3 irradiance) {
+    irradiance = vec3(0.0);
+    vec2 atlasTexel;
+    if (!texelLightmapUnpack(pixelLightmapTexel, atlasTexel)) return false;
+    ivec2 size = ivec2(g.uLightmap.yz);
+    if (g.uTransfer.z > 0.5) {
+        ivec2 at = ivec2(floor(atlasTexel));
+        if (any(lessThan(at, ivec2(0))) || any(greaterThanEqual(at, size))) return false;
+        uint id = lightmapIndexMap[at.y * size.x + at.x];
+        if (id == 0xFFFFFFFFu) return false;
+        if (TEXEL_POSITION(id).w < 0.0 && dot(TEXEL_NORMAL(id).xyz, N) < 0.0) id += 1u;
+        return transferRecord(c, N, id, irradiance);
+    }
+    int ids[4];
+    float weights[4];
+    texelsAroundLightmap(atlasTexel, N, size, ids, weights);
+    vec3 sum = vec3(0.0);
+    float total = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        if (ids[i] < 0 || weights[i] <= 0.0) continue;
+        if (dot(normalize(TEXEL_NORMAL(uint(ids[i])).xyz), N) < 0.7) continue;
+        vec3 e;
+        if (!transferRecord(c, N, uint(ids[i]), e)) continue;
+        sum += weights[i] * e;
+        total += weights[i];
+    }
+    if (total <= 1e-4) return false;
+    irradiance = sum / total;
     return true;
 }
 

@@ -31,15 +31,26 @@ def load(path):
     row only the gathered light."""
     with open(path, 'rb') as f:
         stride, count = struct.unpack('<ii', f.read(8))
-        assert stride in (66, 69), stride
+        # A negative stride: the ids are atlas indices (the record less the hashed ones), as weights are keyed. A
+        # positive one is an older dump, by record -- which shifts whenever the hashed texel count does.
+        if stride > 0:
+            raise SystemExit(f"{path}: an older dump, keyed by record rather than atlas index; capture it again.")
+        stride = -stride
+        assert stride in (66, 69, 77), stride
         a = np.frombuffer(f.read(), dtype='<f4', count=count * stride).reshape(count, stride)
     ids = a[:, 0].astype(np.int64)
-    light = a[:, 66:69] if stride == 69 else a[:, 7:10]
-    probes = a[:, 10:66].reshape(count, 8, 7)
+    light = a[:, 66:69] if stride >= 69 else a[:, 7:10]
+    probes = a[:, 10:66].reshape(count, 8, 7).copy()
+    if stride == 77:
+        # Each probe's traced visibility from the texel takes the place of the Chebyshev estimate (column 3): a probe
+        # behind the adjacent wall then weighs nothing, in today's blend and in every fit built on it.
+        probes[:, :, 3] = a[:, 69:77]
     position, normal = a[:, 1:4].astype(np.float64), a[:, 4:7].astype(np.float64)
     base = np.floor((position + normal * 0.25 * SPACING) / SPACING - 0.5)
     probe = (base[:, None, :] + CORNERS[None] + 0.5) * SPACING
     front = np.einsum('nkc,nc->nk', probe - position[:, None, :], normal) >= 0.0
+    if stride == 77:
+        front &= a[:, 69:77] > 0.5      # and seen from the texel: a probe behind the adjacent wall weighs nothing
     return ids, light, probes, front
 
 
@@ -113,7 +124,8 @@ def write(out, paths):
         b.append(light[pos])
     w = nnls_batch(np.concatenate(A, axis=1), np.concatenate(b, axis=1), allowed)
     with open(out, 'wb') as f:
-        f.write(struct.pack('<i', len(common)))
+        f.write(b'BXTW')                              # --transfer-weights' file: version 2, keyed by atlas index
+        f.write(struct.pack('<ii', 2, len(common)))
         f.write(common.astype('<u4').tobytes())
         f.write(w.astype('<f2').tobytes())
     print(f"wrote {len(common):,} texels' weights (fitted on {len(paths)} suns): mean sum {w.sum(1).mean():.3f}, non-zero {(w > 1e-4).sum(1).mean():.2f} of 8 -> {out}")

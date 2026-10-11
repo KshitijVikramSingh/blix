@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Numerics;
 using System.Runtime.InteropServices;
+using Blix.Core;
 using Blix.Geometry;
 using Blix.Graphics;
 
@@ -16,8 +17,19 @@ namespace Blix.Demos.VulkanSponza;
 internal sealed partial class SponzaLoop
 {
     private string? transferDumpPath;
+    // --transfer-suns: the suns one process captures in turn (degrees, as --sun), into transferSunsDirectory. Between
+    // them the sun turns, the clipmap forgets (its 1/n history would hold the last sun for hundreds of solves) and
+    // re-settles while the next truth is traced: one boot, one load, one cook for them all.
+    private List<Vector2>? transferSuns;
+    private string? transferSunsDirectory;
+    private int transferSunIndex;
+    private string TransferSunDumpPath(int i) => Path.Combine(transferSunsDirectory!,
+        string.Create(CultureInfo.InvariantCulture, $"sun_{transferSuns![i].X:0.##}_{transferSuns[i].Y:0.##}.bin"));
     // --transfer-weights <file> (tools/transfer/fit.py --write): fitted weights over each atlas texel's 8 level-0 probes,
-    // by atlas record (id - lightmapFirstRecord), 8 halves in a uvec4; zero where none was fitted. The incident pass
+    // by ATLAS INDEX (the record less lightmapFirstRecord; dumps carry the same), 8 halves in a uvec4; zero where none was
+    // fitted. Not by record: the hashed records come first, and two runs' hashed sets differed by 3 texels (59,776 and
+    // 59,773), which moved every atlas record by 3 -- weights keyed so would have answered three texels off, silently.
+    // The file starts "BXTW", version 2 (count, atlas indices as u32, weights as 8 halves each). The incident pass
     // then answers a pixel whose texel has weights with sum_k w_k . probe_k (incident_clipmap.frag, transferAt) in
     // place of the probe blend, and reads no texels -- probes and transfer alone.
     private string? transferWeightsPath;
@@ -28,6 +40,8 @@ internal sealed partial class SponzaLoop
     {
         if (transferWeightsPath is null) return;
         using var r = new BinaryReader(File.OpenRead(transferWeightsPath));
+        if (r.ReadUInt32() != TransferWeightsMagic || r.ReadInt32() != 2)
+            throw new AppArgsException($"--transfer-weights {transferWeightsPath}: not a version 2 weights file (keyed by atlas index); refit it with tools/transfer/fit.py --write.");
         var count = r.ReadInt32();
         var ids = MemoryMarshal.Cast<byte, uint>(r.ReadBytes(count * 4)).ToArray();
         var halves = MemoryMarshal.Cast<byte, ushort>(r.ReadBytes(count * 16)).ToArray();
@@ -35,8 +49,8 @@ internal sealed partial class SponzaLoop
         var placed = 0;
         for (var i = 0; i < count; i++)
         {
-            var rec = (long)ids[i] - first;
-            if (rec < 0 || rec >= atlasCount) continue;
+            var rec = (long)ids[i];
+            if (rec >= atlasCount) continue;
             for (var k = 0; k < 4; k++) words[rec * 4 + k] = halves[i * 8 + 2 * k] | ((uint)halves[i * 8 + 2 * k + 1] << 16);
             placed++;
         }
@@ -46,6 +60,8 @@ internal sealed partial class SponzaLoop
             $"[VulkanSponza] transfer weights: {placed:N0} atlas texels of {count:N0} in {Path.GetFileName(transferWeightsPath)}; the incident pass answers them from their probes."));
     }
 
+    private const uint TransferWeightsMagic = 0x57545842u;   // "BXTW"
+
     private ShaderBufferBinding TransferWeightsBinding()
     {
         if (transferWeightsBuffer.Equals(default(GpuBufferHandle)))
@@ -53,17 +69,24 @@ internal sealed partial class SponzaLoop
         return new ShaderBufferBinding("TransferWeights", transferWeightsBuffer);
     }
 
-    // x 1 when the weights are up, y the first atlas record.
-    private Vector4 TransferUniform => new(transferWeightsOn ? 1f : 0f, lightmapFirstRecord, 0f, 0f);
+    // x 1 when the weights are up, y the first atlas record, z 1: the nearest texel's alone (--transfer-nearest; the
+    // A/B for the bilinear lookup).
+    private Vector4 TransferUniform => new(transferWeightsOn ? 1f : 0f, lightmapFirstRecord, transferNearest ? 1f : 0f, 0f);
+    private bool transferNearest;
     private bool transferBakeDone;
     private uint transferBakeDoneFrame;
-    // Frames after the region's bake before the dump: the probes keep solving meanwhile.
-    private const uint TransferSettleFrames = 900;
-    // One texel in this many (by a hash of its record id, so every run picks the same ones): --transfer-stride (4), 1 for
+    // Frames after the region's bake (or a sun's turn) at least, before the dump; the probes' solves decide the rest
+    // (TransferProbesSettled).
+    private const uint TransferSettleFrames = 120;
+    // One texel in this many (by a hash of its atlas index, so every run picks the same ones): --transfer-stride (4), 1 for
     // weights a run will read (--transfer-weights).
     private uint transferSampleStride = 4;
-    // A dump row: id, position, normal, gathered light, 8 probes x (valid, trilinear, facing^2, Chebyshev, rgb), traced rgb.
-    private const int TransferRowFloats = 1 + 3 + 3 + 3 + 8 * 7 + 3;
+    // A dump row: id, position, normal, gathered light, 8 probes x (valid, trilinear, facing^2, Chebyshev, rgb), traced rgb,
+    // then each probe's TRACED visibility from the texel (1 nothing in the way, 0 blocked). Chebyshev let a probe outside
+    // the adjacent wall into a corner texel's blend (Cornell: a pale strip down the back wall's corner and a pink line
+    // along the red wall's foot, against a clean path trace); a scale cannot cancel what that probe's outdoor light does
+    // with the sun, but a weight of 0 can. A segment from the texel (1 cm off it) to the probe, on the CPU ray scene.
+    private const int TransferRowFloats = 1 + 3 + 3 + 3 + 8 * 7 + 3 + 8;
     // The texels' path-traced truth (SponzaLoop.GpuReference.cs, a ReferenceWave at the texels: the software traversal or
     // Metal under --ray-backend hw|both): --transfer-paths a texel (1,024), --ref-bounces deep. The dump writes it beside
     // the gathered light, and tools/transfer/fit.py fits to it.
@@ -84,10 +107,59 @@ internal sealed partial class SponzaLoop
     {
         if (i < firstAtlas || MathF.Abs(texels[2 * i].W) < 2f || clipmap is null) return false;
         // Either side of a double-sided pair may be drawn: each is its own sample.
-        var h = (uint)i * 2654435761u;
+        var h = (uint)(i - firstAtlas) * 2654435761u;   // by atlas index: the same texels whatever the hashed count
         if ((h >> 7) % transferSampleStride != 0) return false;
         var p = new Vector3(texels[2 * i].X, texels[2 * i].Y, texels[2 * i].Z);
         return clipmap.InsideDistance(0, p) >= 1.5f;
+    }
+
+    // --transfer-probe-solves K: the dump waits until the level-0 probes its texels read have K solves each (the 10th
+    // percentile of them, solved and not buried). A probe's value IS its average over solves (each weighs 1/n, to 255),
+    // so this is the averaging window, counted where it matters: after a fixed 900 frames they had had a handful, and
+    // two runs' probes differed by 2.4% a texel (3.3% after a sun change) -- the floor every fit stood on, whatever the
+    // truth's paths. Checked every 30 frames; given up on, and said so, after TransferSettleLimit frames.
+    private int transferProbeSolves = 64;
+    private int[]? transferProbeSlots;
+    private const uint TransferSettleLimit = 20000;
+    private (int P10, int Median) transferProbeSolvesSeen;
+
+    private bool TransferProbesSettled()
+    {
+        if (clipmap is null || transferProbeSolves <= 0) return true;
+        if ((texelFrame - transferBakeDoneFrame) % 30u != 0u) return false;
+        if (transferProbeSlots is null)
+        {
+            // The slots the dump will read: each capture texel's 8 level-0 cells, as the dump picks them.
+            var slots = new HashSet<int>();
+            var points = transferCapturePoints!;
+            var spacing = clipmap.Spacing(0);
+            for (var i = 0; i < points.Count; i += 2)
+            {
+                var n = new Vector3(points[i + 1].X, points[i + 1].Y, points[i + 1].Z);
+                var p = new Vector3(points[i].X, points[i].Y, points[i].Z) + n * (0.25f * spacing);
+                var g = p / spacing - new Vector3(0.5f);
+                var b = new Int3((int)MathF.Floor(g.X), (int)MathF.Floor(g.Y), (int)MathF.Floor(g.Z));
+                for (var k = 0; k < 8; k++)
+                    slots.Add(clipmap.SlotIndex(clipmap.Slot(new Int3(b.X + (k & 1), b.Y + ((k >> 1) & 1), b.Z + ((k >> 2) & 1)))));
+            }
+            transferProbeSlots = slots.ToArray();
+        }
+        var states = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(clipmapState, 0, clipmap.ProbesPerLevel * 16).AsSpan()).ToArray();
+        var solves = new List<int>(transferProbeSlots.Length);
+        foreach (var s in transferProbeSlots)
+        {
+            var w = states[s * 4 + 3];
+            if ((w & 1u) == 0 || (w & 2u) != 0) continue;   // unsolved (counts once solved), or buried (never read)
+            solves.Add((int)((w >> 8) & 0xFFu));
+        }
+        if (solves.Count == 0) return false;
+        solves.Sort();
+        transferProbeSolvesSeen = (solves[solves.Count / 10], solves[solves.Count / 2]);
+        if (transferProbeSolvesSeen.P10 >= transferProbeSolves) return true;
+        if (texelFrame - transferBakeDoneFrame < TransferSettleLimit) return false;
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[VulkanSponza] transfer: the probes reached {transferProbeSolvesSeen.P10} solves (10th percentile; asked {transferProbeSolves}) in {TransferSettleLimit} frames; dumping anyway."));
+        return true;
     }
 
     private void TransferDumpWhenDone()
@@ -103,7 +175,7 @@ internal sealed partial class SponzaLoop
         }
         var captured = transferWave is null || texelFrame - transferWaveStart >= (uint)ReferenceWaveFrames(transferWave);
         if (!captured) RecordReferenceWave(transferWave!);
-        if (texelFrame - transferBakeDoneFrame < TransferSettleFrames || !captured) return;
+        if (texelFrame - transferBakeDoneFrame < TransferSettleFrames || !captured || !TransferProbesSettled()) return;
         var path = transferDumpPath;
         transferDumpPath = null;
         var irradiance = device.ReadTexture(clipmapIrradiance, out var aw, out _, out _);
@@ -135,6 +207,25 @@ internal sealed partial class SponzaLoop
         }
 
         var spacing = clipmap.Spacing(0);
+        // Each texel's 8 probes, seen from it or not (above).
+        var seenFrom = new float[live.Length * 8];
+        if (rayQueries is { } scene)
+            Parallel.For(0, live.Length, li =>
+            {
+                var id = live[li];
+                var pos = new Vector3(texels[2 * id].X, texels[2 * id].Y, texels[2 * id].Z);
+                var n = Vector3.Normalize(new Vector3(texels[2 * id + 1].X, texels[2 * id + 1].Y, texels[2 * id + 1].Z));
+                var g = (pos + n * (0.25f * spacing)) / spacing - new Vector3(0.5f);
+                var b = new Int3((int)MathF.Floor(g.X), (int)MathF.Floor(g.Y), (int)MathF.Floor(g.Z));
+                var o = pos + n * 0.01f;
+                for (var k = 0; k < 8; k++)
+                {
+                    var to = clipmap.ProbePosition(0, new Int3(b.X + (k & 1), b.Y + ((k >> 1) & 1), b.Z + ((k >> 2) & 1))) - o;
+                    var len = to.Length();
+                    seenFrom[li * 8 + k] = len < 1e-4f || !scene.Any(new Ray(o, to / len), 0f, len, (uint)(li * 8 + k)) ? 1f : 0f;
+                }
+            });
+        else Array.Fill(seenFrom, 1f);
         var rows = new List<float>(live.Length * TransferRowFloats);
         var written = 0;
         for (var li = 0; li < live.Length; li++)
@@ -144,7 +235,7 @@ internal sealed partial class SponzaLoop
             var n = Vector3.Normalize(new Vector3(texels[2 * id + 1].X, texels[2 * id + 1].Y, texels[2 * id + 1].Z));
             var l = light[id];
             if (l.W <= 0f) continue;
-            rows.Add(id); rows.Add(pos.X); rows.Add(pos.Y); rows.Add(pos.Z); rows.Add(n.X); rows.Add(n.Y); rows.Add(n.Z);
+            rows.Add(id - lightmapFirstRecord); rows.Add(pos.X); rows.Add(pos.Y); rows.Add(pos.Z); rows.Add(n.X); rows.Add(n.Y); rows.Add(n.Z);
             rows.Add(l.X); rows.Add(l.Y); rows.Add(l.Z);
             var p = pos + n * (0.25f * spacing);
             var g = p / spacing - new Vector3(0.5f);
@@ -186,15 +277,47 @@ internal sealed partial class SponzaLoop
             var t = traced is null ? new Vector4(-1f, -1f, -1f, 1f) : traced[li];
             var paths = MathF.Max(t.W, 1f);
             rows.Add(t.X / paths); rows.Add(t.Y / paths); rows.Add(t.Z / paths);
+            for (var k = 0; k < 8; k++) rows.Add(seenFrom[li * 8 + k]);
             written++;
         }
         using (var w = new BinaryWriter(File.Create(path)))
         {
-            w.Write(TransferRowFloats);
+            w.Write(-TransferRowFloats);   // negative: ids by atlas index (tools/transfer/fit.py)
             w.Write(written);
             foreach (var v in rows) w.Write(v);
         }
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[VulkanSponza] transfer dump: {written:N0} texels (of {live.Length:N0} baked) with their 8 level-0 probes at {spacing} m, sun {sunDirection}: {path}"));
+            $"[VulkanSponza] transfer dump: {written:N0} texels (of {live.Length:N0} baked) with their 8 level-0 probes at {spacing} m (solves: 10th percentile {transferProbeSolvesSeen.P10}, median {transferProbeSolvesSeen.Median}, after {texelFrame - transferBakeDoneFrame} frames), sun {sunDirection}: {path}"));
+        NextTransferSun();
     }
+
+    // --transfer-suns: on to the next sun -- turned, the clipmap forgotten, a fresh wave -- or, the last captured, done.
+    private void NextTransferSun()
+    {
+        if (transferSuns is not { } suns) return;
+        if (++transferSunIndex >= suns.Count)
+        {
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza] transfer suns: all {suns.Count} captured in {transferSunsClock.Elapsed.TotalMinutes:0.0} min, into {transferSunsDirectory}."));
+            host.RequestClose();
+            return;
+        }
+        sunYaw = suns[transferSunIndex].X * MathF.PI / 180f;
+        sunPitch = suns[transferSunIndex].Y * MathF.PI / 180f;
+        UpdateSunDirection();
+        clipmapForget = true;
+        if (transferWave is { } w)
+        {
+            device.WaitIdle();
+            foreach (var b in new[] { w.Points, w.Lanes, w.Sums, w.Rays, w.Hits, w.Origins, w.Occluded }) Disown(b);
+            transferWave = null;
+        }
+        transferBakeDoneFrame = texelFrame;
+        transferDumpPath = TransferSunDumpPath(transferSunIndex);
+        transferProbeSolvesSeen = (0, 0);
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[VulkanSponza] transfer suns: {transferSunIndex + 1} of {suns.Count}, sun {suns[transferSunIndex].X:0.##},{suns[transferSunIndex].Y:0.##} ({sunDirection}); the clipmap re-solves from nothing."));
+    }
+
+    private readonly System.Diagnostics.Stopwatch transferSunsClock = System.Diagnostics.Stopwatch.StartNew();
 }
