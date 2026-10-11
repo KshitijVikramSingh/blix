@@ -284,6 +284,7 @@ kernel void blix_buried(device const float4* records [[buffer(0)]],
 struct HwxContext {
     id<MTLDevice> device;
     id<MTLCommandQueue> queue;
+    id<MTLCommandQueue> ownQueue;   // the one it was created with (hwx_use_queue(ctx, NULL) returns to it)
     id<MTLComputePipelineState> pso;
     id<MTLIntersectionFunctionTable> table;
     id<MTLComputePipelineState> shadowPso;
@@ -372,6 +373,7 @@ HWX_EXPORT HwxContext* hwx_create(void* mtlDevice, char* err, int errLength) {
         auto* ctx = new HwxContext();
         ctx->device = device;
         ctx->queue = [device newCommandQueue];
+        ctx->ownQueue = ctx->queue;
         ctx->queue.label = @"blix-hwx";
         ctx->pso = pso;
         ctx->table = table;
@@ -879,4 +881,11 @@ HWX_EXPORT int hwx_shadow_host(HwxContext* ctx, const float* origins, uint32_t c
 // interleaved with the first's lost the device to the GPU watchdog).
 HWX_EXPORT void hwx_share_queue(HwxContext* ctx, HwxContext* from) {
     if (ctx && from && ctx != from) ctx->queue = from->queue;
+}
+
+// From now on `ctx` submits on `queue` (an id<MTLCommandQueue>, retained here): the Vulkan device's own queue
+// (VK_EXT_metal_objects), so the frame's Vulkan work and this tracer's run in commit order on one queue rather than
+// synchronising across two. NULL: back to its own queue.
+HWX_EXPORT void hwx_use_queue(HwxContext* ctx, void* queue) {
+    if (ctx) ctx->queue = queue ? (__bridge id<MTLCommandQueue>)queue : ctx->ownQueue;
 }

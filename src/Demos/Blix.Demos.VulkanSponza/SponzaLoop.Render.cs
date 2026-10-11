@@ -462,6 +462,14 @@ internal sealed partial class SponzaLoop
         // on it); not under --rt-isolated, whose sky rays are read per full-res pixel.
         halfLightingNow = render.HalfResLighting && incidentField && !(abMode == "incident" && AbOffPhase) && ClipmapActive && !rtIsolated;
         lightingFrame++;
+        // --ab queue: the Metal tracers on the Vulkan device's queue (ON) or their own (OFF), switched at each phase. Safe
+        // mid-run: the hand-offs still wait on the frame timeline, so work already on the other queue stays ordered.
+        if (abMode == "queue" && frameTracer is { } queueTracer && tracerOnDeviceQueue == AbOffPhase)
+        {
+            tracerOnDeviceQueue = !AbOffPhase;
+            queueTracer.UseDeviceQueue(tracerOnDeviceQueue);
+            BakeTracer?.UseDeviceQueue(tracerOnDeviceQueue);
+        }
 
         // Stress hook: flip fog every 90 frames to exercise the on/off barrier
         // transitions under validation (no effect without --fog-stress).
@@ -1188,6 +1196,7 @@ internal sealed partial class SponzaLoop
             "normal" => "normal mapping",
             "cull"    => "camera frustum culling",
             "castercull" => "shadow caster culling against the camera",
+            "queue"   => "the Metal tracers on the Vulkan device's command queue (OFF: their own)",
             "lod"     => lodArmOff > 0f
                 ? string.Create(Inv, $"mesh LOD at {lodArmOn:0.##} px rather than {lodArmOff:0.##} px")
                 : "mesh level of detail",

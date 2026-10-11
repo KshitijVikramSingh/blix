@@ -82,6 +82,9 @@ internal static unsafe class HwxNative
     public static extern void hwx_share_queue(nint ctx, nint from);
 
     [DllImport(Library)]
+    public static extern void hwx_use_queue(nint ctx, nint queue);
+
+    [DllImport(Library)]
     public static extern void hwx_memory(nint ctx, ulong* allocated, ulong* recommended);
 
     [DllImport(Library)]

@@ -100,6 +100,17 @@ public sealed partial class VulkanGraphicsDevice
     }
 
     /// <inheritdoc />
+    public unsafe nint ExportMetalCommandQueue()
+    {
+        var queueInfo = new ExportMetalCommandQueueInfoEXT { SType = StructureType.ExportMetalCommandQueueInfoExt, Queue = GraphicsQueue };
+        var info = new ExportMetalObjectsInfoEXT { SType = StructureType.ExportMetalObjectsInfoExt, PNext = &queueInfo };
+        MetalObjects.ExportMetalObjects(Device, &info);
+        if ((nint)queueInfo.MtlCommandQueue == 0)
+            throw new InvalidOperationException("the graphics queue exported no MTLCommandQueue.");
+        return (nint)queueInfo.MtlCommandQueue;
+    }
+
+    /// <inheritdoc />
     public unsafe nint ExportMetalDevice()
     {
         var deviceInfo = new ExportMetalDeviceInfoEXT { SType = StructureType.ExportMetalDeviceInfoExt };

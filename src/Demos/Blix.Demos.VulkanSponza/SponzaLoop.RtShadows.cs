@@ -33,6 +33,13 @@ internal sealed partial class SponzaLoop
 {
     private bool rtShadows;
     private bool rtNoOverlap;
+    // --metal-device-queue: the Metal tracers on the Vulkan device's own command queue rather than one of their own. A
+    // Sponza frame idles 7-19 ms around each hand-off between the two queues (Metal System Trace), and one queue was the
+    // obvious fix -- measured, it is worse: --ab queue (LOD 0, camera still, one process) put one queue at a 96.4 ms
+    // median against 73.6 ms on two (IQRs 88-100 and 69-80). On two queues the tracers' work (the traced shadows' 7.4 ms
+    // among it) runs beside the Vulkan passes; on one it runs between them. Two it is; this keeps the other measurable.
+    private bool metalDeviceQueue;
+    private bool tracerOnDeviceQueue;
     private bool rtIsolated;
     // --rt-coverage-coin: leaf cards' shadows by the baked coverage's coin (as the software traversal meets them), not by
     // their textures' alpha at the point hit.
@@ -217,6 +224,10 @@ internal sealed partial class SponzaLoop
         var blocks = RayQueryGpuData.BlockNames.Select(name => rayBlockBuffers.First(b => b.Name == name).Buffer).ToArray();
         var (alphaMaterials, rowMaterial) = rtCoverageCoin ? (new List<MetalRayTracer.AlphaMaterial>(), Array.Empty<uint>()) : RtAlphaMaterials();
         var alphaTested = rowMaterial.Select(m => m != uint.MaxValue).ToArray();
+        // On its own queue unless --metal-device-queue (above); the bake scene's tracer shares this one either way
+        // (SponzaLoop.BakeScene.cs).
+        if (metalDeviceQueue) tracer.UseDeviceQueue();
+        tracerOnDeviceQueue = metalDeviceQueue;
         rtBuild = tracer.Build(rayGpuData, blocks, surfaceWords, alphaTested);
         if (!rtCoverageCoin) tracer.SetAlpha(alphaMaterials, rowMaterial, raySurfaceBakeBuffers.First(b => b.Name == "BlixRayUvs").Buffer, rtAlphaMip);
         frameTracer = tracer;

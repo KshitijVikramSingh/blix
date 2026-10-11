@@ -51,6 +51,13 @@ public interface IGraphicsDevice : IDisposable
     /// <remarks>Only with <see cref="GraphicsFeatures.MetalObjects"/>. It lives as long as this device.</remarks>
     nint ExportMetalDevice() => throw new NotSupportedException("this device has no Metal objects to export (GraphicsFeatures.MetalObjects).");
 
+    /// <summary>The MTLCommandQueue this device's frames are submitted on, as a raw id&lt;MTLCommandQueue&gt;, not retained.</summary>
+    /// <remarks>
+    /// Only with <see cref="GraphicsFeatures.MetalObjects"/>. A native Metal pass that commits on this queue runs in commit
+    /// order with the frame's own work, rather than synchronising with it across two queues.
+    /// </remarks>
+    nint ExportMetalCommandQueue() => throw new NotSupportedException("this device has no Metal objects to export (GraphicsFeatures.MetalObjects).");
+
     /// <summary>The MTLBuffer behind a GPU buffer, as a raw id&lt;MTLBuffer&gt;, not retained; the GPU buffer starts at its offset 0.</summary>
     /// <remarks>
     /// Only with <see cref="GraphicsFeatures.MetalObjects"/>. It lives as long as the GPU buffer, and Metal work on it is

@@ -243,6 +243,18 @@ public sealed class MetalRayTracer : IDisposable
     }
 
     /// <summary>
+    /// From now on this tracer submits on the Vulkan device's own Metal command queue
+    /// (<see cref="IGraphicsDevice.ExportMetalCommandQueue"/>), its in-frame passes in commit order with the frame's
+    /// Vulkan work on one queue; <paramref name="deviceQueue"/> false: back to its own. Whether one queue is cheaper
+    /// than two is measured, not assumed (VulkanSponza --ab queue).
+    /// </summary>
+    public void UseDeviceQueue(bool deviceQueue = true)
+    {
+        ObjectDisposedException.ThrowIf(ctx == 0, this);
+        HwxNative.hwx_use_queue(ctx, deviceQueue ? device.ExportMetalCommandQueue() : 0);
+    }
+
+    /// <summary>
     /// From now on this tracer submits on <paramref name="other"/>'s command queue: tracers whose in-frame passes share the
     /// frame's timeline must run in the order the frame encodes them, which one serial queue guarantees and two do not.
     /// </summary>
