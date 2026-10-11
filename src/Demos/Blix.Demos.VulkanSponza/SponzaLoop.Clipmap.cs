@@ -161,7 +161,7 @@ internal sealed partial class SponzaLoop
                 new("uTexelGrid", new Vector4Uniform(texel.Grid)),
                 new("uTexelParams", new Vector4Uniform(texel.Params)),
                 new("uReference", new Vector4Uniform(reference.Params)),
-                new("uClipExact", new Vector4Uniform(new Vector4(clipmapExactVisibility ? 1f : 0f, clipmapNormalBias, clipmapViewBias, clipmapRelocate ? 1f : 0f))),
+                new("uClipExact", new Vector4Uniform(new Vector4(incidentExactVisibility ? 1f : 0f, clipmapNormalBias, clipmapViewBias, clipmapRelocate ? 1f : 0f))),
                 new("uTransfer", new Vector4Uniform(TransferUniform)),
                 new("uTexelDebug", new Vector4Uniform(new Vector4(texelFrame, 0f, 0f, 0f))),
                 new("uLightmap", new Vector4Uniform(LightmapUniform)),
@@ -192,7 +192,7 @@ internal sealed partial class SponzaLoop
     private bool clipmapNoBounce;
     private float clipmapLift;
     private float clipmapVisibilityPower;
-    private bool clipmapExactVisibility;
+    private bool clipmapExactVisibility, incidentExactVisibility;
     private float clipmapNormalBias, clipmapViewBias;
     private bool clipmapRelocate;
     private GpuBufferHandle clipmapOffsets;

@@ -250,9 +250,13 @@ internal sealed partial class SponzaLoop
         if (args.Float("clipmap-blend") is { } cb)
             clipmapBlendOverride = Math.Clamp(cb, 0f, (Math.Min(ClipmapDims.X, Math.Min(ClipmapDims.Y, ClipmapDims.Z)) - 1) / 2f - 0.01f);
         if (args.Float("clipmap-visibility-power") is { } vp) clipmapVisibilityPower = Math.Max(0f, vp);
-        // --clipmap-exact-visibility: each probe's visibility traced from the point (incident_clipmap.frag), the ceiling
-        // for a cooked mask; costly.
+        // --clipmap-exact-visibility: the probes' solves read the clipmap at their hits with each probe's visibility traced
+        // (clipmap_inject.comp; on the wavefront, a batch): the interpolated read let a sunlit layer outside a wall into
+        // Cornell's room (1.19 of the truth at a low sun, 1.01 traced). --incident-exact-visibility: the same at every
+        // pixel (incident_clipmap.frag), the ceiling for a cooked mask; costly, and apart since the solve's alone is what
+        // the probes need (Cornell's room view: 0.913 of the truth with the pixels' traced, 0.910 without).
         clipmapExactVisibility = args.Flag("clipmap-exact-visibility");
+        incidentExactVisibility = args.Flag("incident-exact-visibility");
         // --clipmap-normal-bias / --clipmap-view-bias: DDGI's surface bias, in probe spacings (both 0: the default lift).
         if (args.Float("clipmap-normal-bias") is { } cnb) clipmapNormalBias = Math.Max(0f, cnb);
         if (args.Float("clipmap-view-bias") is { } cvb) clipmapViewBias = Math.Max(0f, cvb);
