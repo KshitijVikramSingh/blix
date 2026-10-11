@@ -219,6 +219,29 @@ public sealed class MetalRayTracer : IDisposable
         return result;
     }
 
+    /// <summary>
+    /// Shadow rays from host memory toward <paramref name="towardLight"/>, by the coverage coin: per origin (position, and
+    /// how far: 0 or less, no ray) whether anything is in the way. Waits for the GPU; touches no device buffer, so it can
+    /// run off the frame's thread (a transport relight's sunlets).
+    /// </summary>
+    public unsafe bool[] OccludedFromHost(ReadOnlySpan<Vector4> origins, Vector3 towardLight, uint seedBase, out double gpuMs)
+    {
+        ObjectDisposedException.ThrowIf(ctx == 0, this);
+        var flags = new byte[Math.Max(origins.Length, 1)];
+        var direction = stackalloc float[3] { towardLight.X, towardLight.Y, towardLight.Z };
+        double ms;
+        fixed (Vector4* o = origins)
+        fixed (byte* f = flags)
+        {
+            if (HwxNative.hwx_shadow_host(ctx, (float*)o, (uint)origins.Length, direction, seedBase, f, &ms) != 0)
+                throw new InvalidOperationException($"Metal shadow trace: {Error}");
+        }
+        gpuMs = ms;
+        var result = new bool[origins.Length];
+        for (var k = 0; k < origins.Length; k++) result[k] = flags[k] != 0;
+        return result;
+    }
+
     /// <summary>The device's GPU memory in MB: allocated by every client (Vulkan's included), and the working set Metal
     /// recommends staying under before it pages.</summary>
     public unsafe (double AllocatedMb, double RecommendedMb) Memory

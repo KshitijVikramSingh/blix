@@ -23,8 +23,11 @@ internal sealed partial class SponzaLoop
     // --texel-trust N: the rays at which its answer replaces the clipmap's whole (fewer: blended by the fraction).
     // 1024: the gather's cost is the trace (--texel-ablate on Sponza's hall, 65k rays a frame: 10.5 ms all in, 9.8 ms
     // without its shadow rays, cooked lookups and guide, 0.4 ms without the trace) -- ~8 M rays/s on this GPU. Half the
-    // budget, ~5 ms, and only while a view is still settling (texelMaxRays).
+    // budget, ~5 ms, and only while a view is still settling (texelMaxRays). With frame rays on Metal, 32,768 (~1 M rays)
+    // unless --texel-budget says: at 1,024 a sun's turn took ~7,000 frames to re-gather the ~460 k texels a view reads
+    // (UploadTexels sets it).
     private int texelBudget = 1024;
+    private bool texelBudgetGiven;
     // --texel-levels N: texels at N sizes, each twice the last (5 / 10 / 20 cm); --texel-pixels P: a pixel reads the
     // level whose texel spans about P pixels at its depth, and the coarser ones fill in until it has rays (texel.glsl).
     // A view used to need every surface it showed traced at 5 cm before it settled: ~240k texels on Sponza's hall at
@@ -109,7 +112,7 @@ internal sealed partial class SponzaLoop
         texelWavefront = args.Flag("texel-wavefront");
         ReadLightBakeArgs(args);
         if (args.Float("transport-texel") is { } s) texelSpacing = Math.Clamp(s, 0.01f, 1f);
-        if (args.Int("texel-budget") is { } b) texelBudget = Math.Clamp(b, 64, 1 << 20);
+        if (args.Int("texel-budget") is { } b) { texelBudget = Math.Clamp(b, 64, 1 << 20); texelBudgetGiven = true; }
         if (args.Int("texel-rays") is { } r) texelTarget = Math.Clamp(r, 32, 1 << 16);
         if (args.Int("texel-max-rays") is { } mr) texelMaxRays = Math.Clamp(mr, texelTarget, 1 << 20);
         if (args.Float("texel-noise") is { } tn) texelNoise = Math.Max(0f, tn);
@@ -308,6 +311,7 @@ internal sealed partial class SponzaLoop
         _ = checked(bake.Texels.Length * 16 + texelCount * 16);
         var stamps = new uint[texelCount];
         Array.Fill(stamps, 0xFFFFFFFFu);
+        if (!texelBudgetGiven && FrameRaysOnHardware) texelBudget = 32768;
         var queueWords = 8 + 4 * Math.Max(texelBudget, LightBakeBudget);
         texelHashBuffer = Own(device.CreateGpuBuffer(bake.Table.Length * 4, MemoryMarshal.AsBytes(bake.Table.AsSpan()), "sponza.texels.hash"));
         texelBuffer = Own(device.CreateGpuBuffer(bake.Texels.Length * 16, MemoryMarshal.AsBytes(bake.Texels.AsSpan()), "sponza.texels"));

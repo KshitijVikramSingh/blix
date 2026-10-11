@@ -801,3 +801,46 @@ HWX_EXPORT void hwx_memory(HwxContext* ctx, uint64_t* allocated, uint64_t* recom
     *allocated = ctx->device.currentAllocatedSize;
     *recommended = ctx->device.recommendedMaxWorkingSetSize;
 }
+
+// Shadow rays from host memory toward one direction (blix_shadow, the coverage coin): `count` origins, float4 each
+// (position, tMax; 0 or less: no ray), one byte each out (1: something in the way). In chunks, each waited for;
+// callable off the frame's thread, as hwx_buried.
+HWX_EXPORT int hwx_shadow_host(HwxContext* ctx, const float* origins, uint32_t count, const float* direction, uint32_t seedBase,
+                               uint8_t* occluded, double* gpuMs) {
+    @autoreleasepool {
+        if (!ctx->tlas) return Fail(ctx, "shadow trace before build");
+        id<MTLDevice> device = ctx->device;
+        const uint32_t chunk = 1u << 21;
+        if (gpuMs) *gpuMs = 0.0;
+        for (uint32_t first = 0; first < count; first += chunk) {
+            uint32_t n = std::min(chunk, count - first);
+            id<MTLBuffer> in = [device newBufferWithBytes:origins + uint64_t(first) * 4 length:uint64_t(n) * 16 options:MTLResourceStorageModeShared];
+            id<MTLBuffer> out = [device newBufferWithLength:uint64_t(n) * 4 options:MTLResourceStorageModeShared];
+            id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
+            cb.label = @"blix-hwx host shadow";
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:ctx->shadowPso];
+            [enc setBuffer:in offset:0 atIndex:0];
+            [enc setBuffer:out offset:0 atIndex:1];
+            [enc setAccelerationStructure:ctx->tlas atBufferIndex:2];
+            [enc setIntersectionFunctionTable:ctx->shadowTable atBufferIndex:3];
+            struct { float direction[4]; uint32_t count, seedBase, sky, pad1; } params =
+                {{direction[0], direction[1], direction[2], 0.0f}, n, seedBase + first, 0u, 0u};
+            [enc setBytes:&params length:sizeof(params) atIndex:4];
+            [enc setBuffer:in offset:0 atIndex:5];
+            [enc useResources:ctx->blas.data() count:ctx->blas.size() usage:MTLResourceUsageRead];
+            id<MTLResource> tableBuffers[] = {ctx->primRows, ctx->entryRows, ctx->instances, ctx->triangles, ctx->owners, ctx->surfaces,
+                                              ctx->alphaOff, ctx->rowMaterial, ctx->materials, ctx->uvs};
+            [enc useResources:tableBuffers count:10 usage:MTLResourceUsageRead];
+            [enc dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+            [enc endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
+            if (!Completed(ctx, cb, "host shadow trace")) return 1;
+            if (gpuMs) *gpuMs += (cb.GPUEndTime - cb.GPUStartTime) * 1e3;
+            const uint32_t* words = (const uint32_t*)out.contents;
+            for (uint32_t k = 0; k < n; ++k) occluded[first + k] = (words[k] & 1u) ? 1 : 0;
+        }
+        return 0;
+    }
+}

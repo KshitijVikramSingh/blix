@@ -165,6 +165,25 @@ internal sealed partial class SponzaLoop
     // fixed point, where a fixed 25% blend kept wandering (dark, bounce-lit areas worst; --stability, d175e53).
     // --clipmap-converge-floor sets a floor for the A/B.
     private float clipmapConvergeFloor;
+    // After the sun turns (more than a quarter degree from the last direction the probes were solved under), the static
+    // light blends at no less than this per solve for ClipmapSunTurnFrames: under 1/n a probe at n = 255 kept the old
+    // sun's bounce light for hundreds of re-solves.
+    private const float ClipmapSunTurnFloor = 0.2f;
+    private const int ClipmapSunTurnFrames = 240;
+    private Vector3 clipmapSolvedSun;
+    private int clipmapSunTurnFrame = -1;
+    private float ClipmapStaticFloor()
+    {
+        var toSun = -Vector3.Normalize(sunDirection);
+        if (clipmapSolvedSun == Vector3.Zero) clipmapSolvedSun = toSun;
+        if (Vector3.Dot(toSun, clipmapSolvedSun) < MathF.Cos(0.25f * MathF.PI / 180f))
+        {
+            clipmapSolvedSun = toSun;
+            clipmapSunTurnFrame = clipmapFrame;
+        }
+        var turning = clipmapSunTurnFrame >= 0 && clipmapFrame - clipmapSunTurnFrame < ClipmapSunTurnFrames;
+        return turning ? MathF.Max(clipmapConvergeFloor, ClipmapSunTurnFloor) : clipmapConvergeFloor;
+    }
     // --clipmap-lift M / --clipmap-visibility-power P: the incident pass's lookup lift (0: a quarter of the spacing)
     // and Chebyshev power (0: 3). Knobs for the level probe (stage 4g-v), not tuned defaults.
     // --clipmap-no-bounce: a probe ray's hit takes no light from the clipmap (sun only): single-bounce probes, the
@@ -282,10 +301,11 @@ internal sealed partial class SponzaLoop
             .Concat(ClipmapWaveBindings()).ToArray();
         var surface = SurfaceUniforms(slots);
         var wave = ClipmapOnWavefront;
+        var staticFloor = ClipmapStaticFloor();
         DispatchCommand Phase(int mode, int groups) => new(clipmapPipeline, groups, 1, 1, new ShaderUniform[]
         {
             new("uDims", new Vector4Uniform(new Vector4(ClipmapDims.X, ClipmapDims.Y, ClipmapDims.Z, clipmapSpacing))),
-            new("uParams", new Vector4Uniform(new Vector4(ClipmapBlend, clipmapConvergeFloor, mode, clipmapBudget))),
+            new("uParams", new Vector4Uniform(new Vector4(ClipmapBlend, staticFloor, mode, clipmapBudget))),
             new("uOrigin0", new Vector4Uniform(origins[0])),
             new("uOrigin1", new Vector4Uniform(origins[1])),
             new("uOrigin2", new Vector4Uniform(origins[2])),

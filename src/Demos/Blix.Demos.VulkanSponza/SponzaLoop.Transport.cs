@@ -724,8 +724,25 @@ internal sealed partial class SponzaLoop
             var direct = new Vector3[patches];
             var first = new Vector3[patches];
             var sOut = new Vector3[useSunlets ? sunlets : 0];
+            var relightClock = Stopwatch.StartNew();
+            var raysOn = "the CPU";
             if (useSunlets)
             {
+                // The sunlets' shadow rays on Metal when the frame's tracer is there (the scene they were cooked on):
+                // ~9 M on Sponza, seconds on the CPU.
+                if (Volatile.Read(ref frameTracer) is { } metal)
+                {
+                    var origins = new Vector4[sunlets];
+                    for (var s = 0; s < sunlets; s++)
+                        origins[s] = Vector3.Dot(sunletNrm[s], toSunNew) > 0f
+                            ? new Vector4(sunletPos[s] + sunletNrm[s] * 1e-3f, float.PositiveInfinity) : Vector4.Zero;
+                    var blocked = metal.OccludedFromHost(origins, toSunNew, 3u, out var shadowGpuMs);
+                    for (var s = 0; s < sunlets; s++)
+                        if (origins[s].W > 0f && !blocked[s])
+                            sOut[s] = sunletAlbedo[s] * sunIrrNew * Vector3.Dot(sunletNrm[s], toSunNew) / MathF.PI;
+                    raysOn = string.Create(CultureInfo.InvariantCulture, $"Metal ({shadowGpuMs:0} ms GPU)");
+                }
+                else
                 Parallel.For(0, sunlets, s =>
                 {
                     var ndl = Vector3.Dot(sunletNrm[s], toSunNew);
@@ -756,7 +773,11 @@ internal sealed partial class SponzaLoop
                 });
             }
             lastIncident = inc;
-            return (inc, BuildGuides(outg, sOut));
+            var raysMs = relightClock.Elapsed.TotalMilliseconds;
+            var guides = BuildGuides(outg, sOut);
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza] transport relight: {(useSunlets ? sunlets : patches):N0} sun rays on {raysOn} and {iterations} bounces in {raysMs:0} ms, guides in {relightClock.Elapsed.TotalMilliseconds - raysMs:0} ms."));
+            return (inc, guides);
         };
         transportRelightSun = (toSun, sunIrr);
         // Each patch's openness: the fraction of its cosine rays that meet nothing within TexelOpenReach -- what a texel's
