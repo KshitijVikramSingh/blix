@@ -40,7 +40,7 @@ internal sealed partial class SponzaLoop
     private bool lightBakeSaving;
     private int lightBakeReported = -1;
 
-    private const int LightBakeVersion = 2;
+    private const int LightBakeVersion = 3;
     // Per record on disk: light rgb (half), its rays (float), the blend rgb (half), the moment and the openness (half),
     // the openness's ray count (float).
     private const int LightBakeRecordBytes = 3 * 2 + 4 + 3 * 2 + 2 + 2 + 4;
@@ -56,7 +56,7 @@ internal sealed partial class SponzaLoop
     private string LightBakePathFor(string transportKey, (Vector3 ToSun, Vector3 Irradiance) sun)
     {
         var spec = string.Create(CultureInfo.InvariantCulture,
-            $"{transportKey};sun {sun.ToSun.X:F5},{sun.ToSun.Y:F5},{sun.ToSun.Z:F5};{sun.Irradiance.X:F4},{sun.Irradiance.Y:F4},{sun.Irradiance.Z:F4};target {texelTarget};buried {(lightmapKeepBuried ? "kept" : lightmapBackface.ToString(CultureInfo.InvariantCulture))}/16;v{LightBakeVersion}");
+            $"{transportKey};sun {sun.ToSun.X:F5},{sun.ToSun.Y:F5},{sun.ToSun.Z:F5};{sun.Irradiance.X:F4},{sun.Irradiance.Y:F4},{sun.Irradiance.Z:F4};target {texelTarget};buried {LightmapBuriedRule};v{LightBakeVersion}");
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(spec)))[..16].ToLowerInvariant();
         return Path.ChangeExtension(TransportCachePath(transportKey), $".light-{hash}");
     }

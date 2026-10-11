@@ -76,8 +76,8 @@ internal static unsafe class HwxNative
         uint* rowMaterial, uint rowCount, nint uvs, float mip);
 
     [DllImport(Library)]
-    public static extern int hwx_buried(nint ctx, float* records, uint count, uint tests, uint threshold, uint seed,
-        byte* doubleSided, uint placementCount, byte* buried, double* gpuMs);
+    public static extern int hwx_buried(nint ctx, float* records, uint count, uint tests, uint threshold, uint seed, float reach,
+        float lift, byte* doubleSided, uint placementCount, byte* buried, double* gpuMs);
 
     [DllImport(Library)]
     public static extern int hwx_trace(nint ctx, nint rays, nint hits, uint count, uint seedBase, uint closestOnly, uint repeats, double* gpuMs);

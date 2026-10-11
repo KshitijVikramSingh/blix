@@ -192,11 +192,13 @@ public sealed class MetalRayTracer : IDisposable
 
     /// <summary>
     /// The lightmap's buried test on Metal: per record (two float4s: position, normal), <paramref name="tests"/> cosine rays
-    /// from just off it, buried when <paramref name="threshold"/> of them first meet a back face of a placement not flagged
+    /// from <paramref name="lift"/> off it, each as far as <paramref name="reach"/>, buried when <paramref name="threshold"/> of them first meet a
+    /// back face of a placement not flagged
     /// in <paramref name="doubleSided"/> (by placement; a double-sided sheet has no inside). Waits for the GPU; touches no
     /// device buffer, so it can run off the frame's thread. Returns one flag per record, and the GPU time.
     /// </summary>
-    public unsafe bool[] TestBuried(ReadOnlySpan<Vector4> records, int tests, int threshold, uint seed, ReadOnlySpan<bool> doubleSided, out double gpuMs)
+    public unsafe bool[] TestBuried(ReadOnlySpan<Vector4> records, int tests, int threshold, float reach, float lift, uint seed, ReadOnlySpan<bool> doubleSided,
+        out double gpuMs)
     {
         ObjectDisposedException.ThrowIf(ctx == 0, this);
         var count = records.Length / 2;
@@ -208,7 +210,7 @@ public sealed class MetalRayTracer : IDisposable
         fixed (byte* sp = sided)
         fixed (byte* fp = flags)
         {
-            if (HwxNative.hwx_buried(ctx, (float*)r, (uint)count, (uint)tests, (uint)threshold, seed, sp, (uint)doubleSided.Length, fp, &ms) != 0)
+            if (HwxNative.hwx_buried(ctx, (float*)r, (uint)count, (uint)tests, (uint)threshold, seed, reach, lift, sp, (uint)doubleSided.Length, fp, &ms) != 0)
                 throw new InvalidOperationException($"Metal buried test: {Error}");
         }
         gpuMs = ms;

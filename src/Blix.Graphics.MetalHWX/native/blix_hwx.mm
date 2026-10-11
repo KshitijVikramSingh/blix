@@ -225,9 +225,10 @@ kernel void blix_trace(device const float4* rays [[buffer(0)]],
 }
 
 // The lightmap's buried test (hwx_buried): per record (two float4s: position, normal), `tests` cosine rays from just
-// off it; buried when `threshold` of them first meet a single-sided triangle's back face. A double-sided placement's
-// back face (doubleSided[placement] != 0) is the far side of a sheet with no inside, and does not count.
-struct BuriedParams { uint count; uint tests; uint threshold; uint seed; };
+// `lift` off it, each as far as `reach`; buried when `threshold` of them first meet a single-sided triangle's back face. A
+// double-sided placement's back face (doubleSided[placement] != 0) is the far side of a sheet with no inside, and does
+// not count.
+struct BuriedParams { uint count; uint tests; uint threshold; uint seed; float reach; float lift; uint pad0, pad1; };
 
 kernel void blix_buried(device const float4* records [[buffer(0)]],
                         device uchar* buried [[buffer(1)]],
@@ -246,7 +247,7 @@ kernel void blix_buried(device const float4* records [[buffer(0)]],
     float3 n = records[i * 2u + 1u].xyz;
     if (dot(n, n) < 1e-12f) { buried[i] = 0; return; }
     n = normalize(n);
-    float3 o = records[i * 2u].xyz + n * 1e-3f;
+    float3 o = records[i * 2u].xyz + n * p.lift;
     float3 t = normalize(abs(n.y) < 0.999f ? cross(float3(0.0f, 1.0f, 0.0f), n) : cross(float3(1.0f, 0.0f, 0.0f), n));
     float3 b = cross(n, t);
     intersector<triangle_data, instancing> isect;
@@ -258,7 +259,7 @@ kernel void blix_buried(device const float4* records [[buffer(0)]],
         float r = sqrt(u1), phi = 6.28318530718f * u2;
         float3 d = t * (r * cos(phi)) + b * (r * sin(phi)) + n * sqrt(max(0.0f, 1.0f - u1));
         uint seed = blix_pcg(h);
-        auto res = isect.intersect(ray(o, d, 0.0f, INFINITY), tlas, 0xFFu, table, seed);
+        auto res = isect.intersect(ray(o, d, 0.0f, p.reach), tlas, 0xFFu, table, seed);
         if (res.type != intersection_type::triangle || res.triangle_front_facing) continue;
         uint row = blix_row(primRows, entryRows, res.instance_id, res.geometry_id, res.primitive_id);
         uint placement = instances[res.instance_id].info.y;
@@ -751,7 +752,7 @@ HWX_EXPORT int hwx_set_alpha(HwxContext* ctx, void* const* textures, const float
 // The lightmap's buried test (blix_buried) over `count` records in host memory (two float4s each), into one byte each
 // (1: buried). In chunks, each waited for; callable off the frame's thread (its own command buffers on the queue).
 HWX_EXPORT int hwx_buried(HwxContext* ctx, const float* records, uint32_t count, uint32_t tests, uint32_t threshold, uint32_t seed,
-                          const uint8_t* doubleSided, uint32_t placementCount, uint8_t* buried, double* gpuMs) {
+                          float reach, float lift, const uint8_t* doubleSided, uint32_t placementCount, uint8_t* buried, double* gpuMs) {
     @autoreleasepool {
         if (!ctx->tlas) return Fail(ctx, "buried test before build");
         id<MTLDevice> device = ctx->device;
@@ -770,8 +771,9 @@ HWX_EXPORT int hwx_buried(HwxContext* ctx, const float* records, uint32_t count,
             [enc setBuffer:out offset:0 atIndex:1];
             [enc setAccelerationStructure:ctx->tlas atBufferIndex:2];
             [enc setIntersectionFunctionTable:ctx->buriedTable atBufferIndex:3];
-            uint32_t params[4] = {n, tests, threshold, seed + first * tests};
-            [enc setBytes:params length:sizeof(params) atIndex:4];
+            struct { uint32_t count, tests, threshold, seed; float reach, lift; uint32_t pad[2]; } params =
+                {n, tests, threshold, seed + first * tests, reach, lift, {0, 0}};
+            [enc setBytes:&params length:sizeof(params) atIndex:4];
             [enc setBuffer:sided offset:0 atIndex:5];
             [enc setBuffer:ctx->primRows offset:0 atIndex:6];
             [enc setBuffer:ctx->entryRows offset:0 atIndex:7];

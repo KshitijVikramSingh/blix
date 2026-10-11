@@ -52,6 +52,9 @@ internal sealed partial class SponzaLoop
         // --lightmap-keep-buried: gather the atlas texels inside a solid too (SponzaLoop.Lightmap.cs), for A/B.
         lightmapKeepBuried = args.Flag("lightmap-keep-buried");
         if (args.Int("lightmap-backface") is { } bf) lightmapBackface = Math.Clamp(bf, 1, 16);
+        lightmapBuriedWhy = args.Flag("lightmap-buried-why");
+        if (args.Float("lightmap-buried-lift") is { } bl) lightmapBuriedLiftAsked = Math.Clamp(bl, 0f, 1f);
+        if (args.Float("lightmap-buried-reach") is { } br) lightmapBuriedReach = Math.Clamp(br, 0.01f, 1000f);
         // --no-lightmap-frames: the drawn LOD's own normals, not LOD 0's through the atlas (lightmap_frame.glsl), for A/B.
         lightmapNoFrames = args.Flag("no-lightmap-frames");
         // --texel-inspect [N | x,y;...]: at the shot, what the darkest-against-their-surroundings pixels (or these, in
