@@ -404,6 +404,7 @@ internal sealed partial class SponzaLoop
                 rayInstances.Add(new RayQueryScene.Instance(rayMeshes[i], world));
                 rayPlacementMaterials.Add(new RayMaterial(s.Albedo, s.BaseColor, s.AlphaCutoff, s.IsBlend));
                 rayPlacementLightmapped.Add(s.LightmapTexels is not null);
+                rayPlacementDoubleSided.Add(s.Pipeline == opaqueDoubleSidedPipeline || s.Pipeline == blendDoubleSidedPipeline);
                 rayPlacementNames.Add(s.Name);
                 if (!UniformScale(world)) nonUniform++;
             }

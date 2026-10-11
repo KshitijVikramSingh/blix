@@ -19,6 +19,8 @@ internal sealed partial class SponzaLoop
     // Per placement (the ray scene's order): whether its surface is in the lightmap atlas (--lightmap). The hashed
     // texels leave those out when the atlas's texels serve them (SponzaLoop.Lightmap.cs).
     private readonly List<bool> rayPlacementLightmapped = new();
+    // Per placement: whether it is drawn double-sided -- a sheet with no inside (the lightmap's buried test).
+    private readonly List<bool> rayPlacementDoubleSided = new();
     // Per placement: its primitive's name (--texel-inspect).
     private readonly List<string> rayPlacementNames = new();
     private RayQueryGpuData? rayGpuData;

@@ -37,7 +37,7 @@ internal sealed partial class SponzaLoop
     private bool lightBakeSaving;
     private int lightBakeReported = -1;
 
-    private const int LightBakeVersion = 1;
+    private const int LightBakeVersion = 2;
     // Per record on disk: light rgb (half), its rays (float), the blend rgb (half), the moment and the openness (half),
     // the openness's ray count (float).
     private const int LightBakeRecordBytes = 3 * 2 + 4 + 3 * 2 + 2 + 2 + 4;

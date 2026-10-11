@@ -4,6 +4,7 @@ using System.Numerics;
 using System.Runtime.InteropServices;
 using Blix.Geometry;
 using Blix.Graphics;
+using Blix.Graphics.MetalHWX;
 
 namespace Blix.Demos.VulkanSponza;
 
@@ -169,7 +170,9 @@ internal sealed partial class SponzaLoop
         // ray goes out free while its slanting ones go into the solid -- gathering half dark: Sponza's upper walls showed
         // them as black squares along every such edge. A buried record keeps its place (and its pair's sign) with |w| 1
         // instead of 4; texel.glsl and the filter skip it, and a pixel's other texels or the coarser level answer.
-        // --lightmap-keep-buried keeps them all.
+        // --lightmap-keep-buried keeps them all. Only a single-sided triangle has an inside: a double-sided one's back face
+        // is the far side of a sheet (a curtain's next fold), and counting it buried 57% of the curtains' texels and
+        // the pillar and floor texels beside them -- skipped, the survivors stretched over them in hard-edged blocks.
         // The test is 9.8M rays and more on Sponza (~170 s), so its answer is kept beside the transport cache, under the
         // same key (which names the scene and these .blixlightmap files).
         long buried = 0;
@@ -180,7 +183,17 @@ internal sealed partial class SponzaLoop
             var flags = ReadBuriedCache(cacheKey, count, lightmapBackface);
             buriedCached = flags is not null;
             flags ??= new bool[count];
-            if (!buriedCached)
+            // On Metal when frame rays are (the frame tracer, built a few frames in; this runs on the cook's thread):
+            // ~210 M rays in about a second, against ~3 minutes on the CPU.
+            var buriedClock = Stopwatch.StartNew();
+            var metal = buriedCached ? null : WaitForFrameTracer();
+            if (metal is not null)
+            {
+                flags = metal.TestBuried(texels.AsSpan(0, count * 2), 16, lightmapBackface, 173u, CollectionsMarshal.AsSpan(rayPlacementDoubleSided), out var buriedGpuMs);
+                Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                    $"[VulkanSponza] lightmap buried test on Metal: {count:N0} records x 16 rays in {buriedClock.Elapsed.TotalSeconds:0.0} s ({buriedGpuMs:0} ms GPU)."));
+            }
+            else if (!buriedCached)
             Parallel.For(0, count, k =>
             {
                 var p = new Vector3(texels![2 * k].X, texels[2 * k].Y, texels[2 * k].Z);
@@ -190,7 +203,8 @@ internal sealed partial class SponzaLoop
                 var back = 0;
                 const int tests = 16;
                 for (var t = 0; t < tests && back < lightmapBackface; t++)
-                    if (scene.Closest(new Ray(origin, CosineHemisphereCpu(n, r)), 0f, float.PositiveInfinity, (uint)r.Next()) is { FrontFace: false }) back++;
+                    if (scene.Closest(new Ray(origin, CosineHemisphereCpu(n, r)), 0f, float.PositiveInfinity, (uint)r.Next()) is { FrontFace: false } hit
+                        && !rayPlacementDoubleSided[hit.Instance]) back++;
                 flags[k] = back >= lightmapBackface;
             });
             if (!buriedCached) WriteBuriedCache(cacheKey, flags, lightmapBackface);
@@ -248,9 +262,21 @@ internal sealed partial class SponzaLoop
         return (Oct(normal), packed | (handed < 0f ? 1u : 0u));
     }
 
+    // The frame's Metal tracer for work off the frame's thread: waited for while frame rays are on Metal and it is being
+    // built (EnsureFrameTracer, a few frames after the surface bake); null otherwise, and the caller uses the CPU.
+    private MetalRayTracer? WaitForFrameTracer()
+    {
+        if (!FrameRaysOnHardware) return null;
+        // A cook on the frame's thread (--transport-wait) cannot wait for what the frame builds.
+        if (!transportCookAsync) return Volatile.Read(ref frameTracer);
+        var clock = Stopwatch.StartNew();
+        while (Volatile.Read(ref frameTracer) is null && !Volatile.Read(ref frameTracerFailed) && clock.Elapsed.TotalSeconds < 60) Thread.Sleep(20);
+        return Volatile.Read(ref frameTracer);
+    }
+
     private static string BuriedCachePath(string cacheKey) => Path.ChangeExtension(TransportCachePath(cacheKey), ".lightmap-buried");
 
-    private const int BuriedCacheVersion = 2;
+    private const int BuriedCacheVersion = 3;
 
     private static bool[]? ReadBuriedCache(string cacheKey, int count, int backface)
     {

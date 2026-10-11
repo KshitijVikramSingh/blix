@@ -947,7 +947,7 @@ internal sealed partial class SponzaLoop
             WriteTexelCensus();
             WriteTexelInspect();
             WriteRayView(Path.ChangeExtension(path, null));
-            WriteRtShadows();
+            WriteRtShadows(Path.ChangeExtension(path, null));
             WriteFrameTracerStats();
             if (probeReference)
             {

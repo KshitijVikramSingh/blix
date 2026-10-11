@@ -2,6 +2,7 @@ using System.Numerics;
 using System.Runtime.InteropServices;
 using Blix.Geometry;
 using Blix.Graphics;
+using Blix.Graphics.Images;
 using Blix.Graphics.MetalHWX;
 
 namespace Blix.Demos.VulkanSponza;
@@ -226,7 +227,7 @@ internal sealed partial class SponzaLoop
         return (materials, rowMaterial);
     }
 
-    private void WriteRtShadows()
+    private void WriteRtShadows(string basePath)
     {
         if (frameTracer is null || !rtShadows) return;
         var rays = (long)rtShadowSize.Width * rtShadowSize.Height;
@@ -236,6 +237,15 @@ internal sealed partial class SponzaLoop
         foreach (var word in mask) if ((word & 1u) != 0) blocked++;
         long skyBlocked = 0;
         foreach (var word in mask) if ((word & 2u) != 0) skyBlocked++;
+        // The mask itself beside the shot (white: the sun reaches; black: blocked), pixel for pixel with the image.
+        var rgba = new byte[rays * 4];
+        for (var i = 0; i < rays; i++)
+        {
+            var lit = (mask[i] & 1u) == 0 ? (byte)255 : (byte)0;
+            rgba[i * 4] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = lit;
+            rgba[i * 4 + 3] = 255;
+        }
+        PngWriter.WriteRgba8(basePath + ".rtmask.png", rgba, rtShadowSize.Width, rtShadowSize.Height);
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] rt shadows, last frame's mask: sun blocked at {100.0 * blocked / rays:0.0}% of pixels, reaching {100.0 * (rays - blocked) / rays:0.0}%{(RtSkyRays ? string.Create(Inv, $"; sky rays blocked at {100.0 * skyBlocked / rays:0.0}%") : "")}."));
         for (var slot = 1; slot < RtShadowKinds.Length; slot++)

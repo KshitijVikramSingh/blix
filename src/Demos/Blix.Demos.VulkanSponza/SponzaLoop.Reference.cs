@@ -15,7 +15,10 @@ internal sealed partial class SponzaLoop
     private bool referenceView;
     private bool referenceAvailable;
     // --texel-debug: the incident pass writes where texels answer instead of light (incident_clipmap.frag).
-    private bool texelDebug;
+    // --texel-debug-records: which atlas record each of a pixel's four lightmap texels gives it, by bilinear weight --
+    // green a double-sided texel's front, blue its back, white a one-sided texel, red buried (skipped), black none
+    // there (a gutter or off the atlas); magenta where the pixel has no lightmap coordinate.
+    private bool texelDebug, texelDebugRecords;
     private bool lightmapEnabled;
     // --texel-gtao 1: darken texels' light by GTAO as well. Off by default: texels resolve occlusion to 5 cm
     // themselves, and on top of them GTAO darkened corners twice -- the Cornell box's presented image against the
@@ -42,6 +45,7 @@ internal sealed partial class SponzaLoop
         referenceAvailable = true;
         if (args.Int("gi-reference-bounces") is { } b) referenceBounces = Math.Clamp(b, 1, 32);
         texelDebug = args.Flag("texel-debug");
+        texelDebugRecords = args.Flag("texel-debug-records");
         // --lightmap: draw with each pack's lightmap unwrap (blix cook lightmap --write): its split vertices and LOD
         // chains, and every vertex's atlas texel (the lightmap debug view shows the parameterization).
         lightmapEnabled = args.Flag("lightmap");
@@ -119,7 +123,7 @@ internal sealed partial class SponzaLoop
         if (referenceAccum.Equals(default(GpuBufferHandle)))
             referenceAccum = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.reference.none"));
         var on = referenceView && referenceSize.X > 0 && referenceSamples > 0;
-        return (new Vector4(on ? 1f : 0f, referenceSize.X, referenceSize.Y, texelDebug ? 1f : 0f), new ShaderBufferBinding("ReferenceAccum", referenceAccum));
+        return (new Vector4(on ? 1f : 0f, referenceSize.X, referenceSize.Y, texelDebugRecords ? 2f : texelDebug ? 1f : 0f), new ShaderBufferBinding("ReferenceAccum", referenceAccum));
     }
 
     private void ReportReference(DebugContext debug)

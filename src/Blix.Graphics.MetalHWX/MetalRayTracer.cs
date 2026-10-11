@@ -190,6 +190,33 @@ public sealed class MetalRayTracer : IDisposable
         return ms;
     }
 
+    /// <summary>
+    /// The lightmap's buried test on Metal: per record (two float4s: position, normal), <paramref name="tests"/> cosine rays
+    /// from just off it, buried when <paramref name="threshold"/> of them first meet a back face of a placement not flagged
+    /// in <paramref name="doubleSided"/> (by placement; a double-sided sheet has no inside). Waits for the GPU; touches no
+    /// device buffer, so it can run off the frame's thread. Returns one flag per record, and the GPU time.
+    /// </summary>
+    public unsafe bool[] TestBuried(ReadOnlySpan<Vector4> records, int tests, int threshold, uint seed, ReadOnlySpan<bool> doubleSided, out double gpuMs)
+    {
+        ObjectDisposedException.ThrowIf(ctx == 0, this);
+        var count = records.Length / 2;
+        var sided = new byte[Math.Max(doubleSided.Length, 1)];
+        for (var k = 0; k < doubleSided.Length; k++) sided[k] = doubleSided[k] ? (byte)1 : (byte)0;
+        var flags = new byte[Math.Max(count, 1)];
+        double ms;
+        fixed (Vector4* r = records)
+        fixed (byte* sp = sided)
+        fixed (byte* fp = flags)
+        {
+            if (HwxNative.hwx_buried(ctx, (float*)r, (uint)count, (uint)tests, (uint)threshold, seed, sp, (uint)doubleSided.Length, fp, &ms) != 0)
+                throw new InvalidOperationException($"Metal buried test: {Error}");
+        }
+        gpuMs = ms;
+        var result = new bool[count];
+        for (var k = 0; k < count; k++) result[k] = flags[k] != 0;
+        return result;
+    }
+
     /// <summary>A material's alpha test, as the raster draws it: its albedo texture's alpha times a factor, against a cutoff.</summary>
     public readonly record struct AlphaMaterial(TextureHandle Albedo, float Cutoff, float AlphaFactor);
 
