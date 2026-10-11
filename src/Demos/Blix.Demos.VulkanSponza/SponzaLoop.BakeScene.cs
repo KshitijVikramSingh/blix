@@ -31,7 +31,9 @@ internal sealed partial class SponzaLoop
     private bool BakeSceneDone => texelsUploaded && !lightBakeActive && transferDumpPath is null;
     private int gpuMemoryLoggedFrame = -1;
 
-    private bool BakeSceneWanted => lightmapEnabled && transportTexels && FrameRaysOnHardware && rayLodError > 0f;
+    // --no-bake-scene: the atlas bakes against the frame's scene (the A/B).
+    private bool noBakeScene;
+    private bool BakeSceneWanted => !noBakeScene && lightmapEnabled && transportTexels && FrameRaysOnHardware && rayLodError > 0f;
     // The bake scene's tracer once built (null before, or without one).
     private MetalRayTracer? BakeTracer => Volatile.Read(ref bakeTracer);
 
@@ -104,6 +106,8 @@ internal sealed partial class SponzaLoop
             bakeTracerFailed = true;
             return;
         }
+        // On the frame tracer's queue: its passes share the frame's timeline (see MetalRayTracer.ShareQueueWith).
+        if (frameTracer is { } frame) tracer.ShareQueueWith(frame);
         var data = bakeSceneData;
         var surfaceWords = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(bakeSceneBlocks[6], 0, data.RowPlacements.Length * 4).AsSpan()).ToArray();
         device.WaitIdle();

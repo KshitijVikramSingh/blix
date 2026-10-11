@@ -844,3 +844,10 @@ HWX_EXPORT int hwx_shadow_host(HwxContext* ctx, const float* origins, uint32_t c
         return 0;
     }
 }
+
+// From now on `ctx` submits on `from`'s command queue: two tracers whose in-frame passes wait on and signal one frame
+// timeline stay on one serial queue, in the order the frame encodes them (a second queue's waits and signals
+// interleaved with the first's lost the device to the GPU watchdog).
+HWX_EXPORT void hwx_share_queue(HwxContext* ctx, HwxContext* from) {
+    if (ctx && from && ctx != from) ctx->queue = from->queue;
+}

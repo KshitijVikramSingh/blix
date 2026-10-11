@@ -79,6 +79,9 @@ internal static unsafe class HwxNative
     public static extern int hwx_shadow_host(nint ctx, float* origins, uint count, float* direction, uint seedBase, byte* occluded, double* gpuMs);
 
     [DllImport(Library)]
+    public static extern void hwx_share_queue(nint ctx, nint from);
+
+    [DllImport(Library)]
     public static extern void hwx_memory(nint ctx, ulong* allocated, ulong* recommended);
 
     [DllImport(Library)]

@@ -242,6 +242,17 @@ public sealed class MetalRayTracer : IDisposable
         return result;
     }
 
+    /// <summary>
+    /// From now on this tracer submits on <paramref name="other"/>'s command queue: tracers whose in-frame passes share the
+    /// frame's timeline must run in the order the frame encodes them, which one serial queue guarantees and two do not.
+    /// </summary>
+    public void ShareQueueWith(MetalRayTracer other)
+    {
+        ObjectDisposedException.ThrowIf(ctx == 0, this);
+        ObjectDisposedException.ThrowIf(other.ctx == 0, other);
+        HwxNative.hwx_share_queue(ctx, other.ctx);
+    }
+
     /// <summary>The device's GPU memory in MB: allocated by every client (Vulkan's included), and the working set Metal
     /// recommends staying under before it pages.</summary>
     public unsafe (double AllocatedMb, double RecommendedMb) Memory

@@ -237,6 +237,8 @@ internal sealed partial class SponzaLoop
         if (args.Int("clipmap-young-rays") is { } youngRays) clipmapYoungRays = Math.Clamp(youngRays, 1, 16);
         clipmapWavefront = args.Flag("clipmap-wavefront");
         clipmapInline = args.Flag("clipmap-inline");
+        keepRayNodes = args.Flag("keep-ray-nodes");
+        noBakeScene = args.Flag("no-bake-scene");
         if (args.Int("clipmap-young") is { } young) clipmapYoung = Math.Clamp(young, 0, 16);
         // --clipmap-visible-share F: at most this share of the budget a frame goes to the probes the image reads (0: none,
         // the A/B).

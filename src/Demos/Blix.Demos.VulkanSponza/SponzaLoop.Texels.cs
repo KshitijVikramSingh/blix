@@ -591,11 +591,14 @@ internal sealed partial class SponzaLoop
             // The gather as a wavefront: rays out, their hits shaded, the hits' sun out, the answers gathered. Each batch
             // on Metal when frame rays are (RecordClosestBatch), else on the software traversal.
             var rayCount = gatherBudget * 32;
+            // The bake scene answers the light bake's gathers (and the transfer capture's); the runtime gathers take
+            // the frame's tracer, as they do once it is released.
+            var gatherOn = baking ? BakeTracer : null;
             var seed = unchecked(texelFrame * 0x9E3779B9u + 0x7F4A7C15u);
             graph.Dispatch(texelRaysPassHandle, Gather(3));
-            RecordClosestBatch(texelClosestBatch, texelWaveRays, texelWaveHits, rayCount, seed, BakeTracer);
+            RecordClosestBatch(texelClosestBatch, texelWaveRays, texelWaveHits, rayCount, seed, gatherOn);
             graph.Dispatch(texelShadePassHandle, Gather(4));
-            RecordShadowBatch(texelShadowBatch, texelWaveOrigins, texelWaveOccluded, rayCount, -Vector3.Normalize(sunDirection), seed ^ 0x5bd1e995u, BakeTracer);
+            RecordShadowBatch(texelShadowBatch, texelWaveOrigins, texelWaveOccluded, rayCount, -Vector3.Normalize(sunDirection), seed ^ 0x5bd1e995u, gatherOn);
             graph.Dispatch(texelGatherPassHandle, Gather(5));
         }
         else

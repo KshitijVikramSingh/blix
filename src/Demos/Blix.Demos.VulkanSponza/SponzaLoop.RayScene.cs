@@ -124,7 +124,9 @@ internal sealed partial class SponzaLoop
     // left out (placeholders bound; ~220 MB on Sponza). The G key's reference view and a Metal tracer that fails bring
     // them back first (RestoreRayTraversal).
     private bool rayTraversalDropped;
-    private bool SoftwareTraversalNeeded => !FrameRaysOnHardware || clipmapInline || clipmapExactVisibility || incidentExactVisibility || screenProbesEnabled
+    // --keep-ray-nodes: the nodes uploaded whatever traces (the A/B).
+    private bool keepRayNodes;
+    private bool SoftwareTraversalNeeded => keepRayNodes || !FrameRaysOnHardware || clipmapInline || clipmapExactVisibility || incidentExactVisibility || screenProbesEnabled
         || rayView || rayCheck || gpuReference || referenceMonolithic || referenceView;
 
     private void BuildRayGpu()
