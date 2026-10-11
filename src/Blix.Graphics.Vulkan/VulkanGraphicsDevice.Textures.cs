@@ -126,9 +126,11 @@ public sealed partial class VulkanGraphicsDevice
         foreach (var m in mipBytes) { Array.Copy(m, 0L, concat, c, m.Length); c += m.Length; }
         var staging = CreateHostVisibleBuffer(concat, BufferUsageFlags.TransferSrcBit, $"{label}.staging");
 
+        var metalTextureExport = MetalTextureExport();
         var imageCi = new ImageCreateInfo
         {
             SType = StructureType.ImageCreateInfo,
+            PNext = MetalObjectsEnabled ? &metalTextureExport : null,
             ImageType = ImageType.Type2D,
             Format = vkFormat,
             Extent = new Extent3D((uint)description.Width, (uint)description.Height, 1),
@@ -226,9 +228,11 @@ public sealed partial class VulkanGraphicsDevice
         var label = name ?? "texture2D.mips";
         var vkFormat = MapTextureFormat(description.Format);
 
+        var metalTextureExport = MetalTextureExport();
         var imageCi = new ImageCreateInfo
         {
             SType = StructureType.ImageCreateInfo,
+            PNext = MetalObjectsEnabled ? &metalTextureExport : null,
             ImageType = ImageType.Type2D,
             Format = vkFormat,
             Extent = new Extent3D((uint)description.Width, (uint)description.Height, 1),
@@ -811,9 +815,11 @@ public sealed partial class VulkanGraphicsDevice
         var staging = CreateHostVisibleBuffer(pixels, BufferUsageFlags.TransferSrcBit, $"{name}.staging");
 
         // 2. Image + memory.
+        var metalTextureExport = MetalTextureExport();
         var imageCi = new ImageCreateInfo
         {
             SType = StructureType.ImageCreateInfo,
+            PNext = MetalObjectsEnabled ? &metalTextureExport : null,
             ImageType = ImageType.Type2D,
             Format = vkFormat,
             Extent = new Extent3D((uint)width, (uint)height, 1),

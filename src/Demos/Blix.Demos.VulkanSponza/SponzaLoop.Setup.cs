@@ -160,12 +160,10 @@ internal sealed partial class SponzaLoop
         rtShadows = args.Flag("rt-shadows");
         // --rt-no-overlap: no join, so the frame waits for the trace right after it (the overlap's control).
         rtNoOverlap = args.Flag("rt-no-overlap");
-        // --rt-shadow-scale N: trace one pixel in N x N (1 or 2); lit.frag upsamples by depth.
-        if (args.Int("rt-shadow-scale") is { } rtScale)
-        {
-            if (rtScale is not (1 or 2)) throw new AppArgsException($"--rt-shadow-scale takes 1 or 2, not {rtScale}.");
-            rtShadowScale = rtScale;
-        }
+        // --rt-isolated: nothing but the trace lights the frame, sky included: no incident field (SponzaLoop.RtShadows).
+        rtIsolated = args.Flag("rt-isolated");
+        rtCoverageCoin = args.Flag("rt-coverage-coin");
+        var fogAsked = args.Flag("fog");
         // --ray-view: trace the camera's view and hold it against the raster at the shot (it brings the ray check with it).
         rayView = args.Flag("ray-view");
         rayCheck |= rayView;
@@ -231,6 +229,7 @@ internal sealed partial class SponzaLoop
         // --clipmap-converge-floor F: the static light's blend never falls below F (0.25 was the steady rate before it
         // converged; the A/B). Default 0: each solve weighs 1/n, up to n = 255.
         if (args.Float("clipmap-converge-floor") is { } ccf) clipmapConvergeFloor = Math.Clamp(ccf, 0f, 1f);
+        if (args.Int("clipmap-young-rays") is { } youngRays) clipmapYoungRays = Math.Clamp(youngRays, 1, 16);
         if (args.Int("clipmap-young") is { } young) clipmapYoung = Math.Clamp(young, 0, 16);
         // --clipmap-visible-share F: at most this share of the budget a frame goes to the probes the image reads (0: none,
         // the A/B).
@@ -309,6 +308,23 @@ internal sealed partial class SponzaLoop
             abFlat = abMode == "flat";
             // rtshadow: ray-traced sun shadows (ON) against the cascades (OFF), which needs the traced path built.
             if (abMode == "rtshadow") rtShadows = true;
+        }
+        // --rt-shadows: whatever asks whether a point sees the sun asks a ray, never the cascades (SponzaLoop.RtShadows).
+        // The lit pass asks the Metal trace; the clipmap's injection asks shadow rays at its hits (--clipmap-shadow-rays,
+        // the same scene and coverage); the fog, which can only ask the cascades, is off unless --fog asks for it. An
+        // --ab rtshadow run sets this up in both phases, so it compares the lit pass's shadows alone.
+        if (rtShadows)
+        {
+            clipmapShadowRays = true;
+            if (!fogAsked) fog.Enabled = false;
+            if (rtIsolated)
+            {
+                incidentField = false;
+                screenProbesEnabled = false;
+            }
+            Console.WriteLine(rtIsolated
+                ? "[VulkanSponza] rt shadows: isolated (the trace's sun and sky only: no incident field or screen probes; no fog); the sun is off until the trace is ready."
+                : "[VulkanSponza] rt shadows: sun visibility from rays everywhere (lit pass: Metal; clipmap injection: shadow rays; fog off unless --fog); the sun is off until the trace is ready.");
         }
         if (args.Float("ao-debug") is { } aoDebugValue) aoDebug = aoDebugValue;
         if (args.Float("viz") is { } vizValue) vizChannel = vizValue;

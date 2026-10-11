@@ -74,6 +74,31 @@ public sealed partial class VulkanGraphicsDevice
         frameTimelineEvent = 0;
     }
 
+    // Sampled 2D textures (material maps) allocate exportable wherever the device can export, so a native Metal pass can
+    // read them (ExportMetalTexture): the request belongs to the image's creation.
+    private static ExportMetalObjectCreateInfoEXT MetalTextureExport() => new()
+    {
+        SType = StructureType.ExportMetalObjectCreateInfoExt,
+        ExportObjectType = ExportMetalObjectTypeFlagsEXT.ExportMetalObjectTypeMetalTextureBitExt,
+    };
+
+    /// <inheritdoc />
+    public unsafe nint ExportMetalTexture(TextureHandle handle)
+    {
+        var entry = GetTexture(handle);
+        var textureInfo = new ExportMetalTextureInfoEXT
+        {
+            SType = StructureType.ExportMetalTextureInfoExt,
+            Image = entry.Image,
+            Plane = ImageAspectFlags.Plane0Bit,
+        };
+        var info = new ExportMetalObjectsInfoEXT { SType = StructureType.ExportMetalObjectsInfoExt, PNext = &textureInfo };
+        MetalObjects.ExportMetalObjects(Device, &info);
+        if ((nint)textureInfo.MtlTexture == 0)
+            throw new InvalidOperationException($"texture {handle.Id} exported no MTLTexture.");
+        return (nint)textureInfo.MtlTexture;
+    }
+
     /// <inheritdoc />
     public unsafe nint ExportMetalDevice()
     {

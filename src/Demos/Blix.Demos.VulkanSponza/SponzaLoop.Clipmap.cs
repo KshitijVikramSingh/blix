@@ -34,6 +34,10 @@ internal sealed partial class SponzaLoop
     private float clipmapDependentShare = 0.5f;
     // --clipmap-shadow-rays: every hit's sun by a shadow ray, as before the cascades were consulted (the A/B).
     private bool clipmapShadowRays;
+    // --clipmap-young-rays P: a probe's first solve traces P passes of 64 rays, its second to fourth P/2 (clipmap_inject:
+    // its first solve is the whole answer until the next, and its noise is the colour a wall flashes after a scroll).
+    // 1: one pass, as every solve.
+    private int clipmapYoungRays = 1;
     private GpuBufferHandle clipmapState;
     private GpuBufferHandle clipmapQueue;
     private ShaderInterface clipmapInterface = null!;
@@ -250,7 +254,7 @@ internal sealed partial class SponzaLoop
             new("uSurfaceGrid", new Vector4Uniform(surface.Grid)),
             new("uSurfaceDims", new Vector4Uniform(surface.Dims)),
             new("uSurfaceAtlas", new Vector4Uniform(surface.Atlas)),
-            new("uGuide", new Vector4Uniform(new Vector4(clipmapGuide ? 1f : 0f, clipmapGuideFloor, 0f, 0f))),
+            new("uGuide", new Vector4Uniform(new Vector4(clipmapGuide ? 1f : 0f, clipmapGuideFloor, clipmapYoungRays, 0f))),
             new("uFallback", new Vector4Uniform(new Vector4(clipmapUnknownSky, MathF.Min(1.5f, Math.Max(0, iblPrefilterMips - 1)), clipmapYoung, MathF.Floor(clipmapBudget * clipmapVisibleShare)))),
             new("uDynamicMin", new Vector4Uniform(dynamicReach ? new Vector4(moverReach.Min, 1f) : Vector4.Zero)),
             new("uDynamicMax", new Vector4Uniform(new Vector4(MoverActive ? moverReach.Max : Vector3.Zero, clipmapDynamicConverge))),

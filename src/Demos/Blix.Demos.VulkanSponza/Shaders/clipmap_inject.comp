@@ -49,6 +49,7 @@ layout(set = 0, binding = 0) uniform ClipmapInject {
     vec4 uSurfaceDims;
     vec4 uSurfaceAtlas;
     vec4 uGuide;           // x 1: half of each solve's rays guided by the probe's radiance bins (--clipmap-guide), y the
+                           // z: 64-ray passes in a probe's first solve, half as many in its second to fourth (--clipmap-young-rays; 1 or less: one)
                            // bins' floor, as a share of their mean luminance
     vec4 uFallback;        // x the sky visibility taken at a hit no probe answers for, y the sky's mip for a ray
                            // z young probes: fewer solves than this are queued before the round-robin (0: none)
@@ -394,116 +395,127 @@ void main() {
         sGuided = guide ? 1u : 0u;
     }
     barrier();
-    vec3 dir;
-    const int halfRays = RAYS / 2;
-    if (sGuided != 0u && int(lane) >= halfRays) {
-        // A bin by the guide (stratified over the guided lanes), then a uniform point inside it.
-        int j = int(lane) - halfRays;
-        uint r = blix_pcg(seed ^ (lane * 0x9E3779B9u));
-        float pick = (float(j) + float(r & 0xFFFFu) / 65536.0) / float(halfRays);
-        int b = 0;
-        while (b < 35 && sBinCdf[b] < pick) ++b;
-        uint r2 = blix_pcg(r);
-        vec2 inBin = vec2(float(r2 & 0xFFFFu), float(r2 >> 16)) / 65536.0;
-        dir = blix_octDecode(((vec2(b % 6, b / 6) + inBin) / 6.0) * 2.0 - 1.0);
-    } else {
-        dir = rotation(seed) * (sGuided != 0u ? fibonacci(int(lane), halfRays) : fibonacci(int(lane), RAYS));
-    }
-    {
-        vec2 uvBin = blix_octEncode(dir);
-        ivec2 b2 = clamp(ivec2(floor((uvBin * 0.5 + 0.5) * 6.0)), ivec2(0), ivec2(5));
-        sRayBin[lane] = b2.y * 6 + b2.x;
-    }
-    if (sGuided != 0u) {
-        // The mixture's density at dir, in solid angle: half uniform, half the guide's bin probability spread evenly
-        // over the bin's square (4/36 of [-1,1]^2's area 4, so density 9 q per unit), where a unit of square is 1/|p|^3 steradians
-        // (p the octahedron point, |p|_1 = 1).
-        vec2 uv = blix_octEncode(dir);
-        ivec2 bxy = clamp(ivec2(floor((uv * 0.5 + 0.5) * 6.0)), ivec2(0), ivec2(5));
-        vec3 pOct = vec3(uv, 1.0 - abs(uv.x) - abs(uv.y));
-        if (pOct.z < 0.0) pOct.xy = (1.0 - abs(pOct.yx)) * vec2(pOct.x >= 0.0 ? 1.0 : -1.0, pOct.y >= 0.0 ? 1.0 : -1.0);
-        float len = length(pOct);
-        float pGuide = sBinQ[bxy.y * 6 + bxy.x] * 9.0 * len * len * len;
-        float pMix = 0.5 / (4.0 * PI) + 0.5 * pGuide;
-        sWeight[lane] = 1.0 / (4.0 * PI * pMix);
-    } else {
-        sWeight[lane] = 1.0;
-    }
-    vec3 toSun = -normalize(u.uSunDirection.xyz);
-    BlixRayHit hit;
-    vec3 radiance = vec3(0.0);
-    float distance = farDistance;
-    float facing = 0.0;   // 1 a front face met, -1 a back face, 0 none (relocation)
-    float escaped = 1.0;
-    bool dependent = false;
-    if (blix_traceClosest(origin, dir, 0.0, uintBitsToFloat(0x7F800000u), seed ^ lane, hit)) {
-        escaped = 0.0;
-        distance = min(hit.t, farDistance);
-        if (!hit.frontFace) atomicAdd(sBackfaces, 1u);
-        facing = hit.frontFace ? 1.0 : -1.0;
-        vec3 n = dot(hit.normal, dir) > 0.0 ? -hit.normal : hit.normal;
-        vec3 hitPos = origin + dir * hit.t;
-        float ndotl = max(dot(n, toSun), 0.0);
-        // The gather segment, and the hit's way to the sun (stage 4f).
-        dependent = crossesMovingReach(origin, dir, hit.t) || (ndotl > 0.0 && crossesMovingReach(hitPos + n * 0.01, toSun, 1e30));
-        float sun = 0.0;
-        if (ndotl > 0.0) {
-            int cascade = -1;
-            float lit = 1.0;
-            if (u.uDynamicQueue.z < 0.5 && cascadeReceives(u.uCascadeReceivers, hitPos + n * 0.01)) {
-                lit = blix_sun_shadow_cascaded_hard(
-                    uCascadeShadowMaps[0], uCascadeShadowMaps[1], uCascadeShadowMaps[2],
-                    u.uCascadeVP[0], u.uCascadeVP[1], u.uCascadeVP[2], hitPos + n * 0.01, ndotl, cascade);
+    // A probe's first solves take several passes of RAYS rays (uGuide.z): its first solve is the whole answer until the
+    // second comes, so its noise is what a wall shows for a moment after the clipmap scrolls a probe in, and a few rays
+    // on a sunlit curtain colour it. The passes' sums add up before the solve is blended, as if it had passes x RAYS rays.
+    uint youngSolves = (stateWord & BLIX_CLIPMAP_SOLVED) != 0u ? (stateWord >> 8) & 0xFFu : 0u;
+    int passes = youngSolves == 0u ? max(int(u.uGuide.z), 1) : youngSolves < 4u ? max(int(u.uGuide.z) / 2, 1) : 1;
+    ivec2 texelAt = ivec2(int(lane) % 6, int(lane) / 6);
+    vec3 texelDir = blix_octDecode(((vec2(texelAt) + 0.5) / 6.0) * 2.0 - 1.0);
+    vec3 irr = vec3(0.0);
+    vec3 irrDynamic = vec3(0.0);
+    float cosSum = 0.0, skySum = 0.0;
+    float dSum = 0.0, d2Sum = 0.0, dWeight = 0.0;
+    for (int pass = 0; pass < passes; ++pass) {
+        uint passSeed = pass == 0 ? seed : blix_pcg(seed + uint(pass) * 0x632BE5ABu);
+        vec3 dir;
+        const int halfRays = RAYS / 2;
+        if (sGuided != 0u && int(lane) >= halfRays) {
+            // A bin by the guide (stratified over the guided lanes), then a uniform point inside it.
+            int j = int(lane) - halfRays;
+            uint r = blix_pcg(passSeed ^ (lane * 0x9E3779B9u));
+            float pick = (float(j) + float(r & 0xFFFFu) / 65536.0) / float(halfRays);
+            int b = 0;
+            while (b < 35 && sBinCdf[b] < pick) ++b;
+            uint r2 = blix_pcg(r);
+            vec2 inBin = vec2(float(r2 & 0xFFFFu), float(r2 >> 16)) / 65536.0;
+            dir = blix_octDecode(((vec2(b % 6, b / 6) + inBin) / 6.0) * 2.0 - 1.0);
+        } else {
+            dir = rotation(passSeed) * (sGuided != 0u ? fibonacci(int(lane), halfRays) : fibonacci(int(lane), RAYS));
+        }
+        {
+            vec2 uvBin = blix_octEncode(dir);
+            ivec2 b2 = clamp(ivec2(floor((uvBin * 0.5 + 0.5) * 6.0)), ivec2(0), ivec2(5));
+            sRayBin[lane] = b2.y * 6 + b2.x;
+        }
+        if (sGuided != 0u) {
+            // The mixture's density at dir, in solid angle: half uniform, half the guide's bin probability spread evenly
+            // over the bin's square (4/36 of [-1,1]^2's area 4, so density 9 q per unit), where a unit of square is 1/|p|^3 steradians
+            // (p the octahedron point, |p|_1 = 1).
+            vec2 uv = blix_octEncode(dir);
+            ivec2 bxy = clamp(ivec2(floor((uv * 0.5 + 0.5) * 6.0)), ivec2(0), ivec2(5));
+            vec3 pOct = vec3(uv, 1.0 - abs(uv.x) - abs(uv.y));
+            if (pOct.z < 0.0) pOct.xy = (1.0 - abs(pOct.yx)) * vec2(pOct.x >= 0.0 ? 1.0 : -1.0, pOct.y >= 0.0 ? 1.0 : -1.0);
+            float len = length(pOct);
+            float pGuide = sBinQ[bxy.y * 6 + bxy.x] * 9.0 * len * len * len;
+            float pMix = 0.5 / (4.0 * PI) + 0.5 * pGuide;
+            sWeight[lane] = 1.0 / (4.0 * PI * pMix);
+        } else {
+            sWeight[lane] = 1.0;
+        }
+        vec3 toSun = -normalize(u.uSunDirection.xyz);
+        BlixRayHit hit;
+        vec3 radiance = vec3(0.0);
+        float distance = farDistance;
+        float facing = 0.0;   // 1 a front face met, -1 a back face, 0 none (relocation)
+        float escaped = 1.0;
+        bool dependent = false;
+        if (blix_traceClosest(origin, dir, 0.0, uintBitsToFloat(0x7F800000u), passSeed ^ lane, hit)) {
+            escaped = 0.0;
+            distance = min(hit.t, farDistance);
+            if (!hit.frontFace) atomicAdd(sBackfaces, 1u);
+            facing = hit.frontFace ? 1.0 : -1.0;
+            vec3 n = dot(hit.normal, dir) > 0.0 ? -hit.normal : hit.normal;
+            vec3 hitPos = origin + dir * hit.t;
+            float ndotl = max(dot(n, toSun), 0.0);
+            // The gather segment, and the hit's way to the sun (stage 4f).
+            dependent = crossesMovingReach(origin, dir, hit.t) || (ndotl > 0.0 && crossesMovingReach(hitPos + n * 0.01, toSun, 1e30));
+            float sun = 0.0;
+            if (ndotl > 0.0) {
+                int cascade = -1;
+                float lit = 1.0;
+                if (u.uDynamicQueue.z < 0.5 && cascadeReceives(u.uCascadeReceivers, hitPos + n * 0.01)) {
+                    lit = blix_sun_shadow_cascaded_hard(
+                        uCascadeShadowMaps[0], uCascadeShadowMaps[1], uCascadeShadowMaps[2],
+                        u.uCascadeVP[0], u.uCascadeVP[1], u.uCascadeVP[2], hitPos + n * 0.01, ndotl, cascade);
+                }
+                if (cascade < 0)
+                    lit = blix_traceAny(hitPos + n * 0.01, toSun, 0.0, uintBitsToFloat(0x7F800000u), blix_pcg(passSeed ^ lane ^ 0x5bd1e995u)) ? 0.0 : 1.0;
+                sun = ndotl * lit;
             }
-            if (cascade < 0)
-                lit = blix_traceAny(hitPos + n * 0.01, toSun, 0.0, uintBitsToFloat(0x7F800000u), blix_pcg(seed ^ lane ^ 0x5bd1e995u)) ? 0.0 : 1.0;
-            sun = ndotl * lit;
+            // What the clipmap knows at the hit, from earlier solves: bounce in rgb, sky visibility in a. Beyond its
+            // coarsest level it knows nothing, and the sky is taken as open there.
+            // What the clipmap knows arrives at the hit, from earlier solves: all the indirect light, sky included. Where
+            // no probe answers (start-up, or past the coarsest level) it adds nothing, so a wrong start is dark.
+            bool known;
+            injectViewDir = -dir;
+            vec4 field = blix_worldSample(sg, c, hitPos, n, known);
+            atomicAdd(queue[4], 1u);
+            if (!known) atomicAdd(queue[5], 1u);
+            vec3 indirect = known ? field.rgb * u.uFrame.y : vec3(0.0);
+            radiance = hit.albedo * (u.uSunIrradiance.rgb * sun + indirect) / PI;
+        } else {
+            // The sky this direction sees, as the lighting integrals see it (no disc: the sun is the shadow rays' job).
+            radiance = textureLod(uSkyRadiance, dir, u.uFallback.y).rgb * u.uFrame.z;
+            dependent = crossesMovingReach(origin, dir, 1e30);
         }
-        // What the clipmap knows at the hit, from earlier solves: bounce in rgb, sky visibility in a. Beyond its
-        // coarsest level it knows nothing, and the sky is taken as open there.
-        // What the clipmap knows arrives at the hit, from earlier solves: all the indirect light, sky included. Where
-        // no probe answers (start-up, or past the coarsest level) it adds nothing, so a wrong start is dark.
-        bool known;
-        injectViewDir = -dir;
-        vec4 field = blix_worldSample(sg, c, hitPos, n, known);
-        atomicAdd(queue[4], 1u);
-        if (!known) atomicAdd(queue[5], 1u);
-        vec3 indirect = known ? field.rgb * u.uFrame.y : vec3(0.0);
-        radiance = hit.albedo * (u.uSunIrradiance.rgb * sun + indirect) / PI;
-    } else {
-        // The sky this direction sees, as the lighting integrals see it (no disc: the sun is the shadow rays' job).
-        radiance = textureLod(uSkyRadiance, dir, u.uFallback.y).rgb * u.uFrame.z;
-        dependent = crossesMovingReach(origin, dir, 1e30);
-    }
-    if (dependent) { atomicOr(sAnyDependent, 1u); atomicAdd(sDependentRays, 1u); }
-    sDependent[lane] = dependent ? 1u : 0u;
-    sRadiance[lane] = radiance;
-    sDirection[lane] = dir;
-    sDistance[lane] = distance;
-    sEscaped[lane] = escaped;
-    sFacing[lane] = facing;
-    barrier();
+        if (dependent) { atomicOr(sAnyDependent, 1u); atomicAdd(sDependentRays, 1u); }
+        sDependent[lane] = dependent ? 1u : 0u;
+        sRadiance[lane] = radiance;
+        sDirection[lane] = dir;
+        sDistance[lane] = distance;
+        sEscaped[lane] = escaped;
+        sFacing[lane] = facing;
+        barrier();
 
-    if (lane < 36u) {
-        ivec2 t = ivec2(int(lane) % 6, int(lane) / 6);
-        vec3 texelDir = blix_octDecode(((vec2(t) + 0.5) / 6.0) * 2.0 - 1.0);
-        vec3 irr = vec3(0.0);
-        vec3 irrDynamic = vec3(0.0);
-        float cosSum = 0.0, skySum = 0.0;
-        float dSum = 0.0, d2Sum = 0.0, dWeight = 0.0;
-        for (int i = 0; i < RAYS; ++i) {
-            float cosine = max(dot(texelDir, sDirection[i]), 0.0);
-            if (cosine <= 0.0) continue;
-            float k = cosine * sWeight[i];
-            if (sDependent[i] != 0u) irrDynamic += sRadiance[i] * k;
-            else irr += sRadiance[i] * k;
-            skySum += sEscaped[i] * k;
-            cosSum += k;
-            float w = pow(cosine, u.uFrame.w) * sWeight[i];
-            dSum += sDistance[i] * w;
-            d2Sum += sDistance[i] * sDistance[i] * w;
-            dWeight += w;
+        if (lane < 36u) {
+            for (int i = 0; i < RAYS; ++i) {
+                float cosine = max(dot(texelDir, sDirection[i]), 0.0);
+                if (cosine <= 0.0) continue;
+                float k = cosine * sWeight[i];
+                if (sDependent[i] != 0u) irrDynamic += sRadiance[i] * k;
+                else irr += sRadiance[i] * k;
+                skySum += sEscaped[i] * k;
+                cosSum += k;
+                float w = pow(cosine, u.uFrame.w) * sWeight[i];
+                dSum += sDistance[i] * w;
+                d2Sum += sDistance[i] * sDistance[i] * w;
+                dWeight += w;
+            }
         }
+        barrier();
+    }
+    if (lane < 36u) {
         sTexel[lane] = cosSum > 0.0 ? vec4(irr * (PI / cosSum), skySum / cosSum) : vec4(0.0, 0.0, 0.0, 1.0);
         sTexelDynamic[lane] = cosSum > 0.0 ? irrDynamic * (PI / cosSum) : vec3(0.0);
         float mean = dWeight > 0.0 ? dSum / dWeight : farDistance;
@@ -546,7 +558,7 @@ void main() {
             }
             float minFront = 0.2 * spacing;
             vec3 moved = was;
-            if (float(sBackfaces) > 0.25 * float(RAYS) && closestBack < 1e29) moved = was + backDir * (closestBack + 0.5 * minFront);
+            if (float(sBackfaces) > 0.25 * float(RAYS * passes) && closestBack < 1e29) moved = was + backDir * (closestBack + 0.5 * minFront);
             else if (closestFront < minFront) moved = was - frontDir * (minFront - closestFront);
             moved = clamp(moved, vec3(-0.45 * spacing), vec3(0.45 * spacing));
             if (length(moved - was) > 0.05 * spacing) sMoved = 1u;
@@ -563,11 +575,11 @@ void main() {
     // uParams.y is a floor for the A/B (0.25 was the old steady rate).
     uint solves = solvedBefore ? (previousFlags >> 8) & 0xFFu : 0u;
     // A quarter of the rays meeting back faces: the probe sits inside something.
-    bool buried = float(sBackfaces) > 0.25 * float(RAYS);
+    bool buried = float(sBackfaces) > 0.25 * float(RAYS * passes);
     float converge = max(u.uParams.y, 1.0 / float(solves + 1u));
     // Depth moments and sky visibility move with the geometry: a probe whose rays cross a moving reach keeps the short
     // blend for them.
-    uint dependentNow = u.uDynamicMin.w > 0.5 ? sDependentRays : 0u;
+    uint dependentNow = u.uDynamicMin.w > 0.5 ? sDependentRays / uint(passes) : 0u;
     float geometryConverge = dependentNow > 0u ? max(converge, 0.25) : converge;
     ivec2 tile = probeTile;
     ivec2 texel = ivec2(int(lane) % 8, int(lane) / 8);
