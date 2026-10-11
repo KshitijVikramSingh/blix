@@ -115,6 +115,10 @@ internal sealed partial class SponzaLoop
             return;
         }
 
+        // RenderSettings.HalfResLighting: a ray per half-res pixel, from the full-res pixel it stands for this frame
+        // (SponzaLoop.HalfLighting.cs); lighting_upsample.frag brings the mask back to full resolution.
+        if (halfLightingNow) (width, height) = HalfLightingSize(width, height);
+        var sub = LightingSubpixel;
         if (rtShadowSize != (width, height))
         {
             // Sized with the window; a resize waits for the device like every other resize here.
@@ -149,6 +153,7 @@ internal sealed partial class SponzaLoop
                 new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, 0f))),
                 new("uSun", new Vector4Uniform(new Vector4(towardSun, reach))),
                 new("uSky", new Vector4Uniform(new Vector4(sky is null ? 0f : 1f, rtShadowFrame % (1u << 24), 0f, 0f))),
+                new("uHalf", new Vector4Uniform(new Vector4(halfLightingNow ? 1f : 0f, sub.X, sub.Y, 0f))),
             },
             new[]
             {

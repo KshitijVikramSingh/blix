@@ -555,6 +555,9 @@ internal sealed partial class SponzaLoop
         // Incident light, full resolution: rgb the clipmap's incoming light, a sky visibility. Rgba16F preserves HDR gradients.
         incidentHandle = graph.ColorTarget("incident-light", TextureFormat.Rgba16F, fullSize);
         incidentGradientHandle = graph.ColorTarget("incident-gradient", TextureFormat.Rgba16F, fullSize);
+        // RenderSettings.HalfResLighting: the incident pass into these, lighting-upsample back into the two above.
+        incidentHalfHandle = graph.ColorTarget("incident-light-half", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(0.5f));
+        incidentGradientHalfHandle = graph.ColorTarget("incident-gradient-half", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(0.5f));
 
         // The pre-pass writes geometric normals for incident reconstruction instead of inferring
         // them from depth. That inference measured 5.31 mean sRGB error. Rgba16F avoids directional
@@ -752,11 +755,33 @@ internal sealed partial class SponzaLoop
             for (var c = 0; c < CascadeCount; c++) incidentBuilder = incidentBuilder.Read(cascadeHandles[c]);
             incidentBuilder = incidentBuilder.Read(lightmapEnabled ? lightmapTexelHandle : surfaceKeyHandle);
             incidentPassHandle = incidentBuilder.Shader(incidentClipmapInterface).Handle;
+            // The same pass at half resolution (RenderSettings.HalfResLighting); a frame records one of the two.
+            var halfBuilder = graph.GraphicsPass("incident-light-half")
+                .Target(incidentHalfHandle, LoadOp.Clear, StoreOp.Store)
+                .Target(incidentGradientHalfHandle, LoadOp.Clear, StoreOp.Store)
+                .Read(SampleableSceneDepth)
+                .Read(SampleablePrepassNormal);
+            for (var c = 0; c < CascadeCount; c++) halfBuilder = halfBuilder.Read(cascadeHandles[c]);
+            halfBuilder = halfBuilder.Read(lightmapEnabled ? lightmapTexelHandle : surfaceKeyHandle);
+            incidentHalfPassHandle = halfBuilder.Shader(incidentClipmapInterface).Handle;
         }
 
 
         // The traced shadows are needed from here on.
         if (!rtNoOverlap) graph.ExternalJoin(rtShadowTracePassHandle, "rt-shadow-join");
+
+        // Half-res lighting back to full resolution (lighting_upsample.frag): after the join, since it reads the traced
+        // mask too, and into the targets the lit pass reads.
+        lightingUpsampleInterface = Reflect("present.vert", "lighting_upsample.frag");
+        lightingUpsamplePassHandle = graph.GraphicsPass("lighting-upsample")
+            .Target(incidentHandle, LoadOp.Clear, StoreOp.Store)
+            .Target(incidentGradientHandle, LoadOp.Clear, StoreOp.Store)
+            .Read(incidentHalfHandle)
+            .Read(incidentGradientHalfHandle)
+            .Read(SampleableSceneDepth)
+            .Read(SampleablePrepassNormal)
+            .Shader(lightingUpsampleInterface)
+            .Handle;
 
         // At one sample there is nothing to resolve, and asking for a resolve anyway is invalid —
         // so the single-sample path renders straight into the target present reads.
@@ -983,6 +1008,14 @@ internal sealed partial class SponzaLoop
                 presentVertSpv, incidentClipmapSpv, incidentClipmapInterface, "incident_clipmap")),
             VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
             new[] { BlendState.Disabled, BlendState.Disabled }, incidentPassHandle, "incident_clipmap");
+        incidentHalfPipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
+                presentVertSpv, incidentClipmapSpv, incidentClipmapInterface, "incident_clipmap_half")),
+            VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
+            new[] { BlendState.Disabled, BlendState.Disabled }, incidentHalfPassHandle, "incident_clipmap_half");
+        lightingUpsamplePipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
+                presentVertSpv, File.ReadAllBytes(Path.Combine(shaderDir, "lighting_upsample.frag.spv")), lightingUpsampleInterface, "lighting_upsample")),
+            VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
+            new[] { BlendState.Disabled, BlendState.Disabled }, lightingUpsamplePassHandle, "lighting_upsample");
 
 
         // Fullscreen triangle for the sky + present passes (positions synthesised

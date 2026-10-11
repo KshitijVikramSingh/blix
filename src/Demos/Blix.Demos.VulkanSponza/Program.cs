@@ -261,6 +261,16 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // The incident light's luminance gradient with the normal: how the lit pass carries light evaluated at the
     // geometric normal to its normal-mapped one (incident_clipmap.frag).
     private GraphResourceHandle incidentGradientHandle;
+    // RenderSettings.HalfResLighting: the same pass into half-size targets, and lighting-upsample bringing them (and the
+    // half-res traced shadow mask) back to incidentHandle / incidentGradientHandle, the sun's visibility in the
+    // gradient's w. A frame records one path or the other; the lit pass reads the full-size targets either way.
+    private GraphResourceHandle incidentHalfHandle, incidentGradientHalfHandle;
+    private PassHandle incidentHalfPassHandle, lightingUpsamplePassHandle;
+    private PipelineHandle incidentHalfPipeline, lightingUpsamplePipeline;
+    private ShaderInterface lightingUpsampleInterface = null!;
+    // Which of its 2x2 a half-res pixel stands for this frame (LightingSubpixel), all four every four frames.
+    private uint lightingFrame;
+    private bool halfLightingNow;
     private ShaderProgramHandle gtaoProgram;
     private PipelineHandle gtaoPipeline;
     private ShaderProgramHandle gtaoDenoiseProgram;
@@ -1073,6 +1083,10 @@ internal sealed class RenderSettings
     // 1.5 ms, while 2 -> 4 px saved another 17% for only 0.56 ms. Use the exact LOD census when
     // retuning rather than relying on noisy frame time alone.
     [Tune(0f, 8f)]     public float LodErrorPixels = 2.0f;
+    // The incident light and the traced sun shadows at half resolution, each half-res pixel standing for one of its
+    // 2x2 (a different one each frame, TAA gathering all four), brought back to full resolution along the depth and
+    // normals (lighting_upsample.frag). Off: both at full resolution, the reference.
+    [Tune]             public bool HalfResLighting = true;
     // History weight for the full-screen resolve; zero is the current-frame reference. History is
     // rejected off-screen and neighbourhood-clamped so the present frame remains authoritative.
     [Tune(0f, 0.97f)]  public float Taa = 0.9f;

@@ -457,6 +457,12 @@ internal sealed partial class SponzaLoop
             viewProjJittered = viewProj;
         }
 
+        // RenderSettings.HalfResLighting, decided once for the frame: the traced shadows, the incident pass, the texel
+        // mark and the lit pass's uIncident.w must agree on it. Only where the incident pass runs (the upsample rides
+        // on it); not under --rt-isolated, whose sky rays are read per full-res pixel.
+        halfLightingNow = render.HalfResLighting && incidentField && !(abMode == "incident" && AbOffPhase) && ClipmapActive && !rtIsolated;
+        lightingFrame++;
+
         // Stress hook: flip fog every 90 frames to exercise the on/off barrier
         // transitions under validation (no effect without --fog-stress).
         if (fogStress && (++fogStressFrame % 90 == 0)) fog.Enabled = !fog.Enabled;
@@ -491,7 +497,7 @@ internal sealed partial class SponzaLoop
                 skyVisibilityEnabled && !skipSkySample ? 1f : 0f,
                 IncidentHoldsOcclusion ? 1f : 0f,
                 IncidentFieldNow ? 1f : 0f,
-                0f))),
+                halfLightingNow ? 1f : 0f))),
             new("uIncidentGradient", new Vector4Uniform(new Vector4(incidentNormalBias, incidentGradientClamp, 0f, 0f))),
             new("uViewProjUnjittered", new Matrix4x4Uniform(viewProj)),
             // Last frame's un-jittered camera, or this frame's on the first (zero motion rather than garbage).
@@ -851,7 +857,13 @@ internal sealed partial class SponzaLoop
                 RecordTexels(incidentInvProj, incidentInvView, frame.Width, frame.Height);
                 RecordReference(incidentInvProj, incidentInvView, frame.Width, frame.Height);
                 RecordGpuReference();
-                RecordIncidentClipmap(incidentInvProj, incidentInvView, frame.Width, frame.Height, frame.Width, frame.Height);
+                if (halfLightingNow)
+                {
+                    var (halfWidth, halfHeight) = HalfLightingSize(frame.Width, frame.Height);
+                    RecordIncidentClipmap(incidentInvProj, incidentInvView, halfWidth, halfHeight, frame.Width, frame.Height, half: true);
+                    RecordLightingUpsample(incidentInvProj, incidentInvView);
+                }
+                else RecordIncidentClipmap(incidentInvProj, incidentInvView, frame.Width, frame.Height, frame.Width, frame.Height);
             }
             // Before the clipmap's first solve there is nothing to read, and the lit pass does not (uIncident.z is 0
             // until then). Recorded empty anyway: the graph runs a pass with nothing drawn, so its Clear load op

@@ -91,6 +91,7 @@
     <GlslShader Include="Shaders\hiz_build.frag" />
     <GlslShader Include="Shaders\gtao.frag" />
     <GlslShader Include="Shaders\gtao_denoise.frag" />
+    <GlslShader Include="Shaders\lighting_upsample.frag" />
     <GlslShader Include="Shaders\froxel.comp" />
   </ItemGroup>
 

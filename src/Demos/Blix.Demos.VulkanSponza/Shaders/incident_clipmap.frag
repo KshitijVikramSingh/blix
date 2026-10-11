@@ -55,6 +55,8 @@ layout(set = 0, binding = 0) uniform IncidentClipmap {
                          // transferAt), texels unread; y the first atlas record
     vec4 uTransferStaleMin; // what moves (--mover), widened by a level-0 cell: a texel inside holds a transfer the mover
     vec4 uTransferStaleMax; // may have made untrue, and the probes answer it instead; w of the min 1 when there is one
+    vec4 uHalf;          // x 1: this target is half the frame (RenderSettings.HalfResLighting), each pixel standing for
+                         // the full-res pixel 2p + yz of its 2x2 (a different one each frame; lighting_upsample.frag)
 } g;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -347,7 +349,9 @@ void main() {
     clipRelocate = g.uClipExact.w;
     clipExactSeed = blix_pcg(uint(gl_FragCoord.x) * 7919u + uint(gl_FragCoord.y) * 104729u);
     // Exact fetches, as texel_mark.comp reads them: the texels a pixel weighs must be the ones the mark queued for it.
-    ivec2 pixel = clamp(ivec2(vUv * vec2(textureSize(uSceneDepth, 0))), ivec2(0), textureSize(uSceneDepth, 0) - 1);
+    ivec2 pixel = g.uHalf.x > 0.5
+        ? clamp(ivec2(gl_FragCoord.xy) * 2 + ivec2(g.uHalf.yz), ivec2(0), textureSize(uSceneDepth, 0) - 1)
+        : clamp(ivec2(vUv * vec2(textureSize(uSceneDepth, 0))), ivec2(0), textureSize(uSceneDepth, 0) - 1);
     float raw = texelFetch(uSceneDepth, pixel, 0).r;
     if (raw >= 1.0 - 1e-6) {
         outIncident = vec4(0.0, 0.0, 0.0, 1.0);

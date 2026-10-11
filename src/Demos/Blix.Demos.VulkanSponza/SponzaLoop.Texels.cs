@@ -481,6 +481,13 @@ internal sealed partial class SponzaLoop
         var baking = lightBakeActive;
         var gatherBudget = baking ? RecordLightBake() : texelBudget;
         var groups = (((width + TexelMarkStride - 1) / TexelMarkStride + 7) / 8, ((height + TexelMarkStride - 1) / TexelMarkStride + 7) / 8);
+        // The mark's pixel in each 4 x 4 block. Under RenderSettings.HalfResLighting the incident pass reads only the
+        // pixels at this frame's LightingSubpixel of each 2x2, so the mark takes one of the block's four of those (all
+        // four over four frames of a run): a texel it queues is one the image reads, under the same jitter.
+        var markIndex = MarkOffset(texelFrame);
+        var markOffset = halfLightingNow
+            ? new Vector2(2 * (markIndex & 1u) + LightingSubpixel.X, 2 * ((markIndex >> 1) & 1u) + LightingSubpixel.Y)
+            : new Vector2(markIndex % 4, markIndex / 4);
         if (!baking)
         graph.Dispatch(texelMarkPassHandle, new DispatchCommand(texelMarkPipeline, groups.Item1, groups.Item2, 1,
             new ShaderUniform[]
@@ -488,7 +495,7 @@ internal sealed partial class SponzaLoop
                 new("uInvProjection", new Matrix4x4Uniform(invProjection)),
                 new("uInvView", new Matrix4x4Uniform(invView)),
                 new("uTarget", new Vector4Uniform(new Vector4(width, height, TexelMarkStride, 0f))),
-                new("uOffset", new Vector4Uniform(new Vector4(MarkOffset(texelFrame) % 4, MarkOffset(texelFrame) / 4, texelEpoch, 0f))),
+                new("uOffset", new Vector4Uniform(new Vector4(markOffset.X, markOffset.Y, texelEpoch, 0f))),
                 new("uNoise", new Vector4Uniform(new Vector4(texelMaxRays, texelNoise, TexelNoiseFloor, TexelFilterCapacity))),
                 new("uTexelLevels", new Vector4Uniform(TexelLevelsUniform(height))),
                 new("uTexelGrid", new Vector4Uniform(texelGrid)),

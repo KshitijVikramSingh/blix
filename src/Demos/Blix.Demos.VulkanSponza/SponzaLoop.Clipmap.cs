@@ -124,15 +124,19 @@ internal sealed partial class SponzaLoop
     private bool ClipmapActive => clipmap is not null && clipmapFrame > 0;
 
     // The incident field from the clipmap (incident_clipmap.frag): rgb the light arriving, a sky visibility.
-    private void RecordIncidentClipmap(Matrix4x4 invProjection, Matrix4x4 invView, int width, int height, int frameWidth, int frameHeight)
+    // half: into the half-size targets (RenderSettings.HalfResLighting), each pixel standing for LightingSubpixel of its 2x2;
+    // RecordLightingUpsample brings them back.
+    private void RecordIncidentClipmap(Matrix4x4 invProjection, Matrix4x4 invView, int width, int height, int frameWidth, int frameHeight,
+        bool half = false)
     {
+        var sub = LightingSubpixel;
         var origins = clipmap!.Origins;
         var screen = ScreenProbeIncidentInputs(frameWidth, frameHeight);
         var surface = SurfaceUniforms(ClipmapLevels * clipmap.ProbesPerLevel);
         var texel = TexelIncidentInputs();
         var reference = ReferenceIncidentInputs();
-        graph.Pass(incidentPassHandle, scope => fullscreen.Draw(
-            scope, incidentClipmapPipeline,
+        graph.Pass(half ? incidentHalfPassHandle : incidentPassHandle, scope => fullscreen.Draw(
+            scope, half ? incidentHalfPipeline : incidentClipmapPipeline,
             new[]
             {
                 new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
@@ -168,6 +172,7 @@ internal sealed partial class SponzaLoop
                 new("uTexelDebug", new Vector4Uniform(new Vector4(texelFrame, 0f, 0f, 0f))),
                 new("uLightmap", new Vector4Uniform(LightmapUniform)),
                 new("uTexelLevels", new Vector4Uniform(TexelLevelsUniform(frameHeight))),
+                new("uHalf", new Vector4Uniform(new Vector4(half ? 1f : 0f, sub.X, sub.Y, 0f))),
             }.Concat(TexelSunUniforms()).ToArray(),
             buffers: new[] { new ShaderBufferBinding("ClipmapState", clipmapState), new ShaderBufferBinding("ScreenProbeTiles", screen.Tiles), new ShaderBufferBinding("ScreenProbes", screen.Probes), new ShaderBufferBinding("SurfaceIndex", surfaceIndex) }.Concat(texel.Buffers).Append(reference.Buffer).Append(new ShaderBufferBinding("LightmapIndexMap", LightmapIndexMap()))
                 // The ray scene, for --clipmap-exact-visibility, and the probes' offsets, for --clipmap-relocate
