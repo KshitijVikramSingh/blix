@@ -3,7 +3,7 @@
 
     tools/transfer/fit.py sunA.bin sunB.bin sunC.bin ...    (VulkanSponza --transfer-dump, one per --sun, same --cam)
 
-Per texel, truth is its traced irradiance; a probe's value is its irradiance at the texel's normal. For each sun held
+Per texel, truth is its path-traced irradiance (or, in an older dump, its gathered light); a probe's value is its irradiance at the texel's normal. For each sun held
 out in turn, non-negative weights are fitted on the others (each sun's rgb: three equations) and judged on the one left
 out, against today's blend (trilinear x facing^2 x Chebyshev^3 over the valid probes, normalised: probe_clipmap.glsl).
 Reported as the GI gate does: |error| over the mean light, the median ratio, energy. 'fit (seen)' is the same weights
@@ -14,17 +14,16 @@ import sys
 
 import numpy as np
 
-STRIDE = 66
-
-
 def load(path):
+    """Per texel: its id, its truth, its 8 probes. A 69-float row carries the path-traced truth (--transfer-dump's
+    ReferenceWave) after the probes, and that is the truth; a 66-float row only the gathered light."""
     with open(path, 'rb') as f:
         stride, count = struct.unpack('<ii', f.read(8))
-        assert stride == STRIDE, stride
+        assert stride in (66, 69), stride
         a = np.frombuffer(f.read(), dtype='<f4', count=count * stride).reshape(count, stride)
     ids = a[:, 0].astype(np.int64)
-    light = a[:, 7:10]
-    probes = a[:, 10:].reshape(count, 8, 7)
+    light = a[:, 66:69] if stride == 69 else a[:, 7:10]
+    probes = a[:, 10:66].reshape(count, 8, 7)
     return ids, light, probes
 
 

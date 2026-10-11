@@ -131,8 +131,18 @@ internal sealed partial class SponzaLoop
         for (var i = 0; i < count; i++)
             if (transferDumpPath is not null ? TransferSampleKeeps(texels, i, firstAtlas) : i < firstAtlas || MathF.Abs(texels[2 * i].W) >= 2f)
                 live.Add((uint)i);
-        // --transfer-dump: a region's sample, baked for the dump and not saved.
-        if (transferDumpPath is not null) lightBakePath = null;
+        // --transfer-dump: a region's sample, baked for the dump and not saved; and its points for the path-traced capture.
+        if (transferDumpPath is not null)
+        {
+            lightBakePath = null;
+            transferCapturePoints = new List<Vector4>(live.Count * 2);
+            foreach (var i in live)
+            {
+                var n = Vector3.Normalize(new Vector3(texels[2 * i + 1].X, texels[2 * i + 1].Y, texels[2 * i + 1].Z));
+                transferCapturePoints.Add(new Vector4(new Vector3(texels[2 * i].X, texels[2 * i].Y, texels[2 * i].Z) + n * 0.01f, 0f));
+                transferCapturePoints.Add(new Vector4(n, 0f));
+            }
+        }
         if (live.Count == 0) return;
         lightBakeLive = live.Count;
         lightBakeLiveBuffer = Own(device.CreateGpuBuffer(live.Count * 4, MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(live)), "sponza.light-bake.live"));

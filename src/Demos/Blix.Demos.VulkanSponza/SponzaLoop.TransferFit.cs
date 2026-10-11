@@ -19,8 +19,18 @@ internal sealed partial class SponzaLoop
     private uint transferBakeDoneFrame;
     // Frames after the region's bake before the dump: the probes keep solving meanwhile.
     private const uint TransferSettleFrames = 900;
-    // One texel in this many (by a hash of its record id, so every run picks the same ones).
-    private const uint TransferSampleStride = 4;
+    // One texel in this many (by a hash of its record id, so every run picks the same ones): --transfer-stride (4).
+    private uint transferSampleStride = 4;
+    // A dump row: id, position, normal, gathered light, 8 probes x (valid, trilinear, facing^2, Chebyshev, rgb), traced rgb.
+    private const int TransferRowFloats = 1 + 3 + 3 + 3 + 8 * 7 + 3;
+    // The texels' path-traced truth (SponzaLoop.GpuReference.cs, a ReferenceWave at the texels: the software traversal or
+    // Metal under --ray-backend hw|both): --transfer-paths a texel (1,024), --ref-bounces deep. The dump writes it beside
+    // the gathered light, and tools/transfer/fit.py fits to it.
+    private List<Vector4>? transferCapturePoints;
+    private ReferenceWave? transferWave;
+    private uint transferWaveStart;
+    private int transferPaths = 1024;
+    private const int TransferLanesPerPoint = 4;
 
     // BeginLightBake's live list under --transfer-dump: the sample, inside level 0 with a probe on every side.
     private bool TransferSampleKeeps(Vector4[] texels, int i, int firstAtlas)
@@ -28,14 +38,24 @@ internal sealed partial class SponzaLoop
         if (i < firstAtlas || MathF.Abs(texels[2 * i].W) < 2f || clipmap is null) return false;
         // Either side of a double-sided pair may be drawn: each is its own sample.
         var h = (uint)i * 2654435761u;
-        if ((h >> 7) % TransferSampleStride != 0) return false;
+        if ((h >> 7) % transferSampleStride != 0) return false;
         var p = new Vector3(texels[2 * i].X, texels[2 * i].Y, texels[2 * i].Z);
         return clipmap.InsideDistance(0, p) >= 1.5f;
     }
 
     private void TransferDumpWhenDone()
     {
-        if (transferDumpPath is null || !transferBakeDone || texelFrame - transferBakeDoneFrame < TransferSettleFrames || clipmap is null) return;
+        if (transferDumpPath is null || !transferBakeDone || clipmap is null) return;
+        if (transferWave is null && transferCapturePoints is { Count: > 0 } points)
+        {
+            transferWave = CreateReferenceWave(points, TransferLanesPerPoint, (transferPaths + TransferLanesPerPoint - 1) / TransferLanesPerPoint, "transfer");
+            transferWaveStart = texelFrame;
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza] transfer capture: {transferWave.PointCount:N0} texels, {transferPaths} paths x {refBounces} bounces each, {transferWave.Count:N0} lanes, ~{ReferenceWaveFrames(transferWave)} frames ({(FrameRaysOnHardware ? "Metal" : "software")})."));
+        }
+        var captured = transferWave is null || texelFrame - transferWaveStart >= (uint)ReferenceWaveFrames(transferWave);
+        if (!captured) RecordReferenceWave(transferWave!);
+        if (texelFrame - transferBakeDoneFrame < TransferSettleFrames || !captured) return;
         var path = transferDumpPath;
         transferDumpPath = null;
         var irradiance = device.ReadTexture(clipmapIrradiance, out var aw, out _, out _);
@@ -44,6 +64,8 @@ internal sealed partial class SponzaLoop
         var texels = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(texelBuffer, 0, texelCount * 32).AsSpan()).ToArray();
         var light = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(texelLightBuffer, 0, texelCount * 16).AsSpan()).ToArray();
         var live = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(lightBakeLiveBuffer, 0, lightBakeLive * 4).AsSpan()).ToArray();
+        // The path-traced truth, in the live list's order (as the capture's points were packed).
+        var traced = transferWave is null ? null : ReferenceWaveSums(transferWave);
 
         Vector4 Atlas(byte[] img, int x, int y)
         {
@@ -65,10 +87,11 @@ internal sealed partial class SponzaLoop
         }
 
         var spacing = clipmap.Spacing(0);
-        var rows = new List<float>(live.Length * 66);
+        var rows = new List<float>(live.Length * TransferRowFloats);
         var written = 0;
-        foreach (var id in live)
+        for (var li = 0; li < live.Length; li++)
         {
+            var id = live[li];
             var pos = new Vector3(texels[2 * id].X, texels[2 * id].Y, texels[2 * id].Z);
             var n = Vector3.Normalize(new Vector3(texels[2 * id + 1].X, texels[2 * id + 1].Y, texels[2 * id + 1].Z));
             var l = light[id];
@@ -111,11 +134,15 @@ internal sealed partial class SponzaLoop
                 rows.Add(valid ? 1f : 0f); rows.Add(trilinear); rows.Add(facing * facing); rows.Add(chebyshev);
                 rows.Add(rgb.X); rows.Add(rgb.Y); rows.Add(rgb.Z);
             }
+            // The traced truth (pi x radiance over its paths), -1 where there was none.
+            var t = traced is null ? new Vector4(-1f, -1f, -1f, 1f) : traced[li];
+            var paths = MathF.Max(t.W, 1f);
+            rows.Add(t.X / paths); rows.Add(t.Y / paths); rows.Add(t.Z / paths);
             written++;
         }
         using (var w = new BinaryWriter(File.Create(path)))
         {
-            w.Write(66);
+            w.Write(TransferRowFloats);
             w.Write(written);
             foreach (var v in rows) w.Write(v);
         }
