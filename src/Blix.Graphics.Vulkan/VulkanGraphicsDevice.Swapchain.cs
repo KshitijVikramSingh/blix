@@ -921,6 +921,13 @@ public sealed partial class VulkanGraphicsDevice
             {
                 currentPassName = pass.Name;
                 CountPass(pass.Name);
+                // An earlier pass's work still out (a join to come) is waited for first: this pass's submit signals a
+                // higher timeline value, which must not come before that work's own signal (a timeline only rises).
+                if (pendingJoins is { Count: > 0 })
+                {
+                    foreach (var value in pendingJoins.Values) timelineWait = Math.Max(timelineWait, value);
+                    pendingJoins.Clear();
+                }
                 cmd = RunExternalPass(cmd, pass, external, ref isolationFirstSubmit, ref timelineWait, f.ImageAvailable, out var signalled);
                 if (pass.Description.ExternalJoinLater) (pendingJoins ??= new Dictionary<string, ulong>())[pass.Name] = signalled;
                 else timelineWait = Math.Max(timelineWait, signalled);

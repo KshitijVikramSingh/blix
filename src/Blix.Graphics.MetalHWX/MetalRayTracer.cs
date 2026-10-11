@@ -201,7 +201,9 @@ public sealed class MetalRayTracer : IDisposable
     /// <param name="rowMaterial">Per packed triangle row, its index in <paramref name="materials"/>; uint.MaxValue: none
     /// (the coin decides).</param>
     /// <param name="uvs">The scene's texture coordinates on the GPU, one float2 per position (RayQueryGpuData.Uvs).</param>
-    public unsafe void SetAlpha(IReadOnlyList<AlphaMaterial> materials, ReadOnlySpan<uint> rowMaterial, GpuBufferHandle uvs)
+    /// <param name="mip">The mip level the alpha is read at: coarser is cheaper (every leaf card a shadow ray crosses samples
+    /// once) and rounder; 0 is the texture's own.</param>
+    public unsafe void SetAlpha(IReadOnlyList<AlphaMaterial> materials, ReadOnlySpan<uint> rowMaterial, GpuBufferHandle uvs, float mip = 0f)
     {
         ObjectDisposedException.ThrowIf(ctx == 0, this);
         var textures = new nint[Math.Max(1, materials.Count)];
@@ -218,7 +220,7 @@ public sealed class MetalRayTracer : IDisposable
         fixed (float* fp = factors)
         fixed (uint* rp = rowMaterial)
         {
-            if (HwxNative.hwx_set_alpha(ctx, tp, cp, fp, (uint)materials.Count, rp, (uint)rowMaterial.Length, device.ExportMetalBuffer(uvs)) != 0)
+            if (HwxNative.hwx_set_alpha(ctx, tp, cp, fp, (uint)materials.Count, rp, (uint)rowMaterial.Length, device.ExportMetalBuffer(uvs), mip) != 0)
                 throw new InvalidOperationException($"Metal alpha test: {Error}");
         }
     }

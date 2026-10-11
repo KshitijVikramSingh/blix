@@ -71,7 +71,13 @@ internal sealed partial class SponzaLoop
     private ReferenceWave? transferWave;
     private uint transferWaveStart;
     private int transferPaths = 1024;
-    private const int TransferLanesPerPoint = 4;
+    // Lanes a texel (--transfer-lanes N): the capture is bound by frames (each lane runs its paths one bounce a frame), not
+    // rays, so on Metal as many as TransferLaneBudget lanes in all allow (~200 B of state a lane), up to the paths; 4 on
+    // the software traversal, whose rays are the cost.
+    private int transferLanes;
+    private const int TransferLaneBudget = 1 << 21;
+    private int TransferLanesPerPoint(int points) => transferLanes > 0 ? Math.Min(transferLanes, transferPaths)
+        : FrameRaysOnHardware ? Math.Clamp(TransferLaneBudget / Math.Max(points, 1), 4, transferPaths) : 4;
 
     // BeginLightBake's live list under --transfer-dump: the sample, inside level 0 with a probe on every side.
     private bool TransferSampleKeeps(Vector4[] texels, int i, int firstAtlas)
@@ -89,7 +95,8 @@ internal sealed partial class SponzaLoop
         if (transferDumpPath is null || !transferBakeDone || clipmap is null) return;
         if (transferWave is null && transferCapturePoints is { Count: > 0 } points)
         {
-            transferWave = CreateReferenceWave(points, TransferLanesPerPoint, (transferPaths + TransferLanesPerPoint - 1) / TransferLanesPerPoint, "transfer");
+            var lanes = TransferLanesPerPoint(points.Count / 2);
+            transferWave = CreateReferenceWave(points, lanes, (transferPaths + lanes - 1) / lanes, "transfer");
             transferWaveStart = texelFrame;
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] transfer capture: {transferWave.PointCount:N0} texels, {transferPaths} paths x {refBounces} bounces each, {transferWave.Count:N0} lanes, ~{ReferenceWaveFrames(transferWave)} frames ({(FrameRaysOnHardware ? "Metal" : "software")})."));

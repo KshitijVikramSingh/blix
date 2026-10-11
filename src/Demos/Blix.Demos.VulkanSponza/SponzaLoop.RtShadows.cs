@@ -36,6 +36,8 @@ internal sealed partial class SponzaLoop
     // --rt-coverage-coin: leaf cards' shadows by the baked coverage's coin (as the software traversal meets them), not by
     // their textures' alpha at the point hit.
     private bool rtCoverageCoin;
+    // --rt-alpha-mip N: the mip the shadows' alpha test reads (0: full resolution).
+    private float rtAlphaMip;
     private ShaderInterface rtShadowRaysInterface = null!;
     private PassHandle rtShadowRaysPassHandle, rtShadowTracePassHandle;
     private PipelineHandle rtShadowRaysPipeline;
@@ -53,8 +55,11 @@ internal sealed partial class SponzaLoop
     private GpuBufferHandle rtShadowPending;
     // The mask the lit pass binds this frame: a slot's, or the placeholder of zeros (the cascades shade).
     private GpuBufferHandle rtShadowBound;
-    // Frames since the surface bake was recorded: the build reads its coverage once it has run.
+    // Frames since the surface bake was recorded: the build reads its coverage once it has run. Counted once a frame
+    // (rtBakeCountedFrame): every batch asks for the tracer, and counting the asks read the coverage before the bake ran
+    // (no foliage partly covered, its shadows solid).
     private int rtFramesSinceBake;
+    private long rtBakeCountedFrame = -1;
     private uint rtShadowFrame;
     private int rtShadowFrames;
     private MetalRayTracerBuild? rtBuild;
@@ -165,7 +170,12 @@ internal sealed partial class SponzaLoop
     {
         if (frameTracer is not null) return true;
         if (frameTracerFailed || !raySurfacesBaked) return false;
-        if (++rtFramesSinceBake < device.MaxFramesInFlightCount + 1) return false;
+        if (rtBakeCountedFrame != postLoadFrames)
+        {
+            rtBakeCountedFrame = postLoadFrames;
+            rtFramesSinceBake++;
+        }
+        if (rtFramesSinceBake < device.MaxFramesInFlightCount + 1) return false;
         var tracer = MetalRayTracer.TryCreate(device, out var reason);
         if (tracer is null)
         {
@@ -179,7 +189,7 @@ internal sealed partial class SponzaLoop
         var (alphaMaterials, rowMaterial) = rtCoverageCoin ? (new List<MetalRayTracer.AlphaMaterial>(), Array.Empty<uint>()) : RtAlphaMaterials();
         var alphaTested = rowMaterial.Select(m => m != uint.MaxValue).ToArray();
         rtBuild = tracer.Build(rayGpuData, blocks, surfaceWords, alphaTested);
-        if (!rtCoverageCoin) tracer.SetAlpha(alphaMaterials, rowMaterial, raySurfaceBakeBuffers.First(b => b.Name == "BlixRayUvs").Buffer);
+        if (!rtCoverageCoin) tracer.SetAlpha(alphaMaterials, rowMaterial, raySurfaceBakeBuffers.First(b => b.Name == "BlixRayUvs").Buffer, rtAlphaMip);
         frameTracer = tracer;
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] metal tracer: {rtBuild.Value.SolidTriangles + rtBuild.Value.PartialTriangles:N0} triangles ({rtBuild.Value.PartialTriangles:N0} partly covered, {(rtCoverageCoin ? "by the coverage coin" : string.Create(Inv, $"alpha-tested by {alphaMaterials.Count} materials' textures"))}) in {rtBuild.Value.Hierarchies} bottom-level structures, built in {rtBuild.Value.CpuPrepareMs + rtBuild.Value.BlasGpuMs + rtBuild.Value.CompactTlasGpuMs:0} ms; {rtBuild.Value.CompactedBytes / 1048576.0:0} MB."));

@@ -57,6 +57,7 @@ internal sealed partial class SponzaLoop
         transferDumpPath = args.String("transfer-dump");
         if (args.Int("transfer-stride") is { } ts) transferSampleStride = (uint)Math.Max(1, ts);
         if (args.Int("transfer-paths") is { } tp) transferPaths = Math.Clamp(tp, 16, 1 << 20);
+        if (args.Int("transfer-lanes") is { } tl) transferLanes = Math.Clamp(tl, 1, 1 << 16);
         // --transfer-weights <file>: fitted transfer weights to answer with (SponzaLoop.TransferFit.cs).
         transferWeightsPath = args.String("transfer-weights");
         if (args.Int("texel-gtao") is { } tg) texelGtao = tg != 0;

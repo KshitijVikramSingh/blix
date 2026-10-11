@@ -73,7 +73,7 @@ internal static unsafe class HwxNative
 
     [DllImport(Library)]
     public static extern int hwx_set_alpha(nint ctx, nint* textures, float* cutoffs, float* alphaFactors, uint materialCount,
-        uint* rowMaterial, uint rowCount, nint uvs);
+        uint* rowMaterial, uint rowCount, nint uvs, float mip);
 
     [DllImport(Library)]
     public static extern int hwx_trace(nint ctx, nint rays, nint hits, uint count, uint seedBase, uint closestOnly, uint repeats, double* gpuMs);

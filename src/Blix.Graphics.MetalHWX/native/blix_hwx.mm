@@ -74,7 +74,7 @@ static uint blix_row(device const uint* primRows, device const uint2* entryRows,
 
 // A material's alpha test, for hwx_set_alpha: its albedo texture, cutoff and the factor its alpha is multiplied by.
 struct BlixAlphaMaterial { texture2d<float> albedo; float cutoff; float alphaFactor; };
-struct BlixAlphaParams { uint enabled; uint pad0; uint pad1; uint pad2; };
+struct BlixAlphaParams { uint enabled; float mip; uint pad1; uint pad2; };   // mip: the level the alpha is read at
 
 // A partly covered triangle, met or not. With alpha (the table's own switch, hwx_set_alpha), the material's alpha at
 // the point hit, as the raster's alpha test decides it: what a leaf card's shadow should be. Otherwise blix_covered:
@@ -97,7 +97,7 @@ bool blix_coverage(uint primitive [[primitive_id]], uint geometry [[geometry_id]
             uint4 tri = triangles[row];
             float2 uv = uvs[tri.x] * (1.0f - bary.x - bary.y) + uvs[tri.y] * bary.x + uvs[tri.z] * bary.y;
             constexpr sampler s(filter::linear, mip_filter::nearest, address::repeat);
-            float a = materials[m].albedo.sample(s, uv, level(0.0f)).a * materials[m].alphaFactor;
+            float a = materials[m].albedo.sample(s, uv, level(alpha.mip)).a * materials[m].alphaFactor;
             return a >= materials[m].cutoff;
         }
     }
@@ -657,7 +657,7 @@ HWX_EXPORT void hwx_shadow_stats(HwxContext* ctx, uint64_t* dispatches, uint64_t
 // texture coordinates, one float2 per position (an exported buffer). From now on the shadow pass meets a partly covered
 // triangle where its material's alpha passes at the point hit; the ray check keeps the coin.
 HWX_EXPORT int hwx_set_alpha(HwxContext* ctx, void* const* textures, const float* cutoffs, const float* alphaFactors,
-                             uint32_t materialCount, const uint32_t* rowMaterial, uint32_t rowCount, void* uvs) {
+                             uint32_t materialCount, const uint32_t* rowMaterial, uint32_t rowCount, void* uvs, float mip) {
     @autoreleasepool {
         id<MTLDevice> device = ctx->device;
         id<MTLBuffer> uvBuffer = (__bridge id<MTLBuffer>)uvs;
@@ -675,8 +675,8 @@ HWX_EXPORT int hwx_set_alpha(HwxContext* ctx, void* const* textures, const float
         ctx->materials = [device newBufferWithBytes:materials.data() length:materials.size() * sizeof(Material) options:MTLResourceStorageModeShared];
         ctx->rowMaterial = [device newBufferWithBytes:rowMaterial length:std::max<uint32_t>(rowCount, 1) * 4 options:MTLResourceStorageModeShared];
         ctx->uvs = uvBuffer;
-        uint32_t on[4] = {1, 0, 0, 0};
-        ctx->alphaOn = [device newBufferWithBytes:on length:sizeof(on) options:MTLResourceStorageModeShared];
+        struct { uint32_t enabled; float mip; uint32_t pad1, pad2; } on = {1, mip, 0, 0};
+        ctx->alphaOn = [device newBufferWithBytes:&on length:sizeof(on) options:MTLResourceStorageModeShared];
         for (id<MTLIntersectionFunctionTable> table : {ctx->table, ctx->shadowTable, ctx->shadowAlphaTable}) {
             [table setBuffer:table == ctx->shadowAlphaTable ? ctx->alphaOn : ctx->alphaOff offset:0 atIndex:6];
             [table setBuffer:ctx->rowMaterial offset:0 atIndex:7];

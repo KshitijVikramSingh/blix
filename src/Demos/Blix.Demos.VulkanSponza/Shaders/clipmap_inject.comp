@@ -72,6 +72,8 @@ layout(set = 0, binding = 0) uniform ClipmapInject {
                            // DDGI's surface bias along the normal / back along the ray, in spacings (0, 0: the lift);
                            // w 1: probes relocate (--clipmap-relocate)
     mat4 uCascadeReceivers;  // where the cascades may answer (cascade_receivers.glsl)
+    vec4 uWave;            // the solve as a wavefront (SponzaLoop.Clipmap, modes 3-5): x 1 when it is, y ray slots per lane
+                           // (the most passes a probe takes), z the per-frame base of the batches' coverage seeds
 } u;
 
 layout(set = 0, binding = 1, rgba16f) uniform image2D uClipmapIrradiance;
@@ -144,6 +146,19 @@ float injectTracedVisibility(vec3 world, vec3 n, vec3 probe) {
 // out of a solid through the nearest back face, away from a front face nearer than a fifth of a cell -- and kept within
 // 0.45 of a cell. Reset when the slot is re-pointed to another cell. The probe traces from it and readers measure from it.
 layout(std430, set = 0, binding = 24) buffer ClipmapOffsets { vec4 clipmapOffsets[]; };
+// The solve as a wavefront (modes 3-5): its rays go out to a CLOSEST batch and its hits' sun to a SHADOW batch
+// (SponzaLoop.RayBatch.cs: the software traversal or Metal's), in the batches' formats. Workgroup w's lane l in pass p
+// owns ray slot w * RAYS * uWave.y + p * RAYS + l.
+layout(std430, set = 0, binding = 25) buffer InjectRays { vec4 injectRays[]; };          // 2 per ray: origin, tMin; dir, tMax
+layout(std430, set = 0, binding = 26) readonly buffer InjectHits { uvec4 injectHits[]; }; // 3 per ray: the CLOSEST answer
+// 4 per ray, between the phases: direction and sampling weight; light found at the hit (or the sky's) and whether it
+// escaped; the sun's share before its shadow ray, and that ray's answer if known (-1: the SHADOW batch's); radiance bin,
+// facing, distance, whether it crosses a moving reach.
+layout(std430, set = 0, binding = 27) buffer InjectRayState { vec4 injectState[]; };
+layout(std430, set = 0, binding = 28) buffer InjectShadowOrigins { vec4 injectOrigins[]; };   // the SHADOW batch's origins
+layout(std430, set = 0, binding = 29) readonly buffer InjectOccluded { uint injectOccluded[]; }; // and its answers
+layout(std430, set = 0, binding = 30) buffer InjectProbeCounters { uvec4 injectCounters[]; };  // per workgroup: back faces,
+                                                                                              // dependent rays, any dependent
 float injectRelocate;
 #define BLIX_CLIPMAP_PROBE_OFFSET(s) (injectRelocate > 0.5 ? clipmapOffsets[s].xyz : vec3(0.0))
 // DDGI's surface bias at a probe ray's hit: the "viewer" is the probe, back along the ray (injectViewDir, set at the hit).
@@ -444,6 +459,87 @@ void main() {
             sWeight[lane] = 1.0;
         }
         vec3 toSun = -normalize(u.uSunDirection.xyz);
+        uint waveSlots = uint(max(u.uWave.y, 1.0));
+        uint rayIndex = gl_WorkGroupID.x * uint(RAYS) * waveSlots + uint(pass * RAYS) + lane;
+        if (mode == 3) {
+            // The wavefront's rays: the directions the inline solve would trace, out to the CLOSEST batch.
+            injectRays[rayIndex * 2u] = vec4(origin, 0.0);
+            injectRays[rayIndex * 2u + 1u] = vec4(dir, uintBitsToFloat(0x7F800000u));
+            injectState[rayIndex * 4u] = vec4(dir, sWeight[lane]);
+            injectState[rayIndex * 4u + 3u] = vec4(float(sRayBin[lane]), 0.0, 0.0, 0.0);
+            continue;
+        }
+        if (mode == 4) {
+            // The wavefront's hits, as the inline solve shades them below; the sun's visibility goes out to the SHADOW
+            // batch where the cascades do not answer.
+            uvec4 h0 = injectHits[rayIndex * 3u];
+            uvec4 h2 = injectHits[rayIndex * 3u + 2u];
+            vec4 st0 = injectState[rayIndex * 4u];
+            vec3 rayDir = st0.xyz;
+            vec3 light = vec3(0.0), sunShare = vec3(0.0);
+            float lit = 0.0, rayDistance = farDistance, rayFacing = 0.0, rayEscaped = 1.0;
+            bool rayDependent = false;
+            vec4 shadowOrigin = vec4(0.0);
+            if ((h0.w & 1u) != 0u) {
+                float t = uintBitsToFloat(h0.x);
+                bool front = (h0.w & 2u) != 0u;
+                vec3 normal = uintBitsToFloat(h2.xyz);
+                vec3 albedo = unpackUnorm4x8(h2.w).rgb;
+                rayEscaped = 0.0;
+                rayDistance = min(t, farDistance);
+                if (!front) atomicAdd(sBackfaces, 1u);
+                rayFacing = front ? 1.0 : -1.0;
+                vec3 n = dot(normal, rayDir) > 0.0 ? -normal : normal;
+                vec3 hitPos = origin + rayDir * t;
+                float ndotl = max(dot(n, toSun), 0.0);
+                rayDependent = crossesMovingReach(origin, rayDir, t) || (ndotl > 0.0 && crossesMovingReach(hitPos + n * 0.01, toSun, 1e30));
+                if (ndotl > 0.0) {
+                    int cascade = -1;
+                    lit = 1.0;
+                    if (u.uDynamicQueue.z < 0.5 && cascadeReceives(u.uCascadeReceivers, hitPos + n * 0.01)) {
+                        lit = blix_sun_shadow_cascaded_hard(
+                            uCascadeShadowMaps[0], uCascadeShadowMaps[1], uCascadeShadowMaps[2],
+                            u.uCascadeVP[0], u.uCascadeVP[1], u.uCascadeVP[2], hitPos + n * 0.01, ndotl, cascade);
+                    }
+                    if (cascade < 0) {
+                        shadowOrigin = vec4(hitPos + n * 0.01, uintBitsToFloat(0x7F800000u));
+                        lit = -1.0;
+                    }
+                    sunShare = albedo * u.uSunIrradiance.rgb * ndotl / PI;
+                }
+                bool known;
+                injectViewDir = -rayDir;
+                vec4 field = blix_worldSample(sg, c, hitPos, n, known);
+                atomicAdd(queue[4], 1u);
+                if (!known) atomicAdd(queue[5], 1u);
+                light = known ? albedo * field.rgb * u.uFrame.y / PI : vec3(0.0);
+            } else {
+                light = textureLod(uSkyRadiance, rayDir, u.uFallback.y).rgb * u.uFrame.z;
+                rayDependent = crossesMovingReach(origin, rayDir, 1e30);
+            }
+            if (rayDependent) { atomicOr(sAnyDependent, 1u); atomicAdd(sDependentRays, 1u); }
+            injectState[rayIndex * 4u + 1u] = vec4(light, rayEscaped);
+            injectState[rayIndex * 4u + 2u] = vec4(sunShare, lit);
+            injectState[rayIndex * 4u + 3u] = vec4(injectState[rayIndex * 4u + 3u].x, rayFacing, rayDistance, rayDependent ? 1.0 : 0.0);
+            injectOrigins[rayIndex] = shadowOrigin;
+            continue;
+        }
+        if (mode == 5) {
+            // The wavefront's answers into the arrays the inline solve fills, and the solve goes on as it does.
+            vec4 st0 = injectState[rayIndex * 4u];
+            vec4 st1 = injectState[rayIndex * 4u + 1u];
+            vec4 st2 = injectState[rayIndex * 4u + 2u];
+            vec4 st3 = injectState[rayIndex * 4u + 3u];
+            float lit = st2.w >= 0.0 ? st2.w : ((injectOccluded[rayIndex] & 1u) != 0u ? 0.0 : 1.0);
+            sDirection[lane] = st0.xyz;
+            sWeight[lane] = st0.w;
+            sRayBin[lane] = int(st3.x);
+            sRadiance[lane] = st1.rgb + st2.rgb * lit;
+            sEscaped[lane] = st1.w;
+            sFacing[lane] = st3.y;
+            sDistance[lane] = st3.z;
+            sDependent[lane] = st3.w > 0.5 ? 1u : 0u;
+        } else {
         BlixRayHit hit;
         vec3 radiance = vec3(0.0);
         float distance = farDistance;
@@ -496,6 +592,7 @@ void main() {
         sDistance[lane] = distance;
         sEscaped[lane] = escaped;
         sFacing[lane] = facing;
+        }
         barrier();
 
         if (lane < 36u) {
@@ -512,6 +609,31 @@ void main() {
                 d2Sum += sDistance[i] * sDistance[i] * w;
                 dWeight += w;
             }
+        }
+        barrier();
+    }
+    if (mode == 3) {
+        // The slots this probe does not use this frame: no ray, no shadow ray.
+        uint waveSlots = uint(max(u.uWave.y, 1.0));
+        for (uint pass = uint(passes); pass < waveSlots; ++pass) {
+            uint rayIndex = gl_WorkGroupID.x * uint(RAYS) * waveSlots + pass * uint(RAYS) + lane;
+            injectRays[rayIndex * 2u] = vec4(origin, 0.0);
+            injectRays[rayIndex * 2u + 1u] = vec4(0.0);
+            injectOrigins[rayIndex] = vec4(0.0);
+        }
+        return;
+    }
+    if (mode == 4) {
+        barrier();
+        if (lane == 0u) injectCounters[gl_WorkGroupID.x] = uvec4(sBackfaces, sDependentRays, sAnyDependent, 0u);
+        return;
+    }
+    if (mode == 5) {
+        if (lane == 0u) {
+            uvec4 k = injectCounters[gl_WorkGroupID.x];
+            sBackfaces = k.x;
+            sDependentRays = k.y;
+            sAnyDependent = k.z;
         }
         barrier();
     }

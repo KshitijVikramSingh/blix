@@ -26,6 +26,8 @@ internal sealed partial class SponzaLoop
     private IndirectBufferHandle Own(IndirectBufferHandle h) { ownedIndirect.Add(h); return h; }
     private MaterialHandle Own(MaterialHandle h) { ownedMaterials.Add(h); return h; }
     private GpuBufferHandle Own(GpuBufferHandle h) { ownedGpuBuffers.Add(h); return h; }
+    // An owned buffer destroyed before teardown (the caller has waited for the GPU), so teardown does not destroy it again.
+    private void Disown(GpuBufferHandle h) { ownedGpuBuffers.Remove(h); device.DestroyGpuBuffer(h); }
 
     private void ReleaseDeviceResources()
     {

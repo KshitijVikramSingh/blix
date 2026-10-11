@@ -163,6 +163,7 @@ internal sealed partial class SponzaLoop
         // --rt-isolated: nothing but the trace lights the frame, sky included: no incident field (SponzaLoop.RtShadows).
         rtIsolated = args.Flag("rt-isolated");
         rtCoverageCoin = args.Flag("rt-coverage-coin");
+        if (args.Float("rt-alpha-mip") is { } alphaMip) rtAlphaMip = Math.Clamp(alphaMip, 0f, 12f);
         var fogAsked = args.Flag("fog");
         // --ray-view: trace the camera's view and hold it against the raster at the shot (it brings the ray check with it).
         rayView = args.Flag("ray-view");
@@ -230,6 +231,8 @@ internal sealed partial class SponzaLoop
         // converged; the A/B). Default 0: each solve weighs 1/n, up to n = 255.
         if (args.Float("clipmap-converge-floor") is { } ccf) clipmapConvergeFloor = Math.Clamp(ccf, 0f, 1f);
         if (args.Int("clipmap-young-rays") is { } youngRays) clipmapYoungRays = Math.Clamp(youngRays, 1, 16);
+        clipmapWavefront = args.Flag("clipmap-wavefront");
+        clipmapInline = args.Flag("clipmap-inline");
         if (args.Int("clipmap-young") is { } young) clipmapYoung = Math.Clamp(young, 0, 16);
         // --clipmap-visible-share F: at most this share of the budget a frame goes to the probes the image reads (0: none,
         // the A/B).
@@ -483,10 +486,23 @@ internal sealed partial class SponzaLoop
 
         // The clipmap's solve, after the cascades it takes the sun from where they cover a hit (frame audit F4), and
         // before the fog, screen probes and incident pass that read it.
+        // The ray batches' interfaces (SponzaLoop.RayBatch.cs), before the first consumer declares a batch.
+        batchClosestInterface = Reflect("ray_batch_closest.comp");
+        batchShadowInterface = Reflect("ray_batch_shadow.comp");
         clipmapInterface = Reflect("clipmap_inject.comp");
         var clipmapBuilder = graph.ComputePass("probe-clipmap").Shader(clipmapInterface);
         for (var c = 0; c < CascadeCount; c++) clipmapBuilder = clipmapBuilder.Read(cascadeHandles[c]);
         clipmapPassHandle = clipmapBuilder.Handle;
+        // The solve as a wavefront (--clipmap-wavefront, or frame rays on Metal): rays out, hits shaded, the hits' sun
+        // out, the answers solved; the batches between the phases (SponzaLoop.Clipmap.cs).
+        clipmapClosestBatch = DeclareClosestBatch("clipmap-closest");
+        var shadeBuilder = graph.ComputePass("probe-clipmap-shade").Shader(clipmapInterface);
+        for (var c = 0; c < CascadeCount; c++) shadeBuilder = shadeBuilder.Read(cascadeHandles[c]);
+        clipmapShadePassHandle = shadeBuilder.Handle;
+        clipmapShadowBatch = DeclareShadowBatch("clipmap-shadow");
+        var resolveBuilder = graph.ComputePass("probe-clipmap-resolve").Shader(clipmapInterface);
+        for (var c = 0; c < CascadeCount; c++) resolveBuilder = resolveBuilder.Read(cascadeHandles[c]);
+        clipmapResolvePassHandle = resolveBuilder.Handle;
         // --watch: the clipmap's answer at fixed points each frame, right after the solve (stage 4g-viii).
         clipmapWatchInterface = Reflect("clipmap_watch.comp");
         clipmapWatchPassHandle = graph.ComputePass("clipmap-watch").Shader(clipmapWatchInterface).Handle;
@@ -680,8 +696,6 @@ internal sealed partial class SponzaLoop
         gpuReferenceInterface = Reflect("reference_points.comp");
         gpuReferencePassHandle = graph.ComputePass("reference-points").Shader(gpuReferenceInterface).Handle;
         // The reference as a wavefront (SponzaLoop.GpuReference.cs), its batches between its steps, in frame order.
-        batchClosestInterface = Reflect("ray_batch_closest.comp");
-        batchShadowInterface = Reflect("ray_batch_shadow.comp");
         referenceWaveInterface = Reflect("reference_wave.comp");
         referenceWaveStepPass = graph.ComputePass("reference-wave-step").Shader(referenceWaveInterface).Handle;
         referenceClosestBatch = DeclareClosestBatch("reference-closest");
@@ -695,6 +709,16 @@ internal sealed partial class SponzaLoop
         lightBakeInterface = Reflect("texel_bake.comp");
         lightBakePassHandle = graph.ComputePass("light-bake").Shader(lightBakeInterface).Handle;
         texelGatherInterface = Reflect("texel_gather.comp");
+        // The gather as a wavefront (--texel-wavefront, or frame rays on Metal): rays out, hits shaded, the hits' sun out,
+        // the answers gathered in texel-gather; the batches between the phases (SponzaLoop.Texels.cs).
+        texelRaysPassHandle = graph.ComputePass("texel-gather-rays").Shader(texelGatherInterface).Handle;
+        texelClosestBatch = DeclareClosestBatch("texel-closest");
+        {
+            var builder = graph.ComputePass("texel-gather-shade");
+            for (var c = 0; c < CascadeCount; c++) builder = builder.Read(cascadeHandles[c]);
+            texelShadePassHandle = builder.Shader(texelGatherInterface).Handle;
+        }
+        texelShadowBatch = DeclareShadowBatch("texel-shadow");
         {
             var builder = graph.ComputePass("texel-gather");
             for (var c = 0; c < CascadeCount; c++) builder = builder.Read(cascadeHandles[c]);

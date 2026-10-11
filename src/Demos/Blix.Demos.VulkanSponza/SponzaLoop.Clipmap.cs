@@ -38,6 +38,48 @@ internal sealed partial class SponzaLoop
     // its first solve is the whole answer until the next, and its noise is the colour a wall flashes after a scroll).
     // 1: one pass, as every solve.
     private int clipmapYoungRays = 1;
+    // --clipmap-wavefront: the probes' solves as a wavefront on the ray batches (SponzaLoop.RayBatch.cs; clipmap_inject
+    // modes 3-5), on the software traversal; with frame rays on Metal (--ray-backend hw|both, --rt-shadows) always, so
+    // Metal answers them. The inline solve (mode 2) otherwise.
+    // --clipmap-inline: the inline solve whatever the frame's rays (the A/B).
+    private bool clipmapWavefront, clipmapInline;
+    private bool ClipmapOnWavefront => !clipmapInline && (clipmapWavefront || FrameRaysOnHardware);
+    private RayBatchPasses clipmapClosestBatch, clipmapShadowBatch;
+    private PassHandle clipmapShadePassHandle, clipmapResolvePassHandle;
+    // The wavefront's buffers, sized for the budget's probes at clipmapYoungRays slots a lane (placeholders while off:
+    // the program declares them either way).
+    private GpuBufferHandle clipmapWaveRays, clipmapWaveHits, clipmapWaveState, clipmapWaveOrigins, clipmapWaveOccluded, clipmapWaveCounters;
+    private int clipmapWaveRayCount = -1;
+
+    private void EnsureClipmapWaveBuffers()
+    {
+        var rays = ClipmapOnWavefront ? clipmapBudget * 64 * clipmapYoungRays : 1;
+        if (rays == clipmapWaveRayCount) return;
+        if (clipmapWaveRayCount >= 0)
+        {
+            device.WaitIdle();
+            foreach (var b in new[] { clipmapWaveRays, clipmapWaveHits, clipmapWaveState, clipmapWaveOrigins, clipmapWaveOccluded, clipmapWaveCounters })
+                Disown(b);
+        }
+        clipmapWaveRays = Own(device.CreateGpuBuffer(rays * 32, name: "sponza.clipmap.wave-rays"));
+        clipmapWaveHits = Own(device.CreateGpuBuffer(rays * 48, name: "sponza.clipmap.wave-hits"));
+        clipmapWaveState = Own(device.CreateGpuBuffer(rays * 64, name: "sponza.clipmap.wave-state"));
+        clipmapWaveOrigins = Own(device.CreateGpuBuffer(rays * 16, name: "sponza.clipmap.wave-origins"));
+        clipmapWaveOccluded = Own(device.CreateGpuBuffer(rays * 4, name: "sponza.clipmap.wave-occluded"));
+        clipmapWaveCounters = Own(device.CreateGpuBuffer(Math.Max(1, clipmapBudget) * 16, name: "sponza.clipmap.wave-counters"));
+        clipmapWaveRayCount = rays;
+    }
+
+    private IEnumerable<ShaderBufferBinding> ClipmapWaveBindings()
+    {
+        EnsureClipmapWaveBuffers();
+        yield return new ShaderBufferBinding("InjectRays", clipmapWaveRays);
+        yield return new ShaderBufferBinding("InjectHits", clipmapWaveHits);
+        yield return new ShaderBufferBinding("InjectRayState", clipmapWaveState);
+        yield return new ShaderBufferBinding("InjectShadowOrigins", clipmapWaveOrigins);
+        yield return new ShaderBufferBinding("InjectOccluded", clipmapWaveOccluded);
+        yield return new ShaderBufferBinding("InjectProbeCounters", clipmapWaveCounters);
+    }
     private GpuBufferHandle clipmapState;
     private GpuBufferHandle clipmapQueue;
     private ShaderInterface clipmapInterface = null!;
@@ -236,8 +278,10 @@ internal sealed partial class SponzaLoop
             .Append(new ShaderBufferBinding("ClipmapOffsets", clipmapOffsets))
             .Append(new ShaderBufferBinding("ClipmapQueue", clipmapQueue))
             .Append(new ShaderBufferBinding("ClipmapSeen", clipmapSeen))
-            .Append(new ShaderBufferBinding("SurfaceIndex", surfaceIndex)).ToArray();
+            .Append(new ShaderBufferBinding("SurfaceIndex", surfaceIndex))
+            .Concat(ClipmapWaveBindings()).ToArray();
         var surface = SurfaceUniforms(slots);
+        var wave = ClipmapOnWavefront;
         DispatchCommand Phase(int mode, int groups) => new(clipmapPipeline, groups, 1, 1, new ShaderUniform[]
         {
             new("uDims", new Vector4Uniform(new Vector4(ClipmapDims.X, ClipmapDims.Y, ClipmapDims.Z, clipmapSpacing))),
@@ -261,10 +305,26 @@ internal sealed partial class SponzaLoop
             new("uDynamicQueue", new Vector4Uniform(new Vector4(clipmapDependentRays, MathF.Floor(clipmapBudget * clipmapDependentShare), clipmapShadowRays ? 1f : 0f, dynamicActive ? 1f : 0f))),
             new("uCascadeVP", new Matrix4x4ArrayUniform(cascadeViewProj)),
             new("uCascadeReceivers", new Matrix4x4Uniform(CascadeReceivers)),
+            new("uWave", new Vector4Uniform(new Vector4(wave ? 1f : 0f, clipmapYoungRays, 0f, 0f))),
         }, textures, Buffers: buffers);
         graph.Dispatch(clipmapPassHandle, Phase(0, 1));
         graph.Dispatch(clipmapPassHandle, Phase(1, (slots + surfaceCapacity + 63) / 64));
-        graph.Dispatch(clipmapPassHandle, Phase(2, clipmapBudget));
+        if (wave)
+        {
+            // The solve as a wavefront: rays out, their hits shaded, the hits' sun out, the answers solved. Each batch
+            // on Metal when frame rays are (RecordClosestBatch), else on the software traversal.
+            var rayCount = clipmapBudget * 64 * clipmapYoungRays;
+            var seed = unchecked((uint)clipmapFrame * 0x9E3779B9u);
+            graph.Dispatch(clipmapPassHandle, Phase(3, clipmapBudget));
+            RecordClosestBatch(clipmapClosestBatch, clipmapWaveRays, clipmapWaveHits, rayCount, seed);
+            graph.Dispatch(clipmapShadePassHandle, Phase(4, clipmapBudget));
+            RecordShadowBatch(clipmapShadowBatch, clipmapWaveOrigins, clipmapWaveOccluded, rayCount, -Vector3.Normalize(sunDirection), seed ^ 0x5bd1e995u);
+            graph.Dispatch(clipmapResolvePassHandle, Phase(5, clipmapBudget));
+        }
+        else
+        {
+            graph.Dispatch(clipmapPassHandle, Phase(2, clipmapBudget));
+        }
         clipmapFrame++;
     }
 
