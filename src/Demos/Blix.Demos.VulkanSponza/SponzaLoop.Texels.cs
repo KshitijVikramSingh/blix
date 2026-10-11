@@ -91,6 +91,21 @@ internal sealed partial class SponzaLoop
     private ShaderInterface texelMarkInterface = null!, texelGatherInterface = null!, texelFilterInterface = null!;
     private PassHandle texelMarkPassHandle, texelGatherPassHandle, texelFilterPassHandle;
     private PipelineHandle texelMarkPipeline, texelGatherPipeline, texelFilterPipeline;
+    private ShaderInterface texelFilterFillInterface = null!;
+    private PassHandle texelFilterFillPassHandle;
+    private PipelineHandle texelFilterFillPipeline;
+    // Every live texel (the hashed records, and the atlas's not buried in a solid): what the filter sweep walks.
+    private GpuBufferHandle texelLiveBuffer;
+    private int texelLiveCount;
+    // Resting: the texels' light is settled (a settled bake, loaded or just made) for the epoch it was settled at, so
+    // nothing the mark could queue would change it and the filtered light is final once swept. The mark, the gather
+    // (and its Metal batches, each a split of the frame) and the filter then do not run at all; the sun moving (a new
+    // epoch) wakes them, and the texels gather as the image reads them, as before.
+    private bool texelsSettled;
+    private uint texelSettledEpoch;
+    // The filter sweep's next entry in the live list; -1 when none is under way.
+    private long filterSweepIssued = -1;
+    private bool texelsRestReported;
     // --texel-wavefront: the gather as a wavefront on the ray batches (SponzaLoop.RayBatch.cs; texel_gather phases 3-5),
     // on the software traversal; with frame rays on Metal always, so Metal answers them (the light bake's too). The
     // inline gather (phase 0) otherwise.
@@ -330,6 +345,16 @@ internal sealed partial class SponzaLoop
         texelProbeBuffer = Own(device.CreateGpuBuffer(24 * 24 * 48, new byte[24 * 24 * 48], "sponza.texels.probe"));
         texelGrid = bake.Grid;
         texelsUploaded = true;
+        {
+            var all = firstAtlas < 0 ? texelCount : firstAtlas;
+            var live = new List<uint>(texelCount);
+            for (var i = 0; i < texelCount; i++)
+                if (i < all || MathF.Abs(bake.Texels[2 * i].W) >= 2f) live.Add((uint)i);
+            texelLiveCount = live.Count;
+            texelLiveBuffer = Own(device.CreateGpuBuffer(Math.Max(live.Count, 1) * 4, MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(live)), "sponza.texels.live"));
+        }
+        // A loaded bake is settled (LightBakeVersion 4 refines until it is): filter it once and rest.
+        if (light is not null) SettleTexels("the baked light loaded");
         // Under --transfer-weights the texels' light is never read (the transfer answers instead), so it is not baked.
         if (light is null && bakePath is not null && (transferWeightsPath is null || transferDumpPath is not null))
         {
@@ -483,6 +508,27 @@ internal sealed partial class SponzaLoop
         var texelParams = new Vector4(texelCapacity, texelBudget, texelTarget, texelFrame);
         // While the light bakes (SponzaLoop.LightBake.cs) its slice takes the queue the mark would fill, at its budget.
         var baking = lightBakeActive;
+        if (!baking && texelsSettled)
+        {
+            if (texelEpoch != texelSettledEpoch)
+            {
+                texelsSettled = false;
+                filterSweepIssued = -1;
+                Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                    $"[VulkanSponza] texels: the light changed (epoch {texelEpoch}); they gather and filter as the image reads them."));
+            }
+            else
+            {
+                if (filterSweepIssued >= 0) RecordFilterSweep();
+                else if (!texelsRestReported)
+                {
+                    texelsRestReported = true;
+                    Console.WriteLine("[VulkanSponza] texels: settled and filtered; the mark, the gather and the filter rest until the light changes.");
+                }
+                texelFrame++;
+                return;
+            }
+        }
         var gatherBudget = baking ? RecordLightBake() : texelBudget;
         var groups = (((width + TexelMarkStride - 1) / TexelMarkStride + 7) / 8, ((height + TexelMarkStride - 1) / TexelMarkStride + 7) / 8);
         // The mark's pixel in each 4 x 4 block. Under RenderSettings.HalfResLighting the incident pass reads only the
@@ -622,7 +668,13 @@ internal sealed partial class SponzaLoop
         {
             graph.Dispatch(texelGatherPassHandle, Gather(0));
         }
-        if (texelFilter)
+        if (texelFilter) RecordTexelFilter();
+        texelFrame++;
+    }
+
+    // The filter over this frame's list (the mark's, or the sweep's slice).
+    private void RecordTexelFilter()
+    {
             graph.Dispatch(texelFilterPassHandle, new DispatchCommand(texelFilterPipeline, TexelFilterCapacity, 1, 1,
                 new ShaderUniform[]
                 {
@@ -640,7 +692,36 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("TexelFilterList", texelFilterListBuffer),
                     new ShaderBufferBinding("LightmapIndexMap", LightmapIndexMap()),
                 }));
-        texelFrame++;
+    }
+
+    // The texels' light is settled for this epoch (a settled bake loaded, or one just made): sweep the filter over every
+    // live texel once, then rest (RecordTexels).
+    private void SettleTexels(string why)
+    {
+        if (transferDumpPath is not null || transferWeightsPath is not null) return;
+        texelsSettled = true;
+        texelSettledEpoch = texelEpoch;
+        texelsRestReported = false;
+        filterSweepIssued = texelFilter && texelLiveCount > 0 ? 0 : -1;
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[VulkanSponza] texels: settled ({why}); the filter sweeps {texelLiveCount:N0} texels, {TexelFilterCapacity:N0} a frame."));
+    }
+
+    // One slice of the filter sweep: the next texels of the live list into the filter's list, and the filter.
+    private void RecordFilterSweep()
+    {
+        var slice = (int)Math.Min(TexelFilterCapacity, texelLiveCount - filterSweepIssued);
+        graph.Dispatch(texelFilterFillPassHandle, new DispatchCommand(texelFilterFillPipeline, (slice + 63) / 64, 1, 1,
+            new ShaderUniform[] { new("uFill", new Vector4Uniform(new Vector4(filterSweepIssued, slice, texelFrame & 1u, texelLiveCount))) },
+            Array.Empty<ShaderTextureBinding>(),
+            Buffers: new[]
+            {
+                new ShaderBufferBinding("TexelLive", texelLiveBuffer),
+                new ShaderBufferBinding("TexelFilterList", texelFilterListBuffer),
+            }));
+        RecordTexelFilter();
+        filterSweepIssued += slice;
+        if (filterSweepIssued >= texelLiveCount) filterSweepIssued = -1;
     }
 
     // The lookup as the incident pass makes it, at the reference's 24 x 24 pixels (texel_mark.comp's probe mode, run

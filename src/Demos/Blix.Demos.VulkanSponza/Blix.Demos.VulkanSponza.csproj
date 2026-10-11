@@ -74,6 +74,7 @@
     <GlslShader Include="Shaders\texel_bake.comp" />
     <GlslShader Include="Shaders\texel_gather.comp" />
     <GlslShader Include="Shaders\texel_filter.comp" />
+    <GlslShader Include="Shaders\texel_filter_fill.comp" />
     <GlslShader Include="Shaders\reference_trace.comp" />
     <GlslShader Include="Shaders\reference_points.comp" />
     <GlslShader Include="Shaders\reference_wave.comp" />

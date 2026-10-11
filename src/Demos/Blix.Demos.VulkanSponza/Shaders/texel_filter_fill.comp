@@ -1,0 +1,23 @@
+#version 450
+// The filter sweep (SponzaLoop.Texels.cs, RecordFilterSweep): in place of texel_mark.comp, which lists the texels the
+// image reads, this lists the next slice of EVERY live texel for texel_filter.comp. Once the texels' light is settled
+// (a settled bake, loaded or just made) a texel's filtered light is final, so it is filtered once, here, and the mark,
+// the filter and the gather then rest until the light changes (the sun moves: a new epoch).
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform TexelFilterFill {
+    vec4 uFill;   // x the slice's first entry in TexelLive, y its length, z the frame's parity, w the live count
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer TexelLive { uint texelLive[]; };
+// [parity] the counts, then the list (texel_filter.comp reads set `parity` and zeroes the other).
+layout(std430, set = 0, binding = 2) buffer TexelFilterList { uint texelFilterList[]; };
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    uint count = uint(u.uFill.y);
+    if (i == 0u) texelFilterList[uint(u.uFill.z)] = count;
+    if (i >= count) return;
+    texelFilterList[2u + i] = texelLive[(uint(u.uFill.x) + i) % uint(u.uFill.w)];
+}

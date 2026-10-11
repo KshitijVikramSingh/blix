@@ -217,6 +217,8 @@ internal sealed partial class SponzaLoop
         lightBakeSaving = lightBakePath is not null;
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] light bake: done in {lightBakeClock!.Elapsed.TotalMinutes:0.0} min ({lightBakeRays / 1e9:0.0} G rays, {lightBakeRound} refining round{(lightBakeRound == 1 ? "" : "s")})."));
+        // Refined until settled (a saved bake: BeginRefineRound): the texels rest once filtered.
+        if (lightBakePath is not null) SettleTexels("the bake settled");
         // The frame still runs the gather with no slice queued: the queue's counts for this parity are the mark's to
         // fill from the next frame, so this one gathers nothing.
         return 0;
