@@ -198,7 +198,9 @@ struct HwxContext {
     id<MTLComputePipelineState> shadowPso;
     id<MTLIntersectionFunctionTable> shadowTable;
     id<MTLCommandBuffer> lastShadow;  // waited on at destroy: its completion handler reads this context
+    id<MTLCommandBuffer> lastTrace;   // likewise, for hwx_encode_trace
     std::atomic<uint64_t> shadowDispatches{0}, shadowGpuNs{0}, shadowLastGpuNs{0}, shadowFailures{0};
+    std::atomic<uint64_t> traceDispatches{0}, traceGpuNs{0}, traceLastGpuNs{0}, traceFailures{0};
     std::vector<id<MTLAccelerationStructure>> blas;  // compacted; indexed by HwxEntry.blas
     id<MTLAccelerationStructure> tlas;
     id<MTLBuffer> instanceDescriptors;
@@ -273,6 +275,7 @@ HWX_EXPORT HwxContext* hwx_create(void* mtlDevice, char* err, int errLength) {
 HWX_EXPORT void hwx_destroy(HwxContext* ctx) {
     if (!ctx) return;
     if (ctx->lastShadow) [ctx->lastShadow waitUntilCompleted];  // its handler writes into ctx
+    if (ctx->lastTrace) [ctx->lastTrace waitUntilCompleted];
     delete ctx;
 }
 
@@ -508,6 +511,67 @@ HWX_EXPORT int hwx_encode_shadow(HwxContext* ctx, void* sharedEvent, uint64_t wa
         ctx->lastShadow = cb;
         return result;
     }
+}
+
+// Closest hits inside a frame -- a wavefront's batch (ray_check.comp's records, as hwx_trace answers them, the any-hit
+// trace skipped): waits for `waitValue` on the frame timeline, traces `count` rays (two float4 each from raysOffset) into
+// `hits` (three uint4 each from hitsOffset), signals `signalValue`. Returns at once. As hwx_encode_shadow, the signal is
+// encoded whatever happens, since a frame waits for it; a skipped or failed dispatch is counted (hwx_trace_stats).
+HWX_EXPORT int hwx_encode_trace(HwxContext* ctx, void* sharedEvent, uint64_t waitValue, uint64_t signalValue,
+                                void* rays, uint64_t raysOffset, void* hits, uint64_t hitsOffset,
+                                uint32_t count, uint32_t seedBase) {
+    @autoreleasepool {
+        id<MTLSharedEvent> event = (__bridge id<MTLSharedEvent>)sharedEvent;
+        id<MTLBuffer> rayBuffer = (__bridge id<MTLBuffer>)rays;
+        id<MTLBuffer> hitBuffer = (__bridge id<MTLBuffer>)hits;
+        id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
+        cb.label = @"blix-hwx trace";
+        [cb encodeWaitForEvent:event value:waitValue];
+        int result = 0;
+        if (!ctx->tlas) result = Fail(ctx, "trace before build");
+        else if (!rayBuffer || rayBuffer.length < raysOffset + uint64_t(count) * 32) result = Fail(ctx, "the ray buffer is smaller than its count");
+        else if (!hitBuffer || hitBuffer.length < hitsOffset + uint64_t(count) * 48) result = Fail(ctx, "the hit buffer is smaller than its count");
+        if (result == 0 && count > 0) {
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:ctx->pso];
+            [enc setBuffer:rayBuffer offset:raysOffset atIndex:0];
+            [enc setBuffer:hitBuffer offset:hitsOffset atIndex:1];
+            [enc setAccelerationStructure:ctx->tlas atBufferIndex:2];
+            [enc setIntersectionFunctionTable:ctx->table atBufferIndex:3];
+            uint32_t params[4] = {count, seedBase, 1u, 0u};
+            [enc setBytes:params length:sizeof(params) atIndex:4];
+            [enc setBuffer:ctx->primRows offset:0 atIndex:5];
+            [enc setBuffer:ctx->entryRows offset:0 atIndex:6];
+            [enc setBuffer:ctx->instances offset:0 atIndex:7];
+            [enc setBuffer:ctx->triangles offset:0 atIndex:8];
+            [enc setBuffer:ctx->positions offset:0 atIndex:9];
+            [enc setBuffer:ctx->owners offset:0 atIndex:10];
+            [enc setBuffer:ctx->surfaces offset:0 atIndex:11];
+            [enc useResources:ctx->blas.data() count:ctx->blas.size() usage:MTLResourceUsageRead];
+            [enc dispatchThreads:MTLSizeMake(count, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+            [enc endEncoding];
+        }
+        [cb encodeSignalEvent:event value:signalValue];
+        HwxContext* c = ctx;
+        bool skipped = result != 0;
+        [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
+            if (skipped || done.status != MTLCommandBufferStatusCompleted) { c->traceFailures++; return; }
+            uint64_t ns = uint64_t((done.GPUEndTime - done.GPUStartTime) * 1e9);
+            c->traceLastGpuNs = ns;
+            c->traceGpuNs += ns;
+            c->traceDispatches++;
+        }];
+        [cb commit];
+        ctx->lastTrace = cb;
+        return result;
+    }
+}
+
+HWX_EXPORT void hwx_trace_stats(HwxContext* ctx, uint64_t* dispatches, uint64_t* totalGpuNs, uint64_t* lastGpuNs, uint64_t* failures) {
+    *dispatches = ctx->traceDispatches;
+    *totalGpuNs = ctx->traceGpuNs;
+    *lastGpuNs = ctx->traceLastGpuNs;
+    *failures = ctx->traceFailures;
 }
 
 // What the shadow dispatches have cost so far, from their command buffers' GPU times.

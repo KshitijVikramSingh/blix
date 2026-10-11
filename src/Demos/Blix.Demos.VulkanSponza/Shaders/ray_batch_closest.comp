@@ -1,0 +1,39 @@
+#version 450
+// A wavefront's CLOSEST batch on the software traversal (SponzaLoop.RayBatch.cs): what Metal's blix_trace answers
+// (libblix_hwx, hwx_encode_trace), in the same formats, so a consumer reads either. Each ray two vec4s (origin and tMin,
+// direction and tMax; tMax <= tMin: no ray, answered as a miss); its coverage seed uBatch.y + its index. Each answer
+// three uvec4s: (t, barycentrics, flags: 1 hit, 2 front face, 4 any hit -- here the closest's), (placement, triangle,
+// 0, 0), (world normal, linear albedo packed unorm4x8).
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform RayBatchClosest {
+    vec4 uBatch;   // x count, y the seed base (its bits)
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer BatchRays { vec4 batchRays[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer BatchHits { uvec4 batchHits[]; };
+
+#define BLIX_RAY_SET 0
+#define BLIX_RAY_BINDING 13
+#include "ray_query.glsl"
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= uint(u.uBatch.x)) return;
+    vec4 o = batchRays[2u * i];
+    vec4 d = batchRays[2u * i + 1u];
+    BlixRayHit hit;
+    bool found = d.w > o.w && blix_traceClosest(o.xyz, d.xyz, o.w, d.w, floatBitsToUint(u.uBatch.y) + i, hit);
+    if (!found) {
+        batchHits[3u * i] = uvec4(floatBitsToUint(d.w), 0u, 0u, 0u);
+        batchHits[3u * i + 1u] = uvec4(0xFFFFFFFFu, 0xFFFFFFFFu, 0u, 0u);
+        batchHits[3u * i + 2u] = uvec4(0u);
+        return;
+    }
+    uint flags = 1u | (hit.frontFace ? 2u : 0u) | 4u;
+    batchHits[3u * i] = uvec4(floatBitsToUint(hit.t), floatBitsToUint(hit.barycentrics.x), floatBitsToUint(hit.barycentrics.y), flags);
+    batchHits[3u * i + 1u] = uvec4(hit.instance, hit.triangle, 0u, 0u);
+    batchHits[3u * i + 2u] = uvec4(floatBitsToUint(hit.normal.x), floatBitsToUint(hit.normal.y), floatBitsToUint(hit.normal.z),
+                                   packUnorm4x8(vec4(hit.albedo, 0.0)));
+}

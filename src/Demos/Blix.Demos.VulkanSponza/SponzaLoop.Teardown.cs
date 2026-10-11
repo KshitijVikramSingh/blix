@@ -51,6 +51,6 @@ internal sealed partial class SponzaLoop
         if (sharedIbU32.Id != 0) device.DestroyIndexBuffer(sharedIbU32);
         textureLoader?.Dispose();
         // Waits for its last in-flight Metal pass before letting go of what it reads.
-        rtTracer?.Dispose();
+        frameTracer?.Dispose();
     }
 }

@@ -1,0 +1,26 @@
+#version 450
+// A wavefront's SHADOW batch on the software traversal (SponzaLoop.RayBatch.cs): what Metal's blix_shadow answers
+// (libblix_hwx, hwx_encode_shadow), in the same formats. Each origin a vec4 (position, tMax; tMax <= 0: no ray, answered
+// unoccluded), every ray toward uShadow.xyz; its coverage seed uSeed.x + its index. Each answer a uint: 1 where anything,
+// met as coverage allows, is in the way.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform RayBatchShadow {
+    vec4 uShadow;   // xyz the direction toward the light (unit), w count
+    vec4 uSeed;     // x the seed base (its bits)
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer BatchOrigins { vec4 batchOrigins[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer BatchOccluded { uint batchOccluded[]; };
+
+#define BLIX_RAY_SET 0
+#define BLIX_RAY_BINDING 13
+#include "ray_query.glsl"
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= uint(u.uShadow.w)) return;
+    vec4 o = batchOrigins[i];
+    batchOccluded[i] = o.w > 0.0 && blix_traceAny(o.xyz, u.uShadow.xyz, 0.0, o.w, floatBitsToUint(u.uSeed.x) + i) ? 1u : 0u;
+}

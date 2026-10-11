@@ -277,6 +277,8 @@ internal sealed partial class SponzaLoop
         if (args.Flag("probe-reference")) probeReference = true;
         // --gpu-reference: the gate's surface reference path-traced on the GPU (SponzaLoop.GpuReference.cs).
         gpuReference = args.Flag("gpu-reference");
+        // --reference-monolithic: the GPU reference's first form (whole paths in one kernel), the wavefront's cross-check.
+        referenceMonolithic = args.Flag("reference-monolithic");
         if (args.Int("gpu-ref-paths") is { } grp) gpuReferencePathsWanted = Math.Clamp(grp, 256, 1 << 22);
         if (args.Int("fog-slices") is { } fs) froxelGridZ = Math.Clamp(fs, 8, 128);
         // --orbit: drive the camera on a fixed path so a measurement is of the renderer rather than
@@ -644,6 +646,15 @@ internal sealed partial class SponzaLoop
         referenceInterface = Reflect("reference_trace.comp");
         gpuReferenceInterface = Reflect("reference_points.comp");
         gpuReferencePassHandle = graph.ComputePass("reference-points").Shader(gpuReferenceInterface).Handle;
+        // The reference as a wavefront (SponzaLoop.GpuReference.cs), its batches between its steps, in frame order.
+        batchClosestInterface = Reflect("ray_batch_closest.comp");
+        batchShadowInterface = Reflect("ray_batch_shadow.comp");
+        referenceWaveInterface = Reflect("reference_wave.comp");
+        referenceWaveStepPass = graph.ComputePass("reference-wave-step").Shader(referenceWaveInterface).Handle;
+        referenceClosestBatch = DeclareClosestBatch("reference-closest");
+        referenceWaveShadePass = graph.ComputePass("reference-wave-shade").Shader(referenceWaveInterface).Handle;
+        referenceShadowBatch = DeclareShadowBatch("reference-shadow");
+        referenceWaveResolvePass = graph.ComputePass("reference-wave-resolve").Shader(referenceWaveInterface).Handle;
         referencePassHandle = graph.ComputePass("reference-trace").Shader(referenceInterface)
             .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
         texelFilterInterface = Reflect("texel_filter.comp");
@@ -928,6 +939,9 @@ internal sealed partial class SponzaLoop
             File.ReadAllBytes(Path.Combine(shaderDir, "clipmap_watch.comp.spv")), clipmapWatchInterface, "clipmap_watch")), "clipmap_watch"));
         surfaceReclaimPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "surface_reclaim.comp.spv")), surfaceReclaimInterface, "surface_reclaim")), "surface_reclaim"));
+        CreateRayBatchPipelines(shaderDir);
+        referenceWavePipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
+            File.ReadAllBytes(Path.Combine(shaderDir, "reference_wave.comp.spv")), referenceWaveInterface, "reference_wave")), "reference_wave"));
         gpuReferencePipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "reference_points.comp.spv")), gpuReferenceInterface, "reference_points")), "reference_points"));
         referencePipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(

@@ -798,7 +798,16 @@ F. *The frame audit* (opened 2026-10-07: "a lot of pure performance on the table
      check): 147.8 M rays/s (Metal acceleration structures) against 15.6 M (ray_query.glsl in software) and ~1 M on 10
      CPU cores; 6 of 65,536 hit/miss differences, all at vertices and edge middles; Sponza's structures 460 MB compacted,
      built in ~0.75 s. What it does NOT change: pixels do not trace -- one ray a pixel at 2880x1620 is ~32 ms even so.
-     Rays go to SHARED things (references, the cook, probes, the atlas); pixels look up. In order:
+     Rays go to SHARED things (references, the cook, probes, the atlas); pixels look up.
+     CORRECTION after reading it (518357e, merged 3d1dd3e): hardware rays do NOT come for free through ray_query.glsl --
+     GLSL under MoltenVK cannot call Metal's intersector. They come as WAVEFRONTS: a Vulkan pass writes rays, a Metal
+     external pass traces them inside the frame (RenderGraph.External, the frame timeline), a later pass reads the
+     answers -- as --rt-shadows does. So every consumer migrates onto two batch operations with two backends, chosen by
+     --ray-backend: CLOSEST (rays -> ray_check's records: distance, front face, placement, triangle, world normal,
+     linear albedo; hardware: an in-frame hwx_encode_trace) and SHADOW (origins -> an occluded mask toward one
+     direction; hardware: hwx_encode_shadow); software is a GLSL kernel for each over ray_query.glsl, and stays the
+     reference behaviour. Order: the references (a persistent wavefront, one bounce a frame), the cook, then the
+     probes and the texel gather. In order:
      (1) REFERENCES on hardware: the path-traced reference (reference_trace.comp) and every cook-time capture, through
          ray_query.glsl, 10x faster with no change of design -- truth at any camera in a minute. The transfer fit then
          trains on real multi-bounce references over many suns and sky alone, not on the texel bake (512 rays over

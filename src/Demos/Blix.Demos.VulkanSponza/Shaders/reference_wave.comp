@@ -1,0 +1,129 @@
+#version 450
+// The gate's surface reference as a WAVEFRONT (SponzaLoop.GpuReference.cs): the same paths as reference_path.glsl, but
+// with every ray traced by the frame's batch operations (SponzaLoop.RayBatch.cs) -- the software traversal, or Metal's
+// hardware -- one bounce a frame:
+//
+//   step     (uParams.x 0) a lane with no path starts one at its point (or, its quota met, stops); every live lane
+//            writes its next cosine ray from where it stands
+//   CLOSEST  the batch
+//   shade    (uParams.x 1) a miss brings the sky and ends the path; a hit past the last lit one ends it; any other hit
+//            writes a shadow origin toward the sun and the sun light it would bring, and becomes the path's next start
+//   SHADOW   the batch
+//   resolve  (uParams.x 2) the sun light lands where the shadow ray met nothing
+//
+// Bounces count as reference_path.glsl counts them (the CPU reference's way): the sun at hits 1..N+1, the sky escaping
+// after up to N+1 hits. A finished path adds pi x its radiance to its lane's sum; the host adds a point's lanes at the
+// shot. Lane l serves point l / uParams.w.
+
+#define PI 3.14159265359
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform ReferenceWave {
+    vec4 uSunDirection;    // xyz the direction the sun travels
+    vec4 uSunIrradiance;   // rgb
+    vec4 uParams;          // x the mode (0 step, 1 shade, 2 resolve), y bounces, z paths a lane in all, w lanes a point
+    vec4 uCount;           // x lanes, y the frame (seed)
+} u;
+
+layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
+// Two vec4s a point: its position, then its normal.
+layout(std430, set = 0, binding = 2) readonly buffer ReferencePointList { vec4 points[]; };
+// Per lane, its path (the layout beside main); the host starts every lane with no path (hits -1).
+layout(std430, set = 0, binding = 3) buffer ReferenceLanes { vec4 lanes[]; };
+// Per lane, the pending sun light and the sum of its finished paths.
+layout(std430, set = 0, binding = 4) buffer ReferenceLaneSums { vec4 sums[]; };
+layout(std430, set = 0, binding = 5) buffer BatchRays { vec4 batchRays[]; };
+layout(std430, set = 0, binding = 6) readonly buffer BatchHits { uvec4 batchHits[]; };
+layout(std430, set = 0, binding = 7) buffer BatchOrigins { vec4 batchOrigins[]; };
+layout(std430, set = 0, binding = 8) readonly buffer BatchOccluded { uint batchOccluded[]; };
+
+// Nothing here traces (the batches do); ray_query.glsl comes in for blix_pcg and reference_path.glsl's sampling, which
+// the paths must share with the monolithic reference to be the same paths.
+#define BLIX_RAY_SET 0
+#define BLIX_RAY_BINDING 13
+#include "ray_query.glsl"
+#include "reference_path.glsl"
+
+// lanes[4l + 0] origin.xyz, hits so far (-1: no path)
+// lanes[4l + 1] normal.xyz, paths finished
+// lanes[4l + 2] throughput.rgb, seed bits
+// lanes[4l + 3] the path's radiance so far
+// sums[2l + 0]  pending sun light (rgb), w unused
+// sums[2l + 1]  the lane's finished paths: sum of pi x radiance (rgb), count
+void main() {
+    uint l = gl_GlobalInvocationID.x;
+    if (l >= uint(u.uCount.x)) return;
+    int mode = int(u.uParams.x + 0.5);
+    int bounces = int(u.uParams.y + 0.5);
+    vec4 a = lanes[4u * l], b = lanes[4u * l + 1u], c = lanes[4u * l + 2u], r = lanes[4u * l + 3u];
+
+    if (mode == 0) {
+        uint seed = floatBitsToUint(c.w);
+        if (a.w < 0.0) {
+            if (b.w >= u.uParams.z) {   // the lane's quota is met: no ray
+                batchRays[2u * l] = vec4(0.0);
+                batchRays[2u * l + 1u] = vec4(0.0, 0.0, 1.0, 0.0);
+                return;
+            }
+            uint point = l / uint(u.uParams.w);
+            vec3 n = normalize(points[2u * point + 1u].xyz);
+            a = vec4(points[2u * point].xyz, 0.0);
+            b = vec4(n, b.w);
+            c = vec4(1.0, 1.0, 1.0, c.w);
+            r = vec4(0.0);
+            if (seed == 0u) seed = blix_pcg(l * 9781u + uint(u.uCount.y) * 2654435761u + 1u);
+        }
+        vec3 dir = referenceCosineAround(b.xyz, referenceRand(seed), referenceRand(seed));
+        batchRays[2u * l] = vec4(a.xyz, 0.0);
+        batchRays[2u * l + 1u] = vec4(dir, uintBitsToFloat(0x7F800000u));
+        lanes[4u * l] = a;
+        lanes[4u * l + 1u] = b;
+        lanes[4u * l + 2u] = vec4(c.xyz, uintBitsToFloat(seed));
+        lanes[4u * l + 3u] = r;
+        return;
+    }
+
+    if (a.w < 0.0) return;   // no path (the quota met)
+    if (mode == 1) {
+        uvec4 h0 = batchHits[3u * l], h2 = batchHits[3u * l + 2u];
+        vec3 dir = batchRays[2u * l + 1u].xyz;
+        sums[2u * l] = vec4(0.0);
+        batchOrigins[l] = vec4(0.0);
+        bool ended = false;
+        if ((h0.w & 1u) == 0u) {
+            r.rgb += c.rgb * textureLod(uSkyRadiance, dir, 1.0).rgb;
+            ended = true;
+        } else if (int(a.w + 0.5) == bounces + 1) {
+            ended = true;   // a hit past the last one lit: only its escape would have counted
+        } else {
+            vec3 normal = vec3(uintBitsToFloat(h2.x), uintBitsToFloat(h2.y), uintBitsToFloat(h2.z));
+            vec3 albedo = unpackUnorm4x8(h2.w).rgb;
+            vec3 hn = dot(normal, dir) > 0.0 ? -normal : normal;
+            vec3 hp = a.xyz + dir * uintBitsToFloat(h0.x);
+            vec3 toSun = -normalize(u.uSunDirection.xyz);
+            float ndl = dot(hn, toSun);
+            if (ndl > 0.0) {
+                batchOrigins[l] = vec4(hp + hn * 0.01, uintBitsToFloat(0x7F800000u));
+                sums[2u * l] = vec4(c.rgb * albedo * u.uSunIrradiance.rgb * ndl / PI, 0.0);
+            }
+            c.rgb *= albedo;
+            a = vec4(hp + hn * 0.01, a.w + 1.0);
+            b.xyz = hn;
+        }
+        if (ended) {
+            vec4 s = sums[2u * l + 1u];
+            sums[2u * l + 1u] = vec4(s.rgb + PI * r.rgb, s.w + 1.0);
+            a.w = -1.0;
+            b.w += 1.0;
+        }
+        lanes[4u * l] = a;
+        lanes[4u * l + 1u] = b;
+        lanes[4u * l + 2u] = c;
+        lanes[4u * l + 3u] = r;
+        return;
+    }
+
+    // mode 2: the sun light lands where nothing was in the way.
+    vec4 pending = sums[2u * l];
+    if (dot(pending.rgb, vec3(1.0)) > 0.0 && batchOccluded[l] == 0u) lanes[4u * l + 3u] = vec4(r.rgb + pending.rgb, 0.0);
+}

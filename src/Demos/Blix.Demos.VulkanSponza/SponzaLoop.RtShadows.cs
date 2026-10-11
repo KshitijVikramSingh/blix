@@ -23,7 +23,9 @@ internal sealed partial class SponzaLoop
     private ShaderInterface rtShadowRaysInterface = null!;
     private PassHandle rtShadowRaysPassHandle, rtShadowTracePassHandle;
     private PipelineHandle rtShadowRaysPipeline;
-    private MetalRayTracer? rtTracer;
+    // The frame's Metal tracer, shared by every wavefront (SponzaLoop.RayBatch.cs): built once, after the surface bake.
+    private MetalRayTracer? frameTracer;
+    private bool frameTracerFailed;
     private GpuBufferHandle[] rtShadowOrigins = Array.Empty<GpuBufferHandle>();
     private GpuBufferHandle[] rtShadowMasks = Array.Empty<GpuBufferHandle>();
     private (int Width, int Height) rtShadowSize;
@@ -49,7 +51,11 @@ internal sealed partial class SponzaLoop
     private void RecordRtShadows(int width, int height)
     {
         if (!rtShadows || rayQueries is null || rayGpuData is null) return;
-        if (rtTracer is null && !BuildRtTracer()) return;
+        if (!EnsureFrameTracer())
+        {
+            if (frameTracerFailed) rtShadows = false;
+            return;
+        }
         if (abMode == "rtshadow" && AbOffPhase)
         {
             // The A/B's OFF phase: the cascades shade, and no external pass splits the frame.
@@ -100,7 +106,7 @@ internal sealed partial class SponzaLoop
             Buffers: new[] { new ShaderBufferBinding("RtShadowOrigins", origins) }));
 
         // A new coin per frame for the partly covered (foliage), so TAA averages their shadows instead of freezing one draw.
-        var tracer = rtTracer!;
+        var tracer = frameTracer!;
         var count = width * height;
         var seed = unchecked(rtShadowFrame++ * 0x9E3779B9u);
         graph.External(rtShadowTracePassHandle, sync => tracer.EncodeShadow(sync, origins, mask, 16, count, towardSun, seed));
@@ -113,31 +119,32 @@ internal sealed partial class SponzaLoop
 
     // Once, a few frames after the surface bake was recorded (so it has run): coverage read back, structures built.
     // A stall of a second or two, once, at load.
-    private bool BuildRtTracer()
+    private bool EnsureFrameTracer()
     {
-        if (!raySurfacesBaked) return false;
+        if (frameTracer is not null) return true;
+        if (frameTracerFailed || !raySurfacesBaked) return false;
         if (++rtFramesSinceBake < device.MaxFramesInFlightCount + 1) return false;
         var tracer = MetalRayTracer.TryCreate(device, out var reason);
         if (tracer is null)
         {
-            Console.WriteLine($"[VulkanSponza] rt shadows: unavailable, {reason}; the cascades shade.");
-            rtShadows = false;
+            Console.WriteLine($"[VulkanSponza] metal tracer: unavailable, {reason}; rays stay on the software traversal.");
+            frameTracerFailed = true;
             return false;
         }
         var surfaceWords = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(raySurfaces, 0, rayGpuData!.RowPlacements.Length * 4).AsSpan()).ToArray();
         device.WaitIdle();
         var blocks = RayQueryGpuData.BlockNames.Select(name => rayBlockBuffers.First(b => b.Name == name).Buffer).ToArray();
         rtBuild = tracer.Build(rayGpuData, blocks, surfaceWords);
-        rtTracer = tracer;
+        frameTracer = tracer;
         Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] rt shadows: {rtBuild.Value.SolidTriangles + rtBuild.Value.PartialTriangles:N0} triangles ({rtBuild.Value.PartialTriangles:N0} partly covered) in {rtBuild.Value.Hierarchies} bottom-level structures, built in {rtBuild.Value.CpuPrepareMs + rtBuild.Value.BlasGpuMs + rtBuild.Value.CompactTlasGpuMs:0} ms; {rtBuild.Value.CompactedBytes / 1048576.0:0} MB."));
+            $"[VulkanSponza] metal tracer: {rtBuild.Value.SolidTriangles + rtBuild.Value.PartialTriangles:N0} triangles ({rtBuild.Value.PartialTriangles:N0} partly covered) in {rtBuild.Value.Hierarchies} bottom-level structures, built in {rtBuild.Value.CpuPrepareMs + rtBuild.Value.BlasGpuMs + rtBuild.Value.CompactTlasGpuMs:0} ms; {rtBuild.Value.CompactedBytes / 1048576.0:0} MB."));
         return true;
     }
 
     private void WriteRtShadows()
     {
-        if (rtTracer is null) return;
-        var stats = rtTracer.ShadowStats;
+        if (frameTracer is null || !rtShadows) return;
+        var stats = frameTracer.ShadowStats;
         var rays = (long)rtShadowSize.Width * rtShadowSize.Height;
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] rt shadows: {stats.Dispatches:N0} frames traced ({rtShadowFrames:N0} recorded), {rtShadowSize.Width}x{rtShadowSize.Height} = {rays:N0} rays a frame; Metal GPU {stats.MeanGpuMs:0.000} ms mean, {stats.LastGpuMs:0.000} ms last, {rays / Math.Max(stats.MeanGpuMs, 1e-6) / 1000.0:0.0} M rays/s; {stats.Failures} failed."));

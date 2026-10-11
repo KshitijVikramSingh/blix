@@ -205,6 +205,32 @@ public sealed class MetalRayTracer : IDisposable
             (uint)Math.Max(count, 0), direction, seedBase);
     }
 
+    /// <summary>
+    /// Closest hits as a frame's external pass (a wavefront's batch): waits for what the frame recorded before the pass,
+    /// traces <paramref name="count"/> rays in <see cref="Trace"/>'s formats (the any-hit trace skipped), and signals the
+    /// rest of the frame on. Returns without waiting; never throws for a bad argument (counted in <see cref="TraceStats"/>).
+    /// </summary>
+    public unsafe void EncodeTrace(ExternalWorkSync sync, GpuBufferHandle rays, long raysOffset, GpuBufferHandle hits, long hitsOffset,
+        int count, uint seedBase)
+    {
+        ObjectDisposedException.ThrowIf(ctx == 0, this);
+        HwxNative.hwx_encode_trace(ctx, sync.MetalSharedEvent, sync.WaitValue, sync.SignalValue,
+            device.ExportMetalBuffer(rays), (ulong)raysOffset, device.ExportMetalBuffer(hits), (ulong)hitsOffset,
+            (uint)Math.Max(count, 0), seedBase);
+    }
+
+    /// <summary>What the in-frame closest-hit dispatches (<see cref="EncodeTrace"/>) have cost, from their own GPU times.</summary>
+    public unsafe MetalShadowStats TraceStats
+    {
+        get
+        {
+            ObjectDisposedException.ThrowIf(ctx == 0, this);
+            ulong dispatches, total, last, failures;
+            HwxNative.hwx_trace_stats(ctx, &dispatches, &total, &last, &failures);
+            return new MetalShadowStats((long)dispatches, total / 1e6, last / 1e6, (long)failures);
+        }
+    }
+
     public unsafe MetalShadowStats ShadowStats
     {
         get
