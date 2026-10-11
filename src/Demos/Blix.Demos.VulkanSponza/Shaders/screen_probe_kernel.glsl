@@ -79,6 +79,7 @@ layout(set = 0, binding = 0) uniform ScreenProbes {
     vec4 uSunIrradiance;   // rgb
     vec4 uFrame;           // x frame counter, y history cap (frames), z sky strength, w sky mip for a ray
     mat4 uCascadeVP[3];
+    mat4 uCascadeReceivers;  // where the cascades may answer (cascade_receivers.glsl)
     vec4 uParams2;         // x frames of history a fresh probe's clipmap prior counts for (0: start from nothing), y 1:
                            // support measured where the point is now, ignoring its world motion (--probe-support-now),
                            // z 1: the control arm (--dependency-reset): a dependent probe drops its whole past instead,
@@ -111,6 +112,7 @@ layout(set = 0, binding = 20) uniform usampler2D uSurfaceKey;
 layout(set = 0, binding = 21) uniform sampler2D uVelocity;
 layout(set = 0, binding = 22) uniform sampler2D uMotion;
 #include "shadow.glsl"
+#include "cascade_receivers.glsl"
 
 #include "screen_probe.glsl"
 layout(std430, set = 0, binding = 7) readonly buffer ScreenProbeTilesPrevious { ScreenProbeTile previousTiles[]; };
@@ -362,7 +364,7 @@ void main() {
             if (ndotl > 0.0 && (ablate & 1) == 0) {
                 int cascade = -1;
                 float lit = 1.0;
-                if ((ablate & 8) == 0) {
+                if ((ablate & 8) == 0 && cascadeReceives(u.uCascadeReceivers, hitPos + hn * 0.01)) {
                     lit = blix_sun_shadow_cascaded_hard(
                         uCascadeShadowMaps[0], uCascadeShadowMaps[1], uCascadeShadowMaps[2],
                         u.uCascadeVP[0], u.uCascadeVP[1], u.uCascadeVP[2], hitPos + hn * 0.01, ndotl, cascade);

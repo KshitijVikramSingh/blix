@@ -792,8 +792,16 @@ F. *The frame audit* (opened 2026-10-07: "a lot of pure performance on the table
      Ray queries, cook and runtime, go through RayQueryScene (CPU) and ray_query.glsl (GPU) ONLY: the user's hardware
      BVH / Metal acceleration-structure spike lands beneath those two in a couple of days. Nothing here calls a
      traversal any other way, and cook-time capture is written so a GPU (hardware) trace can replace the CPU one.
-     The level-0 runtime lookup is written and PARKED (branch transfer-level0-parked, unbuilt) until the weights are
-     trained on hardware-ray references (below).
+     The level-0 runtime lookup is on bistro (--transfer-weights, fd29715); captures by --transfer-dump (Metal-traced
+     truth per texel), fit by tools/transfer/fit.py. First Cornell result (ten suns, judged from the room view at an
+     unseen sun): WORSE than the probes, 11.5% against 3.1% -- and the lookup was not at fault (weights encoding today's
+     blend reproduce the probes exactly, 3.1%). The TRAINING PROBES were: solved from the capture camera (looking at a
+     side wall) they read the back wall 46% high, from the room view correct. The SUN CASCADES LEAK to every gather
+     ray that lands outside the camera's view: their casters are culled against the receivers the camera sees, so a
+     cascade covers an off-view point with no caster in it and answers lit. --offscreen-shadow-rays sends those points
+     to a shadow ray (Shaders/cascade_receivers.glsl; probes, texel gather, screen probes): capture energy 1.25 -> 1.01,
+     back wall 1.46 -> 1.05, matching --no-caster-cull and --clipmap-shadow-rays. Off by default until its cost on
+     Sponza is measured; it is a default-path leak (view-dependent indirect light), not a transfer one.
    HARDWARE RAYS (the next arc, agreed with the user 2026-10-11). The user's metal spike (`--ray-backend both`, its own
      check): 147.8 M rays/s (Metal acceleration structures) against 15.6 M (ray_query.glsl in software) and ~1 M on 10
      CPU cores; 6 of 65,536 hit/miss differences, all at vertices and edge middles; Sponza's structures 460 MB compacted,

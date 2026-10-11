@@ -70,6 +70,7 @@ layout(set = 0, binding = 0) uniform ClipmapInject {
     vec4 uExact;           // x 1: whether a hit sees each probe it reads, TRACED (--clipmap-exact-visibility); y / z
                            // DDGI's surface bias along the normal / back along the ray, in spacings (0, 0: the lift);
                            // w 1: probes relocate (--clipmap-relocate)
+    mat4 uCascadeReceivers;  // where the cascades may answer (cascade_receivers.glsl)
 } u;
 
 layout(set = 0, binding = 1, rgba16f) uniform image2D uClipmapIrradiance;
@@ -120,6 +121,7 @@ layout(std430, set = 0, binding = 10) readonly buffer ClipmapSeen { uint seen[];
 #define BLIX_RAY_BINDING 13
 #include "ray_query.glsl"
 #include "shadow.glsl"
+#include "cascade_receivers.glsl"
 
 #define BLIX_CLIPMAP_IRRADIANCE(t) imageLoad(uClipmapIrradiance, t)
 #define BLIX_CLIPMAP_DEPTH(t) imageLoad(uClipmapDepth, t)
@@ -448,7 +450,7 @@ void main() {
         if (ndotl > 0.0) {
             int cascade = -1;
             float lit = 1.0;
-            if (u.uDynamicQueue.z < 0.5) {
+            if (u.uDynamicQueue.z < 0.5 && cascadeReceives(u.uCascadeReceivers, hitPos + n * 0.01)) {
                 lit = blix_sun_shadow_cascaded_hard(
                     uCascadeShadowMaps[0], uCascadeShadowMaps[1], uCascadeShadowMaps[2],
                     u.uCascadeVP[0], u.uCascadeVP[1], u.uCascadeVP[2], hitPos + n * 0.01, ndotl, cascade);

@@ -256,6 +256,7 @@ internal sealed partial class SponzaLoop
             new("uDynamicMax", new Vector4Uniform(new Vector4(MoverActive ? moverReach.Max : Vector3.Zero, clipmapDynamicConverge))),
             new("uDynamicQueue", new Vector4Uniform(new Vector4(clipmapDependentRays, MathF.Floor(clipmapBudget * clipmapDependentShare), clipmapShadowRays ? 1f : 0f, dynamicActive ? 1f : 0f))),
             new("uCascadeVP", new Matrix4x4ArrayUniform(cascadeViewProj)),
+            new("uCascadeReceivers", new Matrix4x4Uniform(CascadeReceivers)),
         }, textures, Buffers: buffers);
         graph.Dispatch(clipmapPassHandle, Phase(0, 1));
         graph.Dispatch(clipmapPassHandle, Phase(1, (slots + surfaceCapacity + 63) / 64));

@@ -161,6 +161,7 @@ internal sealed partial class SponzaLoop
                 // w: a ray's sky, a little blurred (one mip) so single directions do not flicker on the sky's detail.
                 new("uFrame", new Vector4Uniform(new Vector4(screenProbeFrame + screenProbeSeedOffset, screenProbeHistory, 1f, 1f))),
                 new("uCascadeVP", new Matrix4x4ArrayUniform(cascadeViewProj)),
+                new("uCascadeReceivers", new Matrix4x4Uniform(CascadeReceivers)),
                 new("uParams2", new Vector4Uniform(new Vector4(screenProbeSeedFrames, probeSupportNow ? 1f : 0f, dependencyReset ? 1f : 0f, probeRayLength))),
                 // The reach of what moved this frame: the mover's while it moves, none while held or absent.
                 new("uDynamicMin", new Vector4Uniform(MoverActive && moverMoved && !noDependency ? new Vector4(DependencyBox.Min, 1f) : Vector4.Zero)),

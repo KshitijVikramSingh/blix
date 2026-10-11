@@ -556,6 +556,13 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private Frustum cameraFrustumThisFrame;
     /// <summary>--no-caster-cull turns off culling casters by where their shadow can land.</summary>
     private bool shadowCasterCull = true;
+    /// <summary>--offscreen-shadow-rays: a gather ray's hit outside the camera's view takes its sun by a shadow ray, not
+    /// the cascades, which hold only the casters of what the camera sees (Shaders/cascade_receivers.glsl).</summary>
+    private bool offscreenShadowRays;
+    // Where the gather passes may take the sun from the cascades: the view the casters were culled against, or (every
+    // point to (0, 0, 0.5, 1), inside) anywhere when nothing was culled or the check is off.
+    private Matrix4x4 CascadeReceivers => offscreenShadowRays && shadowCasterCull ? viewProj
+        : new Matrix4x4(0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0.5f, 1f);
     /// <summary>--probe-reference: path-trace references on the CPU and print them beside the clipmap's answers.</summary>
     private bool probeReference;
     /// <summary>--no-foliage: skip the ivy and tree packs, to price alpha-cutout overdraw.</summary>

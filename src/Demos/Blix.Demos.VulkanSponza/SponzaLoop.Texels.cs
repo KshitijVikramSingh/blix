@@ -525,6 +525,7 @@ internal sealed partial class SponzaLoop
                 // A ray's sky as the screen probes take it: strength 1, a little blurred (one mip).
                 new("uSky", new Vector4Uniform(new Vector4(1f, 1f, texelEpoch, texelAblate))),
                 new("uCascadeVP", new Matrix4x4ArrayUniform(cascadeViewProj)),
+                new("uCascadeReceivers", new Matrix4x4Uniform(CascadeReceivers)),
                 new("uOpen", new Vector4Uniform(new Vector4(TexelOpenReach, texelOcclusionError, texelBlend ? 1f : 0f, 0f))),
                 new("uCookedGrid", new Vector4Uniform(cookedGrid)),
                 new("uCookedDims", new Vector4Uniform(cookedDims)),
