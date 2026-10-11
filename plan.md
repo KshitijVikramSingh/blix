@@ -802,6 +802,44 @@ F. *The frame audit* (opened 2026-10-07: "a lot of pure performance on the table
      to a shadow ray (Shaders/cascade_receivers.glsl; probes, texel gather, screen probes): capture energy 1.25 -> 1.01,
      back wall 1.46 -> 1.05, matching --no-caster-cull and --clipmap-shadow-rays. Off by default until its cost on
      Sponza is measured; it is a default-path leak (view-dependent indirect light), not a transfer one.
+     Retrained on twelve clean suns: 4.5% against the probes' 3.4% from the room view; held out, better on all twelve.
+     WHAT THE FIT STORES (tools/transfer analysis, 2026-10-11): across suns a texel's 8 probes move almost together --
+     inside the room ~1.6 of 8 singular values above 10% of the largest -- so the data pins about ONE number a texel,
+     and the weights' shape is wherever the solver landed. That number is real: the correction needed and the one
+     applied are the same map (darker behind the tall box and round the boxes' feet, brighter where floor bounce lands,
+     darker at edges) -- the near field the 0.5 m probes miss. A scale alone gets nearly all of it (back wall 11.0% ->
+     6.9%, floor 6.2 -> 4.3, boxes 6.9 -> 3.9). The free fit put 28% of the ceiling's weight on probes outdoors and broke
+     at low suns (12.9%); fit.py now gives weight only to probes in front of the surface (better on all twelve suns,
+     the worst sun's p90 0.164 -> 0.083).
+     THE BACK WALL'S SUN-DEPENDENT ERROR was the probes leaking THROUGH WALLS in their own solve: a probe ray's hit
+     reads the clipmap by interpolation, Chebyshev lets the sunlit outdoor layer (5 cm beyond the 0.2 m wall) in, and
+     the feedback compounds it. The overshoot tracks the sun on the wall's OUTER face (correlation +0.93). With traced
+     visibility at those lookups (--clipmap-exact-visibility) the worst sun's room goes 1.187 -> 1.013 of the truth
+     (back wall 1.425 -> 1.100). No per-texel constant can learn a leak that follows the sun outside, so the probes
+     are fixed at the source and the transfer is retrained on them.
+   ONE TRUTH, FOUR CACHES (proposed with the user 2026-10-11): screen probes, clipmap probes and texels powered by the
+     same ray-traced truth, each in its own use, then the raster side's buffet cleaned up.
+     The truth: one tracer (CLOSEST / SHADOW batches, software or Metal) and one path rule (reference_path.glsl: the sun
+     at a hit by a shadow ray, the sky at an escape, albedo). The reference runs the path to the end. Every cache is
+     the same rule cut at the first hit and closed by reading the probes there -- with VISIBILITY TRACED, and the sun by
+     a ray (or a cascade only inside the view). Both measured: interpolated lookups leaked 19% into the Cornell room,
+     the cascades 25% off the view. A cache that reads another without them inherits its leaks and feeds them back.
+       CLIPMAP PROBES   volume, 0.5 m doubling, world-anchored: the far field, anything dynamic, and the closure every
+                        other cache's hits read. On hardware: every visible probe re-solved a frame.
+       ATLAS TRANSFER   static lightmapped surfaces: geometry, not light -- a scale (+ front-probe weights) cooked from
+                        the reference; a sun change costs nothing. Static surfaces' full detail.
+       HASHED SURFACES  what has no chart (foliage, ivy): the same transfer keyed by the hash, or the probe blend.
+       SCREEN PROBES    the view: what moved and its contact, where no cooked transfer is true any more; temporal.
+     One answer a pixel, chosen by what the surface is (static + atlas / no atlas / moved), not a stack of mixes; GTAO
+     only where no transfer already holds the near field (else it darkens twice).
+     Retire, the user's call (each superseded above): the CPU cooked transport (patches, couplings, sunlets,
+     cookedIndirect, --transport*: ~400 M CPU rays on Sponza); texels as LIGHT (texel gather/mark/filter, the light
+     bake and its per-sun cache -- the atlas and hash stay, as addresses for transfer); surface probes (4g-ix); the
+     probe experiments that traced visibility replaces (lift/bias/relocate); cascades in the gather passes once
+     shadows are rays on hardware.
+     Order: (1) probes correct (both fixes) and their Sponza cost; (2) transfer on them, Cornell then Sponza; (3) probe
+     solves and their visibility on the batches (hardware); (4) screen probes on the batches as the dynamic layer;
+     (5) retire.
    HARDWARE RAYS (the next arc, agreed with the user 2026-10-11). The user's metal spike (`--ray-backend both`, its own
      check): 147.8 M rays/s (Metal acceleration structures) against 15.6 M (ray_query.glsl in software) and ~1 M on 10
      CPU cores; 6 of 65,536 hit/miss differences, all at vertices and edge middles; Sponza's structures 460 MB compacted,
