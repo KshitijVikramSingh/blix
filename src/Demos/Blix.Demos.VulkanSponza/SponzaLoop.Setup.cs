@@ -164,6 +164,7 @@ internal sealed partial class SponzaLoop
         rtIsolated = args.Flag("rt-isolated");
         rtCoverageCoin = args.Flag("rt-coverage-coin");
         if (args.Float("rt-alpha-mip") is { } alphaMip) rtAlphaMip = Math.Clamp(alphaMip, 0f, 12f);
+        rtAlphaAb = args.Flag("rt-alpha-ab");
         var fogAsked = args.Flag("fog");
         // --ray-view: trace the camera's view and hold it against the raster at the shot (it brings the ray check with it).
         rayView = args.Flag("ray-view");

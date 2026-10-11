@@ -236,6 +236,7 @@ public sealed class MetalRayTracer : IDisposable
     /// <param name="seedBase">Ray i's coverage seed is this plus i; vary it per frame for the partly covered to dither over time.</param>
     /// <param name="alphaTest">Meet cut-outs by their alpha (<see cref="SetAlpha"/>) rather than by the coverage coin the
     /// software batch uses; ignored until SetAlpha.</param>
+    /// <param name="statSlot">Which of <see cref="ShadowStatsOf"/>'s slots (0-3) this dispatch's GPU time counts in.</param>
     /// <param name="skyRays">Optional: a second ray per ray, two float4s (origin and tMax, 0 for none; then direction); its
     /// word gains 2 where it meets anything (the point does not see the sky that way).</param>
     /// <remarks>
@@ -243,13 +244,14 @@ public sealed class MetalRayTracer : IDisposable
     /// and the failure counted in <see cref="ShadowStats"/>. Coverage and geometry are what <see cref="Build"/> saw.
     /// </remarks>
     public unsafe void EncodeShadow(ExternalWorkSync sync, GpuBufferHandle origins, GpuBufferHandle occluded, long occludedOffset,
-        int count, Vector3 towardLight, uint seedBase, GpuBufferHandle? skyRays = null, bool alphaTest = false)
+        int count, Vector3 towardLight, uint seedBase, GpuBufferHandle? skyRays = null, bool alphaTest = false, int statSlot = 0)
     {
         ObjectDisposedException.ThrowIf(ctx == 0, this);
         var direction = stackalloc float[3] { towardLight.X, towardLight.Y, towardLight.Z };
         HwxNative.hwx_encode_shadow(ctx, sync.MetalSharedEvent, sync.WaitValue, sync.SignalValue,
             device.ExportMetalBuffer(origins), 0, device.ExportMetalBuffer(occluded), (ulong)occludedOffset,
-            (uint)Math.Max(count, 0), direction, seedBase, skyRays is { } sky ? device.ExportMetalBuffer(sky) : 0, alphaTest ? 1u : 0u);
+            (uint)Math.Max(count, 0), direction, seedBase, skyRays is { } sky ? device.ExportMetalBuffer(sky) : 0, alphaTest ? 1u : 0u,
+            (uint)Math.Clamp(statSlot, 0, 3));
     }
 
     /// <summary>
@@ -278,15 +280,16 @@ public sealed class MetalRayTracer : IDisposable
         }
     }
 
-    public unsafe MetalShadowStats ShadowStats
+    /// <summary>What every in-frame shadow dispatch (<see cref="EncodeShadow"/>) has cost, from their own GPU times.</summary>
+    public MetalShadowStats ShadowStats => ShadowStatsOf(-1);
+
+    /// <summary>What the shadow dispatches of one stats slot (0-3; -1: all) have cost.</summary>
+    public unsafe MetalShadowStats ShadowStatsOf(int slot)
     {
-        get
-        {
-            ObjectDisposedException.ThrowIf(ctx == 0, this);
-            ulong dispatches, total, last, failures;
-            HwxNative.hwx_shadow_stats(ctx, &dispatches, &total, &last, &failures);
-            return new MetalShadowStats((long)dispatches, total / 1e6, last / 1e6, (long)failures);
-        }
+        ObjectDisposedException.ThrowIf(ctx == 0, this);
+        ulong dispatches, total, last, failures;
+        HwxNative.hwx_shadow_stats(ctx, slot < 0 ? 0xFFFFFFFFu : (uint)slot, &dispatches, &total, &last, &failures);
+        return new MetalShadowStats((long)dispatches, total / 1e6, last / 1e6, (long)failures);
     }
 
     private string Error => Marshal.PtrToStringUTF8(HwxNative.hwx_error(ctx)) ?? "unknown error";

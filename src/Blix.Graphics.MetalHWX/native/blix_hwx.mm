@@ -235,7 +235,9 @@ struct HwxContext {
     id<MTLIntersectionFunctionTable> shadowAlphaTable;  // the alpha test (hwx_set_alpha), asked for per dispatch
     id<MTLCommandBuffer> lastShadow;  // waited on at destroy: its completion handler reads this context
     id<MTLCommandBuffer> lastTrace;   // likewise, for hwx_encode_trace
-    std::atomic<uint64_t> shadowDispatches{0}, shadowGpuNs{0}, shadowLastGpuNs{0}, shadowFailures{0};
+    // By the caller's stats slot (hwx_encode_shadow), so a frame's kinds of shadow dispatch are read apart.
+    static constexpr uint32_t kShadowSlots = 4;
+    std::atomic<uint64_t> shadowDispatches[kShadowSlots]{}, shadowGpuNs[kShadowSlots]{}, shadowLastGpuNs[kShadowSlots]{}, shadowFailures[kShadowSlots]{};
     std::atomic<uint64_t> traceDispatches{0}, traceGpuNs{0}, traceLastGpuNs{0}, traceFailures{0};
     // The alpha test's inputs (hwx_set_alpha), bound to both tables: on for the shadow table, off for the trace's, so
     // the ray check keeps the software traversal's coverage.
@@ -526,7 +528,8 @@ HWX_EXPORT int hwx_trace(HwxContext* ctx, void* rays, void* hits, uint32_t count
 // argument the work is skipped (and counted in hwx_shadow_stats' failures), never the signal.
 HWX_EXPORT int hwx_encode_shadow(HwxContext* ctx, void* sharedEvent, uint64_t waitValue, uint64_t signalValue,
                                  void* origins, uint64_t originsOffset, void* occluded, uint64_t occludedOffset,
-                                 uint32_t count, const float* direction, uint32_t seedBase, void* skyRays, uint32_t alphaTest) {
+                                 uint32_t count, const float* direction, uint32_t seedBase, void* skyRays, uint32_t alphaTest,
+                                 uint32_t statSlot) {
     @autoreleasepool {
         id<MTLSharedEvent> event = (__bridge id<MTLSharedEvent>)sharedEvent;
         id<MTLBuffer> originBuffer = (__bridge id<MTLBuffer>)origins;
@@ -567,12 +570,13 @@ HWX_EXPORT int hwx_encode_shadow(HwxContext* ctx, void* sharedEvent, uint64_t wa
         [cb encodeSignalEvent:event value:signalValue];
         HwxContext* c = ctx;
         bool skipped = result != 0;
+        uint32_t slot = std::min(statSlot, HwxContext::kShadowSlots - 1);
         [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
-            if (skipped || done.status != MTLCommandBufferStatusCompleted) { c->shadowFailures++; return; }
+            if (skipped || done.status != MTLCommandBufferStatusCompleted) { c->shadowFailures[slot]++; return; }
             uint64_t ns = uint64_t((done.GPUEndTime - done.GPUStartTime) * 1e9);
-            c->shadowLastGpuNs = ns;
-            c->shadowGpuNs += ns;
-            c->shadowDispatches++;
+            c->shadowLastGpuNs[slot] = ns;
+            c->shadowGpuNs[slot] += ns;
+            c->shadowDispatches[slot]++;
         }];
         [cb commit];
         ctx->lastShadow = cb;
@@ -644,12 +648,18 @@ HWX_EXPORT void hwx_trace_stats(HwxContext* ctx, uint64_t* dispatches, uint64_t*
     *failures = ctx->traceFailures;
 }
 
-// What the shadow dispatches have cost so far, from their command buffers' GPU times.
-HWX_EXPORT void hwx_shadow_stats(HwxContext* ctx, uint64_t* dispatches, uint64_t* totalGpuNs, uint64_t* lastGpuNs, uint64_t* failures) {
-    *dispatches = ctx->shadowDispatches;
-    *totalGpuNs = ctx->shadowGpuNs;
-    *lastGpuNs = ctx->shadowLastGpuNs;
-    *failures = ctx->shadowFailures;
+// What the shadow dispatches of one stats slot (0xFFFFFFFF: all) have cost so far, from their command buffers' GPU
+// times; `lastGpuNs` is the slot's last (all: the largest slot's last).
+HWX_EXPORT void hwx_shadow_stats(HwxContext* ctx, uint32_t slot, uint64_t* dispatches, uint64_t* totalGpuNs, uint64_t* lastGpuNs,
+                                 uint64_t* failures) {
+    *dispatches = *totalGpuNs = *lastGpuNs = *failures = 0;
+    for (uint32_t k = 0; k < HwxContext::kShadowSlots; ++k) {
+        if (slot != 0xFFFFFFFFu && slot != k) continue;
+        *dispatches += ctx->shadowDispatches[k];
+        *totalGpuNs += ctx->shadowGpuNs[k];
+        *lastGpuNs = std::max<uint64_t>(*lastGpuNs, ctx->shadowLastGpuNs[k]);
+        *failures += ctx->shadowFailures[k];
+    }
 }
 
 // The shadow trace's alpha test: per material its albedo texture (an MTLTexture exported from the device), alpha cutoff

@@ -48,9 +48,9 @@ internal sealed partial class SponzaLoop
     {
         if (frameTracer is null) return;
         var trace = frameTracer.TraceStats;
-        var shadow = frameTracer.ShadowStats;
+        var shadow = frameTracer.ShadowStatsOf(0);
         Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] metal tracer, in-frame batches: closest {trace.Dispatches:N0} ({trace.MeanGpuMs:0.000} ms mean, {trace.Failures} failed), shadow {shadow.Dispatches:N0} ({shadow.MeanGpuMs:0.000} ms mean, {shadow.Failures} failed)."));
+            $"[VulkanSponza] metal tracer, in-frame batches: closest {trace.Dispatches:N0} ({trace.MeanGpuMs:0.000} ms mean, {trace.Failures} failed), shadow batches {shadow.Dispatches:N0} ({shadow.MeanGpuMs:0.000} ms mean, {shadow.Failures} failed)."));
         if (ClipmapOnWavefront && clipmapWaveRayCount > 1)
         {
             // The probes' last shadow batch: how many of its rays went out, and how many met something.

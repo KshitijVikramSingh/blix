@@ -38,6 +38,11 @@ internal sealed partial class SponzaLoop
     private bool rtCoverageCoin;
     // --rt-alpha-mip N: the mip the shadows' alpha test reads (0: full resolution).
     private float rtAlphaMip;
+    // --rt-alpha-ab: the lit pass's trace takes the coin and the alpha test in turn, a frame each, its GPU time kept
+    // apart for each (stats slots 1, 2): one process, one thermal state -- across runs the fanless M4 throttles enough to
+    // drown the difference. Measured so (Sponza, 2880x1620): the alpha test costs what the coin does, within 1%.
+    private bool rtAlphaAb;
+    private static readonly string[] RtShadowKinds = { "batches", "coin", "alpha test" };
     private ShaderInterface rtShadowRaysInterface = null!;
     private PassHandle rtShadowRaysPassHandle, rtShadowTracePassHandle;
     private PipelineHandle rtShadowRaysPipeline;
@@ -155,8 +160,10 @@ internal sealed partial class SponzaLoop
         // A new coin per frame for the partly covered (foliage), so TAA averages their shadows instead of freezing one draw.
         var tracer = frameTracer!;
         var count = width * height;
+        var kind = rtCoverageCoin ? 1 : rtAlphaAb ? 1 + (int)(rtShadowFrame % 2) : 2;
         var seed = unchecked(rtShadowFrame++ * 0x9E3779B9u);
-        graph.External(rtShadowTracePassHandle, sync => tracer.EncodeShadow(sync, origins, mask, 16, count, towardSun, seed, sky, alphaTest: !rtCoverageCoin));
+        graph.External(rtShadowTracePassHandle, sync => tracer.EncodeShadow(sync, origins, mask, 16, count, towardSun, seed, sky,
+            alphaTest: kind == 2, statSlot: kind));
         rtShadowFrames++;
 
         rtShadowBound = mask;
@@ -222,7 +229,6 @@ internal sealed partial class SponzaLoop
     private void WriteRtShadows()
     {
         if (frameTracer is null || !rtShadows) return;
-        var stats = frameTracer.ShadowStats;
         var rays = (long)rtShadowSize.Width * rtShadowSize.Height;
         // And what the lit pass was told: how much of the frame the sun reaches.
         var mask = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(rtShadowMasks[device.CurrentFrameSlot], 16, (int)rays * 4).AsSpan());
@@ -232,7 +238,12 @@ internal sealed partial class SponzaLoop
         foreach (var word in mask) if ((word & 2u) != 0) skyBlocked++;
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] rt shadows, last frame's mask: sun blocked at {100.0 * blocked / rays:0.0}% of pixels, reaching {100.0 * (rays - blocked) / rays:0.0}%{(RtSkyRays ? string.Create(Inv, $"; sky rays blocked at {100.0 * skyBlocked / rays:0.0}%") : "")}."));
-        Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] rt shadows: {stats.Dispatches:N0} frames traced ({rtShadowFrames:N0} recorded), {rtShadowSize.Width}x{rtShadowSize.Height} = {rays:N0} rays a frame; Metal GPU {stats.MeanGpuMs:0.000} ms mean, {stats.LastGpuMs:0.000} ms last, {rays / Math.Max(stats.MeanGpuMs, 1e-6) / 1000.0:0.0} M rays/s; {stats.Failures} failed."));
+        for (var slot = 1; slot < RtShadowKinds.Length; slot++)
+        {
+            var stats = frameTracer.ShadowStatsOf(slot);
+            if (stats.Dispatches == 0) continue;
+            Console.WriteLine(string.Create(Inv,
+                $"[VulkanSponza] rt shadows, {RtShadowKinds[slot]}: {stats.Dispatches:N0} frames traced ({rtShadowFrames:N0} recorded), {rtShadowSize.Width}x{rtShadowSize.Height} = {rays:N0} rays a frame; Metal GPU {stats.MeanGpuMs:0.000} ms mean, {stats.LastGpuMs:0.000} ms last, {rays / Math.Max(stats.MeanGpuMs, 1e-6) / 1000.0:0.0} M rays/s; {stats.Failures} failed."));
+        }
     }
 }
