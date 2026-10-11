@@ -352,6 +352,8 @@ internal sealed partial class SponzaLoop
                 if (i < all || MathF.Abs(bake.Texels[2 * i].W) >= 2f) live.Add((uint)i);
             texelLiveCount = live.Count;
             texelLiveBuffer = Own(device.CreateGpuBuffer(Math.Max(live.Count, 1) * 4, MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(live)), "sponza.texels.live"));
+            // --lightlets: the live texels' sun records (SponzaLoop.LightletBake), read or baked.
+            BeginLightlets(bake.Texels, live.ToArray(), texelCount, bakePath);
         }
         // A loaded bake is settled (LightBakeVersion 4 refines until it is): filter it once and rest.
         if (light is not null) SettleTexels("the baked light loaded");
@@ -502,6 +504,7 @@ internal sealed partial class SponzaLoop
         if (!texelsUploaded || rayBlockBuffers.Length == 0) return;
         FollowSun();
         SaveLightBakeWhenDone();
+        LightletBakeWhenReady();
         // The atlas's light is gathered against the bake scene (SponzaLoop.BakeScene.cs) once it is there, never before.
         if (BakeSceneWanted && BakeTracer is null && !bakeTracerFailed && !bakeSceneReleased) return;
         TransferDumpWhenDone();

@@ -92,5 +92,13 @@ internal static unsafe class HwxNative
         float lift, byte* doubleSided, uint placementCount, byte* buried, double* gpuMs);
 
     [DllImport(Library)]
+    public static extern int hwx_lightlet_dense(nint ctx, float* points, uint count, float* dirs, uint dirCount, uint words, uint seed,
+        float lift, float reach, uint* bits, double* gpuMs);
+
+    [DllImport(Library)]
+    public static extern int hwx_lightlet_rings(nint ctx, float* points, uint pointCount, uint* pairs, uint pairCount, float* nodeDirs,
+        uint nodeCount, float* tanRadii, uint radii, uint azimuths, uint seed, float lift, float reach, uint* bits, double* gpuMs);
+
+    [DllImport(Library)]
     public static extern int hwx_trace(nint ctx, nint rays, nint hits, uint count, uint seedBase, uint closestOnly, uint repeats, double* gpuMs);
 }

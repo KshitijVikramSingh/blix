@@ -191,6 +191,58 @@ public sealed class MetalRayTracer : IDisposable
     }
 
     /// <summary>
+    /// The lightlet bake's dense pass: for every point (two float4s: position, normal) and every direction of
+    /// <paramref name="directions"/>, whether the point faces it and nothing is in the way (from <paramref name="lift"/> off the
+    /// surface, as far as <paramref name="reach"/>), as bits, <paramref name="words"/> uints a point. One coverage coin seed for
+    /// every ray, so a partly covered triangle is opaque or clear the same way in every direction. Waits for the GPU; off the
+    /// frame's thread, as <see cref="TestBuried"/>.
+    /// </summary>
+    public unsafe uint[] LightletVisibility(ReadOnlySpan<Vector4> points, ReadOnlySpan<Vector4> directions, int words, uint seed, float lift,
+        float reach, out double gpuMs)
+    {
+        ObjectDisposedException.ThrowIf(ctx == 0, this);
+        var count = points.Length / 2;
+        var bits = new uint[Math.Max(count * words, 1)];
+        double ms;
+        fixed (Vector4* p = points)
+        fixed (Vector4* d = directions)
+        fixed (uint* b = bits)
+        {
+            if (HwxNative.hwx_lightlet_dense(ctx, (float*)p, (uint)count, (float*)d, (uint)directions.Length, (uint)words, seed, lift, reach, b, &ms) != 0)
+                throw new InvalidOperationException($"Metal lightlet bake: {Error}");
+        }
+        gpuMs = ms;
+        return bits;
+    }
+
+    /// <summary>
+    /// The lightlet bake's ring pass: for each (point, node) pair, rays on rings around the node's direction
+    /// (<paramref name="tanRadii"/>: each ring's angular tangent; <paramref name="azimuths"/> rays a ring, at
+    /// a * 2 pi / azimuths + ring * 0.27, the basis as <c>normalize(cross(dir, up or x))</c>), visible as in
+    /// <see cref="LightletVisibility"/>; two uints of bits a pair.
+    /// </summary>
+    public unsafe uint[] LightletRings(ReadOnlySpan<Vector4> points, ReadOnlySpan<uint> pairs, ReadOnlySpan<Vector4> nodeDirections,
+        ReadOnlySpan<float> tanRadii, int azimuths, uint seed, float lift, float reach, out double gpuMs)
+    {
+        ObjectDisposedException.ThrowIf(ctx == 0, this);
+        var pairCount = pairs.Length / 2;
+        var bits = new uint[Math.Max(pairCount * 2, 1)];
+        double ms;
+        fixed (Vector4* p = points)
+        fixed (uint* pr = pairs)
+        fixed (Vector4* nd = nodeDirections)
+        fixed (float* t = tanRadii)
+        fixed (uint* b = bits)
+        {
+            if (HwxNative.hwx_lightlet_rings(ctx, (float*)p, (uint)(points.Length / 2), pr, (uint)pairCount, (float*)nd, (uint)nodeDirections.Length,
+                    t, (uint)tanRadii.Length, (uint)azimuths, seed, lift, reach, b, &ms) != 0)
+                throw new InvalidOperationException($"Metal lightlet rings: {Error}");
+        }
+        gpuMs = ms;
+        return bits;
+    }
+
+    /// <summary>
     /// The lightmap's buried test on Metal: per record (two float4s: position, normal), <paramref name="tests"/> cosine rays
     /// from <paramref name="lift"/> off it, each as far as <paramref name="reach"/>, buried when <paramref name="threshold"/> of them first meet a
     /// back face of a placement not flagged

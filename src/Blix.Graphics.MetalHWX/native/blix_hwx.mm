@@ -279,6 +279,67 @@ kernel void blix_buried(device const float4* records [[buffer(0)]],
     }
     buried[i] = back >= p.threshold ? 1u : 0u;
 }
+
+// Lightlets (VulkanSponza, SponzaLoop.LightletBake): visibility of surface points toward directions, as bits (1: the point
+// faces the direction and nothing is in the way). One coverage coin seed for the whole bake, so a partly covered
+// triangle is opaque or clear the same way in every direction from a point: visibility over directions is coherent.
+struct LightletParams { uint count; uint dirs; uint words; uint seed; float lift; float reach; uint radii; uint azimuths; };
+
+static bool blix_lightlet_visible(float3 position, float3 n, float3 d, constant LightletParams& p,
+                                  instance_acceleration_structure tlas,
+                                  intersection_function_table<triangle_data, instancing> table)
+{
+    if (dot(n, d) <= 0.0f) return false;
+    intersector<triangle_data, instancing> isect;
+    isect.assume_geometry_type(geometry_type::triangle);
+    isect.accept_any_intersection(true);
+    uint seed = p.seed;
+    return isect.intersect(ray(position + n * p.lift, d, 0.0f, p.reach), tlas, 0xFFu, table, seed).type == intersection_type::none;
+}
+
+// Every point x every direction of a table: thread (direction, point); `words` uints of bits a point.
+kernel void blix_lightlet_dense(device const float4* points [[buffer(0)]],
+                                device atomic_uint* bits [[buffer(1)]],
+                                instance_acceleration_structure tlas [[buffer(2)]],
+                                intersection_function_table<triangle_data, instancing> table [[buffer(3)]],
+                                constant LightletParams& p [[buffer(4)]],
+                                device const float4* dirs [[buffer(5)]],
+                                uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= p.dirs || gid.y >= p.count) return;
+    float3 n = points[gid.y * 2u + 1u].xyz;
+    if (dot(n, n) < 1e-12f) return;
+    if (blix_lightlet_visible(points[gid.y * 2u].xyz, normalize(n), dirs[gid.x].xyz, p, tlas, table))
+        atomic_fetch_or_explicit(&bits[gid.y * p.words + gid.x / 32u], 1u << (gid.x % 32u), memory_order_relaxed);
+}
+
+// Rings around a node direction for listed (point, node) pairs: thread (ring ray, pair); radii x azimuths rays a pair,
+// ring r at angular tangent tanRadii[r], azimuth a at a * 2 pi / azimuths + r * 0.27 around the node, the basis as the
+// host builds it; two uints of bits a pair (up to 64 rays).
+kernel void blix_lightlet_rings(device const float4* points [[buffer(0)]],
+                                device atomic_uint* bits [[buffer(1)]],
+                                instance_acceleration_structure tlas [[buffer(2)]],
+                                intersection_function_table<triangle_data, instancing> table [[buffer(3)]],
+                                constant LightletParams& p [[buffer(4)]],
+                                device const float4* nodeDirs [[buffer(5)]],
+                                device const uint2* pairs [[buffer(6)]],
+                                device const float* tanRadii [[buffer(7)]],
+                                uint2 gid [[thread_position_in_grid]])
+{
+    uint rays = p.radii * p.azimuths;
+    if (gid.x >= rays || gid.y >= p.count) return;
+    uint2 pair = pairs[gid.y];
+    float3 n = points[pair.x * 2u + 1u].xyz;
+    if (dot(n, n) < 1e-12f) return;
+    float3 dn = nodeDirs[pair.y].xyz;
+    float3 u = normalize(abs(dn.y) < 0.999f ? cross(dn, float3(0.0f, 1.0f, 0.0f)) : cross(dn, float3(1.0f, 0.0f, 0.0f)));
+    float3 v = cross(dn, u);
+    uint r = gid.x / p.azimuths, a = gid.x % p.azimuths;
+    float ang = float(a) * 6.28318530718f / float(p.azimuths) + float(r) * 0.27f;
+    float3 d = normalize(dn + (u * cos(ang) + v * sin(ang)) * tanRadii[r]);
+    if (blix_lightlet_visible(points[pair.x * 2u].xyz, normalize(n), d, p, tlas, table))
+        atomic_fetch_or_explicit(&bits[gid.y * 2u + gid.x / 32u], 1u << (gid.x % 32u), memory_order_relaxed);
+}
 )";
 
 struct HwxContext {
@@ -290,6 +351,8 @@ struct HwxContext {
     id<MTLComputePipelineState> shadowPso;
     id<MTLComputePipelineState> buriedPso;            // blix_buried, with its own table
     id<MTLIntersectionFunctionTable> buriedTable;
+    id<MTLComputePipelineState> lightletDensePso, lightletRingsPso;   // the lightlet bake, each with its own table
+    id<MTLIntersectionFunctionTable> lightletDenseTable, lightletRingsTable;
     id<MTLIntersectionFunctionTable> shadowTable;       // the coverage coin, as the software batch
     id<MTLIntersectionFunctionTable> shadowAlphaTable;  // the alpha test (hwx_set_alpha), asked for per dispatch
     id<MTLCommandBuffer> lastShadow;  // waited on at destroy: its completion handler reads this context
@@ -365,6 +428,11 @@ HWX_EXPORT HwxContext* hwx_create(void* mtlDevice, char* err, int errLength) {
         id<MTLIntersectionFunctionTable> buriedTable;
         id<MTLComputePipelineState> buriedPso = pipeline(@"blix_buried", &buriedTable);
         if (!buriedPso) return report([@"buried-test pipeline: " stringByAppendingString:error.localizedDescription]);
+        id<MTLIntersectionFunctionTable> lightletDenseTable, lightletRingsTable;
+        id<MTLComputePipelineState> lightletDensePso = pipeline(@"blix_lightlet_dense", &lightletDenseTable);
+        if (!lightletDensePso) return report([@"lightlet pipeline: " stringByAppendingString:error.localizedDescription]);
+        id<MTLComputePipelineState> lightletRingsPso = pipeline(@"blix_lightlet_rings", &lightletRingsTable);
+        if (!lightletRingsPso) return report([@"lightlet rings pipeline: " stringByAppendingString:error.localizedDescription]);
         MTLIntersectionFunctionTableDescriptor* alphaTd = [MTLIntersectionFunctionTableDescriptor new];
         alphaTd.functionCount = 1;
         id<MTLIntersectionFunctionTable> shadowAlphaTable = [shadowPso newIntersectionFunctionTableWithDescriptor:alphaTd];
@@ -382,6 +450,10 @@ HWX_EXPORT HwxContext* hwx_create(void* mtlDevice, char* err, int errLength) {
         ctx->shadowAlphaTable = shadowAlphaTable;
         ctx->buriedPso = buriedPso;
         ctx->buriedTable = buriedTable;
+        ctx->lightletDensePso = lightletDensePso;
+        ctx->lightletDenseTable = lightletDenseTable;
+        ctx->lightletRingsPso = lightletRingsPso;
+        ctx->lightletRingsTable = lightletRingsTable;
         return ctx;
     }
 }
@@ -426,7 +498,8 @@ HWX_EXPORT int hwx_build(HwxContext* ctx,
         ctx->alphaOff = [device newBufferWithBytes:off length:sizeof(off) options:MTLResourceStorageModeShared];
         ctx->alphaOn = nil;
         ctx->rowMaterial = ctx->materials = ctx->uvs = ctx->alphaOff;
-        for (id<MTLIntersectionFunctionTable> table : {ctx->table, ctx->shadowTable, ctx->shadowAlphaTable, ctx->buriedTable}) {
+        for (id<MTLIntersectionFunctionTable> table : {ctx->table, ctx->shadowTable, ctx->shadowAlphaTable, ctx->buriedTable,
+                                                       ctx->lightletDenseTable, ctx->lightletRingsTable}) {
             [table setBuffer:ctx->primRows offset:0 atIndex:0];
             [table setBuffer:ctx->entryRows offset:0 atIndex:1];
             [table setBuffer:ctx->instances offset:0 atIndex:2];
@@ -768,8 +841,10 @@ HWX_EXPORT int hwx_set_alpha(HwxContext* ctx, void* const* textures, const float
         ctx->uvs = uvBuffer;
         struct { uint32_t enabled; float mip; uint32_t pad1, pad2; } on = {1, mip, 0, 0};
         ctx->alphaOn = [device newBufferWithBytes:&on length:sizeof(on) options:MTLResourceStorageModeShared];
-        for (id<MTLIntersectionFunctionTable> table : {ctx->table, ctx->shadowTable, ctx->shadowAlphaTable}) {
-            [table setBuffer:table == ctx->shadowAlphaTable ? ctx->alphaOn : ctx->alphaOff offset:0 atIndex:6];
+        // The lightlet bake's tables take the alpha test too: its sun records must answer as the traced shadows do.
+        for (id<MTLIntersectionFunctionTable> table : {ctx->table, ctx->shadowTable, ctx->shadowAlphaTable, ctx->lightletDenseTable, ctx->lightletRingsTable}) {
+            bool alpha = table == ctx->shadowAlphaTable || table == ctx->lightletDenseTable || table == ctx->lightletRingsTable;
+            [table setBuffer:alpha ? ctx->alphaOn : ctx->alphaOff offset:0 atIndex:6];
             [table setBuffer:ctx->rowMaterial offset:0 atIndex:7];
             [table setBuffer:ctx->materials offset:0 atIndex:8];
             [table setBuffer:ctx->uvs offset:0 atIndex:9];
@@ -819,6 +894,89 @@ HWX_EXPORT int hwx_buried(HwxContext* ctx, const float* records, uint32_t count,
             if (!Completed(ctx, cb, "buried test")) return 1;
             if (gpuMs) *gpuMs += (cb.GPUEndTime - cb.GPUStartTime) * 1e3;
             memcpy(buried + first, out.contents, n);
+        }
+        return 0;
+    }
+}
+
+// The lightlet bake's two passes (blix_lightlet_dense / _rings) over host memory, in chunks, each waited for; callable off
+// the frame's thread, as hwx_buried. Points: two float4s each (position, normal). Bits are OR-ed into `bits`, which the
+// caller zeroes: dense, `words` uints a point (words >= ceil(dirCount / 32)); rings, two uints a pair.
+static int LightletDispatch(HwxContext* ctx, id<MTLComputePipelineState> pso, id<MTLIntersectionFunctionTable> table, const char* what,
+                            id<MTLBuffer> points, id<MTLBuffer> out, const void* params, uint32_t paramBytes,
+                            id<MTLBuffer> b5, id<MTLBuffer> b6, id<MTLBuffer> b7, MTLSize grid, double* gpuMs) {
+    id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
+    cb.label = [NSString stringWithUTF8String:what];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:pso];
+    [enc setBuffer:points offset:0 atIndex:0];
+    [enc setBuffer:out offset:0 atIndex:1];
+    [enc setAccelerationStructure:ctx->tlas atBufferIndex:2];
+    [enc setIntersectionFunctionTable:table atBufferIndex:3];
+    [enc setBytes:params length:paramBytes atIndex:4];
+    [enc setBuffer:b5 offset:0 atIndex:5];
+    if (b6) [enc setBuffer:b6 offset:0 atIndex:6];
+    if (b7) [enc setBuffer:b7 offset:0 atIndex:7];
+    [enc useResources:ctx->blas.data() count:ctx->blas.size() usage:MTLResourceUsageRead];
+    id<MTLResource> tableBuffers[] = {ctx->primRows, ctx->entryRows, ctx->instances, ctx->triangles, ctx->owners, ctx->surfaces,
+                                      ctx->alphaOn ? ctx->alphaOn : ctx->alphaOff, ctx->rowMaterial, ctx->materials, ctx->uvs};
+    [enc useResources:tableBuffers count:10 usage:MTLResourceUsageRead];
+    // The materials' textures are reached through the argument buffer alone.
+    if (ctx->alphaOn && !ctx->alphaTextures.empty())
+        [enc useResources:ctx->alphaTextures.data() count:ctx->alphaTextures.size() usage:MTLResourceUsageRead];
+    [enc dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+    [enc endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    if (!Completed(ctx, cb, what)) return 1;
+    if (gpuMs) *gpuMs += (cb.GPUEndTime - cb.GPUStartTime) * 1e3;
+    return 0;
+}
+
+HWX_EXPORT int hwx_lightlet_dense(HwxContext* ctx, const float* points, uint32_t count, const float* dirs, uint32_t dirCount,
+                                  uint32_t words, uint32_t seed, float lift, float reach, uint32_t* bits, double* gpuMs) {
+    @autoreleasepool {
+        if (!ctx->tlas) return Fail(ctx, "lightlet bake before build");
+        if (words * 32u < dirCount) return Fail(ctx, "lightlet bits narrower than the direction table");
+        id<MTLDevice> device = ctx->device;
+        id<MTLBuffer> dirBuffer = [device newBufferWithBytes:dirs length:uint64_t(std::max<uint32_t>(dirCount, 1)) * 16 options:MTLResourceStorageModeShared];
+        const uint32_t chunk = std::max<uint32_t>(1u, (1u << 27) / std::max<uint32_t>(dirCount, 1));
+        if (gpuMs) *gpuMs = 0.0;
+        for (uint32_t first = 0; first < count; first += chunk) {
+            uint32_t n = std::min(chunk, count - first);
+            id<MTLBuffer> in = [device newBufferWithBytes:points + uint64_t(first) * 8 length:uint64_t(n) * 32 options:MTLResourceStorageModeShared];
+            id<MTLBuffer> out = [device newBufferWithLength:uint64_t(n) * words * 4 options:MTLResourceStorageModeShared];
+            memset(out.contents, 0, out.length);
+            struct { uint32_t count, dirs, words, seed; float lift, reach; uint32_t radii, azimuths; } params = {n, dirCount, words, seed, lift, reach, 0, 0};
+            if (LightletDispatch(ctx, ctx->lightletDensePso, ctx->lightletDenseTable, "blix-hwx lightlet dense", in, out, &params, sizeof(params),
+                                 dirBuffer, nil, nil, MTLSizeMake(dirCount, n, 1), gpuMs)) return 1;
+            memcpy(bits + uint64_t(first) * words, out.contents, uint64_t(n) * words * 4);
+        }
+        return 0;
+    }
+}
+
+HWX_EXPORT int hwx_lightlet_rings(HwxContext* ctx, const float* points, uint32_t pointCount, const uint32_t* pairs, uint32_t pairCount,
+                                  const float* nodeDirs, uint32_t nodeCount, const float* tanRadii, uint32_t radii, uint32_t azimuths,
+                                  uint32_t seed, float lift, float reach, uint32_t* bits, double* gpuMs) {
+    @autoreleasepool {
+        if (!ctx->tlas) return Fail(ctx, "lightlet bake before build");
+        if (radii * azimuths > 64u) return Fail(ctx, "lightlet rings hold at most 64 rays a pair");
+        id<MTLDevice> device = ctx->device;
+        id<MTLBuffer> in = [device newBufferWithBytes:points length:uint64_t(std::max<uint32_t>(pointCount, 1)) * 32 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> nodes = [device newBufferWithBytes:nodeDirs length:uint64_t(std::max<uint32_t>(nodeCount, 1)) * 16 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> tans = [device newBufferWithBytes:tanRadii length:std::max<uint32_t>(radii, 1) * 4 options:MTLResourceStorageModeShared];
+        const uint32_t chunk = 1u << 21;
+        if (gpuMs) *gpuMs = 0.0;
+        for (uint32_t first = 0; first < pairCount; first += chunk) {
+            uint32_t n = std::min(chunk, pairCount - first);
+            id<MTLBuffer> list = [device newBufferWithBytes:pairs + uint64_t(first) * 2 length:uint64_t(n) * 8 options:MTLResourceStorageModeShared];
+            id<MTLBuffer> out = [device newBufferWithLength:uint64_t(n) * 8 options:MTLResourceStorageModeShared];
+            memset(out.contents, 0, out.length);
+            struct { uint32_t count, dirs, words, seed; float lift, reach; uint32_t radii, azimuths; } params = {n, 0, 2, seed, lift, reach, radii, azimuths};
+            if (LightletDispatch(ctx, ctx->lightletRingsPso, ctx->lightletRingsTable, "blix-hwx lightlet rings", in, out, &params, sizeof(params),
+                                 nodes, list, tans, MTLSizeMake(radii * azimuths, n, 1), gpuMs)) return 1;
+            memcpy(bits + uint64_t(first) * 2, out.contents, uint64_t(n) * 8);
         }
         return 0;
     }

@@ -27,6 +27,9 @@ layout(set = 0, binding = 0) uniform RtShadowRays {
                          // 2x2 (RenderSettings.HalfResLighting: the incident pass's pixel, lighting_upsample.frag)
     vec4 uDisc;          // the sun's disc (ShadowsSettings.SunDiscDegrees): x the tangent of its angular radius (0: a point,
                          // no directions written), y the frame's number
+    vec4 uLightlet;      // the sun records (SponzaLoop.LightletBake, RenderSettings.LightletSun): xy the sun in the band's fine
+                         // node coordinates, z 1 when they answer, w tau (degrees): a record under it is not certain
+    vec4 uLightmap;      // the atlas (texel.glsl): x 1 when on, yz its size
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -37,6 +40,50 @@ layout(std430, set = 0, binding = 4) writeonly buffer RtShadowSky { vec4 skyRays
 // pixel and per frame -- the Metal pass traces each its own way (hwx_encode_shadow's directions), so a penumbra is a
 // mix of rays that reached and rays that did not, which lighting_upsample.frag and TAA average.
 layout(std430, set = 0, binding = 5) writeonly buffer RtShadowDirections { vec4 directions[]; };
+// Lightlets: a pixel whose four atlas texels' sun records all answer, and agree, takes the baked answer and traces no
+// ray (0 lit, 1 shadowed); 2 where it traces. lighting_upsample.frag reads it beside the traced mask.
+layout(std430, set = 0, binding = 6) writeonly buffer RtShadowBaked { uint baked[]; };
+layout(set = 0, binding = 7) uniform usampler2D uLightmapTexel;
+layout(std430, set = 0, binding = 8) readonly buffer LightmapIndexMap { uint lightmapIndexMap[]; };
+layout(std430, set = 0, binding = 9) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 10) readonly buffer LightletIndex { uint lightletIndex[]; };
+layout(std430, set = 0, binding = 11) readonly buffer LightletPool { uint lightletPool[]; };
+#define TEXEL_INDEX_MAP(i) lightmapIndexMap[i]
+#define TEXEL_HASH(i) uvec4(0u)
+#define TEXEL_POSITION(i) texels[2 * (i)]
+#define TEXEL_NORMAL(i) texels[2 * (i) + 1]
+#include "texel.glsl"
+#define LIGHTLET_INDEX(i) lightletIndex[i]
+#define LIGHTLET_POOL(i) lightletPool[i]
+#include "lightlet.glsl"
+
+// 0 lit, 1 shadowed by the four texels' records (or by facing away, single-sided); 2 when they cannot answer (a record
+// under tau, disagreement, a missing texel, no atlas texel, a double-sided sheet facing away: its ray answers the sun on
+// the far side, which no record holds).
+uint bakedSun(ivec2 q, vec3 n) {
+    if (u.uLightlet.z < 0.5 || u.uLightmap.x < 0.5) return 2u;
+    vec2 atlas;
+    if (!texelLightmapUnpack(texelFetch(uLightmapTexel, q, 0).r, atlas)) return 2u;
+    int ids[4];
+    float weights[4];
+    texelsAroundLightmap(atlas, n, ivec2(u.uLightmap.yz), ids, weights);
+    // Facing away from the sun: a single-sided surface gets no direct sun at all -- shadowed, no ray. A double-sided
+    // sheet's (a pair of records: position w < 0) ray answers the sun on its far side (transmission): it traces.
+    if (dot(n, u.uSun.xyz) <= 0.0) {
+        for (int k = 0; k < 4; ++k) if (ids[k] < 0 || TEXEL_POSITION(ids[k]).w < 0.0) return 2u;
+        return 1u;
+    }
+    int agreed = -1;
+    for (int k = 0; k < 4; ++k) {
+        if (ids[k] < 0) return 2u;
+        float d = lightletDistance(uint(ids[k]), u.uLightlet.xy);
+        if (abs(d) < u.uLightlet.w) return 2u;
+        int s = d > 0.0 ? 0 : 1;
+        if (agreed >= 0 && s != agreed) return 2u;
+        agreed = s;
+    }
+    return uint(agreed);
+}
 
 uint hash32(uint x) {
     x ^= x >> 16; x *= 0x7feb352du;
@@ -57,6 +104,7 @@ void main() {
     bool sky = u.uSky.x > 0.5;
     if (raw >= 1.0 - 1e-6 || dot(nSample.xyz, nSample.xyz) < 1e-6) {
         origins[index] = vec4(0.0);
+        baked[index] = 2u;
         if (sky) skyRays[index * 2u] = vec4(0.0);
         return;
     }
@@ -68,7 +116,10 @@ void main() {
     // The lift grows with distance, as depth precision shrinks: 1 cm plus 0.1% of the distance.
     float lift = 0.01 + 0.001 * length(position - u.uCamera.xyz);
     vec3 origin = position + n * (dot(n, u.uSun.xyz) > 0.0 ? lift : -lift);
-    origins[index] = vec4(origin, u.uSun.w);
+    uint answer = bakedSun(q, n);
+    baked[index] = answer;
+    // Answered: no ray (an origin's reach of 0 is no ray, answered unoccluded; the baked word stands instead).
+    origins[index] = vec4(origin, answer == 2u ? u.uSun.w : 0.0);
     if (u.uDisc.x > 0.0) {
         // The frame's point of a low-discrepancy sequence over the disc (R2), shifted per pixel by a hash (Cranley-
         // Patterson): neighbours sample different parts of the disc, and a pixel covers all of it over frames.

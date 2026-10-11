@@ -53,7 +53,7 @@ internal sealed partial class SponzaLoop
                 new("uHalf", new Vector4Uniform(new Vector4(1f, sub.X, sub.Y, SunDiscTangent))),
                 new("uPixel", new Vector4Uniform(new Vector4(pixelAngle, 0f, 0f, 0f))),
             },
-            buffers: new[] { new ShaderBufferBinding("RtShadowMask", mask) }));
+            buffers: new[] { new ShaderBufferBinding("RtShadowMask", mask), new ShaderBufferBinding("RtShadowBaked", RtShadowBakedBound) }));
     }
 
     // ShadowsSettings.SunDiscDegrees: the tangent of the sun's angular radius (0: a point sun). The traced shadows aim each

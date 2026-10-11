@@ -1091,6 +1091,11 @@ internal sealed class RenderSettings
     // 2x2 (a different one each frame, TAA gathering all four), brought back to full resolution along the depth and
     // normals (lighting_upsample.frag). Off: both at full resolution, the reference.
     [Tune]             public bool HalfResLighting = true;
+    // --lightlets: the traced shadows take the baked sun records' answer (SponzaLoop.LightletBake) where a pixel's four
+    // atlas texels all answer and agree, and trace only the rest. Off: every pixel traces (the reference).
+    [Tune]             public bool LightletSun = false;
+    // How far (degrees) from its visibility boundary a record must put the sun to answer (phase 0b: 2 -> 0.001% wrong).
+    [Tune(0.25f, 4f)]  public float LightletTau = 2f;
     // History weight for the full-screen resolve; zero is the current-frame reference. History is
     // rejected off-screen and neighbourhood-clamped so the present frame remains authoritative.
     [Tune(0f, 0.97f)]  public float Taa = 0.9f;

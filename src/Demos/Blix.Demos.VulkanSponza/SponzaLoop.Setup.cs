@@ -163,6 +163,13 @@ internal sealed partial class SponzaLoop
         rtShadows = args.Flag("rt-shadows");
         lightletCensus = args.Flag("lightlet-census");
         lightletRecord = args.Flag("lightlet-record");
+        lightletsAsked = args.Flag("lightlets");
+        // --lightlets-then-exit: close as asked once the sun records are baked and up (a scripted bake).
+        lightletsThenExit = args.Flag("lightlets-then-exit");
+        if (lightletsThenExit) lightletsAsked = true;
+        // --lightlet-sun: RenderSettings.LightletSun on from the start (the overlay's toggle; [Tune] fields are not read
+        // from the command line here).
+        if (args.Flag("lightlet-sun")) { render.LightletSun = true; lightletsAsked = true; }
         metalDeviceQueue = args.Flag("metal-device-queue");
         // --rt-no-overlap: no join, so the frame waits for the trace right after it (the overlap's control).
         rtNoOverlap = args.Flag("rt-no-overlap");
@@ -641,7 +648,9 @@ internal sealed partial class SponzaLoop
         // clipmap's marks, the incident light) reads none of it, so it runs while the rays are traced.
         rtShadowRaysInterface = Reflect("rt_shadow_rays.comp");
         rtShadowRaysPassHandle = graph.ComputePass("rt-shadow-rays").Shader(rtShadowRaysInterface)
-            .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
+            .Read(SampleableSceneDepth).Read(SampleablePrepassNormal)
+            // The atlas texel a pixel shows, for the lightlets' sun records (rt_shadow_rays.comp).
+            .Read(lightmapEnabled ? lightmapTexelHandle : surfaceKeyHandle).Handle;
         rtShadowTracePassHandle = graph.ExternalPass("rt-shadow-trace");
 
         // The Hi-Z pyramid, immediately after the pre-pass that resolves the depth it reduces.

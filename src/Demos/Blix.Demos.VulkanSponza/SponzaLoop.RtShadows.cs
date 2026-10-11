@@ -62,6 +62,10 @@ internal sealed partial class SponzaLoop
     private GpuBufferHandle[] rtShadowMasks = Array.Empty<GpuBufferHandle>();
     // Per ray, its own direction toward the sun's disc (ShadowsSettings.SunDiscDegrees), per frame slot.
     private GpuBufferHandle[] rtShadowDirections = Array.Empty<GpuBufferHandle>();
+    // Per pixel the lightlets' answer (0 lit, 1 shadowed, 2 traced: rt_shadow_rays.comp), per frame slot.
+    private GpuBufferHandle[] rtShadowBaked = Array.Empty<GpuBufferHandle>();
+    private GpuBufferHandle RtShadowBakedBound => rtShadowBaked.Length > 0 && !rtShadowBound.Equals(default(GpuBufferHandle))
+        ? rtShadowBaked[device.CurrentFrameSlot] : RtShadowPlaceholder;
     // Isolated only: one sky ray per pixel, per frame slot.
     private GpuBufferHandle[] rtShadowSky = Array.Empty<GpuBufferHandle>();
     private bool RtSkyRays => rtShadows && rtIsolated;
@@ -139,12 +143,15 @@ internal sealed partial class SponzaLoop
             foreach (var b in rtShadowMasks) device.DestroyGpuBuffer(b);
             foreach (var b in rtShadowSky) device.DestroyGpuBuffer(b);
             foreach (var b in rtShadowDirections) device.DestroyGpuBuffer(b);
+            foreach (var b in rtShadowBaked) device.DestroyGpuBuffer(b);
             var slots = device.MaxFramesInFlightCount;
             var header = MemoryMarshal.AsBytes(new uint[] { (uint)width, (uint)height, 1u, RtSkyRays ? 1u : 0u }.AsSpan()).ToArray();
             rtShadowOrigins = Enumerable.Range(0, slots)
                 .Select(s => Own(device.CreateGpuBuffer(width * height * 16, name: $"sponza.rt-shadow.origins{s}"))).ToArray();
             rtShadowMasks = Enumerable.Range(0, slots)
                 .Select(s => Own(device.CreateGpuBuffer(16 + width * height * 4, header, $"sponza.rt-shadow.mask{s}"))).ToArray();
+            rtShadowBaked = Enumerable.Range(0, slots)
+                .Select(s => Own(device.CreateGpuBuffer(width * height * 4, name: $"sponza.rt-shadow.baked{s}"))).ToArray();
             rtShadowDirections = Enumerable.Range(0, slots)
                 .Select(s => Own(device.CreateGpuBuffer(width * height * 16, name: $"sponza.rt-shadow.directions{s}"))).ToArray();
             rtShadowSky = Enumerable.Range(0, RtSkyRays ? slots : 0)
@@ -174,17 +181,25 @@ internal sealed partial class SponzaLoop
                 new("uHalf", new Vector4Uniform(new Vector4(halfLightingNow ? 1f : 0f, sub.X, sub.Y, 0f))),
                 // The frame's number for the disc's sequence, kept small: a float's fraction holds at 2^16.
                 new("uDisc", new Vector4Uniform(new Vector4(discTangent, rtShadowFrame % 65536u, 0f, 0f))),
+                new("uLightlet", new Vector4Uniform(LightletUniform(towardSun))),
+                new("uLightmap", new Vector4Uniform(LightmapUniform)),
             },
             new[]
             {
                 new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
                 new ShaderTextureBinding("uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
+                LightmapTexelTexture(),
             },
             // Without sky rays the shader writes none, and the placeholder only fills the binding.
             Buffers: new[]
             {
                 new ShaderBufferBinding("RtShadowOrigins", origins), new ShaderBufferBinding("RtShadowSky", sky ?? RtShadowPlaceholder),
                 new ShaderBufferBinding("RtShadowDirections", directions),
+                new ShaderBufferBinding("RtShadowBaked", rtShadowBaked[slot]),
+                new ShaderBufferBinding("LightmapIndexMap", LightmapIndexMap()),
+                new ShaderBufferBinding("Texels", texelsUploaded ? texelBuffer : RtShadowPlaceholder),
+                new ShaderBufferBinding("LightletIndex", lightlets is null ? LightletPlaceholder : lightletIndexBuffer),
+                new ShaderBufferBinding("LightletPool", lightlets is null ? LightletPlaceholder : lightletPoolBuffer),
             }));
 
         // A new coin per frame for the partly covered (foliage), so TAA averages their shadows instead of freezing one draw.
@@ -281,6 +296,15 @@ internal sealed partial class SponzaLoop
             rgba[i * 4 + 3] = 255;
         }
         PngWriter.WriteRgba8(basePath + ".rtmask.png", rgba, rtShadowSize.Width, rtShadowSize.Height);
+        if (rtShadowBaked.Length > 0)
+        {
+            // What the lightlets answered (rt_shadow_rays.comp): baked lit, baked shadowed, traced.
+            var baked = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(rtShadowBaked[device.CurrentFrameSlot], 0, (int)rays * 4).AsSpan());
+            long lit = 0, shadowed = 0;
+            foreach (var b in baked) { if (b == 0u) lit++; else if (b == 1u) shadowed++; }
+            Console.WriteLine(string.Create(Inv,
+                $"[VulkanSponza] lightlets, last frame: baked lit {100.0 * lit / rays:0.0}%, baked shadowed {100.0 * shadowed / rays:0.0}%, traced {100.0 * (rays - lit - shadowed) / rays:0.0}% of {rays:N0} pixels (sun records {(render.LightletSun && lightlets is not null ? "on" : "off")})."));
+        }
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] rt shadows, last frame's mask: sun blocked at {100.0 * blocked / rays:0.0}% of pixels, reaching {100.0 * (rays - blocked) / rays:0.0}%{(RtSkyRays ? string.Create(Inv, $"; sky rays blocked at {100.0 * skyBlocked / rays:0.0}%") : "")}."));
         for (var slot = 1; slot < RtShadowKinds.Length; slot++)

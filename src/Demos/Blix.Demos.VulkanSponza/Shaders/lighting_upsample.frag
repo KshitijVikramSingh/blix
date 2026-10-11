@@ -45,6 +45,8 @@ layout(set = 0, binding = 4) uniform sampler2D uPrepassNormal;
 // The half-res traced mask (SponzaLoop.RtShadows): width, height, 1 while live (0 for the placeholder: no traced
 // shadows, the lit pass asks the cascades and reads no w), 1 with sky rays; then a word per half-res pixel.
 layout(std430, set = 0, binding = 5) readonly buffer RtShadowMask { uvec4 rtShadowHeader; uint rtShadowWords[]; };
+// Lightlets (rt_shadow_rays.comp): per half-res pixel 0 lit, 1 shadowed by the baked sun records, 2 traced (the mask).
+layout(std430, set = 0, binding = 6) readonly buffer RtShadowBaked { uint rtShadowBaked[]; };
 
 vec3 worldAt(ivec2 pixel, float raw, vec2 fullSize) {
     vec2 uv = (vec2(pixel) + 0.5) / fullSize;
@@ -57,6 +59,8 @@ vec3 worldAt(ivec2 pixel, float raw, vec2 fullSize) {
 vec2 sunAt(ivec2 h) {
     if (rtShadowHeader.z == 0u) return vec2(1.0, 0.0);
     if (uint(h.x) >= rtShadowHeader.x || uint(h.y) >= rtShadowHeader.y) return vec2(0.0);
+    uint baked = rtShadowBaked[uint(h.y) * rtShadowHeader.x + uint(h.x)];
+    if (baked < 2u) return vec2(baked == 0u ? 1.0 : 0.0, 0.0);
     uint word = rtShadowWords[uint(h.y) * rtShadowHeader.x + uint(h.x)];
     return (word & 1u) != 0u ? vec2(0.0, unpackHalf2x16(word >> 16).x) : vec2(1.0, 0.0);
 }
