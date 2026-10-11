@@ -52,6 +52,8 @@ internal sealed partial class SponzaLoop
     private bool frameTracerFailed;
     private GpuBufferHandle[] rtShadowOrigins = Array.Empty<GpuBufferHandle>();
     private GpuBufferHandle[] rtShadowMasks = Array.Empty<GpuBufferHandle>();
+    // Per ray, its own direction toward the sun's disc (ShadowsSettings.SunDiscDegrees), per frame slot.
+    private GpuBufferHandle[] rtShadowDirections = Array.Empty<GpuBufferHandle>();
     // Isolated only: one sky ray per pixel, per frame slot.
     private GpuBufferHandle[] rtShadowSky = Array.Empty<GpuBufferHandle>();
     private bool RtSkyRays => rtShadows && rtIsolated;
@@ -126,12 +128,15 @@ internal sealed partial class SponzaLoop
             foreach (var b in rtShadowOrigins) device.DestroyGpuBuffer(b);
             foreach (var b in rtShadowMasks) device.DestroyGpuBuffer(b);
             foreach (var b in rtShadowSky) device.DestroyGpuBuffer(b);
+            foreach (var b in rtShadowDirections) device.DestroyGpuBuffer(b);
             var slots = device.MaxFramesInFlightCount;
             var header = MemoryMarshal.AsBytes(new uint[] { (uint)width, (uint)height, 1u, RtSkyRays ? 1u : 0u }.AsSpan()).ToArray();
             rtShadowOrigins = Enumerable.Range(0, slots)
                 .Select(s => Own(device.CreateGpuBuffer(width * height * 16, name: $"sponza.rt-shadow.origins{s}"))).ToArray();
             rtShadowMasks = Enumerable.Range(0, slots)
                 .Select(s => Own(device.CreateGpuBuffer(16 + width * height * 4, header, $"sponza.rt-shadow.mask{s}"))).ToArray();
+            rtShadowDirections = Enumerable.Range(0, slots)
+                .Select(s => Own(device.CreateGpuBuffer(width * height * 16, name: $"sponza.rt-shadow.directions{s}"))).ToArray();
             rtShadowSky = Enumerable.Range(0, RtSkyRays ? slots : 0)
                 .Select(s => Own(device.CreateGpuBuffer(width * height * 32, name: $"sponza.rt-shadow.sky{s}"))).ToArray();
             rtShadowSize = (width, height);
@@ -142,6 +147,9 @@ internal sealed partial class SponzaLoop
         var mask = rtShadowMasks[slot];
         GpuBufferHandle? sky = RtSkyRays ? rtShadowSky[slot] : null;
         var towardSun = -Vector3.Normalize(sunDirection);
+        // The sun's disc (ShadowsSettings.SunDiscDegrees): each ray toward its own point of it (rt_shadow_rays.comp).
+        var discTangent = SunDiscTangent;
+        var directions = rtShadowDirections[slot];
         var bounds = rayQueries.Nodes[0].Bounds;
         var reach = (bounds.Max - bounds.Min).Length();
         Matrix4x4.Invert(viewProjJittered, out var invViewProj);
@@ -154,6 +162,8 @@ internal sealed partial class SponzaLoop
                 new("uSun", new Vector4Uniform(new Vector4(towardSun, reach))),
                 new("uSky", new Vector4Uniform(new Vector4(sky is null ? 0f : 1f, rtShadowFrame % (1u << 24), 0f, 0f))),
                 new("uHalf", new Vector4Uniform(new Vector4(halfLightingNow ? 1f : 0f, sub.X, sub.Y, 0f))),
+                // The frame's number for the disc's sequence, kept small: a float's fraction holds at 2^16.
+                new("uDisc", new Vector4Uniform(new Vector4(discTangent, rtShadowFrame % 65536u, 0f, 0f))),
             },
             new[]
             {
@@ -161,15 +171,20 @@ internal sealed partial class SponzaLoop
                 new ShaderTextureBinding("uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
             },
             // Without sky rays the shader writes none, and the placeholder only fills the binding.
-            Buffers: new[] { new ShaderBufferBinding("RtShadowOrigins", origins), new ShaderBufferBinding("RtShadowSky", sky ?? RtShadowPlaceholder) }));
+            Buffers: new[]
+            {
+                new ShaderBufferBinding("RtShadowOrigins", origins), new ShaderBufferBinding("RtShadowSky", sky ?? RtShadowPlaceholder),
+                new ShaderBufferBinding("RtShadowDirections", directions),
+            }));
 
         // A new coin per frame for the partly covered (foliage), so TAA averages their shadows instead of freezing one draw.
         var tracer = frameTracer!;
         var count = width * height;
         var kind = rtCoverageCoin ? 1 : rtAlphaAb ? 1 + (int)(rtShadowFrame % 2) : 2;
         var seed = unchecked(rtShadowFrame++ * 0x9E3779B9u);
+        GpuBufferHandle? perRay = discTangent > 0f ? directions : null;
         graph.External(rtShadowTracePassHandle, sync => tracer.EncodeShadow(sync, origins, mask, 16, count, towardSun, seed, sky,
-            alphaTest: kind == 2, statSlot: kind));
+            alphaTest: kind == 2, statSlot: kind, directions: perRay));
         rtShadowFrames++;
 
         rtShadowBound = mask;

@@ -28,8 +28,10 @@ internal sealed partial class SponzaLoop
     private static (int Width, int Height) HalfLightingSize(int width, int height) =>
         (Math.Max(1, width / 2), Math.Max(1, height / 2));
 
-    private void RecordLightingUpsample(Matrix4x4 invProjection, Matrix4x4 invView)
+    private void RecordLightingUpsample(Matrix4x4 invProjection, Matrix4x4 invView, int frameHeight)
     {
+        // A full-res pixel's angular size at the centre of the view: the penumbra filter's pixels per metre of shadow.
+        var pixelAngle = 2f / (MathF.Max(MathF.Abs(cameraProjection.M22), 1e-6f) * Math.Max(frameHeight, 1));
         var sub = LightingSubpixel;
         // The mask the lit pass would bind: this frame's half-res one, the pending one (the sun off), or the placeholder
         // (no traced shadows: the lit pass asks the cascades and never reads the w this writes).
@@ -48,8 +50,13 @@ internal sealed partial class SponzaLoop
             {
                 new("uInvProjection", new Matrix4x4Uniform(invProjection)),
                 new("uInvView", new Matrix4x4Uniform(invView)),
-                new("uHalf", new Vector4Uniform(new Vector4(1f, sub.X, sub.Y, 0f))),
+                new("uHalf", new Vector4Uniform(new Vector4(1f, sub.X, sub.Y, SunDiscTangent))),
+                new("uPixel", new Vector4Uniform(new Vector4(pixelAngle, 0f, 0f, 0f))),
             },
             buffers: new[] { new ShaderBufferBinding("RtShadowMask", mask) }));
     }
+
+    // ShadowsSettings.SunDiscDegrees: the tangent of the sun's angular radius (0: a point sun). The traced shadows aim each
+    // ray at its own point of the disc (rt_shadow_rays.comp); lighting_upsample.frag sizes the penumbra filter from it.
+    private float SunDiscTangent => MathF.Tan(MathF.Max(shadows.SunDiscDegrees, 0f) * 0.5f * MathF.PI / 180f);
 }

@@ -1051,6 +1051,10 @@ internal sealed class ShadowsSettings
 {
     [Tune]            public bool Enabled = true;
     [Tune(10f, 120f)] public float SunDistance = 40f;
+    // --rt-shadows: the sun's angular diameter the traced shadows see, in degrees (the real sun's is 0.53). Each frame
+    // the rays aim at another point of the disc and TAA averages them: a penumbra that widens with the distance from
+    // the occluder, hard at contact. 0: a point sun, every shadow hard (as before).
+    [Tune(0f, 5f)]    public float SunDiscDegrees = 0.53f;
 }
 
 // Ambient-visibility tunables (overlay "Ambient" group).

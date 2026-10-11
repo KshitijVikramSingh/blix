@@ -321,16 +321,19 @@ public sealed class MetalRayTracer : IDisposable
     /// </remarks>
     /// <param name="limit">Optional: a uint the GPU wrote earlier in the frame (at <paramref name="limitOffset"/>), the live
     /// count; the rays past it are neither traced nor answered. A wavefront sized by its budget then costs what it holds.</param>
+    /// <param name="directions">Optional: a float4 per ray, its own direction (xyz), in place of
+    /// <paramref name="towardLight"/>.</param>
     public unsafe void EncodeShadow(ExternalWorkSync sync, GpuBufferHandle origins, GpuBufferHandle occluded, long occludedOffset,
         int count, Vector3 towardLight, uint seedBase, GpuBufferHandle? skyRays = null, bool alphaTest = false, int statSlot = 0,
-        GpuBufferHandle? limit = null, long limitOffset = 0)
+        GpuBufferHandle? limit = null, long limitOffset = 0, GpuBufferHandle? directions = null)
     {
         ObjectDisposedException.ThrowIf(ctx == 0, this);
         var direction = stackalloc float[3] { towardLight.X, towardLight.Y, towardLight.Z };
         HwxNative.hwx_encode_shadow(ctx, sync.MetalSharedEvent, sync.WaitValue, sync.SignalValue,
             device.ExportMetalBuffer(origins), 0, device.ExportMetalBuffer(occluded), (ulong)occludedOffset,
             (uint)Math.Max(count, 0), direction, seedBase, skyRays is { } sky ? device.ExportMetalBuffer(sky) : 0, alphaTest ? 1u : 0u,
-            (uint)Math.Clamp(statSlot, 0, 3), limit is { } l ? device.ExportMetalBuffer(l) : 0, (ulong)limitOffset);
+            (uint)Math.Clamp(statSlot, 0, 3), limit is { } l ? device.ExportMetalBuffer(l) : 0, (ulong)limitOffset,
+            directions is { } d ? device.ExportMetalBuffer(d) : 0);
     }
 
     /// <summary>

@@ -861,7 +861,7 @@ internal sealed partial class SponzaLoop
                 {
                     var (halfWidth, halfHeight) = HalfLightingSize(frame.Width, frame.Height);
                     RecordIncidentClipmap(incidentInvProj, incidentInvView, halfWidth, halfHeight, frame.Width, frame.Height, half: true);
-                    RecordLightingUpsample(incidentInvProj, incidentInvView);
+                    RecordLightingUpsample(incidentInvProj, incidentInvView, frame.Height);
                 }
                 else RecordIncidentClipmap(incidentInvProj, incidentInvView, frame.Width, frame.Height, frame.Width, frame.Height);
             }
