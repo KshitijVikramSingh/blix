@@ -70,13 +70,14 @@ internal sealed partial class SponzaLoop
     private static float SeedBits(uint seed) => BitConverter.UInt32BitsToSingle(seed);
 
     // With frame rays on Metal, `on` answers (the bake scene's tracer, for the texels' gathers), else the frame's.
+    // limit (Metal only): a uint the frame wrote before the batch, its live count; the software kernel traces all count.
     private void RecordClosestBatch(RayBatchPasses passes, GpuBufferHandle rays, GpuBufferHandle hits, int count, uint seedBase,
-        MetalRayTracer? on = null)
+        MetalRayTracer? on = null, GpuBufferHandle? limit = null)
     {
         if (count <= 0) return;
         if (FrameRaysOnHardware && (on ?? (EnsureFrameTracer() ? frameTracer : null)) is { } tracer)
         {
-            graph.External(passes.Hardware, sync => tracer.EncodeTrace(sync, rays, 0, hits, 0, count, seedBase));
+            graph.External(passes.Hardware, sync => tracer.EncodeTrace(sync, rays, 0, hits, 0, count, seedBase, limit));
             return;
         }
         var declared = batchClosestInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
@@ -88,12 +89,12 @@ internal sealed partial class SponzaLoop
     }
 
     private void RecordShadowBatch(RayBatchPasses passes, GpuBufferHandle origins, GpuBufferHandle occluded, int count, Vector3 towardLight, uint seedBase,
-        MetalRayTracer? on = null)
+        MetalRayTracer? on = null, GpuBufferHandle? limit = null)
     {
         if (count <= 0) return;
         if (FrameRaysOnHardware && (on ?? (EnsureFrameTracer() ? frameTracer : null)) is { } tracer)
         {
-            graph.External(passes.Hardware, sync => tracer.EncodeShadow(sync, origins, occluded, 0, count, towardLight, seedBase));
+            graph.External(passes.Hardware, sync => tracer.EncodeShadow(sync, origins, occluded, 0, count, towardLight, seedBase, limit: limit));
             return;
         }
         var declared = batchShadowInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();

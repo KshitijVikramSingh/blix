@@ -319,15 +319,18 @@ public sealed class MetalRayTracer : IDisposable
     /// Never throws for a bad argument: the frame waits for the signal, so the work is skipped, the signal still sent,
     /// and the failure counted in <see cref="ShadowStats"/>. Coverage and geometry are what <see cref="Build"/> saw.
     /// </remarks>
+    /// <param name="limit">Optional: a uint the GPU wrote earlier in the frame (at <paramref name="limitOffset"/>), the live
+    /// count; the rays past it are neither traced nor answered. A wavefront sized by its budget then costs what it holds.</param>
     public unsafe void EncodeShadow(ExternalWorkSync sync, GpuBufferHandle origins, GpuBufferHandle occluded, long occludedOffset,
-        int count, Vector3 towardLight, uint seedBase, GpuBufferHandle? skyRays = null, bool alphaTest = false, int statSlot = 0)
+        int count, Vector3 towardLight, uint seedBase, GpuBufferHandle? skyRays = null, bool alphaTest = false, int statSlot = 0,
+        GpuBufferHandle? limit = null, long limitOffset = 0)
     {
         ObjectDisposedException.ThrowIf(ctx == 0, this);
         var direction = stackalloc float[3] { towardLight.X, towardLight.Y, towardLight.Z };
         HwxNative.hwx_encode_shadow(ctx, sync.MetalSharedEvent, sync.WaitValue, sync.SignalValue,
             device.ExportMetalBuffer(origins), 0, device.ExportMetalBuffer(occluded), (ulong)occludedOffset,
             (uint)Math.Max(count, 0), direction, seedBase, skyRays is { } sky ? device.ExportMetalBuffer(sky) : 0, alphaTest ? 1u : 0u,
-            (uint)Math.Clamp(statSlot, 0, 3));
+            (uint)Math.Clamp(statSlot, 0, 3), limit is { } l ? device.ExportMetalBuffer(l) : 0, (ulong)limitOffset);
     }
 
     /// <summary>
@@ -335,13 +338,14 @@ public sealed class MetalRayTracer : IDisposable
     /// traces <paramref name="count"/> rays in <see cref="Trace"/>'s formats (the any-hit trace skipped), and signals the
     /// rest of the frame on. Returns without waiting; never throws for a bad argument (counted in <see cref="TraceStats"/>).
     /// </summary>
+    /// <param name="limit">Optional: the live count, as <see cref="EncodeShadow"/>'s.</param>
     public unsafe void EncodeTrace(ExternalWorkSync sync, GpuBufferHandle rays, long raysOffset, GpuBufferHandle hits, long hitsOffset,
-        int count, uint seedBase)
+        int count, uint seedBase, GpuBufferHandle? limit = null, long limitOffset = 0)
     {
         ObjectDisposedException.ThrowIf(ctx == 0, this);
         HwxNative.hwx_encode_trace(ctx, sync.MetalSharedEvent, sync.WaitValue, sync.SignalValue,
             device.ExportMetalBuffer(rays), (ulong)raysOffset, device.ExportMetalBuffer(hits), (ulong)hitsOffset,
-            (uint)Math.Max(count, 0), seedBase);
+            (uint)Math.Max(count, 0), seedBase, limit is { } l ? device.ExportMetalBuffer(l) : 0, (ulong)limitOffset);
     }
 
     /// <summary>What the in-frame closest-hit dispatches (<see cref="EncodeTrace"/>) have cost, from their own GPU times.</summary>

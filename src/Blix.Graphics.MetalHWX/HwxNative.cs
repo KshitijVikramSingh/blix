@@ -59,14 +59,14 @@ internal static unsafe class HwxNative
     [DllImport(Library)]
     public static extern int hwx_encode_shadow(nint ctx, nint sharedEvent, ulong waitValue, ulong signalValue,
         nint origins, ulong originsOffset, nint occluded, ulong occludedOffset, uint count, float* direction, uint seedBase, nint skyRays,
-        uint alphaTest, uint statSlot);
+        uint alphaTest, uint statSlot, nint limit, ulong limitOffset);
 
     [DllImport(Library)]
     public static extern void hwx_shadow_stats(nint ctx, uint slot, ulong* dispatches, ulong* totalGpuNs, ulong* lastGpuNs, ulong* failures);
 
     [DllImport(Library)]
     public static extern int hwx_encode_trace(nint ctx, nint sharedEvent, ulong waitValue, ulong signalValue,
-        nint rays, ulong raysOffset, nint hits, ulong hitsOffset, uint count, uint seedBase);
+        nint rays, ulong raysOffset, nint hits, ulong hitsOffset, uint count, uint seedBase, nint limit, ulong limitOffset);
 
     [DllImport(Library)]
     public static extern void hwx_trace_stats(nint ctx, ulong* dispatches, ulong* totalGpuNs, ulong* lastGpuNs, ulong* failures);

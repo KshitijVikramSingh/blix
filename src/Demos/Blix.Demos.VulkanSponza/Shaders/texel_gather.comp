@@ -29,7 +29,8 @@ layout(set = 0, binding = 0) uniform TexelGather {
     vec4 uCookedGrid;
     vec4 uCookedDims;
     vec4 uWave;           // x the phase: 0 the gather traced inline; as a wavefront (SponzaLoop.Texels.cs) 3 rays out,
-                          // 4 their hits shaded, 5 the answers gathered
+                          // 4 their hits shaded, 5 the answers gathered; y 1: the batches stop at TexelWaveLimit (Metal),
+                          // so the empty slots past it need no zeroed rays
 } u;
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
@@ -71,6 +72,10 @@ layout(std430, set = 0, binding = 25) readonly buffer GatherHits { uvec4 gatherH
 layout(std430, set = 0, binding = 26) buffer GatherRayState { vec4 gatherState[]; };
 layout(std430, set = 0, binding = 27) buffer GatherShadowOrigins { vec4 gatherOrigins[]; };    // the SHADOW batch's origins
 layout(std430, set = 0, binding = 28) readonly buffer GatherOccluded { uint gatherOccluded[]; }; // and its answers
+// The wavefront's live rays this frame (phase 3 writes it: the queued texels the dispatch holds, 32 rays each, from
+// slot 0 -- the lists fill the groups in order): the batches trace that many and no more, so a frame whose mark queued
+// nothing traces nothing, whatever the budget.
+layout(std430, set = 0, binding = 29) buffer TexelWaveLimit { uint texelWaveLimit[]; };
 
 #define COOKED_BINDING 6
 #define COOKED_GRID u.uCookedGrid
@@ -128,6 +133,11 @@ void main() {
     uint slot = group * uint(RAYS) + gl_LocalInvocationID.x;
     // Once a frame: by the first phase, before any reads the lists.
     if (mode <= 3 && group == 0u && gl_LocalInvocationID.x < 4u) texelQueue[(parity ^ 1u) * 4u + gl_LocalInvocationID.x] = 0u;
+    if (mode == 3 && group == 0u && gl_LocalInvocationID.x == 0u) {
+        uint queued = 0u;
+        for (uint list = 0u; list < 4u; ++list) queued += min(texelQueue[parity * 4u + list], capacity);
+        texelWaveLimit[0] = min(queued, gl_NumWorkGroups.x) * uint(RAYS);
+    }
     // Which texel: the lists in order, each clamped to what it holds.
     int id = -1;
     uint i = group;
@@ -137,7 +147,7 @@ void main() {
         else i -= count;
     }
     if (id < 0) {   // the whole workgroup: id is uniform across it
-        if (mode == 3) {   // its slots: no ray, no shadow ray
+        if (mode == 3 && u.uWave.y < 0.5) {   // its slots: no ray, no shadow ray (past the limit, nothing reads them)
             gatherRays[slot * 2u] = vec4(0.0);
             gatherRays[slot * 2u + 1u] = vec4(0.0);
             gatherOrigins[slot] = vec4(0.0);
