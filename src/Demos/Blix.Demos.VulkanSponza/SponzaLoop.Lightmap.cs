@@ -37,13 +37,12 @@ internal sealed partial class SponzaLoop
     // let a visible texel's slanting rays into the arch above, its inside faces ~0.5-1 m up, and buried it; a texel
     // gone past a joint into the next solid meets that solid's faces close by, and stays buried.
     private float lightmapBuriedReach = 0.3f;
-    // --lightmap-buried-lift M: how far off its texel the test's rays start. The texels sit on LOD 0 (the atlas is
-    // rasterized from it); the ray scene is simplified up to rayLodError, and on a concave curve (an arch's soffit, a
-    // moulding) its chords pass in front of LOD 0: a texel lifted 1 mm started behind its own mesh's coarse surface, met
-    // its back face within a centimetre on almost every ray, and was buried in plain view -- the red and black tears
-    // along Sponza's arches. Default: the LOD error and a millimetre.
+    // --lightmap-buried-lift M: how far off its texel the test's rays start. Against the bake scene (full detail, the
+    // surfaces the texels sit on) a millimetre. Against the frame's scene, simplified up to rayLodError, the LOD error
+    // and a millimetre: on a concave curve its chords pass in front of LOD 0, and a texel lifted 1 mm started behind its
+    // own mesh's coarse surface and was buried in plain view (the red tears along Sponza's arches).
     private float? lightmapBuriedLiftAsked;
-    private float LightmapBuriedLift => lightmapBuriedLiftAsked ?? rayLodError + 0.001f;
+    private float LightmapBuriedLift => lightmapBuriedLiftAsked ?? (BakeSceneWanted ? 0.001f : rayLodError + 0.001f);
     // --lightmap-buried-why: for buried records near the camera, what their test rays met (SponzaLoop.Lightmap.cs).
     private bool lightmapBuriedWhy;
     // The test's rays a record: 64 where Metal answers them (the edge between kept and buried was speckled at 16), 16
@@ -220,7 +219,7 @@ internal sealed partial class SponzaLoop
             // On Metal when frame rays are (the frame tracer, built a few frames in; this runs on the cook's thread):
             // ~210 M rays in about a second, against ~3 minutes on the CPU.
             var buriedClock = Stopwatch.StartNew();
-            var metal = buriedCached ? null : WaitForFrameTracer();
+            var metal = buriedCached ? null : WaitForBakeTracer();
             if (metal is not null)
             {
                 flags = metal.TestBuried(texels.AsSpan(0, count * 2), LightmapBuriedTests, LightmapBuriedThreshold, lightmapBuriedReach, LightmapBuriedLift, 173u,

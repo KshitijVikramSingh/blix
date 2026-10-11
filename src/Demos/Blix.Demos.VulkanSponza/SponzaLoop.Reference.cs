@@ -78,6 +78,7 @@ internal sealed partial class SponzaLoop
         if (input[Key.G].Pressed)
         {
             referenceView = !referenceView;
+            if (referenceView) RestoreRayTraversal("the reference view traces in GLSL");
             referenceSamples = 0;
             Console.WriteLine($"[VulkanSponza] reference view {(referenceView ? "on" : "off")} (G)");
         }

@@ -40,8 +40,10 @@ internal sealed partial class SponzaLoop
     // Bistro 0.0050) for 506 MB on the GPU rather than 781 (Sponza).
     private float rayLodError = 0.02f;
 
-    private RayMesh[] BuildRayMeshes(List<DrawableStaging> ordered)
+    // At each mesh's coarsest level within lodError (null: rayLodError; 0: full detail -- the bake scene's).
+    private RayMesh[] BuildRayMeshes(List<DrawableStaging> ordered, float? lodError = null)
     {
+        var lodLimit = lodError ?? rayLodError;
         var stride = sharedLayout.Stride;
         var semantics = Blix.Graphics.VertexSemantics.Of(sharedLayout);
         var position = semantics?.Position ?? 0;
@@ -62,9 +64,9 @@ internal sealed partial class SponzaLoop
             var scale = s.Worlds.Select(w => MathF.Max(new Vector3(w.M11, w.M12, w.M13).Length(),
                 MathF.Max(new Vector3(w.M21, w.M22, w.M23).Length(), new Vector3(w.M31, w.M32, w.M33).Length()))).DefaultIfEmpty(1f).Max();
             var level = 0;
-            for (var l = 1; l < s.Lods.Count && rayLodError > 0f; l++)
+            for (var l = 1; l < s.Lods.Count && lodLimit > 0f; l++)
             {
-                if (s.Lods[l].Error * scale <= rayLodError) level = l;
+                if (s.Lods[l].Error * scale <= lodLimit) level = l;
                 else break;
             }
             var lod = s.Lods[level];
@@ -117,17 +119,30 @@ internal sealed partial class SponzaLoop
     // blocks, and the surface bake's inputs.
     private ShaderBufferBinding[] rayBlockBuffers = Array.Empty<ShaderBufferBinding>();
 
+    // The software traversal's node blocks (TopNodes, Nodes) are needed only by what traces in GLSL (ray_query.glsl).
+    // With frame rays on Metal every wavefront's batch goes to Metal, and unless one of these traces inline the nodes are
+    // left out (placeholders bound; ~220 MB on Sponza). The G key's reference view and a Metal tracer that fails bring
+    // them back first (RestoreRayTraversal).
+    private bool rayTraversalDropped;
+    private bool SoftwareTraversalNeeded => !FrameRaysOnHardware || clipmapInline || clipmapExactVisibility || screenProbesEnabled
+        || rayView || rayCheck || gpuReference || referenceMonolithic || referenceView;
+
     private void BuildRayGpu()
     {
         var data = RayQueryGpuData.Pack(rayQueries!);
         rayGpuData = data;
         var blocks = data.Blocks();
         var buffers = new List<ShaderBufferBinding>();
+        rayTraversalDropped = !SoftwareTraversalNeeded;
         for (var b = 0; b < blocks.Length; b++)
         {
+            var content = rayTraversalDropped && b is 0 or 2 ? new byte[16] : blocks[b];
             buffers.Add(new ShaderBufferBinding(RayQueryGpuData.BlockNames[b],
-                Own(device.CreateGpuBuffer(Math.Max(16, blocks[b].Length), blocks[b], $"sponza.{RayQueryGpuData.BlockNames[b]}"))));
+                Own(device.CreateGpuBuffer(Math.Max(16, content.Length), content, $"sponza.{RayQueryGpuData.BlockNames[b]}"))));
         }
+        if (rayTraversalDropped)
+            Console.WriteLine(string.Create(Inv,
+                $"[VulkanSponza] ray scene: the software traversal's nodes left off the GPU ({(blocks[0].Length + blocks[2].Length) / 1048576.0:0} MB): every trace goes to Metal."));
         raySurfaces = buffers[^1].Buffer;
 
         // The surface bake's inputs: every triangle row grouped by its placement's material, one run per material.
@@ -156,6 +171,19 @@ internal sealed partial class SponzaLoop
         rayBlockBuffers = buffers.ToArray();
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] ray scene on the GPU: {data.SizeInBytes / 1048576.0:0.0} MB ({data.Nodes.Length:N0} mesh nodes, {data.Triangles.Length / 4:N0} triangles, {data.Positions.Length:N0} vertices, {data.Instances.Length:N0} entries)."));
+    }
+
+    // The node blocks back on the GPU, for a trace in GLSL after all. Every binding is by name from rayBlockBuffers, so
+    // the next frame's dispatches take them.
+    private void RestoreRayTraversal(string why)
+    {
+        if (!rayTraversalDropped || rayGpuData is null) return;
+        var blocks = rayGpuData.Blocks();
+        foreach (var b in new[] { 0, 2 })
+            rayBlockBuffers[b] = new ShaderBufferBinding(RayQueryGpuData.BlockNames[b],
+                Own(device.CreateGpuBuffer(Math.Max(16, blocks[b].Length), blocks[b], $"sponza.{RayQueryGpuData.BlockNames[b]}")));
+        rayTraversalDropped = false;
+        Console.WriteLine($"[VulkanSponza] ray scene: the software traversal's nodes restored ({why}).");
     }
 
     private void BuildRayCheck()

@@ -219,6 +219,19 @@ public sealed class MetalRayTracer : IDisposable
         return result;
     }
 
+    /// <summary>The device's GPU memory in MB: allocated by every client (Vulkan's included), and the working set Metal
+    /// recommends staying under before it pages.</summary>
+    public unsafe (double AllocatedMb, double RecommendedMb) Memory
+    {
+        get
+        {
+            ObjectDisposedException.ThrowIf(ctx == 0, this);
+            ulong allocated, recommended;
+            HwxNative.hwx_memory(ctx, &allocated, &recommended);
+            return (allocated / 1048576.0, recommended / 1048576.0);
+        }
+    }
+
     /// <summary>A material's alpha test, as the raster draws it: its albedo texture's alpha times a factor, against a cutoff.</summary>
     public readonly record struct AlphaMaterial(TextureHandle Albedo, float Cutoff, float AlphaFactor);
 

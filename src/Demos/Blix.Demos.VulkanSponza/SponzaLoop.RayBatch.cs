@@ -1,6 +1,7 @@
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Blix.Graphics;
+using Blix.Graphics.MetalHWX;
 
 namespace Blix.Demos.VulkanSponza;
 
@@ -68,12 +69,13 @@ internal sealed partial class SponzaLoop
     // The seed travels as its bits in a float (a vec4 uniform): exact, which a float's value would not be past 2^24.
     private static float SeedBits(uint seed) => BitConverter.UInt32BitsToSingle(seed);
 
-    private void RecordClosestBatch(RayBatchPasses passes, GpuBufferHandle rays, GpuBufferHandle hits, int count, uint seedBase)
+    // With frame rays on Metal, `on` answers (the bake scene's tracer, for the texels' gathers), else the frame's.
+    private void RecordClosestBatch(RayBatchPasses passes, GpuBufferHandle rays, GpuBufferHandle hits, int count, uint seedBase,
+        MetalRayTracer? on = null)
     {
         if (count <= 0) return;
-        if (FrameRaysOnHardware && EnsureFrameTracer())
+        if (FrameRaysOnHardware && (on ?? (EnsureFrameTracer() ? frameTracer : null)) is { } tracer)
         {
-            var tracer = frameTracer!;
             graph.External(passes.Hardware, sync => tracer.EncodeTrace(sync, rays, 0, hits, 0, count, seedBase));
             return;
         }
@@ -85,12 +87,12 @@ internal sealed partial class SponzaLoop
                 .Where(b => declared.Contains(b.Name)).ToArray()));
     }
 
-    private void RecordShadowBatch(RayBatchPasses passes, GpuBufferHandle origins, GpuBufferHandle occluded, int count, Vector3 towardLight, uint seedBase)
+    private void RecordShadowBatch(RayBatchPasses passes, GpuBufferHandle origins, GpuBufferHandle occluded, int count, Vector3 towardLight, uint seedBase,
+        MetalRayTracer? on = null)
     {
         if (count <= 0) return;
-        if (FrameRaysOnHardware && EnsureFrameTracer())
+        if (FrameRaysOnHardware && (on ?? (EnsureFrameTracer() ? frameTracer : null)) is { } tracer)
         {
-            var tracer = frameTracer!;
             graph.External(passes.Hardware, sync => tracer.EncodeShadow(sync, origins, occluded, 0, count, towardLight, seedBase));
             return;
         }

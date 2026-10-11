@@ -102,7 +102,8 @@ internal sealed partial class SponzaLoop
                 $"[VulkanSponza] transfer capture: {transferWave.PointCount:N0} texels, {transferPaths} paths x {refBounces} bounces each, {transferWave.Count:N0} lanes, ~{ReferenceWaveFrames(transferWave)} frames ({(FrameRaysOnHardware ? "Metal" : "software")})."));
         }
         var captured = transferWave is null || texelFrame - transferWaveStart >= (uint)ReferenceWaveFrames(transferWave);
-        if (!captured) RecordReferenceWave(transferWave!);
+        // The texels' truth against the scene their light was gathered in: the bake scene where there is one.
+        if (!captured) RecordReferenceWave(transferWave!, BakeTracer);
         if (texelFrame - transferBakeDoneFrame < TransferSettleFrames || !captured) return;
         var path = transferDumpPath;
         transferDumpPath = null;

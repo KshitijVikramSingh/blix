@@ -419,6 +419,7 @@ internal sealed partial class SponzaLoop
 
         SelectMover(rayInstances);
         BuildRayScene(rayMeshes, rayInstances);
+        StartBakeScene(ordered);
         WriteSurfaceKeyCensus(ordered, surfaceKeys.Count);
 
         // lit.vert carries normals by the model's linear part, exact for rotation and uniform scale. Said

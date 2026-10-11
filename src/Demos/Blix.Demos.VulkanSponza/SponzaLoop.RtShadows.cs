@@ -189,6 +189,7 @@ internal sealed partial class SponzaLoop
         {
             Console.WriteLine($"[VulkanSponza] metal tracer: unavailable, {reason}; rays stay on the software traversal.");
             frameTracerFailed = true;
+            RestoreRayTraversal("no Metal tracer");
             return false;
         }
         var surfaceWords = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(raySurfaces, 0, rayGpuData!.RowPlacements.Length * 4).AsSpan()).ToArray();

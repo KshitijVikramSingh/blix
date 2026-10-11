@@ -794,3 +794,10 @@ HWX_EXPORT int hwx_buried(HwxContext* ctx, const float* records, uint32_t count,
         return 0;
     }
 }
+
+// The device's GPU memory: what Metal has allocated in all (every client of the device, Vulkan's included), and the
+// working set it recommends staying under before it pages.
+HWX_EXPORT void hwx_memory(HwxContext* ctx, uint64_t* allocated, uint64_t* recommended) {
+    *allocated = ctx->device.currentAllocatedSize;
+    *recommended = ctx->device.recommendedMaxWorkingSetSize;
+}

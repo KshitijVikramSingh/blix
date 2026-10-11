@@ -76,6 +76,9 @@ internal static unsafe class HwxNative
         uint* rowMaterial, uint rowCount, nint uvs, float mip);
 
     [DllImport(Library)]
+    public static extern void hwx_memory(nint ctx, ulong* allocated, ulong* recommended);
+
+    [DllImport(Library)]
     public static extern int hwx_buried(nint ctx, float* records, uint count, uint tests, uint threshold, uint seed, float reach,
         float lift, byte* doubleSided, uint placementCount, byte* buried, double* gpuMs);
 

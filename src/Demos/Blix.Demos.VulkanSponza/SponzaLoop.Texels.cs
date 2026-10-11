@@ -468,6 +468,8 @@ internal sealed partial class SponzaLoop
         if (!texelsUploaded || rayBlockBuffers.Length == 0) return;
         FollowSun();
         SaveLightBakeWhenDone();
+        // The atlas's light is gathered against the bake scene (SponzaLoop.BakeScene.cs) once it is there, never before.
+        if (BakeSceneWanted && BakeTracer is null && !bakeTracerFailed && !bakeSceneReleased) return;
         TransferDumpWhenDone();
         var texelParams = new Vector4(texelCapacity, texelBudget, texelTarget, texelFrame);
         // While the light bakes (SponzaLoop.LightBake.cs) its slice takes the queue the mark would fill, at its budget.
@@ -586,9 +588,9 @@ internal sealed partial class SponzaLoop
             var rayCount = gatherBudget * 32;
             var seed = unchecked(texelFrame * 0x9E3779B9u + 0x7F4A7C15u);
             graph.Dispatch(texelRaysPassHandle, Gather(3));
-            RecordClosestBatch(texelClosestBatch, texelWaveRays, texelWaveHits, rayCount, seed);
+            RecordClosestBatch(texelClosestBatch, texelWaveRays, texelWaveHits, rayCount, seed, BakeTracer);
             graph.Dispatch(texelShadePassHandle, Gather(4));
-            RecordShadowBatch(texelShadowBatch, texelWaveOrigins, texelWaveOccluded, rayCount, -Vector3.Normalize(sunDirection), seed ^ 0x5bd1e995u);
+            RecordShadowBatch(texelShadowBatch, texelWaveOrigins, texelWaveOccluded, rayCount, -Vector3.Normalize(sunDirection), seed ^ 0x5bd1e995u, BakeTracer);
             graph.Dispatch(texelGatherPassHandle, Gather(5));
         }
         else
