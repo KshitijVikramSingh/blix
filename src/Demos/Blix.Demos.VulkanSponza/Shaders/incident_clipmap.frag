@@ -373,7 +373,8 @@ void main() {
     bool texelFound = false;
     pixelLightmapTexel = g.uLightmap.x > 0.5 ? texelFetch(uLightmapTexel, pixel, 0).r : 0u;
     vec3 transferred;
-    if (g.uTransfer.x > 0.5 && g.uClipParams.y < 0.5 && transferAt(c, N, transferred)) outIncident.rgb = transferred;
+    bool transferUsed = g.uTransfer.x > 0.5 && g.uClipParams.y < 0.5 && transferAt(c, N, transferred);
+    if (transferUsed) outIncident.rgb = transferred;
     if (g.uTexelParams.y > 0.5 && g.uTransfer.x < 0.5 && g.uClipParams.y < 0.5 && texelsAt(worldPos, N, nSample.w, viewDepth, gathered, confidence)) {
         outIncident.rgb = mix(outIncident.rgb, gathered, confidence);
         texelFound = true;
@@ -402,4 +403,6 @@ void main() {
         vec3 relative = (t1 * (dot(e1, luma) - lum0) + t2 * (dot(e2, luma) - lum0)) / (s * lum0);
         outIncidentGradient = vec4(relative * dot(outIncident.rgb, luma), 0.0);
     }
+    // w: 1 where the transfer answered (lit.frag reads only xyz) -- the shot counts them (WriteGpuSurfaceReference).
+    outIncidentGradient.w = transferUsed ? 1.0 : 0.0;
 }
