@@ -32,6 +32,7 @@ namespace Blix.Demos.VulkanSponza;
 internal sealed partial class SponzaLoop
 {
     private bool rtShadows;
+    private readonly (bool Half, int X, int Y)[] rtShadowSlotPixel = new (bool, int, int)[8];
     private bool rtNoOverlap;
     // --metal-device-queue: the Metal tracers on the Vulkan device's own command queue rather than one of their own. A
     // Sponza frame idles 7-19 ms around each hand-off between the two queues (Metal System Trace), and one queue was the
@@ -128,6 +129,8 @@ internal sealed partial class SponzaLoop
         // (SponzaLoop.HalfLighting.cs); lighting_upsample.frag brings the mask back to full resolution.
         if (halfLightingNow) (width, height) = HalfLightingSize(width, height);
         var sub = LightingSubpixel;
+        // Which full-res pixel each slot's rays started from (the lightlet census reads them back, SponzaLoop.LightletCensus).
+        rtShadowSlotPixel[device.CurrentFrameSlot] = (halfLightingNow, sub.X, sub.Y);
         if (rtShadowSize != (width, height))
         {
             // Sized with the window; a resize waits for the device like every other resize here.

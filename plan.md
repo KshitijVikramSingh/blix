@@ -954,6 +954,16 @@ F. *The frame audit* (opened 2026-10-07: "a lot of pure performance on the table
      Phases, each gated on a measurement:
      (0) the band in SceneProfile; bake the sun records; census -- non-uniform cells, memory, NEEDS-A-RAY fraction of
          half-res pixels over suns across the band at several cameras incl. the tree. Gate: fits memory, < ~10%.
+         Census done first, no bake (--lightlet-census at a shot): per half-res pixel 4 points over a 4 cm footprint,
+         toward 16 suns across the band (40 N, winter / equinox / summer x hour +-60, and the authored sun) and rings
+         0.25-4 deg around each; a pixel's MARGIN is the first ring that disagrees. Share of pixels needing a ray for a
+         record of error e = margin under e. Mean over the band, margin under 0.5 / 1 / 2 deg: hall (default camera)
+         1.3 / 1.7 / 2.4%, the user's camera 1.0 / 1.5 / 2.2, tree close-up 2.4 / 3.0 / 3.9, arcade 0.2 / 0.3 / 0.4 --
+         the mean passes everywhere. The worst sun is high summer (the authored one, 74.5 deg): 9.9 / 12.7% (hall), 18.9
+         / 22.2 (tree), because the floor is lit only through the atrium's opening, within a degree of the walls' shadow
+         boundary; the tree view adds 9.1% of mixed foliage footprints. Low and mid suns: ~0-3%. Open: the RECORD's real
+         error (a signed distance is near-exact along straight occluder edges, which are smooth curves over directions;
+         corners are its weakness) -- phase 0b measures it before the bake is built.
      (1) the lit pass from the records + rays for the list (Metal first), a toggle in the overlay. Gate: a SCENE-image
          diff (the .scene.png, not the presented debug view) against the full trace at several band positions; --ab.
      (2) rays and probe batches on the software traversal. Gate: the zero-hand-off frame by --ab; the diff again.
