@@ -964,6 +964,16 @@ F. *The frame audit* (opened 2026-10-07: "a lot of pure performance on the table
          boundary; the tree view adds 9.1% of mixed foliage footprints. Low and mid suns: ~0-3%. Open: the RECORD's real
          error (a signed distance is near-exact along straight occluder edges, which are smooth curves over directions;
          corners are its weakness) -- phase 0b measures it before the bake is built.
+         Phase 0b (--lightlet-record at a shot; hall camera, 33,326 sampled surface points, truth at every node by rings
+         0.125-8 deg, 64 test suns across the band incl. 35-45 N): 50.5% of points are UNIFORM over the whole band (2
+         bits, no grid). The rest, 4-bit codes, tau = the |interpolated| under which a pixel traces; "wrong" = certain
+         and the sign is wrong (a visible error):
+           fine 31x15 (233 B)    tau 1: need 0.88% wrong 0.013%   tau 2: need 1.53% wrong 0.001%
+           coarse 16x8 (64 B)    tau 1: need 0.73% wrong 0.164%   tau 2: need 1.34% wrong 0.050%  -- too wrong
+           ADAPTIVE (90 B)       identical to fine: the coarse grid, refined to fine nodes only in the coarse cells the
+                                 boundary crosses (a corner under the 8 deg cap) -- 10.2 of 105 a non-uniform point.
+         So the record is ADAPTIVE, 4-bit, tau 2 deg: ~1.5% of pixels trace (100% today), 0.001% misjudged; memory
+         ~23.7 M records x 49.5% x 90 B = ~1.05 GB (~0.7 GB if sunlets, indirect only, keep the coarse grid). Passes.
      (1) the lit pass from the records + rays for the list (Metal first), a toggle in the overlay. Gate: a SCENE-image
          diff (the .scene.png, not the presented debug view) against the full trace at several band positions; --ab.
      (2) rays and probe batches on the software traversal. Gate: the zero-hand-off frame by --ab; the diff again.

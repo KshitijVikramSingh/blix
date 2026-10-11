@@ -970,6 +970,7 @@ internal sealed partial class SponzaLoop
             WriteRayView(Path.ChangeExtension(path, null));
             WriteRtShadows(Path.ChangeExtension(path, null));
             WriteLightletCensus(Path.ChangeExtension(path, null));
+            WriteLightletRecordStudy();
             WriteFrameTracerStats();
             if (probeReference)
             {

@@ -162,6 +162,7 @@ internal sealed partial class SponzaLoop
         // --rt-shadows: the lit pass's sun shadows traced on Apple's ray tracing hardware (SponzaLoop.RtShadows).
         rtShadows = args.Flag("rt-shadows");
         lightletCensus = args.Flag("lightlet-census");
+        lightletRecord = args.Flag("lightlet-record");
         metalDeviceQueue = args.Flag("metal-device-queue");
         // --rt-no-overlap: no join, so the frame waits for the trace right after it (the overlap's control).
         rtNoOverlap = args.Flag("rt-no-overlap");

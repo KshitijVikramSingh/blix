@@ -44,6 +44,20 @@ internal sealed partial class SponzaLoop
             enu.Z,
             enu.X * MathF.Cos(theta) + enu.Y * MathF.Sin(theta)));
 
+    // North from the authored sun: the hour angle that gives its elevation at midsummer, 37 deg N (morning), and north
+    // turned so that sun's azimuth lands on the authored one.
+    private float BandNorth(out float authoredHour)
+    {
+        var authored = -Vector3.Normalize(sunDirection);
+        var elev = MathF.Asin(Math.Clamp(authored.Y, -1f, 1f));
+        float rad(float d) => d * MathF.PI / 180f;
+        var cosH = (MathF.Sin(elev) - MathF.Sin(rad(AuthoredLatitude)) * MathF.Sin(rad(Obliquity)))
+                   / (MathF.Cos(rad(AuthoredLatitude)) * MathF.Cos(rad(Obliquity)));
+        authoredHour = -MathF.Acos(Math.Clamp(cosH, -1f, 1f)) * 180f / MathF.PI;
+        var local = SunLocal(AuthoredLatitude, Obliquity, authoredHour);
+        return MathF.Atan2(authored.Z, authored.X) - MathF.Atan2(local.X, local.Y);
+    }
+
     private void WriteLightletCensus(string basePath)
     {
         if (!lightletCensus) return;
@@ -59,16 +73,8 @@ internal sealed partial class SponzaLoop
         var normalBytes = device.ReadTexture(graph.GetColorTexture(SampleablePrepassNormal), out var fw, out var fh, out _);
         var (half, sx, sy) = rtShadowSlotPixel[slot];
 
-        // North from the authored sun: solve the hour angle that gives its elevation at midsummer, 37 deg N (morning),
-        // then turn north so that sun's azimuth lands on the authored one.
-        var authored = -Vector3.Normalize(sunDirection);
-        var elev = MathF.Asin(Math.Clamp(authored.Y, -1f, 1f));
+        var theta = BandNorth(out var authoredHour);
         float rad(float d) => d * MathF.PI / 180f;
-        var cosH = (MathF.Sin(elev) - MathF.Sin(rad(AuthoredLatitude)) * MathF.Sin(rad(Obliquity)))
-                   / (MathF.Cos(rad(AuthoredLatitude)) * MathF.Cos(rad(Obliquity)));
-        var authoredHour = -MathF.Acos(Math.Clamp(cosH, -1f, 1f)) * 180f / MathF.PI;
-        var local = SunLocal(AuthoredLatitude, Obliquity, authoredHour);
-        var theta = MathF.Atan2(authored.Z, authored.X) - MathF.Atan2(local.X, local.Y);
 
         // Suns across the band: winter, equinox, summer x hour angles, above the minimum elevation; and the authored one.
         var suns = new List<(string Name, float Lat, float Dec, float Hour)> { ("authored", AuthoredLatitude, Obliquity, authoredHour) };
