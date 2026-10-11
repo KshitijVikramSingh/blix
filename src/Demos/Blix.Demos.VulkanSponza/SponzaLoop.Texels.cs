@@ -88,6 +88,17 @@ internal sealed partial class SponzaLoop
     private ShaderInterface texelMarkInterface = null!, texelGatherInterface = null!, texelFilterInterface = null!;
     private PassHandle texelMarkPassHandle, texelGatherPassHandle, texelFilterPassHandle;
     private PipelineHandle texelMarkPipeline, texelGatherPipeline, texelFilterPipeline;
+    // --texel-wavefront: the gather as a wavefront on the ray batches (SponzaLoop.RayBatch.cs; texel_gather phases 3-5),
+    // on the software traversal; with frame rays on Metal always, so Metal answers them (the light bake's too). The
+    // inline gather (phase 0) otherwise.
+    private bool texelWavefront;
+    private bool TexelsOnWavefront => texelWavefront || FrameRaysOnHardware;
+    private RayBatchPasses texelClosestBatch, texelShadowBatch;
+    private PassHandle texelRaysPassHandle, texelShadePassHandle;
+    // The wavefront's buffers, grown to the most texels a frame has asked for (placeholders while off: the program
+    // declares them either way).
+    private GpuBufferHandle texelWaveRays, texelWaveHits, texelWaveState, texelWaveOrigins, texelWaveOccluded;
+    private int texelWaveGroups = -1;
     // Texels the filter refreshes a frame at most (texel_filter.comp): the mark lists each texel the image reads once a
     // frame, a pixel in each 4 x 4 block -- ~15k a frame on Sponza's hall.
     private const int TexelFilterCapacity = 32768;
@@ -95,6 +106,7 @@ internal sealed partial class SponzaLoop
     private void ReadTexelArgs(AppArgs args)
     {
         transportTexels = args.Flag("transport-texels");
+        texelWavefront = args.Flag("texel-wavefront");
         ReadLightBakeArgs(args);
         if (args.Float("transport-texel") is { } s) texelSpacing = Math.Clamp(s, 0.01f, 1f);
         if (args.Int("texel-budget") is { } b) texelBudget = Math.Clamp(b, 64, 1 << 20);
@@ -425,6 +437,32 @@ internal sealed partial class SponzaLoop
         });
     }
 
+    // The gather wavefront's buffers for `groups` texels of 32 rays, grown as asked (one-element placeholders while off).
+    private IEnumerable<ShaderBufferBinding> TexelWaveBindings(int groups)
+    {
+        var want = TexelsOnWavefront ? Math.Max(groups, texelWaveGroups) : Math.Max(texelWaveGroups, 0);
+        if (texelWaveGroups < 0 || want > texelWaveGroups)
+        {
+            if (texelWaveGroups >= 0)
+            {
+                device.WaitIdle();
+                foreach (var b in new[] { texelWaveRays, texelWaveHits, texelWaveState, texelWaveOrigins, texelWaveOccluded }) Disown(b);
+            }
+            var rays = Math.Max(want * 32, 1);
+            texelWaveRays = Own(device.CreateGpuBuffer(rays * 32, name: "sponza.texel.wave-rays"));
+            texelWaveHits = Own(device.CreateGpuBuffer(rays * 48, name: "sponza.texel.wave-hits"));
+            texelWaveState = Own(device.CreateGpuBuffer(rays * 32, name: "sponza.texel.wave-state"));
+            texelWaveOrigins = Own(device.CreateGpuBuffer(rays * 16, name: "sponza.texel.wave-origins"));
+            texelWaveOccluded = Own(device.CreateGpuBuffer(rays * 4, name: "sponza.texel.wave-occluded"));
+            texelWaveGroups = want;
+        }
+        yield return new ShaderBufferBinding("GatherRays", texelWaveRays);
+        yield return new ShaderBufferBinding("GatherHits", texelWaveHits);
+        yield return new ShaderBufferBinding("GatherRayState", texelWaveState);
+        yield return new ShaderBufferBinding("GatherShadowOrigins", texelWaveOrigins);
+        yield return new ShaderBufferBinding("GatherOccluded", texelWaveOccluded);
+    }
+
     private void RecordTexels(Matrix4x4 invProjection, Matrix4x4 invView, int width, int height)
     {
         if (!texelsUploaded || rayBlockBuffers.Length == 0) return;
@@ -513,9 +551,11 @@ internal sealed partial class SponzaLoop
             .Append(new ShaderBufferBinding("TexelFiltered", texelFilteredBuffer))
             .Append(new ShaderBufferBinding("TexelOpen", texelOpenBuffer))
             .Append(new ShaderBufferBinding("TexelBlend", texelBlendBuffer))
-            .Concat(CookedBuffers()).ToArray();
+            .Concat(CookedBuffers())
+            .Concat(TexelWaveBindings(gatherBudget)).ToArray();
         var declared = texelGatherInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
-        graph.Dispatch(texelGatherPassHandle, new DispatchCommand(texelGatherPipeline, gatherBudget, 1, 1,
+        var wave = TexelsOnWavefront;
+        DispatchCommand Gather(int mode) => new(texelGatherPipeline, gatherBudget, 1, 1,
             new ShaderUniform[]
             {
                 new("uTexelGrid", new Vector4Uniform(texelGrid)),
@@ -529,6 +569,7 @@ internal sealed partial class SponzaLoop
                 new("uOpen", new Vector4Uniform(new Vector4(TexelOpenReach, texelOcclusionError, texelBlend ? 1f : 0f, 0f))),
                 new("uCookedGrid", new Vector4Uniform(cookedGrid)),
                 new("uCookedDims", new Vector4Uniform(cookedDims)),
+                new("uWave", new Vector4Uniform(new Vector4(mode, 0f, 0f, 0f))),
             },
             new[]
             {
@@ -537,7 +578,23 @@ internal sealed partial class SponzaLoop
                 new ShaderTextureBinding("uCascadeShadowMaps[1]", graph.GetDepthTexture(cascadeHandles[1])),
                 new ShaderTextureBinding("uCascadeShadowMaps[2]", graph.GetDepthTexture(cascadeHandles[2])),
             },
-            Buffers: gatherBuffers.Where(b => declared.Contains(b.Name)).ToArray()));
+            Buffers: gatherBuffers.Where(b => declared.Contains(b.Name)).ToArray());
+        if (wave)
+        {
+            // The gather as a wavefront: rays out, their hits shaded, the hits' sun out, the answers gathered. Each batch
+            // on Metal when frame rays are (RecordClosestBatch), else on the software traversal.
+            var rayCount = gatherBudget * 32;
+            var seed = unchecked(texelFrame * 0x9E3779B9u + 0x7F4A7C15u);
+            graph.Dispatch(texelRaysPassHandle, Gather(3));
+            RecordClosestBatch(texelClosestBatch, texelWaveRays, texelWaveHits, rayCount, seed);
+            graph.Dispatch(texelShadePassHandle, Gather(4));
+            RecordShadowBatch(texelShadowBatch, texelWaveOrigins, texelWaveOccluded, rayCount, -Vector3.Normalize(sunDirection), seed ^ 0x5bd1e995u);
+            graph.Dispatch(texelGatherPassHandle, Gather(5));
+        }
+        else
+        {
+            graph.Dispatch(texelGatherPassHandle, Gather(0));
+        }
         if (texelFilter)
             graph.Dispatch(texelFilterPassHandle, new DispatchCommand(texelFilterPipeline, TexelFilterCapacity, 1, 1,
                 new ShaderUniform[]

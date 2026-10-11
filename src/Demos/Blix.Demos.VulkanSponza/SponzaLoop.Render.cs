@@ -948,6 +948,7 @@ internal sealed partial class SponzaLoop
             WriteTexelInspect();
             WriteRayView(Path.ChangeExtension(path, null));
             WriteRtShadows();
+            WriteFrameTracerStats();
             if (probeReference)
             {
                 WriteSkyVisibilityReference(samples: 200, rays: 2048);

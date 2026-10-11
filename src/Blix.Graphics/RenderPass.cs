@@ -32,4 +32,11 @@ public sealed record RenderPassDescription(
     // Native Metal work in place of dispatches (RenderGraph.External): the device splits the frame's submission
     // here and calls this with the timeline values to wait for and signal (ExternalWorkSync). Set on a Compute pass
     // with no commands.
-    Action<ExternalWorkSync>? External = null);
+    Action<ExternalWorkSync>? External = null,
+
+    // An external pass whose result is first needed later (RenderGraph.ExternalJoin): the frame continues past it
+    // without waiting, so independent work overlaps the Metal work, and waits at the join.
+    bool ExternalJoinLater = false,
+
+    // A join (RenderGraph.ExternalJoin): the name of the external pass whose work everything after this waits for.
+    string? ExternalJoin = null);

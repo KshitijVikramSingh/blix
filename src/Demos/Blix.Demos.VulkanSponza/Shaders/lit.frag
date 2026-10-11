@@ -114,10 +114,25 @@ layout(set = 1, binding = 19) uniform sampler uLinearClamp;
 layout(set = 1, binding = 11) uniform texture2D uClipmapIrradiance;
 layout(set = 1, binding = 12) uniform texture2D uClipmapDepth;
 layout(std430, set = 1, binding = 13) readonly buffer ClipmapState { uvec4 clipmapStates[]; };
-// --rt-shadows: the sun's visibility at this frame's pixels, traced on Apple's ray tracing hardware
-// (SponzaLoop.RtShadows): a header (width, height, 1 while live), then one word per pixel, nonzero where the sun is
-// blocked. A placeholder of zeros otherwise, and the cascades answer as before.
-layout(std430, set = 1, binding = 21) readonly buffer RtShadowMask { uvec4 rtShadowHeader; uint rtShadowOccluded[]; };
+// --rt-shadows: the sun's visibility traced on Apple's ray tracing hardware (SponzaLoop.RtShadows): a header (width,
+// height, 1 while live, 1 with sky rays), then one word per pixel: 1 where the sun is blocked, plus 2, with sky rays,
+// where this frame's sky ray met something. Live with no size: the trace is not ready, and the sun is off
+// (the cascades are not asked). A placeholder of zeros otherwise, and the cascades answer as before.
+layout(std430, set = 1, binding = 21) readonly buffer RtShadowMask { uvec4 rtShadowHeader; uint rtShadowWords[]; };
+
+float rtSunVisibility(vec2 fragCoord) {
+    uvec2 px = uvec2(fragCoord);
+    if (px.x >= rtShadowHeader.x || px.y >= rtShadowHeader.y) return 0.0;
+    return (rtShadowWords[px.y * rtShadowHeader.x + px.x] & 1u) != 0u ? 0.0 : 1.0;
+}
+
+// This frame's traced sky ray at the pixel: 1 where it reached the sky. One cosine-weighted ray a frame, so TAA's
+// history is what makes it the sky visibility.
+float rtSkyVisibility(vec2 fragCoord) {
+    uvec2 px = uvec2(fragCoord);
+    if (px.x >= rtShadowHeader.x || px.y >= rtShadowHeader.y) return 1.0;
+    return (rtShadowWords[px.y * rtShadowHeader.x + px.x] & 2u) != 0u ? 0.0 : 1.0;
+}
 #define BLIX_CLIPMAP_IRRADIANCE(t) texelFetch(sampler2D(uClipmapIrradiance, uLinearClamp), t, 0)
 #define BLIX_CLIPMAP_DEPTH(t) texelFetch(sampler2D(uClipmapDepth, uLinearClamp), t, 0)
 #define BLIX_CLIPMAP_IRRADIANCE_FILTERED(p) textureLod(sampler2D(uClipmapIrradiance, uLinearClamp), (p) / vec2(textureSize(sampler2D(uClipmapIrradiance, uLinearClamp), 0)), 0.0)
@@ -402,9 +417,7 @@ void main() {
     float backNdotL = max(dot(-N, L), 0.0);
     float shadowNeed = max(NdotL, mat.uMaterialParams2.z > 0.0 ? backNdotL : 0.0);
     if (frame.uShadowStrength > 0.0 && shadowNeed > 0.0 && rtShadowHeader.z != 0u) {
-        uvec2 px = uvec2(gl_FragCoord.xy);
-        bool inside = px.x < rtShadowHeader.x && px.y < rtShadowHeader.y;
-        sunShadow = inside && rtShadowOccluded[px.y * rtShadowHeader.x + px.x] != 0u ? 0.0 : 1.0;
+        sunShadow = rtSunVisibility(gl_FragCoord.xy);
         sunShadow = mix(1.0, sunShadow, frame.uShadowStrength);
     } else if (frame.uShadowStrength > 0.0 && shadowNeed > 0.0) {
         sunShadow = blix_sun_shadow_cascaded(
@@ -545,6 +558,8 @@ void main() {
         ? texture(sampler2D(uIncidentField, uLinearClamp), gl_FragCoord.xy / frame.uFog.xy)
         : vec4(0.0);
     float skyVisibility = incidentUsed ? incidentField.a : 1.0;
+    // The isolated traced path's own answer: the sky ray traced at this pixel (SponzaLoop.RtShadows).
+    if (!incidentUsed && rtShadowHeader.z != 0u && rtShadowHeader.w != 0u) skyVisibility = rtSkyVisibility(gl_FragCoord.xy);
 
     // With the field the sky's diffuse light arrives through it, as the sky the surface actually sees;
     // adding the cube's irradiance times visibility here would count it twice.

@@ -68,7 +68,11 @@ public sealed class MetalRayTracer : IDisposable
     /// <summary>Builds the acceleration structures over a packed scene.</summary>
     /// <param name="blocks">The scene's GPU buffers, in <see cref="RayQueryGpuData.BlockNames"/> order.</param>
     /// <param name="surfaces">The surfaces block's words as baked (coverage in the top byte), one per triangle row.</param>
-    public unsafe MetalRayTracerBuild Build(RayQueryGpuData data, IReadOnlyList<GpuBufferHandle> blocks, ReadOnlySpan<uint> surfaces)
+    /// <param name="alphaTested">Optional, one per triangle row: rows the shadow pass alpha-tests (<see cref="SetAlpha"/>).
+    /// They go in the non-opaque geometry even where the bake found them fully covered, since its samples can miss a
+    /// cut-out's holes; the coverage coin still meets those every time.</param>
+    public unsafe MetalRayTracerBuild Build(RayQueryGpuData data, IReadOnlyList<GpuBufferHandle> blocks, ReadOnlySpan<uint> surfaces,
+        ReadOnlySpan<bool> alphaTested = default)
     {
         ArgumentNullException.ThrowIfNull(data);
         ObjectDisposedException.ThrowIf(ctx == 0, this);
@@ -88,6 +92,9 @@ public sealed class MetalRayTracer : IDisposable
         var triangles = data.Triangles;
         var owners = data.Owners;
         var surfaceWords = surfaces.ToArray();
+        var tested = alphaTested.ToArray();
+        if (tested.Length != 0 && tested.Length < rows)
+            throw new ArgumentException($"{tested.Length} alpha-tested flags for {rows} triangle rows.", nameof(alphaTested));
         Parallel.For(0, bases.Length, h =>
         {
             var first = (int)bases[h];
@@ -104,7 +111,7 @@ public sealed class MetalRayTracer : IDisposable
                 if (!seen.Add(key)) { duplicates[h]++; continue; }
                 var coverage = surfaceWords[row] >> 24;
                 if (coverage == 0) uncovered[h]++;
-                else (coverage == 255 ? s : p).Add((uint)row);
+                else (coverage == 255 && (tested.Length == 0 || !tested[row]) ? s : p).Add((uint)row);
             }
             solid[h] = s;
             partial[h] = p;
@@ -183,26 +190,68 @@ public sealed class MetalRayTracer : IDisposable
         return ms;
     }
 
+    /// <summary>A material's alpha test, as the raster draws it: its albedo texture's alpha times a factor, against a cutoff.</summary>
+    public readonly record struct AlphaMaterial(TextureHandle Albedo, float Cutoff, float AlphaFactor);
+
+    /// <summary>
+    /// From now on a shadow pass that asks for it (<see cref="EncodeShadow"/>'s alphaTest) meets a partly covered triangle
+    /// where its material's alpha passes at the point hit, instead of by the coverage coin: shadows of cut-out leaves shaped
+    /// like the leaves, and steady from frame to frame. Every other trace keeps the coin, the software traversal's.
+    /// </summary>
+    /// <param name="rowMaterial">Per packed triangle row, its index in <paramref name="materials"/>; uint.MaxValue: none
+    /// (the coin decides).</param>
+    /// <param name="uvs">The scene's texture coordinates on the GPU, one float2 per position (RayQueryGpuData.Uvs).</param>
+    /// <param name="mip">The mip level the alpha is read at: coarser is cheaper (every leaf card a shadow ray crosses samples
+    /// once) and rounder; 0 is the texture's own.</param>
+    public unsafe void SetAlpha(IReadOnlyList<AlphaMaterial> materials, ReadOnlySpan<uint> rowMaterial, GpuBufferHandle uvs, float mip = 0f)
+    {
+        ObjectDisposedException.ThrowIf(ctx == 0, this);
+        var textures = new nint[Math.Max(1, materials.Count)];
+        var cutoffs = new float[textures.Length];
+        var factors = new float[textures.Length];
+        for (var m = 0; m < materials.Count; m++)
+        {
+            textures[m] = device.ExportMetalTexture(materials[m].Albedo);
+            cutoffs[m] = materials[m].Cutoff;
+            factors[m] = materials[m].AlphaFactor;
+        }
+        fixed (nint* tp = textures)
+        fixed (float* cp = cutoffs)
+        fixed (float* fp = factors)
+        fixed (uint* rp = rowMaterial)
+        {
+            if (HwxNative.hwx_set_alpha(ctx, tp, cp, fp, (uint)materials.Count, rp, (uint)rowMaterial.Length, device.ExportMetalBuffer(uvs), mip) != 0)
+                throw new InvalidOperationException($"Metal alpha test: {Error}");
+        }
+    }
+
     /// <summary>
     /// Sun shadows as a frame's external pass (<see cref="RenderGraph.External"/>): waits for what the frame recorded
     /// before the pass, traces one ray per origin toward <paramref name="towardLight"/>, and signals the rest of the
     /// frame on. Returns without waiting.
     /// </summary>
     /// <param name="origins">float4 per ray: where it starts, and how far it goes (0 or less: no ray, reported unoccluded).</param>
-    /// <param name="occluded">uint per ray from <paramref name="occludedOffset"/> bytes: 1 where something is in the way.</param>
+    /// <param name="occluded">uint per ray from <paramref name="occludedOffset"/> bytes: 1 where something is in the way of the
+    /// light, plus 2 where the sky ray (if any) meets something; written whole.</param>
     /// <param name="seedBase">Ray i's coverage seed is this plus i; vary it per frame for the partly covered to dither over time.</param>
+    /// <param name="alphaTest">Meet cut-outs by their alpha (<see cref="SetAlpha"/>) rather than by the coverage coin the
+    /// software batch uses; ignored until SetAlpha.</param>
+    /// <param name="statSlot">Which of <see cref="ShadowStatsOf"/>'s slots (0-3) this dispatch's GPU time counts in.</param>
+    /// <param name="skyRays">Optional: a second ray per ray, two float4s (origin and tMax, 0 for none; then direction); its
+    /// word gains 2 where it meets anything (the point does not see the sky that way).</param>
     /// <remarks>
     /// Never throws for a bad argument: the frame waits for the signal, so the work is skipped, the signal still sent,
     /// and the failure counted in <see cref="ShadowStats"/>. Coverage and geometry are what <see cref="Build"/> saw.
     /// </remarks>
     public unsafe void EncodeShadow(ExternalWorkSync sync, GpuBufferHandle origins, GpuBufferHandle occluded, long occludedOffset,
-        int count, Vector3 towardLight, uint seedBase)
+        int count, Vector3 towardLight, uint seedBase, GpuBufferHandle? skyRays = null, bool alphaTest = false, int statSlot = 0)
     {
         ObjectDisposedException.ThrowIf(ctx == 0, this);
         var direction = stackalloc float[3] { towardLight.X, towardLight.Y, towardLight.Z };
         HwxNative.hwx_encode_shadow(ctx, sync.MetalSharedEvent, sync.WaitValue, sync.SignalValue,
             device.ExportMetalBuffer(origins), 0, device.ExportMetalBuffer(occluded), (ulong)occludedOffset,
-            (uint)Math.Max(count, 0), direction, seedBase);
+            (uint)Math.Max(count, 0), direction, seedBase, skyRays is { } sky ? device.ExportMetalBuffer(sky) : 0, alphaTest ? 1u : 0u,
+            (uint)Math.Clamp(statSlot, 0, 3));
     }
 
     /// <summary>
@@ -231,15 +280,16 @@ public sealed class MetalRayTracer : IDisposable
         }
     }
 
-    public unsafe MetalShadowStats ShadowStats
+    /// <summary>What every in-frame shadow dispatch (<see cref="EncodeShadow"/>) has cost, from their own GPU times.</summary>
+    public MetalShadowStats ShadowStats => ShadowStatsOf(-1);
+
+    /// <summary>What the shadow dispatches of one stats slot (0-3; -1: all) have cost.</summary>
+    public unsafe MetalShadowStats ShadowStatsOf(int slot)
     {
-        get
-        {
-            ObjectDisposedException.ThrowIf(ctx == 0, this);
-            ulong dispatches, total, last, failures;
-            HwxNative.hwx_shadow_stats(ctx, &dispatches, &total, &last, &failures);
-            return new MetalShadowStats((long)dispatches, total / 1e6, last / 1e6, (long)failures);
-        }
+        ObjectDisposedException.ThrowIf(ctx == 0, this);
+        ulong dispatches, total, last, failures;
+        HwxNative.hwx_shadow_stats(ctx, slot < 0 ? 0xFFFFFFFFu : (uint)slot, &dispatches, &total, &last, &failures);
+        return new MetalShadowStats((long)dispatches, total / 1e6, last / 1e6, (long)failures);
     }
 
     private string Error => Marshal.PtrToStringUTF8(HwxNative.hwx_error(ctx)) ?? "unknown error";

@@ -686,11 +686,12 @@ public sealed partial class VulkanGraphicsDevice
     }
 
     // An external pass: the frame so far is submitted signalling the timeline, the pass encodes its Metal work
-    // between that value and the next, and recording continues in a fresh buffer whose submission waits for the
-    // second. Nothing here waits on the CPU (except under isolation, which times the pass the way it times others),
-    // and the frame's fence still covers the Metal work: the last submission cannot start before it has signalled.
+    // between that value and the next (returned in `signalled`), and recording continues in a fresh buffer. The caller
+    // makes a later submission wait for `signalled`: the next one, or the one after the pass's join. Nothing here
+    // waits on the CPU (except under isolation, which times the pass the way it times others), and the frame's fence
+    // still covers the Metal work, because the frame's last submission waits for every signal (see the final submit).
     private unsafe CommandBuffer RunExternalPass(CommandBuffer cmd, RenderPass pass, Action<ExternalWorkSync> encode,
-        ref bool imageAvailPending, ref ulong timelineWait, Semaphore imageAvail)
+        ref bool imageAvailPending, ref ulong timelineWait, Semaphore imageAvail, out ulong signalled)
     {
         if (frameTimeline.Handle == 0)
             throw new InvalidOperationException($"pass '{pass.Name}' is native Metal work, which needs GraphicsFeatures.MetalObjects; this device does not have it.");
@@ -723,8 +724,13 @@ public sealed partial class VulkanGraphicsDevice
             gpuPassIsolated.TryGetValue(pass.Name, out var acc);
             gpuPassIsolated[pass.Name] = acc + new GpuPassTotal(Stopwatch.GetElapsedTime(t0).TotalMilliseconds, 1);
         }
-        timelineWait = after;
+        signalled = after;
+        return NextContinuationBuffer();
+    }
 
+    // The next of this slot's continuation buffers, begun.
+    private unsafe CommandBuffer NextContinuationBuffer()
+    {
         var list = continuationBuffers[currentFrame];
         if (continuationsUsed[currentFrame] == list.Count)
         {
@@ -882,6 +888,8 @@ public sealed partial class VulkanGraphicsDevice
         var cmd = f.CommandBuffer;
         // A frame timeline value the next submission waits for: an external pass's signal.
         ulong timelineWait = 0;
+        // External passes whose work a later join waits for, by pass name: their signals.
+        Dictionary<string, ulong>? pendingJoins = null;
 
         // vkCmdResetQueryPool must run outside a render pass.
         var slotQueryBase = (uint)(currentFrame * (int)QueriesPerFrameSlot);
@@ -907,12 +915,47 @@ public sealed partial class VulkanGraphicsDevice
         var isolationFirstSubmit = true;
         foreach (var pass in commandList.Passes)
         {
-            // Native Metal work: the frame splits here (RunExternalPass) and continues in another buffer.
+            // Native Metal work: the frame splits here (RunExternalPass) and continues in another buffer, which waits
+            // for the work at once, or, when the pass has a join, carries on alongside it until the join.
             if (pass.Description.External is { } external)
             {
                 currentPassName = pass.Name;
                 CountPass(pass.Name);
-                cmd = RunExternalPass(cmd, pass, external, ref isolationFirstSubmit, ref timelineWait, f.ImageAvailable);
+                // An earlier pass's work still out (a join to come) is waited for first: this pass's submit signals a
+                // higher timeline value, which must not come before that work's own signal (a timeline only rises).
+                if (pendingJoins is { Count: > 0 })
+                {
+                    foreach (var value in pendingJoins.Values) timelineWait = Math.Max(timelineWait, value);
+                    pendingJoins.Clear();
+                }
+                cmd = RunExternalPass(cmd, pass, external, ref isolationFirstSubmit, ref timelineWait, f.ImageAvailable, out var signalled);
+                if (pass.Description.ExternalJoinLater) (pendingJoins ??= new Dictionary<string, ulong>())[pass.Name] = signalled;
+                else timelineWait = Math.Max(timelineWait, signalled);
+                continue;
+            }
+            // Where an external pass's work is first needed: what was recorded since it goes out without waiting for
+            // it, and what follows waits.
+            if (pass.Description.ExternalJoin is { } joined)
+            {
+                if (pendingJoins is not null && pendingJoins.Remove(joined, out var joinValue))
+                {
+                    ThrowIfNotSuccess(Vk.EndCommandBuffer(cmd), "vkEndCommandBuffer(join)");
+                    SubmitFrameBatch(cmd, ref isolationFirstSubmit, ref timelineWait, f.ImageAvailable, signalTimeline: 0, binarySignal: default,
+                        fence: default, "vkQueueSubmit(join)");
+                    timelineWait = joinValue;
+                    cmd = NextContinuationBuffer();
+                    // The batch just submitted is in no semaphore chain to the frame's fence (it signals nothing: a
+                    // timeline value above the Metal work's would let waits on that pass early). A barrier's first
+                    // scope is every command earlier on the queue, so this one puts it under the rest of the frame,
+                    // and under the fence with it.
+                    var afterAll = new MemoryBarrier
+                    {
+                        SType = StructureType.MemoryBarrier,
+                        SrcAccessMask = AccessFlags.MemoryWriteBit,
+                        DstAccessMask = AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit,
+                    };
+                    Vk.CmdPipelineBarrier(cmd, PipelineStageFlags.AllCommandsBit, PipelineStageFlags.AllCommandsBit, 0, 1, &afterAll, 0, null, 0, null);
+                }
                 continue;
             }
 
@@ -1112,6 +1155,8 @@ public sealed partial class VulkanGraphicsDevice
         // Always submit, even with zero default-target passes — skipping
         // would strand the acquired imageAvailable semaphore and deadlock
         // the next acquire.
+        // A join that never came still holds the frame: its fence must mean the Metal work is done too.
+        if (pendingJoins is not null) foreach (var value in pendingJoins.Values) timelineWait = Math.Max(timelineWait, value);
         var renderDone = perImageRenderFinished[imageIndex];
         SubmitFrameBatch(cmd, ref isolationFirstSubmit, ref timelineWait, f.ImageAvailable, signalTimeline: 0, renderDone, f.InFlight, "vkQueueSubmit");
 

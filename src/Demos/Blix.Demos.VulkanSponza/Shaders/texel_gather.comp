@@ -28,6 +28,8 @@ layout(set = 0, binding = 0) uniform TexelGather {
     vec4 uOpen;           // x the occlusion estimate's reach (m), y its relative error (the blend's), z 1: blend at all
     vec4 uCookedGrid;
     vec4 uCookedDims;
+    vec4 uWave;           // x the phase: 0 the gather traced inline; as a wavefront (SponzaLoop.Texels.cs) 3 rays out,
+                          // 4 their hits shaded, 5 the answers gathered
 } u;
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
@@ -59,6 +61,16 @@ layout(std430, set = 0, binding = 12) readonly buffer CookedGuides { float cooke
 // light is unbiased but noisy. TexelBlend is the two by inverse variance: what the filter and the incident pass read.
 layout(std430, set = 0, binding = 22) buffer TexelOpen { vec4 texelOpen[]; };
 layout(std430, set = 0, binding = 23) buffer TexelBlend { vec4 texelBlend[]; };
+// The gather as a wavefront (uWave.x 3-5): its rays go out to a CLOSEST batch and its hits' sun to a SHADOW batch
+// (SponzaLoop.RayBatch.cs: the software traversal or Metal's), in the batches' formats. Workgroup w's ray r owns slot
+// w * RAYS + r. Each phase works its texel's rays out afresh -- nothing they read changes before phase 5 writes.
+layout(std430, set = 0, binding = 24) buffer GatherRays { vec4 gatherRays[]; };           // 2 a ray: origin, tMin; dir, tMax
+layout(std430, set = 0, binding = 25) readonly buffer GatherHits { uvec4 gatherHits[]; };  // 3 a ray: the CLOSEST answer
+// 2 a ray, between the phases: the weighted light at the hit but the sun's (or the sky's), and the ray's openness (-1:
+// a guided ray); the sun's weighted share, and its shadow ray's answer if known (-1: the SHADOW batch's).
+layout(std430, set = 0, binding = 26) buffer GatherRayState { vec4 gatherState[]; };
+layout(std430, set = 0, binding = 27) buffer GatherShadowOrigins { vec4 gatherOrigins[]; };    // the SHADOW batch's origins
+layout(std430, set = 0, binding = 28) readonly buffer GatherOccluded { uint gatherOccluded[]; }; // and its answers
 
 #define COOKED_BINDING 6
 #define COOKED_GRID u.uCookedGrid
@@ -112,7 +124,10 @@ void main() {
     uint frame = uint(u.uTexelParams.w);
     uint parity = frame & 1u;
     uint capacity = uint(u.uTexelParams.y);
-    if (group == 0u && gl_LocalInvocationID.x < 4u) texelQueue[(parity ^ 1u) * 4u + gl_LocalInvocationID.x] = 0u;
+    int mode = int(u.uWave.x + 0.5);
+    uint slot = group * uint(RAYS) + gl_LocalInvocationID.x;
+    // Once a frame: by the first phase, before any reads the lists.
+    if (mode <= 3 && group == 0u && gl_LocalInvocationID.x < 4u) texelQueue[(parity ^ 1u) * 4u + gl_LocalInvocationID.x] = 0u;
     // Which texel: the lists in order, each clamped to what it holds.
     int id = -1;
     uint i = group;
@@ -121,7 +136,14 @@ void main() {
         if (i < count) id = int(texelQueue[8u + list * capacity + i]);
         else i -= count;
     }
-    if (id < 0) return;   // the whole workgroup: id is uniform across it
+    if (id < 0) {   // the whole workgroup: id is uniform across it
+        if (mode == 3) {   // its slots: no ray, no shadow ray
+            gatherRays[slot * 2u] = vec4(0.0);
+            gatherRays[slot * 2u + 1u] = vec4(0.0);
+            gatherOrigins[slot] = vec4(0.0);
+        }
+        return;
+    }
 
     vec3 position = texels[2 * id].xyz;
     vec3 n = texels[2 * id + 1].xyz;
@@ -162,35 +184,74 @@ void main() {
     float mixturePdf = guide >= 0 ? 0.5 * max(cosTheta, 0.0) / PI + 0.5 * guidePdf(guide, dir) : max(cosTheta, 0.0) / PI;
     float rayWeight = cosTheta > 0.0 && mixturePdf > 0.0 ? cosTheta / mixturePdf : 0.0;
     vec3 origin = position + n * 0.01;
-
-    vec3 radiance;
-    BlixRayHit hit;
-    bool hitSomething = (ablate & 8) == 0 && blix_traceClosest(origin, dir, 0.0, uintBitsToFloat(0x7F800000u), seed, hit);
-    // Openness, from the cosine-distributed rays only (-1: a guided ray says nothing about it).
-    sOpen[ray] = guided ? -1.0 : (hitSomething && hit.t < u.uOpen.x ? 0.0 : 1.0);
-    if (hitSomething) {
-        vec3 hn = dot(hit.normal, dir) > 0.0 ? -hit.normal : hit.normal;
-        vec3 hitPos = origin + dir * hit.t;
-        vec3 toSun = -normalize(u.uSunDirection.xyz);
-        float ndotl = max(dot(hn, toSun), 0.0);
-        float sun = 0.0;
-        if (ndotl > 0.0) {
-            int cascade = -1;
-            float lit = 1.0;
-            if (cascadeReceives(u.uCascadeReceivers, hitPos + hn * 0.01))
-                lit = blix_sun_shadow_cascaded_hard(
-                    uCascadeShadowMaps[0], uCascadeShadowMaps[1], uCascadeShadowMaps[2],
-                    u.uCascadeVP[0], u.uCascadeVP[1], u.uCascadeVP[2], hitPos + hn * 0.01, ndotl, cascade);
-            if (cascade < 0) lit = (ablate & 1) != 0 ? 0.0 : blix_traceAny(hitPos + hn * 0.01, toSun, 0.0, uintBitsToFloat(0x7F800000u), blix_pcg(seed ^ 0x5bd1e995u)) ? 0.0 : 1.0;
-            sun = ndotl * lit;
-        }
-        bool found;
-        vec3 indirect = (ablate & 2) != 0 ? vec3(0.0) : cookedIndirect(hitPos, hn, found);
-        radiance = hit.albedo * (u.uSunIrradiance.rgb * sun + indirect) / PI;
-    } else {
-        radiance = textureLod(uSkyRadiance, dir, u.uSky.y).rgb * u.uSky.x;
+    if (mode == 3) {
+        // The wavefront's rays: the directions the inline gather would trace, out to the CLOSEST batch.
+        gatherRays[slot * 2u] = vec4(origin, 0.0);
+        gatherRays[slot * 2u + 1u] = vec4(dir, (ablate & 8) != 0 ? 0.0 : uintBitsToFloat(0x7F800000u));
+        return;
     }
-    sRadiance[ray] = radiance * rayWeight;
+
+    if (mode == 5) {
+        // The wavefront's answers, as the inline gather would have them.
+        vec4 s0 = gatherState[slot * 2u];
+        vec4 s1 = gatherState[slot * 2u + 1u];
+        float lit = s1.w >= 0.0 ? s1.w : ((gatherOccluded[slot] & 1u) != 0u ? 0.0 : 1.0);
+        sRadiance[ray] = s0.rgb + s1.rgb * lit;
+        sOpen[ray] = s0.w;
+    } else {
+        BlixRayHit hit;
+        bool hitSomething;
+        if (mode == 4) {
+            // The CLOSEST batch's answer: t, flags (1 a hit); world normal, linear albedo.
+            uvec4 h0 = gatherHits[slot * 3u];
+            uvec4 h2 = gatherHits[slot * 3u + 2u];
+            hitSomething = (ablate & 8) == 0 && (h0.w & 1u) != 0u;
+            hit.t = uintBitsToFloat(h0.x);
+            hit.normal = uintBitsToFloat(h2.xyz);
+            hit.albedo = unpackUnorm4x8(h2.w).rgb;
+        } else {
+            hitSomething = (ablate & 8) == 0 && blix_traceClosest(origin, dir, 0.0, uintBitsToFloat(0x7F800000u), seed, hit);
+        }
+        // Openness, from the cosine-distributed rays only (-1: a guided ray says nothing about it).
+        float open = guided ? -1.0 : (hitSomething && hit.t < u.uOpen.x ? 0.0 : 1.0);
+        // The light at the hit but the sun's, the sun's share, and its visibility (-1: the SHADOW batch's answer).
+        vec3 radiance, sunShare = vec3(0.0);
+        float lit = 0.0;
+        vec4 shadowOrigin = vec4(0.0);
+        if (hitSomething) {
+            vec3 hn = dot(hit.normal, dir) > 0.0 ? -hit.normal : hit.normal;
+            vec3 hitPos = origin + dir * hit.t;
+            vec3 toSun = -normalize(u.uSunDirection.xyz);
+            float ndotl = max(dot(hn, toSun), 0.0);
+            if (ndotl > 0.0) {
+                int cascade = -1;
+                lit = 1.0;
+                if (cascadeReceives(u.uCascadeReceivers, hitPos + hn * 0.01))
+                    lit = blix_sun_shadow_cascaded_hard(
+                        uCascadeShadowMaps[0], uCascadeShadowMaps[1], uCascadeShadowMaps[2],
+                        u.uCascadeVP[0], u.uCascadeVP[1], u.uCascadeVP[2], hitPos + hn * 0.01, ndotl, cascade);
+                if (cascade < 0) {
+                    if ((ablate & 1) != 0) lit = 0.0;
+                    else if (mode == 4) { shadowOrigin = vec4(hitPos + hn * 0.01, uintBitsToFloat(0x7F800000u)); lit = -1.0; }
+                    else lit = blix_traceAny(hitPos + hn * 0.01, toSun, 0.0, uintBitsToFloat(0x7F800000u), blix_pcg(seed ^ 0x5bd1e995u)) ? 0.0 : 1.0;
+                }
+                sunShare = hit.albedo * u.uSunIrradiance.rgb * ndotl / PI;
+            }
+            bool found;
+            vec3 indirect = (ablate & 2) != 0 ? vec3(0.0) : cookedIndirect(hitPos, hn, found);
+            radiance = hit.albedo * indirect / PI;
+        } else {
+            radiance = textureLod(uSkyRadiance, dir, u.uSky.y).rgb * u.uSky.x;
+        }
+        if (mode == 4) {
+            gatherState[slot * 2u] = vec4(radiance * rayWeight, open);
+            gatherState[slot * 2u + 1u] = vec4(sunShare * rayWeight, lit);
+            gatherOrigins[slot] = shadowOrigin;
+            return;
+        }
+        sRadiance[ray] = (radiance + sunShare * lit) * rayWeight;
+        sOpen[ray] = open;
+    }
     barrier();
     if (ray == 0u) {
         vec3 sum = vec3(0.0);

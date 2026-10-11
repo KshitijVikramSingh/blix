@@ -59,6 +59,11 @@ public interface IGraphicsDevice : IDisposable
     /// </remarks>
     nint ExportMetalBuffer(GpuBufferHandle handle) => throw new NotSupportedException("this device has no Metal objects to export (GraphicsFeatures.MetalObjects).");
 
+    /// <summary>The MTLTexture behind a sampled 2D texture, as a raw id&lt;MTLTexture&gt;, not retained.</summary>
+    /// <remarks>Only with <see cref="GraphicsFeatures.MetalObjects"/>; it lives as long as the texture. Ordering as for
+    /// <see cref="ExportMetalBuffer"/>: Metal reads it once the device has finished writing it.</remarks>
+    nint ExportMetalTexture(TextureHandle handle) => throw new NotSupportedException("this device has no Metal objects to export (GraphicsFeatures.MetalObjects).");
+
     GraphicsDeviceDiagnostics DiagnosticsSnapshot { get; }
 
     void SetDefaultRenderSurfaceSize(int width, int height);

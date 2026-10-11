@@ -122,7 +122,10 @@ internal sealed partial class SponzaLoop
         // overlap, so isolated pass times are not additive components of the normal frame.
         if (args.Flag("gpu-isolate")) host.Timing.IsolatePasses = true;
         if (args.Flag("no-caster-cull")) shadowCasterCull = false;
-        offscreenShadowRays = args.Flag("offscreen-shadow-rays");
+        // A transfer capture (--transfer-dump) brings it: its truth takes the sun by rays, and gather rays landing off the
+        // view would read it from cascades whose casters were culled (Sponza: gathered energy 2.37x the traced, 1.02x
+        // with it).
+        offscreenShadowRays = args.Flag("offscreen-shadow-rays") || args.String("transfer-dump") is not null;
         if (args.Flag("no-foliage")) noFoliage = true;
         // --flatten: bake every placement into its own primitive, placed once at identity: the pre-
         // instancing shape through the same draw path, so an A/B isolates instancing alone.
@@ -158,6 +161,14 @@ internal sealed partial class SponzaLoop
         }
         // --rt-shadows: the lit pass's sun shadows traced on Apple's ray tracing hardware (SponzaLoop.RtShadows).
         rtShadows = args.Flag("rt-shadows");
+        // --rt-no-overlap: no join, so the frame waits for the trace right after it (the overlap's control).
+        rtNoOverlap = args.Flag("rt-no-overlap");
+        // --rt-isolated: nothing but the trace lights the frame, sky included: no incident field (SponzaLoop.RtShadows).
+        rtIsolated = args.Flag("rt-isolated");
+        rtCoverageCoin = args.Flag("rt-coverage-coin");
+        if (args.Float("rt-alpha-mip") is { } alphaMip) rtAlphaMip = Math.Clamp(alphaMip, 0f, 12f);
+        rtAlphaAb = args.Flag("rt-alpha-ab");
+        var fogAsked = args.Flag("fog");
         // --ray-view: trace the camera's view and hold it against the raster at the shot (it brings the ray check with it).
         rayView = args.Flag("ray-view");
         rayCheck |= rayView;
@@ -223,6 +234,9 @@ internal sealed partial class SponzaLoop
         // --clipmap-converge-floor F: the static light's blend never falls below F (0.25 was the steady rate before it
         // converged; the A/B). Default 0: each solve weighs 1/n, up to n = 255.
         if (args.Float("clipmap-converge-floor") is { } ccf) clipmapConvergeFloor = Math.Clamp(ccf, 0f, 1f);
+        if (args.Int("clipmap-young-rays") is { } youngRays) clipmapYoungRays = Math.Clamp(youngRays, 1, 16);
+        clipmapWavefront = args.Flag("clipmap-wavefront");
+        clipmapInline = args.Flag("clipmap-inline");
         if (args.Int("clipmap-young") is { } young) clipmapYoung = Math.Clamp(young, 0, 16);
         // --clipmap-visible-share F: at most this share of the budget a frame goes to the probes the image reads (0: none,
         // the A/B).
@@ -301,6 +315,23 @@ internal sealed partial class SponzaLoop
             abFlat = abMode == "flat";
             // rtshadow: ray-traced sun shadows (ON) against the cascades (OFF), which needs the traced path built.
             if (abMode == "rtshadow") rtShadows = true;
+        }
+        // --rt-shadows: whatever asks whether a point sees the sun asks a ray, never the cascades (SponzaLoop.RtShadows).
+        // The lit pass asks the Metal trace; the clipmap's injection asks shadow rays at its hits (--clipmap-shadow-rays,
+        // the same scene and coverage); the fog, which can only ask the cascades, is off unless --fog asks for it. An
+        // --ab rtshadow run sets this up in both phases, so it compares the lit pass's shadows alone.
+        if (rtShadows)
+        {
+            clipmapShadowRays = true;
+            if (!fogAsked) fog.Enabled = false;
+            if (rtIsolated)
+            {
+                incidentField = false;
+                screenProbesEnabled = false;
+            }
+            Console.WriteLine(rtIsolated
+                ? "[VulkanSponza] rt shadows: isolated (the trace's sun and sky only: no incident field or screen probes; no fog); the sun is off until the trace is ready."
+                : "[VulkanSponza] rt shadows: sun visibility from rays everywhere (lit pass: Metal; clipmap injection: shadow rays; fog off unless --fog); the sun is off until the trace is ready.");
         }
         if (args.Float("ao-debug") is { } aoDebugValue) aoDebug = aoDebugValue;
         if (args.Float("viz") is { } vizValue) vizChannel = vizValue;
@@ -459,10 +490,23 @@ internal sealed partial class SponzaLoop
 
         // The clipmap's solve, after the cascades it takes the sun from where they cover a hit (frame audit F4), and
         // before the fog, screen probes and incident pass that read it.
+        // The ray batches' interfaces (SponzaLoop.RayBatch.cs), before the first consumer declares a batch.
+        batchClosestInterface = Reflect("ray_batch_closest.comp");
+        batchShadowInterface = Reflect("ray_batch_shadow.comp");
         clipmapInterface = Reflect("clipmap_inject.comp");
         var clipmapBuilder = graph.ComputePass("probe-clipmap").Shader(clipmapInterface);
         for (var c = 0; c < CascadeCount; c++) clipmapBuilder = clipmapBuilder.Read(cascadeHandles[c]);
         clipmapPassHandle = clipmapBuilder.Handle;
+        // The solve as a wavefront (--clipmap-wavefront, or frame rays on Metal): rays out, hits shaded, the hits' sun
+        // out, the answers solved; the batches between the phases (SponzaLoop.Clipmap.cs).
+        clipmapClosestBatch = DeclareClosestBatch("clipmap-closest");
+        var shadeBuilder = graph.ComputePass("probe-clipmap-shade").Shader(clipmapInterface);
+        for (var c = 0; c < CascadeCount; c++) shadeBuilder = shadeBuilder.Read(cascadeHandles[c]);
+        clipmapShadePassHandle = shadeBuilder.Handle;
+        clipmapShadowBatch = DeclareShadowBatch("clipmap-shadow");
+        var resolveBuilder = graph.ComputePass("probe-clipmap-resolve").Shader(clipmapInterface);
+        for (var c = 0; c < CascadeCount; c++) resolveBuilder = resolveBuilder.Read(cascadeHandles[c]);
+        clipmapResolvePassHandle = resolveBuilder.Handle;
         // --watch: the clipmap's answer at fixed points each frame, right after the solve (stage 4g-viii).
         clipmapWatchInterface = Reflect("clipmap_watch.comp");
         clipmapWatchPassHandle = graph.ComputePass("clipmap-watch").Shader(clipmapWatchInterface).Handle;
@@ -575,6 +619,14 @@ internal sealed partial class SponzaLoop
         rayViewInterface = Reflect("ray_view.comp");
         rayViewPassHandle = graph.ComputePass("ray-view").Shader(rayViewInterface).Read(SampleableSceneDepth).Handle;
 
+        // --rt-shadows: the shadow rays as soon as the pre-pass has the depth and normals they start from, and the Metal
+        // pass that traces them; the lit pass joins it (rt-shadow-join, below). Everything between (Hi-Z, GTAO, the
+        // clipmap's marks, the incident light) reads none of it, so it runs while the rays are traced.
+        rtShadowRaysInterface = Reflect("rt_shadow_rays.comp");
+        rtShadowRaysPassHandle = graph.ComputePass("rt-shadow-rays").Shader(rtShadowRaysInterface)
+            .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
+        rtShadowTracePassHandle = graph.ExternalPass("rt-shadow-trace");
+
         // The Hi-Z pyramid, immediately after the pre-pass that resolves the depth it reduces.
         // Level 0 is half the framebuffer — the same grid GTAO already works on, so its consumers
         // need no extra rescaling — and each level halves again.
@@ -648,8 +700,6 @@ internal sealed partial class SponzaLoop
         gpuReferenceInterface = Reflect("reference_points.comp");
         gpuReferencePassHandle = graph.ComputePass("reference-points").Shader(gpuReferenceInterface).Handle;
         // The reference as a wavefront (SponzaLoop.GpuReference.cs), its batches between its steps, in frame order.
-        batchClosestInterface = Reflect("ray_batch_closest.comp");
-        batchShadowInterface = Reflect("ray_batch_shadow.comp");
         referenceWaveInterface = Reflect("reference_wave.comp");
         referenceWaveStepPass = graph.ComputePass("reference-wave-step").Shader(referenceWaveInterface).Handle;
         referenceClosestBatch = DeclareClosestBatch("reference-closest");
@@ -663,6 +713,16 @@ internal sealed partial class SponzaLoop
         lightBakeInterface = Reflect("texel_bake.comp");
         lightBakePassHandle = graph.ComputePass("light-bake").Shader(lightBakeInterface).Handle;
         texelGatherInterface = Reflect("texel_gather.comp");
+        // The gather as a wavefront (--texel-wavefront, or frame rays on Metal): rays out, hits shaded, the hits' sun out,
+        // the answers gathered in texel-gather; the batches between the phases (SponzaLoop.Texels.cs).
+        texelRaysPassHandle = graph.ComputePass("texel-gather-rays").Shader(texelGatherInterface).Handle;
+        texelClosestBatch = DeclareClosestBatch("texel-closest");
+        {
+            var builder = graph.ComputePass("texel-gather-shade");
+            for (var c = 0; c < CascadeCount; c++) builder = builder.Read(cascadeHandles[c]);
+            texelShadePassHandle = builder.Shader(texelGatherInterface).Handle;
+        }
+        texelShadowBatch = DeclareShadowBatch("texel-shadow");
         {
             var builder = graph.ComputePass("texel-gather");
             for (var c = 0; c < CascadeCount; c++) builder = builder.Read(cascadeHandles[c]);
@@ -670,12 +730,6 @@ internal sealed partial class SponzaLoop
         }
         screenProbeFilterInterface = Reflect("screen_probe_filter.comp");
         screenProbeFilterPassHandle = graph.ComputePass("screen-probe-filter").Shader(screenProbeFilterInterface).Handle;
-
-        // --rt-shadows: the shadow rays from the pre-pass, then the Metal pass that traces them, both before the lit pass.
-        rtShadowRaysInterface = Reflect("rt_shadow_rays.comp");
-        rtShadowRaysPassHandle = graph.ComputePass("rt-shadow-rays").Shader(rtShadowRaysInterface)
-            .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
-        rtShadowTracePassHandle = graph.ExternalPass("rt-shadow-trace");
 
         {
             var incidentBuilder = graph.GraphicsPass("incident-light")
@@ -689,6 +743,9 @@ internal sealed partial class SponzaLoop
             incidentPassHandle = incidentBuilder.Shader(incidentClipmapInterface).Handle;
         }
 
+
+        // The traced shadows are needed from here on.
+        if (!rtNoOverlap) graph.ExternalJoin(rtShadowTracePassHandle, "rt-shadow-join");
 
         // At one sample there is nothing to resolve, and asking for a resolve anyway is invalid —
         // so the single-sample path renders straight into the target present reads.

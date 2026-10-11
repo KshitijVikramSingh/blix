@@ -230,7 +230,7 @@ internal sealed partial class SponzaLoop
         if (!referenceMonolithic && FrameRaysOnHardware && frameTracer is not null)
         {
             var trace = frameTracer.TraceStats;
-            var shadow = frameTracer.ShadowStats;
+            var shadow = frameTracer.ShadowStatsOf(0);
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] reference wavefront on Metal: closest {trace.Dispatches:N0} batches, {trace.MeanGpuMs:0.000} ms mean, {trace.Failures} failed; shadow {shadow.Dispatches:N0} batches, {shadow.MeanGpuMs:0.000} ms mean, {shadow.Failures} failed ({gateWave?.Count ?? 0:N0} rays a batch)."));
         }

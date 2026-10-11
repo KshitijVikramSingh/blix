@@ -6862,6 +6862,66 @@ static ShaderInterface MinimalShader() => new(new[]
     }
     t.Expect("BX.1 every colour format maps to Vulkan and back to itself", lost.Count == 0, string.Join("; ", lost));
 }
+// ============================================================================
+// Section BY — external passes: native Metal work in the frame, and where the frame waits for it.
+// ============================================================================
+//
+// RenderGraph.ExternalPass places work another API does (a Metal pass on the device's own memory) in declaration
+// order; RenderGraph.ExternalJoin says where its result is first needed, so the passes between run alongside it. The
+// device splits its submission around both (VulkanGraphicsDevice.Swapchain, RunExternalPass); what is pinned here is
+// the graph's side: what it accepts, what it refuses, and what the command list hands the device.
+{
+    ExternalWorkSync seen = default;
+    void Encode(ExternalWorkSync sync) => seen = sync;
+
+    var graph = new RenderGraph();
+    var color = graph.ColorTarget("c", TextureFormat.Rgba8, new FixedGraphSize(64, 64));
+    var compute = graph.ComputePass("work").Shader(MinimalShader()).Handle;
+    var external = graph.ExternalPass("metal");
+    graph.GraphicsPass("between").Target(color, LoadOp.Clear, StoreOp.Store).Shader(MinimalShader());
+    var join = graph.ExternalJoin(external, "metal-join");
+    var lone = graph.ExternalPass("metal-lone");
+    t.ExpectThrows("BY.0 an external pass takes one join", () => graph.ExternalJoin(external, "again"), mustMention: "already has a join");
+    t.ExpectThrows("BY.0 and a join names an external pass", () => graph.ExternalJoin(compute, "wrong"), mustMention: "not an external pass");
+    var threw = false;
+    try { graph.Compile(); } catch { threw = true; }
+    t.ExpectTrue("BY.1 external passes and their join compile with no shader", !threw && graph.IsCompiled);
+
+    var shaderless = new RenderGraph();
+    shaderless.ComputePass("bare");
+    t.ExpectThrows("BY.1 CONTROL a compute pass with no shader is still refused", () => shaderless.Compile(), mustMention: "has no Shader declared");
+
+    t.ExpectThrows("BY.2 an external pass takes no dispatches",
+        () => graph.Dispatch(external, new DispatchCommand(default, 1, 1, 1, Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>())),
+        mustMention: "is an external pass");
+    t.ExpectThrows("BY.2 a compute pass takes no external work", () => graph.External(compute, Encode), mustMention: "not an external pass");
+    t.ExpectThrows("BY.2 nor does a join", () => graph.External(join, Encode), mustMention: "not an external pass");
+    graph.External(external, Encode);
+    t.ExpectThrows("BY.3 one piece of external work a frame", () => graph.External(external, Encode), mustMention: "already has work");
+    graph.External(lone, Encode);
+
+    // What the device is handed: the graph's Execute emits these (test graphs have no backend to execute against).
+    var list = new RenderCommandList();
+    list.ExternalPass("metal", Encode, joinLater: true);
+    list.ExternalJoin("metal-join", "metal");
+    list.ExternalPass("metal-lone", Encode);
+    var passes = list.Passes;
+    t.ExpectTrue("BY.4 an external pass is a compute pass with no commands, carrying its work",
+        passes[0].Description is { Compute: true, External: not null, ExternalJoinLater: true } && passes[0].Commands.Count == 0);
+    passes[0].Description.External!(new ExternalWorkSync(1, 2, 3));
+    t.ExpectTrue("BY.4 and the work it carries is the caller's", seen == new ExternalWorkSync(1, 2, 3));
+    t.ExpectTrue("BY.5 a join names the external pass whose work what follows waits for",
+        passes[1].Description is { Compute: true, External: null, ExternalJoin: "metal" } && passes[1].Commands.Count == 0);
+    t.ExpectTrue("BY.5 an external pass without a join is waited for at once",
+        passes[2].Description is { External: not null, ExternalJoinLater: false, ExternalJoin: null });
+
+    // The export a Metal pass starts from is refused by a device that has none, by default, rather than handing out 0.
+    IGraphicsDevice plain = new RecordingDevice();
+    t.ExpectTrue("BY.6 a device without GraphicsFeatures.MetalObjects says so", (plain.Features & GraphicsFeatures.MetalObjects) == 0);
+    t.ExpectThrows("BY.6 and refuses to export a Metal device", () => plain.ExportMetalDevice(), mustMention: "MetalObjects");
+    t.ExpectThrows("BY.6 or a Metal buffer", () => plain.ExportMetalBuffer(default), mustMention: "MetalObjects");
+}
+
 t.PrintSummary();
 return t.Failed;
 

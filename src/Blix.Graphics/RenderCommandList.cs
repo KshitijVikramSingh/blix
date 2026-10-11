@@ -48,7 +48,10 @@ public sealed class RenderCommandList
     public void ComputePass(string name, IReadOnlyList<DispatchCommand> dispatches) => ComputePass(name, dispatches, null);
 
     /// <summary>Native Metal work at this point of the frame; see <see cref="ExternalWorkSync"/>.</summary>
-    public void ExternalPass(string name, Action<ExternalWorkSync> encode)
+    public void ExternalPass(string name, Action<ExternalWorkSync> encode) => ExternalPass(name, encode, joinLater: false);
+
+    /// <param name="joinLater">The frame does not wait after the pass; an <see cref="ExternalJoin"/> later in it does.</param>
+    public void ExternalPass(string name, Action<ExternalWorkSync> encode, bool joinLater)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         ArgumentNullException.ThrowIfNull(encode);
@@ -56,13 +59,24 @@ public sealed class RenderCommandList
         try
         {
             var desc = new RenderPassDescription(
-                RenderSurfaceHandle.Default, Array.Empty<GraphicsColor?>(), ClearDepth: false, Compute: true, External: encode);
+                RenderSurfaceHandle.Default, Array.Empty<GraphicsColor?>(), ClearDepth: false, Compute: true, External: encode,
+                ExternalJoinLater: joinLater);
             passes.Add(new RenderPass(name, desc, Array.Empty<RenderCommand>()));
         }
         finally
         {
             recorder?.OnPassEnd();
         }
+    }
+
+    /// <summary>Everything recorded after this waits for the work of the external pass named (see <see cref="ExternalPass(string, Action{ExternalWorkSync}, bool)"/>).</summary>
+    public void ExternalJoin(string name, string externalPass)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        ArgumentException.ThrowIfNullOrWhiteSpace(externalPass);
+        var desc = new RenderPassDescription(
+            RenderSurfaceHandle.Default, Array.Empty<GraphicsColor?>(), ClearDepth: false, Compute: true, ExternalJoin: externalPass);
+        passes.Add(new RenderPass(name, desc, Array.Empty<RenderCommand>()));
     }
 
     /// <param name="attachmentReads">Render-target outputs the dispatches sample; see RenderPassDescription.AttachmentReads.</param>
