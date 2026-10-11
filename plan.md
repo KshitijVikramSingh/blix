@@ -817,29 +817,60 @@ F. *The frame audit* (opened 2026-10-07: "a lot of pure performance on the table
      visibility at those lookups (--clipmap-exact-visibility) the worst sun's room goes 1.187 -> 1.013 of the truth
      (back wall 1.425 -> 1.100). No per-texel constant can learn a leak that follows the sun outside, so the probes
      are fixed at the source and the transfer is retrained on them.
-   ONE TRUTH, FOUR CACHES (proposed with the user 2026-10-11): screen probes, clipmap probes and texels powered by the
-     same ray-traced truth, each in its own use, then the raster side's buffet cleaned up.
+   ONE TRUTH, FOUR CACHES (proposed with the user 2026-10-11; contracts settled after an outside review the same day):
+     screen probes, clipmap probes and texels powered by the same ray-traced truth, each in its own use, then the
+     raster side's buffet cleaned up.
      The truth: one tracer (CLOSEST / SHADOW batches, software or Metal) and one path rule (reference_path.glsl: the sun
      at a hit by a shadow ray, the sky at an escape, albedo). The reference runs the path to the end. Every cache is
      the same rule cut at the first hit and closed by reading the probes there -- with VISIBILITY TRACED, and the sun by
      a ray (or a cascade only inside the view). Both measured: interpolated lookups leaked 19% into the Cornell room,
      the cascades 25% off the view. A cache that reads another without them inherits its leaks and feeds them back.
-       CLIPMAP PROBES   volume, 0.5 m doubling, world-anchored: the far field, anything dynamic, and the closure every
-                        other cache's hits read. On hardware: every visible probe re-solved a frame.
-       ATLAS TRANSFER   static lightmapped surfaces: geometry, not light -- a scale (+ front-probe weights) cooked from
-                        the reference; a sun change costs nothing. Static surfaces' full detail.
-       HASHED SURFACES  what has no chart (foliage, ivy): the same transfer keyed by the hash, or the probe blend.
-       SCREEN PROBES    the view: what moved and its contact, where no cooked transfer is true any more; temporal.
-     One answer a pixel, chosen by what the surface is (static + atlas / no atlas / moved), not a stack of mixes; GTAO
-     only where no transfer already holds the near field (else it darkens twice).
+       CLIPMAP PROBES   volume, 0.5 m doubling, world-anchored: the far field, anything dynamic, and THE closure: the only
+                        thing a ray's hit reads. On hardware: every visible probe re-solved a frame.
+       ATLAS TRANSFER   static lightmapped surfaces: geometry, not light. A per-texel correction of the probe blend
+                        cooked from the reference -- measured to be ~one number a texel (scale x today's weights; the
+                        front-probe weights add little and fit the truth's noise), 2 B a texel (Sponza 8192^2: ~128 MB,
+                        not ~1 GB of 8 weights). Not PRT: no surface-to-surface links, and it needs none so far.
+       HASHED SURFACES  what has no chart (foliage, ivy): the same transfer, another address (a hash). Surface identity
+                        is the hash's weak point.
+       SCREEN PROBES    the visible fine detail where nothing cooked is true: moved receivers and their contact.
+     WHO READS WHOM (the contract). Sources: the sun (shadow rays, always live; never cooked) and the sky. The clipmap
+     reads itself at its hits -- multiple bounces by a fixed-point iteration (each solve's 1/n blend reads the field
+     earlier solves left) -- and NOTHING ELSE is read at a hit. The transfer, screen probes and texel gather are
+     TERMINAL: they read the clipmap and feed nothing back. So the only loop is the clipmap's own, and the two
+     measured fixes are what keep it honest; a leak inside it compounds (19% at Cornell's worst sun). Letting hits
+     read the transfer would make a second loop and needs explicit lighting generations first -- not until measured.
+     THE SUN, three claims kept apart: (a) a sun change needs no recook of the transfer -- true by construction; (b) it
+     costs nothing at the atlas -- true, one fetch; (c) the image is right at once -- NOT claimed: the probes re-solve
+     over frames (measure the settle), and the transfer's correction holding under a new sun is empirical, per scene:
+     its measure is the held-out sun's error (Cornell, twelve suns: 0.9-1.8%).
+     WHAT MOVES. A moved receiver: screen probes / the probe blend. A moved OCCLUDER over a static surface (a curtain
+     across the light) is the harder case: the wall did not move, its transfer is stale anyway. Bounded, though: the
+     transfer encodes only what lies within ~a probe cell (0.5 m) of its texel, the probes beyond trace the current
+     geometry. A texel whose cell a mover's swept reach touches is invalid (the 4f reach test, crossesMovingReach,
+     reused) and REPLACED -- by the probe blend, or screen probes where seen -- never corrected by adding a delta to
+     it, which would double-count the bounce both estimate.
+     One answer a pixel, chosen by what the surface is (static + atlas / no atlas / moved / near a mover), not a stack
+     of mixes. GTAO only where no transfer holds the near field (it already skips the bounce over texels).
+     Cache or trace: Metal ~150 M rays/s; a ray a pixel at 2880x1620 is ~31 ms, so pixels still look up. Rays go where
+     they are sparse and decisive (visibility at the probes' reads, invalidated texels, screen probes, the cook);
+     measure lookup against trace per use before moving any term from one side to the other.
+     Measured, reported for every change: error against the GPU reference AND error against time since the last change
+     (sun, mover, camera) -- a 2% that takes three seconds differs from a 4% at once; and not leaning on TAA to hide
+     a GI system's instability. Scenarios: static fixed light; the sun moving; an occluder moving across the light
+     (Cornell: a panel sliding over the skylight -- to build); foliage moving by a wall; a camera revealing a room; a
+     bright mover behind the camera.
      Retire, the user's call (each superseded above): the CPU cooked transport (patches, couplings, sunlets,
      cookedIndirect, --transport*: ~400 M CPU rays on Sponza); texels as LIGHT (texel gather/mark/filter, the light
      bake and its per-sun cache -- the atlas and hash stay, as addresses for transfer); surface probes (4g-ix); the
      probe experiments that traced visibility replaces (lift/bias/relocate); cascades in the gather passes once
      shadows are rays on hardware.
-     Order: (1) probes correct (both fixes) and their Sponza cost; (2) transfer on them, Cornell then Sponza; (3) probe
-     solves and their visibility on the batches (hardware); (4) screen probes on the batches as the dynamic layer;
-     (5) retire.
+     Order: (1) probes correct -- DONE on Cornell (both fixes; visibility on the batches, 4f476e2); Sponza's 2x is NOT
+     the wall leak (traced visibility moves it 2.05 -> 2.03) but near field, and a quarter of its sampled texels are
+     unlit hidden faces to drop; (2) transfer on clean probes -- Cornell room view 3.4% against the probes' 9.4%, but
+     grainy: the 1,024-path truth carries 3.2% texel noise (p90 9.1%), so captures go to 16,384 paths (8 min a sun on
+     Metal) and the lookup to bilinear across texels; then Sponza; (3) the moving-panel scene and invalidation by
+     reach; (4) screen probes on the batches; (5) retire.
    HARDWARE RAYS (the next arc, agreed with the user 2026-10-11). The user's metal spike (`--ray-backend both`, its own
      check): 147.8 M rays/s (Metal acceleration structures) against 15.6 M (ray_query.glsl in software) and ~1 M on 10
      CPU cores; 6 of 65,536 hit/miss differences, all at vertices and edge middles; Sponza's structures 460 MB compacted,
