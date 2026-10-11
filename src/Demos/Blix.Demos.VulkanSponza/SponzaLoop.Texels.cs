@@ -593,7 +593,9 @@ internal sealed partial class SponzaLoop
                 new ShaderTextureBinding("uCascadeShadowMaps[2]", graph.GetDepthTexture(cascadeHandles[2])),
             },
             Buffers: gatherBuffers.Where(b => declared.Contains(b.Name)).ToArray());
-        if (wave)
+        // The light bake's last frame (FinishLightBake) queues no slice and the mark has not run: nothing to gather.
+        if (gatherBudget == 0) { }
+        else if (wave)
         {
             // The gather as a wavefront: rays out, their hits shaded, the hits' sun out, the answers gathered. Each batch
             // on Metal when frame rays are (RecordClosestBatch), else on the software traversal.

@@ -17,6 +17,14 @@ namespace Blix.Demos.VulkanSponza;
 // keyed by it, the solved sun and the target. A later run loads it, and every texel is settled from its first frame: the
 // mark finds nothing to queue, and the gather costs nothing until the sun moves (the epoch, as before).
 // --no-light-bake: gathered as the image reads them, every run, as before.
+//
+// Done means what the mark means by it (texel.glsl, texelSettled): the target's rays, and then either the noise under
+// --texel-noise (5% standard error) or --texel-max-rays. A sweep of every live texel to the target leaves about half of
+// them short of that (Sponza: 50.7% settled at 512 rays, the rest at a median 13.6% error), and a run that loaded such a
+// bake went on gathering them -- ~2 M Metal rays a frame with the sun still, the frame 4x slower. So after the sweep the
+// bake REFINES: it reads the light back, keeps the texels the mark would still queue, gives each RefinePasses more
+// passes, and again, until none is left. A loaded bake is then settled everywhere, and a frame gathers only what
+// changed (the sun, an epoch) or was never baked.
 internal sealed partial class SponzaLoop
 {
     // --light-bake-budget N: texels a frame while baking, one 32-ray pass each. By default 16,384 (~0.5 M rays) on the
@@ -40,7 +48,13 @@ internal sealed partial class SponzaLoop
     private bool lightBakeSaving;
     private int lightBakeReported = -1;
 
-    private const int LightBakeVersion = 3;
+    // 4: refined until settled (above); a version 3 bake stopped at the target.
+    private const int LightBakeVersion = 4;
+    // Passes (of 32 rays) a refining round gives each texel still unsettled before the light is read back again.
+    private const int RefinePasses = 4;
+    // 0: the sweep to the target; then the refining rounds.
+    private int lightBakeRound;
+    private long lightBakeRays;
     // Per record on disk: light rgb (half), its rays (float), the blend rgb (half), the moment and the openness (half),
     // the openness's ray count (float).
     private const int LightBakeRecordBytes = 3 * 2 + 4 + 3 * 2 + 2 + 2 + 4;
@@ -56,7 +70,7 @@ internal sealed partial class SponzaLoop
     private string LightBakePathFor(string transportKey, (Vector3 ToSun, Vector3 Irradiance) sun)
     {
         var spec = string.Create(CultureInfo.InvariantCulture,
-            $"{transportKey};sun {sun.ToSun.X:F5},{sun.ToSun.Y:F5},{sun.ToSun.Z:F5};{sun.Irradiance.X:F4},{sun.Irradiance.Y:F4},{sun.Irradiance.Z:F4};target {texelTarget};buried {LightmapBuriedRule};v{LightBakeVersion}");
+            $"{transportKey};sun {sun.ToSun.X:F5},{sun.ToSun.Y:F5},{sun.ToSun.Z:F5};{sun.Irradiance.X:F4},{sun.Irradiance.Y:F4},{sun.Irradiance.Z:F4};target {texelTarget};settled {texelNoise:G6} {texelMaxRays};buried {LightmapBuriedRule};v{LightBakeVersion}");
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(spec)))[..16].ToLowerInvariant();
         return Path.ChangeExtension(TransportCachePath(transportKey), $".light-{hash}");
     }
@@ -152,6 +166,8 @@ internal sealed partial class SponzaLoop
         var passes = (texelTarget + 31) / 32;
         lightBakeTotal = (long)lightBakeLive * passes;
         lightBakeIssued = 0;
+        lightBakeRound = 0;
+        lightBakeRays = lightBakeTotal * 32;
         lightBakeActive = true;
         lightBakeClock = Stopwatch.StartNew();
         lightBakeReported = -1;
@@ -162,10 +178,14 @@ internal sealed partial class SponzaLoop
     // RecordTexels, while baking: the next slice into the gather's queue. Returns the gather's budget this frame.
     private int RecordLightBake()
     {
-        graph.Dispatch(lightBakePassHandle, new DispatchCommand(lightBakePipeline, (LightBakeBudget + 63) / 64, 1, 1,
+        // The sweep (or the round) is out: what it left unsettled gets another round, read back from what has run.
+        if (lightBakeIssued >= lightBakeTotal && !BeginRefineRound()) return FinishLightBake();
+        // No longer than the list: a texel twice in one slice would be gathered twice at once, into one sum.
+        var slice = (int)Math.Min(LightBakeBudget, lightBakeLive);
+        graph.Dispatch(lightBakePassHandle, new DispatchCommand(lightBakePipeline, (slice + 63) / 64, 1, 1,
             new ShaderUniform[]
             {
-                new("uBake", new Vector4Uniform(new Vector4(lightBakeIssued % lightBakeLive, LightBakeBudget, texelFrame & 1u, lightBakeLive))),
+                new("uBake", new Vector4Uniform(new Vector4(lightBakeIssued % lightBakeLive, slice, texelFrame & 1u, lightBakeLive))),
             },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
@@ -173,27 +193,71 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("TexelLive", lightBakeLiveBuffer),
                 new ShaderBufferBinding("TexelQueue", texelQueueBuffer),
             }));
-        lightBakeIssued += LightBakeBudget;
+        lightBakeIssued += slice;
         var percent = (int)(100 * Math.Min(lightBakeIssued, lightBakeTotal) / lightBakeTotal);
         if (percent / 5 != lightBakeReported / 5)
         {
             lightBakeReported = percent;
             var elapsed = lightBakeClock!.Elapsed.TotalMinutes;
             var left = percent > 0 ? elapsed * (100 - percent) / percent : double.NaN;
+            // The sweep's estimate is the sweep's; a refining round's, its round's (how many follow is not known yet).
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                $"[VulkanSponza] light bake: {percent}% ({elapsed:0.0} min{(percent > 0 ? $", ~{left:0.0} left" : "")})."));
+                $"[VulkanSponza] light bake{(lightBakeRound > 0 ? $", refining round {lightBakeRound}" : "")}: {percent}% ({elapsed:0.0} min{(percent > 0 && lightBakeRound == 0 ? $", ~{left:0.0} left in the sweep" : "")})."));
         }
-        if (lightBakeIssued >= lightBakeTotal)
-        {
-            lightBakeActive = false;
-            lightBakeDoneFrame = texelFrame;
-            transferBakeDone = transferDumpPath is not null;
-            transferBakeDoneFrame = texelFrame;
-            lightBakeSaving = lightBakePath is not null;
-            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                $"[VulkanSponza] light bake: done in {lightBakeClock.Elapsed.TotalMinutes:0.0} min."));
-        }
-        return LightBakeBudget;
+        return slice;
+    }
+
+    // The bake is settled (or not refined: --transfer-dump's, never saved): the queue goes back to the mark.
+    private int FinishLightBake()
+    {
+        lightBakeActive = false;
+        lightBakeDoneFrame = texelFrame;
+        transferBakeDone = transferDumpPath is not null;
+        transferBakeDoneFrame = texelFrame;
+        lightBakeSaving = lightBakePath is not null;
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[VulkanSponza] light bake: done in {lightBakeClock!.Elapsed.TotalMinutes:0.0} min ({lightBakeRays / 1e9:0.0} G rays, {lightBakeRound} refining round{(lightBakeRound == 1 ? "" : "s")})."));
+        // The frame still runs the gather with no slice queued: the queue's counts for this parity are the mark's to
+        // fill from the next frame, so this one gathers nothing.
+        return 0;
+    }
+
+    // Reads back the live texels' light and moments (after everything submitted so far: the last slice's gather was
+    // recorded in an earlier frame) and keeps those the mark would still queue (texelSettled, as texel.glsl has it).
+    // False when none is left. Only a bake that is saved refines; --transfer-dump's sample is the sweep's.
+    private bool BeginRefineRound()
+    {
+        if (lightBakePath is null) return false;
+        var clock = Stopwatch.StartNew();
+        var live = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(lightBakeLiveBuffer, 0, lightBakeLive * 4).AsSpan()).ToArray();
+        var light = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(texelLightBuffer, 0, texelCount * 16).AsSpan());
+        var moment = MemoryMarshal.Cast<byte, float>(device.ReadGpuBuffer(texelMomentBuffer, 0, texelCount * 4).AsSpan());
+        var unsettled = new List<uint>();
+        foreach (var id in live)
+            if (!TexelSettled(light[(int)id], moment[(int)id])) unsettled.Add(id);
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[VulkanSponza] light bake: {live.Length - unsettled.Count:N0} of {live.Length:N0} texels settled after {(lightBakeRound == 0 ? "the sweep" : $"round {lightBakeRound}")} ({clock.Elapsed.TotalSeconds:0.0} s to read back); {unsettled.Count:N0} refine."));
+        if (unsettled.Count == 0) return false;
+        Disown(lightBakeLiveBuffer);
+        lightBakeLiveBuffer = Own(device.CreateGpuBuffer(unsettled.Count * 4, MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(unsettled)), "sponza.light-bake.refine"));
+        lightBakeLive = unsettled.Count;
+        lightBakeTotal = (long)lightBakeLive * RefinePasses;
+        lightBakeIssued = 0;
+        lightBakeRound++;
+        lightBakeReported = -1;
+        lightBakeRays += lightBakeTotal * 32;
+        return true;
+    }
+
+    // texel.glsl's texelSettled, on the CPU: the target's rays, then the noise under --texel-noise or the most rays.
+    private bool TexelSettled(Vector4 light, float m2)
+    {
+        if (light.W < texelTarget) return false;
+        if (light.W >= texelMaxRays) return true;
+        var mean = 0.2126f * light.X + 0.7152f * light.Y + 0.0722f * light.Z;
+        var variance = MathF.Max(m2 - mean * mean, 0f);
+        var standardError = MathF.Sqrt(variance / (light.W / 32f));
+        return standardError <= texelNoise * MathF.Max(mean, TexelNoiseFloor);
     }
 
     // A few frames after the last slice (its gather finished on the GPU): the light read back and written in the
