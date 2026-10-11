@@ -308,7 +308,7 @@ internal sealed partial class SponzaLoop
         _ = checked(bake.Texels.Length * 16 + texelCount * 16);
         var stamps = new uint[texelCount];
         Array.Fill(stamps, 0xFFFFFFFFu);
-        var queueWords = 8 + 4 * Math.Max(texelBudget, lightBakeBudget);
+        var queueWords = 8 + 4 * Math.Max(texelBudget, LightBakeBudget);
         texelHashBuffer = Own(device.CreateGpuBuffer(bake.Table.Length * 4, MemoryMarshal.AsBytes(bake.Table.AsSpan()), "sponza.texels.hash"));
         texelBuffer = Own(device.CreateGpuBuffer(bake.Texels.Length * 16, MemoryMarshal.AsBytes(bake.Texels.AsSpan()), "sponza.texels"));
         texelLightBuffer = Own(device.CreateGpuBuffer(texelCount * 16, light is null ? new byte[texelCount * 16] : MemoryMarshal.AsBytes(light.Light.AsSpan()), "sponza.texels.light"));
