@@ -849,7 +849,9 @@ F. *The frame audit* (opened 2026-10-07: "a lot of pure performance on the table
      transfer encodes only what lies within ~a probe cell (0.5 m) of its texel, the probes beyond trace the current
      geometry. A texel whose cell a mover's swept reach touches is invalid (the 4f reach test, crossesMovingReach,
      reused) and REPLACED -- by the probe blend, or screen probes where seen -- never corrected by adding a delta to
-     it, which would double-count the bounce both estimate.
+     it, which would double-count the bounce both estimate. GAP: Metal's acceleration structures are built once with
+     their instances fixed (SponzaLoop.HardwareRays.cs), so Metal rays do not see a mover; the software traversal does
+     (mover_rays.comp). Until the top level is refit each frame, mover runs trace on --ray-backend sw.
      One answer a pixel, chosen by what the surface is (static + atlas / no atlas / moved / near a mover), not a stack
      of mixes. GTAO only where no transfer holds the near field (it already skips the bounce over texels).
      Cache or trace: Metal ~150 M rays/s; a ray a pixel at 2880x1620 is ~31 ms, so pixels still look up. Rays go where

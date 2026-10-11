@@ -73,6 +73,8 @@ internal sealed partial class SponzaLoop
     // A/B for the bilinear lookup).
     private Vector4 TransferUniform => new(transferWeightsOn ? 1f : 0f, lightmapFirstRecord, transferNearest ? 1f : 0f, 0f);
     private bool transferNearest;
+    // --transfer-keep-stale: texels a mover can reach keep their transfer (the A/B for giving them to the probes).
+    private bool transferKeepStale;
     private bool transferBakeDone;
     private uint transferBakeDoneFrame;
     // Frames after the region's bake (or a sun's turn) at least, before the dump; the probes' solves decide the rest

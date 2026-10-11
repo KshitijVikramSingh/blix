@@ -163,7 +163,7 @@ internal sealed partial class SponzaLoop
                 new("uReference", new Vector4Uniform(reference.Params)),
                 new("uClipExact", new Vector4Uniform(new Vector4(incidentExactVisibility ? 1f : 0f, clipmapNormalBias, clipmapViewBias, clipmapRelocate ? 1f : 0f))),
                 new("uTransfer", new Vector4Uniform(TransferUniform)),
-                new("uTransferStaleMin", new Vector4Uniform(MoverActive ? new Vector4(moverReach.Min - new Vector3(clipmapSpacing), 1f) : Vector4.Zero)),
+                new("uTransferStaleMin", new Vector4Uniform(MoverActive && !transferKeepStale ? new Vector4(moverReach.Min - new Vector3(clipmapSpacing), 1f) : Vector4.Zero)),
                 new("uTransferStaleMax", new Vector4Uniform(MoverActive ? new Vector4(moverReach.Max + new Vector3(clipmapSpacing), 0f) : Vector4.Zero)),
                 new("uTexelDebug", new Vector4Uniform(new Vector4(texelFrame, 0f, 0f, 0f))),
                 new("uLightmap", new Vector4Uniform(LightmapUniform)),

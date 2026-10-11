@@ -81,6 +81,7 @@ internal sealed partial class SponzaLoop
         // --transfer-weights <file>: fitted transfer weights to answer with (SponzaLoop.TransferFit.cs).
         transferWeightsPath = args.String("transfer-weights");
         transferNearest = args.Flag("transfer-nearest");
+        transferKeepStale = args.Flag("transfer-keep-stale");
         if (args.Int("texel-gtao") is { } tg) texelGtao = tg != 0;
         // --gi-reference-seed N: start the paths' random sequence elsewhere -- two references that differ only in it
         // differ only by their noise (the floor any comparison against one can resolve).
