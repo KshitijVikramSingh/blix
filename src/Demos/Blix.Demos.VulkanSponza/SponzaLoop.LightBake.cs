@@ -19,8 +19,11 @@ namespace Blix.Demos.VulkanSponza;
 // --no-light-bake: gathered as the image reads them, every run, as before.
 internal sealed partial class SponzaLoop
 {
-    // --light-bake-budget N: texels a frame while baking, one 32-ray pass each. 16384: ~0.5 M rays a frame.
-    private int lightBakeBudget = 16384;
+    // --light-bake-budget N: texels a frame while baking, one 32-ray pass each. By default 16,384 (~0.5 M rays) on the
+    // software traversal; on Metal 131,072 (~4.2 M rays, ~550 MB of wavefront buffers) -- a rebake of Sponza's 11 M live
+    // texels took ~47 minutes at the software budget, the image's own texels waiting behind it.
+    private int? lightBakeBudgetAsked;
+    private int LightBakeBudget => lightBakeBudgetAsked ?? (FrameRaysOnHardware ? 131072 : 16384);
     private bool lightBakeOff;
     private ShaderInterface lightBakeInterface = null!;
     private PassHandle lightBakePassHandle;
@@ -37,7 +40,7 @@ internal sealed partial class SponzaLoop
     private bool lightBakeSaving;
     private int lightBakeReported = -1;
 
-    private const int LightBakeVersion = 1;
+    private const int LightBakeVersion = 3;
     // Per record on disk: light rgb (half), its rays (float), the blend rgb (half), the moment and the openness (half),
     // the openness's ray count (float).
     private const int LightBakeRecordBytes = 3 * 2 + 4 + 3 * 2 + 2 + 2 + 4;
@@ -45,7 +48,7 @@ internal sealed partial class SponzaLoop
     private void ReadLightBakeArgs(AppArgs args)
     {
         lightBakeOff = args.Flag("no-light-bake");
-        if (args.Int("light-bake-budget") is { } b) lightBakeBudget = Math.Clamp(b, 1024, 1 << 18);
+        if (args.Int("light-bake-budget") is { } b) lightBakeBudgetAsked = Math.Clamp(b, 1024, 1 << 18);
     }
 
     // The baked light's file: the transport cache's key (the scene, the lightmap files, the texel settings), the sun
@@ -53,7 +56,7 @@ internal sealed partial class SponzaLoop
     private string LightBakePathFor(string transportKey, (Vector3 ToSun, Vector3 Irradiance) sun)
     {
         var spec = string.Create(CultureInfo.InvariantCulture,
-            $"{transportKey};sun {sun.ToSun.X:F5},{sun.ToSun.Y:F5},{sun.ToSun.Z:F5};{sun.Irradiance.X:F4},{sun.Irradiance.Y:F4},{sun.Irradiance.Z:F4};target {texelTarget};buried {(lightmapKeepBuried ? "kept" : lightmapBackface.ToString(CultureInfo.InvariantCulture))}/16;v{LightBakeVersion}");
+            $"{transportKey};sun {sun.ToSun.X:F5},{sun.ToSun.Y:F5},{sun.ToSun.Z:F5};{sun.Irradiance.X:F4},{sun.Irradiance.Y:F4},{sun.Irradiance.Z:F4};target {texelTarget};buried {LightmapBuriedRule};v{LightBakeVersion}");
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(spec)))[..16].ToLowerInvariant();
         return Path.ChangeExtension(TransportCachePath(transportKey), $".light-{hash}");
     }
@@ -153,16 +156,16 @@ internal sealed partial class SponzaLoop
         lightBakeClock = Stopwatch.StartNew();
         lightBakeReported = -1;
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[VulkanSponza] light bake: {lightBakeLive:N0} live texels of {count:N0}, {passes} passes of 32 rays each ({lightBakeTotal * 32 / 1e9:0.0} G rays), {lightBakeBudget:N0} a frame."));
+            $"[VulkanSponza] light bake: {lightBakeLive:N0} live texels of {count:N0}, {passes} passes of 32 rays each ({lightBakeTotal * 32 / 1e9:0.0} G rays), {LightBakeBudget:N0} a frame."));
     }
 
     // RecordTexels, while baking: the next slice into the gather's queue. Returns the gather's budget this frame.
     private int RecordLightBake()
     {
-        graph.Dispatch(lightBakePassHandle, new DispatchCommand(lightBakePipeline, (lightBakeBudget + 63) / 64, 1, 1,
+        graph.Dispatch(lightBakePassHandle, new DispatchCommand(lightBakePipeline, (LightBakeBudget + 63) / 64, 1, 1,
             new ShaderUniform[]
             {
-                new("uBake", new Vector4Uniform(new Vector4(lightBakeIssued % lightBakeLive, lightBakeBudget, texelFrame & 1u, lightBakeLive))),
+                new("uBake", new Vector4Uniform(new Vector4(lightBakeIssued % lightBakeLive, LightBakeBudget, texelFrame & 1u, lightBakeLive))),
             },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
@@ -170,7 +173,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("TexelLive", lightBakeLiveBuffer),
                 new ShaderBufferBinding("TexelQueue", texelQueueBuffer),
             }));
-        lightBakeIssued += lightBakeBudget;
+        lightBakeIssued += LightBakeBudget;
         var percent = (int)(100 * Math.Min(lightBakeIssued, lightBakeTotal) / lightBakeTotal);
         if (percent / 5 != lightBakeReported / 5)
         {
@@ -190,7 +193,7 @@ internal sealed partial class SponzaLoop
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] light bake: done in {lightBakeClock.Elapsed.TotalMinutes:0.0} min."));
         }
-        return lightBakeBudget;
+        return LightBakeBudget;
     }
 
     // A few frames after the last slice (its gather finished on the GPU): the light read back and written in the

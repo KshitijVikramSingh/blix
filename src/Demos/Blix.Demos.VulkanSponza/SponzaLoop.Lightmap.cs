@@ -4,6 +4,7 @@ using System.Numerics;
 using System.Runtime.InteropServices;
 using Blix.Geometry;
 using Blix.Graphics;
+using Blix.Graphics.MetalHWX;
 
 namespace Blix.Demos.VulkanSponza;
 
@@ -32,6 +33,25 @@ internal sealed partial class SponzaLoop
     private bool lightmapKeepBuried;
     // --lightmap-backface N: of 16 hemisphere rays, how many meeting a back face first bury a texel (4: a quarter).
     private int lightmapBackface = 4;
+    // --lightmap-buried-reach M: a back face counts only this near (0.3 m). Open-bottomed stone resting on a capital
+    // let a visible texel's slanting rays into the arch above, its inside faces ~0.5-1 m up, and buried it; a texel
+    // gone past a joint into the next solid meets that solid's faces close by, and stays buried.
+    private float lightmapBuriedReach = 0.3f;
+    // --lightmap-buried-lift M: how far off its texel the test's rays start. Against the bake scene (full detail, the
+    // surfaces the texels sit on) a millimetre. Against the frame's scene, simplified up to rayLodError, the LOD error
+    // and a millimetre: on a concave curve its chords pass in front of LOD 0, and a texel lifted 1 mm started behind its
+    // own mesh's coarse surface and was buried in plain view (the red tears along Sponza's arches).
+    private float? lightmapBuriedLiftAsked;
+    private float LightmapBuriedLift => lightmapBuriedLiftAsked ?? (BakeSceneWanted ? 0.001f : rayLodError + 0.001f);
+    // --lightmap-buried-why: for buried records near the camera, what their test rays met (SponzaLoop.Lightmap.cs).
+    private bool lightmapBuriedWhy;
+    // The test's rays a record: 64 where Metal answers them (the edge between kept and buried was speckled at 16), 16
+    // on the CPU; the threshold the same share of them as lightmapBackface is of 16.
+    private int LightmapBuriedTests => FrameRaysOnHardware ? 64 : 16;
+    private int LightmapBuriedThreshold => (LightmapBuriedTests * lightmapBackface + 15) / 16;
+    // What the buried flags depend on, for the caches that hold them or what was gathered with them.
+    private string LightmapBuriedRule => lightmapKeepBuried ? "kept"
+        : string.Create(CultureInfo.InvariantCulture, $"{LightmapBuriedThreshold}/{LightmapBuriedTests} within {lightmapBuriedReach} m from {LightmapBuriedLift} m off, single-sided");
     private bool lightmapNoFrames;
     private int lightmapFirstRecord;
 
@@ -56,17 +76,23 @@ internal sealed partial class SponzaLoop
         Array.Fill(map, 0xFFFFFFFFu);
         // Records per source, to say where they went when the budget refuses.
         var perSource = new long[lightmapSources.Count];
-        long records = 0, covered = 0, paired = 0;
+        long records = 0, covered = 0, paired = 0, edgeCovered = 0;
         // Double-sided texels whose stored face normal (the triangle's winding) disagrees with the interpolated vertex
         // normal -- what a pixel's shading normal is picked against (texelsAroundLightmap) -- and those near edge-on.
         long pairedOpposed = 0, pairedGrazing = 0;
         Vector4[]? texels = null;
         // Per record (pairs share the front's): LOD 0's interpolated vertex normal and tangent, packed (PackFrame).
         uint[]? frames = null;
-        for (var pass = 0; pass < 2; pass++)
+        // Four passes over the same triangles in the same order: claim the texels whose centre a triangle covers, then
+        // (conservative) the still-empty texels a triangle overlaps; fill the first kind, then the second. Centres alone
+        // left a chart thinner than a texel -- an arch rim's moulding strip -- without one record: nothing for the
+        // gutter to spread, its pixels black, or a neighbouring chart's light (the tears along Sponza's arches). An
+        // overlap texel's record is the triangle's point nearest its centre.
+        for (var pass = 0; pass < 4; pass++)
         for (var si = 0; si < lightmapSources.Count; si++)
         {
             var source = lightmapSources[si];
+            var edges = (pass & 1) == 1;
             var stride = source.Stride;
             Vector3 Position(uint v) => Vector3.Transform(new Vector3(
                 BitConverter.ToSingle(source.VertexBytes, (int)v * stride),
@@ -91,9 +117,16 @@ internal sealed partial class SponzaLoop
                     var wa = ((b.X - p.X) * (c.Y - p.Y) - (b.Y - p.Y) * (c.X - p.X)) / area;
                     var wb = ((c.X - p.X) * (a.Y - p.Y) - (c.Y - p.Y) * (a.X - p.X)) / area;
                     var wc = 1f - wa - wb;
-                    if (wa < -1e-4f || wb < -1e-4f || wc < -1e-4f) continue;
+                    var inside = wa >= -1e-4f && wb >= -1e-4f && wc >= -1e-4f;
+                    if (!edges && !inside) continue;
+                    if (edges)
+                    {
+                        // Overlapping the texel's square (within its half diagonal of the centre), at the nearest point.
+                        (wa, wb, wc) = NearestBarycentric(p, a, b, c);
+                        if (Vector2.DistanceSquared(a * wa + b * wb + c * wc, p) > 0.5f) continue;
+                    }
                     var cell = (long)y * w + x;
-                    if (pass == 0)
+                    if (pass < 2)
                     {
                         // Claim: the first triangle to reach a texel owns it (the second pass meets them in the same
                         // order). Counted past uint's reach rather than wrapped: the guard reads the long.
@@ -103,6 +136,7 @@ internal sealed partial class SponzaLoop
                         records += size;
                         perSource[si] += size;
                         covered++;
+                        if (edges) edgeCovered++;
                         if (source.DoubleSided) paired++;
                         continue;
                     }
@@ -146,7 +180,7 @@ internal sealed partial class SponzaLoop
                     }
                 }
             }
-            if (pass == 0 && si == lightmapSources.Count - 1)
+            if (pass == 1 && si == lightmapSources.Count - 1)
             {
                 var bytes = records * LightmapRecordBytes;
                 if (bytes > LightmapRecordBudgetBytes || records * 2 * 16 > int.MaxValue)
@@ -164,12 +198,14 @@ internal sealed partial class SponzaLoop
         // Sides inside a solid -- where one piece runs on into another, or a slab's inner face -- are buried: gathered,
         // they read the dark inside and a bilinear lookup spreads it onto the visible texels beside them (a crisp black
         // square a texel wide, where one of a pixel's four is). A lightmap baker's backface tolerance: buried when
-        // lightmapBackface of 16 hemisphere rays meet a back face first. The hashed cook's rule (a ray along the normal
+        // lightmapBackface in 16 of its hemisphere rays meet a back face first, within lightmapBuriedReach (LightmapBuriedRule). The hashed cook's rule (a ray along the normal
         // meeting one, then 15 of 16) left the texels at a joint -- the end of a wall running into the next, whose normal
         // ray goes out free while its slanting ones go into the solid -- gathering half dark: Sponza's upper walls showed
         // them as black squares along every such edge. A buried record keeps its place (and its pair's sign) with |w| 1
         // instead of 4; texel.glsl and the filter skip it, and a pixel's other texels or the coarser level answer.
-        // --lightmap-keep-buried keeps them all.
+        // --lightmap-keep-buried keeps them all. Only a single-sided triangle has an inside: a double-sided one's back face
+        // is the far side of a sheet (a curtain's next fold), and counting it buried 57% of the curtains' texels and
+        // the pillar and floor texels beside them -- skipped, the survivors stretched over them in hard-edged blocks.
         // The test is 9.8M rays and more on Sponza (~170 s), so its answer is kept beside the transport cache, under the
         // same key (which names the scene and these .blixlightmap files).
         long buried = 0;
@@ -177,23 +213,36 @@ internal sealed partial class SponzaLoop
         if (!lightmapKeepBuried)
         {
             var count = (int)records;
-            var flags = ReadBuriedCache(cacheKey, count, lightmapBackface);
+            var flags = ReadBuriedCache(cacheKey, count, LightmapBuriedRule);
             buriedCached = flags is not null;
             flags ??= new bool[count];
-            if (!buriedCached)
+            // On Metal when frame rays are (the frame tracer, built a few frames in; this runs on the cook's thread):
+            // ~210 M rays in about a second, against ~3 minutes on the CPU.
+            var buriedClock = Stopwatch.StartNew();
+            var metal = buriedCached ? null : WaitForBakeTracer();
+            if (metal is not null)
+            {
+                flags = metal.TestBuried(texels.AsSpan(0, count * 2), LightmapBuriedTests, LightmapBuriedThreshold, lightmapBuriedReach, LightmapBuriedLift, 173u,
+                    CollectionsMarshal.AsSpan(rayPlacementDoubleSided), out var buriedGpuMs);
+                Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                    $"[VulkanSponza] lightmap buried test on Metal ({LightmapBuriedRule}): {count:N0} records in {buriedClock.Elapsed.TotalSeconds:0.0} s ({buriedGpuMs:0} ms GPU)."));
+            }
+            else if (!buriedCached)
             Parallel.For(0, count, k =>
             {
                 var p = new Vector3(texels![2 * k].X, texels[2 * k].Y, texels[2 * k].Z);
                 var n = new Vector3(texels[2 * k + 1].X, texels[2 * k + 1].Y, texels[2 * k + 1].Z);
-                var origin = p + n * 1e-3f;
+                var origin = p + n * LightmapBuriedLift;
                 var r = new Random(173 + k);
                 var back = 0;
-                const int tests = 16;
-                for (var t = 0; t < tests && back < lightmapBackface; t++)
-                    if (scene.Closest(new Ray(origin, CosineHemisphereCpu(n, r)), 0f, float.PositiveInfinity, (uint)r.Next()) is { FrontFace: false }) back++;
-                flags[k] = back >= lightmapBackface;
+                int tests = LightmapBuriedTests, threshold = LightmapBuriedThreshold;
+                for (var t = 0; t < tests && back < threshold; t++)
+                    if (scene.Closest(new Ray(origin, CosineHemisphereCpu(n, r)), 0f, lightmapBuriedReach, (uint)r.Next()) is { FrontFace: false } hit
+                        && !rayPlacementDoubleSided[hit.Instance]) back++;
+                flags[k] = back >= threshold;
             });
-            if (!buriedCached) WriteBuriedCache(cacheKey, flags, lightmapBackface);
+            if (!buriedCached) WriteBuriedCache(cacheKey, flags, LightmapBuriedRule);
+            if (lightmapBuriedWhy) ExplainBuried(scene, texels!, flags);
             for (var k = 0; k < count; k++)
                 if (flags[k]) { texels![2 * k].W = MathF.Sign(texels[2 * k].W); buried++; }
         }
@@ -222,11 +271,34 @@ internal sealed partial class SponzaLoop
             map = next;
         }
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[VulkanSponza] lightmap texels: {covered:N0} atlas texels covered ({paired:N0} of them double-sided, two records each), {gutter:N0} gutter texels pointing at a neighbour; {w} x {h} atlas; {records * LightmapRecordBytes / 1048576.0:N0} MB of texel state; {(lightmapKeepBuried ? "buried sides kept (--lightmap-keep-buried)" : string.Create(CultureInfo.InvariantCulture, $"{buried:N0} records buried in a solid ({buried / (double)Math.Max(1, records):P1}), skipped{(buriedCached ? ", from the cache" : "")}"))}; baked in {clock.Elapsed.TotalSeconds:0.0} s."));
+            $"[VulkanSponza] lightmap texels: {covered:N0} atlas texels covered ({edgeCovered:N0} by a triangle's edge, not its centre; {paired:N0} double-sided, two records each), {gutter:N0} gutter texels pointing at a neighbour; {w} x {h} atlas; {records * LightmapRecordBytes / 1048576.0:N0} MB of texel state; {(lightmapKeepBuried ? "buried sides kept (--lightmap-keep-buried)" : string.Create(CultureInfo.InvariantCulture, $"{buried:N0} records buried in a solid ({buried / (double)Math.Max(1, records):P1}), skipped{(buriedCached ? ", from the cache" : "")}"))}; baked in {clock.Elapsed.TotalSeconds:0.0} s."));
         if (paired > 0)
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] lightmap double-sided texels: {pairedOpposed / (double)paired:P1} have vertex normals opposite their winding, {pairedGrazing / (double)paired:P1} within ~17 deg of edge-on (a pixel picks its side by the vertex normal)."));
         return (texels!, map, frames!, (int)records);
+    }
+
+    // The barycentrics of the point of triangle abc nearest p (in the atlas's plane): Ericson's region tests.
+    private static (float A, float B, float C) NearestBarycentric(Vector2 p, Vector2 a, Vector2 b, Vector2 c)
+    {
+        Vector2 ab = b - a, ac = c - a, ap = p - a;
+        float d1 = Vector2.Dot(ab, ap), d2 = Vector2.Dot(ac, ap);
+        if (d1 <= 0f && d2 <= 0f) return (1f, 0f, 0f);
+        var bp = p - b;
+        float d3 = Vector2.Dot(ab, bp), d4 = Vector2.Dot(ac, bp);
+        if (d3 >= 0f && d4 <= d3) return (0f, 1f, 0f);
+        var vc = d1 * d4 - d3 * d2;
+        if (vc <= 0f && d1 >= 0f && d3 <= 0f) { var v = d1 / (d1 - d3); return (1f - v, v, 0f); }
+        var cp = p - c;
+        float d5 = Vector2.Dot(ab, cp), d6 = Vector2.Dot(ac, cp);
+        if (d6 >= 0f && d5 <= d6) return (0f, 0f, 1f);
+        var vb = d5 * d2 - d1 * d6;
+        if (vb <= 0f && d2 >= 0f && d6 <= 0f) { var u = d2 / (d2 - d6); return (1f - u, 0f, u); }
+        var va = d3 * d6 - d5 * d4;
+        if (va <= 0f && d4 - d3 >= 0f && d5 - d6 >= 0f) { var u = (d4 - d3) / (d4 - d3 + (d5 - d6)); return (0f, 1f - u, u); }
+        var denom = 1f / (va + vb + vc);
+        float bv = vb * denom, cw = vc * denom;
+        return (1f - bv - cw, bv, cw);
     }
 
     // A shading frame in two words: the normal octahedral as two snorm16s, the tangent the same with its handedness in
@@ -248,18 +320,75 @@ internal sealed partial class SponzaLoop
         return (Oct(normal), packed | (handed < 0f ? 1u : 0u));
     }
 
+    // --lightmap-buried-why: up to 3,000 buried records within 12 m of the camera that it sees, their test rays again on the CPU: whose
+    // back faces they met and how far, and a probe straight behind each (2 cm) -- a back face there means the record's
+    // normal points into its own surface (the winding against the vertex normals), a front face that it points out.
+    private void ExplainBuried(RayQueryScene scene, Vector4[] texels, bool[] flags)
+    {
+        var eye = cameraPosition;
+        var picked = new List<int>();
+        for (var k = 0; k < flags.Length && picked.Count < 3000; k++)
+        {
+            if (!flags[k]) continue;
+            var p = new Vector3(texels[2 * k].X, texels[2 * k].Y, texels[2 * k].Z);
+            var toward = p - eye;
+            var d = toward.Length();
+            if (d > 12f || d < 0.1f) continue;
+            // Seen by the camera: the ray from the eye reaches the record's point (within 2 cm) on a front face.
+            if (scene.Closest(new Ray(eye, toward / d), 0f, d + 0.02f, 1u) is { } seen && seen.T > d - 0.02f) picked.Add(k);
+        }
+        var byName = new Dictionary<string, int>();
+        var distances = new int[5];   // < 1 cm, < 5 cm, < 10 cm, < 30 cm, beyond
+        int behindBack = 0, behindFront = 0, behindNone = 0, hits = 0;
+        foreach (var k in picked)
+        {
+            var p = new Vector3(texels[2 * k].X, texels[2 * k].Y, texels[2 * k].Z);
+            var n = Vector3.Normalize(new Vector3(texels[2 * k + 1].X, texels[2 * k + 1].Y, texels[2 * k + 1].Z));
+            var r = new Random(911 + k);
+            for (var t = 0; t < 64; t++)
+                if (scene.Closest(new Ray(p + n * LightmapBuriedLift, CosineHemisphereCpu(n, r)), 0f, lightmapBuriedReach, (uint)r.Next()) is { FrontFace: false } hit
+                    && !rayPlacementDoubleSided[hit.Instance])
+                {
+                    hits++;
+                    var name = rayPlacementNames[hit.Instance];
+                    byName[name] = byName.GetValueOrDefault(name) + 1;
+                    distances[hit.T < 0.01f ? 0 : hit.T < 0.05f ? 1 : hit.T < 0.1f ? 2 : hit.T < 0.3f ? 3 : 4]++;
+                }
+            var behind = scene.Closest(new Ray(p + n * 0.005f, -n), 0f, 0.02f, 1u);
+            if (behind is null) behindNone++;
+            else if (behind.Value.FrontFace) behindFront++;
+            else behindBack++;
+        }
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[VulkanSponza] buried, why ({picked.Count:N0} records the camera sees within 12 m, {hits:N0} back-face hits): met at < 1 cm {distances[0]:N0}, < 5 cm {distances[1]:N0}, < 10 cm {distances[2]:N0}, < 30 cm {distances[3]:N0}; straight behind each: its own front face {behindFront:N0}, a back face {behindBack:N0}, nothing within 2 cm {behindNone:N0}."));
+        foreach (var (name, c) in byName.OrderByDescending(x => x.Value).Take(12))
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {c,7:N0}  {name}"));
+    }
+
+    // The frame's Metal tracer for work off the frame's thread: waited for while frame rays are on Metal and it is being
+    // built (EnsureFrameTracer, a few frames after the surface bake); null otherwise, and the caller uses the CPU.
+    private MetalRayTracer? WaitForFrameTracer()
+    {
+        if (!FrameRaysOnHardware) return null;
+        // A cook on the frame's thread (--transport-wait) cannot wait for what the frame builds.
+        if (!transportCookAsync) return Volatile.Read(ref frameTracer);
+        var clock = Stopwatch.StartNew();
+        while (Volatile.Read(ref frameTracer) is null && !Volatile.Read(ref frameTracerFailed) && clock.Elapsed.TotalSeconds < 60) Thread.Sleep(20);
+        return Volatile.Read(ref frameTracer);
+    }
+
     private static string BuriedCachePath(string cacheKey) => Path.ChangeExtension(TransportCachePath(cacheKey), ".lightmap-buried");
 
-    private const int BuriedCacheVersion = 2;
+    private const int BuriedCacheVersion = 4;
 
-    private static bool[]? ReadBuriedCache(string cacheKey, int count, int backface)
+    private static bool[]? ReadBuriedCache(string cacheKey, int count, string rule)
     {
         var path = BuriedCachePath(cacheKey);
         if (!File.Exists(path)) return null;
         try
         {
             using var r = new BinaryReader(File.OpenRead(path));
-            if (r.ReadString() != "blix-lightmap-buried" || r.ReadInt32() != BuriedCacheVersion || r.ReadInt32() != count || r.ReadInt32() != backface) return null;
+            if (r.ReadString() != "blix-lightmap-buried" || r.ReadInt32() != BuriedCacheVersion || r.ReadInt32() != count || r.ReadString() != rule) return null;
             var bits = r.ReadBytes((count + 7) / 8);
             if (bits.Length != (count + 7) / 8) return null;
             var flags = new bool[count];
@@ -269,7 +398,7 @@ internal sealed partial class SponzaLoop
         catch (IOException) { return null; }
     }
 
-    private static void WriteBuriedCache(string cacheKey, bool[] flags, int backface)
+    private static void WriteBuriedCache(string cacheKey, bool[] flags, string rule)
     {
         var bits = new byte[(flags.Length + 7) / 8];
         for (var k = 0; k < flags.Length; k++) if (flags[k]) bits[k >> 3] |= (byte)(1 << (k & 7));
@@ -281,7 +410,7 @@ internal sealed partial class SponzaLoop
             w.Write("blix-lightmap-buried");
             w.Write(BuriedCacheVersion);
             w.Write(flags.Length);
-            w.Write(backface);
+            w.Write(rule);
             w.Write(bits);
         }
         catch (IOException e) { Console.WriteLine($"[VulkanSponza] lightmap: buried cache not written ({e.Message})."); }

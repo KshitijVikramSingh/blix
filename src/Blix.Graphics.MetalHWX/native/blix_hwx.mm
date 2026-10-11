@@ -223,6 +223,51 @@ kernel void blix_trace(device const float4* rays [[buffer(0)]],
     hits[i * 3u + 1u] = uint4(placement, triangle, 0u, 0u);
     hits[i * 3u + 2u] = uint4(as_type<uint>(n.x), as_type<uint>(n.y), as_type<uint>(n.z), albedo);
 }
+
+// The lightmap's buried test (hwx_buried): per record (two float4s: position, normal), `tests` cosine rays from just
+// `lift` off it, each as far as `reach`; buried when `threshold` of them first meet a single-sided triangle's back face. A
+// double-sided placement's back face (doubleSided[placement] != 0) is the far side of a sheet with no inside, and does
+// not count.
+struct BuriedParams { uint count; uint tests; uint threshold; uint seed; float reach; float lift; uint pad0, pad1; };
+
+kernel void blix_buried(device const float4* records [[buffer(0)]],
+                        device uchar* buried [[buffer(1)]],
+                        instance_acceleration_structure tlas [[buffer(2)]],
+                        intersection_function_table<triangle_data, instancing> table [[buffer(3)]],
+                        constant BuriedParams& p [[buffer(4)]],
+                        device const uchar* doubleSided [[buffer(5)]],
+                        device const uint* primRows [[buffer(6)]],
+                        device const uint2* entryRows [[buffer(7)]],
+                        device const BlixRayInstance* instances [[buffer(8)]],
+                        device const uint4* triangles [[buffer(9)]],
+                        device const uint2* owners [[buffer(10)]],
+                        uint i [[thread_position_in_grid]])
+{
+    if (i >= p.count) return;
+    float3 n = records[i * 2u + 1u].xyz;
+    if (dot(n, n) < 1e-12f) { buried[i] = 0; return; }
+    n = normalize(n);
+    float3 o = records[i * 2u].xyz + n * p.lift;
+    float3 t = normalize(abs(n.y) < 0.999f ? cross(float3(0.0f, 1.0f, 0.0f), n) : cross(float3(1.0f, 0.0f, 0.0f), n));
+    float3 b = cross(n, t);
+    intersector<triangle_data, instancing> isect;
+    isect.assume_geometry_type(geometry_type::triangle);
+    uint back = 0u;
+    for (uint k = 0u; k < p.tests && back < p.threshold; ++k) {
+        uint h = blix_pcg(p.seed + i * p.tests + k);
+        float u1 = float(h & 0xFFFFu) / 65536.0f, u2 = float(h >> 16) / 65536.0f;
+        float r = sqrt(u1), phi = 6.28318530718f * u2;
+        float3 d = t * (r * cos(phi)) + b * (r * sin(phi)) + n * sqrt(max(0.0f, 1.0f - u1));
+        uint seed = blix_pcg(h);
+        auto res = isect.intersect(ray(o, d, 0.0f, p.reach), tlas, 0xFFu, table, seed);
+        if (res.type != intersection_type::triangle || res.triangle_front_facing) continue;
+        uint row = blix_row(primRows, entryRows, res.instance_id, res.geometry_id, res.primitive_id);
+        uint placement = instances[res.instance_id].info.y;
+        if (placement == 0xFFFFFFFFu) placement = owners[triangles[row].w].x;
+        if (doubleSided[placement] == 0u) back++;
+    }
+    buried[i] = back >= p.threshold ? 1u : 0u;
+}
 )";
 
 struct HwxContext {
@@ -231,6 +276,8 @@ struct HwxContext {
     id<MTLComputePipelineState> pso;
     id<MTLIntersectionFunctionTable> table;
     id<MTLComputePipelineState> shadowPso;
+    id<MTLComputePipelineState> buriedPso;            // blix_buried, with its own table
+    id<MTLIntersectionFunctionTable> buriedTable;
     id<MTLIntersectionFunctionTable> shadowTable;       // the coverage coin, as the software batch
     id<MTLIntersectionFunctionTable> shadowAlphaTable;  // the alpha test (hwx_set_alpha), asked for per dispatch
     id<MTLCommandBuffer> lastShadow;  // waited on at destroy: its completion handler reads this context
@@ -303,6 +350,9 @@ HWX_EXPORT HwxContext* hwx_create(void* mtlDevice, char* err, int errLength) {
         if (!pso) return report([@"trace pipeline: " stringByAppendingString:error.localizedDescription]);
         id<MTLComputePipelineState> shadowPso = pipeline(@"blix_shadow", &shadowTable);
         if (!shadowPso) return report([@"shadow pipeline: " stringByAppendingString:error.localizedDescription]);
+        id<MTLIntersectionFunctionTable> buriedTable;
+        id<MTLComputePipelineState> buriedPso = pipeline(@"blix_buried", &buriedTable);
+        if (!buriedPso) return report([@"buried-test pipeline: " stringByAppendingString:error.localizedDescription]);
         MTLIntersectionFunctionTableDescriptor* alphaTd = [MTLIntersectionFunctionTableDescriptor new];
         alphaTd.functionCount = 1;
         id<MTLIntersectionFunctionTable> shadowAlphaTable = [shadowPso newIntersectionFunctionTableWithDescriptor:alphaTd];
@@ -317,6 +367,8 @@ HWX_EXPORT HwxContext* hwx_create(void* mtlDevice, char* err, int errLength) {
         ctx->shadowPso = shadowPso;
         ctx->shadowTable = shadowTable;
         ctx->shadowAlphaTable = shadowAlphaTable;
+        ctx->buriedPso = buriedPso;
+        ctx->buriedTable = buriedTable;
         return ctx;
     }
 }
@@ -361,7 +413,7 @@ HWX_EXPORT int hwx_build(HwxContext* ctx,
         ctx->alphaOff = [device newBufferWithBytes:off length:sizeof(off) options:MTLResourceStorageModeShared];
         ctx->alphaOn = nil;
         ctx->rowMaterial = ctx->materials = ctx->uvs = ctx->alphaOff;
-        for (id<MTLIntersectionFunctionTable> table : {ctx->table, ctx->shadowTable, ctx->shadowAlphaTable}) {
+        for (id<MTLIntersectionFunctionTable> table : {ctx->table, ctx->shadowTable, ctx->shadowAlphaTable, ctx->buriedTable}) {
             [table setBuffer:ctx->primRows offset:0 atIndex:0];
             [table setBuffer:ctx->entryRows offset:0 atIndex:1];
             [table setBuffer:ctx->instances offset:0 atIndex:2];
@@ -692,6 +744,102 @@ HWX_EXPORT int hwx_set_alpha(HwxContext* ctx, void* const* textures, const float
             [table setBuffer:ctx->rowMaterial offset:0 atIndex:7];
             [table setBuffer:ctx->materials offset:0 atIndex:8];
             [table setBuffer:ctx->uvs offset:0 atIndex:9];
+        }
+        return 0;
+    }
+}
+
+// The lightmap's buried test (blix_buried) over `count` records in host memory (two float4s each), into one byte each
+// (1: buried). In chunks, each waited for; callable off the frame's thread (its own command buffers on the queue).
+HWX_EXPORT int hwx_buried(HwxContext* ctx, const float* records, uint32_t count, uint32_t tests, uint32_t threshold, uint32_t seed,
+                          float reach, float lift, const uint8_t* doubleSided, uint32_t placementCount, uint8_t* buried, double* gpuMs) {
+    @autoreleasepool {
+        if (!ctx->tlas) return Fail(ctx, "buried test before build");
+        id<MTLDevice> device = ctx->device;
+        id<MTLBuffer> sided = [device newBufferWithBytes:doubleSided length:std::max<uint32_t>(placementCount, 1) options:MTLResourceStorageModeShared];
+        const uint32_t chunk = 1u << 20;
+        if (gpuMs) *gpuMs = 0.0;
+        for (uint32_t first = 0; first < count; first += chunk) {
+            uint32_t n = std::min(chunk, count - first);
+            id<MTLBuffer> in = [device newBufferWithBytes:records + uint64_t(first) * 8 length:uint64_t(n) * 32 options:MTLResourceStorageModeShared];
+            id<MTLBuffer> out = [device newBufferWithLength:std::max<uint32_t>(n, 4) options:MTLResourceStorageModeShared];
+            id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
+            cb.label = @"blix-hwx buried";
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:ctx->buriedPso];
+            [enc setBuffer:in offset:0 atIndex:0];
+            [enc setBuffer:out offset:0 atIndex:1];
+            [enc setAccelerationStructure:ctx->tlas atBufferIndex:2];
+            [enc setIntersectionFunctionTable:ctx->buriedTable atBufferIndex:3];
+            struct { uint32_t count, tests, threshold, seed; float reach, lift; uint32_t pad[2]; } params =
+                {n, tests, threshold, seed + first * tests, reach, lift, {0, 0}};
+            [enc setBytes:&params length:sizeof(params) atIndex:4];
+            [enc setBuffer:sided offset:0 atIndex:5];
+            [enc setBuffer:ctx->primRows offset:0 atIndex:6];
+            [enc setBuffer:ctx->entryRows offset:0 atIndex:7];
+            [enc setBuffer:ctx->instances offset:0 atIndex:8];
+            [enc setBuffer:ctx->triangles offset:0 atIndex:9];
+            [enc setBuffer:ctx->owners offset:0 atIndex:10];
+            [enc useResources:ctx->blas.data() count:ctx->blas.size() usage:MTLResourceUsageRead];
+            id<MTLResource> tableBuffers[] = {ctx->surfaces, ctx->alphaOff, ctx->rowMaterial, ctx->materials, ctx->uvs};
+            [enc useResources:tableBuffers count:5 usage:MTLResourceUsageRead];
+            [enc dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+            [enc endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
+            if (!Completed(ctx, cb, "buried test")) return 1;
+            if (gpuMs) *gpuMs += (cb.GPUEndTime - cb.GPUStartTime) * 1e3;
+            memcpy(buried + first, out.contents, n);
+        }
+        return 0;
+    }
+}
+
+// The device's GPU memory: what Metal has allocated in all (every client of the device, Vulkan's included), and the
+// working set it recommends staying under before it pages.
+HWX_EXPORT void hwx_memory(HwxContext* ctx, uint64_t* allocated, uint64_t* recommended) {
+    *allocated = ctx->device.currentAllocatedSize;
+    *recommended = ctx->device.recommendedMaxWorkingSetSize;
+}
+
+// Shadow rays from host memory toward one direction (blix_shadow, the coverage coin): `count` origins, float4 each
+// (position, tMax; 0 or less: no ray), one byte each out (1: something in the way). In chunks, each waited for;
+// callable off the frame's thread, as hwx_buried.
+HWX_EXPORT int hwx_shadow_host(HwxContext* ctx, const float* origins, uint32_t count, const float* direction, uint32_t seedBase,
+                               uint8_t* occluded, double* gpuMs) {
+    @autoreleasepool {
+        if (!ctx->tlas) return Fail(ctx, "shadow trace before build");
+        id<MTLDevice> device = ctx->device;
+        const uint32_t chunk = 1u << 21;
+        if (gpuMs) *gpuMs = 0.0;
+        for (uint32_t first = 0; first < count; first += chunk) {
+            uint32_t n = std::min(chunk, count - first);
+            id<MTLBuffer> in = [device newBufferWithBytes:origins + uint64_t(first) * 4 length:uint64_t(n) * 16 options:MTLResourceStorageModeShared];
+            id<MTLBuffer> out = [device newBufferWithLength:uint64_t(n) * 4 options:MTLResourceStorageModeShared];
+            id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
+            cb.label = @"blix-hwx host shadow";
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:ctx->shadowPso];
+            [enc setBuffer:in offset:0 atIndex:0];
+            [enc setBuffer:out offset:0 atIndex:1];
+            [enc setAccelerationStructure:ctx->tlas atBufferIndex:2];
+            [enc setIntersectionFunctionTable:ctx->shadowTable atBufferIndex:3];
+            struct { float direction[4]; uint32_t count, seedBase, sky, pad1; } params =
+                {{direction[0], direction[1], direction[2], 0.0f}, n, seedBase + first, 0u, 0u};
+            [enc setBytes:&params length:sizeof(params) atIndex:4];
+            [enc setBuffer:in offset:0 atIndex:5];
+            [enc useResources:ctx->blas.data() count:ctx->blas.size() usage:MTLResourceUsageRead];
+            id<MTLResource> tableBuffers[] = {ctx->primRows, ctx->entryRows, ctx->instances, ctx->triangles, ctx->owners, ctx->surfaces,
+                                              ctx->alphaOff, ctx->rowMaterial, ctx->materials, ctx->uvs};
+            [enc useResources:tableBuffers count:10 usage:MTLResourceUsageRead];
+            [enc dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+            [enc endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
+            if (!Completed(ctx, cb, "host shadow trace")) return 1;
+            if (gpuMs) *gpuMs += (cb.GPUEndTime - cb.GPUStartTime) * 1e3;
+            const uint32_t* words = (const uint32_t*)out.contents;
+            for (uint32_t k = 0; k < n; ++k) occluded[first + k] = (words[k] & 1u) ? 1 : 0;
         }
         return 0;
     }

@@ -711,6 +711,7 @@ internal sealed partial class SponzaLoop
         // blinking in and out as you turn. Half a metre of slack costs a fraction of a percent of
         // the rejections and removes the whole class.
         RecordRaySurfaceBake();
+        UpdateBakeScene();
         RecordRtShadows(frame.Width, frame.Height);
         CookTransportWhenReady();
         RecordClipmap();
@@ -947,7 +948,7 @@ internal sealed partial class SponzaLoop
             WriteTexelCensus();
             WriteTexelInspect();
             WriteRayView(Path.ChangeExtension(path, null));
-            WriteRtShadows();
+            WriteRtShadows(Path.ChangeExtension(path, null));
             WriteFrameTracerStats();
             if (probeReference)
             {

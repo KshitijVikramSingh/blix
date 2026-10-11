@@ -607,8 +607,8 @@ public sealed partial class VulkanGraphicsDevice
         var fence = isolationFence;
         ThrowIfNotSuccess(Vk.ResetFences(Device, 1, &fence), "vkResetFences(isolate)");
         var t0 = Stopwatch.GetTimestamp();
-        SubmitFrameBatch(local, ref first, ref timelineWait, imageAvail, signalTimeline: 0, binarySignal: default, fence, "vkQueueSubmit(isolate)");
-        ThrowIfNotSuccess(Vk.WaitForFences(Device, 1, &fence, true, ulong.MaxValue), "vkWaitForFences(isolate)");
+        SubmitFrameBatch(local, ref first, ref timelineWait, imageAvail, signalTimeline: 0, binarySignal: default, fence, $"vkQueueSubmit(isolate, pass '{passName}')");
+        ThrowIfNotSuccess(Vk.WaitForFences(Device, 1, &fence, true, ulong.MaxValue), $"vkWaitForFences(isolate, pass '{passName}')");
         var ms = Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
 
         gpuPassIsolated.TryGetValue(passName, out var acc);

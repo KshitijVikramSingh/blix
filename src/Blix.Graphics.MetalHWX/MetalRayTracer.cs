@@ -190,6 +190,71 @@ public sealed class MetalRayTracer : IDisposable
         return ms;
     }
 
+    /// <summary>
+    /// The lightmap's buried test on Metal: per record (two float4s: position, normal), <paramref name="tests"/> cosine rays
+    /// from <paramref name="lift"/> off it, each as far as <paramref name="reach"/>, buried when <paramref name="threshold"/> of them first meet a
+    /// back face of a placement not flagged
+    /// in <paramref name="doubleSided"/> (by placement; a double-sided sheet has no inside). Waits for the GPU; touches no
+    /// device buffer, so it can run off the frame's thread. Returns one flag per record, and the GPU time.
+    /// </summary>
+    public unsafe bool[] TestBuried(ReadOnlySpan<Vector4> records, int tests, int threshold, float reach, float lift, uint seed, ReadOnlySpan<bool> doubleSided,
+        out double gpuMs)
+    {
+        ObjectDisposedException.ThrowIf(ctx == 0, this);
+        var count = records.Length / 2;
+        var sided = new byte[Math.Max(doubleSided.Length, 1)];
+        for (var k = 0; k < doubleSided.Length; k++) sided[k] = doubleSided[k] ? (byte)1 : (byte)0;
+        var flags = new byte[Math.Max(count, 1)];
+        double ms;
+        fixed (Vector4* r = records)
+        fixed (byte* sp = sided)
+        fixed (byte* fp = flags)
+        {
+            if (HwxNative.hwx_buried(ctx, (float*)r, (uint)count, (uint)tests, (uint)threshold, seed, reach, lift, sp, (uint)doubleSided.Length, fp, &ms) != 0)
+                throw new InvalidOperationException($"Metal buried test: {Error}");
+        }
+        gpuMs = ms;
+        var result = new bool[count];
+        for (var k = 0; k < count; k++) result[k] = flags[k] != 0;
+        return result;
+    }
+
+    /// <summary>
+    /// Shadow rays from host memory toward <paramref name="towardLight"/>, by the coverage coin: per origin (position, and
+    /// how far: 0 or less, no ray) whether anything is in the way. Waits for the GPU; touches no device buffer, so it can
+    /// run off the frame's thread (a transport relight's sunlets).
+    /// </summary>
+    public unsafe bool[] OccludedFromHost(ReadOnlySpan<Vector4> origins, Vector3 towardLight, uint seedBase, out double gpuMs)
+    {
+        ObjectDisposedException.ThrowIf(ctx == 0, this);
+        var flags = new byte[Math.Max(origins.Length, 1)];
+        var direction = stackalloc float[3] { towardLight.X, towardLight.Y, towardLight.Z };
+        double ms;
+        fixed (Vector4* o = origins)
+        fixed (byte* f = flags)
+        {
+            if (HwxNative.hwx_shadow_host(ctx, (float*)o, (uint)origins.Length, direction, seedBase, f, &ms) != 0)
+                throw new InvalidOperationException($"Metal shadow trace: {Error}");
+        }
+        gpuMs = ms;
+        var result = new bool[origins.Length];
+        for (var k = 0; k < origins.Length; k++) result[k] = flags[k] != 0;
+        return result;
+    }
+
+    /// <summary>The device's GPU memory in MB: allocated by every client (Vulkan's included), and the working set Metal
+    /// recommends staying under before it pages.</summary>
+    public unsafe (double AllocatedMb, double RecommendedMb) Memory
+    {
+        get
+        {
+            ObjectDisposedException.ThrowIf(ctx == 0, this);
+            ulong allocated, recommended;
+            HwxNative.hwx_memory(ctx, &allocated, &recommended);
+            return (allocated / 1048576.0, recommended / 1048576.0);
+        }
+    }
+
     /// <summary>A material's alpha test, as the raster draws it: its albedo texture's alpha times a factor, against a cutoff.</summary>
     public readonly record struct AlphaMaterial(TextureHandle Albedo, float Cutoff, float AlphaFactor);
 

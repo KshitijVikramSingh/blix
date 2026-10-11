@@ -46,7 +46,7 @@ layout(set = 0, binding = 0) uniform IncidentClipmap {
     mat4 uTexelCascadeVP[3];
     vec4 uReference;     // the reference view (reference_trace.comp): x 1 when shown, yz its pixels (half the frame's);
                          // w 1: the texel debug view (--texel-debug: r the texels' confidence, g 1 where any was found,
-                         // b 1 where the lookup found none)
+                         // b 1 where the lookup found none); w 2: the records view (--texel-debug-records)
     vec4 uClipExact;     // x 1: whether a point sees each probe, TRACED (--clipmap-exact-visibility): the ceiling a
                          // cooked per-texel mask could reach, in place of the Chebyshev estimate; y / z DDGI's surface
                          // bias, along the normal / toward the viewer, in probe spacings (--clipmap-normal-bias /
@@ -415,6 +415,35 @@ void main() {
     if (g.uTexelParams.y > 0.5 && g.uTransfer.x < 0.5 && g.uClipParams.y < 0.5 && texelsAt(worldPos, N, nSample.w, viewDepth, gathered, confidence)) {
         outIncident.rgb = mix(outIncident.rgb, gathered, confidence);
         texelFound = true;
+    }
+    if (g.uReference.w > 1.5) {
+        // Which record each of the pixel's four lightmap texels gives it (texelsAroundLightmap's choice), by weight.
+        vec2 at;
+        vec3 shown = vec3(1.0, 0.0, 1.0);
+        if (g.uLightmap.x > 0.5 && texelLightmapUnpack(pixelLightmapTexel, at)) {
+            ivec2 atlasSize = ivec2(g.uLightmap.yz);
+            vec2 f = at - 0.5;
+            ivec2 base = ivec2(floor(f));
+            vec2 t = f - vec2(base);
+            shown = vec3(0.0);
+            for (int i = 0; i < 4; ++i) {
+                ivec2 o = ivec2(i & 1, i >> 1);
+                ivec2 q = base + o;
+                float w = (o.x == 1 ? t.x : 1.0 - t.x) * (o.y == 1 ? t.y : 1.0 - t.y);
+                if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, atlasSize))) continue;
+                uint id = TEXEL_INDEX_MAP(q.y * atlasSize.x + q.x);
+                if (id == 0xFFFFFFFFu) continue;
+                bool pair = TEXEL_POSITION(id).w < 0.0;
+                bool back = pair && dot(TEXEL_NORMAL(id).xyz, N) < 0.0;
+                if (back) id += 1u;
+                vec3 kind = abs(TEXEL_POSITION(id).w) < 2.0 ? vec3(1.0, 0.0, 0.0)
+                    : !pair ? vec3(1.0) : back ? vec3(0.0, 0.3, 1.0) : vec3(0.0, 1.0, 0.0);
+                shown += w * kind;
+            }
+        }
+        outIncident = vec4(shown, 1.0);
+        outIncidentGradient = vec4(0.0);
+        return;
     }
     if (g.uReference.w > 0.5) {
         // r confidence, g the share of the texels read the mark stamped in the last 32 frames, b the share with rays.

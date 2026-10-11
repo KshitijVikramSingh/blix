@@ -3,6 +3,7 @@ using System.Numerics;
 using System.Runtime.InteropServices;
 using Blix.Geometry;
 using Blix.Graphics;
+using Blix.Graphics.MetalHWX;
 
 namespace Blix.Demos.VulkanSponza;
 
@@ -125,7 +126,7 @@ internal sealed partial class SponzaLoop
 
     // One bounce of every lane's path: step (the next rays) -> CLOSEST -> shade (shadow rays, the next start) -> SHADOW ->
     // resolve. The batches are the frame's (SponzaLoop.RayBatch.cs): software, or Metal under --ray-backend hw|both.
-    private void RecordReferenceWave(ReferenceWave w)
+    private void RecordReferenceWave(ReferenceWave w, MetalRayTracer? on = null)
     {
         var count = w.Count;
         if (count == 0) return;
@@ -150,9 +151,9 @@ internal sealed partial class SponzaLoop
                 .Append(new ShaderBufferBinding("BatchOccluded", w.Occluded))
                 .Where(b => declared.Contains(b.Name)).ToArray());
         graph.Dispatch(referenceWaveStepPass, Wave(0));
-        RecordClosestBatch(referenceClosestBatch, w.Rays, w.Hits, count, frameSeed);
+        RecordClosestBatch(referenceClosestBatch, w.Rays, w.Hits, count, frameSeed, on);
         graph.Dispatch(referenceWaveShadePass, Wave(1));
-        RecordShadowBatch(referenceShadowBatch, w.Origins, w.Occluded, count, -Vector3.Normalize(sunDirection), frameSeed ^ 0x5bd1e995u);
+        RecordShadowBatch(referenceShadowBatch, w.Origins, w.Occluded, count, -Vector3.Normalize(sunDirection), frameSeed ^ 0x5bd1e995u, on);
         graph.Dispatch(referenceWaveResolvePass, Wave(2));
         w.Dispatch++;
     }
