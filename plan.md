@@ -910,6 +910,59 @@ F. *The frame audit* (opened 2026-10-07: "a lot of pure performance on the table
      low-sample cross-check; Transport.cs (couplings ~1k rays a patch, 32x32 sun maps a patch, sunlets per sun,
      openness: ~400 M rays on Sponza); the hashed cook's and the atlas's buried tests (~200 M). The ray check and
      bench, picking, SurfaceCheck / Watch / TexelInspect stay CPU.
+   LIGHTLETS (decided with the user 2026-10-12): surfaces carry VISIBILITY over the domain of their potential lights --
+     a plausible band of suns and a set of local lights -- so a light's state is a lookup, and a frame traces only where
+     the stored visibility cannot answer at pixel resolution.
+     Why, measured (Sponza, LOD 0, half-res lighting, texels resting, camera still, one process): a frame is ~74 ms and
+     the GPU idles ~46% of it. The CPU is never late (every command buffer committed 80-260 ms ahead, Metal System
+     Trace); the idle is committed work waiting on the frame timeline's MTLSharedEvent at each Vulkan<->Metal hand-off,
+     ~4-16 ms each, three a resting frame (the traced shadows; the probes' closest and shadow batches, ~0.5 ms of Metal
+     work between them). One queue with the waits kept: 96.4 ms against 73.6 (--ab queue). One queue without them:
+     48 ms but a NaN-white image (races; parked in a stash, not committed). LOD 0 against 2 px: no difference (75.1 /
+     78.0, IQRs overlapping). The traced shadows themselves: 1.17 M half-res rays, 7.9 ms of Metal, and the cascades still
+     rendered beside them for texelSunlit and the gather's shade. So: fewer hand-offs, and fewer rays, by not re-deriving
+     each frame what the scene's static geometry already decides.
+     Unit: a SURFACE CELL -- an atlas texel (4 cm, 2 cm curtains) and a sunlet are the same thing and share one record;
+     hashed cells (foliage, what the atlas leaves out) at their own levels. Every value is over the cell's whole
+     footprint: "lit" means every point of it sees the light, "shadowed" none; anything else is UNCERTAIN, and only
+     uncertain cells' pixels trace. Correct by construction where certain, whatever the cell's size on screen (a 4 cm
+     texel is ~11 pixels at 5 m).
+     THE SUN: a PLAUSIBLE BAND, not all directions -- hour angle x declination (+-23.4 deg) over a latitude range,
+     elevation above ~5 deg; per scene in SceneProfile (Sponza: 35-45 deg N, north set so the authored sun, elevation
+     74.5 down the hall, lies inside it -- reachable south of ~39 deg N in midsummer). Per cell a small grid over the
+     band of SIGNED ANGULAR DISTANCES to the visibility boundary (4 bits, ~64 bytes): bilinear at the sun's direction,
+     the sign is lit / shadowed, a magnitude under the interpolation bound or the disc's radius is uncertain (the
+     penumbra). Sparse: cells lit (or shadowed) for every sun in the band keep 2 bits and no grid. A sun outside the band
+     (the debug yaw / pitch) traces every pixel, as today.
+     LIGHTLETS: sample points on local lights -- first the 23 lamp bulbs of main_sponza (material light_bulb, emissive
+     1.0; 22 first-floor lamps at ~4.8 m along the colonnades and the entrance lamp; bulbs 7-9 cm), 8 points a bulb for
+     real penumbrae; the candles once the pack is downloaded again (its .blixmesh is a pre-v19 cook and its source is not
+     in sponza-src). Per cell, per lamp within its cutoff radius (sparse per-light lists, not per-cell arrays): the
+     visible fraction of the bulb's points (4 bits) and uncertain. Lights switch, dim and flicker freely; only a moving
+     light traces. The bulbs are emissive today and light nothing: their light (intensity from the emissive factor and
+     KHR_materials_emissive_strength, falloff, direct and into the probes) is part of this arc.
+     BAKE, once per scene (not per sun): per non-uniform cell, directions sampled densely around each grid point with
+     area samples over the footprint (on the order of 10-30 G Metal shadow rays: minutes); lightlets the same per lamp
+     in reach. Sunlets read the same records, so a sun move inside the band relights the indirect by arithmetic -- the
+     ~9 M sunlet rays a relight retire, and with them the per-patch 32x32 sun maps.
+     FRAME: the incident pass (half res, already reading the atlas) evaluates the pixel's cells for the sun and each lamp
+     in reach -> baked visibilities and a NEEDS-A-RAY mask; those pixels compact on the GPU and trace on the software
+     traversal INSIDE the Vulkan frame (Metal only as the overflow, a sun off the band); the probes' batches go back to
+     the software traversal (--clipmap-inline) -> a resting frame makes NO hand-off. The cascades render only for
+     movers (a mover's swept volume along the light marks its pixels needs-a-ray); texelSunlit and the gather's shade
+     read the records.
+     Phases, each gated on a measurement:
+     (0) the band in SceneProfile; bake the sun records; census -- non-uniform cells, memory, NEEDS-A-RAY fraction of
+         half-res pixels over suns across the band at several cameras incl. the tree. Gate: fits memory, < ~10%.
+     (1) the lit pass from the records + rays for the list (Metal first), a toggle in the overlay. Gate: a SCENE-image
+         diff (the .scene.png, not the presented debug view) against the full trace at several band positions; --ab.
+     (2) rays and probe batches on the software traversal. Gate: the zero-hand-off frame by --ab; the diff again.
+     (3) sunlets on the records; cascades off without movers. Gate: relight time; the texel census agrees.
+     (4) the lamps' light and their lightlets. Gate: the lit image against a path-traced reference with the lamps on.
+     (5) the candles.
+     Unknowns the census answers first: foliage (leaf cards are mostly uncertain: if the tree view floods, leaves take
+     hashed-cell visibility and only leaf-over-surface edges trace); thin shadows missed by area sampling (the diff);
+     the incident pass's extra reads at half res.
 
 Known instrument gap: a Sponza `--shot` raises 9 validation errors on `main` as well (a storage image
 copied to a buffer without transfer-source usage, in the shot's readback). Not this arc's, and not fixed.
