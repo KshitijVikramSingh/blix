@@ -49,7 +49,7 @@ internal sealed partial class SponzaLoop
 
     /// <summary>One reference wavefront: its points (two vec4s each: position, normal), lanesPerPoint lanes a point each
     /// running Quota whole paths one bounce a frame, and the buffers its steps and batches pass between them. The gate's
-    /// points have one (gateWave); the transfer capture's texels another (SponzaLoop.TransferFit.cs).</summary>
+    /// points have one (gateWave).</summary>
     private sealed class ReferenceWave
     {
         public GpuBufferHandle Points, Lanes, Sums, Rays, Hits, Origins, Occluded;
@@ -234,24 +234,6 @@ internal sealed partial class SponzaLoop
             var shadow = frameTracer.ShadowStatsOf(0);
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] reference wavefront on Metal: closest {trace.Dispatches:N0} batches, {trace.MeanGpuMs:0.000} ms mean, {trace.Failures} failed; shadow {shadow.Dispatches:N0} batches, {shadow.MeanGpuMs:0.000} ms mean, {shadow.Failures} failed ({gateWave?.Count ?? 0:N0} rays a batch)."));
-        }
-        if (transferWeightsOn)
-        {
-            // incident_clipmap.frag marks the gradient's w where the transfer answered: of the pixels with a surface, and
-            // of the points judged here.
-            var gradient = device.ReadTexture(graph.GetColorTexture(incidentGradientHandle), out var gw, out var gh, out _);
-            var depthInfo = device.ReadTexture(graph.GetColorTexture(incidentHandle), out _, out _, out _);
-            long surface = 0, answered = 0;
-            for (var i = 0; i < gw * gh; i++)
-            {
-                var lit = (float)BitConverter.ToHalf(depthInfo, i * 8) + (float)BitConverter.ToHalf(depthInfo, i * 8 + 2) > 0f;
-                if (!lit) continue;
-                surface++;
-                if ((float)BitConverter.ToHalf(gradient, i * 8 + 6) > 0.5f) answered++;
-            }
-            var atPoints = points.Count(p => (float)BitConverter.ToHalf(gradient, (Math.Clamp((int)p.Py, 0, gh - 1) * gw + Math.Clamp((int)p.Px, 0, gw - 1)) * 8 + 6) > 0.5f);
-            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                $"[VulkanSponza] transfer answered {answered / (double)Math.Max(surface, 1):P1} of the pixels with light, {atPoints} of the {points.Count} points judged."));
         }
         var pairs = new List<(double Cpu, double Gpu)>();
         for (var i = 0; i < points.Count; i++)

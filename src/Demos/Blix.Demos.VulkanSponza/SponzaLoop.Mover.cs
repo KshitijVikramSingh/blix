@@ -50,8 +50,6 @@ internal sealed partial class SponzaLoop
     private ShaderInterface? moverRaysInterface;
 
     private bool MoverActive => moverRows.Length > 0;
-    // At rest until the cook has read the scene (and its texels are up): the cook reads the ray scene the mover moves.
-    private bool MoverWaitsForCook => transportSpike && (!transportCooked || transportCookAsync || !texelsUploaded);
 
     private void ParseMoverArgs()
     {
@@ -62,12 +60,9 @@ internal sealed partial class SponzaLoop
         moverHold = args.Int("mover-hold");
         // The cooked transport treats the scene as static, and the cook (in the background, by default) reads the same
         // ray scene the mover moves: cooking it mid-swing would be wrong whichever thread did it. What moving geometry
-        // does to cooked transport is stage 5's R4; until then the two are exclusive -- except under --transfer-weights,
-        // which reads only the cook's texel records (not its light) and holds the mover at rest until the cook is done
-        // (MoverWaitsForCook); the texels a mover can reach then give way to the probes (incident_clipmap's transferAt).
-        if (moverName is not null && args.String("transfer-weights") is null
-            && (args.Flag("transport-gpu") || args.Flag("transport-texels") || args.Flag("transport")))
-            throw new AppArgsException("--mover cannot run with the cooked transport (--transport, --transport-gpu, --transport-texels) but under --transfer-weights: the cook takes the scene as static, and moving geometry is stage 5's R4.");
+        // does to cooked transport is stage 5's R4; until then the two are exclusive.
+        if (moverName is not null && (args.Flag("transport-gpu") || args.Flag("transport-texels")))
+            throw new AppArgsException("--mover cannot run with the cooked transport (--transport-gpu, --transport-texels): the cook takes the scene as static, and moving geometry is stage 5's R4.");
     }
 
     // The swing at a frame: about the pivot, row-vector form (world point · rest · motion).
@@ -159,8 +154,8 @@ internal sealed partial class SponzaLoop
     {
         if (!MoverActive) return;
         var previous = moverMotion;
-        moverMotion = MoverMotionAt(moverHold ?? (MoverWaitsForCook ? 0 : moverFrame));
-        if (!MoverWaitsForCook) moverFrame++;
+        moverMotion = MoverMotionAt(moverHold ?? moverFrame);
+        moverFrame++;
         moverMoved = previous != moverMotion;
         var now = new Matrix4x4[moverRows.Length];
         var then = new Matrix4x4[moverRows.Length];

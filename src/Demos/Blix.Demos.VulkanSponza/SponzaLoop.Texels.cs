@@ -357,11 +357,10 @@ internal sealed partial class SponzaLoop
         }
         // A loaded bake is settled (LightBakeVersion 4 refines until it is): filter it once and rest.
         if (light is not null) SettleTexels("the baked light loaded");
-        // Under --transfer-weights the texels' light is never read (the transfer answers instead), so it is not baked.
         // What a sun change re-bakes toward (RebakeForSun): the texels, where the atlas's start.
         texelsForRebake = bake.Texels;
         texelFirstAtlasForRebake = firstAtlas < 0 ? texelCount : firstAtlas;
-        if (light is null && bakePath is not null && (transferWeightsPath is null || transferDumpPath is not null))
+        if (light is null && bakePath is not null)
         {
             lightBakePath = bakePath;
             BeginLightBake(bake.Texels, texelCount, firstAtlas < 0 ? texelCount : firstAtlas);
@@ -510,7 +509,6 @@ internal sealed partial class SponzaLoop
         LightletBakeWhenReady();
         // The atlas's light is gathered against the bake scene (SponzaLoop.BakeScene.cs) once it is there, never before.
         if (BakeSceneWanted && BakeTracer is null && !bakeTracerFailed && !bakeSceneReleased) return;
-        TransferDumpWhenDone();
         var texelParams = new Vector4(texelCapacity, texelBudget, texelTarget, texelFrame);
         // While the light bakes (SponzaLoop.LightBake.cs) its slice takes the queue the mark would fill, at its budget.
         var baking = lightBakeActive;
@@ -660,7 +658,7 @@ internal sealed partial class SponzaLoop
             // The gather as a wavefront: rays out, their hits shaded, the hits' sun out, the answers gathered. Each batch
             // on Metal when frame rays are (RecordClosestBatch), else on the software traversal.
             var rayCount = gatherBudget * 32;
-            // The bake scene answers the light bake's gathers (and the transfer capture's); the runtime gathers take
+            // The bake scene answers the light bake's gathers; the runtime gathers take
             // the frame's tracer, as they do once it is released. rayCount is the budget's; the batches trace what the
             // first phase found queued (texelWaveLimit), so a settled view costs nothing here.
             var seed = unchecked(texelFrame * 0x9E3779B9u + 0x7F4A7C15u);
@@ -704,7 +702,6 @@ internal sealed partial class SponzaLoop
     // live texel once, then rest (RecordTexels).
     private void SettleTexels(string why)
     {
-        if (transferDumpPath is not null || transferWeightsPath is not null) return;
         texelsSettled = true;
         texelSettledEpoch = texelEpoch;
         texelsRestReported = false;

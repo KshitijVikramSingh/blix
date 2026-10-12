@@ -14,10 +14,10 @@ namespace Blix.Demos.VulkanSponza;
 internal sealed partial class SponzaLoop
 {
     // Background, parallel: each cooked pack is read to CPU geometry/material data, with tangents for the
-    // lit TBN: each unique primitive once, in mesh space, with every world the scene places it at (or,
-    // under --flatten, every placement baked into its own primitive). Returns pack order (main first).
+    // lit TBN: each unique primitive once, in mesh space, with every world the scene places it at. Returns pack order
+    // (main first).
     private static List<(string Name, PlacedPrimitive[] Primitives)> ParsePacksParallel(
-        List<(string Name, string Path)> packs, bool flatten, bool lightmap = false)
+        List<(string Name, string Path)> packs, bool lightmap = false)
     {
         var parsed = new (string Name, PlacedPrimitive[] Primitives)?[packs.Count];
         System.Threading.Tasks.Parallel.For(0, packs.Count, i =>
@@ -28,10 +28,10 @@ internal sealed partial class SponzaLoop
                 var model = ModelData.Load(p.Path, new ModelNeeds(Tangents: true, Skinned: false));
                 // --lightmap: the unwrap beside the mesh (blix cook lightmap --write), if there is one.
                 var lightmapPath = Path.ChangeExtension(p.Path, ".blixlightmap");
-                var lightmapFile = lightmap && !flatten && File.Exists(lightmapPath) ? LightmapFile.Read(lightmapPath) : null;
+                var lightmapFile = lightmap && File.Exists(lightmapPath) ? LightmapFile.Read(lightmapPath) : null;
                 if (lightmapFile is not null) { lightmapAtlasWidth = lightmapFile.Width; lightmapAtlasHeight = lightmapFile.Height; }
                 if (lightmap && lightmapFile is null) Console.WriteLine($"[VulkanSponza] {p.Name}: no {Path.GetFileName(lightmapPath)} (blix cook lightmap --write); drawn without a lightmap.");
-                parsed[i] = (p.Name, flatten ? Flattened(model, i) : Placed(model, i, lightmapFile));
+                parsed[i] = (p.Name, Placed(model, i, lightmapFile));
             }
             catch (Exception ex)
             {
@@ -41,10 +41,6 @@ internal sealed partial class SponzaLoop
         return parsed.Where(r => r.HasValue).Select(r => r!.Value).ToList();
     }
 
-    // The old shape: every placement baked into world-space vertices, each placed once at identity.
-    private static PlacedPrimitive[] Flattened(ModelData model, int pack) => model.Flattened()
-        .Select((x, i) => new PlacedPrimitive(x.Primitive, new[] { Matrix4x4.Identity }, new[] { new PlacementInstance(pack, -1, i) }))
-        .ToArray();
 
     // Each mesh's primitives once, with every world a shown node draws the mesh at (DrawnWorlds: the
     // node's world, or each of its instances'), in the order the file first places the mesh. A skinned
@@ -171,7 +167,7 @@ internal sealed partial class SponzaLoop
         BuildCullBuffers();
         Console.WriteLine(
             $"[VulkanSponza] total: {opaqueDrawables.Count} opaque/mask + {blendDrawables.Count} blend unique primitives, "
-            + $"placed {opaquePlacements.Count} + {blendPlacements.Count} times{(flatten ? " (--flatten: every placement baked)" : "")}.");
+            + $"placed {opaquePlacements.Count} + {blendPlacements.Count} times.");
         LogPrimitiveSizeHistogram();
         UpdateCamera();
         sceneLoaded = true;
@@ -638,10 +634,6 @@ internal sealed partial class SponzaLoop
             : gm?.AlphaMode == AlphaMode.Mask ? (gm?.AlphaCutoff ?? 0.5f)
             : gm?.AlphaMode == AlphaMode.Blend ? 0.5f
             : 0.0f;
-        // Measurement switch: a zero cutoff makes PickPipeline choose Opaque everywhere, which is
-        // what takes the alpha sample out of the shadow casters and the pre-pass as well as the lit
-        // pass. See --no-mask.
-        if (forceOpaqueMask) alphaCutoff = 0f;
         baseColorAlpha = baseColorFactor.W;
         var normalScale = gm?.NormalScale ?? 1.0f;
         var roughness = gm?.RoughnessFactor ?? 0.8f;
@@ -666,10 +658,9 @@ internal sealed partial class SponzaLoop
                 // a spare component here beats duplicating a std140 layout to reach one float.
                 //
                 // At one sample, carry the cutout policy in the same material channel so depth and
-                // lit passes make identical coverage decisions. A negative value selects the plain
-                // binary --no-hashed-alpha comparison; a positive value enables hashed coverage.
+                // lit passes make identical coverage decisions: hashed coverage (positive).
                 new Vector4(transmission, sheenRoughness, diffuseTransmission,
-                    MsaaSamples > 1 ? MsaaSamples : (hashedAlpha ? 1f : -1f)))
+                    MsaaSamples > 1 ? MsaaSamples : 1f))
             .SetUniform(binding: 0, "uSheenColor", new Vector4(sheen.X, sheen.Y, sheen.Z, 0f))
             .SetUniform(binding: 0, "uDiffuseTransmissionColor",
                 new Vector4(diffuseTransmissionColor.X, diffuseTransmissionColor.Y,

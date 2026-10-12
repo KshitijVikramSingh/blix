@@ -147,20 +147,8 @@ internal sealed partial class SponzaLoop
     {
         var live = new List<uint>(count);
         for (var i = 0; i < count; i++)
-            if (transferDumpPath is not null ? TransferSampleKeeps(texels, i, firstAtlas) : i < firstAtlas || MathF.Abs(texels[2 * i].W) >= 2f)
+            if (i < firstAtlas || MathF.Abs(texels[2 * i].W) >= 2f)
                 live.Add((uint)i);
-        // --transfer-dump: a region's sample, baked for the dump and not saved; and its points for the path-traced capture.
-        if (transferDumpPath is not null)
-        {
-            lightBakePath = null;
-            transferCapturePoints = new List<Vector4>(live.Count * 2);
-            foreach (var i in live)
-            {
-                var n = Vector3.Normalize(new Vector3(texels[2 * i + 1].X, texels[2 * i + 1].Y, texels[2 * i + 1].Z));
-                transferCapturePoints.Add(new Vector4(new Vector3(texels[2 * i].X, texels[2 * i].Y, texels[2 * i].Z) + n * 0.01f, 0f));
-                transferCapturePoints.Add(new Vector4(n, 0f));
-            }
-        }
         if (live.Count == 0) return;
         lightBakeLive = live.Count;
         lightBakeLiveBuffer = Own(device.CreateGpuBuffer(live.Count * 4, MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(live)), "sponza.light-bake.live"));
@@ -208,13 +196,11 @@ internal sealed partial class SponzaLoop
         return slice;
     }
 
-    // The bake is settled (or not refined: --transfer-dump's, never saved): the queue goes back to the mark.
+    // The bake is settled: the queue goes back to the mark.
     private int FinishLightBake()
     {
         lightBakeActive = false;
         lightBakeDoneFrame = texelFrame;
-        transferBakeDone = transferDumpPath is not null;
-        transferBakeDoneFrame = texelFrame;
         lightBakeSaving = lightBakePath is not null;
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] light bake: done in {lightBakeClock!.Elapsed.TotalMinutes:0.0} min ({lightBakeRays / 1e9:0.0} G rays, {lightBakeRound} refining round{(lightBakeRound == 1 ? "" : "s")})."));
@@ -227,7 +213,7 @@ internal sealed partial class SponzaLoop
 
     // Reads back the live texels' light and moments (after everything submitted so far: the last slice's gather was
     // recorded in an earlier frame) and keeps those the mark would still queue (texelSettled, as texel.glsl has it).
-    // False when none is left. Only a bake that is saved refines; --transfer-dump's sample is the sweep's.
+    // False when none is left. Only a bake that is saved refines.
     private bool BeginRefineRound()
     {
         if (lightBakePath is null) return false;
@@ -294,7 +280,7 @@ internal sealed partial class SponzaLoop
     {
         AbortLightBake("the sun turned");
         if (!sunRebake || lightBakeOff || lightBakeKey is null || texelsForRebake is null
-            || transferDumpPath is not null || transferWeightsPath is not null) return;
+) return;
         if (!lightBakeLiveBuffer.Equals(default(GpuBufferHandle))) RetireGpuBuffer(lightBakeLiveBuffer);
         lightBakePath = LightBakePathFor(lightBakeKey, sun);
         BeginLightBake(texelsForRebake, texelCount, texelFirstAtlasForRebake);

@@ -8,7 +8,7 @@ using Blix.Graphics.MetalHWX;
 namespace Blix.Demos.VulkanSponza;
 
 // The bake scene: the ray scene at full detail, for the work that bakes the lightmap atlas -- the buried test, the light
-// bake and the texels' gathers, and the transfer capture's truth -- so their rays meet the LOD 0 surfaces the texels sit
+// bake and the texels' gathers -- so their rays meet the LOD 0 surfaces the texels sit
 // on. The frame's scene is simplified up to rayLodError: its chords pass in front of concave detail (a texel started
 // behind its own mesh's coarse surface and read as buried in plain view) and over convex detail, which the bake exists
 // to keep. Metal only (--lightmap --transport-texels, frame rays on Metal): packed off the frame's thread from LOD 0
@@ -24,11 +24,10 @@ internal sealed partial class SponzaLoop
     private long bakeSceneSurfacesFrame = -1;
     private MetalRayTracer? bakeTracer;
     private bool bakeTracerFailed;
-    // Its work done -- the cook's buried test run, no light bake under way, no transfer capture to come (or both
-    // read from their caches) -- the bake scene lets go of its ~1.4 GB, and the texels' later gathers (a sun's turn, the
+    // Its work done -- the cook's buried test run, no light bake under way (or both read from their caches) -- the bake scene lets go of its ~1.4 GB, and the texels' later gathers (a sun's turn, the
     // rays past the bake's) take the frame's tracer.
     private bool bakeSceneReleased;
-    private bool BakeSceneDone => texelsUploaded && !lightBakeActive && transferDumpPath is null;
+    private bool BakeSceneDone => texelsUploaded && !lightBakeActive;
     private int gpuMemoryLoggedFrame = -1;
 
     // --no-bake-scene: the atlas bakes against the frame's scene (the A/B).

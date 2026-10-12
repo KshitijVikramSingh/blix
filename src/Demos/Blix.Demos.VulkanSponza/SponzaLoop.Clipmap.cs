@@ -24,10 +24,8 @@ internal sealed partial class SponzaLoop
     // Stage 4f: the irradiance's two parts, private to the injection (their sum is clipmapIrradiance).
     private TextureHandle clipmapStatic;
     private TextureHandle clipmapDynamic;
-    // --clipmap-dynamic-converge B: the dynamic part's blend per update (1: no history); --no-clipmap-dependency: no
-    // split and no priority for the clipmap alone (screen probes keep theirs).
+    // --clipmap-dynamic-converge B: the dynamic part's blend per update (1: no history).
     private float clipmapDynamicConverge = 0.5f;
-    private bool noClipmapDependency;
     // --clipmap-dependent-rays K: of a probe's 64 rays, how many must cross the moving reach for it to be re-solved first.
     private int clipmapDependentRays = 32;
     // --clipmap-dependent-share F: at most this share of the budget re-solves dependent probes a frame.
@@ -165,20 +163,15 @@ internal sealed partial class SponzaLoop
                 new("uTexelGrid", new Vector4Uniform(texel.Grid)),
                 new("uTexelParams", new Vector4Uniform(texel.Params)),
                 new("uReference", new Vector4Uniform(reference.Params)),
-                new("uClipExact", new Vector4Uniform(new Vector4(incidentExactVisibility ? 1f : 0f, clipmapNormalBias, clipmapViewBias, clipmapRelocate ? 1f : 0f))),
-                new("uTransfer", new Vector4Uniform(TransferUniform)),
-                new("uTransferStaleMin", new Vector4Uniform(MoverActive && !transferKeepStale ? new Vector4(moverReach.Min - new Vector3(clipmapSpacing), 1f) : Vector4.Zero)),
-                new("uTransferStaleMax", new Vector4Uniform(MoverActive ? new Vector4(moverReach.Max + new Vector3(clipmapSpacing), 0f) : Vector4.Zero)),
+                new("uClipExact", new Vector4Uniform(new Vector4(incidentExactVisibility ? 1f : 0f, 0f, 0f, 0f))),
                 new("uTexelDebug", new Vector4Uniform(new Vector4(texelFrame, 0f, 0f, 0f))),
                 new("uLightmap", new Vector4Uniform(LightmapUniform)),
                 new("uTexelLevels", new Vector4Uniform(TexelLevelsUniform(frameHeight))),
                 new("uHalf", new Vector4Uniform(new Vector4(half ? 1f : 0f, sub.X, sub.Y, 0f))),
             }.Concat(TexelSunUniforms()).ToArray(),
             buffers: new[] { new ShaderBufferBinding("ClipmapState", clipmapState), new ShaderBufferBinding("ScreenProbeTiles", screen.Tiles), new ShaderBufferBinding("ScreenProbes", screen.Probes), new ShaderBufferBinding("SurfaceIndex", surfaceIndex) }.Concat(texel.Buffers).Append(reference.Buffer).Append(new ShaderBufferBinding("LightmapIndexMap", LightmapIndexMap()))
-                // The ray scene, for --clipmap-exact-visibility, and the probes' offsets, for --clipmap-relocate
-                // (declared always; read only then).
-                .Concat(rayBlockBuffers).Append(new ShaderBufferBinding("ClipmapOffsets", clipmapOffsets))
-                .Append(TransferWeightsBinding()).ToArray()));
+                // The ray scene, for --clipmap-exact-visibility (declared always; read only then).
+                .Concat(rayBlockBuffers).ToArray()));
     }
 
     private const int ClipmapLevels = 4;
@@ -213,17 +206,9 @@ internal sealed partial class SponzaLoop
     }
     // --clipmap-lift M / --clipmap-visibility-power P: the incident pass's lookup lift (0: a quarter of the spacing)
     // and Chebyshev power (0: 3). Knobs for the level probe (stage 4g-v), not tuned defaults.
-    // --clipmap-no-bounce: a probe ray's hit takes no light from the clipmap (sun only): single-bounce probes, the
-    // control for what multiple bounces carry -- in the sealed thin-wall room, whether a leak is fed back and grown.
-    private bool clipmapNoBounce;
     private float clipmapLift;
     private float clipmapVisibilityPower;
     private bool clipmapExactVisibility, incidentExactVisibility;
-    // Set for one frame: every clipmap probe unsolved, solved afresh (clipmap_inject's uWave.w).
-    private bool clipmapForget;
-    private float clipmapNormalBias, clipmapViewBias;
-    private bool clipmapRelocate;
-    private GpuBufferHandle clipmapOffsets;
     // The blend band between levels, in probes, as every reader takes it (the overlay's slider; -1: the clipmap's own).
     // Under 7.5: the band must fit inside a level 16 probes tall.
     private float clipmapBlendOverride = -1f;
@@ -273,7 +258,6 @@ internal sealed partial class SponzaLoop
         for (var i = 0; i < slots; i++) { initial[i * 4] = 0x80000000u; initial[i * 4 + 1] = 0x80000000u; initial[i * 4 + 2] = 0x80000000u; }
         clipmapState = Own(device.CreateGpuBuffer(total * 16, MemoryMarshal.AsBytes(initial.AsSpan()), "sponza.clipmap.state"));
         // Each slot's probe offset from its cell's centre (--clipmap-relocate, clipmap_inject.comp), zero to begin.
-        clipmapOffsets = Own(device.CreateGpuBuffer(total * 16, new byte[total * 16], "sponza.clipmap.offsets"));
         // Counters, the per-level unsolved queues, the dependent queue (stage 4f), the cursor, and the buckets' counts and
         // lists (every slot's worth, surface slots included): visible probes by solves (4g-iii), then young ones off
         // screen (4g-ii).
@@ -319,11 +303,10 @@ internal sealed partial class SponzaLoop
         // The reach classifies paths whenever there is a mover, held or not: the static part averages every solve
         // (1/n), so a path through the reach counted static while the mover held would stay stale once it moved.
         // Priority re-solving is for when it moved this frame (uDynamicQueue.w).
-        var dynamicReach = MoverActive && !noDependency && !noClipmapDependency;
+        var dynamicReach = MoverActive;
         var dynamicActive = dynamicReach && moverMoved;
         var buffers = rayBlockBuffers
             .Append(new ShaderBufferBinding("ClipmapState", clipmapState))
-            .Append(new ShaderBufferBinding("ClipmapOffsets", clipmapOffsets))
             .Append(new ShaderBufferBinding("ClipmapQueue", clipmapQueue))
             .Append(new ShaderBufferBinding("ClipmapSeen", clipmapSeen))
             .Append(new ShaderBufferBinding("SurfaceIndex", surfaceIndex))
@@ -341,8 +324,8 @@ internal sealed partial class SponzaLoop
             new("uOrigin3", new Vector4Uniform(origins[3])),
             new("uSunDirection", new Vector4Uniform(new Vector4(sunDirection, 0f))),
             new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 1f))),
-            new("uFrame", new Vector4Uniform(new Vector4(clipmapFrame, clipmapNoBounce ? 0f : 1f, 1f, ClipmapDepthLobe))),
-            new("uExact", new Vector4Uniform(new Vector4(clipmapExactVisibility ? 1f : 0f, clipmapNormalBias, clipmapViewBias, clipmapRelocate ? 1f : 0f))),
+            new("uFrame", new Vector4Uniform(new Vector4(clipmapFrame, 1f, 1f, ClipmapDepthLobe))),
+            new("uExact", new Vector4Uniform(new Vector4(clipmapExactVisibility ? 1f : 0f, 0f, 0f, 0f))),
             // y: the prefiltered sky's mip a probe ray reads, about a ray's 1/64 of the sphere (a ~15 degree cone).
             new("uSurfaceGrid", new Vector4Uniform(surface.Grid)),
             new("uSurfaceDims", new Vector4Uniform(surface.Dims)),
@@ -354,11 +337,10 @@ internal sealed partial class SponzaLoop
             new("uDynamicQueue", new Vector4Uniform(new Vector4(clipmapDependentRays, MathF.Floor(clipmapBudget * clipmapDependentShare), clipmapShadowRays ? 1f : 0f, dynamicActive ? 1f : 0f))),
             new("uCascadeVP", new Matrix4x4ArrayUniform(cascadeViewProj)),
             new("uCascadeReceivers", new Matrix4x4Uniform(CascadeReceivers)),
-            new("uWave", new Vector4Uniform(new Vector4(wave ? 1f : 0f, clipmapYoungRays, 0f, clipmapForget ? 1f : 0f))),
+            new("uWave", new Vector4Uniform(new Vector4(wave ? 1f : 0f, clipmapYoungRays, 0f, 0f))),
         }, textures, Buffers: buffers);
         graph.Dispatch(clipmapPassHandle, Phase(0, 1));
         graph.Dispatch(clipmapPassHandle, Phase(1, (slots + surfaceCapacity + 63) / 64));
-        clipmapForget = false;
         if (wave)
         {
             // The solve as a wavefront: rays out, their hits shaded, the hits' sun out, the answers solved. Each batch

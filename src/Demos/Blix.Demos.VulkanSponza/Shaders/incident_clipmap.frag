@@ -48,13 +48,7 @@ layout(set = 0, binding = 0) uniform IncidentClipmap {
                          // w 1: the texel debug view (--texel-debug: r the texels' confidence, g 1 where any was found,
                          // b 1 where the lookup found none); w 2: the records view (--texel-debug-records)
     vec4 uClipExact;     // x 1: whether a point sees each probe, TRACED (--clipmap-exact-visibility): the ceiling a
-                         // cooked per-texel mask could reach, in place of the Chebyshev estimate; y / z DDGI's surface
-                         // bias, along the normal / toward the viewer, in probe spacings (--clipmap-normal-bias /
-                         // --clipmap-view-bias; both 0: the default lift); w 1: probes relocated (--clipmap-relocate)
-    vec4 uTransfer;      // x 1: fitted transfer weights answer the pixels that have them (--transfer-weights,
-                         // transferAt), texels unread; y the first atlas record
-    vec4 uTransferStaleMin; // what moves (--mover), widened by a level-0 cell: a texel inside holds a transfer the mover
-    vec4 uTransferStaleMax; // may have made untrue, and the probes answer it instead; w of the min 1 when there is one
+                         // cooked per-texel mask could reach, in place of the Chebyshev estimate; yzw unused
     vec4 uHalf;          // x 1: this target is half the frame (RenderSettings.HalfResLighting), each pixel standing for
                          // the full-res pixel 2p + yz of its 2x2 (a different one each frame; lighting_upsample.frag)
 } g;
@@ -138,16 +132,6 @@ float clipmapTracedVisibility(vec3 world, vec3 n, vec3 probe) {
     return blix_traceAny(o, d / len, 0.0, len, clipExactSeed) ? 0.0 : 1.0;
 }
 #define BLIX_CLIPMAP_PROBE_VISIBILITY(world, n, probe) (clipExactKnob > 0.5 ? clipmapTracedVisibility(world, n, probe) : -1.0)
-// --clipmap-relocate: each probe where clipmap_inject.comp moved it (its offset from the cell's centre, by slot).
-layout(std430, set = 0, binding = 32) readonly buffer ClipmapOffsets { vec4 clipmapOffsets[]; };
-float clipRelocate;
-#define BLIX_CLIPMAP_PROBE_OFFSET(s) (clipRelocate > 0.5 ? clipmapOffsets[s].xyz : vec3(0.0))
-// DDGI's surface bias (--clipmap-normal-bias, --clipmap-view-bias): toward the viewer is the side of a wall the pixel is
-// seen from. clipViewDir, the point to the camera, is set in main.
-float clipNormalBias, clipViewBias;
-vec3 clipViewDir;
-#define BLIX_CLIPMAP_BIAS(world, n, spacing) (clipNormalBias > 0.0 || clipViewBias > 0.0 \
-    ? ((n) * clipNormalBias + clipViewDir * clipViewBias) * (spacing) : (n) * BLIX_CLIPMAP_LIFT(spacing))
 #include "probe_clipmap.glsl"
 layout(std430, set = 0, binding = 9) readonly buffer SurfaceIndex { uint surfaceIndex[]; };
 #define BLIX_SURFACE_INDEX(i) surfaceIndex[i]
@@ -166,8 +150,6 @@ float debugStamped, debugLit;
 layout(set = 0, binding = 19) uniform usampler2D uLightmapTexel;
 layout(std430, set = 0, binding = 20) readonly buffer LightmapIndexMap { uint lightmapIndexMap[]; };
 #define TEXEL_INDEX_MAP(i) lightmapIndexMap[i]
-// --transfer-weights: per atlas record (id - uTransfer.y), fitted weights over its 8 level-0 probes, 8 halves.
-layout(std430, set = 0, binding = 33) readonly buffer TransferWeights { uvec4 transferWeights[]; };
 // This pixel's packed atlas texel (main sets it): not 0, the atlas's texels are its level 0 and the hashed cells its
 // coarser levels; 0 (no lightmap, or a surface the atlas leaves out), the hashed cells at every level.
 uint pixelLightmapTexel;
@@ -267,86 +249,10 @@ bool texelsAt(vec3 worldPos, vec3 n, float faceBin, float viewDepth, out vec3 ir
     return any;
 }
 
-// The surface transfer atlas (plan.md, stage 5): the pixel's nearest atlas texel's fitted weights over the 8 level-0
-// probes around that texel's lookup point (its record's position lifted a quarter cell along its face normal, as the
-// fit had it: SponzaLoop.TransferFit.cs), each probe read at the pixel's normal. False where the texel has no weights,
-// or a probe the fit leaned on is not solved (or is buried) here now: today's blend answers instead.
-// One atlas record's transfer: its weights over its 8 level-0 probes, read at N. False where it has none, where a
-// probe it weighs is not there (unsolved, buried, another cell), or where a mover may have made it untrue.
-bool transferRecord(BlixClipmap c, vec3 N, uint id, out vec3 irradiance) {
-    irradiance = vec3(0.0);
-    int rec = int(id) - int(g.uTransfer.y + 0.5);
-    if (rec < 0) return false;
-    uvec4 packed = transferWeights[rec];
-    if (packed == uvec4(0u)) return false;
-    float w[8];
-    vec2 h;
-    h = unpackHalf2x16(packed.x); w[0] = h.x; w[1] = h.y;
-    h = unpackHalf2x16(packed.y); w[2] = h.x; w[3] = h.y;
-    h = unpackHalf2x16(packed.z); w[4] = h.x; w[5] = h.y;
-    h = unpackHalf2x16(packed.w); w[6] = h.x; w[7] = h.y;
-    float spacing = c.baseSpacing;
-    // A mover near the texel: what its transfer encodes -- the geometry within about a probe cell of it -- may have
-    // changed, a curtain across the light over a wall that did not move. It is not corrected by a delta (the probes'
-    // answer and the transfer's estimate the same bounce: adding would count it twice); the probes REPLACE it.
-    vec3 where = TEXEL_POSITION(id).xyz;
-    if (g.uTransferStaleMin.w > 0.5 && all(greaterThanEqual(where, g.uTransferStaleMin.xyz)) && all(lessThanEqual(where, g.uTransferStaleMax.xyz)))
-        return false;
-    vec3 p = where + normalize(TEXEL_NORMAL(id).xyz) * (0.25 * spacing);
-    ivec3 base = ivec3(floor(p / spacing - 0.5));
-    vec3 sum = vec3(0.0);
-    for (int k = 0; k < 8; ++k) {
-        if (w[k] <= 0.0) continue;
-        ivec3 cell = base + ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1);
-        ivec3 slot = blix_clipmapSlot(c, cell);
-        uvec4 state = BLIX_CLIPMAP_STATE(blix_clipmapSlotIndex(c, slot));
-        if ((state.w & BLIX_CLIPMAP_SOLVED) == 0u || (state.w & BLIX_CLIPMAP_BURIED) != 0u || ivec3(state.xyz) != cell) return false;
-        sum += w[k] * blix_clipmapTileSample(blix_clipmapTileOrigin(c, 0, slot), N, false).rgb;
-    }
-    irradiance = sum;
-    return true;
-}
-
-// The transfer at the pixel: bilinear over the four atlas texels around its atlas point, each read through its own
-// probes, those that cannot answer (no weights, another face at a chart's edge, stale) left out and the rest
-// renormalised. A texel's transfer is fitted alone, so the nearest one's alone printed the atlas grid as steps
-// (Cornell's room view, the first run on clean probes); uTransfer.z 1 keeps the nearest (--transfer-nearest, the A/B).
-bool transferAt(BlixClipmap c, vec3 N, out vec3 irradiance) {
-    irradiance = vec3(0.0);
-    vec2 atlasTexel;
-    if (!texelLightmapUnpack(pixelLightmapTexel, atlasTexel)) return false;
-    ivec2 size = ivec2(g.uLightmap.yz);
-    if (g.uTransfer.z > 0.5) {
-        ivec2 at = ivec2(floor(atlasTexel));
-        if (any(lessThan(at, ivec2(0))) || any(greaterThanEqual(at, size))) return false;
-        uint id = lightmapIndexMap[at.y * size.x + at.x];
-        if (id == 0xFFFFFFFFu) return false;
-        if (TEXEL_POSITION(id).w < 0.0 && dot(TEXEL_NORMAL(id).xyz, N) < 0.0) id += 1u;
-        return transferRecord(c, N, id, irradiance);
-    }
-    int ids[4];
-    float weights[4];
-    texelsAroundLightmap(atlasTexel, N, size, ids, weights);
-    vec3 sum = vec3(0.0);
-    float total = 0.0;
-    for (int i = 0; i < 4; ++i) {
-        if (ids[i] < 0 || weights[i] <= 0.0) continue;
-        if (dot(normalize(TEXEL_NORMAL(uint(ids[i])).xyz), N) < 0.7) continue;
-        vec3 e;
-        if (!transferRecord(c, N, uint(ids[i]), e)) continue;
-        sum += weights[i] * e;
-        total += weights[i];
-    }
-    if (total <= 1e-4) return false;
-    irradiance = sum / total;
-    return true;
-}
-
 void main() {
     clipLiftKnob = g.uClipParams.z;
     clipVisibilityKnob = g.uClipParams.w;
     clipExactKnob = g.uClipExact.x;
-    clipRelocate = g.uClipExact.w;
     clipExactSeed = blix_pcg(uint(gl_FragCoord.x) * 7919u + uint(gl_FragCoord.y) * 104729u);
     // Exact fetches, as texel_mark.comp reads them: the texels a pixel weighs must be the ones the mark queued for it.
     ivec2 pixel = g.uHalf.x > 0.5
@@ -361,9 +267,6 @@ void main() {
     vec2 pixelUv = (vec2(pixel) + 0.5) / vec2(textureSize(uSceneDepth, 0));
     vec4 view = g.uInvProjection * vec4(pixelUv * 2.0 - 1.0, raw, 1.0);
     vec3 worldPos = (g.uInvView * vec4(view.xyz / view.w, 1.0)).xyz;
-    clipNormalBias = g.uClipExact.y;
-    clipViewBias = g.uClipExact.z;
-    clipViewDir = normalize((g.uInvView * vec4(0.0, 0.0, 0.0, 1.0)).xyz - worldPos);
     float viewDepth = abs(view.z / view.w);
     vec4 nSample = texelFetch(uPrepassNormal, pixel, 0);
     vec3 N = dot(nSample.xyz, nSample.xyz) > 1e-6
@@ -413,10 +316,7 @@ void main() {
     float confidence;
     bool texelFound = false;
     pixelLightmapTexel = g.uLightmap.x > 0.5 ? texelFetch(uLightmapTexel, pixel, 0).r : 0u;
-    vec3 transferred;
-    bool transferUsed = g.uTransfer.x > 0.5 && g.uClipParams.y < 0.5 && transferAt(c, N, transferred);
-    if (transferUsed) outIncident.rgb = transferred;
-    if (g.uTexelParams.y > 0.5 && g.uTransfer.x < 0.5 && g.uClipParams.y < 0.5 && texelsAt(worldPos, N, nSample.w, viewDepth, gathered, confidence)) {
+    if (g.uTexelParams.y > 0.5 && g.uClipParams.y < 0.5 && texelsAt(worldPos, N, nSample.w, viewDepth, gathered, confidence)) {
         outIncident.rgb = mix(outIncident.rgb, gathered, confidence);
         texelFound = true;
     }
@@ -473,6 +373,4 @@ void main() {
         vec3 relative = (t1 * (dot(e1, luma) - lum0) + t2 * (dot(e2, luma) - lum0)) / (s * lum0);
         outIncidentGradient = vec4(relative * dot(outIncident.rgb, luma), 0.0);
     }
-    // w: 1 where the transfer answered (lit.frag reads only xyz) -- the shot counts them (WriteGpuSurfaceReference).
-    outIncidentGradient.w = transferUsed ? 1.0 : 0.0;
 }

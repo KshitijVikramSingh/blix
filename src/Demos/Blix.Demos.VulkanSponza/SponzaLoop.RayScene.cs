@@ -8,7 +8,7 @@ namespace Blix.Demos.VulkanSponza;
 
 // The scene under CPU ray-query hierarchies (Blix.Geometry), built at load over every primitive's full-detail
 // triangles: regions over the placements of meshes used once, an instance per placement of a mesh used more. Always
-// built: the clipmap traces it (--ray-scene, which once asked for it, is a no-op kept for existing invocations). Stage 3's measure of whether a load-time build fits these scenes, and what a CPU ray costs in them.
+// built: the clipmap traces it. Stage 3's measure of whether a load-time build fits these scenes, and what a CPU ray costs in them.
 internal sealed partial class SponzaLoop
 {
     private RayQueryScene? rayQueries;

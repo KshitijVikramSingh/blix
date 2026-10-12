@@ -30,7 +30,6 @@ internal sealed partial class SponzaLoop
     // shading frame; and the index map again, under the lit interface's name for it.
     private GpuBufferHandle lightmapFramesBuffer;
     private bool lightmapTexels;
-    private bool lightmapKeepBuried;
     // --lightmap-backface N: of 16 hemisphere rays, how many meeting a back face first bury a texel (4: a quarter).
     private int lightmapBackface = 4;
     // --lightmap-buried-reach M: a back face counts only this near (0.3 m). Open-bottomed stone resting on a capital
@@ -50,9 +49,7 @@ internal sealed partial class SponzaLoop
     private int LightmapBuriedTests => FrameRaysOnHardware ? 64 : 16;
     private int LightmapBuriedThreshold => (LightmapBuriedTests * lightmapBackface + 15) / 16;
     // What the buried flags depend on, for the caches that hold them or what was gathered with them.
-    private string LightmapBuriedRule => lightmapKeepBuried ? "kept"
-        : string.Create(CultureInfo.InvariantCulture, $"{LightmapBuriedThreshold}/{LightmapBuriedTests} within {lightmapBuriedReach} m from {LightmapBuriedLift} m off, single-sided");
-    private bool lightmapNoFrames;
+    private string LightmapBuriedRule => string.Create(CultureInfo.InvariantCulture, $"{LightmapBuriedThreshold}/{LightmapBuriedTests} within {lightmapBuriedReach} m from {LightmapBuriedLift} m off, single-sided");
     private int lightmapFirstRecord;
 
     // What one texel record costs on the GPU: its two vec4s (position, normal) and the light state UploadTexels makes
@@ -203,14 +200,13 @@ internal sealed partial class SponzaLoop
         // ray goes out free while its slanting ones go into the solid -- gathering half dark: Sponza's upper walls showed
         // them as black squares along every such edge. A buried record keeps its place (and its pair's sign) with |w| 1
         // instead of 4; texel.glsl and the filter skip it, and a pixel's other texels or the coarser level answer.
-        // --lightmap-keep-buried keeps them all. Only a single-sided triangle has an inside: a double-sided one's back face
+        // Only a single-sided triangle has an inside: a double-sided one's back face
         // is the far side of a sheet (a curtain's next fold), and counting it buried 57% of the curtains' texels and
         // the pillar and floor texels beside them -- skipped, the survivors stretched over them in hard-edged blocks.
         // The test is 9.8M rays and more on Sponza (~170 s), so its answer is kept beside the transport cache, under the
         // same key (which names the scene and these .blixlightmap files).
         long buried = 0;
         var buriedCached = false;
-        if (!lightmapKeepBuried)
         {
             var count = (int)records;
             var flags = ReadBuriedCache(cacheKey, count, LightmapBuriedRule);
@@ -271,7 +267,7 @@ internal sealed partial class SponzaLoop
             map = next;
         }
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[VulkanSponza] lightmap texels: {covered:N0} atlas texels covered ({edgeCovered:N0} by a triangle's edge, not its centre; {paired:N0} double-sided, two records each), {gutter:N0} gutter texels pointing at a neighbour; {w} x {h} atlas; {records * LightmapRecordBytes / 1048576.0:N0} MB of texel state; {(lightmapKeepBuried ? "buried sides kept (--lightmap-keep-buried)" : string.Create(CultureInfo.InvariantCulture, $"{buried:N0} records buried in a solid ({buried / (double)Math.Max(1, records):P1}), skipped{(buriedCached ? ", from the cache" : "")}"))}; baked in {clock.Elapsed.TotalSeconds:0.0} s."));
+            $"[VulkanSponza] lightmap texels: {covered:N0} atlas texels covered ({edgeCovered:N0} by a triangle's edge, not its centre; {paired:N0} double-sided, two records each), {gutter:N0} gutter texels pointing at a neighbour; {w} x {h} atlas; {records * LightmapRecordBytes / 1048576.0:N0} MB of texel state; {buried:N0} records buried in a solid ({buried / (double)Math.Max(1, records):P1}), skipped{(buriedCached ? ", from the cache" : "")}; baked in {clock.Elapsed.TotalSeconds:0.0} s."));
         if (paired > 0)
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] lightmap double-sided texels: {pairedOpposed / (double)paired:P1} have vertex normals opposite their winding, {pairedGrazing / (double)paired:P1} within ~17 deg of edge-on (a pixel picks its side by the vertex normal)."));
@@ -437,14 +433,12 @@ internal sealed partial class SponzaLoop
         frames[0] = (uint)lightmapAtlasWidth;
         frames[1] = (uint)lightmapAtlasHeight;
         atlas.Frames.CopyTo(frames, 2 * (1 + first));
-        if (!lightmapNoFrames)
-            lightmapFramesBuffer = Own(device.CreateGpuBuffer(frames.Length * 4, MemoryMarshal.AsBytes(frames.AsSpan()), "sponza.lightmap.frames"));
+        lightmapFramesBuffer = Own(device.CreateGpuBuffer(frames.Length * 4, MemoryMarshal.AsBytes(frames.AsSpan()), "sponza.lightmap.frames"));
         // The lit interface's bindings are cached by name (LitSceneBuffers): rebuilt with these.
         litSceneBuffers = null;
         litClipmapBuffer = null;
         lightmapFirstRecord = first;
         lightmapTexels = true;
-        UploadTransferWeights(first, atlas.Count);
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] texels: {first:N0} hashed (the surfaces the atlas leaves out) and {atlas.Count:N0} lightmap records, one set."));
     }

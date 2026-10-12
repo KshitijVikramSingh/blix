@@ -20,12 +20,11 @@ internal sealed partial class SponzaLoop
     // there (a gutter or off the atlas); magenta where the pixel has no lightmap coordinate.
     private bool texelDebug, texelDebugRecords;
     private bool lightmapEnabled;
-    // --texel-gtao 1: darken texels' light by GTAO as well. Off by default: texels resolve occlusion to 5 cm
-    // themselves, and on top of them GTAO darkened corners twice -- the Cornell box's presented image against the
-    // reference read mean error 1.53%, p99 19.4%, 2.86% of pixels over 10% with it; 0.64%, 7.4%, 0.57% without.
-    private bool texelGtao;
     // Whether the incident field already holds its occlusion: the reference view's always; the texels' with GTAO off.
-    private bool IncidentHoldsOcclusion => (referenceView && referenceSamples > 0) || (texelsUploaded && !texelGtao);
+    // GTAO never darkens the texels' light: texels resolve occlusion to 5 cm themselves, and on top of them GTAO darkened
+    // corners twice -- the Cornell box's presented image against the reference read mean error 1.53%, p99 19.4%, 2.86% of
+    // pixels over 10% with it; 0.64%, 7.4%, 0.57% without.
+    private bool IncidentHoldsOcclusion => (referenceView && referenceSamples > 0) || texelsUploaded;
     // --gi-reference-bounces N: path length (6: the 16-bounce CPU reference differs from 6 by well under its noise
     // indoors, where albedos under 0.6 shrink each bounce).
     private int referenceBounces = 6;
@@ -49,47 +48,13 @@ internal sealed partial class SponzaLoop
         // --lightmap: draw with each pack's lightmap unwrap (blix cook lightmap --write): its split vertices and LOD
         // chains, and every vertex's atlas texel (the lightmap debug view shows the parameterization).
         lightmapEnabled = args.Flag("lightmap");
-        // --lightmap-keep-buried: gather the atlas texels inside a solid too (SponzaLoop.Lightmap.cs), for A/B.
-        lightmapKeepBuried = args.Flag("lightmap-keep-buried");
         if (args.Int("lightmap-backface") is { } bf) lightmapBackface = Math.Clamp(bf, 1, 16);
         lightmapBuriedWhy = args.Flag("lightmap-buried-why");
         if (args.Float("lightmap-buried-lift") is { } bl) lightmapBuriedLiftAsked = Math.Clamp(bl, 0f, 1f);
         if (args.Float("lightmap-buried-reach") is { } br) lightmapBuriedReach = Math.Clamp(br, 0.01f, 1000f);
-        // --no-lightmap-frames: the drawn LOD's own normals, not LOD 0's through the atlas (lightmap_frame.glsl), for A/B.
-        lightmapNoFrames = args.Flag("no-lightmap-frames");
         // --texel-inspect [N | x,y;...]: at the shot, what the darkest-against-their-surroundings pixels (or these, in
         // frame fractions) read from the atlas (SponzaLoop.TexelInspect.cs).
         texelInspect = args.String("texel-inspect");
-        // --transfer-dump <file>: the surface transfer atlas's fit data at this camera and sun (SponzaLoop.TransferFit.cs).
-        transferDumpPath = args.String("transfer-dump");
-        if (args.Int("transfer-stride") is { } ts) transferSampleStride = (uint)Math.Max(1, ts);
-        if (args.Int("transfer-paths") is { } tp) transferPaths = Math.Clamp(tp, 16, 1 << 20);
-        if (args.Int("transfer-lanes") is { } tl) transferLanes = Math.Clamp(tl, 1, 1 << 16);
-        if (args.Int("transfer-probe-solves") is { } tps) transferProbeSolves = Math.Clamp(tps, 0, 255);
-        // --transfer-suns "yaw,pitch;yaw,pitch;...": capture every sun in this one process, --transfer-dump then a
-        // directory (sun_<yaw>_<pitch>.bin in it), the first sun in place of --sun (SponzaLoop.TransferFit.cs).
-        if (args.String("transfer-suns") is { } suns)
-        {
-            if (transferDumpPath is null) throw new AppArgsException("--transfer-suns needs --transfer-dump <directory>.");
-            transferSuns = suns.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(s =>
-            {
-                var p = s.Split(',', StringSplitOptions.TrimEntries);
-                if (p.Length != 2 || !float.TryParse(p[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var yaw)
-                    || !float.TryParse(p[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var pitch))
-                    throw new AppArgsException($"--transfer-suns: '{s}' is not yaw,pitch (degrees, as --sun).");
-                return new Vector2(yaw, pitch);
-            }).ToList();
-            if (transferSuns.Count == 0) throw new AppArgsException("--transfer-suns names no sun.");
-            transferSunsDirectory = transferDumpPath;
-            Directory.CreateDirectory(transferSunsDirectory);
-            sunOverrideDegrees = transferSuns[0];
-            transferDumpPath = TransferSunDumpPath(0);
-        }
-        // --transfer-weights <file>: fitted transfer weights to answer with (SponzaLoop.TransferFit.cs).
-        transferWeightsPath = args.String("transfer-weights");
-        transferNearest = args.Flag("transfer-nearest");
-        transferKeepStale = args.Flag("transfer-keep-stale");
-        if (args.Int("texel-gtao") is { } tg) texelGtao = tg != 0;
         // --gi-reference-seed N: start the paths' random sequence elsewhere -- two references that differ only in it
         // differ only by their noise (the floor any comparison against one can resolve).
         if (args.Int("gi-reference-seed") is { } seed) referenceFrame = (uint)seed * 1000003u;

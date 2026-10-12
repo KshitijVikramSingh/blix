@@ -68,14 +68,10 @@ layout(set = 0, binding = 0) uniform ClipmapInject {
     // The sun's cascades, as the lit pass rendered them this frame: a hit they cover is answered there, a shadow
     // ray only beyond them (frame audit F4; screen probes measured their shadow rays at 30% of their pass).
     mat4 uCascadeVP[3];
-    vec4 uExact;           // x 1: whether a hit sees each probe it reads, TRACED (--clipmap-exact-visibility); y / z
-                           // DDGI's surface bias along the normal / back along the ray, in spacings (0, 0: the lift);
-                           // w 1: probes relocate (--clipmap-relocate)
+    vec4 uExact;           // x 1: whether a hit sees each probe it reads, TRACED (--clipmap-exact-visibility); yzw unused
     mat4 uCascadeReceivers;  // where the cascades may answer (cascade_receivers.glsl)
     vec4 uWave;            // the solve as a wavefront (SponzaLoop.Clipmap, modes 3-6): x 1 when it is, y ray slots per lane
-                           // (the most passes a probe takes), z the per-frame base of the batches' coverage seeds;
-                           // w 1: FORGET -- every clipmap probe unsolved this frame, to be solved afresh (a sun the
-                           // transfer capture turned: the 1/n history would hold the last sun for hundreds of solves)
+                           // (the most passes a probe takes), z the per-frame base of the batches' coverage seeds; w unused
 } u;
 
 layout(set = 0, binding = 1, rgba16f) uniform image2D uClipmapIrradiance;
@@ -182,10 +178,6 @@ void injectVisClose(uint base, uint from) {
     }
 }
 #define BLIX_CLIPMAP_PROBE_VISIBILITY(world, n, probe) (injectExactKnob > 0.5 ? injectTracedVisibility(world, n, probe) : -1.0)
-// --clipmap-relocate (DDGI's relocation): each probe's offset from its cell's centre, by slot, moved after each solve --
-// out of a solid through the nearest back face, away from a front face nearer than a fifth of a cell -- and kept within
-// 0.45 of a cell. Reset when the slot is re-pointed to another cell. The probe traces from it and readers measure from it.
-layout(std430, set = 0, binding = 24) buffer ClipmapOffsets { vec4 clipmapOffsets[]; };
 // The solve as a wavefront (modes 3-5): its rays go out to a CLOSEST batch and its hits' sun to a SHADOW batch
 // (SponzaLoop.RayBatch.cs: the software traversal or Metal's), in the batches' formats. Workgroup w's lane l in pass p
 // owns ray slot w * RAYS * uWave.y + p * RAYS + l.
@@ -199,13 +191,6 @@ layout(std430, set = 0, binding = 28) buffer InjectShadowOrigins { vec4 injectOr
 layout(std430, set = 0, binding = 29) readonly buffer InjectOccluded { uint injectOccluded[]; }; // and its answers
 layout(std430, set = 0, binding = 30) buffer InjectProbeCounters { uvec4 injectCounters[]; };  // per workgroup: back faces,
                                                                                               // dependent rays, any dependent
-float injectRelocate;
-#define BLIX_CLIPMAP_PROBE_OFFSET(s) (injectRelocate > 0.5 ? clipmapOffsets[s].xyz : vec3(0.0))
-// DDGI's surface bias at a probe ray's hit: the "viewer" is the probe, back along the ray (injectViewDir, set at the hit).
-float injectNormalBias, injectViewBias;
-vec3 injectViewDir;
-#define BLIX_CLIPMAP_BIAS(world, n, spacing) (injectNormalBias > 0.0 || injectViewBias > 0.0 \
-    ? ((n) * injectNormalBias + injectViewDir * injectViewBias) * (spacing) : (n) * BLIX_CLIPMAP_LIFT(spacing))
 #include "probe_clipmap.glsl"
 layout(std430, set = 0, binding = 12) readonly buffer SurfaceIndex { uint surfaceIndex[]; };
 #define BLIX_SURFACE_INDEX(i) surfaceIndex[i]
@@ -255,8 +240,6 @@ bool crossesMovingReach(vec3 origin, vec3 dir, float tEnd) {
     return max(max(lo.x, lo.y), max(lo.z, 0.0)) <= min(min(hi.x, hi.y), min(hi.z, tEnd));
 }
 shared uint sBackfaces;
-shared float sFacing[RAYS];   // relocation: 1 a front face met, -1 a back face, 0 none
-shared uint sMoved;
 shared vec4 sTexel[36];      // irradiance rgb, sky visibility a
 shared vec2 sMoments[36];
 shared int sProbe;
@@ -295,10 +278,6 @@ mat3 rotation(uint seed) {
 
 void main() {
     injectExactKnob = u.uExact.x;
-    injectRelocate = u.uExact.w;
-    injectNormalBias = u.uExact.y;
-    injectViewBias = u.uExact.z;
-    injectViewDir = vec3(0.0, 1.0, 0.0);
     injectExactSeed = blix_pcg(gl_GlobalInvocationID.x * 7919u + uint(u.uFrame.x) * 104729u);
     injectVisMode = 0;
     BlixClipmap c = clipmap();
@@ -354,10 +333,6 @@ void main() {
         uvec4 state = states[g];
         if (ivec3(state.xyz) != expected) {
             state = uvec4(uvec3(expected), 0u);
-            states[g] = state;
-            clipmapOffsets[g] = vec4(0.0);
-        } else if (u.uWave.w > 0.5) {
-            state = uvec4(state.xyz, 0u);
             states[g] = state;
         }
         if ((state.w & BLIX_CLIPMAP_SOLVED) == 0u) {
@@ -422,7 +397,7 @@ void main() {
     int index = g % perLevel;
     ivec3 slot = ivec3(index % c.dims.x, (index / c.dims.x) % c.dims.y, index / (c.dims.x * c.dims.y));
     ivec3 cell = surfaceProbe ? ivec3(states[g].xyz) : blix_clipmapCellInSlot(c, level, slot);
-    vec3 origin = blix_clipmapProbePosition(c, level, cell) + (surfaceProbe ? vec3(0.0) : BLIX_CLIPMAP_PROBE_OFFSET(g));
+    vec3 origin = blix_clipmapProbePosition(c, level, cell);
     float spacing = blix_clipmapSpacing(c, level);
     ivec2 probeTile = surfaceProbe ? blix_surfaceTileOrigin(sg, g - int(clipSlots)) : blix_clipmapTileOrigin(c, level, slot);
     // As far as a ray can usefully report a distance: well past the level's block.
@@ -552,7 +527,6 @@ void main() {
                     sunShare = albedo * u.uSunIrradiance.rgb * ndotl / PI;
                 }
                 bool known;
-                injectViewDir = -rayDir;
                 injectVisMode = injectExactKnob > 0.5 ? 1 : 0;
                 injectVisBase = rayIndex * VIS_SLOTS;
                 injectVisCount = 0u;
@@ -586,7 +560,6 @@ void main() {
                 vec3 n = dot(normal, rayDir) > 0.0 ? -normal : normal;
                 vec3 hitPos = origin + rayDir * uintBitsToFloat(h0.x);
                 bool known;
-                injectViewDir = -rayDir;
                 injectVisMode = 2;
                 injectVisBase = rayIndex * VIS_SLOTS;
                 vec4 field = blix_worldSample(sg, c, hitPos, n, known);
@@ -608,7 +581,6 @@ void main() {
             sRayBin[lane] = int(st3.x);
             sRadiance[lane] = st1.rgb + st2.rgb * lit;
             sEscaped[lane] = st1.w;
-            sFacing[lane] = st3.y;
             sDistance[lane] = st3.z;
             sDependent[lane] = st3.w > 0.5 ? 1u : 0u;
         } else {
@@ -646,7 +618,6 @@ void main() {
             // What the clipmap knows arrives at the hit, from earlier solves: all the indirect light, sky included. Where
             // no probe answers (start-up, or past the coarsest level) it adds nothing, so a wrong start is dark.
             bool known;
-            injectViewDir = -dir;
             vec4 field = blix_worldSample(sg, c, hitPos, n, known);
             atomicAdd(queue[4], 1u);
             if (!known) atomicAdd(queue[5], 1u);
@@ -663,7 +634,6 @@ void main() {
         sDirection[lane] = dir;
         sDistance[lane] = distance;
         sEscaped[lane] = escaped;
-        sFacing[lane] = facing;
         }
         barrier();
 
@@ -740,29 +710,6 @@ void main() {
         }
     }
 
-    // Relocation (--clipmap-relocate), from this solve's rays: a probe that moved far enough is solved afresh where it
-    // now is (unsolved: the scan queues it at once), since what it holds was seen from elsewhere.
-    if (lane == 0u) {
-        sMoved = 0u;
-        if (injectRelocate > 0.5 && !surfaceProbe) {
-            vec3 was = clipmapOffsets[g].xyz;
-            float closestBack = 1e30, closestFront = 1e30;
-            vec3 backDir = vec3(0.0), frontDir = vec3(0.0);
-            for (int k = 0; k < RAYS; ++k) {
-                if (sFacing[k] < -0.5 && sDistance[k] < closestBack) { closestBack = sDistance[k]; backDir = sDirection[k]; }
-                if (sFacing[k] > 0.5 && sDistance[k] < closestFront) { closestFront = sDistance[k]; frontDir = sDirection[k]; }
-            }
-            float minFront = 0.2 * spacing;
-            vec3 moved = was;
-            if (float(sBackfaces) > 0.25 * float(RAYS * passes) && closestBack < 1e29) moved = was + backDir * (closestBack + 0.5 * minFront);
-            else if (closestFront < minFront) moved = was - frontDir * (minFront - closestFront);
-            moved = clamp(moved, vec3(-0.45 * spacing), vec3(0.45 * spacing));
-            if (length(moved - was) > 0.05 * spacing) sMoved = 1u;
-            clipmapOffsets[g] = vec4(moved, 0.0);
-        }
-    }
-    barrier();
-
     uint previousFlags = states[g].w;
     bool solvedBefore = (previousFlags & BLIX_CLIPMAP_SOLVED) != 0u;
     // How many times this slot has been solved for its cell (bits 8-15). The static light averages every solve evenly
@@ -797,8 +744,7 @@ void main() {
         // it moves (uDynamicQueue.w).
         uint dependentRays = dependentNow;
         if (sAnyDependent != 0u) atomicAdd(queue[6], 1u);
-        states[g] = sMoved != 0u ? uvec4(uvec3(cell), 0u)
-            : uvec4(uvec3(cell), BLIX_CLIPMAP_SOLVED | (buried ? BLIX_CLIPMAP_BURIED : 0u) | (surfaceProbe ? BLIX_SURFACE_ALLOCATED : 0u)
+        states[g] = uvec4(uvec3(cell), BLIX_CLIPMAP_SOLVED | (buried ? BLIX_CLIPMAP_BURIED : 0u) | (surfaceProbe ? BLIX_SURFACE_ALLOCATED : 0u)
             | (min(solves + 1u, 255u) << 8) | (dependentRays << CLIPMAP_DEPENDENT_SHIFT));
     }
 }

@@ -4,21 +4,13 @@ using Blix.Graphics;
 
 namespace Blix.Demos.VulkanSponza;
 
-// --gi-screen-probes (with --gi-clipmap): a probe per 16x16 tile on the visible surface, its rays traced full length
+// --gi-screen-probes: a probe per 16x16 tile on the visible surface, its rays traced full length
 // with the clipmap answering only at what they hit (screen_probe.glsl says why), read by the incident pass in place
 // of the clipmap's own answer wherever a probe fits the pixel.
 internal sealed partial class SponzaLoop
 {
-    private bool probeSupportNow;
-    // Stage 4f: --dynamic-history N, the history cap of the probes' dynamic part (paths through a moving reach);
-    // --dependency-reset, the control arm (a dependent probe drops its whole past); --no-dependency, no split at all
-    // (every path static, as before 4f).
+    // Stage 4f: --dynamic-history N, the history cap of the probes' dynamic part (paths through a moving reach).
     private float dynamicHistory = 4f;
-    private bool dependencyReset;
-    private bool noDependency;
-    // --dependency-everything: a control -- the reach every path counts as crossing is the whole world, so every
-    // probe runs on the dynamic history alone. Where the real reach leaves bias this removes, a path is being missed.
-    private bool dependencyEverything;
     // Stage 4f-ii': --fresh-passes N, how many passes of 32 rays a fresh probe traces; --fresh-frames F, under how
     // many frames last frame's probe in the tile makes it fresh.
     private float freshPasses = 4f;
@@ -28,10 +20,9 @@ internal sealed partial class SponzaLoop
     // --probe-layers 1|2: whether a tile may place a second probe on another surface (stage 4f-iv).
     private int probeLayers = 2;
     // --probe-layer-keys: a different SurfaceKey alone opens a second layer (the rule before depth discontinuities).
-    private bool probeLayerKeys;
     // --dependent-passes N: passes a probe traces whose last trace crossed a moving reach (it also traces every frame).
     private float dependentPasses = 1f;
-    private Bounds3 DependencyBox => dependencyEverything ? new Bounds3(new Vector3(-1e5f), new Vector3(1e5f)) : moverReach;
+    private Bounds3 DependencyBox => moverReach;
     private bool screenProbesEnabled;
     // --screen-probe-history N: frames a probe's radiance averages over at most. 256: at 64 a probe's average kept
     // wandering by its last few rays, and --stability (TAA off, still camera) measured the incident light varying
@@ -66,18 +57,16 @@ internal sealed partial class SponzaLoop
     // --screen-probe-reset-at F: drop every probe's past on post-load frame F, as a camera move does, so a shot a few
     // frames later shows what the user sees for the first seconds after moving.
     private int screenProbeResetAt = -1;
-    // --screen-probe-seed N: frames a fresh probe's clipmap prior counts for (0, the default: from its own rays);
-    // --young-filter: widen young probes' filter. Both off since stage 4f-ii': a fresh probe traces --fresh-passes
-    // (4) passes of its own instead, and borrowing was biased -- after a reset, 30 frames on, the rest of the frame
+    // --screen-probe-seed N: frames a fresh probe's clipmap prior counts for (0, the default: from its own rays). Young
+    // probes' filter is not widened either, since stage 4f-ii': a fresh probe traces --fresh-passes (4) passes of its
+    // own instead, and borrowing was biased -- after a reset, 30 frames on, the rest of the frame
     // read +8.1% (median 9.0%, p90 83%) with them against -0.3% (5.0%, 22%) with 4 passes and neither; the mover's
     // ring +32% against +12%.
     private float screenProbeSeedFrames = 0f;
-    private bool screenProbeYoungWide = false;
 
     // --no-incident-gradient: the incident pass writes no gradient, and the lit pass shades indirect light at the
     // geometric normal (the control for what the normal map adds). The gradient comes from the clipmap's own
     // directional irradiance (incident_clipmap.frag), not the screen probes' SH, which shimmered.
-    private bool noIncidentGradient;
     // --incident-normal-bias B: mips down the normal map is read for the gradient; --incident-gradient-clamp C: the
     // correction's factor stays in [1 - C, 1 + C] (it was [0, 3]). Sponza, still camera: pixels the gradient moves
     // (TAA off) against the presented image's median variation (TAA on): bias 0 (clamp 0-3) 13.0% / 6.69%, 1 5.3% /
@@ -162,12 +151,12 @@ internal sealed partial class SponzaLoop
                 new("uFrame", new Vector4Uniform(new Vector4(screenProbeFrame + screenProbeSeedOffset, screenProbeHistory, 1f, 1f))),
                 new("uCascadeVP", new Matrix4x4ArrayUniform(cascadeViewProj)),
                 new("uCascadeReceivers", new Matrix4x4Uniform(CascadeReceivers)),
-                new("uParams2", new Vector4Uniform(new Vector4(screenProbeSeedFrames, probeSupportNow ? 1f : 0f, dependencyReset ? 1f : 0f, probeRayLength))),
+                new("uParams2", new Vector4Uniform(new Vector4(screenProbeSeedFrames, 0f, 0f, probeRayLength))),
                 // The reach of what moved this frame: the mover's while it moves, none while held or absent.
-                new("uDynamicMin", new Vector4Uniform(MoverActive && moverMoved && !noDependency ? new Vector4(DependencyBox.Min, 1f) : Vector4.Zero)),
+                new("uDynamicMin", new Vector4Uniform(MoverActive && moverMoved ? new Vector4(DependencyBox.Min, 1f) : Vector4.Zero)),
                 new("uDynamicMax", new Vector4Uniform(new Vector4(MoverActive ? DependencyBox.Max : Vector3.Zero, dynamicHistory))),
                 new("uFresh", new Vector4Uniform(new Vector4(freshPasses, freshFrames, probeLayers < 2 ? 1f : 0f, dependentPasses))),
-                new("uLayers", new Vector4Uniform(new Vector4(probeLayerKeys ? 1f : 0f, ScreenProbePassStride, 0f, 0f))),
+                new("uLayers", new Vector4Uniform(new Vector4(0f, ScreenProbePassStride, 0f, 0f))),
                 new("uCookedGrid", new Vector4Uniform(cookedGrid)),
                 new("uCookedDims", new Vector4Uniform(cookedDims)),
             };
@@ -209,7 +198,7 @@ internal sealed partial class SponzaLoop
             new ShaderUniform[]
             {
                 new("uTarget", new Vector4Uniform(new Vector4(frameWidth, frameHeight, tiles.Item1, tiles.Item2))),
-                new("uParams", new Vector4Uniform(new Vector4(screenProbeFilterRadius, screenProbeYoungWide ? 0f : 1f, 0f, 0f))),
+                new("uParams", new Vector4Uniform(new Vector4(screenProbeFilterRadius, 1f, 0f, 0f))),
             },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
@@ -228,7 +217,7 @@ internal sealed partial class SponzaLoop
     {
         if (ScreenProbesActive && screenProbeTiles.X > 0)
         {
-            return (new Vector4(1f, screenProbeTiles.X, screenProbeTiles.Y, noIncidentGradient ? 1f : 0f), new Vector4(frameWidth, frameHeight, 0f, 0f),
+            return (new Vector4(1f, screenProbeTiles.X, screenProbeTiles.Y, 0f), new Vector4(frameWidth, frameHeight, 0f, 0f),
                 screenProbeTileBuffers[screenProbeCurrent], screenProbeFiltered);
         }
         if (screenProbeDummy.Equals(default(GpuBufferHandle)))
@@ -236,7 +225,7 @@ internal sealed partial class SponzaLoop
             screenProbeDummy = Own(device.CreateGpuBuffer(ScreenProbeBytes, name: "sponza.screen-probes.none"));
             screenProbeTileDummy = Own(device.CreateGpuBuffer(ScreenProbeTileBytes, name: "sponza.screen-probe-tiles.none"));
         }
-        return (new Vector4(0f, 0f, 0f, noIncidentGradient ? 1f : 0f), new Vector4(frameWidth, frameHeight, 0f, 0f), screenProbeTileDummy, screenProbeDummy);
+        return (new Vector4(0f, 0f, 0f, 0f), new Vector4(frameWidth, frameHeight, 0f, 0f), screenProbeTileDummy, screenProbeDummy);
     }
 
     // At the shot: how many frames each placed probe has accumulated (a probe that keeps losing its past shows only
