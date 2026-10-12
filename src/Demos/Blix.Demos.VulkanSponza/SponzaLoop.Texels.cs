@@ -353,17 +353,15 @@ internal sealed partial class SponzaLoop
             texelLiveCount = live.Count;
             texelLiveBuffer = Own(device.CreateGpuBuffer(Math.Max(live.Count, 1) * 4, MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(live)), "sponza.texels.live"));
             // --lightlets: the live texels' sun records (SponzaLoop.LightletBake), read or baked.
-            BeginLightlets(bake.Texels, live.ToArray(), texelCount, bakePath);
+            texelLiveIds = live.ToArray();
+            BeginLightlets(bake.Texels, texelLiveIds, texelCount, bakePath);
         }
         // A loaded bake is settled (LightBakeVersion 4 refines until it is): filter it once and rest.
         if (light is not null) SettleTexels("the baked light loaded");
-        // What a sun change re-bakes toward (RebakeForSun): the texels, where the atlas's start.
-        texelsForRebake = bake.Texels;
-        texelFirstAtlasForRebake = firstAtlas < 0 ? texelCount : firstAtlas;
         if (light is null && bakePath is not null)
         {
             lightBakePath = bakePath;
-            BeginLightBake(bake.Texels, texelCount, firstAtlas < 0 ? texelCount : firstAtlas);
+            BeginLightBake(texelLiveIds!, texelCount);
         }
     }
 
@@ -508,7 +506,7 @@ internal sealed partial class SponzaLoop
         SaveLightBakeWhenDone();
         LightletBakeWhenReady();
         // The atlas's light is gathered against the bake scene (SponzaLoop.BakeScene.cs) once it is there, never before.
-        if (BakeSceneWanted && BakeTracer is null && !bakeTracerFailed && !bakeSceneReleased) return;
+        if (BakeSceneWanted && !bakeSceneSkipped && BakeTracer is null && !bakeTracerFailed && !bakeSceneReleased) return;
         var texelParams = new Vector4(texelCapacity, texelBudget, texelTarget, texelFrame);
         // While the light bakes (SponzaLoop.LightBake.cs) its slice takes the queue the mark would fill, at its budget.
         var baking = lightBakeActive;

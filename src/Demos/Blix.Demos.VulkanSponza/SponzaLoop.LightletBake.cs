@@ -332,7 +332,9 @@ internal sealed partial class SponzaLoop
 
     private void UploadLightlets(LightletRecords records, string how)
     {
-        lightlets = records;
+        // Up on the GPU; the CPU's copy (~930 MB on Sponza) is let go -- nothing reads it after the upload. The field
+        // stays as the "records are up" mark.
+        lightlets = new LightletRecords(Array.Empty<uint>(), Array.Empty<uint>());
         lightletIndexBuffer = Own(device.CreateGpuBuffer(records.Index.Length * 4, MemoryMarshal.AsBytes(records.Index.AsSpan()), "sponza.lightlets.index"));
         lightletPoolBuffer = Own(device.CreateGpuBuffer(Math.Max(records.Pool.Length, 1) * 4, MemoryMarshal.AsBytes(records.Pool.AsSpan()), "sponza.lightlets.pool"));
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,

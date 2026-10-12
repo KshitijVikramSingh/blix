@@ -143,15 +143,11 @@ internal sealed partial class SponzaLoop
 
     // After the texels are on the GPU with no baked light (UploadTexels): every live texel, and the bake under way.
     // Below firstAtlas every record is hashed and live; from it, the atlas's, live unless buried (|w| 1).
-    private void BeginLightBake(Vector4[] texels, int count, int firstAtlas)
+    private void BeginLightBake(uint[] live, int count)
     {
-        var live = new List<uint>(count);
-        for (var i = 0; i < count; i++)
-            if (i < firstAtlas || MathF.Abs(texels[2 * i].W) >= 2f)
-                live.Add((uint)i);
-        if (live.Count == 0) return;
-        lightBakeLive = live.Count;
-        lightBakeLiveBuffer = Own(device.CreateGpuBuffer(live.Count * 4, MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(live)), "sponza.light-bake.live"));
+        if (live.Length == 0) return;
+        lightBakeLive = live.Length;
+        lightBakeLiveBuffer = Own(device.CreateGpuBuffer(live.Length * 4, MemoryMarshal.AsBytes(live.AsSpan()), "sponza.light-bake.live"));
         var passes = (texelTarget + 31) / 32;
         lightBakeTotal = (long)lightBakeLive * passes;
         lightBakeIssued = 0;
@@ -273,17 +269,17 @@ internal sealed partial class SponzaLoop
     // --no-sun-rebake: the mark alone, as before (the A/B).
     private bool sunRebake = true;
     private string? lightBakeKey;
-    private Vector4[]? texelsForRebake;
-    private int texelFirstAtlasForRebake;
+    // The live texels' ids (what a bake gathers), kept for a re-bake: 4 B a texel, not the texels themselves.
+    private uint[]? texelLiveIds;
 
     private void RebakeForSun((Vector3 ToSun, Vector3 Irradiance) sun)
     {
         AbortLightBake("the sun turned");
-        if (!sunRebake || lightBakeOff || lightBakeKey is null || texelsForRebake is null
+        if (!sunRebake || lightBakeOff || lightBakeKey is null || texelLiveIds is null
 ) return;
         if (!lightBakeLiveBuffer.Equals(default(GpuBufferHandle))) RetireGpuBuffer(lightBakeLiveBuffer);
         lightBakePath = LightBakePathFor(lightBakeKey, sun);
-        BeginLightBake(texelsForRebake, texelCount, texelFirstAtlasForRebake);
+        BeginLightBake(texelLiveIds, texelCount);
     }
 
     // The sun turned while baking: the patches' light the texels gather from is re-solved and the epoch moves on, so

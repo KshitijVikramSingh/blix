@@ -75,6 +75,9 @@ internal sealed partial class SponzaLoop
     // rays (traced per pixel) or --no-rt-pack (the A/B).
     private bool rtNoPack;
     private bool RtPack => !rtNoPack && !RtSkyRays;
+    // The per-pixel origins and directions (285 MB at 2880x1620, two slots): the unpacked trace reads them, and the
+    // census tools (leak census, lightlet census and record study); a packed frame needs neither.
+    private bool RtPerPixel => !RtPack || rayLeakCensus || lightletCensus || lightletRecord;
     private GpuBufferHandle[] rtShadowPacked = Array.Empty<GpuBufferHandle>();
     private GpuBufferHandle[] rtShadowPixelOf = Array.Empty<GpuBufferHandle>();
     private GpuBufferHandle[] rtShadowCounters = Array.Empty<GpuBufferHandle>();
@@ -158,13 +161,13 @@ internal sealed partial class SponzaLoop
             foreach (var b in rtShadowCounters) device.DestroyGpuBuffer(b);
             var slots = device.MaxFramesInFlightCount;
             var header = MemoryMarshal.AsBytes(new uint[] { (uint)width, (uint)height, 1u, RtSkyRays ? 1u : 0u }.AsSpan()).ToArray();
-            rtShadowOrigins = Enumerable.Range(0, slots)
+            rtShadowOrigins = Enumerable.Range(0, RtPerPixel ? slots : 0)
                 .Select(s => Own(device.CreateGpuBuffer(width * height * 16, name: $"sponza.rt-shadow.origins{s}"))).ToArray();
             rtShadowMasks = Enumerable.Range(0, slots)
                 .Select(s => Own(device.CreateGpuBuffer(16 + width * height * 4, header, $"sponza.rt-shadow.mask{s}"))).ToArray();
             rtShadowBaked = Enumerable.Range(0, slots)
                 .Select(s => Own(device.CreateGpuBuffer(width * height * 4, name: $"sponza.rt-shadow.baked{s}"))).ToArray();
-            rtShadowDirections = Enumerable.Range(0, slots)
+            rtShadowDirections = Enumerable.Range(0, RtPerPixel ? slots : 0)
                 .Select(s => Own(device.CreateGpuBuffer(width * height * 16, name: $"sponza.rt-shadow.directions{s}"))).ToArray();
             rtShadowSky = Enumerable.Range(0, RtSkyRays ? slots : 0)
                 .Select(s => Own(device.CreateGpuBuffer(width * height * 32, name: $"sponza.rt-shadow.sky{s}"))).ToArray();
@@ -179,7 +182,8 @@ internal sealed partial class SponzaLoop
         }
 
         var slot = device.CurrentFrameSlot;
-        var origins = rtShadowOrigins[slot];
+        // Per pixel only when something reads them (RtPerPixel); the shader writes none otherwise.
+        var origins = rtShadowOrigins.Length > 0 ? rtShadowOrigins[slot] : RtShadowPlaceholder;
         var mask = rtShadowMasks[slot];
         // Packed (RtPack): this use of the slot counts into one of its two counters and zeroes the other for its next.
         var pack = rtShadowPacked.Length > 0;
@@ -190,7 +194,7 @@ internal sealed partial class SponzaLoop
         // its centre), or each ray toward its own point of it (rt_shadow_rays.comp) and TAA averaging them.
         var filterPenumbra = shadows.PenumbraFilter && !halfShadowsNow && SunDiscTangent > 0f;
         var discTangent = filterPenumbra ? 0f : SunDiscTangent;
-        var directions = rtShadowDirections[slot];
+        var directions = rtShadowDirections.Length > 0 ? rtShadowDirections[slot] : RtShadowPlaceholder;
         var bounds = rayQueries.Nodes[0].Bounds;
         var reach = (bounds.Max - bounds.Min).Length();
         Matrix4x4.Invert(viewProjJittered, out var invViewProj);
@@ -207,7 +211,7 @@ internal sealed partial class SponzaLoop
                 new("uDisc", new Vector4Uniform(new Vector4(discTangent, rtShadowFrame % 65536u, 0f, 0f))),
                 new("uLightlet", new Vector4Uniform(LightletUniform(towardSun))),
                 new("uLightmap", new Vector4Uniform(LightmapUniform)),
-                new("uCompact", new Vector4Uniform(new Vector4(pack ? 1f : 0f, counter, 0f, 0f))),
+                new("uCompact", new Vector4Uniform(new Vector4(pack ? 1f : 0f, counter, rtShadowOrigins.Length > 0 ? 1f : 0f, 0f))),
             },
             new[]
             {

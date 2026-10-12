@@ -34,7 +34,8 @@ internal sealed partial class SponzaLoop
         var rays = w * h;
         var origins = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(rtShadowOrigins[slot], 0, rays * 16).AsSpan()).ToArray();
         var words = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(rtShadowMasks[slot], 16, rays * 4).AsSpan()).ToArray();
-        var perRay = SunDiscTangent > 0f;
+        // Per-ray directions only under the disc's jitter (PenumbraFilter off); filtered, every ray went to the sun's centre.
+        var perRay = SunDiscTangent > 0f && !(shadows.PenumbraFilter && !halfShadowsNow);
         var directions = perRay ? MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(rtShadowDirections[slot], 0, rays * 16).AsSpan()).ToArray() : null;
         var towardSun = -Vector3.Normalize(sunDirection);
 

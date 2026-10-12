@@ -33,6 +33,29 @@ internal sealed partial class SponzaLoop
     // --no-bake-scene: the atlas bakes against the frame's scene (the A/B).
     private bool noBakeScene;
     private bool BakeSceneWanted => !noBakeScene && lightmapEnabled && transportTexels && FrameRaysOnHardware && rayLodError > 0f;
+    // The staged drawables the bake scene would be built from, held from load until the transport cook knows its key
+    // (DecideBakeScene); then built from, or let go of.
+    private List<DrawableStaging>? bakeSceneSource;
+    // Every cache the bake scene would fill was found (the buried flags, this sun's light; the lightlet records bake on
+    // the frame's tracer): it is not built at all -- ~1.3 GB of GPU memory at the boot's peak and 45-85 s of CPU, every boot, for nothing.
+    private volatile bool bakeSceneSkipped;
+
+    // On the cook's thread, with the key: the caches checked, the bake scene started or skipped.
+    private void DecideBakeScene(string cacheKey)
+    {
+        if (Interlocked.Exchange(ref bakeSceneSource, null) is not { } source) return;
+        var light = lightBakeOff || File.Exists(LightBakePathFor(cacheKey, (-Vector3.Normalize(sunDirection), EffectiveSunIrradiance)));
+        var buried = !lightmapEnabled || File.Exists(BuriedCachePath(cacheKey));
+        if (light && buried)
+        {
+            bakeSceneSkipped = true;
+            Console.WriteLine("[VulkanSponza] bake scene: not built -- the buried flags and this sun's light are both cached.");
+            return;
+        }
+        Console.WriteLine($"[VulkanSponza] bake scene: building (missing:{(buried ? "" : " buried flags")}{(light ? "" : " light")}).");
+        StartBakeScene(source);
+    }
+
     // The bake scene's tracer once built (null before, or without one).
     private MetalRayTracer? BakeTracer => Volatile.Read(ref bakeTracer);
 
@@ -193,7 +216,7 @@ internal sealed partial class SponzaLoop
     // and being built; else the frame's (WaitForFrameTracer).
     private MetalRayTracer? WaitForBakeTracer()
     {
-        if (!BakeSceneWanted) return WaitForFrameTracer();
+        if (!BakeSceneWanted || bakeSceneSkipped) return WaitForFrameTracer();
         if (!transportCookAsync) return BakeTracer;
         var clock = Stopwatch.StartNew();
         while (BakeTracer is null && !Volatile.Read(ref bakeTracerFailed) && !Volatile.Read(ref bakeSceneReleased) && clock.Elapsed.TotalSeconds < 300)

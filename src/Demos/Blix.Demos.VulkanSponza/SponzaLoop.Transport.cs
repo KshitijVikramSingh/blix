@@ -205,6 +205,7 @@ internal sealed partial class SponzaLoop
 
         // The cook's cache (SponzaLoop.TransportCache.cs): a run whose inputs match reads what the cook would make.
         var cacheKey = TransportCacheKey(scene, surfaces);
+        DecideBakeScene(cacheKey);
         var cached = LoadTransportCache(cacheKey);
 
         // ---- R1: patches ------------------------------------------------------------------------------------------
@@ -646,10 +647,16 @@ internal sealed partial class SponzaLoop
             var lightPath = lightBakeOff ? null : LightBakePathFor(cacheKey, transportRelightSun);
             lightBakeKey = cacheKey;
             var light = lightPath is null ? null : ReadLightBake(lightPath, texelTotal);
+            // Its own copy of the atlas: the method's locals are dropped at its end (below), before this may run.
+            var atlasForUpload = lightmapBake;
             OnMain(() =>
             {
-                if (lightmapBake is { } atlas) UploadLightmapTexels(hashed, atlas, light, lightPath);
+                if (atlasForUpload is { } atlas) UploadLightmapTexels(hashed, atlas, light, lightPath);
                 else UploadTexels(hashed, light, lightPath);
+                // Uploaded: let the CPU's texels go (the relight closure shares this scope and lives on).
+                hashed = null!;
+                atlasForUpload = null;
+                light = null;
             });
         }
         if (transportGpu && (cached is null || (transportTexels && cached.Texels is null)))
@@ -660,5 +667,10 @@ internal sealed partial class SponzaLoop
                 SunletPos = sunletPos.ToArray(), SunletNrm = sunletNrm.ToArray(), SunletAlbedo = sunletAlbedo.ToArray(),
                 Sky = sky, SunVis = sunVis, Texels = texelBake,
             });
+        // transportRelight (above) closes over this method's locals, and a closure keeps every local it shares a scope
+        // with: drop the big ones it never reads (the cache as read, the texels and the atlas's records, both uploaded).
+        cached = null;
+        texelBake = null;
+        lightmapBake = null;
     }
 }

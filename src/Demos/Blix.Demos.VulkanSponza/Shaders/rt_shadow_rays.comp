@@ -30,7 +30,8 @@ layout(set = 0, binding = 0) uniform RtShadowRays {
     vec4 uLightlet;      // the sun records (SponzaLoop.LightletBake, RenderSettings.LightletSun): xy the sun in the band's fine
                          // node coordinates, z 1 when they answer, w tau (degrees): a record under it is not certain
     vec4 uLightmap;      // the atlas (texel.glsl): x 1 when on, yz its size
-    vec4 uCompact;       // x 1: the traced rays packed (below); y which of the two counters is this frame's
+    vec4 uCompact;       // x 1: the traced rays packed (below); y which of the two counters is this frame's; z 1: the
+                         // per-pixel origins and directions written too (unpacked, or a census reads them)
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -114,6 +115,7 @@ void main() {
     if (p.x >= uint(u.uSize.x) || p.y >= uint(u.uSize.y)) return;
     uint index = p.y * uint(u.uSize.x) + p.x;
     bool packing = u.uCompact.x > 0.5;
+    bool perPixel = u.uCompact.z > 0.5;
     // The header's z back to 1 (traced; rt_shadow_filter.comp sets 2 when it filters this frame's mask).
     if (index == 0u) maskHeader.z = 1u;
     if (packing && index == 0u) counters[1u - uint(u.uCompact.y)] = 0u;
@@ -124,7 +126,7 @@ void main() {
     vec4 nSample = texelFetch(uPrepassNormal, q, 0);
     bool sky = u.uSky.x > 0.5;
     if (raw >= 1.0 - 1e-6 || dot(nSample.xyz, nSample.xyz) < 1e-6) {
-        origins[index] = vec4(0.0);
+        if (perPixel) origins[index] = vec4(0.0);
         baked[index] = 3u;
         if (packing) maskWords[index] = 0u;
         if (sky) skyRays[index * 2u] = vec4(0.0);
@@ -142,7 +144,7 @@ void main() {
     baked[index] = answer;
     // Answered: no ray, and the answer rides the reach (blix_shadow: 0 answered lit, < 0 answered shadowed), so the mask
     // every reader takes -- lit.frag at full res, lighting_upsample at half -- holds it with the traced pixels'.
-    origins[index] = vec4(origin, answer >= 2u ? u.uSun.w : answer == 1u ? -1.0 : 0.0);
+    if (perPixel) origins[index] = vec4(origin, answer >= 2u ? u.uSun.w : answer == 1u ? -1.0 : 0.0);
     vec3 rayDir = u.uSun.xyz;
     if (u.uDisc.x > 0.0) {
         // The frame's point of a low-discrepancy sequence over the disc (R2), shifted per pixel by a hash (Cranley-
@@ -157,7 +159,7 @@ void main() {
         float r = u.uDisc.x * sqrt(xi.x);
         float phi = 6.28318530718 * xi.y;
         rayDir = normalize(s + (t * cos(phi) + b * sin(phi)) * r);
-        directions[index] = vec4(rayDir, 0.0);
+        if (perPixel) directions[index] = vec4(rayDir, 0.0);
     }
     if (packing) {
         if (answer >= 2u) {

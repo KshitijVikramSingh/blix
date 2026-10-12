@@ -415,7 +415,8 @@ internal sealed partial class SponzaLoop
 
         SelectMover(rayInstances);
         BuildRayScene(rayMeshes, rayInstances);
-        StartBakeScene(ordered);
+        // The bake scene waits for the transport cook's key: built only if a cache it would fill is missing.
+        if (BakeSceneWanted) bakeSceneSource = ordered;
         WriteSurfaceKeyCensus(ordered, surfaceKeys.Count);
 
         // lit.vert carries normals by the model's linear part, exact for rotation and uniform scale. Said
