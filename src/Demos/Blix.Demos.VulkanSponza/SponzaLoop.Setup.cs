@@ -651,6 +651,41 @@ internal sealed partial class SponzaLoop
         rayViewInterface = Reflect("ray_view.comp");
         rayViewPassHandle = graph.ComputePass("ray-view").Shader(rayViewInterface).Read(SampleableSceneDepth).Handle;
 
+        // The texels (mark, filter, the light bake's slice, the gather and its Metal batches) BEFORE the traced shadows:
+        // they read only the pre-pass and the cascades, and a Metal batch declared between rt-shadow-trace and its join
+        // waits for the trace first (VulkanGraphicsDevice: a later external pass waits on the pending join) -- the overlap
+        // lost, two bubbles more, every frame the texels gather or bake.
+        texelMarkInterface = Reflect("texel_mark.comp");
+        {
+            var markBuilder = graph.ComputePass("texel-mark").Read(SampleableSceneDepth).Read(SampleablePrepassNormal);
+            for (var c = 0; c < CascadeCount; c++) markBuilder = markBuilder.Read(cascadeHandles[c]);
+            markBuilder = markBuilder.Read(lightmapEnabled ? lightmapTexelHandle : surfaceKeyHandle);
+            texelMarkPassHandle = markBuilder.Shader(texelMarkInterface).Handle;
+        }
+        texelFilterInterface = Reflect("texel_filter.comp");
+        // The filter sweep's list (texel_filter_fill.comp), before the filter that reads it.
+        texelFilterFillInterface = Reflect("texel_filter_fill.comp");
+        texelFilterFillPassHandle = graph.ComputePass("texel-filter-fill").Shader(texelFilterFillInterface).Handle;
+        texelFilterPassHandle = graph.ComputePass("texel-filter").Shader(texelFilterInterface).Handle;
+        lightBakeInterface = Reflect("texel_bake.comp");
+        lightBakePassHandle = graph.ComputePass("light-bake").Shader(lightBakeInterface).Handle;
+        texelGatherInterface = Reflect("texel_gather.comp");
+        // The gather as a wavefront (--texel-wavefront, or frame rays on Metal): rays out, hits shaded, the hits' sun out,
+        // the answers gathered in texel-gather; the batches between the phases (SponzaLoop.Texels.cs).
+        texelRaysPassHandle = graph.ComputePass("texel-gather-rays").Shader(texelGatherInterface).Handle;
+        texelClosestBatch = DeclareClosestBatch("texel-closest");
+        {
+            var builder = graph.ComputePass("texel-gather-shade");
+            for (var c = 0; c < CascadeCount; c++) builder = builder.Read(cascadeHandles[c]);
+            texelShadePassHandle = builder.Shader(texelGatherInterface).Handle;
+        }
+        texelShadowBatch = DeclareShadowBatch("texel-shadow");
+        {
+            var builder = graph.ComputePass("texel-gather");
+            for (var c = 0; c < CascadeCount; c++) builder = builder.Read(cascadeHandles[c]);
+            texelGatherPassHandle = builder.Shader(texelGatherInterface).Handle;
+        }
+
         // --rt-shadows: the shadow rays as soon as the pre-pass has the depth and normals they start from, and the Metal
         // pass that traces them; the lit pass joins it (rt-shadow-join, below). Everything between (Hi-Z, GTAO, the
         // clipmap's marks, the incident light) reads none of it, so it runs while the rays are traced.
@@ -723,13 +758,6 @@ internal sealed partial class SponzaLoop
             for (var c = 0; c < CascadeCount; c++) builder = builder.Read(cascadeHandles[c]);
             screenProbePassHandles[stage] = builder.Shader(screenProbeInterfaces[stage]).Handle;
         }
-        texelMarkInterface = Reflect("texel_mark.comp");
-        {
-            var markBuilder = graph.ComputePass("texel-mark").Read(SampleableSceneDepth).Read(SampleablePrepassNormal);
-            for (var c = 0; c < CascadeCount; c++) markBuilder = markBuilder.Read(cascadeHandles[c]);
-            markBuilder = markBuilder.Read(lightmapEnabled ? lightmapTexelHandle : surfaceKeyHandle);
-            texelMarkPassHandle = markBuilder.Shader(texelMarkInterface).Handle;
-        }
         referenceInterface = Reflect("reference_trace.comp");
         gpuReferenceInterface = Reflect("reference_points.comp");
         gpuReferencePassHandle = graph.ComputePass("reference-points").Shader(gpuReferenceInterface).Handle;
@@ -742,29 +770,6 @@ internal sealed partial class SponzaLoop
         referenceWaveResolvePass = graph.ComputePass("reference-wave-resolve").Shader(referenceWaveInterface).Handle;
         referencePassHandle = graph.ComputePass("reference-trace").Shader(referenceInterface)
             .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
-        texelFilterInterface = Reflect("texel_filter.comp");
-        // The filter sweep's list (texel_filter_fill.comp), before the filter that reads it.
-        texelFilterFillInterface = Reflect("texel_filter_fill.comp");
-        texelFilterFillPassHandle = graph.ComputePass("texel-filter-fill").Shader(texelFilterFillInterface).Handle;
-        texelFilterPassHandle = graph.ComputePass("texel-filter").Shader(texelFilterInterface).Handle;
-        lightBakeInterface = Reflect("texel_bake.comp");
-        lightBakePassHandle = graph.ComputePass("light-bake").Shader(lightBakeInterface).Handle;
-        texelGatherInterface = Reflect("texel_gather.comp");
-        // The gather as a wavefront (--texel-wavefront, or frame rays on Metal): rays out, hits shaded, the hits' sun out,
-        // the answers gathered in texel-gather; the batches between the phases (SponzaLoop.Texels.cs).
-        texelRaysPassHandle = graph.ComputePass("texel-gather-rays").Shader(texelGatherInterface).Handle;
-        texelClosestBatch = DeclareClosestBatch("texel-closest");
-        {
-            var builder = graph.ComputePass("texel-gather-shade");
-            for (var c = 0; c < CascadeCount; c++) builder = builder.Read(cascadeHandles[c]);
-            texelShadePassHandle = builder.Shader(texelGatherInterface).Handle;
-        }
-        texelShadowBatch = DeclareShadowBatch("texel-shadow");
-        {
-            var builder = graph.ComputePass("texel-gather");
-            for (var c = 0; c < CascadeCount; c++) builder = builder.Read(cascadeHandles[c]);
-            texelGatherPassHandle = builder.Shader(texelGatherInterface).Handle;
-        }
         screenProbeFilterInterface = Reflect("screen_probe_filter.comp");
         screenProbeFilterPassHandle = graph.ComputePass("screen-probe-filter").Shader(screenProbeFilterInterface).Handle;
 
