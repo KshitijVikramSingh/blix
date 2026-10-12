@@ -62,6 +62,7 @@ internal sealed partial class SponzaLoop
     private void ReadLightBakeArgs(AppArgs args)
     {
         lightBakeOff = args.Flag("no-light-bake");
+        sunRebake = !args.Flag("no-sun-rebake");
         if (args.Int("light-bake-budget") is { } b) lightBakeBudgetAsked = Math.Clamp(b, 1024, 1 << 18);
     }
 
@@ -276,6 +277,27 @@ internal sealed partial class SponzaLoop
             MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(texelBlendBuffer, 0, texelCount * 16).AsSpan()).ToArray(),
             MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(texelOpenBuffer, 0, texelCount * 16).AsSpan()).ToArray());
         Task.Run(() => WriteLightBake(path, state));
+    }
+
+    // The sun turned and the patches' light was re-solved for it (FollowSun): the texels converge on the new sun the way
+    // they did on the boot's -- every live texel baked and refined until settled, then the filter sweep and rest, the
+    // result saved under the new sun's key -- rather than only where the mark happens to look. Gathered from the mark
+    // alone, texels the view sampled rarely kept the old sun's light for long: ghost outlines of the old patch. While it
+    // bakes, a texel from the old epoch counts as one pass (texel_gather.comp) and fades as the new rays land.
+    // --no-sun-rebake: the mark alone, as before (the A/B).
+    private bool sunRebake = true;
+    private string? lightBakeKey;
+    private Vector4[]? texelsForRebake;
+    private int texelFirstAtlasForRebake;
+
+    private void RebakeForSun((Vector3 ToSun, Vector3 Irradiance) sun)
+    {
+        AbortLightBake("the sun turned");
+        if (!sunRebake || lightBakeOff || lightBakeKey is null || texelsForRebake is null
+            || transferDumpPath is not null || transferWeightsPath is not null) return;
+        if (!lightBakeLiveBuffer.Equals(default(GpuBufferHandle))) RetireGpuBuffer(lightBakeLiveBuffer);
+        lightBakePath = LightBakePathFor(lightBakeKey, sun);
+        BeginLightBake(texelsForRebake, texelCount, texelFirstAtlasForRebake);
     }
 
     // The sun turned while baking: the patches' light the texels gather from is re-solved and the epoch moves on, so

@@ -819,6 +819,7 @@ internal sealed partial class SponzaLoop
             // once the texels are up, toward the same file.
             var texelTotal = hashed.Count + (lightmapBake?.Count ?? 0);
             var lightPath = lightBakeOff ? null : LightBakePathFor(cacheKey, transportRelightSun);
+            lightBakeKey = cacheKey;
             var light = lightPath is null || transferDumpPath is not null ? null : ReadLightBake(lightPath, texelTotal);
             OnMain(() =>
             {

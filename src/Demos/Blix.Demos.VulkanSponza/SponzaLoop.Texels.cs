@@ -358,6 +358,9 @@ internal sealed partial class SponzaLoop
         // A loaded bake is settled (LightBakeVersion 4 refines until it is): filter it once and rest.
         if (light is not null) SettleTexels("the baked light loaded");
         // Under --transfer-weights the texels' light is never read (the transfer answers instead), so it is not baked.
+        // What a sun change re-bakes toward (RebakeForSun): the texels, where the atlas's start.
+        texelsForRebake = bake.Texels;
+        texelFirstAtlasForRebake = firstAtlas < 0 ? texelCount : firstAtlas;
         if (light is null && bakePath is not null && (transferWeightsPath is null || transferDumpPath is not null))
         {
             lightBakePath = bakePath;
@@ -394,7 +397,7 @@ internal sealed partial class SponzaLoop
             cookedPatchBuffer = Own(device.CreateGpuBuffer(cookedPacked.Length * 16, MemoryMarshal.AsBytes(cookedPacked.AsSpan()), "sponza.cooked.patches"));
             transportRelightSun = relightTaskSun;
             texelEpoch++;
-            AbortLightBake("the sun turned");
+            RebakeForSun(transportRelightSun);
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] transport: patch light re-solved for the sun in {relightClock!.Elapsed.TotalSeconds:0.0} s; texels re-gather (epoch {texelEpoch})."));
             relightTask = null;
