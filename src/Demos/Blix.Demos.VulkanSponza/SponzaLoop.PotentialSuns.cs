@@ -86,7 +86,7 @@ internal sealed partial class SponzaLoop
     private string PotentialSunsPathFor(string transportKey)
     {
         var spec = string.Create(CultureInfo.InvariantCulture,
-            $"{transportKey};grid {GridHour}x{GridDec};band {BandLatitude} {Obliquity} {BandMinElevation};north {BandNorth(out _):F5};sun {EffectiveSunIrradiance.X:F4},{EffectiveSunIrradiance.Y:F4},{EffectiveSunIrradiance.Z:F4};rays {sunNodeRays} {(sunNodeGuide && !sunNodeCpuSolve ? "guided" : "cosine")};lift {sunNodeLift:G4};lookup {sunNodePlane:G3} {sunNodeSigma:G3};discover {sunNodeDiscoverStride};unknown sun {sunNodeUnknownSun:G3};rank {SunNodeBlocks.Rank} block {SunNodeBlocks.Block};v{PotentialSunsVersion}");
+            $"{transportKey};grid {GridHour}x{GridDec};band {BandLatitude} {Obliquity} {BandMinElevation};north {BandNorth(out _):F5};sun {EffectiveSunIrradiance.X:F4},{EffectiveSunIrradiance.Y:F4},{EffectiveSunIrradiance.Z:F4};rays {sunNodeRays} {(sunNodeGuide && !sunNodeCpuSolve ? "guided" : "cosine")};lift {sunNodeLift:G4};lookup {sunNodePlane:G3} {sunNodeSigma:G3};discover {sunNodeDiscoverStride};unknown sun {sunNodeUnknownSun:G3};buried {LightmapBuriedRule};rank {SunNodeBlocks.Rank} block {SunNodeBlocks.Block};v{PotentialSunsVersion}");
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(spec)))[..16].ToLowerInvariant();
         return Path.ChangeExtension(TransportCachePath(transportKey), $".sunnodes-{hash}");
     }

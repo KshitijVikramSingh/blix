@@ -49,7 +49,7 @@ internal sealed partial class SponzaLoop
     private int LightmapBuriedTests => FrameRaysOnHardware ? 64 : 16;
     private int LightmapBuriedThreshold => (LightmapBuriedTests * lightmapBackface + 15) / 16;
     // What the buried flags depend on, for the caches that hold them or what was gathered with them.
-    private string LightmapBuriedRule => string.Create(CultureInfo.InvariantCulture, $"{LightmapBuriedThreshold}/{LightmapBuriedTests} within {lightmapBuriedReach} m from {LightmapBuriedLift} m off, single-sided");
+    private string LightmapBuriedRule => string.Create(CultureInfo.InvariantCulture, $"{LightmapBuriedThreshold}/{LightmapBuriedTests} within {lightmapBuriedReach} m from {LightmapBuriedLift} m off, single-sided; edges inset {LightmapEdgeInset} m");
     private int lightmapFirstRecord;
 
     // What one texel record costs on the GPU: its two vec4s (position, normal) and the light state UploadTexels makes
@@ -140,7 +140,7 @@ internal sealed partial class SponzaLoop
                     // Fill: the record this texel's owner claimed, written once (w is +-4 once written, 0 before).
                     var id = map[cell];
                     if (texels![2 * id].W != 0f) continue;
-                    var pos = pa * wa + pb * wb + pc * wc;
+                    var pos = Inset(pa, pb, pc, wa, wb, wc);
                     var atlas = BitConverter.Int32BitsToSingle(x | (y << 16));
                     // Position w: the area weight texel.glsl's hashed path reads (4: whole), negative for a pair.
                     texels[2 * id] = new Vector4(pos, source.DoubleSided ? -4f : 4f);
@@ -275,6 +275,25 @@ internal sealed partial class SponzaLoop
     }
 
     // The barycentrics of the point of triangle abc nearest p (in the atlas's plane): Ericson's region tests.
+    // A record's point, kept LightmapEdgeInset off each of its triangle's edges (or at its centroid, when narrower): a
+    // texel at a chart's edge took the triangle's nearest point, on the edge itself, and where the edge meets another wall
+    // at a corner its rays started in that wall's plane and went through it -- the thin wall's sealed room read the sky
+    // outside at every corner (2026-10-13). Each weight floored at the inset over the triangle's height across from its
+    // vertex, the rest spread as it was.
+    private const float LightmapEdgeInset = 0.01f;
+    private static Vector3 Inset(Vector3 pa, Vector3 pb, Vector3 pc, float wa, float wb, float wc)
+    {
+        var twiceArea = Vector3.Cross(pb - pa, pc - pa).Length();
+        float Floor(Vector3 e) => MathF.Min(LightmapEdgeInset * e.Length() / MathF.Max(twiceArea, 1e-12f), 1f / 3f);
+        float fa = Floor(pc - pb), fb = Floor(pa - pc), fc = Floor(pb - pa);
+        float ra = MathF.Max(wa - fa, 0f), rb = MathF.Max(wb - fb, 0f), rc = MathF.Max(wc - fc, 0f);
+        var rest = 1f - fa - fb - fc;
+        var sum = ra + rb + rc;
+        if (sum > 1e-12f) { ra *= rest / sum; rb *= rest / sum; rc *= rest / sum; }
+        else ra = rb = rc = rest / 3f;
+        return pa * (fa + ra) + pb * (fb + rb) + pc * (fc + rc);
+    }
+
     private static (float A, float B, float C) NearestBarycentric(Vector2 p, Vector2 a, Vector2 b, Vector2 c)
     {
         Vector2 ab = b - a, ac = c - a, ap = p - a;
