@@ -15,8 +15,16 @@ selectable, and caches grew by accretion. This section defines what the stack IS
 moved to cook time, compressed, or optimised around it.
 
 **Measured, today's defaults** (Sponza, 2880x1620, full-res lighting, LOD 0, still camera, no vsync, M4):
-frame 109.1 ms median (p95 115); the RT shadow trace alone 43.7 ms on Metal (4.67 M rays, all traced -- see bug 1);
-in-frame probe batches 0.4 ms; the frame before the lighting is up 29.4 ms. GPU memory 8.2 GB of 12.1. Boot to a
+frame 109.1 ms median (p95 115); the frame before the lighting is up 29.4 ms. The engine's own counters mislead here:
+Vulkan timestamps on MoltenVK bracket encoders, and the Metal tracer's "GPU ms" includes its wait on the hand-off.
+A Metal System Trace (BLIX_GPU_LABELS=1, passes named; parse: join metal-application-intervals to
+metal-gpu-intervals by encoder id) gives per instance, median (p90): incident-light 13.7 (38) ms, often two
+instances a frame -- the largest cost; the Metal shadow kernel ~43 ms a frame and NOT smaller with 27.5% of pixels
+traced (one thread a pixel; the traced spread over every SIMD group: compact them first); lit-scene 9.1 fragment +
+5.4 vertex; depth pre-pass 6.0 vertex + 3.7 fragment (LOD 0); the "Blit Command" encoders are MoltenVK's own and
+wait on their neighbours (not work); GPU idle 19-48% of the window (waits, bubbles).
+Half res made the incident pass 4x cheaper -- why it was faster; the user's objection was the SHADOWS' blockiness:
+split them (shadows full, incident half). GPU memory 8.2 GB of 12.1. Boot to a
 settled image ~120 s with every cache warm. Caches 4.9 GB on disk (~2 GB of it stale versions).
 
 ### What one pixel is made of today (and where it overlaps)
