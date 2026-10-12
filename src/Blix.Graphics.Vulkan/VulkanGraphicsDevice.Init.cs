@@ -81,6 +81,7 @@ public sealed partial class VulkanGraphicsDevice
     /// </remarks>
     private PfnDebugUtilsMessengerCallbackEXT debugCallback;
     private ExtDebugUtils? debugUtils;
+    private readonly bool gpuLabels = System.Environment.GetEnvironmentVariable("BLIX_GPU_LABELS") == "1";
     private bool validationEnabled;
 
     // <b>On with the validation layers, and for the same reason they are.</b> The uniform-conflict
@@ -152,7 +153,7 @@ public sealed partial class VulkanGraphicsDevice
         {
             extensions.Add("VK_KHR_portability_enumeration");
         }
-        if (validationEnabled)
+        if (validationEnabled || (gpuLabels && InstanceExtensionAvailable("VK_EXT_debug_utils")))
         {
             extensions.Add("VK_EXT_debug_utils");
         }
@@ -212,9 +213,10 @@ public sealed partial class VulkanGraphicsDevice
 
     private unsafe void TryAttachDebugMessenger()
     {
-        if (!validationEnabled) return;
+        if (!validationEnabled && !gpuLabels) return;
         if (!Vk.TryGetInstanceExtension(Instance, out ExtDebugUtils du)) return;
         debugUtils = du;
+        if (!validationEnabled) return;
 
         // Built into the FIELD first. Inline in the initialiser, its only reference is the local
         // create-info, which the GC may reclaim the moment this method returns.

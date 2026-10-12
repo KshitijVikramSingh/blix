@@ -25,6 +25,25 @@ public sealed partial class VulkanGraphicsDevice
     /// off only for the A/B (--no-pass-barriers).</summary>
     public bool ExplicitPassBarriers { get; set; } = true;
     private ulong previousFrameEnd;
+
+    // BLIX_GPU_LABELS=1 (or validation): each graph pass in a debug label, which MoltenVK turns into a Metal debug group,
+    // so a Metal System Trace names the encoders by pass rather than "vkCmdBeginRenderPass RenderEncoder".
+    private unsafe void BeginGpuLabel(CommandBuffer cmd, string name)
+    {
+        if (debugUtils is not { } du || !gpuLabels) return;
+        var bytes = System.Text.Encoding.UTF8.GetBytes(name + "\0");
+        fixed (byte* p = bytes)
+        {
+            var label = new DebugUtilsLabelEXT { SType = StructureType.DebugUtilsLabelExt, PLabelName = p };
+            du.CmdBeginDebugUtilsLabel(cmd, in label);
+        }
+    }
+
+    private void EndGpuLabel(CommandBuffer cmd)
+    {
+        if (debugUtils is not { } du || !gpuLabels) return;
+        du.CmdEndDebugUtilsLabel(cmd);
+    }
     public int CurrentFrameSlot => currentFrame;
 
     // Present mode: true → FIFO (vsync, no tearing, capped at the display
@@ -994,7 +1013,9 @@ public sealed partial class VulkanGraphicsDevice
                 if (canTimeCompute)
                     Vk.CmdWriteTimestamp(cmd, PipelineStageFlags.ComputeShaderBit, gpuTimingPool, cStart);
 
+                BeginGpuLabel(cmd, pass.Name);
                 TranslateComputePass(cmd, pass, currentFrame);
+                EndGpuLabel(cmd);
 
                 if (canTimeCompute)
                 {
@@ -1130,6 +1151,7 @@ public sealed partial class VulkanGraphicsDevice
                     0, 1, &visible, 0, null, 0, null);
             }
 
+            BeginGpuLabel(cmd, pass.Name);
             Vk.CmdBeginRenderPass(cmd, in rpBegin, SubpassContents.Inline);
             // Timestamps INSIDE the pass — MoltenVK resolves counter samplers
             // at draw boundaries; ColorAttachmentOutputBit pairs naturally.
@@ -1166,6 +1188,7 @@ public sealed partial class VulkanGraphicsDevice
                 Vk.CmdWriteTimestamp(cmd, PipelineStageFlags.ColorAttachmentOutputBit, gpuTimingPool, endIndex);
             }
             Vk.CmdEndRenderPass(cmd);
+            EndGpuLabel(cmd);
 
             if (canTimePass)
             {
