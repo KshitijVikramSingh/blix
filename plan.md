@@ -93,9 +93,21 @@ DECIDE (c): the budget. Proposed: 33 ms (30 fps) at 2880x1620 on the M4, full-re
 - Deliberate: texel light at 8 cm where the light is smooth (a level rule by gradient), records' tau tuned against
   the measured wrong-rate; clipmap budget dropped once the texels are settled (its rgb is thrown away).
 
+### Decided (the user, 2026-10-12)
+
+- KEEP for now, to refine on other scene types: half-res lighting, screen probes, surface probes, MSAA, the clipmap,
+  GTAO. Different scenes may not suit the defined stack equally; these stay as experiments, tuned with the budget.
+- CUT as proposed otherwise: the CPU cooked-transport spike, the probe lift/bias/relocate experiments, the software /
+  inline frame traversal (CPU ray scene kept only as a lazily built judge), dead flags, settled A/B arms; cascades
+  once the gather's hits no longer need them.
+- (a) The fitted transfer: parked, then cleaned out. Texels are the indirect for static surfaces.
+- (b) The sun model: potential suns -- the texels' light baked at the band's nodes at cook time, compressed, and
+  interpolated; a sun change is a lookup. Feasibility first (storage per texel per node, interpolation error).
+- (c) The budget: 33 ms at 2880x1620 on the M4, full-res direct, sun moving; 4 GB GPU.
+
 ### Order
 
-0. Bugs 1-4 and 6 (days). Re-measure; re-test the black spots.
+0. Bugs 1-4 and 6, one at a time with the user. Re-measure; re-test the black spots.
 1. Define: this table becomes `docs/` (the stack) and code. Cut the list above; split diagnostics out of the
    frame files into a tools layer; lit.frag to one path + a separate debug-view include.
 2. Cook: `.blixlightmap` v2, `.blixtransport`, lightlets by band; no bake scene or CPU ray scene at boot.
