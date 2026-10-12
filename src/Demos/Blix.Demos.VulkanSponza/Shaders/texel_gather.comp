@@ -25,7 +25,8 @@ layout(set = 0, binding = 0) uniform TexelGather {
                           // 8 no trace at all (every ray the sky)
     mat4 uCascadeVP[3];
     mat4 uCascadeReceivers;  // where the cascades may answer (cascade_receivers.glsl)
-    vec4 uOpen;           // x the occlusion estimate's reach (m), y its relative error (the blend's), z 1: blend at all
+    vec4 uOpen;           // x the occlusion estimate's reach (m), y its relative error (the blend's), z 1: blend at all,
+                          // w 1: that error at least y of the gathered mean too (--texel-blend-floor)
     vec4 uCookedGrid;
     vec4 uCookedDims;
     vec4 uWave;           // x the phase: 0 the gather traced inline; as a wavefront (SponzaLoop.Texels.cs) 3 rays out,
@@ -300,7 +301,9 @@ void main() {
                 float mean = dot(gathered.rgb, luma);
                 float passes = total / float(RAYS);
                 float variance = (max(m2 - mean * mean, 0.0) * passes + mean * mean) / (passes * (passes + 1.0));
-                float occlusionError = u.uOpen.y * dot(occlusion, luma);
+                // Relative to the estimate alone, a near-black estimate (a crevice: openness ~0) claimed near-certainty
+                // and won outright over the gathered light, however much light the gather found -- shade blended dark.
+                float occlusionError = u.uOpen.y * (u.uOpen.w > 0.5 ? max(dot(occlusion, luma), mean) : dot(occlusion, luma));
                 float wGathered = 1.0 / (variance + 1e-12);
                 float wOcclusion = 1.0 / (occlusionError * occlusionError + 1e-12);
                 value = vec4((wGathered * gathered.rgb + wOcclusion * occlusion) / (wGathered + wOcclusion), total);

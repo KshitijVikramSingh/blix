@@ -61,6 +61,15 @@ internal sealed partial class SponzaLoop
     // --texel-filter 0|1: the spatial filter over neighbouring texels, refreshed each frame a texel is seen
     // (texel_filter.comp).
     private bool texelFilter = true;
+    // The blend's occlusion estimate claims at least texelOcclusionError of the gathered mean as its error, not only of
+    // itself (texel_gather.comp): relative to itself alone, a crevice's near-zero estimate claimed near-certainty and won
+    // over the gather -- Sponza (every 16th texel, against the raw ray bake): dim texels -22..-29% blended, -5..-7%
+    // floored; hashed texels' total -7.1% -> -1.2%, atlas -1.2% -> -0.4%. The testbeds (crevices, -dark, -hashed against a
+    // 32-bounce path trace) read within 1-2% either way. --texel-blend-floor 0: as before.
+    private bool texelBlendFloor = true;
+    // The filter's edge measured against the brighter texel, not the centre (texel_filter.comp): equal to the centre's on
+    // every testbed (2026-10-13); off, a switch while Sponza's hashed texels are looked into.
+    private bool texelFilterSymmetric;
     private const float TexelNoiseFloor = 1e-4f;
     // 32 -- one pass: the blend (texel_gather.comp) already weighs a young gather's noise against the occlusion
     // estimate, so a texel's answer is whole from its first pass. At 64 a pixel showed the clipmap for two passes, and
@@ -137,6 +146,8 @@ internal sealed partial class SponzaLoop
         if (args.Float("texel-noise") is { } tn) texelNoise = Math.Max(0f, tn);
         if (args.Int("texel-filter") is { } tf) texelFilter = tf != 0;
         if (args.Int("texel-blend") is { } tb) texelBlend = tb != 0;
+        if (args.Int("texel-blend-floor") is { } bf) texelBlendFloor = bf != 0;
+        if (args.Int("texel-filter-symmetric") is { } fs) texelFilterSymmetric = fs != 0;
         if (args.Int("texel-levels") is { } tl) texelLevels = Math.Clamp(tl, 1, 5);
         if (args.Int("texel-ablate") is { } ta) texelAblate = ta;
         if (args.Float("texel-pixels") is { } tp) texelPixels = Math.Max(0.5f, tp);
@@ -665,7 +676,7 @@ internal sealed partial class SponzaLoop
                 new("uSky", new Vector4Uniform(new Vector4(1f, 1f, texelEpoch, texelAblate))),
                 new("uCascadeVP", new Matrix4x4ArrayUniform(cascadeViewProj)),
                 new("uCascadeReceivers", new Matrix4x4Uniform(CascadeReceivers)),
-                new("uOpen", new Vector4Uniform(new Vector4(TexelOpenReach, texelOcclusionError, texelBlend ? 1f : 0f, 0f))),
+                new("uOpen", new Vector4Uniform(new Vector4(TexelOpenReach, texelOcclusionError, texelBlend ? 1f : 0f, texelBlendFloor ? 1f : 0f))),
                 new("uCookedGrid", new Vector4Uniform(cookedGrid)),
                 new("uCookedDims", new Vector4Uniform(cookedDims)),
                 new("uWave", new Vector4Uniform(new Vector4(mode, limited ? 1f : 0f, 0f, 0f))),
@@ -712,6 +723,7 @@ internal sealed partial class SponzaLoop
                     new("uTexelGrid", new Vector4Uniform(texelGrid)),
                     new("uTexelParams", new Vector4Uniform(new Vector4(texelCapacity, TexelFilterCapacity, texelTrust, texelFrame))),
                     new("uLightmap", new Vector4Uniform(LightmapUniform)),
+                    new("uEdge", new Vector4Uniform(new Vector4(texelFilterSymmetric ? 1f : 0f, 0f, 0f, 0f))),
                 },
                 Array.Empty<ShaderTextureBinding>(),
                 Buffers: new[]

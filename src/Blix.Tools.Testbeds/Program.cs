@@ -153,6 +153,79 @@ public static class Program
         return 0;
     }
 
+    /// <summary>
+    /// A courtyard open to the sky with the places Sponza's shade lives in: a deep slot, a niche under a shelf, an L-shaped
+    /// corridor whose far leg sees no sky and no sun, and two walls a few centimetres apart in the sun. In each of them a
+    /// surface's light comes through a few narrow paths -- what a gather must find rarely and a filter or a blend can
+    /// bias, and what the GI gate's other scenes (open boxes, flat walls) never ask.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The courtyard is --size m square (10 by default) inside 4 m walls of 0.2 m slabs, no roof. Its back wall (-Z) is
+    /// 1.5 m thick and has a slot cut 1.3 m into it, 0.12 m wide, 2.5 m tall, closed at the back. Along the left wall (-X) a
+    /// shelf 1.2 m deep stands 0.4 m off the floor. The right wall (+X) opens into a corridor 1 m wide and 2.5 m tall,
+    /// roofed: 3 m straight out, then 3 m toward -Z to a dead end whose last block is red (0.63/0.065/0.05) -- its leg
+    /// is lit by bounce alone. Near the front, two free-standing walls 2 m long and 0.1 m thick stand 0.08 m apart.
+    /// </para>
+    /// <para>
+    /// White 0.73 elsewhere, matte. The scene profile's pose looks across the courtyard at the slot and the shelf; the
+    /// gate adds one into the corridor (tools/testbeds/gate.sh).
+    /// </para>
+    /// </remarks>
+    [BlixApp("crevices", Summary = "write a courtyard with a slot, a shelf niche, an L corridor and a narrow gap, as glTF: the GI gate's shade scene")]
+    public static int Crevices(AppArgs args)
+    {
+        var output = args.String("out") ?? "crevices.gltf";
+        var size = args.Float("size") ?? 10f;
+        if (size < 8f) throw new AppArgsException("--size must be at least 8 m (the features need the room).");
+        // --albedo A: the grey everything but the red block is (0.73 by default). Dark (crevices-dark: 0.25), a surface's
+        // light comes through fewer bounces and rarer paths: the noisy gathers a blend or a filter can bias.
+        var grey = args.Float("albedo") ?? 0.73f;
+        if (grey <= 0f || grey >= 1f) throw new AppArgsException("--albedo must lie between 0 and 1.");
+        var white = Matte("white", new Vector3(grey));
+        var red = Matte("red", new Vector3(0.63f, 0.065f, 0.05f));
+        var mesh = new Mesh("crevices");
+        var p = mesh.UsePrimitive(white);
+        const float t = 0.2f, height = 4f;
+        var h = size / 2f;
+        // Floor, under the corridor too.
+        Box(p, new Vector3(-h - t, -t, -h - 1.5f), new Vector3(h + 4.5f, 0f, h + t));
+        // Front (+Z) and left (-X) walls.
+        Box(p, new Vector3(-h - t, 0f, h), new Vector3(h + t, height, h + t));
+        Box(p, new Vector3(-h - t, 0f, -h - 1.5f), new Vector3(-h, height, h));
+        // The back wall, 1.5 m thick, with a slot 0.12 m wide and 2.5 m tall at x = -1, closed at its back.
+        const float slot = 0.12f, slotTall = 2.5f;
+        var back0 = -h - 1.5f;
+        Box(p, new Vector3(-h, 0f, back0), new Vector3(-1f - slot / 2f, height, -h));
+        Box(p, new Vector3(-1f + slot / 2f, 0f, back0), new Vector3(h + t, height, -h));
+        Box(p, new Vector3(-1f - slot / 2f, slotTall, back0), new Vector3(-1f + slot / 2f, height, -h));
+        Box(p, new Vector3(-1f - slot / 2f, 0f, back0), new Vector3(-1f + slot / 2f, slotTall, back0 + t));   // its closed back
+        // The right wall (+X), its opening into the corridor (z in [1, 2], 2.5 m tall).
+        Box(p, new Vector3(h, 0f, -h), new Vector3(h + t, height, 1f));
+        Box(p, new Vector3(h, 0f, 2f), new Vector3(h + t, height, h));
+        Box(p, new Vector3(h, 2.5f, 1f), new Vector3(h + t, height, 2f));
+        // The corridor: 1 m wide, 2.5 m tall, roofed; out along +X to x = h + 4, then toward -Z to z = -2.
+        var c0 = h + t;
+        Box(p, new Vector3(c0, 0f, 2f), new Vector3(c0 + 4f, 2.5f, 2f + t));                 // its +Z side, along the first leg
+        Box(p, new Vector3(c0, 0f, -2f), new Vector3(c0 + 3f, 2.5f, 1f));                    // the inner corner block
+        Box(p, new Vector3(c0 + 4f, 0f, -2f - t), new Vector3(c0 + 4f + t, 2.5f, 2f + t));   // its far +X side
+        Box(p, new Vector3(c0 + 3f, 0f, -2f - t), new Vector3(c0 + 4f, 2.5f, -2f));          // the dead end
+        Box(p, new Vector3(c0, 2.5f, -2f - t), new Vector3(c0 + 4f + t, 2.5f + t, 2f + t));  // the roof
+        Box(mesh.UsePrimitive(red), new Vector3(c0 + 3f, 0f, -2f), new Vector3(c0 + 4f, 0.6f, -1.6f));   // red, at the dead end
+        // The shelf along the left wall: 1.2 m deep, 0.4 m up, 3 m long, 0.1 m thick.
+        Box(p, new Vector3(-h, 0.4f, -2f), new Vector3(-h + 1.2f, 0.5f, 1f));
+        // Two walls 0.08 m apart near the front, 2 m long and 2.5 m tall.
+        Box(p, new Vector3(1f, 0f, 2.5f), new Vector3(3f, 2.5f, 2.6f));
+        Box(p, new Vector3(1f, 0f, 2.68f), new Vector3(3f, 2.5f, 2.78f));
+
+        var scene = new SceneBuilder();
+        scene.AddRigidMesh(mesh, Matrix4x4.Identity);
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!);
+        scene.ToGltf2().SaveGLTF(output);
+        Console.WriteLine($"crevices: a {size:0.##} m courtyard with a slot, a shelf niche, an L corridor and a narrow gap, grey {grey:0.##} -> {output}");
+        return 0;
+    }
+
     // The glTF vertex the cook reads in full: position, normal, one UV set (the cook generates the tangent).
     private sealed class Mesh : MeshBuilder<VertexPositionNormal, VertexTexture1, VertexEmpty>
     {

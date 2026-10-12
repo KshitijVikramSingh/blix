@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The GI correctness gate's verdict, from --probe-reference logs of the correctness scenes.
 
-usage: gate.py LOG_DIR      (reads cornell.log, thinwall-sealed.log, thinwall-open.log)
+usage: gate.py LOG_DIR      (reads cornell.log, thinwall-sealed.log, thinwall-open.log, crevices-corridor.log)
 
 Every metric carries two bars:
   target   what correct is. Reported MET or NOT MET; a metric short of it is known work, not a failure.
@@ -47,6 +47,8 @@ def main():
     cornell = samples(os.path.join(logs, 'cornell.log'))
     sealed = samples(os.path.join(logs, 'thinwall-sealed.log'))
     lit = samples(os.path.join(logs, 'thinwall-open.log'))
+    corridor = samples(os.path.join(logs, 'crevices-corridor.log'))
+    corridor_ref = mean(r for _, r in corridor)
 
     cornell_ref = mean(r for _, r in cornell)
     floor = 0.02 * cornell_ref
@@ -55,25 +57,32 @@ def main():
     # (name, value, target test, target text, ratchet test, ratchet text, what it says)
     metrics = [
         ('cornell energy', mean(f for f, _ in cornell) / cornell_ref,
-         lambda v: abs(v - 1) <= 0.03, '|x - 1| <= 0.03', lambda v: abs(v - 1) <= 0.05, '|x - 1| <= 0.05',
-         'mean indirect light over the path trace: is light created or lost'),
+         lambda v: abs(v - 1) <= 0.03, '|x - 1| <= 0.03', lambda v: abs(v - 1) <= 0.03, '|x - 1| <= 0.03',
+         'mean indirect light over the path trace: is light created or lost (2026-10-13: 0.993)'),
         ('cornell median ratio', median(f / r for f, r in cornell if r > floor),
-         lambda v: 0.95 <= v <= 1.05, '0.95-1.05', lambda v: 0.90 <= v <= 1.10, '0.90-1.10',
-         'the typical point, field over truth'),
+         lambda v: 0.95 <= v <= 1.05, '0.95-1.05', lambda v: 0.95 <= v <= 1.05, '0.95-1.05',
+         'the typical point, field over truth (2026-10-13: 0.997)'),
         ('cornell rel |error|', mean(abs(f - r) for f, r in cornell) / cornell_ref,
-         lambda v: v <= 0.10, '<= 0.10', lambda v: v <= 0.20, '<= 0.20',
-         'how far each point is, over the mean light (2026-10-08: 0.171 / 0.172 / 0.171)'),
+         lambda v: v <= 0.10, '<= 0.10', lambda v: v <= 0.05, '<= 0.05',
+         'how far each point is, over the mean light (2026-10-08: 0.171 / 0.172 / 0.171; 2026-10-13: 0.021)'),
         ('thinwall leak', mean(f for f, _ in sealed) / open_field,
-         lambda v: v <= 0.01, '<= 0.01', lambda v: v <= 0.13, '<= 0.13',
-         'light in the sealed room over the open room\'s: all of it crossed a 0.1 m wall (2026-10-08: 0.092 / 0.111 / 0.092 /'
-         ' 0.093 over four runs -- fed back and grown inside the room, it varies run to run; ratchet above the spread)'),
+         lambda v: v <= 0.01, '<= 0.01', lambda v: v <= 0.01, '<= 0.01',
+         'light in the sealed room over the open room\'s: all of it crossed a 0.1 m wall (2026-10-08: 0.092-0.111;'
+         ' 2026-10-13: 0.0008-0.0015 over five runs)'),
         ('thinwall open energy', open_field / mean(r for _, r in lit),
-         lambda v: abs(v - 1) <= 0.05, '|x - 1| <= 0.05', lambda v: abs(v - 1) <= 0.15, '|x - 1| <= 0.15',
-         'the open room against its path trace, so a leak fix that darkens everything shows (2026-10-08: 0.889-0.898)'),
+         lambda v: abs(v - 1) <= 0.05, '|x - 1| <= 0.05', lambda v: abs(v - 1) <= 0.03, '|x - 1| <= 0.03',
+         'the open room against its path trace, so a leak fix that darkens everything shows (2026-10-08: 0.889-0.898 against'
+         ' a 3-bounce trace; 2026-10-13: 1.000 against 32)'),
+        ('crevices corridor energy', mean(f for f, _ in corridor) / corridor_ref,
+         lambda v: abs(v - 1) <= 0.03, '|x - 1| <= 0.03', lambda v: abs(v - 1) <= 0.05, '|x - 1| <= 0.05',
+         'the dark crevices\' L corridor, lit by bounce through a doorway alone: shade from rare paths (2026-10-13: 0.986)'),
+        ('crevices corridor |error|', mean(abs(f - r) for f, r in corridor) / corridor_ref,
+         lambda v: v <= 0.05, '<= 0.05', lambda v: v <= 0.06, '<= 0.06',
+         'how far each corridor point is, over its mean light: the gather\'s noise there (2026-10-13: 0.036)'),
     ]
 
     failed = 0
-    print(f'GI correctness gate ({len(cornell)} / {len(sealed)} / {len(lit)} samples):')
+    print(f'GI correctness gate ({len(cornell)} / {len(sealed)} / {len(lit)} / {len(corridor)} samples):')
     for name, value, target, target_text, ratchet, ratchet_text, what in metrics:
         held = ratchet(value)
         met = target(value)

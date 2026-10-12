@@ -94,6 +94,8 @@ internal sealed partial class SponzaLoop
             // transport strength remains one so material albedo is not silently reinterpreted.
             render.Exposure = 1.0f;
         }
+        // --exposure X: the display exposure from the start (the testbeds' sun and sky read white at Sponza's).
+        if (args.Float("exposure") is { } ex) render.Exposure = Math.Clamp(ex, 0.05f, 16f);
         // The A/B for the single-sample canopy: hashed stochastic cutout against the plain binary
         // one. Re-cooks nothing and rebuilds nothing — it changes one number in the material.
         if (args.Flag("msaa1")) MsaaSamples = 1;

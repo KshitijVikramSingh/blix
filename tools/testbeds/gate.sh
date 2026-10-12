@@ -18,7 +18,7 @@ if [[ -z "${BLIX_TESTBED_ASSETS:-}" ]]; then
     echo "gate: BLIX_TESTBED_ASSETS is not set; it names the cooked correctness scenes." >&2
     exit 1
 fi
-for scene in cornell thinwall; do
+for scene in cornell thinwall crevices-dark; do
     if [[ ! -f "$BLIX_TESTBED_ASSETS/$scene/$scene.blixmesh" ]]; then
         echo "gate: $scene is not cooked; running tools/testbeds/setup.sh"
         "$REPO/tools/testbeds/setup.sh"
@@ -28,12 +28,15 @@ done
 LOGS="$(mktemp -d "${TMPDIR:-/tmp}/blix-gi-gate.XXXXXX")"
 export BLIX_CONFIG=Release BLIX_DIAG=off
 build=(--build)
-reference=(--gpu-reference --gpu-ref-paths 16384)
+# 32 bounces: at the default 3 the path trace stopped short in every room lit by bounce -- 0.73 grey loses a quarter
+# of its light each bounce: the thin wall's open room read 1.125 against 3 bounces, 1.000 against 32; the crevices'
+# corridor 1.45 and 0.998 (2026-10-13).
+reference=(--gpu-reference --gpu-ref-paths 16384 --ref-bounces 32)
 if [[ "${BLIX_GATE_CPU_REFERENCE:-0}" == 1 ]]; then reference+=(--probe-reference); fi
 run() {
     local name=$1; shift
     "$REPO/blix" run ${build[@]+"${build[@]}"} Blix.Demos.VulkanSponza "$@" --no-fog --win=960 540 "${reference[@]}" \
-        --shot-frames=1500 --shot="$LOGS/$name.png" > "$LOGS/$name.log" 2>&1 || {
+        --shot-frames=3000 --shot="$LOGS/$name.png" > "$LOGS/$name.log" 2>&1 || {
         echo "gate: the $name run failed; its log is $LOGS/$name.log" >&2
         tail -5 "$LOGS/$name.log" >&2
         exit 1
@@ -44,6 +47,7 @@ run() {
 run cornell --scene=cornell "$@"
 run thinwall-sealed --scene=thinwall "$@"
 run thinwall-open --scene=thinwall --cam -3.05,3,0,90,0 "$@"
+run crevices-corridor --scene=crevices-dark --cam 6,1.5,1.5,90,-5 "$@"
 rm -f "$LOGS"/*.png
 python3 "$REPO/tools/testbeds/gate.py" "$LOGS"
 status=$?

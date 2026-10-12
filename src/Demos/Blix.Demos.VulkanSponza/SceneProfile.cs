@@ -177,7 +177,46 @@ internal sealed record SceneProfile(
         StartPitch: 0f,
         MoveSpeed: 3f);
 
-    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, CornellPanel, ThinWall };
+    /// <summary>A courtyard with a slot, a shelf niche, an L corridor and a narrow gap (<c>blix crevices</c>): the shade scene.</summary>
+    /// <remarks>
+    /// Where the light reaches a surface through a few narrow paths. The camera stands in the courtyard's front half,
+    /// looking at the back wall's slot and the shelf; <c>--cam 6,1.5,1.5,90,-5</c> looks down the corridor's first leg.
+    /// </remarks>
+    public static readonly SceneProfile Crevices = new(
+        Name: "crevices",
+        Title: "Vulkan crevices",
+        AssetsVariable: "BLIX_TESTBED_ASSETS",
+        SetupHint: "tools/testbeds/setup.sh generates and cooks it",
+        Packs: new ScenePack[] { new("crevices", Required: true) },
+        ProbeDirectory: "textures",
+        ProbeCandidates: Array.Empty<string>(),
+        FarPlane: 100f,
+        CascadeSplits: new[] { 0.1f, 8f, 20f, 50f },
+        SunDistance: 20f,
+        FogFar: 30f,
+        StartPosition: new Vector3(0f, 1.6f, 3.5f),
+        StartYaw: -20f,
+        StartPitch: -8f,
+        MoveSpeed: 3f);
+
+    /// <summary>The crevices at a grey of 0.25 (<c>blix crevices --albedo 0.25</c>): their shade lit through rare paths.</summary>
+    public static readonly SceneProfile CrevicesDark = Crevices with
+    {
+        Name = "crevices-dark",
+        Title = "Vulkan crevices (dark)",
+        Packs = new ScenePack[] { new("crevices-dark", Required: true) },
+    };
+
+    /// <summary>The dark crevices cooked without a lightmap: every texel hashed (the cell grid's), as Sponza's trees,
+    /// ivy and every surface the atlas leaves out are -- what --texel-filter does there.</summary>
+    public static readonly SceneProfile CrevicesHashed = CrevicesDark with
+    {
+        Name = "crevices-hashed",
+        Title = "Vulkan crevices (dark, hashed texels)",
+        Packs = new ScenePack[] { new("crevices-hashed", Required: true) },
+    };
+
+    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, CornellPanel, ThinWall, Crevices, CrevicesDark, CrevicesHashed };
 
     /// <summary>The profile <c>--scene</c> names, Sponza when it names none.</summary>
     public static SceneProfile Named(string? name)
