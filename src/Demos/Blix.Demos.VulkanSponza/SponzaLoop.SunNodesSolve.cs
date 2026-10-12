@@ -52,7 +52,7 @@ internal sealed partial class SponzaLoop
         sunNodeSolvePipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "texel_nodes_solve.comp.spv")), sunNodeSolveInterface, "texel_nodes_solve")), "texel_nodes_solve"));
 
-    private bool SunNodeGpuSolve => transportSolve is not null && FrameRaysOnHardware && frameTracer is not null;
+    private bool SunNodeGpuSolve => !sunNodeCpuSolve && transportSolve is not null && FrameRaysOnHardware && frameTracer is not null;
 
     // BeginSunNodes: the solve's inputs packed off the frame thread (CSR couplings, the sunlets, a patch's terms).
     private void BeginGpuSolve()

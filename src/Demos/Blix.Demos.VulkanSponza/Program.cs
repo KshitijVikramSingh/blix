@@ -560,7 +560,12 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private bool offscreenShadowRays;
     // Where the gather passes may take the sun from the cascades: the view the casters were culled against, or (every
     // point to (0, 0, 0.5, 1), inside) anywhere when nothing was culled or the check is off.
-    private Matrix4x4 CascadeReceivers => offscreenShadowRays ? viewProj
+    // --texel-sun-rays: nowhere (every point to w 0) -- every hit takes its sun by a ray. The cascades hold only the casters
+    // the camera's view culled them to and filter hard at 2-20 cm a texel: Sponza's authored-sun bake read ~8% brighter
+    // than the same gather with a ray at every hit (the sun nodes' cook, 2026-10-12).
+    private bool texelSunRays;
+    private Matrix4x4 CascadeReceivers => texelSunRays ? default
+        : offscreenShadowRays ? viewProj
         : new Matrix4x4(0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0.5f, 1f);
     /// <summary>--probe-reference: path-trace references on the CPU and print them beside the clipmap's answers.</summary>
     private bool probeReference;

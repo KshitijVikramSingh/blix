@@ -116,6 +116,7 @@ internal sealed partial class SponzaLoop
         // overlap, so isolated pass times are not additive components of the normal frame.
         if (args.Flag("gpu-isolate")) host.Timing.IsolatePasses = true;
         offscreenShadowRays = args.Flag("offscreen-shadow-rays");
+        texelSunRays = args.Flag("texel-sun-rays");
         if (args.Flag("no-foliage")) noFoliage = true;
         // --cpu-cull: build the indirect records and visible lists on the CPU, the way 1a did, for an A/B
         // against the GPU cull (scene_cull.comp) that is otherwise the default.
