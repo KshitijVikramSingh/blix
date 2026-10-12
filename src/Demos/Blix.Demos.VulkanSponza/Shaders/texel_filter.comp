@@ -13,7 +13,8 @@ layout(set = 0, binding = 0) uniform TexelFilter {
     vec4 uTexelGrid;      // xyz the cells' origin, w the spacing
     vec4 uTexelParams;    // x hash capacity, y the list's capacity, z the trust rays, w the frame
     vec4 uLightmap;       // --lightmap: x 1 when the atlas's texels are on, yz the atlas size, w its first record
-    vec4 uEdge;           // x 1: the edge measured against the brighter of the two (--texel-filter-symmetric)
+    vec4 uEdge;           // x 1: the edge measured against the brighter of the two (--texel-filter-symmetric);
+                          // y 1: each neighbour weighed by the surface it holds (--texel-filter-area)
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer TexelHash { uvec4 texelHash[]; };
@@ -89,6 +90,10 @@ void main() {
                 float edge = (other - centre) / (0.5 * (u.uEdge.x > 0.5 ? max(other, centre) : centre) + 1e-5);
                 float f = dot(tn, n);
                 float w = exp(-0.5 * dot(dp, dp)) * exp(-edge * edge) * f * f * f * f * min(light.w / u.uTexelParams.z, 1.0);
+                // A texel's surface in its cell, as texelsAround weighs it (texel.glsl): a sliver of a wall at an inside
+                // corner holds a texel lit like the corner, and at full weight it pulled its neighbours dark -- most at
+                // the hashed texels' coarser levels, where cells are 8-16 cm and Sponza's mouldings make slivers.
+                if (u.uEdge.y > 0.5) w *= min(abs(TEXEL_POSITION(uint(other)).w) / (4.0 * float(1u << (2u * tg.level))), 1.0);
                 sNeighbour[lane] = vec4(w * light.rgb, w);
             }
         }

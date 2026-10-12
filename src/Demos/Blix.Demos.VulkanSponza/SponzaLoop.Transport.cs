@@ -104,7 +104,7 @@ internal sealed partial class SponzaLoop
             transportCookTask = null;
             Console.WriteLine($"[VulkanSponza] transport: the background cook landed at post-load frame {postLoadFrames}.");
         }
-        if (!transportGpu || transportCooked || !fullyLoaded || !raySurfacesBaked || postLoadFrames < 2) return;
+        if (!transportGpu || transportCooked || !fullyLoaded || !RaySurfacesReady || postLoadFrames < 2) return;
         if (transportWait || rayQueries is not { } scene || rayGpuData is not { } data)
         {
             CookTransport();

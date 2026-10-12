@@ -280,7 +280,7 @@ internal sealed partial class SponzaLoop
 
     private void RecordClipmap()
     {
-        if (clipmap is null || rayBlockBuffers.Length == 0 || !raySurfacesBaked) return;
+        if (clipmap is null || rayBlockBuffers.Length == 0 || !RaySurfacesReady) return;
         if (clipmapFrame >= clipmapFreeze) return;
         clipmap.Follow(cameraPosition);
         var origins = new Vector4[4];

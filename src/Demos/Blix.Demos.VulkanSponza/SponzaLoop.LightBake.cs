@@ -75,7 +75,7 @@ internal sealed partial class SponzaLoop
     private string LightBakePathFor(string transportKey, (Vector3 ToSun, Vector3 Irradiance) sun)
     {
         var spec = string.Create(CultureInfo.InvariantCulture,
-            $"{transportKey};sun {sun.ToSun.X:F5},{sun.ToSun.Y:F5},{sun.ToSun.Z:F5};{sun.Irradiance.X:F4},{sun.Irradiance.Y:F4},{sun.Irradiance.Z:F4};target {texelTarget};settled {texelNoise:G6} {texelMaxRays};buried {LightmapBuriedRule};v{LightBakeVersion}{(texelSunRays ? ";hit sun rays" : "")}{(texelBlend ? (texelBlendFloor ? ";blend floored" : ";blend unfloored") : ";no blend")}{(texelFilter ? (texelFilterSymmetric ? ";filter symmetric" : "") : ";no filter")}{(lightBakeStride > 1 ? $";stride {lightBakeStride}" : "")}");
+            $"{transportKey};sun {sun.ToSun.X:F5},{sun.ToSun.Y:F5},{sun.ToSun.Z:F5};{sun.Irradiance.X:F4},{sun.Irradiance.Y:F4},{sun.Irradiance.Z:F4};target {texelTarget};settled {texelNoise:G6} {texelMaxRays};buried {LightmapBuriedRule};v{LightBakeVersion}{(texelSunRays ? ";hit sun rays" : "")}{(texelBlend ? (texelBlendFloor ? ";blend floored" : ";blend unfloored") : ";no blend")}{(texelFilter ? (texelFilterSymmetric ? ";filter symmetric" : "") + (texelFilterArea ? ";filter area" : "") : ";no filter")}{(lightBakeStride > 1 ? $";stride {lightBakeStride}" : "")}");
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(spec)))[..16].ToLowerInvariant();
         return Path.ChangeExtension(TransportCachePath(transportKey), $".light-{hash}");
     }

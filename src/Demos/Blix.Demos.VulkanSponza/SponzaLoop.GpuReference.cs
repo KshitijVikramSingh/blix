@@ -81,7 +81,7 @@ internal sealed partial class SponzaLoop
     // Each frame: from as many frames before the shot as the paths need, the points picked and their paths dispatched.
     private void RecordGpuReference()
     {
-        if (!gpuReference || shotPath is null || shotWritten || rayQueries is not { } scene || rayBlockBuffers.Length == 0 || !raySurfacesBaked) return;
+        if (!gpuReference || shotPath is null || shotWritten || rayQueries is not { } scene || rayBlockBuffers.Length == 0 || !RaySurfacesReady) return;
         if (!referenceMonolithic)
         {
             RecordGateReferenceWave(scene);

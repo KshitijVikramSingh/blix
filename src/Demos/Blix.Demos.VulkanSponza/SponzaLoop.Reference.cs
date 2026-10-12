@@ -73,7 +73,7 @@ internal sealed partial class SponzaLoop
 
     private void RecordReference(Matrix4x4 invProjection, Matrix4x4 invView, int width, int height)
     {
-        if (!referenceView || rayBlockBuffers.Length == 0 || !raySurfacesBaked) return;
+        if (!referenceView || rayBlockBuffers.Length == 0 || !RaySurfacesReady) return;
         var size = ((width + 1) / 2, (height + 1) / 2);
         var restart = referenceSamples == 0 || viewProj != referenceViewProj || sunDirection != referenceSun;
         if (size != referenceSize)

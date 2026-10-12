@@ -281,7 +281,7 @@ internal sealed partial class SponzaLoop
     private bool EnsureFrameTracer()
     {
         if (frameTracer is not null) return true;
-        if (frameTracerFailed || !raySurfacesBaked) return false;
+        if (frameTracerFailed || !RaySurfacesReady) return false;
         if (rtBakeCountedFrame != postLoadFrames)
         {
             rtBakeCountedFrame = postLoadFrames;

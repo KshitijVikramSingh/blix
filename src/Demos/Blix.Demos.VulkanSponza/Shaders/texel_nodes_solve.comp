@@ -3,15 +3,19 @@
 // (SponzaLoop.Transport.cs) for many suns at once. On the CPU, a sun at a time (Sponza: ~6 s each) or the group's suns
 // together (~4.6 s each), it read 26 M couplings 48 times over a sun.
 //   mode 0  a sunlet's shadow ray toward the group's sun k (none where it faces away), for the SHADOW batch
-//   mode 1  a patch's first bounce of sun k: its sunlet couplings over the sunlets the batch found lit
-//   mode 2  the bounces start from the boot sun's answer (as the CPU's warm start does)
+//   mode 1  a patch's first bounce of sun k: its sunlet couplings over the sunlets the batch found lit (none for a
+//           component without a sun: uSun.w 1)
+//   mode 2  the bounces start from the boot sun's answer (as the CPU's warm start does), or from nothing (uIrr.w 0)
 //   mode 3  a patch's outgoing light for every sun of the group: albedo / pi x its incoming
-//   mode 4  its incoming: the sky, the first bounce, and pi x its couplings over the others' outgoing
+//   mode 4  its incoming: the sky (times the component's sky weight: 0 for a sun alone, SolveSkyWeights), the first
+//           bounce, and pi x its couplings over the others' outgoing
 //   mode 5  into the nodes' patch light (SunNodePatchLight, half rgb [patch][sun]) at the group's suns
 //   mode 6  a patch's outgoing light over the group's suns, into its average over every sun (PatchAverage)
 //   mode 7  a sunlet's sunlit light for the group's sun k, into its average over every sun (SunletAverage)
 // The two averages build the nodes' guides (SponzaLoop.SunNodesSolve.cs): where a patch's light comes from over the
 // band, so one set of rays serves every sun.
+// A component is a sun with or without the sky, or the sky alone (SponzaLoop.SunNodesSolve.cs): light is linear, so a
+// sun's light and the sky's, solved apart, sum to the two together.
 // Modes 2-5 run a thread a (patch, sun of the group), the sun fastest: a patch's group of suns is one run in memory, so
 // a gather over couplings reads runs of G.
 
@@ -19,8 +23,8 @@ layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) uniform NodesSolve {
     vec4 uSolve;   // x the mode, y patches, z the group's suns (G), w the group's sun this dispatch (modes 0, 1)
-    vec4 uSun;     // xyz toward that sun
-    vec4 uIrr;     // rgb the sun's irradiance
+    vec4 uSun;     // xyz toward that sun; w 1: the component has no sun (mode 1 writes none)
+    vec4 uIrr;     // rgb the sun's irradiance; w 1: the bounces start from the boot answer (mode 2), 0 from nothing
     vec4 uCount;   // x sunlets, y the group's first sun among all, z all the suns (the node table's stride), w 1 / all
 } u;
 
@@ -40,6 +44,7 @@ layout(std430, set = 0, binding = 13) buffer NodeOutgoing { vec4 nodeOut[]; };
 layout(std430, set = 0, binding = 14) buffer SunNodePatchLight { uvec2 patchLight[]; };
 layout(std430, set = 0, binding = 15) buffer PatchAverage { vec4 patchAverage[]; };
 layout(std430, set = 0, binding = 16) buffer SunletAverage { vec4 sunletAverage[]; };
+layout(std430, set = 0, binding = 17) readonly buffer SolveSkyWeights { float skyWeight[]; };   // per component, all of them
 
 #define PI 3.14159265359
 
@@ -59,6 +64,7 @@ void main() {
     if (mode == 1) {
         if (i >= patches) return;
         vec3 s = vec3(0.0);
+        if (u.uSun.w > 0.5) { nodeFirst[i * G + uint(u.uSolve.w)] = vec4(0.0); return; }
         for (uint c = sunletStart[i]; c < sunletStart[i + 1u]; ++c) {
             uint to = sunletCoupling[c].x;
             if (sunletOrigins[to].w <= 0.0 || (sunletOccluded[to] & 1u) != 0u) continue;
@@ -82,14 +88,14 @@ void main() {
     if (i >= patches * G) return;
     uint p = i / G, k = i % G;
     if (mode == 2) {
-        nodeIn[i] = vec4(patchTerms[3u * p + 2u].rgb, 0.0);
+        nodeIn[i] = vec4(u.uIrr.w > 0.5 ? patchTerms[3u * p + 2u].rgb : vec3(0.0), 0.0);
     } else if (mode == 3) {
         nodeOut[i] = vec4(patchTerms[3u * p].rgb / PI * nodeIn[i].rgb, 0.0);
     } else if (mode == 4) {
         vec3 h = vec3(0.0);
         for (uint c = couplingStart[p]; c < couplingStart[p + 1u]; ++c)
             h += uintBitsToFloat(coupling[c].y) * nodeOut[coupling[c].x * G + k].rgb;
-        nodeIn[i] = vec4(patchTerms[3u * p + 1u].rgb + nodeFirst[i].rgb + h * PI, 0.0);
+        nodeIn[i] = vec4(skyWeight[uint(u.uCount.y) + k] * patchTerms[3u * p + 1u].rgb + nodeFirst[i].rgb + h * PI, 0.0);
     } else if (mode == 5) {
         vec3 c = nodeIn[i].rgb;
         patchLight[p * uint(u.uCount.z) + uint(u.uCount.y) + k] = uvec2(packHalf2x16(c.rg), packHalf2x16(vec2(c.b, 0.0)));

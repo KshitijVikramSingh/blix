@@ -209,7 +209,8 @@ internal sealed partial class SponzaLoop
         if (SunNodeGpuSolve)
         {
             sunNodeClock.Restart();
-            BeginGpuSolve();
+            // The cook's suns, each with the sky, warm-started from the boot answer (as the CPU's relight is).
+            BeginGpuSolve(sunNodeDirs.Select(d => (new Vector3(d.X, d.Y, d.Z), true, 1f)).ToArray(), warm: true);
             sunNodeRelight = null;
             sunNodeStage = SunNodeStage.Relighting;
             Console.WriteLine(string.Create(Inv, $"[VulkanSponza] sun nodes: solving {transportSolve!.Patches:N0} patches' light for {suns.Length} suns on the GPU."));

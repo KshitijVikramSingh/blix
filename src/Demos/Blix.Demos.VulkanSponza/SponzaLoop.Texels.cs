@@ -67,9 +67,13 @@ internal sealed partial class SponzaLoop
     // floored; hashed texels' total -7.1% -> -1.2%, atlas -1.2% -> -0.4%. The testbeds (crevices, -dark, -hashed against a
     // 32-bounce path trace) read within 1-2% either way. --texel-blend-floor 0: as before.
     private bool texelBlendFloor = true;
+    // --texel-dump PATH (SponzaLoop.Texels.cs, UploadTexels).
+    private string? texelDumpPath;
     // The filter's edge measured against the brighter texel, not the centre (texel_filter.comp): equal to the centre's on
     // every testbed (2026-10-13); off, a switch while Sponza's hashed texels are looked into.
     private bool texelFilterSymmetric;
+    // The filter weighs each neighbour by the surface it holds in its cell, as the pixels' lookup does (texel_filter.comp).
+    private bool texelFilterArea;
     private const float TexelNoiseFloor = 1e-4f;
     // 32 -- one pass: the blend (texel_gather.comp) already weighs a young gather's noise against the occlusion
     // estimate, so a texel's answer is whole from its first pass. At 64 a pixel showed the clipmap for two passes, and
@@ -147,7 +151,9 @@ internal sealed partial class SponzaLoop
         if (args.Int("texel-filter") is { } tf) texelFilter = tf != 0;
         if (args.Int("texel-blend") is { } tb) texelBlend = tb != 0;
         if (args.Int("texel-blend-floor") is { } bf) texelBlendFloor = bf != 0;
+        texelDumpPath = args.String("texel-dump");
         if (args.Int("texel-filter-symmetric") is { } fs) texelFilterSymmetric = fs != 0;
+        if (args.Int("texel-filter-area") is { } fa) texelFilterArea = fa != 0;
         if (args.Int("texel-levels") is { } tl) texelLevels = Math.Clamp(tl, 1, 5);
         if (args.Int("texel-ablate") is { } ta) texelAblate = ta;
         if (args.Float("texel-pixels") is { } tp) texelPixels = Math.Max(0.5f, tp);
@@ -365,6 +371,19 @@ internal sealed partial class SponzaLoop
         texelProbeBuffer = Own(device.CreateGpuBuffer(24 * 24 * 48, new byte[24 * 24 * 48], "sponza.texels.probe"));
         texelGrid = bake.Grid;
         texelsUploaded = true;
+        if (texelDumpPath is { } dump)
+        {
+            // --texel-dump PATH: every texel record (two vec4s: position, w its samples or +-4 an atlas texel's; mean
+            // face normal, w its level or atlas coordinate) and where the atlas's begin, then the run closes.
+            using (var w = new BinaryWriter(File.Create(dump)))
+            {
+                w.Write(texelCount);
+                w.Write(firstAtlas);
+                w.Write(MemoryMarshal.AsBytes(bake.Texels.AsSpan(0, texelCount * 2)));
+            }
+            Console.WriteLine($"[VulkanSponza] texels: {texelCount:N0} records dumped to {dump}; closing.");
+            host.RequestClose();
+        }
         {
             var all = firstAtlas < 0 ? texelCount : firstAtlas;
             var live = new List<uint>(texelCount);
@@ -537,6 +556,7 @@ internal sealed partial class SponzaLoop
         if (!texelsUploaded || rayBlockBuffers.Length == 0) return;
         if (sunNodeStage != SunNodeStage.Off) RecordSunNodes();
         RecordPotentialSuns();
+        RecordPatchSplitCheck();
         FollowSun();
         SaveLightBakeWhenDone();
         LightletBakeWhenReady();
@@ -723,7 +743,7 @@ internal sealed partial class SponzaLoop
                     new("uTexelGrid", new Vector4Uniform(texelGrid)),
                     new("uTexelParams", new Vector4Uniform(new Vector4(texelCapacity, TexelFilterCapacity, texelTrust, texelFrame))),
                     new("uLightmap", new Vector4Uniform(LightmapUniform)),
-                    new("uEdge", new Vector4Uniform(new Vector4(texelFilterSymmetric ? 1f : 0f, 0f, 0f, 0f))),
+                    new("uEdge", new Vector4Uniform(new Vector4(texelFilterSymmetric ? 1f : 0f, texelFilterArea ? 1f : 0f, 0f, 0f))),
                 },
                 Array.Empty<ShaderTextureBinding>(),
                 Buffers: new[]

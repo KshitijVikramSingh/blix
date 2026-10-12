@@ -161,6 +161,7 @@ internal sealed partial class SponzaLoop
         lightletsThenExit = args.Flag("lightlets-then-exit");
         ReadSunSweepArgs(args);
         ReadSunNodeArgs(args);
+        ReadPatchSplitArgs(args);
         if (lightletsThenExit) lightletsAsked = true;
         // --lightlet-sun: RenderSettings.LightletSun on from the start (the overlay's toggle; [Tune] fields are not read
         // from the command line here).

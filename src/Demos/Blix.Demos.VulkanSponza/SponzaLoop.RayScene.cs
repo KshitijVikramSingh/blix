@@ -306,9 +306,33 @@ internal sealed partial class SponzaLoop
 
     // Once, on the first frame every texture is resident: one dispatch per material into the surfaces block, declared
     // ahead of every pass that traces.
+    // The frame the bake was recorded in, and how many times; a few frames on the surfaces are read back, and a bake that
+    // left every word unbaked white is recorded again (the testbeds' surfaces were never baked: albedo 1 everywhere --
+    // the patches, the texels' hits and the GPU reference all read it, the raster drew the real colours).
+    private int raySurfaceBakeFrame = -1, raySurfaceBakeTries;
+    private bool raySurfacesChecked;
+    // What everything that reads the surfaces waits for: baked, and read back to have been (the transport cook's key and
+    // its patches' albedo, the frame tracer's coverage, the references and the clipmap).
+    private bool RaySurfacesReady => raySurfacesChecked;
+
     private void RecordRaySurfaceBake()
     {
+        if (raySurfacesBaked && !raySurfacesChecked && rayGpuData is { } data
+            && postLoadFrames >= raySurfaceBakeFrame + device.MaxFramesInFlightCount + 1)
+        {
+            device.WaitIdle();
+            var words = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(raySurfaces, 0, data.RowPlacements.Length * 4).AsSpan());
+            var white = 0;
+            foreach (var w in words) if (w == RayQueryGpuData.SolidWhite) white++;
+            Console.WriteLine(string.Create(Inv,
+                $"[VulkanSponza] ray surfaces: read back after bake {raySurfaceBakeTries} (recorded at post-load frame {raySurfaceBakeFrame}): {white:N0} of {words.Length:N0} words still the unbaked white."));
+            if (white == words.Length && raySurfaceBakeTries < 3) raySurfacesBaked = false;   // record it again
+            else raySurfacesChecked = true;
+        }
+        if (raySurfaceBakes.Count == 0 && rayGpuData is not null) raySurfacesChecked = true;   // nothing to bake
         if (raySurfacesBaked || raySurfaceBakes.Count == 0 || !fullyLoaded) return;
+        raySurfaceBakeFrame = postLoadFrames;
+        raySurfaceBakeTries++;
         foreach (var (material, first, count) in raySurfaceBakes)
         {
             graph.Dispatch(raySurfaceBakePassHandle, new DispatchCommand(raySurfaceBakePipeline, (count + 63) / 64, 1, 1,
