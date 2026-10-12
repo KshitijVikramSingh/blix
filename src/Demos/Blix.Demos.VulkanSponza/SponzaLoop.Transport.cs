@@ -545,12 +545,13 @@ internal sealed partial class SponzaLoop
         // sunlets are the cook's. Warm-started from the last answer. Off the frame thread: Sponza's ~9M sunlet rays and
         // 48 bounces take seconds.
         var lastIncident = (Vector3[])incident.Clone();
-        transportRelight = (toSunNew, sunIrrNew) =>
+        // A sun's own terms: its direct light at the patches (the sun map) or at the sunlets and their first bounce to
+        // the patches (an exact ray each).
+        (Vector3[] Direct, Vector3[] First, Vector3[] SOut, string RaysOn) SunTerms(Vector3 toSunNew, Vector3 sunIrrNew)
         {
             var direct = new Vector3[patches];
             var first = new Vector3[patches];
             var sOut = new Vector3[useSunlets ? sunlets : 0];
-            var relightClock = Stopwatch.StartNew();
             var raysOn = "the CPU";
             if (useSunlets)
             {
@@ -586,6 +587,12 @@ internal sealed partial class SponzaLoop
             {
                 for (var i = 0; i < patches; i++) direct[i] = sunIrrNew * MathF.Max(Vector3.Dot(nrm[i], toSunNew), 0f) * SunVisibility(i, toSunNew);
             }
+            return (direct, first, sOut, raysOn);
+        }
+        transportRelight = (toSunNew, sunIrrNew) =>
+        {
+            var relightClock = Stopwatch.StartNew();
+            var (direct, first, sOut, raysOn) = SunTerms(toSunNew, sunIrrNew);
             var inc = (Vector3[])lastIncident.Clone();
             var outg = new Vector3[patches];
             for (var it = 0; it < iterations; it++)
@@ -604,6 +611,71 @@ internal sealed partial class SponzaLoop
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] transport relight: {(useSunlets ? sunlets : patches):N0} sun rays on {raysOn} and {iterations} bounces in {raysMs:0} ms, guides in {relightClock.Elapsed.TotalMilliseconds - raysMs:0} ms."));
             return (inc, guides);
+        };
+        // Many suns at once (SponzaLoop.SunNodes.cs): each sun's own terms as above, then the bounces for a group of them
+        // together -- a sweep of the couplings serves every sun in the group, where one sun at a time read all 26 M of
+        // them (Sponza) 48 times over for each. No guides: they steer one sun's gather, and the nodes' gather is every
+        // sun's. Warm-started from the last answer, as the one-sun relight is.
+        // The same solve's inputs for the GPU (SponzaLoop.SunNodesSolve.cs): the sun nodes' patch light for many suns.
+        // References, not copies: the relight closures keep them alive anyway.
+        if (useSunlets)
+            transportSolve = new TransportSolveData(patches, couplings, sunletCouplings, sunletPos, sunletNrm, sunletAlbedo,
+                albedo, skyIn, () => lastIncident, iterations);
+        transportRelightMany = (toSuns, sunIrrNew) =>
+        {
+            const int group = 32;
+            var result = new Vector3[toSuns.Length][];
+            double termsMs = 0, bounceMs = 0;
+            for (var g0 = 0; g0 < toSuns.Length; g0 += group)
+            {
+                var n = Math.Min(group, toSuns.Length - g0);
+                var clock = Stopwatch.StartNew();
+                var terms = new (Vector3[] Direct, Vector3[] First, Vector3[] SOut, string RaysOn)[n];
+                for (var k = 0; k < n; k++) terms[k] = SunTerms(toSuns[g0 + k], sunIrrNew);
+                termsMs += clock.Elapsed.TotalMilliseconds;
+                clock.Restart();
+                // [patch][sun in the group]
+                var inc = new Vector3[patches * n];
+                var outg = new Vector3[patches * n];
+                var fixedIn = new Vector3[patches * n];
+                var direct = new Vector3[patches * n];
+                for (var i = 0; i < patches; i++)
+                for (var k = 0; k < n; k++)
+                {
+                    inc[i * n + k] = lastIncident[i];
+                    fixedIn[i * n + k] = skyIn[i] + terms[k].First[i];
+                    direct[i * n + k] = terms[k].Direct[i];
+                }
+                for (var it = 0; it < iterations; it++)
+                {
+                    Parallel.For(0, patches, i =>
+                    {
+                        var a = albedo[i] / MathF.PI;
+                        for (var k = 0; k < n; k++) outg[i * n + k] = a * (inc[i * n + k] + direct[i * n + k]);
+                    });
+                    Parallel.For(0, patches, () => new Vector3[group], (i, _, h) =>
+                    {
+                        Array.Clear(h, 0, n);
+                        foreach (var (to, w) in couplings[i])
+                        {
+                            var row = to * n;
+                            for (var k = 0; k < n; k++) h[k] += outg[row + k] * w;
+                        }
+                        for (var k = 0; k < n; k++) inc[i * n + k] = fixedIn[i * n + k] + h[k] * MathF.PI;
+                        return h;
+                    }, _ => { });
+                }
+                for (var k = 0; k < n; k++)
+                {
+                    var one = new Vector3[patches];
+                    for (var i = 0; i < patches; i++) one[i] = inc[i * n + k];
+                    result[g0 + k] = one;
+                }
+                bounceMs += clock.Elapsed.TotalMilliseconds;
+            }
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza] transport relight, {toSuns.Length} suns at once: their own terms in {termsMs / 1000:0.0} s, {iterations} bounces in groups of {group} in {bounceMs / 1000:0.0} s."));
+            return result;
         };
         transportRelightSun = (toSun, sunIrr);
         // Each patch's openness: the fraction of its cosine rays that meet nothing within TexelOpenReach -- what a texel's

@@ -80,6 +80,8 @@ internal sealed partial class SponzaLoop
     // solve in flight, and the texels' epoch -- bumped when new patch light lands; a texel from an older epoch is
     // queued again and keeps its old estimate as one pass's worth.
     private Func<Vector3, Vector3, (Vector3[] Incident, float[] Guides)>? transportRelight;
+    // The same for many suns at once, without guides (SponzaLoop.SunNodes.cs).
+    private Func<Vector3[], Vector3, Vector3[][]>? transportRelightMany;
     private (Vector3 ToSun, Vector3 Irradiance) transportRelightSun;
     private Task<(Vector3[] Incident, float[] Guides)>? relightTask;
     private (Vector3 ToSun, Vector3 Irradiance) relightTaskSun;
@@ -372,7 +374,7 @@ internal sealed partial class SponzaLoop
             SettleTexels("the baked light loaded");
             if (TexelsMayRest && bakePath is not null) pendingResolvedSave = ResolvedPathFor(bakePath);
         }
-        else if (bakePath is not null)
+        else if (bakePath is not null && !FoldBootSunIntoCook(bakePath))
         {
             lightBakePath = bakePath;
             BeginLightBake(texelLiveIds!, texelCount);
@@ -408,8 +410,12 @@ internal sealed partial class SponzaLoop
             RetireGpuBuffer(cookedPatchBuffer);
             cookedPatchBuffer = Own(device.CreateGpuBuffer(cookedPacked.Length * 16, MemoryMarshal.AsBytes(cookedPacked.AsSpan()), "sponza.cooked.patches"));
             transportRelightSun = relightTaskSun;
-            texelEpoch++;
-            RebakeForSun(transportRelightSun);
+            // The potential suns answer a sun in the band (RecordPotentialSuns): nothing to bake.
+            if (!PotentialSunsAnswer(transportRelightSun.ToSun))
+            {
+                texelEpoch++;
+                RebakeForSun(transportRelightSun);
+            }
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] transport: patch light re-solved for the sun in {relightClock!.Elapsed.TotalSeconds:0.0} s; texels re-gather (epoch {texelEpoch})."));
             relightTask = null;
@@ -518,6 +524,8 @@ internal sealed partial class SponzaLoop
     private void RecordTexels(Matrix4x4 invProjection, Matrix4x4 invView, int width, int height)
     {
         if (!texelsUploaded || rayBlockBuffers.Length == 0) return;
+        if (sunNodeStage != SunNodeStage.Off) RecordSunNodes();
+        RecordPotentialSuns();
         FollowSun();
         SaveLightBakeWhenDone();
         LightletBakeWhenReady();

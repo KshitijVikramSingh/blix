@@ -157,6 +157,7 @@ internal sealed partial class SponzaLoop
         // --lightlets-then-exit: close as asked once the sun records are baked and up (a scripted bake).
         lightletsThenExit = args.Flag("lightlets-then-exit");
         ReadSunSweepArgs(args);
+        ReadSunNodeArgs(args);
         if (lightletsThenExit) lightletsAsked = true;
         // --lightlet-sun: RenderSettings.LightletSun on from the start (the overlay's toggle; [Tune] fields are not read
         // from the command line here).
@@ -229,6 +230,7 @@ internal sealed partial class SponzaLoop
         clipmapInline = args.Flag("clipmap-inline");
         keepRayNodes = args.Flag("keep-ray-nodes");
         noBakeScene = args.Flag("no-bake-scene");
+        bakeSceneAlbedoCheck = args.Flag("bake-scene-albedo-check");
         if (args.Int("clipmap-young") is { } young) clipmapYoung = Math.Clamp(young, 0, 16);
         // --clipmap-visible-share F: at most this share of the budget a frame goes to the probes the image reads (0: none,
         // the A/B).
@@ -654,6 +656,9 @@ internal sealed partial class SponzaLoop
             for (var c = 0; c < CascadeCount; c++) builder = builder.Read(cascadeHandles[c]);
             texelGatherPassHandle = builder.Shader(texelGatherInterface).Handle;
         }
+        // --sun-nodes: the texels' light for many suns from one trace (SponzaLoop.SunNodes.cs), among the texels' passes.
+        DeclareSunNodePasses(stages => Reflect(stages));
+        DeclarePotentialSunsPass(stages => Reflect(stages));
 
         // --rt-shadows: the shadow rays as soon as the pre-pass has the depth and normals they start from, and the Metal
         // pass that traces them; the lit pass joins it (rt-shadow-join, below). Everything between (Hi-Z, GTAO, the
@@ -1061,6 +1066,8 @@ internal sealed partial class SponzaLoop
             File.ReadAllBytes(Path.Combine(shaderDir, "texel_mark.comp.spv")), texelMarkInterface, "texel_mark")), "texel_mark"));
         lightBakePipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "texel_bake.comp.spv")), lightBakeInterface, "texel_bake")), "texel_bake"));
+        CreateSunNodePipelines(shaderDir);
+        CreatePotentialSunsPipeline(shaderDir);
         texelGatherPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "texel_gather.comp.spv")), texelGatherInterface, "texel_gather")), "texel_gather"));
         clipmapMarkPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(

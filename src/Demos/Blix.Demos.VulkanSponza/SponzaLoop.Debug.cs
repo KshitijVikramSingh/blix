@@ -162,6 +162,7 @@ internal sealed partial class SponzaLoop
     private void ReportValues(DebugContext debug)
     {
         ReportReference(debug);
+        ReportPotentialSuns(debug);
         using (debug.Scope("Sun"))
         {
             debug.Values.Value("sun-irradiance",

@@ -1,0 +1,117 @@
+#version 450
+// Sun nodes (SponzaLoop.SunNodes.cs): one pass of a slice's gather, shaded for EVERY sun at once. Where a ray goes and
+// what it meets do not depend on the sun; only the light at the hit does -- its own direct sun and the patches' light
+// for that sun. So the rays are traced once (texel_nodes_rays.comp, the CLOSEST batch) and each hit is shaded here for
+// all the suns, as texel_gather.comp shades it for one:
+//   the hit's sun    albedo x the sun's irradiance x n.l x its visibility: the sun bits (texel_nodes_prep.comp) of the
+//                    texels the hit lies among (the cook's hash), weighed as a pixel weighs its texels -- the lightlet
+//                    records answer it for every sun in the band, no shadow ray
+//   its bounce       albedo x its nearest patch's light for that sun (the patches re-solved per sun, SunNodePatchLight)
+//   a miss           the sky, the same for every sun
+// A workgroup a texel: its rays' hits made ready once (threads 0..31: the texels, their bits, the patch), then a thread
+// a sun sums them. Cosine rays (pdf cos/pi): a ray's irradiance weight is pi, so a hit contributes albedo x E and a
+// miss pi x the sky. NodeAccum holds the passes' running sum of each pass's mean.
+
+#define RAYS 32
+#define PI 3.14159265359
+#define MAX_WORDS 8
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform SunNodesShade {
+    vec4 uShade;          // x the slice's texels, y suns, z the cook hash's slots, w the pass (0: the sums start)
+    vec4 uTexelGrid;      // xyz the cells' origin, w the finest spacing
+    vec4 uCookedGrid;
+    vec4 uCookedDims;
+    vec4 uSunIrradiance;  // rgb
+    vec4 uSky;            // x strength, y mip
+} u;
+
+layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
+layout(std430, set = 0, binding = 2) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 3) readonly buffer NodeRays { vec4 nodeRays[]; };
+layout(std430, set = 0, binding = 4) readonly buffer NodeHits { uvec4 nodeHits[]; };    // 3 a ray: the CLOSEST answer
+layout(std430, set = 0, binding = 5) readonly buffer SunNodes { vec4 sunNodes[]; };
+layout(std430, set = 0, binding = 6) readonly buffer SunNodeBits { uint sunBits[]; };
+layout(std430, set = 0, binding = 7) readonly buffer SunNodeHash { uint cookHash[]; };
+layout(std430, set = 0, binding = 8) readonly buffer SunNodePatchLight { uvec2 patchLight[]; };   // [patch][sun]: half rgb
+layout(std430, set = 0, binding = 9) buffer NodeAccum { vec4 nodeAccum[]; };                       // [slice texel][sun]
+// x hits, y hits among no texel (no sun there), z hits with no patch, w misses.
+layout(std430, set = 0, binding = 10) buffer NodeStats { uint nodeStats[]; };
+
+#define COOKED_BINDING 11
+#define COOKED_GRID u.uCookedGrid
+#define COOKED_DIMS u.uCookedDims
+#include "cooked_patches.glsl"
+#define NODE_LOOKUP
+#include "texel_nodes.glsl"
+
+shared vec4 sHit[RAYS];      // albedo (a hit) or pi x the sky (a miss); w its patch (-1 none), or -2 a miss
+shared vec3 sNormal[RAYS];
+shared float sWeight[RAYS * NODE_CANDIDATES];
+shared uint sBits[RAYS * NODE_CANDIDATES * MAX_WORDS];
+
+void main() {
+    uint group = gl_WorkGroupID.x;
+    if (group >= uint(u.uShade.x)) return;
+    uint lid = gl_LocalInvocationID.x;
+    int suns = int(u.uShade.y);
+    uint words = uint(suns + 31) / 32u;
+    if (lid < uint(RAYS)) {
+        uint slot = group * uint(RAYS) + lid;
+        uvec4 h0 = nodeHits[slot * 3u];
+        uvec4 h2 = nodeHits[slot * 3u + 2u];
+        vec3 origin = nodeRays[slot * 2u].xyz;
+        vec3 dir = nodeRays[slot * 2u + 1u].xyz;
+        for (int c = 0; c < NODE_CANDIDATES; ++c) sWeight[lid * NODE_CANDIDATES + c] = 0.0;
+        if ((h0.w & 1u) != 0u) {
+            vec3 normal = uintBitsToFloat(h2.xyz);
+            vec3 hn = dot(normal, dir) > 0.0 ? -normal : normal;
+            vec3 hitPos = origin + dir * uintBitsToFloat(h0.x);
+            int patchIndex = cookedNearest(hitPos, hn);
+            sHit[lid] = vec4(unpackUnorm4x8(h2.w).rgb, float(patchIndex));
+            sNormal[lid] = hn;
+            int ids[NODE_CANDIDATES];
+            float weights[NODE_CANDIDATES];
+            float total = nodeTexelsAt(hitPos, hn, u.uTexelGrid, uint(u.uShade.z), ids, weights);
+            for (int c = 0; c < NODE_CANDIDATES; ++c) {
+                if (total <= 0.0 || ids[c] < 0) continue;
+                sWeight[lid * NODE_CANDIDATES + c] = weights[c] / total;
+                for (uint w = 0u; w < words; ++w)
+                    sBits[(lid * NODE_CANDIDATES + uint(c)) * MAX_WORDS + w] = sunBits[uint(ids[c]) * words + w];
+            }
+            atomicAdd(nodeStats[0], 1u);
+            if (total <= 0.0) atomicAdd(nodeStats[1], 1u);
+            if (patchIndex < 0) atomicAdd(nodeStats[2], 1u);
+        } else {
+            sHit[lid] = vec4(PI * textureLod(uSkyRadiance, dir, u.uSky.y).rgb * u.uSky.x, -2.0);
+            sNormal[lid] = vec3(0.0);
+            atomicAdd(nodeStats[3], 1u);
+        }
+    }
+    barrier();
+    for (int k = int(lid); k < suns; k += 64) {
+        vec3 toSun = sunNodes[k].xyz;
+        uint word = uint(k) / 32u, bit = 1u << (uint(k) % 32u);
+        vec3 sum = vec3(0.0);
+        for (int r = 0; r < RAYS; ++r) {
+            vec4 h = sHit[r];
+            if (h.w < -1.5) { sum += h.rgb; continue; }
+            vec3 light = vec3(0.0);
+            if (h.w >= 0.0) {
+                uvec2 p = patchLight[uint(h.w) * uint(suns) + uint(k)];
+                light = vec3(unpackHalf2x16(p.x), unpackHalf2x16(p.y).x);
+            }
+            float ndotl = max(dot(sNormal[r], toSun), 0.0);
+            if (ndotl > 0.0) {
+                float visible = 0.0;
+                for (int c = 0; c < NODE_CANDIDATES; ++c)
+                    if ((sBits[(uint(r) * NODE_CANDIDATES + uint(c)) * MAX_WORDS + word] & bit) != 0u) visible += sWeight[r * NODE_CANDIDATES + c];
+                light += u.uSunIrradiance.rgb * ndotl * visible;
+            }
+            sum += h.rgb * light;
+        }
+        uint at = group * uint(suns) + uint(k);
+        vec3 mean = sum / float(RAYS);
+        nodeAccum[at] = vec4((u.uShade.w > 0.5 ? nodeAccum[at].rgb : vec3(0.0)) + mean, 0.0);
+    }
+}

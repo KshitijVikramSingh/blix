@@ -1,0 +1,49 @@
+#version 450
+// Sun nodes (SponzaLoop.SunNodes.cs): one pass of a slice's gather rays, out to the CLOSEST batch. A workgroup a
+// texel, a thread a ray: RAYS cosine-weighted directions, stratified and rotated afresh each pass as texel_gather.comp
+// draws them without a guide (a guide is the patches' light for ONE sun; these rays serve every sun at once).
+
+#define RAYS 32
+#define PI 3.14159265359
+layout(local_size_x = RAYS) in;
+
+layout(set = 0, binding = 0) uniform SunNodesRays {
+    vec4 uSlice;   // x the slice's first live texel, y its texels, z the pass
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 2) readonly buffer SunNodesLive { uint liveIds[]; };
+layout(std430, set = 0, binding = 3) writeonly buffer NodeRays { vec4 nodeRays[]; };   // 2 a ray: origin, tMin; dir, tMax
+
+// ray_query.glsl's (without its ray scene's buffers): the gather's seeds.
+uint blix_pcg(uint v) {
+    uint state = v * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+void main() {
+    uint group = gl_WorkGroupID.x;
+    uint ray = gl_LocalInvocationID.x;
+    uint slot = group * uint(RAYS) + ray;
+    if (group >= uint(u.uSlice.y)) {
+        nodeRays[slot * 2u] = vec4(0.0);
+        nodeRays[slot * 2u + 1u] = vec4(0.0);
+        return;
+    }
+    uint id = liveIds[uint(u.uSlice.x) + group];
+    vec3 position = texels[2u * id].xyz;
+    vec3 n = normalize(texels[2u * id + 1u].xyz);
+    uint pass = uint(u.uSlice.z);
+    uint seed = blix_pcg(id * 9781u + pass * 0x632BE5ABu + ray * 2654435761u);
+    uint setSeed = blix_pcg(id * 9781u + pass * 0x632BE5ABu);
+    float rotation = float(blix_pcg(setSeed) & 0xFFFFu) / 65536.0;
+    float jitter = float(blix_pcg(seed) & 0xFFFFu) / 65536.0;
+    float r = sqrt((float(ray) + jitter) / float(RAYS));
+    float phi = 2.0 * PI * fract(float(ray) * 0.618034 + rotation);
+    vec3 t = normalize(abs(n.y) < 0.999 ? cross(vec3(0.0, 1.0, 0.0), n) : cross(vec3(1.0, 0.0, 0.0), n));
+    vec3 b = cross(n, t);
+    vec3 dir = normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + n * sqrt(max(0.0, 1.0 - r * r)));
+    nodeRays[slot * 2u] = vec4(position + n * 0.01, 0.0);
+    nodeRays[slot * 2u + 1u] = vec4(dir, uintBitsToFloat(0x7F800000u));
+}

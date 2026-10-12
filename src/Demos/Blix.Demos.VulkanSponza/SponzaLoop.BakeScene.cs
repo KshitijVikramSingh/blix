@@ -138,8 +138,43 @@ internal sealed partial class SponzaLoop
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] bake scene tracer: {build.SolidTriangles + build.PartialTriangles:N0} triangles ({build.PartialTriangles:N0} partly covered) in {build.Hierarchies} bottom-level structures, built in {build.CpuPrepareMs + build.BlasGpuMs + build.CompactTlasGpuMs:0} ms; {build.CompactedBytes / 1048576.0:0} MB."));
         WriteGpuMemory("after the bake scene tracer");
+        if (bakeSceneAlbedoCheck) WriteBakeSceneAlbedoCheck(data);
         bakeSceneData = null;   // the CPU copy is done with: the tracer and the blocks hold what it traces
         Volatile.Write(ref bakeTracer, tracer);
+    }
+
+    // --bake-scene-albedo-check: each placement's baked surfaces (mean albedo, mean coverage) in the frame's scene and in
+    // the bake scene -- what their tracers' hits read. Investigating the sun nodes' cook on the bake scene, which read
+    // Cornell's light 28% dark with the same hits, normals and patches as the frame's tracer.
+    private bool bakeSceneAlbedoCheck;
+
+    private void WriteBakeSceneAlbedoCheck(RayQueryGpuData bake)
+    {
+        if (rayGpuData is null || raySurfaces.Equals(default(GpuBufferHandle))) return;
+        device.WaitIdle();
+        Dictionary<uint, (Vector3 Albedo, float Coverage, int Rows)> Means(RayQueryGpuData data, GpuBufferHandle surfaces)
+        {
+            var words = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(surfaces, 0, data.RowPlacements.Length * 4).AsSpan()).ToArray();
+            var sums = new Dictionary<uint, (Vector3, float, int)>();
+            for (var row = 0; row < data.RowPlacements.Length; row++)
+            {
+                var w = words[row];
+                var p = data.RowPlacements[row];
+                sums.TryGetValue(p, out var s);
+                sums[p] = (s.Item1 + new Vector3(w & 255u, (w >> 8) & 255u, (w >> 16) & 255u) / 255f, s.Item2 + (w >> 24) / 255f, s.Item3 + 1);
+            }
+            return sums.ToDictionary(kv => kv.Key, kv => (kv.Value.Item1 / kv.Value.Item3, kv.Value.Item2 / kv.Value.Item3, kv.Value.Item3));
+        }
+        var frame = Means(rayGpuData, raySurfaces);
+        var baked = Means(bake, bakeSceneBlocks[6]);
+        Console.WriteLine("[VulkanSponza] bake scene albedo check: placement, rows, mean sRGB albedo and coverage -- frame scene | bake scene:");
+        foreach (var p in frame.Keys.Union(baked.Keys).Order().Take(64))
+        {
+            frame.TryGetValue(p, out var f);
+            baked.TryGetValue(p, out var b);
+            Console.WriteLine(string.Create(Inv,
+                $"[VulkanSponza]   {p,5} {(p < rayPlacementNames.Count ? rayPlacementNames[(int)p] : "?"),-24} {f.Rows,6} ({f.Albedo.X:0.000} {f.Albedo.Y:0.000} {f.Albedo.Z:0.000}) {f.Coverage:0.00} | {b.Rows,6} ({b.Albedo.X:0.000} {b.Albedo.Y:0.000} {b.Albedo.Z:0.000}) {b.Coverage:0.00}"));
+        }
     }
 
     private void ReleaseBakeScene()

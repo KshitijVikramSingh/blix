@@ -1,0 +1,37 @@
+#version 450
+// Sun nodes (SponzaLoop.SunNodes.cs), once before the trace: one thread a live texel, into the cook's hash -- every live
+// texel, the atlas's and the hashed ones, keyed as the hashed texels are (texel.glsl: the finest cell of its position,
+// the bin of its normal), so a gather ray's hit finds the texels it landed among. A slot holds a texel id; its key is
+// the texel's own, worked out again on a probe. The first texel of a key keeps it (a cell an atlas chart crosses
+// obliquely can hold two). The texels' sun bits come from Metal (SunNodeBitsFor).
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform SunNodesPrep {
+    vec4 uPrep;       // x the first live texel of this dispatch, w the hash's slots (a power of two)
+    vec4 uRange;      // x the live texels
+    vec4 uTexelGrid;  // xyz the cells' origin, w the finest spacing
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 2) readonly buffer SunNodesLive { uint liveIds[]; };
+layout(std430, set = 0, binding = 3) buffer SunNodeHash { uint cookHash[]; };
+
+#include "texel_nodes.glsl"
+
+void main() {
+    uint i = uint(u.uPrep.x) + gl_GlobalInvocationID.x;
+    if (i >= uint(u.uRange.x)) return;
+    uint id = liveIds[i];
+    uvec2 key;
+    if (!nodeTexelKey(id, u.uTexelGrid, key)) return;
+    uint mask = uint(u.uPrep.w) - 1u;
+    uint slot = texelMix(key) & mask;
+    for (int probe = 0; probe < NODE_HASH_PROBES; ++probe) {
+        uint prev = atomicCompSwap(cookHash[slot], NODE_EMPTY, id);
+        if (prev == NODE_EMPTY) return;
+        uvec2 other;
+        if (nodeTexelKey(prev, u.uTexelGrid, other) && other == key) return;
+        slot = (slot + 1u) & mask;
+    }
+}

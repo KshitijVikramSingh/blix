@@ -1,0 +1,79 @@
+#version 450
+// Sun nodes (SponzaLoop.SunNodesSolve.cs): the patches' light for a group of suns on the GPU -- the transport's relight
+// (SponzaLoop.Transport.cs) for many suns at once. On the CPU, a sun at a time (Sponza: ~6 s each) or the group's suns
+// together (~4.6 s each), it read 26 M couplings 48 times over a sun.
+//   mode 0  a sunlet's shadow ray toward the group's sun k (none where it faces away), for the SHADOW batch
+//   mode 1  a patch's first bounce of sun k: its sunlet couplings over the sunlets the batch found lit
+//   mode 2  the bounces start from the boot sun's answer (as the CPU's warm start does)
+//   mode 3  a patch's outgoing light for every sun of the group: albedo / pi x its incoming
+//   mode 4  its incoming: the sky, the first bounce, and pi x its couplings over the others' outgoing
+//   mode 5  into the nodes' patch light (SunNodePatchLight, half rgb [patch][sun]) at the group's suns
+// Modes 2-5 run a thread a (patch, sun of the group), the sun fastest: a patch's group of suns is one run in memory, so
+// a gather over couplings reads runs of G.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform NodesSolve {
+    vec4 uSolve;   // x the mode, y patches, z the group's suns (G), w the group's sun this dispatch (modes 0, 1)
+    vec4 uSun;     // xyz toward that sun
+    vec4 uIrr;     // rgb the sun's irradiance
+    vec4 uCount;   // x sunlets, y the group's first sun among all, z all the suns (the node table's stride)
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer SunletPos { vec4 sunletPos[]; };
+layout(std430, set = 0, binding = 2) readonly buffer SunletNrm { vec4 sunletNrm[]; };
+layout(std430, set = 0, binding = 3) readonly buffer SunletAlbedo { vec4 sunletAlbedo[]; };
+layout(std430, set = 0, binding = 4) buffer SunletOrigins { vec4 sunletOrigins[]; };
+layout(std430, set = 0, binding = 5) readonly buffer SunletOccluded { uint sunletOccluded[]; };
+layout(std430, set = 0, binding = 6) readonly buffer SunletCouplingStart { uint sunletStart[]; };
+layout(std430, set = 0, binding = 7) readonly buffer SunletCouplings { uvec2 sunletCoupling[]; };   // to, weight bits
+layout(std430, set = 0, binding = 8) readonly buffer CouplingStart { uint couplingStart[]; };
+layout(std430, set = 0, binding = 9) readonly buffer Couplings { uvec2 coupling[]; };               // to, weight bits
+layout(std430, set = 0, binding = 10) readonly buffer PatchTerms { vec4 patchTerms[]; };            // 3 a patch: albedo, sky, boot answer
+layout(std430, set = 0, binding = 11) buffer NodeFirst { vec4 nodeFirst[]; };
+layout(std430, set = 0, binding = 12) buffer NodeIncoming { vec4 nodeIn[]; };
+layout(std430, set = 0, binding = 13) buffer NodeOutgoing { vec4 nodeOut[]; };
+layout(std430, set = 0, binding = 14) buffer SunNodePatchLight { uvec2 patchLight[]; };
+
+#define PI 3.14159265359
+
+void main() {
+    int mode = int(u.uSolve.x);
+    uint patches = uint(u.uSolve.y);
+    uint G = uint(u.uSolve.z);
+    // A 2-D grid: x a row of 65,535 workgroups at most.
+    uint i = (gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x) * 64u + gl_LocalInvocationID.x;
+    if (mode == 0) {
+        if (i >= uint(u.uCount.x)) return;
+        vec3 n = sunletNrm[i].xyz;
+        sunletOrigins[i] = dot(n, u.uSun.xyz) > 0.0
+            ? vec4(sunletPos[i].xyz + n * 1e-3, uintBitsToFloat(0x7F800000u)) : vec4(0.0);
+        return;
+    }
+    if (mode == 1) {
+        if (i >= patches) return;
+        vec3 s = vec3(0.0);
+        for (uint c = sunletStart[i]; c < sunletStart[i + 1u]; ++c) {
+            uint to = sunletCoupling[c].x;
+            if (sunletOrigins[to].w <= 0.0 || (sunletOccluded[to] & 1u) != 0u) continue;
+            s += uintBitsToFloat(sunletCoupling[c].y) * sunletAlbedo[to].rgb * u.uIrr.rgb * dot(sunletNrm[to].xyz, u.uSun.xyz) / PI;
+        }
+        nodeFirst[i * G + uint(u.uSolve.w)] = vec4(s * PI, 0.0);
+        return;
+    }
+    if (i >= patches * G) return;
+    uint p = i / G, k = i % G;
+    if (mode == 2) {
+        nodeIn[i] = vec4(patchTerms[3u * p + 2u].rgb, 0.0);
+    } else if (mode == 3) {
+        nodeOut[i] = vec4(patchTerms[3u * p].rgb / PI * nodeIn[i].rgb, 0.0);
+    } else if (mode == 4) {
+        vec3 h = vec3(0.0);
+        for (uint c = couplingStart[p]; c < couplingStart[p + 1u]; ++c)
+            h += uintBitsToFloat(coupling[c].y) * nodeOut[coupling[c].x * G + k].rgb;
+        nodeIn[i] = vec4(patchTerms[3u * p + 1u].rgb + nodeFirst[i].rgb + h * PI, 0.0);
+    } else if (mode == 5) {
+        vec3 c = nodeIn[i].rgb;
+        patchLight[p * uint(u.uCount.z) + uint(u.uCount.y) + k] = uvec2(packHalf2x16(c.rg), packHalf2x16(vec2(c.b, 0.0)));
+    }
+}
