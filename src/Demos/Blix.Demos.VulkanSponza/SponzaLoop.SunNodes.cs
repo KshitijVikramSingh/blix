@@ -31,6 +31,12 @@ internal sealed partial class SponzaLoop
     // How far off its surface a sun bit's ray starts: the gather's own offset for its hits' shadow rays (texel_gather.comp,
     // hitPos + hn * 0.01); the lightlets use 2 mm (Sponza's authored sun: the same light either way). --sun-nodes-lift M.
     private float sunNodeLift = 0.01f;
+    // Which texels' sun bits a hit reads (texel_nodes.glsl, nodeSetAt): those whose plane lies within sunNodePlane cells
+    // of it, weighed by distance with a spread of sunNodeSigma cells. A pixel's lookup takes a whole cell (texel.glsl's
+    // texelsAround); here that let a hit borrow the sun of texels on the next surface over -- Sponza's authored sun, every
+    // 16th texel, against a shadow ray at every hit: 1.47% off at a cell, 0.72% at a quarter (the mid-lit texels' bias
+    // +2.2% -> +0.5%); the spread hardly mattered (0.6 -> 0.35: 0.72% -> 0.70%).
+    private float sunNodePlane = 0.25f, sunNodeSigma = 0.6f;
     // --sun-nodes-cpu-solve: the patches' light by the CPU's batched relight, not the GPU's (the check between them).
     private bool sunNodeCpuSolve;
     private float sunNodeUnknownSun;
@@ -95,6 +101,9 @@ internal sealed partial class SponzaLoop
         if (args.Float("sun-nodes-unknown-sun") is { } us) sunNodeUnknownSun = Math.Clamp(us, 0f, 1f);
         sunNodeCpuSolve = args.Flag("sun-nodes-cpu-solve");
         sunNodeGuide = !args.Flag("sun-nodes-no-guide");
+        if (args.Int("sun-nodes-bounces") is { } nb) sunNodeBouncesAsked = Math.Max(0, nb);
+        if (args.Float("sun-nodes-plane") is { } pl) sunNodePlane = Math.Max(0.01f, pl);
+        if (args.Float("sun-nodes-sigma") is { } sg) sunNodeSigma = Math.Max(0.05f, sg);
         // Study only: every S-th live texel traced (the sun bits and the hash still hold them all), and one sun's hits by
         // a shadow ray each. A grid kept for the run needs every texel, and every sun.
         var stride = args.Int("sun-nodes-stride");
@@ -569,6 +578,7 @@ internal sealed partial class SponzaLoop
                 new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, sunNodeUnknownSun))),
                 // A ray's sky as the gather takes it: strength 1, one mip blurred.
                 new("uSky", new Vector4Uniform(new Vector4(1f, 1f, 0f, 0f))),
+                new("uLookup", new Vector4Uniform(new Vector4(sunNodePlane, sunNodeSigma, 0f, 0f))),
                 new("uFoliage", new Vector4Uniform(new Vector4(sunNodeFoliageSlots, discover, exactMode, 0f))),
             },
             new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },

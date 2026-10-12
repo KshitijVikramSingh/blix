@@ -59,7 +59,8 @@ int nodeFind(int set, ivec3 cell, uint bin, vec4 grid, uint slots) {
 // the bin across the nearest boundary), weighed as texelsAround weighs them (distance to the centre; the area, |w|: an
 // atlas texel's and a foliage point's 4, -4 double-sided; the facing^4; dropped past a cell from the plane). Returns the
 // summed weight (0: none found).
-float nodeSetAt(int set, vec3 p, vec3 n, vec4 grid, uint slots, out int ids[NODE_CANDIDATES], out float weights[NODE_CANDIDATES]) {
+// lookup: x how far (cells) a candidate's plane may lie from the point, y the distance weight's spread (cells).
+float nodeSetAt(int set, vec3 p, vec3 n, vec4 grid, uint slots, vec2 lookup, out int ids[NODE_CANDIDATES], out float weights[NODE_CANDIDATES]) {
     vec3 f = (p - grid.xyz) / grid.w - 0.5;
     ivec3 base = ivec3(floor(f));
     float total = 0.0;
@@ -73,11 +74,11 @@ float nodeSetAt(int set, vec3 p, vec3 n, vec4 grid, uint slots, out int ids[NODE
             vec4 tp = nodePosition(set, uint(id));
             vec3 tn = normalize(nodeNormal(set, uint(id)).xyz);
             float facing = dot(tn, n);
-            if (facing <= 0.0 || abs(dot(tn, tp.xyz - p)) > grid.w) continue;
+            if (facing <= 0.0 || abs(dot(tn, tp.xyz - p)) > lookup.x * grid.w) continue;
             vec3 dp = (tp.xyz - p) / grid.w;
             float f2 = facing * facing;
             ids[i] = id;
-            weights[i] = exp(-dot(dp, dp) / (2.0 * 0.36)) * min(abs(tp.w) / 4.0, 1.0) * f2 * f2;
+            weights[i] = exp(-dot(dp, dp) / (2.0 * lookup.y * lookup.y)) * min(abs(tp.w) / 4.0, 1.0) * f2 * f2;
             total += weights[i];
         }
     }

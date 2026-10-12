@@ -33,6 +33,9 @@ internal sealed partial class SponzaLoop
     private Task<float[]>? sunNodeGuideTask;
     private const int SolveGroup = 32;
     private const int SolveBouncesPerFrame = 6;
+    // --sun-nodes-bounces N: bounces after the warm start (the transport's own: 48). 0 leaves the boot sun's answer.
+    private int? sunNodeBouncesAsked;
+    private int SolveBounces => sunNodeBouncesAsked ?? transportSolve!.Iterations;
     private ShaderInterface sunNodeSolveInterface = null!;
     private PassHandle sunNodeSolveAPass, sunNodeSolveBPass;
     private PipelineHandle sunNodeSolvePipeline;
@@ -145,12 +148,12 @@ internal sealed partial class SponzaLoop
             graph.Dispatch(sunNodeSolveBPass, SolveDispatch(2, group, 0, Vector3.Zero, items));
             solveBounce = 0;
         }
-        for (var b = 0; b < SolveBouncesPerFrame && solveBounce < d.Iterations; b++, solveBounce++)
+        for (var b = 0; b < SolveBouncesPerFrame && solveBounce < SolveBounces; b++, solveBounce++)
         {
             graph.Dispatch(sunNodeSolveBPass, SolveDispatch(3, group, 0, Vector3.Zero, items));
             graph.Dispatch(sunNodeSolveBPass, SolveDispatch(4, group, 0, Vector3.Zero, items));
         }
-        if (solveBounce < d.Iterations) return false;
+        if (solveBounce < SolveBounces) return false;
         graph.Dispatch(sunNodeSolveBPass, SolveDispatch(5, group, 0, Vector3.Zero, items));
         graph.Dispatch(sunNodeSolveBPass, SolveDispatch(6, group, 0, Vector3.Zero, d.Patches));
         solveGroupStart += group;
@@ -174,7 +177,7 @@ internal sealed partial class SponzaLoop
             });
         }
         Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] sun nodes: {d.Patches:N0} patches' light for {suns} suns solved on the GPU in {solveClock.Elapsed.TotalSeconds:0.0} s ({solveSunlets:N0} sunlet rays a sun, {d.Iterations} bounces in groups of {SolveGroup})."));
+            $"[VulkanSponza] sun nodes: {d.Patches:N0} patches' light for {suns} suns solved on the GPU in {solveClock.Elapsed.TotalSeconds:0.0} s ({solveSunlets:N0} sunlet rays a sun, {SolveBounces} bounces in groups of {SolveGroup})."));
         return true;
     }
 

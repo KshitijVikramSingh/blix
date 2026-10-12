@@ -25,6 +25,7 @@ layout(set = 0, binding = 0) uniform SunNodesShade {
     vec4 uCookedDims;
     vec4 uSunIrradiance;  // rgb; w the visibility a hit among no texel takes (--sun-nodes-unknown-sun; 0 by default)
     vec4 uSky;            // x strength, y mip
+    vec4 uLookup;         // x a sun bit candidate's plane distance at most (cells), y the distance weight's spread (cells)
     vec4 uFoliage;        // x the foliage hash's slots (0: no foliage points); y discovering: the list's room (0: off);
                           // z the exact-sun experiment (--sun-nodes-exact-sun, one sun): 1 write each hit's shadow
                           // ray toward sun 0 (ExactOrigins) and stop; 2 shade sun 0 by that ray's answer (ExactOccluded)
@@ -96,10 +97,10 @@ void main() {
             sNormal[lid] = hn;
             int ids[NODE_CANDIDATES];
             float weights[NODE_CANDIDATES];
-            float total = nodeSetAt(0, hitPos, hn, u.uTexelGrid, uint(u.uShade.z), ids, weights);
+            float total = nodeSetAt(0, hitPos, hn, u.uTexelGrid, uint(u.uShade.z), u.uLookup.xy, ids, weights);
             bool foliage = false;
             if (total <= 0.0 && u.uFoliage.x > 0.5) {
-                total = nodeSetAt(1, hitPos, hn, u.uTexelGrid, uint(u.uFoliage.x), ids, weights);
+                total = nodeSetAt(1, hitPos, hn, u.uTexelGrid, uint(u.uFoliage.x), u.uLookup.xy, ids, weights);
                 foliage = total > 0.0;
                 if (foliage) nodeCount(4u);
             }
