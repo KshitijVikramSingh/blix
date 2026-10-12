@@ -630,6 +630,9 @@ internal sealed partial class SponzaLoop
         texelFilterFillInterface = Reflect("texel_filter_fill.comp");
         texelFilterFillPassHandle = graph.ComputePass("texel-filter-fill").Shader(texelFilterFillInterface).Handle;
         texelFilterPassHandle = graph.ComputePass("texel-filter").Shader(texelFilterInterface).Handle;
+        // The texels at rest, resolved once (SponzaLoop.TexelRest.cs): after the filter, before the incident pass reads them.
+        texelResolveInterface = Reflect("texel_resolve.comp");
+        texelResolvePassHandle = graph.ComputePass("texel-resolve").Shader(texelResolveInterface).Handle;
         lightBakeInterface = Reflect("texel_bake.comp");
         lightBakePassHandle = graph.ComputePass("light-bake").Shader(lightBakeInterface).Handle;
         texelGatherInterface = Reflect("texel_gather.comp");
@@ -1047,6 +1050,8 @@ internal sealed partial class SponzaLoop
             File.ReadAllBytes(Path.Combine(shaderDir, "reference_trace.comp.spv")), referenceInterface, "reference_trace")), "reference_trace"));
         texelFilterPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "texel_filter.comp.spv")), texelFilterInterface, "texel_filter")), "texel_filter"));
+        texelResolvePipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
+            File.ReadAllBytes(Path.Combine(shaderDir, "texel_resolve.comp.spv")), texelResolveInterface, "texel_resolve")), "texel_resolve"));
         texelFilterFillPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "texel_filter_fill.comp.spv")), texelFilterFillInterface, "texel_filter_fill")), "texel_filter_fill"));
         texelMarkPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(

@@ -39,7 +39,7 @@ layout(set = 0, binding = 0) uniform IncidentClipmap {
     vec4 uTexelGrid;     // the texels (texel.glsl, stage 5a): the cells' origin xyz, spacing w
     vec4 uTexelParams;   // x hash capacity, y 1 when on, z the rays at which a texel's answer is trusted whole, w 1:
                          // read the spatially filtered light (texel_gather.comp)
-    vec4 uTexelDebug;    // x the texel frame (the debug view's stamp test)
+    vec4 uTexelDebug;    // x the texel frame (the debug view's stamp test); y 1: the texels at rest (TexelResolved)
     vec4 uLightmap;      // --lightmap: x 1 when the atlas's texels are on (texel.glsl), yz the atlas size, w its first record
     vec4 uTexelLevels;   // x levels, y a pixel's width at unit depth, z / w the pixels a texel should span in sun / in shade
     vec4 uTexelSun;      // xyz the direction the sun travels (texelLevelFor's sunlit)
@@ -145,6 +145,13 @@ layout(std430, set = 0, binding = 14) readonly buffer TexelFiltered { vec4 texel
 layout(std430, set = 0, binding = 15) readonly buffer ReferenceAccum { vec4 referenceAccum[]; };
 layout(std430, set = 0, binding = 16) readonly buffer TexelBlend { vec4 texelBlend[]; };
 layout(std430, set = 0, binding = 17) readonly buffer TexelStamp { uint texelStamp[]; };
+// At rest (uTexelDebug.y): each texel's answer resolved once (texel_resolve.comp) -- RGB9E5, then a 16-bit confidence and a
+// valid bit -- and the buffers above are placeholders.
+layout(std430, set = 0, binding = 34) readonly buffer TexelResolved { uvec2 texelResolved[]; };
+vec3 unpackRgb9e5(uint v) {
+    float scale = exp2(float(int(v >> 27) - 15 - 9));
+    return vec3(float(v & 511u), float((v >> 9) & 511u), float((v >> 18) & 511u)) * scale;
+}
 float debugStamped, debugLit;
 // --lightmap: the pre-pass's packed atlas texel and the atlas's map from texel to record (texel.glsl).
 layout(set = 0, binding = 19) uniform usampler2D uLightmapTexel;
@@ -196,10 +203,20 @@ bool texelsAtLevel(vec3 worldPos, vec3 n, float faceBin, uint level, out vec3 ir
     float weight = 0.0, raysWeighted = 0.0, located = 0.0;
     float count = 0.0;
     debugStamped = 0.0; debugLit = 0.0;
+    bool resting = g.uTexelDebug.y > 0.5;
     for (int i = 0; i < TEXEL_CANDIDATES; ++i) {
         if (ids[i] < 0) continue;
         located += weights[i];
         count += 1.0;
+        if (resting) {
+            uvec2 r = texelResolved[ids[i]];
+            if ((r.y >> 16) == 0u) continue;
+            debugLit += 1.0;
+            sum += weights[i] * unpackRgb9e5(r.x);
+            weight += weights[i];
+            raysWeighted += weights[i] * float(r.y & 0xFFFFu) / 65535.0;
+            continue;
+        }
         if (uint(g.uTexelDebug.x) - texelStamp[ids[i]] < 32u) debugStamped += 1.0;
         if (texelLight[ids[i]].w > 0.0) debugLit += 1.0;
         vec4 light = texelLight[ids[i]];

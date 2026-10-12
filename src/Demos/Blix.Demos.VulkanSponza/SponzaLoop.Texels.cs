@@ -468,6 +468,7 @@ internal sealed partial class SponzaLoop
             new ShaderBufferBinding("TexelFiltered", texelFilteredBuffer),
             new ShaderBufferBinding("TexelBlend", texelBlendBuffer),
             new ShaderBufferBinding("TexelStamp", texelStampBuffer.Equals(default(GpuBufferHandle)) ? texelBlendBuffer : texelStampBuffer),
+            new ShaderBufferBinding("TexelResolved", texelResolvedBuffer.Equals(default(GpuBufferHandle)) ? texelBlendBuffer : texelResolvedBuffer),
         });
     }
 
@@ -514,6 +515,7 @@ internal sealed partial class SponzaLoop
         {
             if (texelEpoch != texelSettledEpoch)
             {
+                WakeTexels(keepResting: false);
                 texelsSettled = false;
                 filterSweepIssued = -1;
                 Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
@@ -522,10 +524,14 @@ internal sealed partial class SponzaLoop
             else
             {
                 if (filterSweepIssued >= 0) RecordFilterSweep();
-                else if (!texelsRestReported)
+                else
                 {
-                    texelsRestReported = true;
-                    Console.WriteLine("[VulkanSponza] texels: settled and filtered; the mark, the gather and the filter rest until the light changes.");
+                    if (!texelsRestReported)
+                    {
+                        texelsRestReported = true;
+                        Console.WriteLine("[VulkanSponza] texels: settled and filtered; the mark, the gather and the filter rest until the light changes.");
+                    }
+                    RestTexels();
                 }
                 texelFrame++;
                 return;
@@ -759,6 +765,12 @@ internal sealed partial class SponzaLoop
     {
         if (!texelsUploaded) return;
         WriteTexelProbe();
+        // At rest the gather's buffers are gone (SponzaLoop.TexelRest.cs): every live texel was settled by the bake.
+        if (texelGatherFreed)
+        {
+            Console.WriteLine("[VulkanSponza] texels: at rest at the shot -- every live texel settled; no gather state to count.");
+            return;
+        }
         var light = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(texelLightBuffer, 0, texelCount * 16).AsSpan()).ToArray();
         var stamps = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(texelStampBuffer, 0, texelCount * 4).AsSpan()).ToArray();
         var queue = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(texelQueueBuffer, 0, 32).AsSpan()).ToArray();

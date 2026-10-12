@@ -279,6 +279,7 @@ internal sealed partial class SponzaLoop
 ) return;
         if (!lightBakeLiveBuffer.Equals(default(GpuBufferHandle))) RetireGpuBuffer(lightBakeLiveBuffer);
         lightBakePath = LightBakePathFor(lightBakeKey, sun);
+        WakeTexels(keepResting: true);
         BeginLightBake(texelLiveIds, texelCount);
     }
 
