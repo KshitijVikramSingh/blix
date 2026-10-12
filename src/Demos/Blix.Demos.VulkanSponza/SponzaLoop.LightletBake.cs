@@ -31,7 +31,8 @@ internal sealed partial class SponzaLoop
     private bool lightletsAsked, lightletsThenExit;
     // 2: baked on the frame tracer with its alpha test (1: the bake scene and the coverage coin, which disagreed with the
     // traced shadows under foliage).
-    private const int LightletVersion = 2;
+    // 3: the footprint sampled (5 points a texel; 2 took texel centres alone, and missed sub-texel dapples).
+    private const int LightletVersion = 3;
     private const int CoarseHour = 16, CoarseDec = 8;
     private const float LightletFar = 4f;
     private static readonly float[] LightletRingRadii = { 0.25f, 0.5f, 1f, 2f, 3f, 4f };
@@ -39,6 +40,10 @@ internal sealed partial class SponzaLoop
     private const float LightletLift = 0.002f;
     private const uint LightletSeed = 0x7A3E11u;
     private const int LightletSlice = 65536;
+    // The footprint: a texel's centre and corners, in atlas cells (4 cm; curtains' 2 cm cells are over-covered: safe).
+    private const float LightletCell = 0.04f;
+    private const int Footprint = 5;
+    private static readonly (float X, float Y)[] FootprintOffsets = { (0f, 0f), (-0.5f, -0.5f), (0.5f, -0.5f), (-0.5f, 0.5f), (0.5f, 0.5f) };
 
     internal sealed record LightletRecords(uint[] Index, uint[] Pool);
 
@@ -57,7 +62,9 @@ internal sealed partial class SponzaLoop
     // frame (RenderSettings.LightletSun, records up, the sun inside the band), and tau.
     private Vector4 LightletUniform(Vector3 towardSun)
     {
-        if (!render.LightletSun || lightlets is null || !halfLightingNow) return Vector4.Zero;
+        // --ab lightlets: the records in the ON phase, every pixel traced in the OFF one.
+        var on = abMode == "lightlets" ? !AbOffPhase : render.LightletSun;
+        if (!on || lightlets is null || !halfLightingNow) return Vector4.Zero;
         if (towardSun.Y <= MathF.Sin(BandMinElevation * MathF.PI / 180f)) return Vector4.Zero;
         var (hour, dec) = Equatorial(towardSun, BandLatitude, lightletNorth);
         var maxDec = Obliquity + 5f;
@@ -165,89 +172,121 @@ internal sealed partial class SponzaLoop
         for (var first = 0; first < live.Length; first += LightletSlice)
         {
             var n = Math.Min(LightletSlice, live.Length - first);
-            var points = new Vector4[n * 2];
-            for (var p = 0; p < n; p++)
+            // Each texel's FOOTPRINT: its centre and its four corners (adjacent texels share corners, so the middle of
+            // every 2 x 2 a pixel blends is sampled too), on its plane.
+            var points = new Vector4[n * Footprint * 2];
+            Parallel.For(0, n, p =>
             {
                 var id = (int)live[first + p];
-                points[2 * p] = new Vector4(texels[2 * id].X, texels[2 * id].Y, texels[2 * id].Z, 0f);
-                points[2 * p + 1] = new Vector4(texels[2 * id + 1].X, texels[2 * id + 1].Y, texels[2 * id + 1].Z, 0f);
-            }
+                var c = new Vector3(texels[2 * id].X, texels[2 * id].Y, texels[2 * id].Z);
+                var nrm = new Vector3(texels[2 * id + 1].X, texels[2 * id + 1].Y, texels[2 * id + 1].Z);
+                var nn = nrm.LengthSquared() > 1e-12f ? Vector3.Normalize(nrm) : Vector3.UnitY;
+                var t = Vector3.Normalize(MathF.Abs(nn.Y) < 0.999f ? Vector3.Cross(nn, Vector3.UnitY) : Vector3.Cross(nn, Vector3.UnitX));
+                var bt = Vector3.Cross(nn, t);
+                for (var f = 0; f < Footprint; f++)
+                {
+                    var (ox, oy) = FootprintOffsets[f];
+                    points[2 * (p * Footprint + f)] = new Vector4(c + (t * ox + bt * oy) * LightletCell, 0f);
+                    points[2 * (p * Footprint + f) + 1] = new Vector4(nrm, 0f);
+                }
+            });
             var bits = tracer.LightletVisibility(points, dense, words, LightletSeed, LightletLift, reach, out var ms);
-            gpuMs += ms; denseRays += (long)n * dense.Length;
+            gpuMs += ms; denseRays += (long)n * Footprint * dense.Length;
 
-            // Per point: each node's sign, and which nodes are near the boundary.
+            // Per texel and node: the points' majority sign; MIXED where they disagree (the footprint spans the
+            // boundary: distance 0, never certain); near where mixed, a ring disagreed, or a neighbouring node differs.
             var sign = new bool[n * nodes];
+            var mixed = new bool[n * nodes];
             var near = new bool[n * nodes];
             var ringDisagrees = new bool[n * nodes];
             Parallel.For(0, n, p =>
             {
-                long w0 = (long)p * words;
                 for (var k = 0; k < nodes; k++)
                 {
-                    var s = Bit(bits, w0, k * perNode);
-                    sign[p * nodes + k] = s;
-                    for (var a = 1; a < perNode; a++) if (Bit(bits, w0, k * perNode + a) != s) { ringDisagrees[p * nodes + k] = true; break; }
+                    var visible = 0;
+                    var rd = false;
+                    for (var f = 0; f < Footprint; f++)
+                    {
+                        long w0 = (long)(p * Footprint + f) * words;
+                        var sv = Bit(bits, w0, k * perNode);
+                        if (sv) visible++;
+                        for (var a = 1; a < perNode && !rd; a++) if (Bit(bits, w0, k * perNode + a) != sv) rd = true;
+                    }
+                    sign[p * nodes + k] = visible * 2 >= Footprint;
+                    mixed[p * nodes + k] = visible != 0 && visible != Footprint;
+                    ringDisagrees[p * nodes + k] = rd;
                 }
                 for (var j = 0; j < RecordNodesDec; j++)
                 for (var i = 0; i < RecordNodesHour; i++)
                 {
                     var k = j * RecordNodesHour + i;
-                    var isNear = ringDisagrees[p * nodes + k];
+                    var isNear = ringDisagrees[p * nodes + k] || mixed[p * nodes + k];
                     for (var dj = -1; dj <= 1 && !isNear; dj++)
                     for (var di = -1; di <= 1 && !isNear; di++)
                     {
                         var (ii, jj) = (i + di, j + dj);
                         if (ii < 0 || jj < 0 || ii >= RecordNodesHour || jj >= RecordNodesDec) continue;
-                        if (sign[p * nodes + jj * RecordNodesHour + ii] != sign[p * nodes + k]) isNear = true;
+                        var kk = jj * RecordNodesHour + ii;
+                        if (sign[p * nodes + kk] != sign[p * nodes + k] || mixed[p * nodes + kk]) isNear = true;
                     }
                     near[p * nodes + k] = isNear;
                 }
             });
+            // Rings from every footprint point around the near, unmixed nodes; the node's distance is the least.
             var pairs = new List<uint>();
             for (var p = 0; p < n; p++)
                 for (var k = 0; k < nodes; k++)
-                    if (near[p * nodes + k]) { pairs.Add((uint)p); pairs.Add((uint)k); }
+                    if (near[p * nodes + k] && !mixed[p * nodes + k])
+                        for (var f = 0; f < Footprint; f++) { pairs.Add((uint)(p * Footprint + f)); pairs.Add((uint)k); }
             var ringBits = pairs.Count == 0 ? Array.Empty<uint>()
                 : tracer.LightletRings(points, CollectionsMarshal.AsSpan(pairs), nodeDirs, tanRadii, azimuths, LightletSeed, LightletLift, reach, out ms);
             if (pairs.Count > 0) { gpuMs += ms; ringRays += (long)pairs.Count / 2 * LightletRingRadii.Length * azimuths; }
 
-            // Distances, then the records.
             var dist = new float[n * nodes];
-            for (var p = 0; p < n * nodes; p++) dist[p] = sign[p] ? LightletFar : -LightletFar;
-            for (var q = 0; q < pairs.Count / 2; q++)
+            for (var x = 0; x < n * nodes; x++) dist[x] = mixed[x] ? 0f : sign[x] ? LightletFar : -LightletFar;
+            Parallel.For(0, pairs.Count / 2 / Footprint, g =>
             {
-                var p = (int)pairs[2 * q];
-                var k = (int)pairs[2 * q + 1];
+                var p = (int)pairs[2 * g * Footprint] / Footprint;
+                var k = (int)pairs[2 * g * Footprint + 1];
                 var s = sign[p * nodes + k];
-                var d = ringDisagrees[p * nodes + k] ? 0.5f * (LightletRingRadii[^2] + LightletFar) : LightletFar;
-                var prev = 0f;
-                for (var r = 0; r < LightletRingRadii.Length; r++)
+                var least = ringDisagrees[p * nodes + k] ? 0.5f * (LightletRingRadii[^2] + LightletFar) : LightletFar;
+                for (var f = 0; f < Footprint; f++)
                 {
-                    var any = false;
-                    for (var a = 0; a < azimuths && !any; a++) any = Bit(ringBits, 2L * q, r * azimuths + a) != s;
-                    if (any) { d = 0.5f * (prev + LightletRingRadii[r]); break; }
-                    prev = LightletRingRadii[r];
+                    var q = g * Footprint + f;
+                    var prev = 0f;
+                    for (var r = 0; r < LightletRingRadii.Length; r++)
+                    {
+                        var any = false;
+                        for (var a = 0; a < azimuths && !any; a++) any = Bit(ringBits, 2L * q, r * azimuths + a) != s;
+                        if (any) { least = MathF.Min(least, 0.5f * (prev + LightletRingRadii[r])); break; }
+                        prev = LightletRingRadii[r];
+                    }
                 }
-                dist[p * nodes + k] = s ? d : -d;
-            }
-            for (var p = 0; p < n; p++)
+                dist[p * nodes + k] = s ? least : -least;
+            });
+
+            // The records, built in parallel, then laid down in order.
+            var built = new uint[n][];
+            var uniformAs = new int[n];   // -1 a record; 0 never lit; 1 always lit
+            long sliceRefined = 0;
+            Parallel.For(0, n, p =>
             {
-                var id = live[first + p];
                 var s0 = sign[p * nodes];
                 var uniform = true;
-                for (var k = 0; k < nodes && uniform; k++) uniform = !near[p * nodes + k] && sign[p * nodes + k] == s0;
-                if (uniform) { index[id] = s0 ? 1u : 0u; uniformCount++; continue; }
-                index[id] = 2u + (uint)pool.Count;
+                for (var k = 0; k < nodes && uniform; k++) uniform = !near[p * nodes + k] && !mixed[p * nodes + k] && sign[p * nodes + k] == s0;
+                if (uniform) { uniformAs[p] = s0 ? 1 : 0; return; }
+                uniformAs[p] = -1;
                 float D(int i, int j) => dist[p * nodes + j * RecordNodesHour + i];
+                var rec = new List<uint>(40);
                 for (var w = 0; w < 16; w++)
                 {
                     uint word = 0;
-                    for (var b = 0; b < 8; b++)
+                    for (var b2 = 0; b2 < 8; b2++)
                     {
-                        var c = w * 8 + b;
-                        word |= LightletCode(D(2 * (c % CoarseHour), 2 * (c / CoarseHour))) << (4 * b);
+                        var c = w * 8 + b2;
+                        word |= LightletCode(D(2 * (c % CoarseHour), 2 * (c / CoarseHour))) << (4 * b2);
                     }
-                    pool.Add(word);
+                    rec.Add(word);
                 }
                 var mask = new uint[4];
                 var extra = new List<uint>();
@@ -264,10 +303,19 @@ internal sealed partial class SponzaLoop
                     extra.Add(LightletCode(D(2 * ci + 1, 2 * cj)) | LightletCode(D(2 * ci, 2 * cj + 1)) << 4 | LightletCode(D(2 * ci + 1, 2 * cj + 1)) << 8
                               | LightletCode(D(2 * ci + 2, 2 * cj + 1)) << 12 | LightletCode(D(2 * ci + 1, 2 * cj + 2)) << 16);
                 }
-                pool.AddRange(mask);
-                pool.AddRange(extra);
-                refinedCells += extra.Count;
+                rec.AddRange(mask);
+                rec.AddRange(extra);
+                Interlocked.Add(ref sliceRefined, extra.Count);
+                built[p] = rec.ToArray();
+            });
+            for (var p = 0; p < n; p++)
+            {
+                var id = live[first + p];
+                if (uniformAs[p] >= 0) { index[id] = (uint)uniformAs[p]; uniformCount++; continue; }
+                index[id] = 2u + (uint)pool.Count;
+                pool.AddRange(built[p]);
             }
+            refinedCells += sliceRefined;
             if (first / LightletSlice % 32 == 0)
                 Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                     $"[VulkanSponza] lightlets: {100.0 * (first + n) / live.Length:0}% ({clock.Elapsed.TotalMinutes:0.0} min)."));
