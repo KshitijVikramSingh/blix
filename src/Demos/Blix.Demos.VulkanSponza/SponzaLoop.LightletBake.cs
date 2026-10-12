@@ -74,17 +74,20 @@ internal sealed partial class SponzaLoop
         return new Vector4(fi, fj, 1f, render.LightletTau);
     }
 
-    private string LightletPathFor(string bakePath, float north) =>
-        bakePath + string.Create(CultureInfo.InvariantCulture,
+    // Keyed by the transport cache's key (the scene, the lightmap, the texel layout the records index) and the band --
+    // not by a solved sun's light bake: the records are the band's, the same for every sun in it. (Hung off the light
+    // bake's path, each solved sun baked and stored its own copy.)
+    private string LightletPathFor(string transportKey, float north) =>
+        Path.ChangeExtension(TransportCachePath(transportKey), ".lightlets") + string.Create(CultureInfo.InvariantCulture,
             $".sun-v{LightletVersion}-{BandLatitude:0}n{Obliquity + 5f:0.0}d{RecordHourSpan:0}h{RecordNodesHour}x{RecordNodesDec}-north{north * 180f / MathF.PI:0.00}");
 
     // UploadTexels, with --lightlets: the records from their file, or a bake once the tracer is there.
     private void BeginLightlets(Vector4[] texels, uint[] live, int count, string? bakePath)
     {
-        if (!lightletsAsked || bakePath is null) return;
+        if (!lightletsAsked || lightBakeKey is null) return;
         var north = BandNorth(out _);
         lightletNorth = north;
-        var path = LightletPathFor(bakePath, north);
+        var path = LightletPathFor(lightBakeKey, north);
         if (ReadLightlets(path, count) is { } read)
         {
             UploadLightlets(read, "read from the cache");
