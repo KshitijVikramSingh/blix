@@ -394,6 +394,7 @@ internal sealed partial class SponzaLoop
         if (lastFrameStamp != 0)
         {
             var periodMs = System.Diagnostics.Stopwatch.GetElapsedTime(lastFrameStamp, stamp).TotalMilliseconds;
+            RecordSettlePeriod(periodMs);
             // Smoothed for the overlay only — the A/B buckets below keep the raw period, because a
             // distribution is the whole point of that instrument and a filter would flatten it.
             lastFramePeriodMs = lastFramePeriodMs > 0.0
@@ -735,7 +736,7 @@ internal sealed partial class SponzaLoop
 
         // Occlusion needs the pre-pass's depth; without one the early list is the whole frustum's.
         var skipPrepass = noPrepass || (abMode == "prepass" && AbOffPhase);
-        var occlusionNow = occlusionCull && !skipPrepass;
+        var occlusionNow = occlusionCull && render.OcclusionCull && !skipPrepass;
         CullList(SceneListCamera, cameraCull, margin: CameraCullMargin, occlusionEarly: occlusionNow);
         cameraTriangles = gpuCull ? -1 : fillIndirectTriangles;
         // Accumulate exactly one contiguous orbit so triangle means cover the full closed path and
@@ -934,6 +935,7 @@ internal sealed partial class SponzaLoop
         // readback targets. Deadlines use post-load frames and require a useful timing sample set.
         var measuredFrames = postLoadFrames;
         SampleStability();
+        SampleSettle();
         WriteWalkDumps();
         WriteLevelProbeDumps();
         SampleWatch();

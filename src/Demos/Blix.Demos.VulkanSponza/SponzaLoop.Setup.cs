@@ -164,6 +164,8 @@ internal sealed partial class SponzaLoop
         lightletCensus = args.Flag("lightlet-census");
         lightletRecord = args.Flag("lightlet-record");
         rayLeakCensus = args.Flag("ray-leak-census");
+        if (args.Flag("settle-log")) settleLogEvery = Math.Max(1, args.Int("settle-every") ?? 60);
+        if (args.String("settle-dir") is { } settleAt) { settleDir = settleAt; Directory.CreateDirectory(settleAt); }
         lightletsAsked = args.Flag("lightlets");
         // --lightlets-then-exit: close as asked once the sun records are baked and up (a scripted bake).
         lightletsThenExit = args.Flag("lightlets-then-exit");

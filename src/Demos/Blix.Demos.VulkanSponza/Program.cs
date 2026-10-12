@@ -1091,6 +1091,9 @@ internal sealed class RenderSettings
     // 2x2 (a different one each frame, TAA gathering all four), brought back to full resolution along the depth and
     // normals (lighting_upsample.frag). Off: both at full resolution, the reference.
     [Tune]             public bool HalfResLighting = true;
+    // Two-phase occlusion culling of the camera's opaque placements (scene_occlusion.comp; --no-occlusion turns it off
+    // for the whole run). Off: the frustum alone decides -- the reference, for geometry that breaks up and comes back.
+    [Tune]             public bool OcclusionCull = true;
     // --lightlets: the traced shadows take the baked sun records' answer (SponzaLoop.LightletBake) where a pixel's four
     // atlas texels all answer and agree, and trace only the rest. Off: every pixel traces (the reference).
     [Tune]             public bool LightletSun = false;
