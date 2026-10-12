@@ -17,6 +17,14 @@ public sealed partial class VulkanGraphicsDevice
     // CurrentFrameSlot during OnRender; the bind path reads from the
     // matching slot automatically.
     public int MaxFramesInFlightCount => MaxFramesInFlight;
+    /// <summary>Each frame's GPU work starts after the previous frame's has ended (on the frame timeline). On by
+    /// default: a frame an external pass splits into several submissions would otherwise overlap the next one's start
+    /// on the graph's shared targets. Off only for the A/B.</summary>
+    public bool ChainFrames { get; set; } = true;
+    /// <summary>A memory barrier before every graphics pass (writes before it visible to its reads). On by default;
+    /// off only for the A/B (--no-pass-barriers).</summary>
+    public bool ExplicitPassBarriers { get; set; } = true;
+    private ulong previousFrameEnd;
     public int CurrentFrameSlot => currentFrame;
 
     // Present mode: true → FIFO (vsync, no tearing, capped at the display
@@ -886,8 +894,13 @@ public sealed partial class VulkanGraphicsDevice
         ThrowIfNotSuccess(Vk.BeginCommandBuffer(f.CommandBuffer, in beginInfo), "vkBeginCommandBuffer");
         // The buffer being recorded: the frame's own, or the continuation an external pass moved it to.
         var cmd = f.CommandBuffer;
-        // A frame timeline value the next submission waits for: an external pass's signal.
-        ulong timelineWait = 0;
+        // A frame timeline value the next submission waits for: an external pass's signal -- and, first, the previous
+        // frame's end. A frame split by an external pass is several submissions, the later ones waiting on Metal; the
+        // next frame's first submission must not start beside them, because both read and write the graph's targets
+        // (one copy each, not one per frame slot): the next pre-pass clearing the depth the last frame's tail still
+        // reduces. Unchained, the occlusion pyramid was measured reduced from the other frame's levels -- visible
+        // placements culled, the tears (--occlusion-audit).
+        ulong timelineWait = ChainFrames ? previousFrameEnd : 0;
         // External passes whose work a later join waits for, by pass name: their signals.
         Dictionary<string, ulong>? pendingJoins = null;
 
@@ -1098,6 +1111,25 @@ public sealed partial class VulkanGraphicsDevice
             currentPassName = pass.Name;
             CountPass(pass.Name);
 
+            // What earlier passes wrote, made visible to this one's shader reads, as an explicit barrier and not only
+            // the render pass's external subpass dependency. Measured on MoltenVK 1.4.1 (argument buffers on): the
+            // dependency alone left a pass sampling the previous pass's target before its tiles were stored -- the
+            // occlusion pyramid reduced from a half-written or last frame's level (--occlusion-audit), visible
+            // placements culled, the tears.
+            if (ExplicitPassBarriers)
+            {
+                var visible = new MemoryBarrier
+                {
+                    SType = StructureType.MemoryBarrier,
+                    SrcAccessMask = AccessFlags.ColorAttachmentWriteBit | AccessFlags.DepthStencilAttachmentWriteBit | AccessFlags.ShaderWriteBit,
+                    DstAccessMask = AccessFlags.ShaderReadBit | AccessFlags.InputAttachmentReadBit | AccessFlags.ColorAttachmentReadBit | AccessFlags.DepthStencilAttachmentReadBit,
+                };
+                Vk.CmdPipelineBarrier(cmd,
+                    PipelineStageFlags.ColorAttachmentOutputBit | PipelineStageFlags.LateFragmentTestsBit | PipelineStageFlags.EarlyFragmentTestsBit | PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.FragmentShaderBit,
+                    PipelineStageFlags.VertexShaderBit | PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.EarlyFragmentTestsBit | PipelineStageFlags.ColorAttachmentOutputBit,
+                    0, 1, &visible, 0, null, 0, null);
+            }
+
             Vk.CmdBeginRenderPass(cmd, in rpBegin, SubpassContents.Inline);
             // Timestamps INSIDE the pass — MoltenVK resolves counter samplers
             // at draw boundaries; ColorAttachmentOutputBit pairs naturally.
@@ -1158,7 +1190,9 @@ public sealed partial class VulkanGraphicsDevice
         // A join that never came still holds the frame: its fence must mean the Metal work is done too.
         if (pendingJoins is not null) foreach (var value in pendingJoins.Values) timelineWait = Math.Max(timelineWait, value);
         var renderDone = perImageRenderFinished[imageIndex];
-        SubmitFrameBatch(cmd, ref isolationFirstSubmit, ref timelineWait, f.ImageAvailable, signalTimeline: 0, renderDone, f.InFlight, "vkQueueSubmit");
+        var frameEnd = ChainFrames && frameTimeline.Handle != 0 ? ++frameTimelineValue : 0;
+        SubmitFrameBatch(cmd, ref isolationFirstSubmit, ref timelineWait, f.ImageAvailable, signalTimeline: frameEnd, renderDone, f.InFlight, "vkQueueSubmit");
+        if (frameEnd != 0) previousFrameEnd = frameEnd;
 
         var swapchain = Swapchain;
         var present = new PresentInfoKHR

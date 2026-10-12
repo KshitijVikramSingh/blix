@@ -936,6 +936,7 @@ internal sealed partial class SponzaLoop
         var measuredFrames = postLoadFrames;
         SampleStability();
         SampleSettle();
+        AuditOcclusion();
         WriteWalkDumps();
         WriteLevelProbeDumps();
         SampleWatch();

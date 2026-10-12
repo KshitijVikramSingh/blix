@@ -164,6 +164,7 @@ internal sealed partial class SponzaLoop
         lightletCensus = args.Flag("lightlet-census");
         lightletRecord = args.Flag("lightlet-record");
         rayLeakCensus = args.Flag("ray-leak-census");
+        if (args.Flag("occlusion-audit")) occlusionAuditEvery = Math.Max(1, args.Int("occlusion-audit-every") ?? 30);
         if (args.Flag("settle-log")) settleLogEvery = Math.Max(1, args.Int("settle-every") ?? 60);
         if (args.String("settle-dir") is { } settleAt) { settleDir = settleAt; Directory.CreateDirectory(settleAt); }
         lightletsAsked = args.Flag("lightlets");
@@ -174,6 +175,9 @@ internal sealed partial class SponzaLoop
         // from the command line here).
         if (args.Flag("lightlet-sun")) { render.LightletSun = true; lightletsAsked = true; }
         metalDeviceQueue = args.Flag("metal-device-queue");
+        // --no-frame-chain: frames may overlap on the GPU again (the A/B for VulkanGraphicsDevice.ChainFrames).
+        if (args.Flag("no-frame-chain") && device is Blix.Graphics.Vulkan.VulkanGraphicsDevice vulkan) vulkan.ChainFrames = false;
+        if (args.Flag("no-pass-barriers") && device is Blix.Graphics.Vulkan.VulkanGraphicsDevice vk2) vk2.ExplicitPassBarriers = false;
         // --rt-no-overlap: no join, so the frame waits for the trace right after it (the overlap's control).
         rtNoOverlap = args.Flag("rt-no-overlap");
         // --rt-isolated: nothing but the trace lights the frame, sky included: no incident field (SponzaLoop.RtShadows).
