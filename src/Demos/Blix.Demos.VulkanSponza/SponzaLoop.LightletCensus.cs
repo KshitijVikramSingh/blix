@@ -27,6 +27,9 @@ internal sealed partial class SponzaLoop
     // The rings around each sun the census tests (degrees).
     private static readonly float[] Rings = { 0.25f, 0.5f, 1f, 2f, 4f };
 
+    // The scene's own sun, before --sun or a sweep turned it (null until the scene is loaded).
+    private Vector3? authoredSunDirection;
+
     private static Vector3 SunLocal(float latitudeDeg, float declinationDeg, float hourDeg)
     {
         float r(float d) => d * MathF.PI / 180f;
@@ -48,7 +51,7 @@ internal sealed partial class SponzaLoop
     // turned so that sun's azimuth lands on the authored one.
     private float BandNorth(out float authoredHour)
     {
-        var authored = -Vector3.Normalize(sunDirection);
+        var authored = -Vector3.Normalize(authoredSunDirection ?? sunDirection);
         var elev = MathF.Asin(Math.Clamp(authored.Y, -1f, 1f));
         float rad(float d) => d * MathF.PI / 180f;
         var cosH = (MathF.Sin(elev) - MathF.Sin(rad(AuthoredLatitude)) * MathF.Sin(rad(Obliquity)))

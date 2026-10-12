@@ -384,6 +384,7 @@ internal sealed partial class SponzaLoop
     // light and bump the texels' epoch. A sun that keeps moving is chased one solve at a time.
     private void FollowSun()
     {
+        StepSunSweep();
         if (sunChange is { } change && postLoadFrames == change.Frame)
         {
             sunYaw = change.Degrees.X * MathF.PI / 180f;

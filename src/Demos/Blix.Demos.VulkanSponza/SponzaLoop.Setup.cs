@@ -156,6 +156,7 @@ internal sealed partial class SponzaLoop
         lightletsAsked = args.Flag("lightlets");
         // --lightlets-then-exit: close as asked once the sun records are baked and up (a scripted bake).
         lightletsThenExit = args.Flag("lightlets-then-exit");
+        ReadSunSweepArgs(args);
         if (lightletsThenExit) lightletsAsked = true;
         // --lightlet-sun: RenderSettings.LightletSun on from the start (the overlay's toggle; [Tune] fields are not read
         // from the command line here).
@@ -354,6 +355,8 @@ internal sealed partial class SponzaLoop
         }
         LoadIbl(assetsRoot);
         sceneAssetsRoot = assetsRoot;
+        // The band's north is set from this sun (BandNorth), whatever --sun or a sweep turns it to.
+        authoredSunDirection = sunDirection;
         // --sun yaw,pitch (degrees; pitch negative, below the horizon of travel): a fixed sun for a measurement -- the
         // transport spike's sun sweep holds one cook against the path trace at several angles (stage 5a).
         if (sunOverrideDegrees is { } sunDeg)
