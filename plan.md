@@ -6,6 +6,104 @@ its history in git.
 
 ---
 
+## The stack, defined (assessment 2026-10-12) -- the user's call on the decisions marked DECIDE
+
+**Why.** The renderer is convincing, but it is a buffet: 222 flags (5 of them the stack the user runs; 21 alternative
+or legacy paths, 50 A/B arms, 70 diagnostics, 63 knobs, 13 dead), 26 overlay toggles, 41 C# files (15.5 k lines),
+61 shaders (6.8 k; lit.frag alone has 47 optional-technique branches). Techniques overlap, settled experiments stayed
+selectable, and caches grew by accretion. This section defines what the stack IS, so everything else can be cut,
+moved to cook time, compressed, or optimised around it.
+
+**Measured, today's defaults** (Sponza, 2880x1620, full-res lighting, LOD 0, still camera, no vsync, M4):
+frame 109.1 ms median (p95 115); the RT shadow trace alone 43.7 ms on Metal (4.67 M rays, all traced -- see bug 1);
+in-frame probe batches 0.4 ms; the frame before the lighting is up 29.4 ms. GPU memory 8.2 GB of 12.1. Boot to a
+settled image ~120 s with every cache warm. Caches 4.9 GB on disk (~2 GB of it stale versions).
+
+### What one pixel is made of today (and where it overlaps)
+
+- Direct sun: Cook-Torrance x the traced mask (Metal, a ray a pixel, sun-disc jitter + TAA for the penumbra). The
+  cascades are still rendered every frame but light nothing in lit.frag; they feed only the texel gather's hit
+  shading and the texel level rule.
+- Indirect diffuse: the incident field = clipmap probes (512 probes x 64 rays re-solved every frame), then the
+  texels blended over them by confidence (atlas texels, hashed texels for what the atlas leaves out). The texels'
+  light is a converged bake per sun gathered from the transport patches. Where the texels answer, the probes' rgb is
+  thrown away; the probes still uniquely give sky visibility, the normal-map gradient, foliage/fallback, glass occlusion.
+- Specular: prefiltered sky x the clipmap's sky visibility x GTAO's specular occlusion. GTAO touches nothing else.
+- Emissive as-is (lamps light nothing yet). Fog forced off under RT shadows. TAA.
+
+### Bugs the survey found (fix first; small)
+
+1. Lightlets are INERT at full res: `LightletUniform` returns zero unless half-res lighting is on
+   (SponzaLoop.LightletBake.cs:66); every pixel traces. Expected win: most of the 43.7 ms trace (records answered ~70%
+   of pixels at half res). Also voids the user's "LightletSun doesn't fix the railing spots" test -- re-test after.
+2. The texel Metal batches sit between rt-shadow-trace and its join: while texels gather or bake they wait for the
+   shadow trace first -- two extra GPU bubbles and the overlap lost (VulkanGraphicsDevice.Swapchain.cs:939).
+3. Material AO multiplies an irradiance that is ray-gathered and already occluded (lit.frag:614) -- double
+   occlusion; GTAO was taken off that term for the same reason, the AO texture was not.
+4. The boot solves the patches three times (full, sun-only, sky-only -- the last two diagnostic): ~16 s of 24.
+5. A first boot (cooking) renders differently from a cached boot: Cornell 5.5% of pixels off by >8/255, smooth
+   wall-wide. One of them is wrong; hold both against the GPU reference.
+6. Lightlet records are keyed under the sun-specific light bake, so every solved sun re-bakes and stores a copy of
+   what is sun-band geometry. ~2 GB of stale caches (lightlet v1/v2, old light bakes) never cleaned.
+7. The railing black spots (Sponza): not yet attributed -- after bug 1, toggle the records; then --texel-inspect.
+
+### Proposal: the stack (one answer per pixel, chosen by what the surface is)
+
+| Term | Static, atlas surface | No atlas (foliage, small) | Moved / near a mover |
+|---|---|---|---|
+| Direct sun visibility | lightlet record; trace only the uncertain | trace | trace |
+| Indirect diffuse | atlas texel (baked per sun) | hashed texel, else clipmap | clipmap (later screen probes) |
+| Sky visibility, specular occlusion | clipmap .a x GTAO spec | same | same |
+| Bounce source | transport patches (cook) re-solved per sun (seconds) | same | -- |
+
+Keep: GPU cull + two-phase occlusion; LOD with lighting fixed so LOD 0 is not required; full-res direct; TAA; the
+Metal tracer as the only frame tracer; the generic `--ab` mechanism; the GPU reference and the audits (as tools).
+
+Cut (with their flags, passes, shader branches): half-res lighting (lighting_upsample, incident-half; rejected for
+blockiness); screen probes and their ~12 knobs; surface probes; the CPU cooked-transport spike; the probe
+lift/bias/relocate experiments; MSAA paths; the inline/software frame traversal (keep the CPU ray scene only as
+the leak-census/reference judge, built lazily); the 13 dead flags; A/B arms whose decision is settled (~40 of 50).
+Cascades: out of the frame once the texel gather's hits take their sun from the records (atlas hits) or a ray.
+
+DECIDE (a): texels as THE indirect for static surfaces (today's working, sun-change-correct path) -- or keep the
+earlier direction (fitted transfer replacing texel light; plan below, "Retire, the user's call"). Recommendation:
+texels; park the transfer fit. They look right, they follow the sun, the format work below makes them cheap.
+DECIDE (b): the sun model. Today: re-solve patches + re-bake every texel per sun at runtime (Cornell 6 s, Sponza
+~6 min, saved per sun). Alternative in the lightlets spirit: bake the texels' light at the band's nodes at cook time
+(a few suns, compressed as a small per-texel basis) and interpolate -- a sun change becomes a lookup.
+DECIDE (c): the budget. Proposed: 33 ms (30 fps) at 2880x1620 on the M4, full-res direct, sun moving; 4 GB GPU.
+
+### Move between runtime and cook time
+
+- To the cook (`.blixlightmap` v2 + a `.blixtransport`): the atlas texel records and index map (today rasterised
+  22 s every boot, 256 MB GPU), the buried flags, the patch couplings / sky bins / sunlets (sun-independent; today
+  keyed with the texel settings and every file's mtime, so any re-cook drops 1.3 GB), the lightlet records keyed by
+  scene + band. Then the boot needs no bake scene (44 s CPU + 1.3 GB, every boot today) and no CPU ray scene.
+- Stay at runtime: the Metal BVH (2 s), the per-sun patch solve (seconds), the per-sun texel light (DECIDE b).
+
+### Compress, or deliberately lose detail
+
+- Texel light on the GPU: float4 per record -> RGB9E5 (16 B -> 4 B); the moment/blend/open/prior buffers live only
+  while baking (~1.9 GB -> ~0.1 GB at rest).
+- Index map: 8192^2 u32 (256 MB) -> per-chart offsets or a tiled indirection.
+- Transport couplings: int32 + float32 -> delta-coded ids + half weights (533 MB -> ~200); sunlet pos/nrm/albedo ->
+  quantised + oct16 + unorm8.
+- Lightlet index: u32 per texel, dead ones included -> live only, uniform states in 2 bits.
+- Sky probe RGBA16F -> BC6H. `.blixlightmap` LOD chains that duplicate the mesh's -> referenced.
+- Deliberate: texel light at 8 cm where the light is smooth (a level rule by gradient), records' tau tuned against
+  the measured wrong-rate; clipmap budget dropped once the texels are settled (its rgb is thrown away).
+
+### Order
+
+0. Bugs 1-4 and 6 (days). Re-measure; re-test the black spots.
+1. Define: this table becomes `docs/` (the stack) and code. Cut the list above; split diagnostics out of the
+   frame files into a tools layer; lit.frag to one path + a separate debug-view include.
+2. Cook: `.blixlightmap` v2, `.blixtransport`, lightlets by band; no bake scene or CPU ray scene at boot.
+3. Compress: the GPU formats above. Target 4 GB.
+4. Optimise to the budget: bubbles at the Metal hand-offs, the clipmap budget, then whatever the profile says.
+
+---
+
 ## The arc now: geometry and lighting for huge, dynamic worlds
 
 **Why.** Not speed, as first thought: timed warm on the orbit (`--ab <term>`, 1500 frames), Bistro's frame
