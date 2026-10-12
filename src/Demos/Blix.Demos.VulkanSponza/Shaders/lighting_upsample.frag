@@ -45,7 +45,7 @@ layout(set = 0, binding = 4) uniform sampler2D uPrepassNormal;
 // The half-res traced mask (SponzaLoop.RtShadows): width, height, 1 while live (0 for the placeholder: no traced
 // shadows, the lit pass asks the cascades and reads no w), 1 with sky rays; then a word per half-res pixel.
 layout(std430, set = 0, binding = 5) readonly buffer RtShadowMask { uvec4 rtShadowHeader; uint rtShadowWords[]; };
-// Lightlets (rt_shadow_rays.comp): per half-res pixel 0 lit, 1 shadowed by the baked sun records, 2 traced (the mask).
+// Lightlets (rt_shadow_rays.comp): per half-res pixel 0 lit, 1 shadowed by the baked sun records, 2 and up traced (the mask; 2 uncertain, 3 no atlas texel, 4 its texel missing or buried).
 layout(std430, set = 0, binding = 6) readonly buffer RtShadowBaked { uint rtShadowBaked[]; };
 
 vec3 worldAt(ivec2 pixel, float raw, vec2 fullSize) {

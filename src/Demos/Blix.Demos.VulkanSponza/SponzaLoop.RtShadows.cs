@@ -300,10 +300,11 @@ internal sealed partial class SponzaLoop
         {
             // What the lightlets answered (rt_shadow_rays.comp): baked lit, baked shadowed, traced.
             var baked = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(rtShadowBaked[device.CurrentFrameSlot], 0, (int)rays * 4).AsSpan());
-            long lit = 0, shadowed = 0;
-            foreach (var b in baked) { if (b == 0u) lit++; else if (b == 1u) shadowed++; }
+            var by = new long[5];
+            foreach (var b in baked) by[Math.Min(b, 4u)]++;
+            double Pc(long v) => 100.0 * v / rays;
             Console.WriteLine(string.Create(Inv,
-                $"[VulkanSponza] lightlets, last frame: baked lit {100.0 * lit / rays:0.0}%, baked shadowed {100.0 * shadowed / rays:0.0}%, traced {100.0 * (rays - lit - shadowed) / rays:0.0}% of {rays:N0} pixels (sun records {(render.LightletSun && lightlets is not null ? "on" : "off")})."));
+                $"[VulkanSponza] lightlets, last frame: baked lit {Pc(by[0]):0.0}%, baked shadowed {Pc(by[1]):0.0}%; traced {Pc(by[2] + by[3] + by[4]):0.0}% -- uncertain {Pc(by[2]):0.0}%, no atlas texel {Pc(by[3]):0.0}%, texel missing or buried {Pc(by[4]):0.0}% -- of {rays:N0} pixels (sun records {(render.LightletSun && lightlets is not null ? "on" : "off")})."));
         }
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] rt shadows, last frame's mask: sun blocked at {100.0 * blocked / rays:0.0}% of pixels, reaching {100.0 * (rays - blocked) / rays:0.0}%{(RtSkyRays ? string.Create(Inv, $"; sky rays blocked at {100.0 * skyBlocked / rays:0.0}%") : "")}."));
