@@ -30,6 +30,7 @@ layout(set = 0, binding = 0) uniform RtShadowRays {
     vec4 uLightlet;      // the sun records (SponzaLoop.LightletBake, RenderSettings.LightletSun): xy the sun in the band's fine
                          // node coordinates, z 1 when they answer, w tau (degrees): a record under it is not certain
     vec4 uLightmap;      // the atlas (texel.glsl): x 1 when on, yz its size
+    vec4 uCompact;       // x 1: the traced rays packed (below); y which of the two counters is this frame's
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -48,6 +49,14 @@ layout(std430, set = 0, binding = 8) readonly buffer LightmapIndexMap { uint lig
 layout(std430, set = 0, binding = 9) readonly buffer Texels { vec4 texels[]; };
 layout(std430, set = 0, binding = 10) readonly buffer LightletIndex { uint lightletIndex[]; };
 layout(std430, set = 0, binding = 11) readonly buffer LightletPool { uint lightletPool[]; };
+// uCompact.x: the rays that trace, packed -- origin, direction, and the pixel each answers -- counted into
+// counters[uCompact.y] (the other zeroed for the slot's next frame). The Metal pass traces only the packed ones, each
+// SIMD group full (one thread a pixel spread the traced over every group: 27.5% traced cost what 100% did), and
+// writes their words; this pass writes every other pixel's word itself (no ray: lit; a record's shadow: 1).
+layout(std430, set = 0, binding = 12) writeonly buffer RtShadowPacked { vec4 packedRays[]; };
+layout(std430, set = 0, binding = 13) writeonly buffer RtShadowPixelOf { uint pixelOf[]; };
+layout(std430, set = 0, binding = 14) buffer RtShadowCounters { uint counters[]; };
+layout(std430, set = 0, binding = 15) writeonly buffer RtShadowMaskWords { uvec4 maskHeader; uint maskWords[]; };
 #define TEXEL_INDEX_MAP(i) lightmapIndexMap[i]
 #define TEXEL_HASH(i) uvec4(0u)
 #define TEXEL_POSITION(i) texels[2 * (i)]
@@ -104,6 +113,10 @@ void main() {
     uvec2 p = gl_GlobalInvocationID.xy;
     if (p.x >= uint(u.uSize.x) || p.y >= uint(u.uSize.y)) return;
     uint index = p.y * uint(u.uSize.x) + p.x;
+    bool packing = u.uCompact.x > 0.5;
+    // The header's z back to 1 (traced; rt_shadow_filter.comp sets 2 when it filters this frame's mask).
+    if (index == 0u) maskHeader.z = 1u;
+    if (packing && index == 0u) counters[1u - uint(u.uCompact.y)] = 0u;
     // The full-res pixel this ray starts from.
     ivec2 fullSize = textureSize(uSceneDepth, 0);
     ivec2 q = u.uHalf.x > 0.5 ? min(ivec2(p) * 2 + ivec2(u.uHalf.yz), fullSize - 1) : ivec2(p);
@@ -113,6 +126,7 @@ void main() {
     if (raw >= 1.0 - 1e-6 || dot(nSample.xyz, nSample.xyz) < 1e-6) {
         origins[index] = vec4(0.0);
         baked[index] = 3u;
+        if (packing) maskWords[index] = 0u;
         if (sky) skyRays[index * 2u] = vec4(0.0);
         return;
     }
@@ -129,6 +143,7 @@ void main() {
     // Answered: no ray, and the answer rides the reach (blix_shadow: 0 answered lit, < 0 answered shadowed), so the mask
     // every reader takes -- lit.frag at full res, lighting_upsample at half -- holds it with the traced pixels'.
     origins[index] = vec4(origin, answer >= 2u ? u.uSun.w : answer == 1u ? -1.0 : 0.0);
+    vec3 rayDir = u.uSun.xyz;
     if (u.uDisc.x > 0.0) {
         // The frame's point of a low-discrepancy sequence over the disc (R2), shifted per pixel by a hash (Cranley-
         // Patterson): neighbours sample different parts of the disc, and a pixel covers all of it over frames.
@@ -141,7 +156,16 @@ void main() {
         vec3 b = cross(s, t);
         float r = u.uDisc.x * sqrt(xi.x);
         float phi = 6.28318530718 * xi.y;
-        directions[index] = vec4(normalize(s + (t * cos(phi) + b * sin(phi)) * r), 0.0);
+        rayDir = normalize(s + (t * cos(phi) + b * sin(phi)) * r);
+        directions[index] = vec4(rayDir, 0.0);
+    }
+    if (packing) {
+        if (answer >= 2u) {
+            uint slot = atomicAdd(counters[uint(u.uCompact.y)], 1u);
+            packedRays[slot * 2u] = vec4(origin, u.uSun.w);
+            packedRays[slot * 2u + 1u] = vec4(rayDir, 0.0);
+            pixelOf[slot] = index;
+        } else maskWords[index] = answer == 1u ? 1u : 0u;
     }
     if (sky) {
         uint h = hash32(index * 0x9E3779B9u ^ hash32(uint(u.uSky.y)));

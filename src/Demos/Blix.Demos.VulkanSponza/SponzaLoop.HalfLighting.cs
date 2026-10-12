@@ -50,7 +50,7 @@ internal sealed partial class SponzaLoop
             {
                 new("uInvProjection", new Matrix4x4Uniform(invProjection)),
                 new("uInvView", new Matrix4x4Uniform(invView)),
-                new("uHalf", new Vector4Uniform(new Vector4(1f, sub.X, sub.Y, SunDiscTangent))),
+                new("uHalf", new Vector4Uniform(new Vector4(halfShadowsNow ? 1f : 0f, sub.X, sub.Y, SunDiscTangent))),
                 new("uPixel", new Vector4Uniform(new Vector4(pixelAngle, 0f, 0f, 0f))),
             },
             buffers: new[] { new ShaderBufferBinding("RtShadowMask", mask), new ShaderBufferBinding("RtShadowBaked", RtShadowBakedBound) }));

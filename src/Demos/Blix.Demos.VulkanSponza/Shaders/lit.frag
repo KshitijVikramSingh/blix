@@ -121,12 +121,15 @@ layout(std430, set = 1, binding = 13) readonly buffer ClipmapState { uvec4 clipm
 layout(std430, set = 1, binding = 21) readonly buffer RtShadowMask { uvec4 rtShadowHeader; uint rtShadowWords[]; };
 
 float rtSunVisibility(vec2 fragCoord) {
-    // RenderSettings.HalfResLighting: the mask is half-res, and lighting_upsample.frag has brought it back to this
+    // RenderSettings.HalfResShadows: the mask is half-res, and lighting_upsample.frag has brought it back to this
     // pixel along the depth and normals, fractional at a shadow's edge, into the gradient's w.
     if (frame.uIncident.w > 0.5) return texelFetch(sampler2D(uIncidentGradient, uLinearClamp), ivec2(fragCoord), 0).w;
     uvec2 px = uvec2(fragCoord);
     if (px.x >= rtShadowHeader.x || px.y >= rtShadowHeader.y) return 0.0;
-    return (rtShadowWords[px.y * rtShadowHeader.x + px.x] & 1u) != 0u ? 0.0 : 1.0;
+    uint word = rtShadowWords[px.y * rtShadowHeader.x + px.x];
+    // z 2: rt_shadow_filter.comp has written the penumbra's visibility into bits 8-15.
+    if (rtShadowHeader.z == 2u) return float((word >> 8) & 255u) / 255.0;
+    return (word & 1u) != 0u ? 0.0 : 1.0;
 }
 
 // This frame's traced sky ray at the pixel: 1 where it reached the sky. One cosine-weighted ray a frame, so TAA's

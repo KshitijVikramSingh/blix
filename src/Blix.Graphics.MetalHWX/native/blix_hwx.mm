@@ -117,7 +117,8 @@ bool blix_coverage(uint primitive [[primitive_id]], uint geometry [[geometry_id]
 // flags (in-frame batches): 1 the live count is limit[0] (a wavefront's pass wrote it), the threads past it idle.
 struct Params { uint count; uint seedBase; uint closestOnly; uint flags; };
 
-// flags: 1 the live count is limit[0], as Params'; 2 each ray's own direction (directions[i].xyz), not `direction`.
+// flags: 1 the live count is limit[0], as Params'; 2 each ray's own direction (directions[i].xyz), not `direction`;
+// 4 packed: ray i is origins[2i] (origin, tMax) and origins[2i + 1] (direction), its answer written to occluded[pixelOf[i]].
 struct ShadowParams { float4 direction; uint count; uint seedBase; uint sky; uint flags; };
 
 // Sun shadows: one ray per origin, every one toward the same direction. An origin is (position, tMax); tMax 0 means
@@ -134,18 +135,20 @@ kernel void blix_shadow(device const float4* origins [[buffer(0)]],
                         device const float4* skyRays [[buffer(5)]],
                         device const uint* limit [[buffer(6)]],
                         device const float4* directions [[buffer(7)]],
+                        device const uint* pixelOf [[buffer(8)]],
                         uint i [[thread_position_in_grid]])
 {
     if (i >= p.count) return;
     if ((p.flags & 1u) != 0u && i >= limit[0]) return;
-    float4 o = origins[i];
+    bool packed = (p.flags & 4u) != 0u;
+    float4 o = packed ? origins[2u * i] : origins[i];
     uint word = 0u;
     intersector<triangle_data, instancing> isect;
     isect.assume_geometry_type(geometry_type::triangle);
     isect.accept_any_intersection(true);
     if (o.w > 0.0f) {
         uint seed = p.seedBase + i;
-        float3 direction = (p.flags & 2u) != 0u ? directions[i].xyz : p.direction.xyz;
+        float3 direction = packed ? origins[2u * i + 1u].xyz : (p.flags & 2u) != 0u ? directions[i].xyz : p.direction.xyz;
         auto res = isect.intersect(ray(o.xyz, direction, 0.0f, o.w), tlas, 0xFFu, table, seed);
         // Occluded, and how far along the ray it met something (the upper 16 bits, a half): with per-ray directions the
         // caller sizes a penumbra from it. Any hit, not the nearest -- an estimate, as a penumbra filter needs.
@@ -161,7 +164,7 @@ kernel void blix_shadow(device const float4* origins [[buffer(0)]],
             if (res.type != intersection_type::none) word |= 2u;
         }
     }
-    occluded[i] = word;
+    occluded[packed ? pixelOf[i] : i] = word;
 }
 
 // ray_check.comp's contract: each ray two float4s (origin, tMin; direction, tMax), its seed seedBase + its index;
@@ -672,7 +675,7 @@ HWX_EXPORT int hwx_trace(HwxContext* ctx, void* rays, void* hits, uint32_t count
 HWX_EXPORT int hwx_encode_shadow(HwxContext* ctx, void* sharedEvent, uint64_t waitValue, uint64_t signalValue,
                                  void* origins, uint64_t originsOffset, void* occluded, uint64_t occludedOffset,
                                  uint32_t count, const float* direction, uint32_t seedBase, void* skyRays, uint32_t alphaTest,
-                                 uint32_t statSlot, void* limit, uint64_t limitOffset, void* directions) {
+                                 uint32_t statSlot, void* limit, uint64_t limitOffset, void* directions, void* pixelOf) {
     @autoreleasepool {
         id<MTLSharedEvent> event = (__bridge id<MTLSharedEvent>)sharedEvent;
         id<MTLBuffer> originBuffer = (__bridge id<MTLBuffer>)origins;
@@ -680,13 +683,15 @@ HWX_EXPORT int hwx_encode_shadow(HwxContext* ctx, void* sharedEvent, uint64_t wa
         id<MTLBuffer> skyBuffer = (__bridge id<MTLBuffer>)skyRays;
         id<MTLBuffer> limitBuffer = (__bridge id<MTLBuffer>)limit;
         id<MTLBuffer> directionBuffer = (__bridge id<MTLBuffer>)directions;
+        id<MTLBuffer> pixelBuffer = (__bridge id<MTLBuffer>)pixelOf;
         id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
         cb.label = @"blix-hwx shadow";
         [cb encodeWaitForEvent:event value:waitValue];
         int result = 0;
         if (!ctx->tlas) result = Fail(ctx, "shadow trace before build");
-        else if (!originBuffer || originBuffer.length < originsOffset + uint64_t(count) * 16) result = Fail(ctx, "the origin buffer is smaller than its count");
+        else if (!originBuffer || originBuffer.length < originsOffset + uint64_t(count) * (pixelBuffer ? 32 : 16)) result = Fail(ctx, "the origin buffer is smaller than its count");
         else if (!occludedBuffer || occludedBuffer.length < occludedOffset + uint64_t(count) * 4) result = Fail(ctx, "the occlusion buffer is smaller than its count");
+        else if (pixelBuffer && (pixelBuffer.length < uint64_t(count) * 4 || skyBuffer)) result = Fail(ctx, "packed rays need a pixel per ray and no sky rays");
         else if (skyBuffer && skyBuffer.length < uint64_t(count) * 32) result = Fail(ctx, "the sky ray buffer is smaller than its count");
         else if (limitBuffer && limitBuffer.length < limitOffset + 4) result = Fail(ctx, "the limit buffer is smaller than its offset");
         else if (directionBuffer && directionBuffer.length < uint64_t(count) * 16) result = Fail(ctx, "the direction buffer is smaller than its count");
@@ -701,12 +706,13 @@ HWX_EXPORT int hwx_encode_shadow(HwxContext* ctx, void* sharedEvent, uint64_t wa
             [enc setIntersectionFunctionTable:alpha ? ctx->shadowAlphaTable : ctx->shadowTable atBufferIndex:3];
             struct { float direction[4]; uint32_t count, seedBase, sky, flags; } params = {
                 {direction[0], direction[1], direction[2], 0.0f}, count, seedBase, skyBuffer ? 1u : 0u,
-                (limitBuffer ? 1u : 0u) | (directionBuffer ? 2u : 0u)};
+                (limitBuffer ? 1u : 0u) | (directionBuffer ? 2u : 0u) | (pixelBuffer ? 4u : 0u)};
             [enc setBytes:&params length:sizeof(params) atIndex:4];
             [enc setBuffer:skyBuffer ? skyBuffer : originBuffer offset:skyBuffer ? 0 : originsOffset atIndex:5];
             // Unread without their flags; bound anyway, as every argument must be.
             [enc setBuffer:limitBuffer ? limitBuffer : originBuffer offset:limitBuffer ? limitOffset : originsOffset atIndex:6];
             [enc setBuffer:directionBuffer ? directionBuffer : originBuffer offset:directionBuffer ? 0 : originsOffset atIndex:7];
+            [enc setBuffer:pixelBuffer ? pixelBuffer : originBuffer offset:pixelBuffer ? 0 : originsOffset atIndex:8];
             // Reached only through the top level and the function table, so not resident unless named here.
             [enc useResources:ctx->blas.data() count:ctx->blas.size() usage:MTLResourceUsageRead];
             id<MTLResource> tableBuffers[] = {ctx->primRows, ctx->entryRows, ctx->instances, ctx->triangles, ctx->owners, ctx->surfaces,

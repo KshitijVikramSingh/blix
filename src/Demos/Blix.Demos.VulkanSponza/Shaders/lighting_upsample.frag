@@ -33,7 +33,7 @@ layout(location = 1) out vec4 outIncidentGradient;
 layout(set = 0, binding = 0) uniform LightingUpsample {
     mat4 uInvProjection;   // the jittered projection the pre-pass drew with, inverted
     mat4 uInvView;
-    vec4 uHalf;            // yz: the full-res pixel of its 2x2 this frame's half-res samples stand for; w the tangent of
+    vec4 uHalf;            // x 1: the shadows are half-res too (carry the mask); yz: the full-res pixel of its 2x2 this frame's half-res samples stand for; w the tangent of
                            // the sun's angular radius (0: a point sun, no penumbra filter)
     vec4 uPixel;           // x a full-res pixel's angular size (radians at the centre of the view)
 } u;
@@ -57,7 +57,9 @@ vec3 worldAt(ivec2 pixel, float raw, vec2 fullSize) {
 // x 1 where this frame's ray from half-res pixel h reached the sun; y how far it went before something blocked it (0
 // where it reached). Not live yet (a size of zero): the sun is off, as lit.frag has it.
 vec2 sunAt(ivec2 h) {
-    if (rtShadowHeader.z == 0u) return vec2(1.0, 0.0);
+    // uHalf.x 0: the shadows are traced at full resolution (RenderSettings.HalfResShadows off) and lit.frag reads the
+    // mask itself; nothing to carry here.
+    if (u.uHalf.x < 0.5 || rtShadowHeader.z == 0u) return vec2(1.0, 0.0);
     if (uint(h.x) >= rtShadowHeader.x || uint(h.y) >= rtShadowHeader.y) return vec2(0.0);
     uint baked = rtShadowBaked[uint(h.y) * rtShadowHeader.x + uint(h.x)];
     if (baked < 2u) return vec2(baked == 0u ? 1.0 : 0.0, 0.0);

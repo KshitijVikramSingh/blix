@@ -63,7 +63,6 @@ internal sealed partial class SponzaLoop
         // The incident-light field ships on. --no-incident is a diagnostic: the lit pass then uses the open-sky
         // irradiance cube with sky visibility 1, no clipmap light at all.
         if (args.Flag("no-incident")) incidentField = false;
-        if (args.Flag("incident")) incidentField = true;
         if (args.Flag("no-prepass")) noPrepass = true;
         if (args.String("probe") is { } probe) probeName = probe;
         // Zero isolates sky-fed transport from the direct-sun source for probe censuses.
@@ -86,11 +85,8 @@ internal sealed partial class SponzaLoop
         }
         if (args.Float("foliage-lod") is { } fl) FoliageLodMargin = MathF.Max(0.1f, fl);
         if (args.Float("shadow-lod") is { } sl) shadowLodTexels = MathF.Max(0.1f, sl);
-        if (args.Flag("sky-no-sample")) skipSkySample = true;
         // Standard rendering takes the clipmap's sky visibility and light through the incident field. --no-sky
-        // turns both off in the lit pass (visibility 1, no incident light); --sky remains a compatibility no-op for
-        // existing invocations.
-        args.Flag("sky");
+        // turns both off in the lit pass (visibility 1, no incident light).
         skyVisibilityEnabled = !args.Flag("no-sky");
         if (skyVisibilityEnabled)
         {
@@ -98,10 +94,8 @@ internal sealed partial class SponzaLoop
             // transport strength remains one so material albedo is not silently reinterpreted.
             render.Exposure = 1.0f;
         }
-        if (args.Flag("no-mask")) forceOpaqueMask = true;
         // The A/B for the single-sample canopy: hashed stochastic cutout against the plain binary
         // one. Re-cooks nothing and rebuilds nothing — it changes one number in the material.
-        if (args.Flag("no-hashed-alpha")) hashedAlpha = false;
         if (args.Flag("msaa1")) MsaaSamples = 1;
         if (args.Flag("msaa2")) MsaaSamples = 2;
         // Present so the sample count can be swept from the command line in BOTH directions. Without
@@ -121,23 +115,14 @@ internal sealed partial class SponzaLoop
         // GPU isolation submits and waits per pass. It attributes real tile execution but removes
         // overlap, so isolated pass times are not additive components of the normal frame.
         if (args.Flag("gpu-isolate")) host.Timing.IsolatePasses = true;
-        if (args.Flag("no-caster-cull")) shadowCasterCull = false;
-        // A transfer capture (--transfer-dump) brings it: its truth takes the sun by rays, and gather rays landing off the
-        // view would read it from cascades whose casters were culled (Sponza: gathered energy 2.37x the traced, 1.02x
-        // with it).
-        offscreenShadowRays = args.Flag("offscreen-shadow-rays") || args.String("transfer-dump") is not null;
+        offscreenShadowRays = args.Flag("offscreen-shadow-rays");
         if (args.Flag("no-foliage")) noFoliage = true;
-        // --flatten: bake every placement into its own primitive, placed once at identity: the pre-
-        // instancing shape through the same draw path, so an A/B isolates instancing alone.
-        flatten = args.Flag("flatten");
         // --cpu-cull: build the indirect records and visible lists on the CPU, the way 1a did, for an A/B
         // against the GPU cull (scene_cull.comp) that is otherwise the default.
         gpuCull = !args.Flag("cpu-cull");
         // --lit-flat: the lit pass shades opaque geometry with flat.frag, everything else unchanged (same lit.vert,
         // culling, pre-pass and LOD). What a cost does under it is the part that is not material shading.
         litFlat = args.Flag("lit-flat");
-        // --ray-scene: a no-op now. The ray scene is always built, because the clipmap traces it.
-        _ = args.Flag("ray-scene");
         // --ray-check: also trace a fixed batch of rays on the GPU every frame and hold them against the CPU at the shot.
         rayCheck = args.Flag("ray-check");
         if (args.String("ray-bench") is { } bench)
@@ -164,6 +149,7 @@ internal sealed partial class SponzaLoop
         lightletCensus = args.Flag("lightlet-census");
         lightletRecord = args.Flag("lightlet-record");
         rayLeakCensus = args.Flag("ray-leak-census");
+        memoryReport = args.Flag("memory-report");
         if (args.Flag("occlusion-audit")) occlusionAuditEvery = Math.Max(1, args.Int("occlusion-audit-every") ?? 30);
         if (args.Flag("settle-log")) settleLogEvery = Math.Max(1, args.Int("settle-every") ?? 60);
         if (args.String("settle-dir") is { } settleAt) { settleDir = settleAt; Directory.CreateDirectory(settleAt); }
@@ -174,12 +160,16 @@ internal sealed partial class SponzaLoop
         // --lightlet-sun: RenderSettings.LightletSun on from the start (the overlay's toggle; [Tune] fields are not read
         // from the command line here).
         if (args.Flag("lightlet-sun")) { render.LightletSun = true; lightletsAsked = true; }
+        // RenderSettings.HalfResLighting / HalfResShadows from the command line, for scripted runs.
+        if (args.Flag("full-res-lighting")) render.HalfResLighting = false;
+        if (args.Flag("half-res-shadows")) render.HalfResShadows = true;
         metalDeviceQueue = args.Flag("metal-device-queue");
         // --no-frame-chain: frames may overlap on the GPU again (the A/B for VulkanGraphicsDevice.ChainFrames).
         if (args.Flag("no-frame-chain") && device is Blix.Graphics.Vulkan.VulkanGraphicsDevice vulkan) vulkan.ChainFrames = false;
         if (args.Flag("no-pass-barriers") && device is Blix.Graphics.Vulkan.VulkanGraphicsDevice vk2) vk2.ExplicitPassBarriers = false;
         // --rt-no-overlap: no join, so the frame waits for the trace right after it (the overlap's control).
         rtNoOverlap = args.Flag("rt-no-overlap");
+        rtNoPack = args.Flag("no-rt-pack");
         // --rt-isolated: nothing but the trace lights the frame, sky included: no incident field (SponzaLoop.RtShadows).
         rtIsolated = args.Flag("rt-isolated");
         rtCoverageCoin = args.Flag("rt-coverage-coin");
@@ -189,9 +179,6 @@ internal sealed partial class SponzaLoop
         // --ray-view: trace the camera's view and hold it against the raster at the shot (it brings the ray check with it).
         rayView = args.Flag("ray-view");
         rayCheck |= rayView;
-        // The camera-relative probe clipmap (SponzaLoop.Clipmap) is the diffuse GI, always on; --gi-clipmap, which once
-        // asked for it, is a no-op kept for existing invocations.
-        _ = args.Flag("gi-clipmap");
         if (args.Float("clipmap-spacing") is { } clipSpacing) clipmapSpacing = Math.Max(0.05f, clipSpacing);
         if (args.Int("clipmap-budget") is { } clipBudget) clipmapBudget = Math.Clamp(clipBudget, 1, 65535);
         if (args.Float("clipmap-unknown-sky") is { } unknownSky) clipmapUnknownSky = Math.Clamp(unknownSky, 0f, 1f);
@@ -217,33 +204,18 @@ internal sealed partial class SponzaLoop
         };
         if (args.Float("taa-gamma") is { } gamma) taaGamma = Math.Max(0.1f, gamma);
         taaCountRejection = args.Flag("taa-count-rejection");
-        taaLinearBlend = args.Flag("taa-linear");
-        // --taa-history11: the resolved history back in R11G11B10F (the control for history that stops converging
-        // once a frame's step falls below half the format's rounding step); Rgba16F is the default.
-        if (args.Flag("taa-history11")) taaHistory16 = false;
         if (args.Float("taa-relax") is { } relax) taaRelax = Math.Max(1f, relax);
         if (args.Float("taa-accumulate") is { } accumulate) taaAccumulate = Math.Max(0f, accumulate);
         // --stability K: per-pixel temporal variation over the K still frames before the shot (SponzaLoop.Stability).
         if (args.Int("stability") is { } stability) stabilityFrames = Math.Max(2, stability);
-        noIncidentGradient = args.Flag("no-incident-gradient");
-        taaNoKey = args.Flag("taa-no-key");
         if (args.Float("taa-dynamic-count") is { } tdc) taaDynamicCount = Math.Max(1f, tdc);
-        taaNoDependency = args.Flag("taa-no-dependency");
         ParseMoverArgs();
-        // --probe-support-now: screen probes measure support at where a point is now, not where it was (the A/B for the
-        // world-motion target, which only a mover can show).
-        probeSupportNow = args.Flag("probe-support-now");
         if (args.Float("dynamic-history") is { } dh) dynamicHistory = Math.Max(1f, dh);
-        dependencyReset = args.Flag("dependency-reset");
-        noDependency = args.Flag("no-dependency");
-        dependencyEverything = args.Flag("dependency-everything");
         if (args.Int("fresh-passes") is { } fp) freshPasses = Math.Clamp(fp, 1, 16);
         if (args.Float("fresh-frames") is { } ff) freshFrames = Math.Max(1f, ff);
         if (args.Float("probe-ray-length") is { } prl) probeRayLength = Math.Max(0f, prl);
         if (args.Int("probe-layers") is { } pl) probeLayers = Math.Clamp(pl, 1, 2);
-        probeLayerKeys = args.Flag("probe-layer-keys");
         if (args.Int("dependent-passes") is { } dp) dependentPasses = Math.Clamp(dp, 1, 16);
-        noClipmapDependency = args.Flag("no-clipmap-dependency");
         if (args.Int("clipmap-dependent-rays") is { } cdr) clipmapDependentRays = Math.Clamp(cdr, 1, 64);
         if (args.Float("clipmap-dependent-share") is { } cds) clipmapDependentShare = Math.Clamp(cds, 0f, 1f);
         clipmapShadowRays = args.Flag("clipmap-shadow-rays");
@@ -261,7 +233,6 @@ internal sealed partial class SponzaLoop
         // the A/B).
         if (args.Float("clipmap-visible-share") is { } cvs) clipmapVisibleShare = Math.Clamp(cvs, 0f, 1f);
         if (args.Float("clipmap-lift") is { } lift) clipmapLift = Math.Max(0f, lift);
-        clipmapNoBounce = args.Flag("clipmap-no-bounce");
         // --clipmap-height N: probes per level vertically (16; 32 doubles level 0's reach to +-8 m and every level's
         // probe count). --clipmap-blend B: the band between levels, in probes (2), held inside a level: 2B + 1 under
         // the smallest dimension.
@@ -276,11 +247,6 @@ internal sealed partial class SponzaLoop
         // the probes need (Cornell's room view: 0.913 of the truth with the pixels' traced, 0.910 without).
         clipmapExactVisibility = args.Flag("clipmap-exact-visibility");
         incidentExactVisibility = args.Flag("incident-exact-visibility");
-        // --clipmap-normal-bias / --clipmap-view-bias: DDGI's surface bias, in probe spacings (both 0: the default lift).
-        if (args.Float("clipmap-normal-bias") is { } cnb) clipmapNormalBias = Math.Max(0f, cnb);
-        if (args.Float("clipmap-view-bias") is { } cvb) clipmapViewBias = Math.Max(0f, cvb);
-        // --clipmap-relocate: DDGI's probe relocation (clipmap_inject.comp), off walls and out of solids.
-        clipmapRelocate = args.Flag("clipmap-relocate");
         if (args.Float("clipmap-guide") is { } cg) { clipmapGuide = cg > 0f; clipmapGuideFloor = Math.Clamp(cg, 0.01f, 10f); }
         // --surface-check: hold the pre-pass's SurfaceKey and velocity against CPU rays at the shot (stage 4e-iv).
         surfaceCheck = args.Flag("surface-check");
@@ -289,9 +255,6 @@ internal sealed partial class SponzaLoop
         if (args.Int("screen-probe-reset-at") is { } resetAt) screenProbeResetAt = resetAt;
         if (args.Int("screen-probe-seed-offset") is { } seedOffset) screenProbeSeedOffset = seedOffset;
         if (args.Float("screen-probe-seed") is { } seed) screenProbeSeedFrames = Math.Max(0f, seed);
-        // --young-filter: widen young probes' filter again (r3 under 16 frames, r2 under 64): the old arm, biased at
-        // lighting edges and after resets (stage 4f-ii').
-        if (args.Flag("young-filter")) screenProbeYoungWide = true;
         if (args.Int("clipmap-freeze") is { } freeze) clipmapFreeze = Math.Max(1, freeze);
         if (args.Int("screen-probe-filter") is { } spFilter) screenProbeFilterRadius = Math.Clamp(spFilter, 0, 4);
         if (args.Int("screen-probe-ablate") is { } ablate) screenProbeAblate = ablate;
@@ -411,7 +374,7 @@ internal sealed partial class SponzaLoop
         hdrHandle = graph.ColorTarget("hdr", TextureFormat.R11G11B10F, fullSize);
         // TAA ping-pongs because each resolve samples prior output while writing the next image.
         for (var i = 0; i < 2; i++)
-            taaHandles[i] = graph.ColorTarget($"taa{i}", taaHistory16 ? TextureFormat.Rgba16F : TextureFormat.R11G11B10F, fullSize);
+            taaHandles[i] = graph.ColorTarget($"taa{i}", TextureFormat.Rgba16F, fullSize);
         if (SurfaceTargets)
         {
             for (var i = 0; i < 2; i++) taaCountHandles[i] = graph.ColorTarget($"taa-count{i}", TextureFormat.R32Uint, fullSize);
@@ -797,6 +760,10 @@ internal sealed partial class SponzaLoop
 
         // The traced shadows are needed from here on.
         if (!rtNoOverlap) graph.ExternalJoin(rtShadowTracePassHandle, "rt-shadow-join");
+        // The penumbra filtered in space (ShadowsSettings.PenumbraFilter): after the trace, before anything reads the mask.
+        rtShadowFilterInterface = Reflect("rt_shadow_filter.comp");
+        rtShadowFilterPassHandle = graph.ComputePass("rt-shadow-filter").Shader(rtShadowFilterInterface)
+            .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
 
         // Half-res lighting back to full resolution (lighting_upsample.frag): after the join, since it reads the traced
         // mask too, and into the targets the lit pass reads.
@@ -1062,6 +1029,8 @@ internal sealed partial class SponzaLoop
             Own(device.CreateComputeShaderProgramFromSpv(rayViewSpv, rayViewInterface, "ray_view")), "ray_view"));
         rtShadowRaysPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "rt_shadow_rays.comp.spv")), rtShadowRaysInterface, "rt_shadow_rays")), "rt_shadow_rays"));
+        rtShadowFilterPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
+            File.ReadAllBytes(Path.Combine(shaderDir, "rt_shadow_filter.comp.spv")), rtShadowFilterInterface, "rt_shadow_filter")), "rt_shadow_filter"));
         var clipmapSpv = File.ReadAllBytes(Path.Combine(shaderDir, "clipmap_inject.comp.spv"));
         clipmapPipeline = Own(device.CreateComputePipeline(
             Own(device.CreateComputeShaderProgramFromSpv(clipmapSpv, clipmapInterface, "clipmap_inject")), "clipmap_inject"));
@@ -1184,7 +1153,7 @@ internal sealed partial class SponzaLoop
         meshLoad.Start(() =>
         {
             var prims = new List<PlacedPrimitive>();
-            foreach (var (name, primitives) in ParsePacksParallel(packsToParse, flatten, lightmapEnabled))
+            foreach (var (name, primitives) in ParsePacksParallel(packsToParse, lightmapEnabled))
             {
                 prims.AddRange(primitives);
                 Console.WriteLine(

@@ -462,6 +462,7 @@ internal sealed partial class SponzaLoop
         // mark and the lit pass's uIncident.w must agree on it. Only where the incident pass runs (the upsample rides
         // on it); not under --rt-isolated, whose sky rays are read per full-res pixel.
         halfLightingNow = render.HalfResLighting && incidentField && !(abMode == "incident" && AbOffPhase) && ClipmapActive && !rtIsolated;
+        halfShadowsNow = halfLightingNow && render.HalfResShadows;
         lightingFrame++;
         // --ab queue: the Metal tracers on the Vulkan device's queue (ON) or their own (OFF), switched at each phase. Safe
         // mid-run: the hand-offs still wait on the frame timeline, so work already on the other queue stays ordered.
@@ -500,13 +501,12 @@ internal sealed partial class SponzaLoop
             new("uVizChannel",       new FloatUniform(vizChannel)),
             // z gates the read: the incident field is there once the clipmap has solved. Off in the --ab incident
             // off phase alongside the pass that fills it, so the arm prices the whole substitution rather than
-            // half of it. x: whether the lit pass takes the field's sky visibility and light (--no-sky and
-            // --sky-no-sample turn both off).
+            // half of it. x: whether the lit pass takes the field's sky visibility and light (--no-sky turns both off).
             new("uIncident",         new Vector4Uniform(new Vector4(
-                skyVisibilityEnabled && !skipSkySample ? 1f : 0f,
+                skyVisibilityEnabled ? 1f : 0f,
                 IncidentHoldsOcclusion ? 1f : 0f,
                 IncidentFieldNow ? 1f : 0f,
-                halfLightingNow ? 1f : 0f))),
+                halfShadowsNow ? 1f : 0f))),
             new("uIncidentGradient", new Vector4Uniform(new Vector4(incidentNormalBias, incidentGradientClamp, 0f, 0f))),
             new("uViewProjUnjittered", new Matrix4x4Uniform(viewProj)),
             // Last frame's un-jittered camera, or this frame's on the first (zero motion rather than garbage).
@@ -605,7 +605,7 @@ internal sealed partial class SponzaLoop
                 && !moverMoved
                 && opaquePlacements.Count == cachedCascadeCasters[ci]
                 && lodKey == cachedCascadeLod[ci]
-                && (!shadowCasterCull || viewProj == cachedCascadeCamera[ci]))
+                && (viewProj == cachedCascadeCamera[ci]))
             {
                 cascadeRendered[ci] = false;
                 continue;
@@ -629,7 +629,7 @@ internal sealed partial class SponzaLoop
                 // detail A/B arm explicitly overrides it so “no LOD” means every pass.
                 abMode == "lod" && LodArmPixels <= 0f ? 0f : cascadeTexelWorld[ci] * shadowLodTexels,
                 // Receiver culling tests the scene-bounded sun sweep against the camera frustum.
-                shadowCasterCull && !(abMode == "castercull" && AbOffPhase) ? viewProj : null,
+                !(abMode == "castercull" && AbOffPhase) ? viewProj : null,
                 Vector3.Normalize(sunDirection));
             cascadeTriangles[ci] = gpuCull ? -1 : fillIndirectTriangles;
             // Opaque casters all push the same bytes (this cascade's VP); mask casters push
@@ -975,6 +975,7 @@ internal sealed partial class SponzaLoop
             WriteLightletCensus(Path.ChangeExtension(path, null));
             WriteLightletRecordStudy();
             WriteLeakCensus(Path.ChangeExtension(path, null));
+            WriteMemoryReport();
             WriteFrameTracerStats();
             if (probeReference)
             {
@@ -983,7 +984,6 @@ internal sealed partial class SponzaLoop
                 WriteSurfaceReference(grid: 24, paths: refPaths, bounces: refBounces);
             }
             WriteGpuSurfaceReference();
-            WriteTransportSpike();
             WriteFrameStats();
             host.RequestClose();
         }
@@ -1695,10 +1695,10 @@ internal sealed partial class SponzaLoop
                 render.Taa, taaHistoryValid ? 1f : 0f, render.ShowTaaRejection ? 1f : 0f, taaCountRejection ? 1f : 0f))),
             new("uViewProj",            new Matrix4x4Uniform(viewProj)),
             new("uMode",                new Vector4Uniform(new Vector4(
-                taaMotionReprojection ? 1f : 0f, taaVarianceClip ? 1f : 0f, taaGamma, taaLinearBlend ? 1f : 0f))),
-            new("uAccumulate",          new Vector4Uniform(new Vector4(taaHistory16 ? taaAccumulate : 0f, taaRelax, 0.25f, taaNoKey ? 1f : 0f))),
+                taaMotionReprojection ? 1f : 0f, taaVarianceClip ? 1f : 0f, taaGamma, 0f))),
+            new("uAccumulate",          new Vector4Uniform(new Vector4(taaAccumulate, taaRelax, 0.25f, 0f))),
             // Stage 4f: what moved this frame, for TAA's per-pixel dependency (surface variant only).
-            new("uDynamicMin",          new Vector4Uniform(MoverActive && moverMoved && !taaNoDependency ? new Vector4(moverReach.Min, 1f) : Vector4.Zero)),
+            new("uDynamicMin",          new Vector4Uniform(MoverActive && moverMoved ? new Vector4(moverReach.Min, 1f) : Vector4.Zero)),
             new("uDynamicMax",          new Vector4Uniform(new Vector4(MoverActive ? moverReach.Max : Vector3.Zero, taaDynamicCount))),
             new("uSunDirection",        new Vector4Uniform(new Vector4(sunDirection, 0f))),
         };

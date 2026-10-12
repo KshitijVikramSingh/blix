@@ -147,10 +147,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private bool taaVarianceClip;
     private float taaGamma = 1f;
     private bool taaCountRejection;
-    // --taa-linear: blend in linear space rather than luminance-tonemapped (the control for that blend's bias).
-    private bool taaLinearBlend;
-    // --taa-history11: the old R11G11B10F history (see above).
-    private bool taaHistory16 = true;
     // --taa-accumulate N: a per-pixel frame count (in the Rgba16F history's alpha), blended at 1/count up to N for a
     // still pixel (10 by a pixel of motion); 0 is the fixed weight. --taa-relax W: the clamp box W times wider where
     // a pixel does not move. Sponza, still camera, presented median variation / pixels over 2% / error against a
@@ -240,12 +236,8 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private PassHandle surfaceKeyHistoryPassHandle;
     private PipelineHandle surfaceKeyHistoryPipeline;
     private readonly GraphResourceHandle[] taaCountHandles = new GraphResourceHandle[2];
-    // --taa-no-key: the surface-identity test off in taa_surface.frag (the A/B for what it rejects).
-    private bool taaNoKey;
-    // Stage 4f: --taa-dynamic-count N, the count a pixel whose shading depends on the mover accumulates up to;
-    // --taa-no-dependency, the A/B.
+    // Stage 4f: --taa-dynamic-count N, the count a pixel whose shading depends on the mover accumulates up to.
     private float taaDynamicCount = 4f;
-    private bool taaNoDependency;
     // Last frame's un-jittered view-projection, for the velocity (the camera's half of it).
     private Matrix4x4 velocityPrevViewProj;
     private bool velocityPrevValid;
@@ -271,6 +263,8 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // Which of its 2x2 a half-res pixel stands for this frame (LightingSubpixel), all four every four frames.
     private uint lightingFrame;
     private bool halfLightingNow;
+    // RenderSettings.HalfResShadows, this frame: the sun rays on the half-res grid and the upsample carrying the mask.
+    private bool halfShadowsNow;
     private ShaderProgramHandle gtaoProgram;
     private PipelineHandle gtaoPipeline;
     private ShaderProgramHandle gtaoDenoiseProgram;
@@ -295,8 +289,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // Smoothed frame period, for the overlay's "share of frame" readouts. The A/B harness keeps
     // its own unsmoothed samples.
     private double lastFramePeriodMs;
-    // --sky-no-sample: the lit pass takes no sky visibility or light from the incident field (as --no-sky).
-    private bool skipSkySample;
 
     private ShaderProgramHandle prepassOpaqueProgram;
     private ShaderProgramHandle prepassMaskProgram;
@@ -411,7 +403,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // pipeline, so no pass samples albedo just to discover a fragment is air — not the camera pass,
     // not the depth pre-pass, not any shadow cascade. The picture is wrong on purpose (leaves become
     // solid cards); the point is the frame time beside it.
-    private bool forceOpaqueMask;
 
     // --ab-flat: after loading, alternate between the FLAT path and the full lit path every
     // AbPeriodFrames frames, bucketing frame times separately.
@@ -564,14 +555,12 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private float shadowLodTexels = 1.5f;
     /// <summary>The camera frustum for this frame; the cascades cull their casters against it.</summary>
     private Frustum cameraFrustumThisFrame;
-    /// <summary>--no-caster-cull turns off culling casters by where their shadow can land.</summary>
-    private bool shadowCasterCull = true;
     /// <summary>--offscreen-shadow-rays: a gather ray's hit outside the camera's view takes its sun by a shadow ray, not
     /// the cascades, which hold only the casters of what the camera sees (Shaders/cascade_receivers.glsl).</summary>
     private bool offscreenShadowRays;
     // Where the gather passes may take the sun from the cascades: the view the casters were culled against, or (every
     // point to (0, 0, 0.5, 1), inside) anywhere when nothing was culled or the check is off.
-    private Matrix4x4 CascadeReceivers => offscreenShadowRays && shadowCasterCull ? viewProj
+    private Matrix4x4 CascadeReceivers => offscreenShadowRays ? viewProj
         : new Matrix4x4(0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0.5f, 1f);
     /// <summary>--probe-reference: path-trace references on the CPU and print them beside the clipmap's answers.</summary>
     private bool probeReference;
@@ -766,8 +755,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     /// <remarks>
     /// A node draws its mesh once, or once per <c>EXT_mesh_gpu_instancing</c> instance (Draw counts them). With the
     /// primitive's <see cref="Blix.Assets.PrimitiveSource"/> this is a surface's identity (stage 4e): every cooked
-    /// chunk of one source primitive, drawn by one instance, is one surface. Node -1: the --flatten path, which
-    /// keeps no node (each baked primitive is its own instance).
+    /// chunk of one source primitive, drawn by one instance, is one surface.
     /// </remarks>
     private readonly record struct PlacementInstance(int Pack, int Node, int Draw);
 
@@ -847,9 +835,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // A Selection-panel margin edit not yet sent: (global placement index + 1, value), carried by the
     // next frame's classify dispatches into the one thread that owns the row.
     private (int Placement, float Margin) pendingMarginEdit;
-    // --flatten: the old shape through the new path. Every placement baked into its own primitive and
-    // placed once at identity, so a same-binary A/B isolates instancing from everything else.
-    private bool flatten;
     private bool sceneLoaded;
     // Background pack parse + budgeted main-thread drain (engine primitive):
     // started in OnLoad, drained by TryFinishLoad in OnUpdate. Produces the flat
@@ -929,7 +914,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // Slack on the camera frustum test, in metres. See the call site in OnRender.
     private const float CameraCullMargin = 0.5f;
     /// <summary>--no-hashed-alpha: use binary rather than hashed cutouts at one sample.</summary>
-    private bool hashedAlpha = true;
     private Matrix4x4 viewProj;
 
     // Sun travel direction, recomputed from overlay yaw/pitch. A cooked probe with a detected sun
@@ -1055,6 +1039,10 @@ internal sealed class ShadowsSettings
     // the rays aim at another point of the disc and TAA averages them: a penumbra that widens with the distance from
     // the occluder, hard at contact. 0: a point sun, every shadow hard (as before).
     [Tune(0f, 5f)]    public float SunDiscDegrees = 0.53f;
+    // The disc's penumbra filtered in space (rt_shadow_filter.comp): every ray toward the sun's centre (coherent, no
+    // direction per pixel), the hard shadow widened by blocker distance x the disc. Stable without TAA. Off: each ray
+    // toward its own point of the disc, a different one each frame, and TAA averages them (noisy, incoherent rays).
+    [Tune]            public bool PenumbraFilter = true;
 }
 
 // Ambient-visibility tunables (overlay "Ambient" group).
@@ -1089,9 +1077,12 @@ internal sealed class RenderSettings
     [Tune(0f, 8f)]     public float LodErrorPixels = 2.0f;
     // The incident light and the traced sun shadows at half resolution, each half-res pixel standing for one of its
     // 2x2 (a different one each frame, TAA gathering all four), brought back to full resolution along the depth and
-    // normals (lighting_upsample.frag). Off (the default): both at full resolution. Half res left blocky shadow patches
-    // the upsample could not hide, worst on cloth, for less than it saved once the lightlets answer most pixels.
-    [Tune]             public bool HalfResLighting = false;
+    // normals (lighting_upsample.frag). Off: the incident light at full resolution -- 4x its cost, the frame's largest
+    // pass there (incident-light, Metal System Trace 2026-10-12). The indirect light is smooth; half res costs it little.
+    [Tune]             public bool HalfResLighting = true;
+    // The traced sun shadows at half resolution too (only with HalfResLighting: the upsample brings the mask back). Off
+    // by default: half-res shadows left blocky patches the upsample could not hide, worst on cloth.
+    [Tune]             public bool HalfResShadows = false;
     // Two-phase occlusion culling of the camera's opaque placements (scene_occlusion.comp; --no-occlusion turns it off
     // for the whole run). Off: the frustum alone decides -- the reference, for geometry that breaks up and comes back.
     [Tune]             public bool OcclusionCull = true;
