@@ -162,6 +162,7 @@ internal sealed partial class SponzaLoop
         ReadSunSweepArgs(args);
         ReadSunNodeArgs(args);
         ReadPatchSplitArgs(args);
+        ReadSplitLightArgs(args);
         if (lightletsThenExit) lightletsAsked = true;
         // --lightlet-sun: RenderSettings.LightletSun on from the start (the overlay's toggle; [Tune] fields are not read
         // from the command line here).
@@ -663,6 +664,7 @@ internal sealed partial class SponzaLoop
         // --sun-nodes: the texels' light for many suns from one trace (SponzaLoop.SunNodes.cs), among the texels' passes.
         DeclareSunNodePasses(stages => Reflect(stages));
         DeclarePotentialSunsPass(stages => Reflect(stages));
+        DeclareSplitLightPass(stages => Reflect(stages));
 
         // --rt-shadows: the shadow rays as soon as the pre-pass has the depth and normals they start from, and the Metal
         // pass that traces them; the lit pass joins it (rt-shadow-join, below). Everything between (Hi-Z, GTAO, the
@@ -1072,6 +1074,7 @@ internal sealed partial class SponzaLoop
             File.ReadAllBytes(Path.Combine(shaderDir, "texel_bake.comp.spv")), lightBakeInterface, "texel_bake")), "texel_bake"));
         CreateSunNodePipelines(shaderDir);
         CreatePotentialSunsPipeline(shaderDir);
+        CreateSplitLightPipeline(shaderDir);
         texelGatherPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "texel_gather.comp.spv")), texelGatherInterface, "texel_gather")), "texel_gather"));
         clipmapMarkPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
@@ -1271,6 +1274,7 @@ internal sealed partial class SponzaLoop
             brdfLutTexture = baked.BrdfLut;
             iblPrefilterMips = baked.Probe.PrefilteredSpecularMipCount;
             Console.WriteLine($"[VulkanSponza] IBL: cooked probe {Path.GetFileName(probePath)} ({iblPrefilterMips} GGX prefilter mips).");
+            skyIdentity = Path.GetFileName(probePath);
             // Align the directional sun (key light + shadow caster) to the probe's
             // detected sun so cast shadows match the visible sky sun. FROM-sun-
             // into-scene convention, matching sunDirection.

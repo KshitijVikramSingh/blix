@@ -1,0 +1,90 @@
+#version 450
+// The texels' light, split (SponzaLoop.SplitLight.cs): each live texel's resting answer (TexelResolved, as
+// texel_resolve.comp writes it) composed from its two parts -- the sky's, as solved, times the sky's scale; the sun's,
+// solved and stored per unit of the sun's irradiance, times the sun's irradiance now. Light is linear: a stronger or
+// weaker sun, a brighter or tinted sky, is this pass again, not a new solve.
+//   mode 0  the parts composed into TexelComposed
+//   mode 1  (--texel-filter) TexelComposed filtered into TexelResolved, as texel_filter.comp filters the gather's light:
+//           the weights from the composed light, so each part is filtered with the same weights (light stays linear:
+//           a part filtered on its own would find other edges). Unfiltered, the cook's parts left the crevices'
+//           corridor at 0.075 |error| against the gather's 0.036 (2026-10-13).
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform TexelCompose {
+    vec4 uCompose;   // x live texels, y the mode
+    vec4 uSky;       // rgb the sky's scale (1: as solved)
+    vec4 uSun;       // rgb the sun's irradiance (its part is stored per unit of it); w 0: no sun part yet
+    vec4 uTexelGrid;  // mode 1: xyz the cells' origin, w the spacing
+    vec4 uTexelParams; // mode 1: x hash capacity
+    vec4 uLightmap;   // mode 1: as texel_filter.comp's
+    vec4 uEdge;       // mode 1: as texel_filter.comp's
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer SunNodesLive { uint liveIds[]; };
+layout(std430, set = 0, binding = 2) readonly buffer TexelSky { uvec2 texelSky[]; };
+layout(std430, set = 0, binding = 3) readonly buffer TexelSun { uvec2 texelSun[]; };
+layout(std430, set = 0, binding = 4) writeonly buffer TexelResolved { uvec2 texelResolved[]; };
+layout(std430, set = 0, binding = 5) buffer TexelComposed { uvec2 texelComposed[]; };
+layout(std430, set = 0, binding = 6) readonly buffer TexelHash { uvec4 texelHash[]; };
+layout(std430, set = 0, binding = 7) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 8) readonly buffer LightmapIndexMap { uint lightmapIndexMap[]; };
+#define TEXEL_INDEX_MAP(i) lightmapIndexMap[i]
+#define TEXEL_HASH(i) texelHash[i]
+#define TEXEL_POSITION(i) texels[2 * (i)]
+#define TEXEL_NORMAL(i) texels[2 * (i) + 1]
+#include "texel.glsl"
+#include "texel_filter_neighbour.glsl"
+
+uint packRgb9e5(vec3 c) {
+    const float maxValue = 65408.0;
+    c = clamp(c, vec3(0.0), vec3(maxValue));
+    float maxC = max(c.r, max(c.g, c.b));
+    int e = max(-16, int(floor(log2(max(maxC, 1e-30))))) + 1;
+    float scale = exp2(float(e - 9));
+    if (int(floor(maxC / scale + 0.5)) == 512) { e += 1; scale *= 2.0; }
+    uvec3 m = uvec3(floor(c / scale + 0.5));
+    return m.r | (m.g << 9) | (m.b << 18) | (uint(e + 15) << 27);
+}
+
+vec3 unpackRgb9e5(uint p) {
+    float scale = exp2(float(int(p >> 27) - 15 - 9));
+    return vec3(p & 511u, (p >> 9) & 511u, (p >> 18) & 511u) * scale;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= uint(u.uCompose.x)) return;
+    uint id = liveIds[i];
+    if (int(u.uCompose.y) == 0) {
+        uvec2 sky = texelSky[id];
+        uvec2 sun = texelSun[id];
+        vec3 light = unpackRgb9e5(sky.x) * u.uSky.rgb + (u.uSun.w > 0.5 ? unpackRgb9e5(sun.x) * u.uSun.rgb : vec3(0.0));
+        // Valid where the sky's part is (every live texel the cook traced); its confidence the cook's (full).
+        texelComposed[id] = uvec2(packRgb9e5(light), sky.y);
+        return;
+    }
+    uvec2 own = texelComposed[id];
+    if ((own.y & 0x10000u) == 0u) { texelResolved[id] = own; return; }
+    const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
+    vec3 position = TEXEL_POSITION(id).xyz;
+    vec3 n = TEXEL_NORMAL(id).xyz;
+    float centre = dot(unpackRgb9e5(own.x), luma);
+    TexelGrid finestGrid;
+    finestGrid.minCorner = u.uTexelGrid.xyz;
+    finestGrid.spacing = u.uTexelGrid.w;
+    finestGrid.capacity = uint(u.uTexelParams.x);
+    finestGrid.level = 0u;
+    vec4 acc = vec4(0.0);
+    for (uint k = 0u; k < 27u; ++k) {
+        TexelGrid tg;
+        int other = texelFilterNeighbour(int(id), k, position, n, finestGrid, u.uLightmap, tg);
+        if (other < 0) continue;
+        uvec2 o = texelComposed[other];
+        if ((o.y & 0x10000u) == 0u) continue;
+        vec3 light = unpackRgb9e5(o.x);
+        float w = texelFilterWeight(other, position, n, tg, centre, dot(light, luma), u.uEdge);
+        acc += vec4(w * light, w);
+    }
+    texelResolved[id] = acc.w > 1e-6 ? uvec2(packRgb9e5(acc.rgb / acc.w), own.y) : own;
+}

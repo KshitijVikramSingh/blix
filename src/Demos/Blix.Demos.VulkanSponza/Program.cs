@@ -1107,6 +1107,8 @@ internal sealed class RenderSettings
     [Tune]             public PotentialSunsView PotentialSunsView = PotentialSunsView.Light;
     [Tune(0f, 7f)]     public float PotentialSunsCoefficient = 0f;
     [Tune(0.01f, 1f)]  public float PotentialSunsHeat = 0.1f;
+    // --split-light: the sky's part of the texels' light times this (SponzaLoop.SplitLight.cs: a compose, no solve).
+    [Tune(0f, 4f)]     public float SkyStrength = 1f;
     // History weight for the full-screen resolve; zero is the current-frame reference. History is
     // rejected off-screen and neighbourhood-clamped so the present frame remains authoritative.
     [Tune(0f, 0.97f)]  public float Taa = 0.9f;

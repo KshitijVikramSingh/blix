@@ -16,7 +16,8 @@ namespace Blix.Demos.VulkanSponza;
 internal sealed partial class SponzaLoop
 {
     // Bump when the cook's output changes meaning (a new sampling rule, a new field).
-    private const int TransportCacheVersion = 2;
+    // 3: a hit's patch the nearest it can see (NearestVisible), not the nearest: the couplings leaked through walls.
+    private const int TransportCacheVersion = 3;
     private string? sceneAssetsRoot;
 
     internal sealed class TransportCache

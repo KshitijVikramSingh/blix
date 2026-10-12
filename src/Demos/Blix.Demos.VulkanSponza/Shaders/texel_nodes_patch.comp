@@ -1,0 +1,86 @@
+#version 450
+// Sun nodes (SponzaLoop.SunNodes.cs): each live texel's nearest patch it can SEE -- what a gather ray's hit among it reads
+// its bounce from (texel_nodes_shade.comp). The nearest patch by distance alone (cooked_patches.glsl, cookedNearest)
+// took the one across a wall when floors either side lay in one plane: the thin wall's sealed room read the open room's
+// sunlit floor at its corners, Sponza's atrium under the lavabo the courtyard's.
+//   mode 0  a texel's PATCH_CANDIDATES nearest patches facing its way, nearest first, and a ray to each (the CLOSEST
+//           batch: blocked where it meets anything short of the patch)
+//   mode 1  the first whose ray got through, into TexelPatch (-1: none)
+// A thread a texel of the slice.
+
+#define PATCH_CANDIDATES 4
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform NodesPatch {
+    vec4 uPatch;      // x the slice's first live texel, y its texels, z the mode
+    vec4 uCookedGrid;
+    vec4 uCookedDims;
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 2) readonly buffer SunNodesLive { uint liveIds[]; };
+layout(std430, set = 0, binding = 3) buffer NodeRays { vec4 nodeRays[]; };          // 2 a ray: origin, tMin; dir, tMax
+layout(std430, set = 0, binding = 4) readonly buffer NodeHits { uvec4 nodeHits[]; };  // 3 a ray: the CLOSEST answer
+layout(std430, set = 0, binding = 5) buffer PatchCandidates { int candidates[]; };    // [slice texel][candidate]
+layout(std430, set = 0, binding = 6) buffer TexelPatch { int texelPatch[]; };          // [texel id]
+
+#define COOKED_BINDING 7
+#define COOKED_GRID u.uCookedGrid
+#define COOKED_DIMS u.uCookedDims
+#include "cooked_patches.glsl"
+
+void main() {
+    uint t = gl_GlobalInvocationID.x;
+    if (t >= uint(u.uPatch.y)) return;
+    uint id = liveIds[uint(u.uPatch.x) + t];
+    vec3 p = texels[2u * id].xyz;
+    vec3 n = normalize(texels[2u * id + 1u].xyz);
+    if (int(u.uPatch.z) == 0) {
+        // The nearest few, insertion-sorted, over the cells around (as cookedNearest searches them).
+        int best[PATCH_CANDIDATES];
+        float bestD[PATCH_CANDIDATES];
+        for (int k = 0; k < PATCH_CANDIDATES; ++k) { best[k] = -1; bestD[k] = 1e30; }
+        if (COOKED_DIMS.w > 0.5) {
+            ivec3 dims = ivec3(COOKED_DIMS.xyz);
+            ivec3 c = ivec3(floor((p - COOKED_GRID.xyz) / COOKED_GRID.w));
+            for (int dz = -1; dz <= 1; ++dz)
+            for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx) {
+                ivec3 cc = c + ivec3(dx, dy, dz);
+                if (any(lessThan(cc, ivec3(0))) || any(greaterThanEqual(cc, dims))) continue;
+                int cell = (cc.z * dims.y + cc.y) * dims.x + cc.x;
+                for (uint k = cookedCellStart[cell]; k < cookedCellStart[cell + 1]; ++k) {
+                    int j = int(cookedId[k]);
+                    if (dot(cookedPatch[3 * j + 1].xyz, n) < 0.5) continue;
+                    vec3 d = cookedPatch[3 * j].xyz - p;
+                    float d2 = dot(d, d);
+                    if (d2 >= bestD[PATCH_CANDIDATES - 1]) continue;
+                    int at = PATCH_CANDIDATES - 1;
+                    while (at > 0 && bestD[at - 1] > d2) { bestD[at] = bestD[at - 1]; best[at] = best[at - 1]; --at; }
+                    bestD[at] = d2;
+                    best[at] = j;
+                }
+            }
+        }
+        vec3 origin = p + n * 0.01;
+        for (int k = 0; k < PATCH_CANDIDATES; ++k) {
+            uint slot = t * uint(PATCH_CANDIDATES) + uint(k);
+            candidates[slot] = best[k];
+            if (best[k] < 0) { nodeRays[slot * 2u] = vec4(0.0); nodeRays[slot * 2u + 1u] = vec4(0.0); continue; }
+            vec3 target = cookedPatch[3 * best[k]].xyz + cookedPatch[3 * best[k] + 1].xyz * 0.01;
+            vec3 d = target - origin;
+            float len = length(d);
+            nodeRays[slot * 2u] = vec4(origin, 0.0);
+            nodeRays[slot * 2u + 1u] = len > 1e-4 ? vec4(d / len, len * 0.999) : vec4(0.0, 1.0, 0.0, 0.0);
+        }
+        return;
+    }
+    int chosen = -1;
+    for (int k = 0; k < PATCH_CANDIDATES && chosen < 0; ++k) {
+        uint slot = t * uint(PATCH_CANDIDATES) + uint(k);
+        int j = candidates[slot];
+        if (j < 0) continue;
+        if ((nodeHits[slot * 3u].w & 1u) == 0u) chosen = j;   // nothing met short of the patch
+    }
+    texelPatch[id] = chosen;
+}

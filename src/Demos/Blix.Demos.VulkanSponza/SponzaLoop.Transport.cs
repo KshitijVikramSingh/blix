@@ -294,41 +294,40 @@ internal sealed partial class SponzaLoop
             if (!grid.TryGetValue(key, out var list)) grid[key] = list = new List<int>();
             list.Add(i);
         }
-        int Nearest(Vector3 p, Vector3 n)
+        // The nearest patch a hit can SEE: the patches around it (the 27 cells), facing its way (or, with none, either way:
+        // dropping the ray dropped its light, energy -4%), nearest first, each taken only when a ray from the hit reaches
+        // it. Nearest by distance alone handed a hit at the foot of a wall the patch across it -- floors either side of a
+        // wall are one plane: the thin wall's sealed room read the open room's sunlit floor at its corners (the truth
+        // there is black), Sponza's atrium under the lavabo the courtyard's. None visible: none.
+        int NearestVisible(Vector3 p, Vector3 n, uint seed, bool anyFacing)
         {
             var (kx, ky, kz) = Key(p);
-            var best = -1;
-            var bestD = float.MaxValue;
+            var candidates = new List<(float D, int J)>();
             for (var dz = -1; dz <= 1; dz++)
             for (var dy = -1; dy <= 1; dy++)
             for (var dx = -1; dx <= 1; dx++)
             {
                 if (!grid.TryGetValue((kx + dx, ky + dy, kz + dz), out var list)) continue;
                 foreach (var j in list)
-                {
-                    if (Vector3.Dot(nrm[j], n) < 0.5f) continue;
-                    var d = Vector3.DistanceSquared(pos[j], p);
-                    if (d < bestD) { bestD = d; best = j; }
-                }
+                    if (anyFacing || Vector3.Dot(nrm[j], n) >= 0.5f) candidates.Add((Vector3.DistanceSquared(pos[j], p), j));
             }
-            return best;
-        }
-        // When no patch near a hit faces its way (2.4% of Sponza's rays), the nearest facing either way rather than none:
-        // dropping the ray dropped its light (energy -4%).
-        int NearestAny(Vector3 p, Vector3 n)
-        {
-            var j = Nearest(p, n);
-            if (j >= 0) return j;
-            var (kx, ky, kz) = Key(p);
-            var best = -1; var bestD = float.MaxValue;
-            for (var dz = -1; dz <= 1; dz++)
-            for (var dy = -1; dy <= 1; dy++)
-            for (var dx = -1; dx <= 1; dx++)
+            candidates.Sort((x, y) => x.D.CompareTo(y.D));
+            var origin = p + n * 1e-3f;
+            foreach (var (_, j) in candidates)
             {
-                if (!grid.TryGetValue((kx + dx, ky + dy, kz + dz), out var list)) continue;
-                foreach (var c in list) { var d = Vector3.DistanceSquared(pos[c], p); if (d < bestD) { bestD = d; best = c; } }
+                var target = pos[j] + nrm[j] * 1e-3f;
+                var d = target - origin;
+                var length = d.Length();
+                if (length < 1e-4f) return j;
+                if (!scene.Any(new Ray(origin, d / length), 0f, length * 0.999f, seed)) return j;
             }
-            return best;
+            return -1;
+        }
+        int Nearest(Vector3 p, Vector3 n, uint seed = 0) => NearestVisible(p, n, seed, anyFacing: false);
+        int NearestAny(Vector3 p, Vector3 n, uint seed = 0)
+        {
+            var j = NearestVisible(p, n, seed, anyFacing: false);
+            return j >= 0 ? j : NearestVisible(p, n, seed, anyFacing: true);
         }
         Vector3 HitNormal(RayHit h, Vector3 dir)
         {
@@ -395,7 +394,7 @@ internal sealed partial class SponzaLoop
                         var sl = SunletOf(hp, hn, Albedo(h.Instance, h.Triangle));
                         accSun[sl] = accSun.GetValueOrDefault(sl) + 1;
                     }
-                    var j = useSunlets ? NearestAny(hp, hn) : Nearest(hp, hn);
+                    var j = useSunlets ? NearestAny(hp, hn, (uint)r.Next()) : Nearest(hp, hn, (uint)r.Next());
                     if (j < 0) { lost++; continue; }
                     acc[j] = acc.GetValueOrDefault(j) + 1;
                 }
@@ -721,8 +720,9 @@ internal sealed partial class SponzaLoop
             var lightPath = lightBakeOff ? null : LightBakePathFor(cacheKey, transportRelightSun);
             lightBakeKey = cacheKey;
             // The resting form first (8 B a texel), else the full state (an older run's), else nothing: the bake begins.
-            var resolved = lightPath is null || !TexelsMayRest ? null : ReadResolved(ResolvedPathFor(lightPath), texelTotal);
-            var light = lightPath is null || resolved is not null ? null : ReadLightBake(lightPath, texelTotal);
+            // Under --split-light the parts' caches answer (BeginSplitLight), not one light's.
+            var resolved = lightPath is null || !TexelsMayRest || splitLight ? null : ReadResolved(ResolvedPathFor(lightPath), texelTotal);
+            var light = lightPath is null || resolved is not null || splitLight ? null : ReadLightBake(lightPath, texelTotal);
             // Its own copy of the atlas: the method's locals are dropped at its end (below), before this may run.
             var atlasForUpload = lightmapBake;
             OnMain(() =>

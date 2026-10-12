@@ -52,6 +52,9 @@ layout(std430, set = 0, binding = 17) buffer NodeDiscover { uint discoverCount; 
 layout(std430, set = 0, binding = 18) buffer ExactOrigins { vec4 exactOrigins[]; };
 layout(std430, set = 0, binding = 19) readonly buffer ExactOccluded { uint exactOccluded[]; };
 layout(std430, set = 0, binding = 20) readonly buffer NodeRayWeights { float nodeRayWeight[]; };
+// Each live texel's nearest patch it can see (texel_nodes_patch.comp; -1 none): a hit among texels reads its bounce from
+// its likeliest texel's -- the nearest by distance alone was the one across a wall at a wall's foot.
+layout(std430, set = 0, binding = 21) readonly buffer TexelPatch { int texelPatch[]; };
 
 #define COOKED_BINDING 11
 #define COOKED_GRID u.uCookedGrid
@@ -92,8 +95,6 @@ void main() {
                 exactOrigins[slot] = dot(hn, sunNodes[0].xyz) > 0.0 ? vec4(hitPos + hn * 0.01, uintBitsToFloat(0x7F800000u)) : vec4(0.0);
                 return;
             }
-            int patchIndex = cookedNearest(hitPos, hn);
-            sHit[lid] = vec4(unpackUnorm4x8(h2.w).rgb * nodeRayWeight[slot] / PI, float(patchIndex));
             sNormal[lid] = hn;
             int ids[NODE_CANDIDATES];
             float weights[NODE_CANDIDATES];
@@ -104,6 +105,15 @@ void main() {
                 foliage = total > 0.0;
                 if (foliage) nodeCount(4u);
             }
+            // The bounce: from the patch the likeliest texel sees, when the hit lies among texels; else the nearest.
+            int patchIndex;
+            if (total > 0.0 && !foliage) {
+                int likeliest = -1;
+                float most = 0.0;
+                for (int c = 0; c < NODE_CANDIDATES; ++c) if (ids[c] >= 0 && weights[c] > most) { most = weights[c]; likeliest = ids[c]; }
+                patchIndex = texelPatch[likeliest];
+            } else patchIndex = cookedNearest(hitPos, hn);
+            sHit[lid] = vec4(unpackUnorm4x8(h2.w).rgb * nodeRayWeight[slot] / PI, float(patchIndex));
             for (int c = 0; c < NODE_CANDIDATES; ++c) {
                 if (total <= 0.0 || ids[c] < 0) continue;
                 sWeight[lid * NODE_CANDIDATES + c] = weights[c] / total;
@@ -136,17 +146,22 @@ void main() {
     barrier();
     for (int k = int(lid); k < suns; k += 64) {
         vec3 toSun = sunNodes[k].xyz;
+        // The column's kind (SunNodes w): 1 its sun alone, 2 the sky alone, 3 both. Each part is what that part lights:
+        // the sky the misses and (through the patches' sky part) the hits; the sun the hits, directly and through the
+        // patches' sun part. The patches' light for the column is already that part's (the solve's component).
+        uint kind = uint(sunNodes[k].w + 0.5);
+        bool hasSun = (kind & 1u) != 0u, hasSky = (kind & 2u) != 0u;
         uint word = uint(k) / 32u, bit = 1u << (uint(k) % 32u);
         vec3 sum = vec3(0.0);
         for (int r = 0; r < RAYS; ++r) {
             vec4 h = sHit[r];
-            if (h.w < -1.5) { sum += h.rgb; continue; }
+            if (h.w < -1.5) { if (hasSky) sum += h.rgb; continue; }
             vec3 light = vec3(0.0);
             if (h.w >= 0.0) {
                 uvec2 p = patchLight[uint(h.w) * uint(suns) + uint(k)];
                 light = vec3(unpackHalf2x16(p.x), unpackHalf2x16(p.y).x);
             }
-            float ndotl = max(dot(sNormal[r], toSun), 0.0);
+            float ndotl = hasSun ? max(dot(sNormal[r], toSun), 0.0) : 0.0;
             if (ndotl > 0.0) {
                 float visible = sUnknown[r] * u.uSunIrradiance.w;
                 if (k == 0 && sExact[r] >= 0.0) { light += u.uSunIrradiance.rgb * ndotl * sExact[r]; sum += h.rgb * light; continue; }

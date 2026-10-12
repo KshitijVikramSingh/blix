@@ -404,7 +404,7 @@ internal sealed partial class SponzaLoop
             SettleTexels("the baked light loaded");
             if (TexelsMayRest && bakePath is not null) pendingResolvedSave = ResolvedPathFor(bakePath);
         }
-        else if (bakePath is not null && !FoldBootSunIntoCook(bakePath))
+        else if (bakePath is not null && !BeginSplitLight() && !FoldBootSunIntoCook(bakePath))
         {
             lightBakePath = bakePath;
             BeginLightBake(texelLiveIds!, texelCount);
@@ -440,8 +440,10 @@ internal sealed partial class SponzaLoop
             RetireGpuBuffer(cookedPatchBuffer);
             cookedPatchBuffer = Own(device.CreateGpuBuffer(cookedPacked.Length * 16, MemoryMarshal.AsBytes(cookedPacked.AsSpan()), "sponza.cooked.patches"));
             transportRelightSun = relightTaskSun;
+            // The split light: the new sun's part read or cooked, the sky's kept (SponzaLoop.SplitLight.cs).
+            if (splitLight) SplitSunChanged(transportRelightSun.ToSun);
             // The potential suns answer a sun in the band (RecordPotentialSuns): nothing to bake.
-            if (!PotentialSunsAnswer(transportRelightSun.ToSun))
+            else if (!PotentialSunsAnswer(transportRelightSun.ToSun))
             {
                 texelEpoch++;
                 RebakeForSun(transportRelightSun);
@@ -557,6 +559,7 @@ internal sealed partial class SponzaLoop
         if (sunNodeStage != SunNodeStage.Off) RecordSunNodes();
         RecordPotentialSuns();
         RecordPatchSplitCheck();
+        RecordSplitCompose();
         FollowSun();
         SaveLightBakeWhenDone();
         LightletBakeWhenReady();
