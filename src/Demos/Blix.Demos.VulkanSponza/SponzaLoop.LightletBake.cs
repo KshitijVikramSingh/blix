@@ -64,7 +64,7 @@ internal sealed partial class SponzaLoop
     {
         // --ab lightlets: the records in the ON phase, every pixel traced in the OFF one.
         var on = abMode == "lightlets" ? !AbOffPhase : render.LightletSun;
-        if (!on || lightlets is null || !halfLightingNow) return Vector4.Zero;
+        if (!on || lightlets is null) return Vector4.Zero;
         if (towardSun.Y <= MathF.Sin(BandMinElevation * MathF.PI / 180f)) return Vector4.Zero;
         var (hour, dec) = Equatorial(towardSun, BandLatitude, lightletNorth);
         var maxDec = Obliquity + 5f;

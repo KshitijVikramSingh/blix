@@ -126,8 +126,9 @@ void main() {
     vec3 origin = position + n * (dot(n, u.uSun.xyz) > 0.0 ? lift : -lift);
     uint answer = bakedSun(q, n);
     baked[index] = answer;
-    // Answered: no ray (an origin's reach of 0 is no ray, answered unoccluded; the baked word stands instead).
-    origins[index] = vec4(origin, answer >= 2u ? u.uSun.w : 0.0);
+    // Answered: no ray, and the answer rides the reach (blix_shadow: 0 answered lit, < 0 answered shadowed), so the mask
+    // every reader takes -- lit.frag at full res, lighting_upsample at half -- holds it with the traced pixels'.
+    origins[index] = vec4(origin, answer >= 2u ? u.uSun.w : answer == 1u ? -1.0 : 0.0);
     if (u.uDisc.x > 0.0) {
         // The frame's point of a low-discrepancy sequence over the disc (R2), shifted per pixel by a hash (Cranley-
         // Patterson): neighbours sample different parts of the disc, and a pixel covers all of it over frames.

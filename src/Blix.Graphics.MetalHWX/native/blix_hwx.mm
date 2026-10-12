@@ -120,8 +120,8 @@ struct Params { uint count; uint seedBase; uint closestOnly; uint flags; };
 // flags: 1 the live count is limit[0], as Params'; 2 each ray's own direction (directions[i].xyz), not `direction`.
 struct ShadowParams { float4 direction; uint count; uint seedBase; uint sky; uint flags; };
 
-// Sun shadows: one ray per origin, every one toward the same direction. An origin is (position, tMax); tMax <= 0 means
-// no ray, answered unoccluded. Writes 1 where anything, met as coverage (or the alpha test, by the table bound) allows,
+// Sun shadows: one ray per origin, every one toward the same direction. An origin is (position, tMax); tMax 0 means
+// no ray, answered unoccluded; tMax < 0 no ray, answered OCCLUDED (the caller knew: a baked record, say). Writes 1 where anything, met as coverage (or the alpha test, by the table bound) allows,
 // is in the way, 0 where nothing is, as the software batch (ray_batch_shadow.comp) answers.
 //
 // With p.sky, each ray also has a sky ray (skyRays, two float4s: origin and tMax, tMax 0 for none, sky seen; then its
@@ -152,6 +152,7 @@ kernel void blix_shadow(device const float4* origins [[buffer(0)]],
         if (res.type != intersection_type::none)
             word |= 1u | (uint(as_type<ushort>(half(min(res.distance, 60000.0f)))) << 16);
     }
+    else if (o.w < 0.0f) word |= 1u;
     if (p.sky != 0u) {
         float4 s = skyRays[i * 2u];
         if (s.w > 0.0f) {
