@@ -1089,8 +1089,9 @@ internal sealed class RenderSettings
     [Tune(0f, 8f)]     public float LodErrorPixels = 2.0f;
     // The incident light and the traced sun shadows at half resolution, each half-res pixel standing for one of its
     // 2x2 (a different one each frame, TAA gathering all four), brought back to full resolution along the depth and
-    // normals (lighting_upsample.frag). Off: both at full resolution, the reference.
-    [Tune]             public bool HalfResLighting = true;
+    // normals (lighting_upsample.frag). Off (the default): both at full resolution. Half res left blocky shadow patches
+    // the upsample could not hide, worst on cloth, for less than it saved once the lightlets answer most pixels.
+    [Tune]             public bool HalfResLighting = false;
     // Two-phase occlusion culling of the camera's opaque placements (scene_occlusion.comp; --no-occlusion turns it off
     // for the whole run). Off: the frustum alone decides -- the reference, for geometry that breaks up and comes back.
     [Tune]             public bool OcclusionCull = true;
