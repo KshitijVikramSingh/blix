@@ -417,7 +417,7 @@ internal sealed partial class SponzaLoop
     // Every pass that reads a record by id reads either kind; the filter tells them apart by id, mark and lookup by
     // whether the pixel has an atlas texel (texel.glsl).
     private void UploadLightmapTexels(TexelBake hashed, (Vector4[] Texels, uint[] IndexMap, uint[] Frames, int Count) atlas,
-        TexelLightState? light = null, string? bakePath = null)
+        TexelLightState? light = null, string? bakePath = null, uint[]? resolved = null)
     {
         var first = hashed.Count;
         var texels = new Vector4[hashed.Texels.Length + atlas.Texels.Length];
@@ -426,7 +426,7 @@ internal sealed partial class SponzaLoop
         var map = atlas.IndexMap;
         for (var i = 0; i < map.Length; i++)
             if (map[i] != 0xFFFFFFFFu) map[i] += (uint)first;
-        UploadTexels(hashed with { Texels = texels, Count = first + atlas.Count }, light, bakePath, first);
+        UploadTexels(hashed with { Texels = texels, Count = first + atlas.Count }, light, bakePath, first, resolved);
         lightmapIndexMapBuffer = Own(device.CreateGpuBuffer(map.Length * 4, MemoryMarshal.AsBytes(map.AsSpan()), "sponza.lightmap.index-map"));
         // The frames by absolute record id, after a one-entry header with the atlas size (zero: none).
         var frames = new uint[2 * (1 + first + atlas.Count)];

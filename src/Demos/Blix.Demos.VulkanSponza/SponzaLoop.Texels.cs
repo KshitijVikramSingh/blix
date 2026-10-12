@@ -320,7 +320,7 @@ internal sealed partial class SponzaLoop
 
     // light: the baked light (SponzaLoop.LightBake.cs), or null -- the texels start from nothing, and with bakePath the
     // bake begins (firstAtlas: where the lightmap's records start, the count without them).
-    private void UploadTexels(TexelBake bake, TexelLightState? light = null, string? bakePath = null, int firstAtlas = -1)
+    private void UploadTexels(TexelBake bake, TexelLightState? light = null, string? bakePath = null, int firstAtlas = -1, uint[]? resolved = null)
     {
         texelCount = bake.Count;
         texelCapacity = bake.Capacity;
@@ -332,16 +332,23 @@ internal sealed partial class SponzaLoop
         var queueWords = 8 + 4 * Math.Max(texelBudget, LightBakeBudget);
         texelHashBuffer = Own(device.CreateGpuBuffer(bake.Table.Length * 4, MemoryMarshal.AsBytes(bake.Table.AsSpan()), "sponza.texels.hash"));
         texelBuffer = Own(device.CreateGpuBuffer(bake.Texels.Length * 16, MemoryMarshal.AsBytes(bake.Texels.AsSpan()), "sponza.texels"));
-        texelLightBuffer = Own(device.CreateGpuBuffer(texelCount * 16, light is null ? new byte[texelCount * 16] : MemoryMarshal.AsBytes(light.Light.AsSpan()), "sponza.texels.light"));
-        texelStampBuffer = Own(device.CreateGpuBuffer(texelCount * 4, MemoryMarshal.AsBytes(stamps.AsSpan()), "sponza.texels.stamp"));
-        texelQueueBuffer = Own(device.CreateGpuBuffer(queueWords * 4, new byte[queueWords * 4], "sponza.texels.queue"));
-        texelPriorBuffer = Own(device.CreateGpuBuffer(texelCount * 16, new byte[texelCount * 16], "sponza.texels.prior"));
-        texelFilteredBuffer = Own(device.CreateGpuBuffer(texelCount * 16, new byte[texelCount * 16], "sponza.texels.filtered"));
-        texelFilterListBuffer = Own(device.CreateGpuBuffer((2 + TexelFilterCapacity) * 4, new byte[(2 + TexelFilterCapacity) * 4], "sponza.texels.filter-list"));
-        texelOpenBuffer = Own(device.CreateGpuBuffer(texelCount * 16, light is null ? new byte[texelCount * 16] : MemoryMarshal.AsBytes(light.Open.AsSpan()), "sponza.texels.open"));
-        texelBlendBuffer = Own(device.CreateGpuBuffer(texelCount * 16, light is null ? new byte[texelCount * 16] : MemoryMarshal.AsBytes(light.Blend.AsSpan()), "sponza.texels.blend"));
-        texelMomentBuffer = Own(device.CreateGpuBuffer(texelCount * 4, light is null ? new byte[texelCount * 4] : MemoryMarshal.AsBytes(light.Moment.AsSpan()), "sponza.texels.moment"));
-        texelEpochBuffer = Own(device.CreateGpuBuffer(texelCount * 4, new byte[texelCount * 4], "sponza.texels.epoch"));
+        // The gather's buffers (zeroed by CreateGpuBuffer where nothing is given); with a resolved cache, placeholders
+        // until a light change wakes them (SponzaLoop.TexelRest.cs).
+        var atRest = resolved is not null;
+        if (atRest && texelRestPlaceholder.Equals(default(GpuBufferHandle)))
+            texelRestPlaceholder = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.texels.rest-placeholder"));
+        GpuBufferHandle Gather(int bytes, ReadOnlySpan<byte> initial, string name) =>
+            atRest ? texelRestPlaceholder : Own(device.CreateGpuBuffer(bytes, initial, name));
+        texelLightBuffer = Gather(texelCount * 16, light is null ? default : MemoryMarshal.AsBytes(light.Light.AsSpan()), "sponza.texels.light");
+        texelStampBuffer = Gather(texelCount * 4, MemoryMarshal.AsBytes(stamps.AsSpan()), "sponza.texels.stamp");
+        texelQueueBuffer = Own(device.CreateGpuBuffer(queueWords * 4, name: "sponza.texels.queue"));
+        texelPriorBuffer = Gather(texelCount * 16, default, "sponza.texels.prior");
+        texelFilteredBuffer = Gather(texelCount * 16, default, "sponza.texels.filtered");
+        texelFilterListBuffer = Own(device.CreateGpuBuffer((2 + TexelFilterCapacity) * 4, name: "sponza.texels.filter-list"));
+        texelOpenBuffer = Gather(texelCount * 16, light is null ? default : MemoryMarshal.AsBytes(light.Open.AsSpan()), "sponza.texels.open");
+        texelBlendBuffer = Gather(texelCount * 16, light is null ? default : MemoryMarshal.AsBytes(light.Blend.AsSpan()), "sponza.texels.blend");
+        texelMomentBuffer = Gather(texelCount * 4, light is null ? default : MemoryMarshal.AsBytes(light.Moment.AsSpan()), "sponza.texels.moment");
+        texelEpochBuffer = Gather(texelCount * 4, default, "sponza.texels.epoch");
         texelProbeBuffer = Own(device.CreateGpuBuffer(24 * 24 * 48, new byte[24 * 24 * 48], "sponza.texels.probe"));
         texelGrid = bake.Grid;
         texelsUploaded = true;
@@ -351,14 +358,21 @@ internal sealed partial class SponzaLoop
             for (var i = 0; i < texelCount; i++)
                 if (i < all || MathF.Abs(bake.Texels[2 * i].W) >= 2f) live.Add((uint)i);
             texelLiveCount = live.Count;
-            texelLiveBuffer = Own(device.CreateGpuBuffer(Math.Max(live.Count, 1) * 4, MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(live)), "sponza.texels.live"));
+            texelLiveBuffer = atRest ? texelRestPlaceholder
+                : Own(device.CreateGpuBuffer(Math.Max(live.Count, 1) * 4, MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(live)), "sponza.texels.live"));
             // --lightlets: the live texels' sun records (SponzaLoop.LightletBake), read or baked.
             texelLiveIds = live.ToArray();
             BeginLightlets(bake.Texels, texelLiveIds, texelCount, bakePath);
         }
-        // A loaded bake is settled (LightBakeVersion 4 refines until it is): filter it once and rest.
-        if (light is not null) SettleTexels("the baked light loaded");
-        if (light is null && bakePath is not null)
+        // A resolved cache: at rest from the first frame. A full-state cache (LightBakeVersion 4, settled by its refining):
+        // filtered once, then at rest, resolved -- and saved in that form for the next run. Neither: the bake begins.
+        if (atRest) StartTexelsAtRest(resolved!);
+        else if (light is not null)
+        {
+            SettleTexels("the baked light loaded");
+            if (TexelsMayRest && bakePath is not null) pendingResolvedSave = ResolvedPathFor(bakePath);
+        }
+        else if (bakePath is not null)
         {
             lightBakePath = bakePath;
             BeginLightBake(texelLiveIds!, texelCount);

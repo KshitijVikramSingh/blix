@@ -646,17 +646,20 @@ internal sealed partial class SponzaLoop
             var texelTotal = hashed.Count + (lightmapBake?.Count ?? 0);
             var lightPath = lightBakeOff ? null : LightBakePathFor(cacheKey, transportRelightSun);
             lightBakeKey = cacheKey;
-            var light = lightPath is null ? null : ReadLightBake(lightPath, texelTotal);
+            // The resting form first (8 B a texel), else the full state (an older run's), else nothing: the bake begins.
+            var resolved = lightPath is null || !TexelsMayRest ? null : ReadResolved(ResolvedPathFor(lightPath), texelTotal);
+            var light = lightPath is null || resolved is not null ? null : ReadLightBake(lightPath, texelTotal);
             // Its own copy of the atlas: the method's locals are dropped at its end (below), before this may run.
             var atlasForUpload = lightmapBake;
             OnMain(() =>
             {
-                if (atlasForUpload is { } atlas) UploadLightmapTexels(hashed, atlas, light, lightPath);
-                else UploadTexels(hashed, light, lightPath);
+                if (atlasForUpload is { } atlas) UploadLightmapTexels(hashed, atlas, light, lightPath, resolved);
+                else UploadTexels(hashed, light, lightPath, resolved: resolved);
                 // Uploaded: let the CPU's texels go (the relight closure shares this scope and lives on).
                 hashed = null!;
                 atlasForUpload = null;
                 light = null;
+                resolved = null;
             });
         }
         if (transportGpu && (cached is null || (transportTexels && cached.Texels is null)))

@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using Blix.Graphics;
 
@@ -25,6 +27,71 @@ internal sealed partial class SponzaLoop
     private uint texelResolvedFrame;
     private GpuBufferHandle texelRestPlaceholder;
     private bool TexelsMayRest => texelInspect is null && !texelDebug && !texelDebugRecords;
+    // Where this light's resolved answers go once they are resolved (a bake just settled, or an old full-state cache
+    // read): the cache a later run starts at rest from (ReadResolved). Null: nothing to save.
+    private string? pendingResolvedSave;
+
+    // The light's cache in its resting form: beside the light bake's path (the same key: transport, sun, settings).
+    private static string ResolvedPathFor(string lightBakePath) => lightBakePath + ".resolved";
+    private const int ResolvedVersion = 1;
+
+    private static uint[]? ReadResolved(string path, int count)
+    {
+        if (!File.Exists(path)) return null;
+        var clock = Stopwatch.StartNew();
+        try
+        {
+            using var stream = File.OpenRead(path);
+            using var r = new BinaryReader(stream);
+            if (r.ReadString() != "blix-texel-resolved" || r.ReadInt32() != ResolvedVersion || r.ReadInt32() != count) return null;
+            var words = new uint[count * 2];
+            var bytes = MemoryMarshal.AsBytes(words.AsSpan());
+            if (stream.Read(bytes) != bytes.Length) return null;
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza] texels: {count:N0} resolved answers read from the cache ({bytes.Length / 1048576.0:0} MB, {clock.Elapsed.TotalSeconds:0.0} s): {Path.GetFileName(path)}"));
+            return words;
+        }
+        catch (IOException) { return null; }
+    }
+
+    private static void WriteResolved(string path, uint[] words)
+    {
+        var partial = path + ".partial";
+        try
+        {
+            using (var stream = File.Create(partial))
+            using (var w = new BinaryWriter(stream))
+            {
+                w.Write("blix-texel-resolved");
+                w.Write(ResolvedVersion);
+                w.Write(words.Length / 2);
+                w.Write(MemoryMarshal.AsBytes(words.AsSpan()));
+            }
+            File.Move(partial, path, overwrite: true);
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza] texels: resolved answers saved ({new FileInfo(path).Length / 1048576.0:0} MB): {Path.GetFileName(path)}"));
+        }
+        catch (IOException e)
+        {
+            try { File.Delete(partial); } catch (IOException) { }
+            Console.WriteLine($"[VulkanSponza] texels: resolved answers not saved ({e.Message}).");
+        }
+    }
+
+    // UploadTexels with a resolved cache: the texels start at rest -- the resolved answers up, the gather's buffers never
+    // made (placeholders until a light change wakes them), no filter sweep.
+    private void StartTexelsAtRest(uint[] resolved)
+    {
+        texelResolvedBuffer = Own(device.CreateGpuBuffer(resolved.Length * 4, MemoryMarshal.AsBytes(resolved.AsSpan()), "sponza.texels.resolved"));
+        texelResting = true;
+        texelResolveCurrent = true;
+        texelGatherFreed = true;
+        texelsSettled = true;
+        texelSettledEpoch = texelEpoch;
+        texelsRestReported = true;
+        filterSweepIssued = -1;
+        Console.WriteLine("[VulkanSponza] texels: at rest from the cache -- the gather's buffers are not made until the light changes.");
+    }
 
     // RecordTexels, at rest: resolve once, and a few frames on let the gather's buffers go.
     private void RestTexels()
@@ -53,6 +120,12 @@ internal sealed partial class SponzaLoop
         }
         // Freed once the resolve has run (four frames, as RetireGpuBuffer counts) and no bake's save still reads them.
         if (texelGatherFreed || lightBakeSaving || texelFrame - texelResolvedFrame < 4u) return;
+        if (pendingResolvedSave is { } savePath)
+        {
+            pendingResolvedSave = null;
+            var words = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(texelResolvedBuffer, 0, texelCount * 8).AsSpan()).ToArray();
+            Task.Run(() => WriteResolved(savePath, words));
+        }
         if (texelRestPlaceholder.Equals(default(GpuBufferHandle)))
             texelRestPlaceholder = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.texels.rest-placeholder"));
         foreach (var b in new[] { texelLightBuffer, texelPriorBuffer, texelFilteredBuffer, texelBlendBuffer, texelOpenBuffer,
