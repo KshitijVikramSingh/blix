@@ -108,28 +108,39 @@ internal static class SunNodeBlocks
         }
     }
 
-    // Modified Gram-Schmidt over the m vectors (rows of x).
+    // Modified Gram-Schmidt over the m vectors (rows of x). A vector with (next to) nothing left once the earlier ones
+    // are taken out -- a block whose light has fewer than m directions in it, Cornell's walls -- is replaced by the first
+    // unit vector that still has something left after the same projection, so the set stays orthonormal (a plain unit
+    // vector in its place left Cornell's bases off by up to 2 in orthogonality, and 36% of the light lost).
     private static void Orthonormalize(double[] x, int m, int cols)
     {
         for (var i = 0; i < m; i++)
         {
-            for (var j = 0; j < i; j++)
+            if (Reduce(x, i, cols) > 1e-12) continue;
+            for (var e = 0; e < cols; e++)
             {
-                double d = 0;
-                for (var c = 0; c < cols; c++) d += x[i * cols + c] * x[j * cols + c];
-                for (var c = 0; c < cols; c++) x[i * cols + c] -= d * x[j * cols + c];
+                for (var c = 0; c < cols; c++) x[i * cols + c] = c == e ? 1.0 : 0.0;
+                if (Reduce(x, i, cols) > 1e-6) break;
             }
-            double n = 0;
-            for (var c = 0; c < cols; c++) n += x[i * cols + c] * x[i * cols + c];
-            n = Math.Sqrt(n);
-            if (n < 1e-30)
-            {
-                // A block with less in it than m directions: any unit vector orthogonal enough will do.
-                for (var c = 0; c < cols; c++) x[i * cols + c] = c == i % cols ? 1.0 : 0.0;
-                continue;
-            }
-            for (var c = 0; c < cols; c++) x[i * cols + c] /= n;
         }
+    }
+
+    // Vector i less its projections on the vectors before it, normalised; returns the norm it had before.
+    private static double Reduce(double[] x, int i, int cols)
+    {
+        for (var pass = 0; pass < 2; pass++)   // twice: one pass leaves rounding's share of the earlier vectors in
+        for (var j = 0; j < i; j++)
+        {
+            double d = 0;
+            for (var c = 0; c < cols; c++) d += x[i * cols + c] * x[j * cols + c];
+            for (var c = 0; c < cols; c++) x[i * cols + c] -= d * x[j * cols + c];
+        }
+        double n = 0;
+        for (var c = 0; c < cols; c++) n += x[i * cols + c] * x[i * cols + c];
+        n = Math.Sqrt(n);
+        if (n > 1e-300)
+            for (var c = 0; c < cols; c++) x[i * cols + c] /= n;
+        return n;
     }
 
     // Cyclic Jacobi for a small symmetric matrix: eigenvalues and eigenvectors (columns of v).

@@ -1,19 +1,34 @@
 #version 450
 // Sun nodes (SponzaLoop.SunNodes.cs): one pass of a slice's gather rays, out to the CLOSEST batch. A workgroup a
-// texel, a thread a ray: RAYS cosine-weighted directions, stratified and rotated afresh each pass as texel_gather.comp
-// draws them without a guide (a guide is the patches' light for ONE sun; these rays serve every sun at once).
+// texel, a thread a ray, drawn as texel_gather.comp draws them: half cosine-weighted (stratified, rotated afresh each
+// pass), half from the texel's nearest patch's guide -- the BAND's guide (built from the patches' and sunlets' light
+// averaged over every node's sun, SunNodesSolve.cs), so one set of rays serves every sun -- each weighted by the
+// mixture's density (NodeRayWeights: the ray's weight on irradiance, pi for a cosine ray without a guide). Without
+// guides (uSlice.w 0) all cosine, as before.
 
 #define RAYS 32
 #define PI 3.14159265359
 layout(local_size_x = RAYS) in;
 
 layout(set = 0, binding = 0) uniform SunNodesRays {
-    vec4 uSlice;   // x the slice's first live texel, y its texels, z the pass
+    vec4 uSlice;   // x the slice's first live texel, y its texels, z the pass, w 1: guided
+    vec4 uCookedGrid;
+    vec4 uCookedDims;
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
 layout(std430, set = 0, binding = 2) readonly buffer SunNodesLive { uint liveIds[]; };
 layout(std430, set = 0, binding = 3) writeonly buffer NodeRays { vec4 nodeRays[]; };   // 2 a ray: origin, tMin; dir, tMax
+layout(std430, set = 0, binding = 4) writeonly buffer NodeRayWeights { float nodeRayWeight[]; };
+layout(std430, set = 0, binding = 5) readonly buffer NodeGuides { float cookedGuide[]; };   // per patch, a CDF over 64 bins
+
+#define COOKED_BINDING 6
+#define COOKED_GRID u.uCookedGrid
+#define COOKED_DIMS u.uCookedDims
+#include "cooked_patches.glsl"
+
+#define GUIDE_RES 8
+#define GUIDE_BINS 64
 
 // ray_query.glsl's (without its ray scene's buffers): the gather's seeds.
 uint blix_pcg(uint v) {
@@ -22,6 +37,40 @@ uint blix_pcg(uint v) {
     return (word >> 22u) ^ word;
 }
 
+// texel_gather.comp's guide sampling and density, unchanged.
+vec2 guideOctEncode(vec3 d) {
+    d /= abs(d.x) + abs(d.y) + abs(d.z);
+    if (d.z >= 0.0) return d.xy;
+    return vec2((1.0 - abs(d.y)) * (d.x >= 0.0 ? 1.0 : -1.0), (1.0 - abs(d.x)) * (d.y >= 0.0 ? 1.0 : -1.0));
+}
+
+vec3 guideOctDecodeRaw(vec2 uv) {
+    vec3 d = vec3(uv, 1.0 - abs(uv.x) - abs(uv.y));
+    if (d.z < 0.0) { float x = d.x; d.x = (1.0 - abs(d.y)) * (x >= 0.0 ? 1.0 : -1.0); d.y = (1.0 - abs(x)) * (d.y >= 0.0 ? 1.0 : -1.0); }
+    return d;
+}
+
+int guideBin(vec3 d) {
+    ivec2 b = clamp(ivec2((guideOctEncode(d) * 0.5 + 0.5) * float(GUIDE_RES)), ivec2(0), ivec2(GUIDE_RES - 1));
+    return b.y * GUIDE_RES + b.x;
+}
+
+float guidePdf(int patchIndex, vec3 d) {
+    int b = guideBin(d);
+    float p = cookedGuide[patchIndex * GUIDE_BINS + b] - (b > 0 ? cookedGuide[patchIndex * GUIDE_BINS + b - 1] : 0.0);
+    float l1 = abs(d.x) + abs(d.y) + abs(d.z);
+    return p * 16.0 / (l1 * l1 * l1);
+}
+
+vec3 guideSample(int patchIndex, float u0, float u1, float u2) {
+    int lo = 0, hi = GUIDE_BINS - 1;
+    while (lo < hi) { int mid = (lo + hi) / 2; if (cookedGuide[patchIndex * GUIDE_BINS + mid] < u0) lo = mid + 1; else hi = mid; }
+    vec2 uv = (vec2(lo % GUIDE_RES, lo / GUIDE_RES) + vec2(u1, u2)) / float(GUIDE_RES) * 2.0 - 1.0;
+    return normalize(guideOctDecodeRaw(uv));
+}
+
+shared int sGuide;
+
 void main() {
     uint group = gl_WorkGroupID.x;
     uint ray = gl_LocalInvocationID.x;
@@ -29,21 +78,38 @@ void main() {
     if (group >= uint(u.uSlice.y)) {
         nodeRays[slot * 2u] = vec4(0.0);
         nodeRays[slot * 2u + 1u] = vec4(0.0);
+        nodeRayWeight[slot] = 0.0;
         return;
     }
     uint id = liveIds[uint(u.uSlice.x) + group];
     vec3 position = texels[2u * id].xyz;
     vec3 n = normalize(texels[2u * id + 1u].xyz);
+    if (ray == 0u) sGuide = u.uSlice.w > 0.5 ? cookedNearest(position, n) : -1;
+    barrier();
+    int guide = sGuide;
     uint pass = uint(u.uSlice.z);
     uint seed = blix_pcg(id * 9781u + pass * 0x632BE5ABu + ray * 2654435761u);
     uint setSeed = blix_pcg(id * 9781u + pass * 0x632BE5ABu);
     float rotation = float(blix_pcg(setSeed) & 0xFFFFu) / 65536.0;
     float jitter = float(blix_pcg(seed) & 0xFFFFu) / 65536.0;
-    float r = sqrt((float(ray) + jitter) / float(RAYS));
-    float phi = 2.0 * PI * fract(float(ray) * 0.618034 + rotation);
-    vec3 t = normalize(abs(n.y) < 0.999 ? cross(vec3(0.0, 1.0, 0.0), n) : cross(vec3(1.0, 0.0, 0.0), n));
-    vec3 b = cross(n, t);
-    vec3 dir = normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + n * sqrt(max(0.0, 1.0 - r * r)));
+    const uint halfRays = uint(RAYS) / 2u;
+    bool guided = guide >= 0 && ray >= halfRays;
+    float cosineCount = guide >= 0 ? float(halfRays) : float(RAYS);
+    uint stratum = guide >= 0 ? ray % halfRays : ray;
+    vec3 dir;
+    if (guided) {
+        uint s1 = blix_pcg(seed ^ 0x9E3779B9u), s2 = blix_pcg(s1);
+        dir = guideSample(guide, (float(stratum) + jitter) / float(halfRays), float(s1 & 0xFFFFu) / 65536.0, float(s2 & 0xFFFFu) / 65536.0);
+    } else {
+        float r = sqrt((float(stratum) + jitter) / cosineCount);
+        float phi = 2.0 * PI * fract(float(stratum) * 0.618034 + rotation);
+        vec3 t = normalize(abs(n.y) < 0.999 ? cross(vec3(0.0, 1.0, 0.0), n) : cross(vec3(1.0, 0.0, 0.0), n));
+        vec3 b = cross(n, t);
+        dir = normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + n * sqrt(max(0.0, 1.0 - r * r)));
+    }
+    float cosTheta = dot(dir, n);
+    float mixturePdf = guide >= 0 ? 0.5 * max(cosTheta, 0.0) / PI + 0.5 * guidePdf(guide, dir) : max(cosTheta, 0.0) / PI;
+    nodeRayWeight[slot] = cosTheta > 0.0 && mixturePdf > 0.0 ? cosTheta / mixturePdf : 0.0;
     nodeRays[slot * 2u] = vec4(position + n * 0.01, 0.0);
     nodeRays[slot * 2u + 1u] = vec4(dir, uintBitsToFloat(0x7F800000u));
 }

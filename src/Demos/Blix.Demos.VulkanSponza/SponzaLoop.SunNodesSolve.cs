@@ -26,6 +26,11 @@ internal sealed record TransportSolveData(
 internal sealed partial class SponzaLoop
 {
     private TransportSolveData? transportSolve;
+    private Func<Vector3[], Vector3[], float[]>? transportBuildGuides;
+    // The band's averages (texel_nodes_solve.comp modes 6, 7), and the nodes' guides built from them (null: no guide,
+    // --sun-nodes-no-guide or the CPU's solve).
+    private GpuBufferHandle solveAvgPatch, solveAvgSunlet;
+    private Task<float[]>? sunNodeGuideTask;
     private const int SolveGroup = 32;
     private const int SolveBouncesPerFrame = 6;
     private ShaderInterface sunNodeSolveInterface = null!;
@@ -130,6 +135,7 @@ internal sealed partial class SponzaLoop
             graph.Dispatch(sunNodeSolveAPass, SolveDispatch(0, group, solveSun, toSun, solveSunlets));
             RecordShadowBatch(sunNodeSunletBatch, solveOrigins, solveOccluded, solveSunlets, toSun, 3u);
             graph.Dispatch(sunNodeSolveBPass, SolveDispatch(1, group, solveSun, toSun, d.Patches));
+            graph.Dispatch(sunNodeSolveBPass, SolveDispatch(7, group, solveSun, toSun, solveSunlets));
             solveSun++;
             return false;
         }
@@ -146,11 +152,27 @@ internal sealed partial class SponzaLoop
         }
         if (solveBounce < d.Iterations) return false;
         graph.Dispatch(sunNodeSolveBPass, SolveDispatch(5, group, 0, Vector3.Zero, items));
+        graph.Dispatch(sunNodeSolveBPass, SolveDispatch(6, group, 0, Vector3.Zero, d.Patches));
         solveGroupStart += group;
         solveSun = 0;
         solveBounce = -1;
         if (solveGroupStart < suns) return false;
         solveActive = false;
+        if (sunNodeGuide && transportBuildGuides is { } build)
+        {
+            device.WaitIdle();
+            var outg = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(solveAvgPatch, 0, d.Patches * 16).AsSpan()).ToArray()
+                .Select(v => new Vector3(v.X, v.Y, v.Z)).ToArray();
+            var sOut = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(solveAvgSunlet, 0, solveSunlets * 16).AsSpan()).ToArray()
+                .Select(v => new Vector3(v.X, v.Y, v.Z)).ToArray();
+            var clock = Stopwatch.StartNew();
+            sunNodeGuideTask = Task.Run(() =>
+            {
+                var cdf = build(outg, sOut);
+                Console.WriteLine(string.Create(Inv, $"[VulkanSponza] sun nodes: the band's guides built in {clock.Elapsed.TotalSeconds:0.0} s ({cdf.Length / 64:N0} patches)."));
+                return cdf;
+            });
+        }
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] sun nodes: {d.Patches:N0} patches' light for {suns} suns solved on the GPU in {solveClock.Elapsed.TotalSeconds:0.0} s ({solveSunlets:N0} sunlet rays a sun, {d.Iterations} bounces in groups of {SolveGroup})."));
         return true;
@@ -167,7 +189,7 @@ internal sealed partial class SponzaLoop
                 new("uSolve", new Vector4Uniform(new Vector4(mode, transportSolve!.Patches, group, sun))),
                 new("uSun", new Vector4Uniform(new Vector4(toSun, 0f))),
                 new("uIrr", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 0f))),
-                new("uCount", new Vector4Uniform(new Vector4(solveSunlets, solveGroupStart, sunNodeSuns!.Length, 0f))),
+                new("uCount", new Vector4Uniform(new Vector4(solveSunlets, solveGroupStart, sunNodeSuns!.Length, 1f / sunNodeSuns.Length))),
             },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
@@ -186,6 +208,8 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("NodeIncoming", solveIn),
                 new ShaderBufferBinding("NodeOutgoing", solveOut),
                 new ShaderBufferBinding("SunNodePatchLight", sunNodePatchLight),
+                new ShaderBufferBinding("PatchAverage", solveAvgPatch),
+                new ShaderBufferBinding("SunletAverage", solveAvgSunlet),
             });
     }
 
@@ -214,6 +238,8 @@ internal sealed partial class SponzaLoop
         solveOut = Own(device.CreateGpuBuffer(items, name: "sponza.sun-nodes.solve.out"));
         solveOrigins = Own(device.CreateGpuBuffer(Math.Max(16, n * 16), name: "sponza.sun-nodes.solve.origins"));
         solveOccluded = Own(device.CreateGpuBuffer(Math.Max(16, n * 4), name: "sponza.sun-nodes.solve.occluded"));
+        solveAvgPatch = Own(device.CreateGpuBuffer(d.Patches * 16, new byte[d.Patches * 16], "sponza.sun-nodes.solve.patch-average"));
+        solveAvgSunlet = Own(device.CreateGpuBuffer(Math.Max(16, n * 16), new byte[Math.Max(16, n * 16)], "sponza.sun-nodes.solve.sunlet-average"));
         sunNodePatchLight = Own(device.CreateGpuBuffer(checked(d.Patches * sunNodeSuns!.Length * 8), name: "sponza.sun-nodes.patch-light"));
         var bytes = n * 48L + (packed.SunletStart.Length + packed.SunletPairs.Length + packed.Start.Length + packed.Pairs.Length) * 4L
             + packed.Terms.Length * 16L + 3L * items + n * 20L;
@@ -224,9 +250,9 @@ internal sealed partial class SponzaLoop
     // The solve's buffers, once the nodes' table is filled.
     private void ReleaseGpuSolve()
     {
-        foreach (var b in solveBuffers.Append(solveFirst).Append(solveIn).Append(solveOut).Append(solveOrigins).Append(solveOccluded))
+        foreach (var b in solveBuffers.Append(solveFirst).Append(solveIn).Append(solveOut).Append(solveOrigins).Append(solveOccluded).Append(solveAvgPatch).Append(solveAvgSunlet))
             if (!b.Equals(default(GpuBufferHandle))) RetireGpuBuffer(b);
         solveBuffers = Array.Empty<GpuBufferHandle>();
-        solveFirst = solveIn = solveOut = solveOrigins = solveOccluded = default;
+        solveFirst = solveIn = solveOut = solveOrigins = solveOccluded = solveAvgPatch = solveAvgSunlet = default;
     }
 }

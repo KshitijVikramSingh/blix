@@ -44,6 +44,10 @@ internal sealed partial class SponzaLoop
     // --sun-nodes-exact-sun (one sun): the hits' sun by a shadow ray each, as the bake's gather has it -- the check on
     // the sun bits' interpolation.
     private bool sunNodeExact;
+    // The band's guides steer half of each texel's rays (texel_nodes_rays.comp); --sun-nodes-no-guide: cosine rays only.
+    private bool sunNodeGuide = true;
+    private bool sunNodeGuided;
+    private GpuBufferHandle sunNodeGuideBuffer, sunNodeRayWeights;
     private PassHandle sunNodeExactOriginsPass;
     private RayBatchPasses sunNodeExactBatch;
     private GpuBufferHandle sunNodeExactOrigins, sunNodeExactOccluded;
@@ -83,10 +87,22 @@ internal sealed partial class SponzaLoop
 
     private void ReadSunNodeArgs(AppArgs args)
     {
+        // The cook's settings, read for both the study (--sun-nodes) and the band's grid (--potential-suns).
         if (args.Int("sun-nodes-rays") is { } r) sunNodeRays = Math.Max(32, r / 32 * 32);
         if (args.Int("sun-nodes-slice") is { } s) sunNodeSlice = Math.Clamp(s, 1024, 65535);
+        if (args.Int("sun-nodes-discover-stride") is { } ds) sunNodeDiscoverStride = Math.Max(0, ds);
+        if (args.Float("sun-nodes-lift") is { } lift) sunNodeLift = Math.Max(0f, lift);
+        if (args.Float("sun-nodes-unknown-sun") is { } us) sunNodeUnknownSun = Math.Clamp(us, 0f, 1f);
+        sunNodeCpuSolve = args.Flag("sun-nodes-cpu-solve");
+        sunNodeGuide = !args.Flag("sun-nodes-no-guide");
+        // Study only: every S-th live texel traced (the sun bits and the hash still hold them all), and one sun's hits by
+        // a shadow ray each. A grid kept for the run needs every texel, and every sun.
+        var stride = args.Int("sun-nodes-stride");
+        var exact = args.Flag("sun-nodes-exact-sun");
         if (args.Flag("potential-suns"))
         {
+            if (stride is > 1 || exact)
+                throw new AppArgsException("--potential-suns cooks every texel at every node: --sun-nodes-stride and --sun-nodes-exact-sun are for --sun-nodes studies.");
             // The band's grid (SponzaLoop.PotentialSuns.cs), from the cache or cooked here; the run goes on with it.
             potentialSunsAsked = true;
             sunNodeSuns = PotentialGrid();
@@ -111,14 +127,8 @@ internal sealed partial class SponzaLoop
         Directory.CreateDirectory(sunNodeDir);
         sunNodeManifest = file + ".nodes.manifest";
         if (args.Int("sun-nodes-keep") is { } k) sunNodeKeep = Math.Max(0, k);
-        // Experiments: every S-th live texel traced (the sun bits and the hash still hold them all), and the visibility a
-        // hit among no texel takes (0: none, the default; 1: lit -- between them, what the foliage's sun is worth).
-        if (args.Int("sun-nodes-stride") is { } st) sunNodeStride = Math.Max(1, st);
-        if (args.Float("sun-nodes-unknown-sun") is { } us) sunNodeUnknownSun = Math.Clamp(us, 0f, 1f);
-        if (args.Int("sun-nodes-discover-stride") is { } ds) sunNodeDiscoverStride = Math.Max(0, ds);
-        if (args.Float("sun-nodes-lift") is { } lift) sunNodeLift = Math.Max(0f, lift);
-        sunNodeCpuSolve = args.Flag("sun-nodes-cpu-solve");
-        sunNodeExact = args.Flag("sun-nodes-exact-sun");
+        if (stride is { } st) sunNodeStride = Math.Max(1, st);
+        sunNodeExact = exact;
         sunNodeStage = SunNodeStage.Waiting;
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] sun nodes: {sunNodeSuns.Length} suns from {file}, {sunNodeRays} rays a texel, slices of {sunNodeSlice:N0}; out to {sunNodeDir}."));
@@ -167,7 +177,8 @@ internal sealed partial class SponzaLoop
     }
 
     // The trace waits for the texels' sun bits (SunNodeBitsFor) as well as the patches' solve.
-    private bool SunNodeTraceReady => texelLiveIds is not null && sunNodeBitsTask is { IsCompleted: true };
+    private bool SunNodeTraceReady => texelLiveIds is not null && sunNodeBitsTask is { IsCompleted: true }
+        && sunNodeGuideTask is null or { IsCompleted: true };
 
     // As soon as the texels, the patches and the tracer are up (the sunlets' sun rays go to Metal): each sun's direction,
     // the texels' sun bits toward them, and the patches' light, all the suns solved together -- both off the frame thread.
@@ -252,6 +263,12 @@ internal sealed partial class SponzaLoop
         var rays = sunNodeSlice * 32;
         sunNodeRaysBuffer = Own(device.CreateGpuBuffer(checked((int)((long)rays * 32)), name: "sponza.sun-nodes.rays"));
         sunNodeHits = Own(device.CreateGpuBuffer(checked((int)((long)rays * 48 + 80)), name: "sponza.sun-nodes.hits"));
+        sunNodeRayWeights = Own(device.CreateGpuBuffer(rays * 4, name: "sponza.sun-nodes.ray-weights"));
+        var guides = sunNodeGuideTask?.Result;
+        sunNodeGuideTask = null;
+        sunNodeGuided = guides is not null;
+        guides ??= new float[64];
+        sunNodeGuideBuffer = Own(device.CreateGpuBuffer(guides.Length * 4, MemoryMarshal.AsBytes(guides.AsSpan()), "sponza.sun-nodes.guides"));
         if (sunNodeExact)
         {
             sunNodeExactOrigins = Own(device.CreateGpuBuffer(rays * 16, name: "sponza.sun-nodes.exact-origins"));
@@ -364,11 +381,13 @@ internal sealed partial class SponzaLoop
         var stats = Enumerable.Range(0, 5).Select(k => (ulong)words[2 * k] | ((ulong)words[2 * k + 1] << 32)).ToArray();
         var hits = Math.Max(stats[0], 1ul);
         Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] sun nodes: traced in {trace:0.0} min ({(long)sunNodeTraceIds.Length * sunNodeRays / 1e9:0.00} G rays, {sunNodeReadSeconds:0} s of it reading back) for {suns.Length} suns, after {sunNodeRelightSeconds:0.0} s of patch solves; hits {stats[0]:N0} ({100.0 * stats[4] / hits:0.00}% answered by the foliage's points, {100.0 * stats[1] / hits:0.00}% among neither: no sun; {100.0 * stats[2] / hits:0.00}% no patch), misses {stats[3]:N0}."));
+            $"[VulkanSponza] sun nodes: traced in {trace:0.0} min ({(long)sunNodeTraceIds.Length * sunNodeRays / 1e9:0.00} G rays, {sunNodeReadSeconds:0} s of it reading back) for {suns.Length} suns ({(sunNodeGuided ? "half the rays by the band's guides" : "cosine rays")}), after {sunNodeRelightSeconds:0.0} s of patch solves; hits {stats[0]:N0} ({100.0 * stats[4] / hits:0.00}% answered by the foliage's points, {100.0 * stats[1] / hits:0.00}% among neither: no sun; {100.0 * stats[2] / hits:0.00}% no patch), misses {stats[3]:N0}."));
+        // The grid's suns, counted before the boot sun's answer is handed over (RestOnBootSun forgets it was one of them).
+        var compressed = SunNodeCompressed;
         RestOnBootSun();
         if (potentialSunsAsked)
         {
-            FinishPotentialSuns(SunNodeCompressed);
+            FinishPotentialSuns(compressed);
             return;
         }
         var lines = new List<string> { "# hour dec elevation toSun.x toSun.y toSun.z resolved" };
@@ -404,10 +423,10 @@ internal sealed partial class SponzaLoop
     // The cook's buffers, once the nodes are compressed and up (the live list stays: the resolve reads it).
     private void ReleaseSunNodeCook()
     {
-        foreach (var b in new[] { sunNodeSunsBuffer, sunNodeBits, sunNodeHash, sunNodePatchLight, sunNodeRaysBuffer, sunNodeHits, sunNodeAccum, sunNodeStats, sunNodeFoliagePoints, sunNodeFoliageHash, sunNodeFoliageBits, sunNodeDiscoverBuffer, sunNodeDiscoverList })
+        foreach (var b in new[] { sunNodeSunsBuffer, sunNodeBits, sunNodeHash, sunNodePatchLight, sunNodeRaysBuffer, sunNodeHits, sunNodeAccum, sunNodeStats, sunNodeFoliagePoints, sunNodeFoliageHash, sunNodeFoliageBits, sunNodeDiscoverBuffer, sunNodeDiscoverList, sunNodeGuideBuffer, sunNodeRayWeights })
             if (!b.Equals(default(GpuBufferHandle))) RetireGpuBuffer(b);
         sunNodeSunsBuffer = sunNodeBits = sunNodeHash = sunNodePatchLight = sunNodeRaysBuffer = sunNodeHits = sunNodeAccum = sunNodeStats = default;
-        sunNodeFoliagePoints = sunNodeFoliageHash = sunNodeFoliageBits = sunNodeDiscoverBuffer = sunNodeDiscoverList = default;
+        sunNodeFoliagePoints = sunNodeFoliageHash = sunNodeFoliageBits = sunNodeDiscoverBuffer = sunNodeDiscoverList = sunNodeGuideBuffer = sunNodeRayWeights = default;
         sunNodePoints = Array.Empty<Vector4>();
         sunNodePointBits = Array.Empty<uint>();
     }
@@ -510,15 +529,23 @@ internal sealed partial class SponzaLoop
     // or, discovering (`discover`: the list's room), the hits among neither texel nor sun point listed (NodeDiscover).
     private void DispatchSunNodePass(GpuBufferHandle ids, int first, int slice, int pass, int discover)
     {
+        var raysDeclared = sunNodeRaysInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
         graph.Dispatch(sunNodeRaysPass, new DispatchCommand(sunNodeRaysPipeline, slice, 1, 1,
-            new ShaderUniform[] { new("uSlice", new Vector4Uniform(new Vector4(first, slice, pass, 0f))) },
+            new ShaderUniform[]
+            {
+                new("uSlice", new Vector4Uniform(new Vector4(first, slice, pass, sunNodeGuided ? 1f : 0f))),
+                new("uCookedGrid", new Vector4Uniform(cookedGrid)),
+                new("uCookedDims", new Vector4Uniform(cookedDims)),
+            },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
             {
                 new ShaderBufferBinding("Texels", texelBuffer),
                 new ShaderBufferBinding("SunNodesLive", ids),
                 new ShaderBufferBinding("NodeRays", sunNodeRaysBuffer),
-            }));
+                new ShaderBufferBinding("NodeRayWeights", sunNodeRayWeights),
+                new ShaderBufferBinding("NodeGuides", sunNodeGuideBuffer),
+            }.Concat(CookedBuffers()).Where(b => raysDeclared.Contains(b.Name)).ToArray()));
         var seed = unchecked((uint)(first * 2654435761L) ^ (uint)pass * 0x9E3779B9u ^ (discover > 0 ? 0xD15C0u : 0u));
         // The frame's tracer: cook with --ray-lod-error 0, so it is the LOD 0 the texels sit on (UploadSunNodes warns). The
         // bake scene's tracer read the light 28% dark on Cornell, the same 120 triangles (its hits' albedo; open).
@@ -562,6 +589,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("NodeDiscover", sunNodeDiscoverList),
                 new ShaderBufferBinding("ExactOrigins", sunNodeExact ? sunNodeExactOrigins : sunNodeRaysBuffer),
                 new ShaderBufferBinding("ExactOccluded", sunNodeExact ? sunNodeExactOccluded : sunNodeHits),
+                new ShaderBufferBinding("NodeRayWeights", sunNodeRayWeights),
             }.Concat(CookedBuffers()).Where(b => declared.Contains(b.Name)).ToArray());
     }
 

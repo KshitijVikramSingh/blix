@@ -621,6 +621,8 @@ internal sealed partial class SponzaLoop
         if (useSunlets)
             transportSolve = new TransportSolveData(patches, couplings, sunletCouplings, sunletPos, sunletNrm, sunletAlbedo,
                 albedo, skyIn, () => lastIncident, iterations);
+        // The guides from given light (SponzaLoop.SunNodesSolve.cs: the nodes' band averages).
+        transportBuildGuides = (outg, sOut) => BuildGuides(outg, sOut);
         transportRelightMany = (toSuns, sunIrrNew) =>
         {
             const int group = 32;

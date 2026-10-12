@@ -8,6 +8,10 @@
 //   mode 3  a patch's outgoing light for every sun of the group: albedo / pi x its incoming
 //   mode 4  its incoming: the sky, the first bounce, and pi x its couplings over the others' outgoing
 //   mode 5  into the nodes' patch light (SunNodePatchLight, half rgb [patch][sun]) at the group's suns
+//   mode 6  a patch's outgoing light over the group's suns, into its average over every sun (PatchAverage)
+//   mode 7  a sunlet's sunlit light for the group's sun k, into its average over every sun (SunletAverage)
+// The two averages build the nodes' guides (SponzaLoop.SunNodesSolve.cs): where a patch's light comes from over the
+// band, so one set of rays serves every sun.
 // Modes 2-5 run a thread a (patch, sun of the group), the sun fastest: a patch's group of suns is one run in memory, so
 // a gather over couplings reads runs of G.
 
@@ -17,7 +21,7 @@ layout(set = 0, binding = 0) uniform NodesSolve {
     vec4 uSolve;   // x the mode, y patches, z the group's suns (G), w the group's sun this dispatch (modes 0, 1)
     vec4 uSun;     // xyz toward that sun
     vec4 uIrr;     // rgb the sun's irradiance
-    vec4 uCount;   // x sunlets, y the group's first sun among all, z all the suns (the node table's stride)
+    vec4 uCount;   // x sunlets, y the group's first sun among all, z all the suns (the node table's stride), w 1 / all
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer SunletPos { vec4 sunletPos[]; };
@@ -34,6 +38,8 @@ layout(std430, set = 0, binding = 11) buffer NodeFirst { vec4 nodeFirst[]; };
 layout(std430, set = 0, binding = 12) buffer NodeIncoming { vec4 nodeIn[]; };
 layout(std430, set = 0, binding = 13) buffer NodeOutgoing { vec4 nodeOut[]; };
 layout(std430, set = 0, binding = 14) buffer SunNodePatchLight { uvec2 patchLight[]; };
+layout(std430, set = 0, binding = 15) buffer PatchAverage { vec4 patchAverage[]; };
+layout(std430, set = 0, binding = 16) buffer SunletAverage { vec4 sunletAverage[]; };
 
 #define PI 3.14159265359
 
@@ -59,6 +65,18 @@ void main() {
             s += uintBitsToFloat(sunletCoupling[c].y) * sunletAlbedo[to].rgb * u.uIrr.rgb * dot(sunletNrm[to].xyz, u.uSun.xyz) / PI;
         }
         nodeFirst[i * G + uint(u.uSolve.w)] = vec4(s * PI, 0.0);
+        return;
+    }
+    if (mode == 7) {
+        if (i >= uint(u.uCount.x) || sunletOrigins[i].w <= 0.0 || (sunletOccluded[i] & 1u) != 0u) return;
+        sunletAverage[i] += vec4(sunletAlbedo[i].rgb * u.uIrr.rgb * dot(sunletNrm[i].xyz, u.uSun.xyz) / PI * u.uCount.w, 0.0);
+        return;
+    }
+    if (mode == 6) {
+        if (i >= patches) return;
+        vec3 s = vec3(0.0);
+        for (uint k = 0u; k < G; ++k) s += nodeIn[i * G + k].rgb;
+        patchAverage[i] += vec4(patchTerms[3u * i].rgb / PI * s * u.uCount.w, 0.0);
         return;
     }
     if (i >= patches * G) return;

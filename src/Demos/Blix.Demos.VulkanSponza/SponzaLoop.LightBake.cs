@@ -30,6 +30,9 @@ internal sealed partial class SponzaLoop
     // --light-bake-budget N: texels a frame while baking, one 32-ray pass each. By default 16,384 (~0.5 M rays) on the
     // software traversal; on Metal 131,072 (~4.2 M rays, ~550 MB of wavefront buffers) -- a rebake of Sponza's 11 M live
     // texels took ~47 minutes at the software budget, the image's own texels waiting behind it.
+    // --light-bake-stride S: bake every S-th live texel only (the rest keep no rays: their resolved answer is marked
+    // invalid), to its own cache file -- a check against the cook in a minute where the whole bake takes 15 (Sponza).
+    private int lightBakeStride = 1;
     private int? lightBakeBudgetAsked;
     private int LightBakeBudget => lightBakeBudgetAsked ?? (FrameRaysOnHardware ? 131072 : 16384);
     private bool lightBakeOff;
@@ -64,6 +67,7 @@ internal sealed partial class SponzaLoop
         lightBakeOff = args.Flag("no-light-bake");
         sunRebake = !args.Flag("no-sun-rebake");
         if (args.Int("light-bake-budget") is { } b) lightBakeBudgetAsked = Math.Clamp(b, 1024, 1 << 18);
+        if (args.Int("light-bake-stride") is { } st) lightBakeStride = Math.Max(1, st);
     }
 
     // The baked light's file: the transport cache's key (the scene, the lightmap files, the texel settings), the sun
@@ -71,7 +75,7 @@ internal sealed partial class SponzaLoop
     private string LightBakePathFor(string transportKey, (Vector3 ToSun, Vector3 Irradiance) sun)
     {
         var spec = string.Create(CultureInfo.InvariantCulture,
-            $"{transportKey};sun {sun.ToSun.X:F5},{sun.ToSun.Y:F5},{sun.ToSun.Z:F5};{sun.Irradiance.X:F4},{sun.Irradiance.Y:F4},{sun.Irradiance.Z:F4};target {texelTarget};settled {texelNoise:G6} {texelMaxRays};buried {LightmapBuriedRule};v{LightBakeVersion}");
+            $"{transportKey};sun {sun.ToSun.X:F5},{sun.ToSun.Y:F5},{sun.ToSun.Z:F5};{sun.Irradiance.X:F4},{sun.Irradiance.Y:F4},{sun.Irradiance.Z:F4};target {texelTarget};settled {texelNoise:G6} {texelMaxRays};buried {LightmapBuriedRule};v{LightBakeVersion}{(texelSunRays ? ";hit sun rays" : "")}{(lightBakeStride > 1 ? $";stride {lightBakeStride}" : "")}");
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(spec)))[..16].ToLowerInvariant();
         return Path.ChangeExtension(TransportCachePath(transportKey), $".light-{hash}");
     }
@@ -145,6 +149,7 @@ internal sealed partial class SponzaLoop
     // Below firstAtlas every record is hashed and live; from it, the atlas's, live unless buried (|w| 1).
     private void BeginLightBake(uint[] live, int count)
     {
+        if (lightBakeStride > 1) live = live.Where((_, i) => i % lightBakeStride == 0).ToArray();
         if (live.Length == 0) return;
         lightBakeLive = live.Length;
         lightBakeLiveBuffer = Own(device.CreateGpuBuffer(live.Length * 4, MemoryMarshal.AsBytes(live.AsSpan()), "sponza.light-bake.live"));

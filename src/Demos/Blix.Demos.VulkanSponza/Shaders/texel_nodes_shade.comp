@@ -9,8 +9,9 @@
 //   its bounce       albedo x its nearest patch's light for that sun (the patches re-solved per sun, SunNodePatchLight)
 //   a miss           the sky, the same for every sun
 // A workgroup a texel: its rays' hits made ready once (threads 0..31: the texels, their bits, the patch), then a thread
-// a sun sums them. Cosine rays (pdf cos/pi): a ray's irradiance weight is pi, so a hit contributes albedo x E and a
-// miss pi x the sky. NodeAccum holds the passes' running sum of each pass's mean.
+// a sun sums them. A ray's weight on irradiance (NodeRayWeights: the rays pass's mixture of cosine and the band's guide;
+// pi for a plain cosine ray): a hit contributes albedo x E x weight / pi, a miss the sky x weight. NodeAccum holds the
+// passes' running sum of each pass's mean.
 
 #define RAYS 32
 #define PI 3.14159265359
@@ -49,6 +50,7 @@ layout(std430, set = 0, binding = 16) readonly buffer FoliageBits { uint foliage
 layout(std430, set = 0, binding = 17) buffer NodeDiscover { uint discoverCount; uint discoverPad[3]; vec4 discovered[]; };
 layout(std430, set = 0, binding = 18) buffer ExactOrigins { vec4 exactOrigins[]; };
 layout(std430, set = 0, binding = 19) readonly buffer ExactOccluded { uint exactOccluded[]; };
+layout(std430, set = 0, binding = 20) readonly buffer NodeRayWeights { float nodeRayWeight[]; };
 
 #define COOKED_BINDING 11
 #define COOKED_GRID u.uCookedGrid
@@ -61,7 +63,7 @@ void nodeCount(uint k) {
     if (atomicAdd(nodeStats[2u * k], 1u) == 0xFFFFFFFFu) atomicAdd(nodeStats[2u * k + 1u], 1u);
 }
 
-shared vec4 sHit[RAYS];      // albedo (a hit) or pi x the sky (a miss); w its patch (-1 none), or -2 a miss
+shared vec4 sHit[RAYS];      // albedo x weight / pi (a hit) or the sky x weight (a miss); w its patch (-1 none), or -2 a miss
 shared vec3 sNormal[RAYS];
 shared float sUnknown[RAYS];
 shared float sExact[RAYS];   // the exact-sun experiment: sun 0's visibility at the hit (-1: by the bits)   // the hit lies among no texel: its sun is uSunIrradiance.w
@@ -90,7 +92,7 @@ void main() {
                 return;
             }
             int patchIndex = cookedNearest(hitPos, hn);
-            sHit[lid] = vec4(unpackUnorm4x8(h2.w).rgb, float(patchIndex));
+            sHit[lid] = vec4(unpackUnorm4x8(h2.w).rgb * nodeRayWeight[slot] / PI, float(patchIndex));
             sNormal[lid] = hn;
             int ids[NODE_CANDIDATES];
             float weights[NODE_CANDIDATES];
@@ -122,7 +124,7 @@ void main() {
             if (patchIndex < 0) nodeCount(2u);
         } else {
             if (u.uFoliage.z > 0.5 && u.uFoliage.z < 1.5) { exactOrigins[slot] = vec4(0.0); return; }
-            sHit[lid] = vec4(PI * textureLod(uSkyRadiance, dir, u.uSky.y).rgb * u.uSky.x, -2.0);
+            sHit[lid] = vec4(nodeRayWeight[slot] * textureLod(uSkyRadiance, dir, u.uSky.y).rgb * u.uSky.x, -2.0);
             sNormal[lid] = vec3(0.0);
             sUnknown[lid] = 0.0;
             nodeCount(3u);

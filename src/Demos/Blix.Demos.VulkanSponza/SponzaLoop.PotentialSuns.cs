@@ -22,7 +22,8 @@ namespace Blix.Demos.VulkanSponza;
 internal sealed partial class SponzaLoop
 {
     private const int GridHour = 17, GridDec = 9;
-    private const int PotentialSunsVersion = 1;
+    // 2: sun bits shot from the texels (a lift), the foliage's and the discovery's sun points, rays by the band's guides.
+    private const int PotentialSunsVersion = 2;
     private bool potentialSunsAsked;
     private string? potentialSunsPath;
     // Loaded: on the GPU, answering when the settings and the sun allow.
@@ -85,7 +86,7 @@ internal sealed partial class SponzaLoop
     private string PotentialSunsPathFor(string transportKey)
     {
         var spec = string.Create(CultureInfo.InvariantCulture,
-            $"{transportKey};grid {GridHour}x{GridDec};band {BandLatitude} {Obliquity} {BandMinElevation};north {BandNorth(out _):F5};sun {EffectiveSunIrradiance.X:F4},{EffectiveSunIrradiance.Y:F4},{EffectiveSunIrradiance.Z:F4};rays {sunNodeRays};rank {SunNodeBlocks.Rank} block {SunNodeBlocks.Block};v{PotentialSunsVersion}");
+            $"{transportKey};grid {GridHour}x{GridDec};band {BandLatitude} {Obliquity} {BandMinElevation};north {BandNorth(out _):F5};sun {EffectiveSunIrradiance.X:F4},{EffectiveSunIrradiance.Y:F4},{EffectiveSunIrradiance.Z:F4};rays {sunNodeRays} {(sunNodeGuide && !sunNodeCpuSolve ? "guided" : "cosine")};lift {sunNodeLift:G4};discover {sunNodeDiscoverStride};unknown sun {sunNodeUnknownSun:G3};rank {SunNodeBlocks.Rank} block {SunNodeBlocks.Block};v{PotentialSunsVersion}");
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(spec)))[..16].ToLowerInvariant();
         return Path.ChangeExtension(TransportCachePath(transportKey), $".sunnodes-{hash}");
     }
@@ -113,7 +114,8 @@ internal sealed partial class SponzaLoop
     {
         potentialSunsPath ??= PotentialSunsPathFor(lightBakeKey!);
         if (!File.Exists(potentialSunsPath)) return false;
-        if (!SunNodeTraceReady || texelResolvedBuffer.Equals(default(GpuBufferHandle))) return true;   // wait for the texels
+        // Only the texels and their resting light: none of the cook's machinery (its sun bits, its guides) is wanted.
+        if (texelLiveIds is null || texelResolvedBuffer.Equals(default(GpuBufferHandle))) return true;
         var clock = Stopwatch.StartNew();
         var live = texelLiveIds!;
         try
