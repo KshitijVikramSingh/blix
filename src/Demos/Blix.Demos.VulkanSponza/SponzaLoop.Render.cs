@@ -971,6 +971,7 @@ internal sealed partial class SponzaLoop
             WriteRtShadows(Path.ChangeExtension(path, null));
             WriteLightletCensus(Path.ChangeExtension(path, null));
             WriteLightletRecordStudy();
+            WriteLeakCensus(Path.ChangeExtension(path, null));
             WriteFrameTracerStats();
             if (probeReference)
             {
@@ -1198,6 +1199,7 @@ internal sealed partial class SponzaLoop
             "normal" => "normal mapping",
             "cull"    => "camera frustum culling",
             "castercull" => "shadow caster culling against the camera",
+            "lightlets" => "the traced shadows answered by the baked sun records where they can (OFF: every pixel traced)",
             "queue"   => "the Metal tracers on the Vulkan device's command queue (OFF: their own)",
             "lod"     => lodArmOff > 0f
                 ? string.Create(Inv, $"mesh LOD at {lodArmOn:0.##} px rather than {lodArmOff:0.##} px")

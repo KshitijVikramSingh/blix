@@ -163,6 +163,7 @@ internal sealed partial class SponzaLoop
         rtShadows = args.Flag("rt-shadows");
         lightletCensus = args.Flag("lightlet-census");
         lightletRecord = args.Flag("lightlet-record");
+        rayLeakCensus = args.Flag("ray-leak-census");
         lightletsAsked = args.Flag("lightlets");
         // --lightlets-then-exit: close as asked once the sun records are baked and up (a scripted bake).
         lightletsThenExit = args.Flag("lightlets-then-exit");
@@ -331,6 +332,7 @@ internal sealed partial class SponzaLoop
             abFlat = abMode == "flat";
             // rtshadow: ray-traced sun shadows (ON) against the cascades (OFF), which needs the traced path built.
             if (abMode == "rtshadow") rtShadows = true;
+            if (abMode == "lightlets") lightletsAsked = true;
         }
         // --rt-shadows: whatever asks whether a point sees the sun asks a ray, never the cascades (SponzaLoop.RtShadows).
         // The lit pass asks the Metal trace; the clipmap's injection asks shadow rays at its hits (--clipmap-shadow-rays,
