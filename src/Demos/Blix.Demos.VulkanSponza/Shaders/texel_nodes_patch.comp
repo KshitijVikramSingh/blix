@@ -5,7 +5,7 @@
 // sunlit floor at its corners, Sponza's atrium under the lavabo the courtyard's.
 //   mode 0  a texel's PATCH_CANDIDATES nearest patches facing its way, nearest first, and a ray to each (the CLOSEST
 //           batch: blocked where it meets anything short of the patch)
-//   mode 1  the first whose ray got through, into TexelPatch (-1: none)
+//   mode 1  the first whose ray got through, into TexelPatch (-1: none got through; -2: no candidate)
 // A thread a texel of the slice.
 
 #define PATCH_CANDIDATES 4
@@ -75,8 +75,8 @@ void main() {
         }
         return;
     }
-    int chosen = -1;
-    for (int k = 0; k < PATCH_CANDIDATES && chosen < 0; ++k) {
+    int chosen = candidates[t * uint(PATCH_CANDIDATES)] < 0 ? -2 : -1;
+    for (int k = 0; k < PATCH_CANDIDATES && chosen == -1; ++k) {
         uint slot = t * uint(PATCH_CANDIDATES) + uint(k);
         int j = candidates[slot];
         if (j < 0) continue;

@@ -11,7 +11,9 @@
 // A workgroup a texel: its rays' hits made ready once (threads 0..31: the texels, their bits, the patch), then a thread
 // a sun sums them. A ray's weight on irradiance (NodeRayWeights: the rays pass's mixture of cosine and the band's guide;
 // pi for a plain cosine ray): a hit contributes albedo x E x weight / pi, a miss the sky x weight. NodeAccum holds the
-// passes' running sum of each pass's mean.
+// passes' running sum of each pass's mean; column 0's w the running sum of the square of each pass's luminance over
+// all the columns (the light composed: the split's sky and sun), the moment its refinement reads its noise from
+// (SponzaLoop.SunNodes.cs, the refining rounds).
 
 #define RAYS 32
 #define PI 3.14159265359
@@ -73,6 +75,7 @@ shared float sUnknown[RAYS];
 shared float sExact[RAYS];   // the exact-sun experiment: sun 0's visibility at the hit (-1: by the bits)   // the hit lies among no texel: its sun is uSunIrradiance.w
 shared float sWeight[RAYS * NODE_CANDIDATES];
 shared uint sBits[RAYS * NODE_CANDIDATES * MAX_WORDS];
+shared float sColumnLum[MAX_WORDS * 32];   // each column's pass mean's luminance
 
 void main() {
     uint group = gl_WorkGroupID.x;
@@ -111,7 +114,7 @@ void main() {
                 int likeliest = -1;
                 float most = 0.0;
                 for (int c = 0; c < NODE_CANDIDATES; ++c) if (ids[c] >= 0 && weights[c] > most) { most = weights[c]; likeliest = ids[c]; }
-                patchIndex = texelPatch[likeliest];
+                patchIndex = max(texelPatch[likeliest], -1);
             } else patchIndex = cookedNearest(hitPos, hn);
             sHit[lid] = vec4(unpackUnorm4x8(h2.w).rgb * nodeRayWeight[slot] / PI, float(patchIndex));
             for (int c = 0; c < NODE_CANDIDATES; ++c) {
@@ -173,6 +176,15 @@ void main() {
         }
         uint at = group * uint(suns) + uint(k);
         vec3 mean = sum / float(RAYS);
-        nodeAccum[at] = vec4((u.uShade.w > 0.5 ? nodeAccum[at].rgb : vec3(0.0)) + mean, 0.0);
+        vec4 before = u.uShade.w > 0.5 ? nodeAccum[at] : vec4(0.0);
+        nodeAccum[at] = vec4(before.rgb + mean, before.w);
+        sColumnLum[k] = dot(mean, vec3(0.2126, 0.7152, 0.0722));
+    }
+    barrier();
+    // Thread 0 wrote column 0 above: the moment rides on it.
+    if (lid == 0u) {
+        float composed = 0.0;
+        for (int k = 0; k < suns; ++k) composed += sColumnLum[k];
+        nodeAccum[group * uint(suns)].w += composed * composed;
     }
 }

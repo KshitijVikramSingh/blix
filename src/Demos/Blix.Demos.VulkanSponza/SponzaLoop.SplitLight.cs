@@ -21,7 +21,7 @@ internal sealed partial class SponzaLoop
     private bool splitLight;
     // The sky the sky's part is for (the probe loaded, else the procedural sky): in its cache's key.
     private string skyIdentity = "procedural";
-    private const int SplitLightVersion = 1;
+    private const int SplitLightVersion = 2;   // 2: refined until settled (SponzaLoop.SunNodesRefine.cs)
     private ShaderInterface texelComposeInterface = null!;
     private PassHandle texelComposePass, texelComposeFilterPass;
     private PipelineHandle texelComposePipeline;
@@ -53,7 +53,7 @@ internal sealed partial class SponzaLoop
     {
         var part = toSun is { } d ? string.Create(CultureInfo.InvariantCulture, $"sun {d.X:F5},{d.Y:F5},{d.Z:F5} per unit irradiance") : "sky";
         var spec = string.Create(CultureInfo.InvariantCulture,
-            $"{transportKey};{part};sky {skyIdentity};rays {sunNodeRays} {(sunNodeGuide ? "guided" : "cosine")};lift {sunNodeLift:G4};lookup {sunNodePlane:G3} {sunNodeSigma:G3};discover {sunNodeDiscoverStride};unknown {sunNodeUnknownSun:G3};buried {LightmapBuriedRule};v{SplitLightVersion}");
+            $"{transportKey};{part};sky {skyIdentity};rays {sunNodeRays} {(sunNodeGuide ? "guided" : "cosine")};lift {sunNodeLift:G4};lookup {sunNodePlane:G3} {sunNodeSigma:G3};discover {sunNodeDiscoverStride};unknown {sunNodeUnknownSun:G3};settled {texelNoise:G6} {texelMaxRays};patches seen of {PatchCandidates};buried {LightmapBuriedRule};v{SplitLightVersion}");
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(spec)))[..16].ToLowerInvariant();
         return Path.ChangeExtension(TransportCachePath(transportKey), $".{(toSun is null ? "sky" : "sun")}-{hash}");
     }

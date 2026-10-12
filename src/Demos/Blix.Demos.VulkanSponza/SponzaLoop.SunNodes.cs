@@ -371,9 +371,11 @@ internal sealed partial class SponzaLoop
     // its passes, the next frame reads its sums back (the GPU idle first) and moves on.
     private void RecordSunNodeSlice()
     {
-        var live = sunNodeTraceIds;
+        var refining = sunNodeRefineRound > 0;
+        var live = refining ? sunNodeRefineIds : sunNodeTraceIds;
         var suns = sunNodeSuns!.Length;
-        var passes = sunNodeRays / 32;
+        var sweepPasses = sunNodeRays / 32;
+        var passes = refining ? RefinePasses : sweepPasses;
         if (sunNodeReadback)
         {
             var clock = Stopwatch.StartNew();
@@ -383,7 +385,7 @@ internal sealed partial class SponzaLoop
             if (potentialSunsAsked) StagePotentialRows(sums, count, suns, SunNodeCompressed, passes, sunNodeFirst + count >= live.Length);
             var results = sunNodeResults;
             var first = sunNodeFirst;
-            if (sunNodeBootPath is not null)
+            if (sunNodeBootPath is not null && !refining)
             {
                 var boot = sunNodeBootResult ??= new uint[texelCount * 2];
                 Parallel.For(0, count, t =>
@@ -394,27 +396,36 @@ internal sealed partial class SponzaLoop
                     boot[2 * id + 1] = 0xFFFFu | 0x10000u;
                 });
             }
-            Parallel.For(0, count, t =>
-            {
-                var id = (int)live[first + t];
-                for (var k = 0; k < results.Length; k++)
+            if (SunNodeRefines) RefineSlice(sums, first, count, suns, passes);
+            else
+                Parallel.For(0, count, t =>
                 {
-                    var s = sums[(long)t * suns + k];
-                    results[k][2 * id] = PackRgb9e5(new Vector3(s.X, s.Y, s.Z) / passes);
-                    results[k][2 * id + 1] = 0xFFFFu | 0x10000u;
-                }
-            });
+                    var id = (int)live[first + t];
+                    for (var k = 0; k < results.Length; k++)
+                    {
+                        var s = sums[(long)t * suns + k];
+                        results[k][2 * id] = PackRgb9e5(new Vector3(s.X, s.Y, s.Z) / passes);
+                        results[k][2 * id + 1] = 0xFFFFu | 0x10000u;
+                    }
+                });
             sunNodeReadSeconds += clock.Elapsed.TotalSeconds;
             sunNodeReadback = false;
             sunNodeFirst += count;
             var done = (double)sunNodeFirst / live.Length;
             if ((int)(done * 20) != (int)((double)(sunNodeFirst - count) / live.Length * 20))
                 Console.WriteLine(string.Create(Inv,
-                    $"[VulkanSponza] sun nodes: {done * 100:0}% of {live.Length:N0} texels ({sunNodeClock.Elapsed.TotalMinutes:0.0} min)."));
-            if (sunNodeFirst >= live.Length) { FinishSunNodes(); return; }
+                    $"[VulkanSponza] sun nodes{(refining ? $", refining round {sunNodeRefineRound}" : "")}: {done * 100:0}% of {live.Length:N0} texels ({sunNodeClock.Elapsed.TotalMinutes:0.0} min)."));
+            if (sunNodeFirst >= live.Length)
+            {
+                if (SunNodeRefines && BeginSunNodeRefineRound()) return;
+                FinishSunNodes();
+                return;
+            }
         }
         var slice = Math.Min(sunNodeSlice, live.Length - sunNodeFirst);
-        DispatchSunNodePass(sunNodeTraceBuffer, sunNodeFirst, slice, sunNodePass, discover: 0);
+        // A round's rays carry on each texel's pass numbering (its seeds): every round after the sweep gives RefinePasses.
+        var seedPass = refining ? sweepPasses + (sunNodeRefineRound - 1) * RefinePasses + sunNodePass : sunNodePass;
+        DispatchSunNodePass(refining ? sunNodeRefineBuffer : sunNodeTraceBuffer, sunNodeFirst, slice, sunNodePass, discover: 0, seedPass);
         if (++sunNodePass == passes)
         {
             sunNodePass = 0;
@@ -431,7 +442,9 @@ internal sealed partial class SponzaLoop
         var stats = Enumerable.Range(0, 5).Select(k => (ulong)words[2 * k] | ((ulong)words[2 * k + 1] << 32)).ToArray();
         var hits = Math.Max(stats[0], 1ul);
         Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] sun nodes: traced in {trace:0.0} min ({(long)sunNodeTraceIds.Length * sunNodeRays / 1e9:0.00} G rays, {sunNodeReadSeconds:0} s of it reading back) for {suns.Length} suns ({(sunNodeGuided ? "half the rays by the band's guides" : "cosine rays")}), after {sunNodeRelightSeconds:0.0} s of patch solves; hits {stats[0]:N0} ({100.0 * stats[4] / hits:0.00}% answered by the foliage's points, {100.0 * stats[1] / hits:0.00}% among neither: no sun; {100.0 * stats[2] / hits:0.00}% no patch), misses {stats[3]:N0}."));
+            $"[VulkanSponza] sun nodes: traced in {trace:0.0} min ({(long)sunNodeTraceIds.Length * sunNodeRays / 1e9:0.00} G rays{(sunNodeRefineRound > 0 ? $" and {sunNodeRefineRays / 1e9:0.00} G refining in {sunNodeRefineRound} rounds" : "")}, {sunNodeReadSeconds:0} s of it reading back) for {suns.Length} suns ({(sunNodeGuided ? "half the rays by the band's guides" : "cosine rays")}), after {sunNodeRelightSeconds:0.0} s of patch solves; hits {stats[0]:N0} ({100.0 * stats[4] / hits:0.00}% answered by the foliage's points, {100.0 * stats[1] / hits:0.00}% among neither: no sun; {100.0 * stats[2] / hits:0.00}% no patch), misses {stats[3]:N0}."));
+        ResetSunNodeRefine();
+        sunNodeRefineRays = 0;
         if (splitCooking)
         {
             FinishSplitCook();
@@ -582,13 +595,15 @@ internal sealed partial class SponzaLoop
 
     // One pass of a slice: its rays (from `ids`, the texels traced), the CLOSEST batch, every hit shaded for every sun --
     // or, discovering (`discover`: the list's room), the hits among neither texel nor sun point listed (NodeDiscover).
-    private void DispatchSunNodePass(GpuBufferHandle ids, int first, int slice, int pass, int discover)
+    // pass: the slice's pass (0: the sums start); seedPass, the texel's pass its rays are seeded by (-1: pass).
+    private void DispatchSunNodePass(GpuBufferHandle ids, int first, int slice, int pass, int discover, int seedPass = -1)
     {
+        if (seedPass < 0) seedPass = pass;
         var raysDeclared = sunNodeRaysInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
         graph.Dispatch(sunNodeRaysPass, new DispatchCommand(sunNodeRaysPipeline, slice, 1, 1,
             new ShaderUniform[]
             {
-                new("uSlice", new Vector4Uniform(new Vector4(first, slice, pass, sunNodeGuided ? 1f : 0f))),
+                new("uSlice", new Vector4Uniform(new Vector4(first, slice, seedPass, sunNodeGuided ? 1f : 0f))),
                 new("uCookedGrid", new Vector4Uniform(cookedGrid)),
                 new("uCookedDims", new Vector4Uniform(cookedDims)),
             },
@@ -601,7 +616,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("NodeRayWeights", sunNodeRayWeights),
                 new ShaderBufferBinding("NodeGuides", sunNodeGuideBuffer),
             }.Concat(CookedBuffers()).Where(b => raysDeclared.Contains(b.Name)).ToArray()));
-        var seed = unchecked((uint)(first * 2654435761L) ^ (uint)pass * 0x9E3779B9u ^ (discover > 0 ? 0xD15C0u : 0u));
+        var seed = unchecked((uint)(first * 2654435761L) ^ (uint)seedPass * 0x9E3779B9u ^ (discover > 0 ? 0xD15C0u : 0u));
         // The frame's tracer: cook with --ray-lod-error 0, so it is the LOD 0 the texels sit on (UploadSunNodes warns). The
         // bake scene's tracer read the light 28% dark on Cornell, the same 120 triangles (its hits' albedo; open).
         RecordClosestBatch(sunNodeClosestBatch, sunNodeRaysBuffer, sunNodeHits, slice * 32, seed);
@@ -737,7 +752,12 @@ internal sealed partial class SponzaLoop
         if (sunNodePatchFirst >= live.Length)
         {
             sunNodeStage = sunNodeDiscoverIds.Length > 0 ? SunNodeStage.Discover : SunNodeStage.Tracing;
-            Console.WriteLine(string.Create(Inv, $"[VulkanSponza] sun nodes: each texel's nearest visible patch picked ({live.Length:N0} texels, {PatchCandidates} rays each)."));
+            device.WaitIdle();
+            var picked = MemoryMarshal.Cast<byte, int>(device.ReadGpuBuffer(sunNodeTexelPatch, 0, texelCount * 4).AsSpan()).ToArray();
+            int blocked = 0, none = 0;
+            foreach (var id in live) { if (picked[id] == -1) blocked++; else if (picked[id] == -2) none++; }
+            Console.WriteLine(string.Create(Inv,
+                $"[VulkanSponza] sun nodes: each texel's nearest visible patch picked ({live.Length:N0} texels, {PatchCandidates} rays each); {blocked:N0} saw none of theirs, {none:N0} had none facing their way."));
             return;
         }
         var count = Math.Min(sunNodeSlice * 32 / PatchCandidates, live.Length - sunNodePatchFirst);
