@@ -864,9 +864,15 @@ public sealed partial class VulkanGraphicsDevice
     {
         if (needsRecreate)
         {
+            var extent = SwapchainExtent;
             RecreateSwapchain();
             needsRecreate = false;
-            return false;
+            // A new size: the frame was recorded for the old one (its viewports, its screen-sized dispatches), so it is
+            // dropped. The same size (a present-mode change: vsync) goes on into the new swapchain: its commands resolve
+            // the graph's handles at submit, onto the new images. Dropped, the frame's one-shot work went with it -- a
+            // compute pass that runs once and is never asked again (the split light's compose: every texel's light
+            // left zero after the cook screen restored vsync, 2026-10-13).
+            if (SwapchainExtent.Width != extent.Width || SwapchainExtent.Height != extent.Height) return false;
         }
 
         ref var f = ref frames[currentFrame];
