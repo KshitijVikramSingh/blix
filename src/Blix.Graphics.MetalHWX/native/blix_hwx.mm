@@ -248,6 +248,38 @@ kernel void blix_trace(device const float4* rays [[buffer(0)]],
 // reaching the contact meets two coplanar faces, and about half the time the other's front face answers.
 struct BuriedParams { uint count; uint tests; uint threshold; uint seed; float reach; float lift; uint enclosedTests; uint pad1; };
 
+// A ray's first hit for the buried test, with a coplanar contact counted as the back face it also is (as the demo's
+// ClosestThroughContacts): where two solids touch, their faces in one plane tie, and the closest hit reports either.
+// A front-facing hit is re-asked along four directions jittered by a millirad; a back face at the same distance wins.
+// (The demo's CPU tests read contacts exactly from a table of coplanar opposite faces; here the jitter stays.)
+// Returns 0 nothing, 1 a front face, 2 a back face; `instance`, `geometry`, `primitive` the hit's.
+inline uint blix_buried_hit(float3 o, float3 d, float tMax, instance_acceleration_structure tlas,
+                            intersection_function_table<triangle_data, instancing> table, uint seed,
+                            thread uint& instance, thread uint& geometry, thread uint& primitive)
+{
+    intersector<triangle_data, instancing> isect;
+    isect.assume_geometry_type(geometry_type::triangle);
+    uint s0 = seed;
+    auto res = isect.intersect(ray(o, d, 0.0f, tMax), tlas, 0xFFu, table, s0);
+    if (res.type != intersection_type::triangle) return 0u;
+    instance = res.instance_id; geometry = res.geometry_id; primitive = res.primitive_id;
+    if (!res.triangle_front_facing) return 2u;
+    float3 t = normalize(abs(d.y) < 0.9f ? cross(d, float3(0.0f, 1.0f, 0.0f)) : cross(d, float3(1.0f, 0.0f, 0.0f)));
+    float3 b = cross(d, t);
+    float near = 1e-3f + 1e-4f * res.distance;
+    for (uint k = 0u; k < 4u; ++k) {
+        float angle = float(k) * 1.5707963f;
+        float3 j = normalize(d + (t * cos(angle) + b * sin(angle)) * 1e-3f);
+        uint s1 = seed;
+        auto again = isect.intersect(ray(o, j, 0.0f, res.distance + 2.0f * near), tlas, 0xFFu, table, s1);
+        if (again.type == intersection_type::triangle && !again.triangle_front_facing && abs(again.distance - res.distance) <= near) {
+            instance = again.instance_id; geometry = again.geometry_id; primitive = again.primitive_id;
+            return 2u;
+        }
+    }
+    return 1u;
+}
+
 kernel void blix_buried(device const float4* records [[buffer(0)]],
                         device uchar* buried [[buffer(1)]],
                         instance_acceleration_structure tlas [[buffer(2)]],
@@ -268,19 +300,16 @@ kernel void blix_buried(device const float4* records [[buffer(0)]],
     float3 o = records[i * 2u].xyz + n * p.lift;
     float3 t = normalize(abs(n.y) < 0.999f ? cross(float3(0.0f, 1.0f, 0.0f), n) : cross(float3(1.0f, 0.0f, 0.0f), n));
     float3 b = cross(n, t);
-    intersector<triangle_data, instancing> isect;
-    isect.assume_geometry_type(geometry_type::triangle);
     uint back = 0u;
     for (uint k = 0u; k < p.tests && back < p.threshold; ++k) {
         uint h = blix_pcg(p.seed + i * p.tests + k);
         float u1 = float(h & 0xFFFFu) / 65536.0f, u2 = float(h >> 16) / 65536.0f;
         float r = sqrt(u1), phi = 6.28318530718f * u2;
         float3 d = t * (r * cos(phi)) + b * (r * sin(phi)) + n * sqrt(max(0.0f, 1.0f - u1));
-        uint seed = blix_pcg(h);
-        auto res = isect.intersect(ray(o, d, 0.0f, p.reach), tlas, 0xFFu, table, seed);
-        if (res.type != intersection_type::triangle || res.triangle_front_facing) continue;
-        uint row = blix_row(primRows, entryRows, res.instance_id, res.geometry_id, res.primitive_id);
-        uint placement = instances[res.instance_id].info.y;
+        uint hi, hg, hp;
+        if (blix_buried_hit(o, d, p.reach, tlas, table, blix_pcg(h), hi, hg, hp) != 2u) continue;
+        uint row = blix_row(primRows, entryRows, hi, hg, hp);
+        uint placement = instances[hi].info.y;
         if (placement == 0xFFFFFFFFu) placement = owners[triangles[row].w].x;
         if (doubleSided[placement] == 0u) back++;
     }
@@ -291,12 +320,11 @@ kernel void blix_buried(device const float4* records [[buffer(0)]],
         float u1 = float(h & 0xFFFFu) / 65536.0f, u2 = float(h >> 16) / 65536.0f;
         float r = sqrt(u1), phi = 6.28318530718f * u2;
         float3 d = t * (r * cos(phi)) + b * (r * sin(phi)) + n * sqrt(max(0.0f, 1.0f - u1));
-        uint seed = blix_pcg(h);
-        auto res = isect.intersect(ray(o, d, 0.0f, INFINITY), tlas, 0xFFu, table, seed);
-        bool into = res.type == intersection_type::triangle && !res.triangle_front_facing;
+        uint hi, hg, hp;
+        bool into = blix_buried_hit(o, d, INFINITY, tlas, table, blix_pcg(h), hi, hg, hp) == 2u;
         if (into) {
-            uint row = blix_row(primRows, entryRows, res.instance_id, res.geometry_id, res.primitive_id);
-            uint placement = instances[res.instance_id].info.y;
+            uint row = blix_row(primRows, entryRows, hi, hg, hp);
+            uint placement = instances[hi].info.y;
             if (placement == 0xFFFFFFFFu) placement = owners[triangles[row].w].x;
             into = doubleSided[placement] == 0u;
         }

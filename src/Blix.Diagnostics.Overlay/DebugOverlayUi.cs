@@ -129,6 +129,14 @@ public sealed class DebugOverlayUi
                 ImGui.EndTabItem();
             }
 
+            // Logs tab: the run's log (DebugLog: stdout, stderr, tagged by their "[Tag]"), with the producers'
+            // own sections (IDebugLogsSection: a cook's progress, memory) above it.
+            if (ImGui.BeginTabItem("Logs"))
+            {
+                DrawLogsTab(debugSystem);
+                ImGui.EndTabItem();
+            }
+
             if (events.Count > 0 && ImGui.BeginTabItem("Events"))
             {
                 DrawEvents(events);
@@ -608,6 +616,114 @@ public sealed class DebugOverlayUi
         if (bytes < 1024) return $"{bytes} B";
         if (bytes < 1024 * 1024) return $"{bytes / 1024.0:0.0} KB";
         return $"{bytes / (1024.0 * 1024.0):0.0} MB";
+    }
+
+    // --- Logs tab ----------------------------------------------------------------------------------------------
+    // The kept lines are copied in as they arrive (DebugLog.Since the last seen index), so a frame touches only
+    // what is new; the filter runs over the copy. UI state, for the renderer's lifetime.
+    private readonly List<DebugLogLine> logLines = new();
+    private long logSeen;
+    private readonly Dictionary<string, bool> logTagsShown = new(StringComparer.Ordinal);
+    private string logFilter = string.Empty;
+    private bool logWarningsOnly;
+    private bool logFollow = true;
+    private readonly List<int> logVisible = new();
+    private int logVisibleFor = -1;
+    private string logVisibleKey = string.Empty;
+
+    private void DrawLogsTab(DebugSystem debugSystem)
+    {
+        var contributors = debugSystem.Contributors;
+        for (var i = 0; i < contributors.Count; i++)
+        {
+            if (contributors[i] is not IDebugLogsSection section) continue;
+            if (!ImGui.CollapsingHeader(section.DebugName + "##logs-section", ImGuiTreeNodeFlags.DefaultOpen)) continue;
+            ImGui.PushID("logs-section-" + section.DebugName);
+            try
+            {
+                section.OnLogsSection();
+            }
+            catch (Exception ex)
+            {
+                ImGui.TextColored(ErrorColor, $"section threw: {ex.GetType().Name}: {ex.Message}");
+            }
+            finally
+            {
+                ImGui.PopID();
+            }
+        }
+
+        var fresh = DebugLog.Since(logSeen);
+        if (fresh.Count > 0)
+        {
+            logSeen = fresh[^1].Index + 1;
+            logLines.AddRange(fresh);
+            if (logLines.Count > DebugLog.Capacity) logLines.RemoveRange(0, logLines.Count - DebugLog.Capacity);
+            logVisibleFor = -1;
+        }
+
+        // Tags: one checkbox each, shown unless turned off.
+        foreach (var tag in DebugLog.Tags)
+            logTagsShown.TryAdd(tag, true);
+        ImGui.SetNextItemWidth(200f);
+        if (ImGui.InputTextWithHint("##log-filter", "filter (text)", ref logFilter, 256)) logVisibleFor = -1;
+        ImGui.SameLine();
+        if (ImGui.Checkbox("warnings", ref logWarningsOnly)) logVisibleFor = -1;
+        ImGui.SameLine();
+        ImGui.Checkbox("follow", ref logFollow);
+        ImGui.SameLine();
+        var copy = ImGui.Button("copy shown");
+        if (ImGui.TreeNode($"tags ({logTagsShown.Count(t => t.Value)} of {logTagsShown.Count})##log-tags"))
+        {
+            if (ImGui.SmallButton("all")) { foreach (var k in logTagsShown.Keys.ToArray()) logTagsShown[k] = true; logVisibleFor = -1; }
+            ImGui.SameLine();
+            if (ImGui.SmallButton("none")) { foreach (var k in logTagsShown.Keys.ToArray()) logTagsShown[k] = false; logVisibleFor = -1; }
+            foreach (var tag in logTagsShown.Keys.OrderBy(t => t, StringComparer.Ordinal).ToArray())
+            {
+                var shown = logTagsShown[tag];
+                if (ImGui.Checkbox(tag, ref shown)) { logTagsShown[tag] = shown; logVisibleFor = -1; }
+            }
+            ImGui.TreePop();
+        }
+
+        // The shown lines, rebuilt when the lines or the filter change.
+        var key = string.Join(",", logTagsShown.Where(t => !t.Value).Select(t => t.Key)) + "|" + logFilter + "|" + logWarningsOnly;
+        if (logVisibleFor != logLines.Count || key != logVisibleKey)
+        {
+            logVisible.Clear();
+            for (var i = 0; i < logLines.Count; i++)
+            {
+                var line = logLines[i];
+                if (logWarningsOnly && line.Severity == DebugEventSeverity.Info) continue;
+                if (logTagsShown.TryGetValue(line.Tag, out var shown) && !shown) continue;
+                if (logFilter.Length > 0 && line.Text.IndexOf(logFilter, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                logVisible.Add(i);
+            }
+            logVisibleFor = logLines.Count;
+            logVisibleKey = key;
+        }
+        if (copy)
+            ImGui.SetClipboardText(string.Join("\n", logVisible.Select(i => logLines[i].Text)));
+
+        ImGui.TextDisabled($"{logVisible.Count:N0} of {logLines.Count:N0} lines ({DebugLog.Written:N0} written)");
+        ImGui.BeginChild("##log-lines", new Vector2(0f, 0f), ImGuiChildFlags.Borders, ImGuiWindowFlags.HorizontalScrollbar);
+        // Only the rows in view are drawn: space stands in for the rest, so 20,000 lines cost what a screenful does.
+        var rowHeight = ImGui.GetTextLineHeightWithSpacing();
+        var firstRow = Math.Clamp((int)(ImGui.GetScrollY() / rowHeight), 0, logVisible.Count);
+        var rows = Math.Min(logVisible.Count - firstRow, (int)(ImGui.GetWindowHeight() / rowHeight) + 2);
+        if (firstRow > 0) ImGui.Dummy(new Vector2(1f, firstRow * rowHeight));
+        for (var row = firstRow; row < firstRow + rows; row++)
+        {
+            var line = logLines[logVisible[row]];
+            ImGui.TextDisabled($"{line.TimestampMs / 1000.0,8:0.0}s");
+            ImGui.SameLine();
+            if (line.Severity == DebugEventSeverity.Info) ImGui.TextUnformatted(line.Text);
+            else ImGui.TextColored(line.Severity == DebugEventSeverity.Warn ? WarnColor : ErrorColor, line.Text);
+        }
+        var after = logVisible.Count - firstRow - rows;
+        if (after > 0) ImGui.Dummy(new Vector2(1f, after * rowHeight));
+        if (logFollow && fresh.Count > 0) ImGui.SetScrollHereY(1f);
+        ImGui.EndChild();
     }
 
     private static bool HasCustomUi(DebugSystem debugSystem)

@@ -111,6 +111,8 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         if (gameLoop is IDebugContributor)
         {
             debugSystem = new DebugSystem();
+            // The run's log, for the overlay's Logs tab: stdout and stderr from here on.
+            DebugLog.CaptureConsole();
             frameRecorder = new DiagnosticsFrameRecorder(debugSystem);
             debugSystem.AddSink(new ConsoleEventSink());
             // Periodic stdout digest of frame Values + Stats + Timers +

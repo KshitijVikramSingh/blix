@@ -36,6 +36,15 @@ internal sealed partial class SponzaLoop
     // 1 mm it grazed the surface: Sponza's rays with no patch 7.99% at 1 mm, 6.14% at 2 cm (4 candidates). It passes over
     // obstacles under 2 cm, far below the patches' spacing.
     private float transportVisLift = 0.02f;
+    // --transport-own-fallback (SponzaLoop.Transport.cs, OwnFallback), and how near its patch must be.
+    private bool transportOwnFallback;
+    // --transport-miss-why's accounting of how hits found their patch (NearestVisibleOr, OwnFallback): the rank seen,
+    // HowAnyFacing, HowFallback or HowMiss; and the time spent past BaseCandidates and in the fallback.
+    private const int BaseCandidates = 4, HowAnyFacing = 64, HowFallback = 65, HowMiss = 66;
+    [ThreadStatic] private static int nearestHow;
+    private readonly long[] nearestHows = new long[67];
+    private long lateRankTicks, fallbackTicks;
+    private const float OwnFallbackReach = 0.5f;
     private int transportRays = 512;
     private int transportVisRes = 32;
     // --transport-sunlet S: the first bounce of direct sun resolved at sunlets of S metres (0: at patch centres, as
@@ -56,6 +65,8 @@ internal sealed partial class SponzaLoop
         if (args.Int("transport-vis") is { } v) transportVisRes = Math.Clamp(v, 4, 256);
         if (args.Float("transport-sunlet") is { } sl) transportSunlet = Math.Max(0f, sl);
         if (args.Int("transport-candidates") is { } tc) transportCandidates = Math.Clamp(tc, 1, 64);
+        transportMissWhy = args.Flag("transport-miss-why");
+        transportOwnFallback = args.Flag("transport-own-fallback");
         if (args.Float("transport-vis-lift") is { } vl) transportVisLift = Math.Clamp(vl, 0.0005f, 0.2f);
     }
 
@@ -278,7 +289,7 @@ internal sealed partial class SponzaLoop
                 for (var k = 0; k < tests; k++)
                 {
                     var d = CosineHemisphereCpu(nrm[i], r);
-                    if (scene.Closest(new Ray(pos[i] + nrm[i] * 1e-3f, d), 0f, float.PositiveInfinity, (uint)r.Next()) is { } h && !h.FrontFace) back++;
+                    if (ClosestThroughContacts(scene, new Ray(pos[i] + nrm[i] * 1e-3f, d), 0f, float.PositiveInfinity, (uint)r.Next()) is { } h && !h.FrontFace) back++;
                 }
                 keep[i] = back * 2 < tests;
             });
@@ -311,7 +322,9 @@ internal sealed partial class SponzaLoop
         // there is black), Sponza's atrium under the lavabo the courtyard's. None visible: none. Only the
         // transportCandidates nearest are tried: every patch in the 27 cells, sorted and each tried, took Sponza's cook
         // past 20 minutes (217 s before visibility) where none was visible.
-        int NearestVisible(Vector3 p, Vector3 n, uint seed, bool anyFacing)
+        int NearestVisible(Vector3 p, Vector3 n, uint seed, bool anyFacing) => NearestVisibleOr(p, n, seed, anyFacing, out _);
+        // As NearestVisible; nearest: the nearest candidate, seen or not (-1: none), for OwnFallback.
+        int NearestVisibleOr(Vector3 p, Vector3 n, uint seed, bool anyFacing, out int nearest)
         {
             var (kx, ky, kz) = Key(p);
             var candidates = transportCandidates;
@@ -335,23 +348,57 @@ internal sealed partial class SponzaLoop
                     best[at] = j;
                 }
             }
+            nearest = bestD[0] <= OwnFallbackReach * OwnFallbackReach ? best[0] : -1;
             var origin = p + n * transportVisLift;
-            foreach (var j in best)
+            for (var rank = 0; rank < candidates; rank++)
             {
+                var j = best[rank];
                 if (j < 0) break;
                 var target = pos[j] + nrm[j] * transportVisLift;
                 var d = target - origin;
                 var length = d.Length();
-                if (length < 1e-4f) return j;
-                if (!scene.Any(new Ray(origin, d / length), 0f, length * 0.999f, seed)) return j;
+                if (length < 1e-4f) { nearestHow = rank; return j; }
+                // The rays past the BaseCandidates nearest, timed: what more candidates cost (--transport-miss-why).
+                var late = transportMissWhy && rank >= BaseCandidates ? Stopwatch.GetTimestamp() : 0L;
+                var seen = !scene.Any(new Ray(origin, d / length), 0f, length * 0.999f, seed);
+                if (late != 0) Interlocked.Add(ref lateRankTicks, Stopwatch.GetTimestamp() - late);
+                if (seen) { nearestHow = rank; return j; }
             }
+            nearestHow = HowMiss;
             return -1;
         }
-        int Nearest(Vector3 p, Vector3 n, uint seed = 0) => NearestVisible(p, n, seed, anyFacing: false);
-        int NearestAny(Vector3 p, Vector3 n, uint seed = 0)
+        // --transport-own-fallback: none visible, the nearest patch facing the hit's way within OwnFallbackReach, when
+        // what blocks the line to it is the hit's own placement -- a door's carving, a curtain's fold: light from the
+        // same piece a few centimetres on, which cannot have come through another piece's wall.
+        // One closest-hit ray to the nearest candidate the search already found (within OwnFallbackReach).
+        int OwnFallback(Vector3 p, Vector3 n, int own, int nearest, uint seed)
         {
-            var j = NearestVisible(p, n, seed, anyFacing: false);
-            return j >= 0 ? j : NearestVisible(p, n, seed, anyFacing: true);
+            if (!transportOwnFallback || own < 0 || nearest < 0) return -1;
+            var started = transportMissWhy ? Stopwatch.GetTimestamp() : 0L;
+            var origin = p + n * transportVisLift;
+            var to = pos[nearest] + nrm[nearest] * transportVisLift - origin;
+            var length = to.Length();
+            var taken = length < 1e-4f
+                || scene.Closest(new Ray(origin, to / length), 0f, length * 0.999f, seed) is { } blocker && blocker.Instance == own;
+            if (started != 0) Interlocked.Add(ref fallbackTicks, Stopwatch.GetTimestamp() - started);
+            if (!taken) return -1;
+            nearestHow = HowFallback;
+            return nearest;
+        }
+        int Nearest(Vector3 p, Vector3 n, int own, uint seed = 0)
+        {
+            var j = NearestVisibleOr(p, n, seed, anyFacing: false, out var nearest);
+            return j >= 0 ? j : OwnFallback(p, n, own, nearest, seed);
+        }
+        int NearestAny(Vector3 p, Vector3 n, int own, uint seed = 0)
+        {
+            var j = NearestVisibleOr(p, n, seed, anyFacing: false, out var nearest);
+            if (j < 0)
+            {
+                j = NearestVisible(p, n, seed, anyFacing: true);
+                if (j >= 0) nearestHow = HowAnyFacing;
+            }
+            return j >= 0 ? j : OwnFallback(p, n, own, nearest, seed);
         }
         Vector3 HitNormal(RayHit h, Vector3 dir)
         {
@@ -370,6 +417,11 @@ internal sealed partial class SponzaLoop
         // Of those, the hits on a back face: rays travelling inside a solid (from a patch at a joint between two), whose
         // light is not real anyway -- nearly all of the Cornell box's 0.36% at 4 candidates, against a slab's far side.
         long droppedInside = 0;
+        // --transport-miss-why: every 16th ray's front-face miss, sorted by why after the cook (MissWhy).
+        var missSamples = transportMissWhy ? new ConcurrentBag<(Vector3 P, Vector3 N, int Instance, int From)>() : null;
+        var recoveredSamples = transportMissWhy ? new ConcurrentBag<(Vector3 P, Vector3 N, bool Fallback)>() : null;
+        Array.Clear(nearestHows);
+        lateRankTicks = fallbackTicks = 0;
         long foliageHits = 0;
         // Sunlets: where cooked rays hit architecture, a cell of transportSunlet metres AND a coarse normal bin (so a
         // corner's two walls, or a sheet's two sides, never share one) -- position, normal and albedo of its first hit.
@@ -399,8 +451,11 @@ internal sealed partial class SponzaLoop
             sunletPos.AddRange(cached.SunletPos); sunletNrm.AddRange(cached.SunletNrm); sunletAlbedo.AddRange(cached.SunletAlbedo);
         }
         else
+        {
+        ProgressBegin("transport: couplings", patches);
         Parallel.For(0, patches, i =>
         {
+            ProgressAdd("transport: couplings");
             var r = new Random(1000 + i);
             var p = pos[i] + nrm[i] * 1e-3f;
             var n = nrm[i];
@@ -421,8 +476,21 @@ internal sealed partial class SponzaLoop
                         var sl = SunletOf(hp, hn, Albedo(h.Instance, h.Triangle));
                         accSun[sl] = accSun.GetValueOrDefault(sl) + 1;
                     }
-                    var j = useSunlets ? NearestAny(hp, hn, (uint)r.Next()) : Nearest(hp, hn, (uint)r.Next());
-                    if (j < 0) { lost++; if (!h.FrontFace) Interlocked.Increment(ref droppedInside); continue; }
+                    var j = useSunlets ? NearestAny(hp, hn, h.Instance, (uint)r.Next()) : Nearest(hp, hn, h.Instance, (uint)r.Next());
+                    if (transportMissWhy && h.FrontFace)
+                    {
+                        Interlocked.Increment(ref nearestHows[Math.Min(nearestHow, nearestHows.Length - 1)]);
+                        // Every 16th hit found past the BaseCandidates nearest, or by the fallback: exposure-tested after.
+                        if (j >= 0 && (k & 15) == 0 && (nearestHow is >= BaseCandidates and < HowAnyFacing || nearestHow == HowFallback))
+                            recoveredSamples!.Add((hp, hn, nearestHow == HowFallback));
+                    }
+                    if (j < 0)
+                    {
+                        lost++;
+                        if (!h.FrontFace) Interlocked.Increment(ref droppedInside);
+                        else if (missSamples is not null && (k & 15) == 0) missSamples.Add((hp, hn, h.Instance, i));
+                        continue;
+                    }
                     acc[j] = acc.GetValueOrDefault(j) + 1;
                 }
                 else
@@ -441,7 +509,110 @@ internal sealed partial class SponzaLoop
                 if (!scene.Any(new Ray(p, d), 0f, float.PositiveInfinity, (uint)(i * 7919 + b))) sunVis[i * visWords + b / 64] |= 1UL << (b % 64);
             }
         });
+        ProgressEnd("transport: couplings");
+        }
         var cookSeconds = clock.Elapsed.TotalSeconds;
+        // Why a front-face hit found no patch it could see: no patch facing its way within the 27 cells, or the nearest
+        // ones blocked -- by the hit's own placement (a fold, a moulding: the patch behind a bump of the same piece) or
+        // another; how far the nearest was; by the hit's placement.
+        void MissWhy(ConcurrentBag<(Vector3 P, Vector3 N, int Instance, int From)> misses)
+        {
+            // How each front-face hit found its patch: by rank, by facing either way, by the fallback, or not at all;
+            // the time the late ranks and the fallback took (summed over threads) against the cook's; and how many of
+            // the hits the late ranks and the fallback recovered are where open air sees them (a sample).
+            long all = nearestHows.Sum();
+            var ranks = string.Join(", ", Enumerable.Range(0, transportCandidates).Select(r => string.Create(CultureInfo.InvariantCulture, $"{r + 1}: {nearestHows[r]:N0}")));
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza] transport hits, how their patch was found ({all:N0} front-face hits): by rank {ranks}; facing either way {nearestHows[HowAnyFacing]:N0}; own fallback {nearestHows[HowFallback]:N0}; none {nearestHows[HowMiss]:N0}."));
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza] transport hits: past rank {BaseCandidates}, {nearestHows.Take(transportCandidates).Skip(BaseCandidates).Sum() / (double)Math.Max(1, all) * 100:0.000}% of hits for {lateRankTicks / (double)Stopwatch.Frequency:0} thread-s; the fallback {nearestHows[HowFallback] / (double)Math.Max(1, all) * 100:0.000}% for {fallbackTicks / (double)Stopwatch.Frequency:0} thread-s; the cook {cookSeconds:0} s on {Environment.ProcessorCount} threads."));
+            if (recoveredSamples is { } recovered)
+            {
+                var r = recovered.ToArray();
+                var late = r.Where(x => !x.Fallback).ToArray();
+                var fell = r.Where(x => x.Fallback).ToArray();
+                int lateSeen = 0, fellSeen = 0;
+                Parallel.For(0, late.Length, i => { if (Exposed(scene, late[i].P, late[i].N, (uint)i)) Interlocked.Increment(ref lateSeen); });
+                Parallel.For(0, fell.Length, i => { if (Exposed(scene, fell[i].P, fell[i].N, (uint)i)) Interlocked.Increment(ref fellSeen); });
+                Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                    $"[VulkanSponza] transport hits recovered, exposed (a sample, every 16th ray): past rank {BaseCandidates} {lateSeen:N0} of {late.Length:N0}; by the fallback {fellSeen:N0} of {fell.Length:N0}."));
+            }
+            var list = misses.ToArray();
+            int none = 0, ownBlock = 0, otherBlock = 0;
+            var near = new int[5];   // nearest candidate < 0.1, < 0.25, < 0.5, < 1, beyond
+            var byHit = new Dictionary<string, int>();
+            var byBlocker = new Dictionary<string, int>();
+            var dumpLines = new List<string>();
+            // Whether each hit is exposed (SponzaLoop.TransportDiag.cs): light lost where open air sees it is a real loss.
+            var exposedMiss = new bool[list.Length];
+            Parallel.For(0, list.Length, m => exposedMiss[m] = Exposed(scene, list[m].P, list[m].N, (uint)m));
+            var exposedByHit = new Dictionary<string, int>();
+            var exposedWhy = new Dictionary<string, int>();
+            var at = -1;
+            foreach (var (hp, hn, inst, from) in list)
+            {
+                at++;
+                var hitName = rayPlacementNames[inst];
+                byHit[hitName] = byHit.GetValueOrDefault(hitName) + 1;
+                if (exposedMiss[at]) exposedByHit[hitName] = exposedByHit.GetValueOrDefault(hitName) + 1;
+                var (kx, ky, kz) = Key(hp);
+                var bestJ = -1;
+                var bestD = float.MaxValue;
+                for (var dz = -1; dz <= 1; dz++)
+                for (var dy = -1; dy <= 1; dy++)
+                for (var dx = -1; dx <= 1; dx++)
+                {
+                    if (!grid.TryGetValue((kx + dx, ky + dy, kz + dz), out var cellList)) continue;
+                    foreach (var j in cellList)
+                    {
+                        if (Vector3.Dot(nrm[j], hn) < 0.5f) continue;
+                        var d2 = Vector3.DistanceSquared(pos[j], hp);
+                        if (d2 < bestD) { bestD = d2; bestJ = j; }
+                    }
+                }
+                var why = "none facing";
+                if (bestJ < 0) none++;
+                else
+                {
+                    var dist = MathF.Sqrt(bestD);
+                    near[dist < 0.1f ? 0 : dist < 0.25f ? 1 : dist < 0.5f ? 2 : dist < 1f ? 3 : 4]++;
+                    var origin = hp + hn * transportVisLift;
+                    var to = pos[bestJ] + nrm[bestJ] * transportVisLift - origin;
+                    var len = to.Length();
+                    if (scene.Closest(new Ray(origin, to / len), 0f, len * 0.999f, 1u) is { } b)
+                    {
+                        var own = b.Instance == inst;
+                        if (own) ownBlock++; else otherBlock++;
+                        var bn = (own ? "own: " : "") + rayPlacementNames[b.Instance] + (b.FrontFace ? "" : " (back)");
+                        byBlocker[bn] = byBlocker.GetValueOrDefault(bn) + 1;
+                        why = string.Create(CultureInfo.InvariantCulture, $"blocked {(own ? "own" : "other")} at {b.T / len:0.00} of {len:0.00} m");
+                    }
+                    else why = "nearest clear (a farther candidate order?)";
+                }
+                if (exposedMiss[at])
+                {
+                    var kind = why.StartsWith("blocked own", StringComparison.Ordinal) ? "blocked by its own placement"
+                        : why.StartsWith("blocked other", StringComparison.Ordinal) ? "blocked by another" : why;
+                    exposedWhy[kind] = exposedWhy.GetValueOrDefault(kind) + 1;
+                }
+                if (dumpLines.Count < 200_000)
+                    dumpLines.Add(string.Create(CultureInfo.InvariantCulture, $"{hp.X} {hp.Y} {hp.Z} {hn.X} {hn.Y} {hn.Z} {hitName};{why};{(exposedMiss[at] ? "exposed" : "hidden")};from {pos[from].X} {pos[from].Y} {pos[from].Z} {nrm[from].X} {nrm[from].Y} {nrm[from].Z}"));
+            }
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza] transport misses, why ({list.Length:N0} front-face misses sampled, every 16th ray): none facing within reach {none:N0}; nearest blocked by its own placement {ownBlock:N0}, by another {otherBlock:N0}; nearest at < 0.1 m {near[0]:N0}, < 0.25 {near[1]:N0}, < 0.5 {near[2]:N0}, < 1 {near[3]:N0}, beyond {near[4]:N0}."));
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza] transport misses, exposed (open air sees the hit): {exposedMiss.Count(e => e):N0} of {list.Length:N0}; why: {string.Join(", ", exposedWhy.OrderByDescending(x => x.Value).Select(x => $"{x.Key} {x.Value:N0}"))}."));
+            Console.WriteLine("    exposed, by the hit's placement:");
+            foreach (var (name, c) in exposedByHit.OrderByDescending(x => x.Value).Take(12))
+                Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {c,7:N0}  {name}"));
+            Console.WriteLine("    by the hit's placement:");
+            foreach (var (name, c) in byHit.OrderByDescending(x => x.Value).Take(10))
+                Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {c,7:N0}  {name}"));
+            Console.WriteLine("    by what blocked the nearest:");
+            foreach (var (name, c) in byBlocker.OrderByDescending(x => x.Value).Take(10))
+                Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {c,7:N0}  {name}"));
+            if (Environment.GetEnvironmentVariable("BLIX_DIAG_DUMP") is { } dump) File.WriteAllLines(dump + ".misses", dumpLines);
+        }
         long nonzero = couplings.Sum(c => (long)c.Length);
         long sunletNonzero = sunletCouplings.Sum(c => (long)(c?.Length ?? 0));
         var sunlets = sunletPos.Count;
@@ -730,6 +901,8 @@ internal sealed partial class SponzaLoop
         // --lightmap: the lightmap atlas's texels are the finest level of the surfaces in the atlas (SponzaLoop.Lightmap.cs),
         // the hashed cells their coarser levels and every level of everything else (the foliage the cook leaves out). Null
         // when the atlas asks for more than the budget: the hashed texels then serve every surface at every level.
+        if (lightmapBuriedWhy || transportMissWhy) BuildDiagViews(scene, pos, nrm);
+        if (missSamples is not null) MissWhy(missSamples);
         var lightmapBake = lightmapEnabled && transportTexels && lightmapSources.Count > 0 ? BakeLightmapTexels(scene, cacheKey) : null;
         TexelBake? texelBake;
         if (cached?.Texels is { } cachedTexels)

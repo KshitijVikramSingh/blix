@@ -220,10 +220,14 @@ internal sealed partial class SponzaLoop
         }
         var locals = new ConcurrentBag<Dictionary<ulong, (Vector3 Pos, Vector3 Nrm, int Hits)>>();
         long samples = 0, hidden = 0;
+        // --lightmap-buried-why: every 64th dropped sample side, and whether what its ray met was a double-sided sheet.
+        var sampleDrops = lightmapBuriedWhy ? new ConcurrentBag<(Vector3 P, Vector3 N, bool DoubleSided)>() : null;
+        ProgressBegin("hashed texels: surface samples", triangleList.Count);
         Parallel.For(0, triangleList.Count,
             () => new Dictionary<ulong, (Vector3 Pos, Vector3 Nrm, int Hits)>(),
             (ti, _, local) =>
             {
+                ProgressAdd("hashed texels: surface samples");
                 var (i, t) = triangleList[ti];
                 var firstLevelHere = firstLevel?.Invoke(i, t) ?? 0;
                 var (a, b, c) = tri(i, t);
@@ -245,9 +249,11 @@ internal sealed partial class SponzaLoop
                     for (var side = 0; side < 2; side++)
                     {
                         var n = side == 0 ? front : -front;
-                        if (scene.Closest(new Ray(at + n * 1e-3f, n), 0f, float.PositiveInfinity, (uint)(ti * 2 + side)) is { FrontFace: false })
+                        if (ClosestThroughContacts(scene, new Ray(at + n * 1e-3f, n), 0f, float.PositiveInfinity, (uint)(ti * 2 + side)) is { FrontFace: false } inside)
                         {
                             mineHidden++;
+                            if (sampleDrops is not null && ((ti * 31 + k * 2 + side) & 63) == 0)
+                                sampleDrops.Add((at, n, rayPlacementDoubleSided[inside.Instance]));
                             continue;
                         }
                         // Every level from the same sample: a coarse texel is the union of the fine ones it nests.
@@ -267,6 +273,7 @@ internal sealed partial class SponzaLoop
                 return local;
             },
             local => locals.Add(local));
+        ProgressEnd("hashed texels: surface samples");
         var merged = new Dictionary<ulong, (Vector3 Pos, Vector3 Nrm, int Hits)>();
         foreach (var local in locals)
             foreach (var (key, e) in local)
@@ -296,15 +303,18 @@ internal sealed partial class SponzaLoop
         // settled. How many only this drops, and how many of those the camera sees, is reported.
         var keep = new bool[placed];
         var enclosedOnly = new bool[placed];
+        var sheetsOnly = new bool[placed];   // dropped by the 15-of-16 rule with double-sided sheets' back faces counted, not enclosed
+        ProgressBegin("hashed texels: inside a solid?", placed);
         Parallel.For(0, placed, i =>
         {
+            ProgressAdd("hashed texels: inside a solid?");
             var r = new Random(91 + i);
             int back = 0, solid = 0;
             const int tests = 16;
             for (var k = 0; k < tests; k++)
             {
                 var d = CosineHemisphereCpu(nrm[i], r);
-                if (scene.Closest(new Ray(pos[i] + nrm[i] * 1e-3f, d), 0f, float.PositiveInfinity, (uint)r.Next()) is { } h && !h.FrontFace)
+                if (ClosestThroughContacts(scene, new Ray(pos[i] + nrm[i] * 1e-3f, d), 0f, float.PositiveInfinity, (uint)r.Next()) is { } h && !h.FrontFace)
                 {
                     back++;
                     if (!rayPlacementDoubleSided[h.Instance]) solid++;
@@ -313,7 +323,9 @@ internal sealed partial class SponzaLoop
             var enclosed = solid * 4 >= tests * 3;
             keep[i] = back < tests - 1 && !enclosed;
             enclosedOnly[i] = back < tests - 1 && enclosed;
+            sheetsOnly[i] = back >= tests - 1 && !enclosed;
         });
+        ProgressEnd("hashed texels: inside a solid?");
         var kept = new List<int>(placed);
         for (var i = 0; i < placed; i++) if (keep[i]) kept.Add(i);
         {
@@ -330,6 +342,43 @@ internal sealed partial class SponzaLoop
             }
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] texels: {only:N0} dropped as enclosed alone (12 of 16 rays meet a single-sided back face), {seen:N0} of them in the camera's sight within 12 m."));
+            if (lightmapBuriedWhy)
+            {
+                var dump = Environment.GetEnvironmentVariable("BLIX_DIAG_DUMP");
+                ReportExposed("hashed texels, dropped as enclosed alone", scene,
+                    Enumerable.Range(0, placed).Where(i => enclosedOnly[i]).Select(i => (pos[i], nrm[i])).ToList(), dump is null ? null : dump + ".hashed-enclosed");
+                var keptSample = kept.Where((_, k) => k % Math.Max(1, kept.Count / 50_000) == 0).Select(i => (pos[i], nrm[i])).ToList();
+                ReportExposed("hashed texels, kept (control, a sample)", scene, keptSample);
+                // Gap 2: dropped by 15 of 16 back faces only because sheets' back faces counted.
+                ReportExposed("hashed texels, dropped with sheets counted, not enclosed", scene,
+                    Enumerable.Range(0, placed).Where(i => sheetsOnly[i]).Select(i => (pos[i], nrm[i])).ToList(), dump is null ? null : dump + ".hashed-sheets");
+                // Gap 1: the sample rule's drops (one ray along the normal, any distance, a back face first).
+                var drops = sampleDrops!.ToArray();
+                ReportExposed($"hashed samples, dropped by the normal ray (every 64th; {drops.Count(d => d.DoubleSided):N0} of {drops.Length:N0} met a sheet)", scene,
+                    drops.Select(d => (d.P, d.N)).ToList(), dump is null ? null : dump + ".sample-drops");
+                ReportExposed("hashed samples, dropped by the normal ray at a sheet", scene, drops.Where(d => d.DoubleSided).Select(d => (d.P, d.N)).ToList());
+                // Gap 3: how far below its surface a texel's centroid sits (a probe from 5 cm up along the normal), by level;
+                // a centroid inside the surface starts the texel's test rays inside the solid.
+                var depthBins = new long[texelLevels, 4];   // at or above (or within 1 mm), below by 1 mm-1 cm, 1-3 cm, more
+                var enclosedBelow = 0;
+                Parallel.For(0, placed, i =>
+                {
+                    if (!keep[i] && !enclosedOnly[i]) return;
+                    var n = nrm[i];
+                    // Below the surface: the probe met it before reaching the centroid (T < 0.05). No surface within
+                    // 10 cm counts as above.
+                    var probe = scene.Closest(new Ray(pos[i] + n * 0.05f, -n), 0f, 0.1f, 1u);
+                    var depth = probe is { } h ? 0.05f - h.T : -1f;
+                    var bin = depth <= 1e-3f ? 0 : depth <= 0.01f ? 1 : depth <= 0.03f ? 2 : 3;
+                    Interlocked.Increment(ref depthBins[(int)(keys[i].Hi >> 21), bin]);
+                    if (enclosedOnly[i] && depth > 1e-3f) Interlocked.Increment(ref enclosedBelow);
+                });
+                for (var level = 0; level < texelLevels; level++)
+                    Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                        $"[VulkanSponza] hashed texels, level {level}: centroid at or above its surface {depthBins[level, 0]:N0}, below by 1 mm-1 cm {depthBins[level, 1]:N0}, 1-3 cm {depthBins[level, 2]:N0}, more {depthBins[level, 3]:N0}."));
+                Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                    $"[VulkanSponza] hashed texels: of the {enclosedOnly.Count(e => e):N0} dropped as enclosed alone, {enclosedBelow:N0} have their centroid over 1 mm below their surface."));
+            }
         }
         texelCount = kept.Count;
         texelCapacity = 1;

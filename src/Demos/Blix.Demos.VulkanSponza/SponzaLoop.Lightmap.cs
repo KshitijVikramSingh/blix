@@ -59,7 +59,7 @@ internal sealed partial class SponzaLoop
     private int lightmapEnclosedTests = 16;
     private int LightmapEnclosedTests => lightmapEnclosedTests;
     // What the buried flags depend on, for the caches that hold them or what was gathered with them.
-    private string LightmapBuriedRule => string.Create(CultureInfo.InvariantCulture, $"{LightmapBuriedThreshold}/{LightmapBuriedTests} within {lightmapBuriedReach} m from {LightmapBuriedLift} m off, single-sided; {(LightmapEnclosedTests > 0 ? $"enclosed {LightmapEnclosedTests * 3 / 4}/{LightmapEnclosedTests}; " : "")}edges inset {LightmapEdgeInset} m");
+    private string LightmapBuriedRule => string.Create(CultureInfo.InvariantCulture, $"{LightmapBuriedThreshold}/{LightmapBuriedTests} within {lightmapBuriedReach} m from {LightmapBuriedLift} m off, single-sided; {(LightmapEnclosedTests > 0 ? $"enclosed {LightmapEnclosedTests * 3 / 4}/{LightmapEnclosedTests}; " : "")}contacts as back faces (Metal: 4 jittered retries); edges inset {LightmapEdgeInset} m");
     private int lightmapFirstRecord;
 
     // What one texel record costs on the GPU: its two vec4s (position, normal) and the light state UploadTexels makes
@@ -228,10 +228,12 @@ internal sealed partial class SponzaLoop
             var metal = buriedCached ? null : WaitForBakeTracer();
             if (metal is not null)
             {
+                ProgressBegin("lightmap: buried test (Metal)", 0);
                 flags = metal.TestBuried(texels.AsSpan(0, count * 2), LightmapBuriedTests, LightmapBuriedThreshold, lightmapBuriedReach, LightmapBuriedLift, 173u,
                     CollectionsMarshal.AsSpan(rayPlacementDoubleSided), LightmapEnclosedTests, out var buriedGpuMs);
                 Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                     $"[VulkanSponza] lightmap buried test on Metal ({LightmapBuriedRule}): {count:N0} records in {buriedClock.Elapsed.TotalSeconds:0.0} s ({buriedGpuMs:0} ms GPU)."));
+                ProgressEnd("lightmap: buried test (Metal)");
                 if (lightmapBuriedWhy && LightmapEnclosedTests > 0)
                 {
                     var without = metal.TestBuried(texels.AsSpan(0, count * 2), LightmapBuriedTests, LightmapBuriedThreshold, lightmapBuriedReach, LightmapBuriedLift, 173u,
@@ -249,13 +251,13 @@ internal sealed partial class SponzaLoop
                 var back = 0;
                 int tests = LightmapBuriedTests, threshold = LightmapBuriedThreshold;
                 for (var t = 0; t < tests && back < threshold; t++)
-                    if (scene.Closest(new Ray(origin, CosineHemisphereCpu(n, r)), 0f, lightmapBuriedReach, (uint)r.Next()) is { FrontFace: false } hit
+                    if (ClosestThroughContacts(scene, new Ray(origin, CosineHemisphereCpu(n, r)), 0f, lightmapBuriedReach, (uint)r.Next()) is { FrontFace: false } hit
                         && !rayPlacementDoubleSided[hit.Instance]) back++;
                 var enclosed = back < threshold;
                 var escaped = 0;
                 for (var t = 0; t < LightmapEnclosedTests && enclosed; t++)
                 {
-                    if (!(scene.Closest(new Ray(origin, CosineHemisphereCpu(n, r)), 0f, float.PositiveInfinity, (uint)r.Next()) is { FrontFace: false } hit
+                    if (!(ClosestThroughContacts(scene, new Ray(origin, CosineHemisphereCpu(n, r)), 0f, float.PositiveInfinity, (uint)r.Next()) is { FrontFace: false } hit
                         && !rayPlacementDoubleSided[hit.Instance])) escaped++;
                     enclosed = escaped * 4 <= LightmapEnclosedTests;
                 }
@@ -430,6 +432,20 @@ internal sealed partial class SponzaLoop
             $"[VulkanSponza] buried as enclosed alone: {only:N0} records; {seen:N0} of them in the camera's sight within 12 m."));
         foreach (var (name, c) in byName.OrderByDescending(x => x.Value).Take(12))
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {c,7:N0}  {name}"));
+        // Exposure (SponzaLoop.TransportDiag.cs): of what the enclosed rule alone buries; and, as the test's controls, of a
+        // sample of the kept records (mostly exposed, if the test is sound) and of what the reach rule already buried.
+        (Vector3, Vector3) At(int k) => (new Vector3(texels[2 * k].X, texels[2 * k].Y, texels[2 * k].Z),
+            new Vector3(texels[2 * k + 1].X, texels[2 * k + 1].Y, texels[2 * k + 1].Z));
+        List<(Vector3, Vector3)> Pick(Func<int, bool> which, int most)
+        {
+            var all = Enumerable.Range(0, with.Length).Where(which).ToArray();
+            var step = Math.Max(1, all.Length / most);
+            return all.Where((_, i) => i % step == 0).Select(At).ToList();
+        }
+        var dump = Environment.GetEnvironmentVariable("BLIX_DIAG_DUMP");
+        ReportExposed("lightmap, buried as enclosed alone", scene, Pick(k => with[k] && !without[k], 1 << 30), dump is null ? null : dump + ".lightmap-enclosed");
+        ReportExposed("lightmap, kept (control, a sample)", scene, Pick(k => !with[k] && MathF.Abs(texels[2 * k].W) >= 2f, 50_000));
+        ReportExposed("lightmap, buried by the reach rule (control, a sample)", scene, Pick(k => without[k], 50_000));
     }
 
     // The frame's Metal tracer for work off the frame's thread: waited for while frame rays are on Metal and it is being
