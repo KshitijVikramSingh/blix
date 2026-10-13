@@ -289,7 +289,7 @@ internal sealed partial class SponzaLoop
         // --reference-monolithic: the GPU reference's first form (whole paths in one kernel), the wavefront's cross-check.
         referenceMonolithic = args.Flag("reference-monolithic");
         if (args.Int("gpu-ref-paths") is { } grp) gpuReferencePathsWanted = Math.Clamp(grp, 256, 1 << 22);
-        if (args.Int("gpu-ref-lanes") is { } grl) referenceLanesPerPoint = Math.Clamp(grl, 64, 8192);
+        if (args.Int("gpu-ref-lanes") is { } grl) referenceLanesAsked = Math.Clamp(grl, 64, 8192);
         if (args.Int("fog-slices") is { } fs) froxelGridZ = Math.Clamp(fs, 8, 128);
         // --orbit: drive the camera on a fixed path so a measurement is of the renderer rather than
         // of one photograph of it. Ignores --cam, which is the still counterpart.

@@ -31,7 +31,7 @@ build=(--build)
 # 32 bounces: at the default 3 the path trace stopped short in every room lit by bounce -- 0.73 grey loses a quarter
 # of its light each bounce: the thin wall's open room read 1.125 against 3 bounces, 1.000 against 32; the crevices'
 # corridor 1.45 and 0.998 (2026-10-13).
-# The corridor's reference runs 262,144 paths a point (2,048 lanes, so 4,500 frames hold them): at 16,384, two references
+# The corridor's reference runs 262,144 paths a point (4,096 lanes: ~2,200 frames, within the 4,500 cap): at 16,384, two references
 # that differ only in their seed sat 0.037 apart there (|diff| over the mean), as far as the field from either, and the
 # |error| metric measured the reference; at 262,144, 0.0096 (2026-10-13). The bright scenes keep 16,384.
 # Each run shoots as soon as its light is at rest and its reference has all its paths (--shot-when-ready), plus a
@@ -54,7 +54,7 @@ run() {
 run cornell --scene=cornell "$@"
 run thinwall-sealed --scene=thinwall "$@"
 run thinwall-open --scene=thinwall --cam -3.05,3,0,90,0 "$@"
-paths=(--gpu-ref-paths 262144 --gpu-ref-lanes 2048)
+paths=(--gpu-ref-paths 262144 --gpu-ref-lanes 4096)
 frames=4500
 run crevices-corridor --scene=crevices-dark --cam 6,1.5,1.5,90,-5 "$@"
 rm -f "$LOGS"/*.png

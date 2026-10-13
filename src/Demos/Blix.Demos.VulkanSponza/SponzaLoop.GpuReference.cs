@@ -37,11 +37,16 @@ internal sealed partial class SponzaLoop
 
     // The wavefront: lanes per point, each running whole paths one bounce a frame, up to its share of the paths.
     private bool referenceMonolithic;
-    // --gpu-ref-lanes N: lanes a point (256). The wave runs a bounce a frame, so its frames go as paths over lanes: more
-    // lanes, more paths before the same shot. The dark crevices' corridor needs them: two 16,384-path references with
-    // different seeds sat 0.037 apart there (|diff| over the mean), as far as the field from either (2026-10-13).
-    private int referenceLanesPerPoint = 256;
-    private int ReferenceLanesPerPoint => referenceLanesPerPoint;
+    // --gpu-ref-lanes N: lanes a point. The wave runs a bounce a frame, so its frames go as paths over lanes: more lanes,
+    // fewer frames for the same paths. By default enough that no lane runs more than ReferenceLaneMostPaths paths
+    // (a power of two, 256 to ReferenceLanesAuto): 16,384 paths on 1,024 lanes are ~550 frames, where 256 lanes took
+    // 2,180 and set the gate's pace (--shot-when-ready, 2026-10-13). The cap keeps the wave's buffers (~200 B a lane)
+    // near 230 MB at the gate's 576 points; past it, ask. The dark corridor's 262,144-path reference (two 16,384-path
+    // ones with different seeds sat 0.037 apart there, as far as the field from either) asks for 4,096.
+    private int? referenceLanesAsked;
+    private const int ReferenceLaneMostPaths = 16, ReferenceLanesAuto = 2048;
+    private int ReferenceLanesPerPoint => referenceLanesAsked
+        ?? Math.Clamp((int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)Math.Max(1, GpuReferenceTarget / ReferenceLaneMostPaths)), 256, ReferenceLanesAuto);
     private ShaderInterface referenceWaveInterface = null!;
     private PipelineHandle referenceWavePipeline;
     private PassHandle referenceWaveStepPass, referenceWaveShadePass, referenceWaveResolvePass;
