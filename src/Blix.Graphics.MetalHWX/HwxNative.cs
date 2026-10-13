@@ -89,7 +89,8 @@ internal static unsafe class HwxNative
 
     [DllImport(Library)]
     public static extern int hwx_buried(nint ctx, float* records, uint count, uint tests, uint threshold, uint seed, float reach,
-        float lift, uint enclosedTests, byte* doubleSided, uint placementCount, byte* buried, double* gpuMs);
+        float lift, uint enclosedTests, byte* doubleSided, uint placementCount, uint* contactStart, uint contactRows, float* contactTris,
+        uint contactCount, byte* buried, double* gpuMs);
 
     [DllImport(Library)]
     public static extern int hwx_lightlet_dense(nint ctx, float* points, uint count, float* dirs, uint dirCount, uint words, uint seed,

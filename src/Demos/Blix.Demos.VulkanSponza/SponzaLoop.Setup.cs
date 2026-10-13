@@ -346,6 +346,7 @@ internal sealed partial class SponzaLoop
         // to be watching.
         if (args.String("shot") is { } shot) shotPath = shot;
         if (args.Int("shot-frames") is { } sf) shotFrame = sf;
+        shotWhenReady = args.Flag("shot-when-ready");
         framesAfterLoad = args.Int("frames-after-load");
 
         // Seed sun yaw/pitch from the default direction so the Sun controls

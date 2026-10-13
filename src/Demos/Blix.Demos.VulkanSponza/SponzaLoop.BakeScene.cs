@@ -18,6 +18,8 @@ internal sealed partial class SponzaLoop
 {
     private Task<RayQueryGpuData>? bakeSceneTask;
     private RayQueryGpuData? bakeSceneData;
+    // The bake scene's placement-and-triangle-to-row map and its row count, kept when its data is let go.
+    private (int[][] Map, int Rows)? bakeSceneRowMap;
     private GpuBufferHandle[] bakeSceneBlocks = Array.Empty<GpuBufferHandle>();
     private readonly List<(RayMaterial Material, int First, int Count)> bakeSceneSurfaceRuns = new();
     private ShaderBufferBinding[] bakeSceneSurfaceBuffers = Array.Empty<ShaderBufferBinding>();
@@ -139,6 +141,7 @@ internal sealed partial class SponzaLoop
             $"[VulkanSponza] bake scene tracer: {build.SolidTriangles + build.PartialTriangles:N0} triangles ({build.PartialTriangles:N0} partly covered) in {build.Hierarchies} bottom-level structures, built in {build.CpuPrepareMs + build.BlasGpuMs + build.CompactTlasGpuMs:0} ms; {build.CompactedBytes / 1048576.0:0} MB."));
         WriteGpuMemory("after the bake scene tracer");
         if (bakeSceneAlbedoCheck) WriteBakeSceneAlbedoCheck(data);
+        bakeSceneRowMap = (data.RowMap, data.RowPlacements.Length);   // the contact table's rows (GpuContacts) outlive the rest
         bakeSceneData = null;   // the CPU copy is done with: the tracer and the blocks hold what it traces
         Volatile.Write(ref bakeTracer, tracer);
     }

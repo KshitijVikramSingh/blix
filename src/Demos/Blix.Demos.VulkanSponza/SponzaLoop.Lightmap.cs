@@ -59,7 +59,7 @@ internal sealed partial class SponzaLoop
     private int lightmapEnclosedTests = 16;
     private int LightmapEnclosedTests => lightmapEnclosedTests;
     // What the buried flags depend on, for the caches that hold them or what was gathered with them.
-    private string LightmapBuriedRule => string.Create(CultureInfo.InvariantCulture, $"{LightmapBuriedThreshold}/{LightmapBuriedTests} within {lightmapBuriedReach} m from {LightmapBuriedLift} m off, single-sided; {(LightmapEnclosedTests > 0 ? $"enclosed {LightmapEnclosedTests * 3 / 4}/{LightmapEnclosedTests}; " : "")}contacts as back faces (Metal: 4 jittered retries); edges inset {LightmapEdgeInset} m");
+    private string LightmapBuriedRule => string.Create(CultureInfo.InvariantCulture, $"{LightmapBuriedThreshold}/{LightmapBuriedTests} within {lightmapBuriedReach} m from {LightmapBuriedLift} m off, single-sided; {(LightmapEnclosedTests > 0 ? $"enclosed {LightmapEnclosedTests * 3 / 4}/{LightmapEnclosedTests}; " : "")}contacts as back faces (the table, then 4 jittered retries where a triangle has partners); edges inset {LightmapEdgeInset} m");
     private int lightmapFirstRecord;
 
     // What one texel record costs on the GPU: its two vec4s (position, normal) and the light state UploadTexels makes
@@ -229,40 +229,41 @@ internal sealed partial class SponzaLoop
             if (metal is not null)
             {
                 ProgressBegin("lightmap: buried test (Metal)", 0);
+                // The contact table by the rows of the data this tracer was built from (the bake scene's or the frame's).
+                var onBake = ReferenceEquals(metal, BakeTracer);
+                (int[][] Map, int Rows)? rowMap = onBake ? bakeSceneRowMap : rayGpuData is { } frameData ? (frameData.RowMap, frameData.RowPlacements.Length) : null;
+                var (contactStart, contactTris) = rowMap is { } rm ? GpuContacts(scene, rm) : (Array.Empty<uint>(), Array.Empty<Vector4>());
+                Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                    $"[VulkanSponza] lightmap buried test: contact table for Metal, by the {(onBake ? "bake scene's" : "frame's")} rows: {contactTris.Length / 3:N0} partners over {Math.Max(0, contactStart.Length - 1):N0} rows."));
                 flags = metal.TestBuried(texels.AsSpan(0, count * 2), LightmapBuriedTests, LightmapBuriedThreshold, lightmapBuriedReach, LightmapBuriedLift, 173u,
-                    CollectionsMarshal.AsSpan(rayPlacementDoubleSided), LightmapEnclosedTests, out var buriedGpuMs);
+                    CollectionsMarshal.AsSpan(rayPlacementDoubleSided), LightmapEnclosedTests, contactStart, contactTris, out var buriedGpuMs);
                 Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                     $"[VulkanSponza] lightmap buried test on Metal ({LightmapBuriedRule}): {count:N0} records in {buriedClock.Elapsed.TotalSeconds:0.0} s ({buriedGpuMs:0} ms GPU)."));
                 ProgressEnd("lightmap: buried test (Metal)");
                 if (lightmapBuriedWhy && LightmapEnclosedTests > 0)
                 {
                     var without = metal.TestBuried(texels.AsSpan(0, count * 2), LightmapBuriedTests, LightmapBuriedThreshold, lightmapBuriedReach, LightmapBuriedLift, 173u,
-                        CollectionsMarshal.AsSpan(rayPlacementDoubleSided), 0, out _);
+                        CollectionsMarshal.AsSpan(rayPlacementDoubleSided), 0, contactStart, contactTris, out _);
                     ExplainEnclosed(scene, texels, flags, without);
+                    // Metal against the CPU (same rules, same contact table and jitter; their own random rays): the
+                    // records they disagree on, of a sample.
+                    var step = Math.Max(1, count / 20_000);
+                    int sampled = 0, metalOnly = 0, cpuOnly = 0;
+                    var flagsNow = flags;
+                    Parallel.For(0, (count + step - 1) / step, s =>
+                    {
+                        var k = s * step;
+                        var cpu = BuriedOnCpu(scene, texels, k);
+                        Interlocked.Increment(ref sampled);
+                        if (flagsNow[k] && !cpu) Interlocked.Increment(ref metalOnly);
+                        if (cpu && !flagsNow[k]) Interlocked.Increment(ref cpuOnly);
+                    });
+                    Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                        $"[VulkanSponza] lightmap buried, Metal against the CPU ({sampled:N0} records): buried by Metal alone {metalOnly:N0}, by the CPU alone {cpuOnly:N0}."));
                 }
             }
             else if (!buriedCached)
-            Parallel.For(0, count, k =>
-            {
-                var p = new Vector3(texels![2 * k].X, texels[2 * k].Y, texels[2 * k].Z);
-                var n = new Vector3(texels[2 * k + 1].X, texels[2 * k + 1].Y, texels[2 * k + 1].Z);
-                var origin = p + n * LightmapBuriedLift;
-                var r = new Random(173 + k);
-                var back = 0;
-                int tests = LightmapBuriedTests, threshold = LightmapBuriedThreshold;
-                for (var t = 0; t < tests && back < threshold; t++)
-                    if (ClosestThroughContacts(scene, new Ray(origin, CosineHemisphereCpu(n, r)), 0f, lightmapBuriedReach, (uint)r.Next()) is { FrontFace: false } hit
-                        && !rayPlacementDoubleSided[hit.Instance]) back++;
-                var enclosed = back < threshold;
-                var escaped = 0;
-                for (var t = 0; t < LightmapEnclosedTests && enclosed; t++)
-                {
-                    if (!(ClosestThroughContacts(scene, new Ray(origin, CosineHemisphereCpu(n, r)), 0f, float.PositiveInfinity, (uint)r.Next()) is { FrontFace: false } hit
-                        && !rayPlacementDoubleSided[hit.Instance])) escaped++;
-                    enclosed = escaped * 4 <= LightmapEnclosedTests;
-                }
-                flags[k] = back >= threshold || enclosed;
-            });
+                Parallel.For(0, count, k => flags[k] = BuriedOnCpu(scene, texels!, k));
             if (!buriedCached) WriteBuriedCache(cacheKey, flags, LightmapBuriedRule);
             if (lightmapBuriedWhy) ExplainBuried(scene, texels!, flags);
             for (var k = 0; k < count; k++)
@@ -404,6 +405,32 @@ internal sealed partial class SponzaLoop
             $"[VulkanSponza] buried, why ({picked.Count:N0} records the camera sees within 12 m, {hits:N0} back-face hits): met at < 1 cm {distances[0]:N0}, < 5 cm {distances[1]:N0}, < 10 cm {distances[2]:N0}, < 30 cm {distances[3]:N0}; straight behind each: its own front face {behindFront:N0}, a back face {behindBack:N0}, nothing within 2 cm {behindNone:N0}."));
         foreach (var (name, c) in byName.OrderByDescending(x => x.Value).Take(12))
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {c,7:N0}  {name}"));
+    }
+
+    // The buried test on the CPU, one record: as the Metal kernel (blix_buried), on the CPU scene with the same contact
+    // table and jitter (ClosestThroughContacts).
+    private bool BuriedOnCpu(RayQueryScene scene, Vector4[] texels, int k)
+    {
+        var p = new Vector3(texels[2 * k].X, texels[2 * k].Y, texels[2 * k].Z);
+        var n = new Vector3(texels[2 * k + 1].X, texels[2 * k + 1].Y, texels[2 * k + 1].Z);
+        if (n.LengthSquared() < 1e-12f) return false;
+        n = Vector3.Normalize(n);
+        var origin = p + n * LightmapBuriedLift;
+        var r = new Random(173 + k);
+        var back = 0;
+        int tests = LightmapBuriedTests, threshold = LightmapBuriedThreshold;
+        for (var t = 0; t < tests && back < threshold; t++)
+            if (ClosestThroughContacts(scene, new Ray(origin, CosineHemisphereCpu(n, r)), 0f, lightmapBuriedReach, (uint)r.Next()) is { FrontFace: false } hit
+                && !rayPlacementDoubleSided[hit.Instance]) back++;
+        if (back >= threshold) return true;
+        var escaped = 0;
+        for (var t = 0; t < LightmapEnclosedTests; t++)
+        {
+            if (!(ClosestThroughContacts(scene, new Ray(origin, CosineHemisphereCpu(n, r)), 0f, float.PositiveInfinity, (uint)r.Next()) is { FrontFace: false } hit
+                && !rayPlacementDoubleSided[hit.Instance])) escaped++;
+            if (escaped * 4 > LightmapEnclosedTests) return false;
+        }
+        return LightmapEnclosedTests > 0;
     }
 
     // --lightmap-buried-why: the records only the enclosed rule buries, and of those the ones the camera sees (within

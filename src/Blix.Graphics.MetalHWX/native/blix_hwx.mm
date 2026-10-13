@@ -246,24 +246,64 @@ kernel void blix_trace(device const float4* rays [[buffer(0)]],
 // a back face first -- a face pressed flat against a solid (a floor under a block, a wall against the next) looks into
 // it, and the solid's far faces lie further than `reach`. Not all of them: where that solid touches another, a ray
 // reaching the contact meets two coplanar faces, and about half the time the other's front face answers.
-struct BuriedParams { uint count; uint tests; uint threshold; uint seed; float reach; float lift; uint enclosedTests; uint pad1; };
+struct BuriedParams { uint count; uint tests; uint threshold; uint seed; float reach; float lift; uint enclosedTests; uint contactRows; };
 
-// A ray's first hit for the buried test, with a coplanar contact counted as the back face it also is (as the demo's
-// ClosestThroughContacts): where two solids touch, their faces in one plane tie, and the closest hit reports either.
-// A front-facing hit is re-asked along four directions jittered by a millirad; a back face at the same distance wins.
-// (The demo's CPU tests read contacts exactly from a table of coplanar opposite faces; here the jitter stays.)
-// Returns 0 nothing, 1 a front face, 2 a back face; `instance`, `geometry`, `primitive` the hit's.
+// A ray's first hit for the buried test, with a coplanar contact counted as the back face it also is -- as the demo's
+// ClosestThroughContacts, from the same table: where two solids touch, their faces in one plane tie, and the closest
+// hit reports either. A front-facing hit is a contact when its point lies inside one of its row's partners (coplanar,
+// facing the other way: contactStart[row]..contactStart[row + 1] index contactTris, three float4s each, the first's w
+// the partner's placement), within 2 mm of their edges. A row that has partners but none holding the point is re-asked
+// along four directions jittered by a millirad, a back face at the same distance winning; a row with none never is.
+// Returns 0 nothing, 1 a front face, 2 a back face; `placement` the face's (for the double-sided test).
+struct BuriedScene {
+    device const uint* primRows; device const uint2* entryRows; device const BlixRayInstance* instances;
+    device const uint4* triangles; device const uint2* owners; device const uint* contactStart; device const float4* contactTris;
+    uint contactRows;
+};
+
+inline uint blix_hit_placement(BuriedScene sc, uint instance, uint geometry, uint primitive, thread uint& row)
+{
+    row = blix_row(sc.primRows, sc.entryRows, instance, geometry, primitive);
+    uint placement = sc.instances[instance].info.y;
+    if (placement == 0xFFFFFFFFu) placement = sc.owners[sc.triangles[row].w].x;
+    return placement;
+}
+
+inline bool blix_inside_triangle(float3 p, float3 a, float3 b, float3 c)
+{
+    float3 n = cross(b - a, c - a);
+    float len = length(n);
+    if (len < 1e-12f) return false;
+    n /= len;
+    if (dot(p - a, normalize(cross(b - a, n))) > 2e-3f) return false;
+    if (dot(p - b, normalize(cross(c - b, n))) > 2e-3f) return false;
+    if (dot(p - c, normalize(cross(a - c, n))) > 2e-3f) return false;
+    return true;
+}
+
 inline uint blix_buried_hit(float3 o, float3 d, float tMax, instance_acceleration_structure tlas,
                             intersection_function_table<triangle_data, instancing> table, uint seed,
-                            thread uint& instance, thread uint& geometry, thread uint& primitive)
+                            BuriedScene sc, thread uint& placement)
 {
     intersector<triangle_data, instancing> isect;
     isect.assume_geometry_type(geometry_type::triangle);
     uint s0 = seed;
     auto res = isect.intersect(ray(o, d, 0.0f, tMax), tlas, 0xFFu, table, s0);
     if (res.type != intersection_type::triangle) return 0u;
-    instance = res.instance_id; geometry = res.geometry_id; primitive = res.primitive_id;
+    uint row;
+    placement = blix_hit_placement(sc, res.instance_id, res.geometry_id, res.primitive_id, row);
     if (!res.triangle_front_facing) return 2u;
+    if (row + 1u >= sc.contactRows) return 1u;
+    uint first = sc.contactStart[row], last = sc.contactStart[row + 1u];
+    if (first == last) return 1u;
+    float3 p = o + d * res.distance;
+    for (uint k = first; k < last; ++k) {
+        float4 a = sc.contactTris[k * 3u];
+        if (blix_inside_triangle(p, a.xyz, sc.contactTris[k * 3u + 1u].xyz, sc.contactTris[k * 3u + 2u].xyz)) {
+            placement = uint(a.w);
+            return 2u;
+        }
+    }
     float3 t = normalize(abs(d.y) < 0.9f ? cross(d, float3(0.0f, 1.0f, 0.0f)) : cross(d, float3(1.0f, 0.0f, 0.0f)));
     float3 b = cross(d, t);
     float near = 1e-3f + 1e-4f * res.distance;
@@ -273,7 +313,8 @@ inline uint blix_buried_hit(float3 o, float3 d, float tMax, instance_acceleratio
         uint s1 = seed;
         auto again = isect.intersect(ray(o, j, 0.0f, res.distance + 2.0f * near), tlas, 0xFFu, table, s1);
         if (again.type == intersection_type::triangle && !again.triangle_front_facing && abs(again.distance - res.distance) <= near) {
-            instance = again.instance_id; geometry = again.geometry_id; primitive = again.primitive_id;
+            uint againRow;
+            placement = blix_hit_placement(sc, again.instance_id, again.geometry_id, again.primitive_id, againRow);
             return 2u;
         }
     }
@@ -291,9 +332,12 @@ kernel void blix_buried(device const float4* records [[buffer(0)]],
                         device const BlixRayInstance* instances [[buffer(8)]],
                         device const uint4* triangles [[buffer(9)]],
                         device const uint2* owners [[buffer(10)]],
+                        device const uint* contactStart [[buffer(11)]],
+                        device const float4* contactTris [[buffer(12)]],
                         uint i [[thread_position_in_grid]])
 {
     if (i >= p.count) return;
+    BuriedScene sc = { primRows, entryRows, instances, triangles, owners, contactStart, contactTris, p.contactRows };
     float3 n = records[i * 2u + 1u].xyz;
     if (dot(n, n) < 1e-12f) { buried[i] = 0; return; }
     n = normalize(n);
@@ -306,11 +350,8 @@ kernel void blix_buried(device const float4* records [[buffer(0)]],
         float u1 = float(h & 0xFFFFu) / 65536.0f, u2 = float(h >> 16) / 65536.0f;
         float r = sqrt(u1), phi = 6.28318530718f * u2;
         float3 d = t * (r * cos(phi)) + b * (r * sin(phi)) + n * sqrt(max(0.0f, 1.0f - u1));
-        uint hi, hg, hp;
-        if (blix_buried_hit(o, d, p.reach, tlas, table, blix_pcg(h), hi, hg, hp) != 2u) continue;
-        uint row = blix_row(primRows, entryRows, hi, hg, hp);
-        uint placement = instances[hi].info.y;
-        if (placement == 0xFFFFFFFFu) placement = owners[triangles[row].w].x;
+        uint placement;
+        if (blix_buried_hit(o, d, p.reach, tlas, table, blix_pcg(h), sc, placement) != 2u) continue;
         if (doubleSided[placement] == 0u) back++;
     }
     uint escaped = 0u;
@@ -320,14 +361,8 @@ kernel void blix_buried(device const float4* records [[buffer(0)]],
         float u1 = float(h & 0xFFFFu) / 65536.0f, u2 = float(h >> 16) / 65536.0f;
         float r = sqrt(u1), phi = 6.28318530718f * u2;
         float3 d = t * (r * cos(phi)) + b * (r * sin(phi)) + n * sqrt(max(0.0f, 1.0f - u1));
-        uint hi, hg, hp;
-        bool into = blix_buried_hit(o, d, INFINITY, tlas, table, blix_pcg(h), hi, hg, hp) == 2u;
-        if (into) {
-            uint row = blix_row(primRows, entryRows, hi, hg, hp);
-            uint placement = instances[hi].info.y;
-            if (placement == 0xFFFFFFFFu) placement = owners[triangles[row].w].x;
-            into = doubleSided[placement] == 0u;
-        }
+        uint placement;
+        bool into = blix_buried_hit(o, d, INFINITY, tlas, table, blix_pcg(h), sc, placement) == 2u && doubleSided[placement] == 0u;
         if (!into) escaped++;
         enclosed = escaped * 4u <= p.enclosedTests;
     }
@@ -913,11 +948,18 @@ HWX_EXPORT int hwx_set_alpha(HwxContext* ctx, void* const* textures, const float
 // The lightmap's buried test (blix_buried) over `count` records in host memory (two float4s each), into one byte each
 // (1: buried). In chunks, each waited for; callable off the frame's thread (its own command buffers on the queue).
 HWX_EXPORT int hwx_buried(HwxContext* ctx, const float* records, uint32_t count, uint32_t tests, uint32_t threshold, uint32_t seed,
-                          float reach, float lift, uint32_t enclosedTests, const uint8_t* doubleSided, uint32_t placementCount, uint8_t* buried, double* gpuMs) {
+                          float reach, float lift, uint32_t enclosedTests, const uint8_t* doubleSided, uint32_t placementCount,
+                          const uint32_t* contactStart, uint32_t contactRows, const float* contactTris, uint32_t contactCount,
+                          uint8_t* buried, double* gpuMs) {
     @autoreleasepool {
         if (!ctx->tlas) return Fail(ctx, "buried test before build");
         id<MTLDevice> device = ctx->device;
         id<MTLBuffer> sided = [device newBufferWithBytes:doubleSided length:std::max<uint32_t>(placementCount, 1) options:MTLResourceStorageModeShared];
+        // The contact table (the demo's GpuContacts): none, one empty row.
+        uint32_t noStart[2] = {0, 0};
+        float noTris[12] = {0};
+        id<MTLBuffer> starts = [device newBufferWithBytes:(contactRows > 0 ? contactStart : noStart) length:uint64_t(std::max<uint32_t>(contactRows, 2)) * 4 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> tris = [device newBufferWithBytes:(contactCount > 0 ? contactTris : noTris) length:uint64_t(std::max<uint32_t>(contactCount, 1)) * 48 options:MTLResourceStorageModeShared];
         const uint32_t chunk = 1u << 20;
         if (gpuMs) *gpuMs = 0.0;
         for (uint32_t first = 0; first < count; first += chunk) {
@@ -932,8 +974,8 @@ HWX_EXPORT int hwx_buried(HwxContext* ctx, const float* records, uint32_t count,
             [enc setBuffer:out offset:0 atIndex:1];
             [enc setAccelerationStructure:ctx->tlas atBufferIndex:2];
             [enc setIntersectionFunctionTable:ctx->buriedTable atBufferIndex:3];
-            struct { uint32_t count, tests, threshold, seed; float reach, lift; uint32_t enclosedTests, pad; } params =
-                {n, tests, threshold, seed + first * tests, reach, lift, enclosedTests, 0};
+            struct { uint32_t count, tests, threshold, seed; float reach, lift; uint32_t enclosedTests, contactRows; } params =
+                {n, tests, threshold, seed + first * tests, reach, lift, enclosedTests, contactRows > 0 ? contactRows : 2u};
             [enc setBytes:&params length:sizeof(params) atIndex:4];
             [enc setBuffer:sided offset:0 atIndex:5];
             [enc setBuffer:ctx->primRows offset:0 atIndex:6];
@@ -941,6 +983,8 @@ HWX_EXPORT int hwx_buried(HwxContext* ctx, const float* records, uint32_t count,
             [enc setBuffer:ctx->instances offset:0 atIndex:8];
             [enc setBuffer:ctx->triangles offset:0 atIndex:9];
             [enc setBuffer:ctx->owners offset:0 atIndex:10];
+            [enc setBuffer:starts offset:0 atIndex:11];
+            [enc setBuffer:tris offset:0 atIndex:12];
             [enc useResources:ctx->blas.data() count:ctx->blas.size() usage:MTLResourceUsageRead];
             id<MTLResource> tableBuffers[] = {ctx->surfaces, ctx->alphaOff, ctx->rowMaterial, ctx->materials, ctx->uvs};
             [enc useResources:tableBuffers count:5 usage:MTLResourceUsageRead];

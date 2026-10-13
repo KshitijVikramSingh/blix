@@ -79,6 +79,31 @@ internal sealed partial class SponzaLoop
         return w;
     }
 
+    // --shot-when-ready: the shot as soon as what it compares is there -- the texels at rest (settled and filtered; when
+    // they are in use) and the gate's reference with all its paths (when asked for; its wave starts at load instead of
+    // counting back from the shot frame) -- and ShotReadyMargin frames more for the image to catch up; --shot-frames
+    // stays the latest it may be. The gate ran each scene a fixed 3,000-4,500 frames, long after both.
+    private bool shotWhenReady;
+    private const int ShotReadyMargin = 120;
+    private int shotReadyFrame = -1;
+
+    private bool ShotReady()
+    {
+        if (!shotWhenReady) return false;
+        if (shotReadyFrame < 0)
+        {
+            var lightReady = !transportTexels || texelsRestReported;
+            var referenceReady = !gpuReference || referenceMonolithic
+                ? !gpuReference || gpuReferencePaths >= GpuReferenceTarget
+                : gateWave is { } w && w.Dispatch >= ReferenceWaveFrames(w);
+            if (!lightReady || !referenceReady) return false;
+            shotReadyFrame = postLoadFrames;
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza] shot: ready at post-load frame {postLoadFrames} (light {(transportTexels ? "at rest" : "not cooked")}, reference {(gpuReference ? "complete" : "none")}); writing in {ShotReadyMargin} frames."));
+        }
+        return postLoadFrames >= shotReadyFrame + ShotReadyMargin;
+    }
+
     // The frames a wave needs at most: every lane's quota of paths at their longest (bounces + 2 rays each).
     private int ReferenceWaveFrames(ReferenceWave w) => w.Quota * (refBounces + 2) + 4;
 
@@ -120,7 +145,8 @@ internal sealed partial class SponzaLoop
     {
         if (gateWave is null)
         {
-            if (postLoadFrames < shotFrame - ReferenceLaneQuota * (refBounces + 2) - 4) return;
+            if (!shotWhenReady && postLoadFrames < shotFrame - ReferenceLaneQuota * (refBounces + 2) - 4) return;
+            if (shotWhenReady && postLoadFrames < 4) return;
             PickGpuReferencePoints(scene);
             if (gpuReferencePackedPoints is not { Count: > 0 } packed) return;
             gateWave = CreateReferenceWave(packed, ReferenceLanesPerPoint, ReferenceLaneQuota, "reference");

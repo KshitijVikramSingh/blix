@@ -15,9 +15,9 @@ namespace Blix.Demos.VulkanSponza;
 // The contact table (built once per scene): every triangle's opposite partners -- triangles of the same plane facing
 // the other way whose bounds overlap its own. A front-face hit is a contact when the hit point lies inside one of its
 // triangle's partners (a per-point test: the crevices' floor is one large triangle, mostly exposed, partly under a
-// block), and is reported as that partner's back face. Exact, and no extra rays. It replaced re-asking each front-face
-// hit along three jittered directions, which made Sponza's hashed texel cook several times slower (its every sample's
-// ray along the normal ends on some front face). The lightmap's Metal test keeps the jitter (blix_hwx.mm).
+// block), and is reported as that partner's back face. Exact, and no extra rays. Re-asking every front-face hit along
+// jittered directions (the first form) made Sponza's hashed texel cook several times slower (its every sample's ray
+// along the normal ends on some front face); the jitter now runs only on triangles that have partners, as a backstop.
 internal sealed partial class SponzaLoop
 {
     // Planes match within ContactAngle in normal and ContactDistance along it; a hit point counts as inside a partner
@@ -152,7 +152,14 @@ internal sealed partial class SponzaLoop
         return true;
     }
 
-    // The closest hit, with a contact read as the back face it also is (the partner whose triangle holds the point).
+    // The closest hit, with a contact read as the back face it also is: the partner whose triangle holds the point;
+    // or, on a triangle that has partners but none holding it (a point just past a partner's edge, beyond the
+    // tolerance), ContactRetries re-asks along directions jittered by ContactJitter radians, a back face at the same
+    // distance winning. A triangle with no partner is never re-asked. The lightmap's Metal test does the same
+    // (blix_hwx.mm, blix_buried_hit), from the same table (GpuContacts).
+    private const int ContactRetries = 4;
+    private const float ContactJitter = 1e-3f;
+
     private RayHit? ClosestThroughContacts(RayQueryScene scene, in Ray ray, float tMin, float tMax, uint seed)
     {
         var hit = scene.Closest(ray, tMin, tMax, seed);
@@ -163,6 +170,56 @@ internal sealed partial class SponzaLoop
         foreach (var (pi, pt, a, b, c) in partners)
             if (InsideTriangle(p, a, b, c))
                 return front with { FrontFace = false, Instance = pi, Triangle = pt };
+        var d = ray.Direction;
+        var u = Vector3.Normalize(MathF.Abs(d.Y) < 0.9f ? Vector3.Cross(d, Vector3.UnitY) : Vector3.Cross(d, Vector3.UnitX));
+        var v = Vector3.Cross(d, u);
+        var near = 1e-3f + 1e-4f * front.T;
+        for (var k = 0; k < ContactRetries; k++)
+        {
+            var angle = k * (2f * MathF.PI / ContactRetries);
+            var jittered = Vector3.Normalize(d + (u * MathF.Cos(angle) + v * MathF.Sin(angle)) * ContactJitter);
+            if (scene.Closest(new Ray(ray.Origin, jittered), tMin, front.T + 2f * near, seed) is { FrontFace: false } back
+                && MathF.Abs(back.T - front.T) <= near)
+                return back;
+        }
         return hit;
+    }
+
+    // The table for the GPU, by the rows of the tracer's data: RowStart[row]..RowStart[row + 1] index Partners, three
+    // float4s each (the partner's corners; the first's w its placement). A row shared by several placements (an
+    // instanced mesh's) has none: which placement was hit is not known by row, and the jitter answers there.
+    private (uint[] RowStart, Vector4[] Partners) GpuContacts(RayQueryScene scene, (int[][] Map, int Rows) rowMap)
+    {
+        var table = Contacts(scene);
+        var rows = rowMap.Rows;
+        var map = rowMap.Map;
+        var owners = new int[rows];
+        Array.Fill(owners, -1);
+        for (var i = 0; i < scene.Instances.Count; i++)
+            for (var t = 0; t < scene.Instances[i].Mesh.Indices.Length / 3; t++)
+            {
+                var row = map[i][t];
+                owners[row] = owners[row] == -1 ? i : -2;
+            }
+        var count = new uint[rows + 1];
+        var byRow = new List<(int Row, int Instance, Vector3 A, Vector3 B, Vector3 C)>();
+        foreach (var ((i, t), list) in table.Partners)
+        {
+            var row = map[i][t];
+            if (owners[row] != i) continue;
+            foreach (var (pi, _, a, b, c) in list) byRow.Add((row, pi, a, b, c));
+        }
+        byRow.Sort((x, y) => x.Row.CompareTo(y.Row));
+        foreach (var e in byRow) count[e.Row + 1]++;
+        for (var r = 0; r < rows; r++) count[r + 1] += count[r];
+        var partners = new Vector4[Math.Max(1, byRow.Count * 3)];
+        for (var k = 0; k < byRow.Count; k++)
+        {
+            var (_, pi, a, b, c) = byRow[k];
+            partners[k * 3] = new Vector4(a, pi);
+            partners[k * 3 + 1] = new Vector4(b, 0f);
+            partners[k * 3 + 2] = new Vector4(c, 0f);
+        }
+        return (count, partners);
     }
 }

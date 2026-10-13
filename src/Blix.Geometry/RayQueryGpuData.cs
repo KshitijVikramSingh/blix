@@ -67,6 +67,9 @@ public sealed class RayQueryGpuData
     /// <summary>The row holding a placement's triangle (its index in that placement's mesh): where its surface word is.</summary>
     public int RowOf(int placement, int triangle) => rowsByPlacement[placement][triangle];
 
+    /// <summary>The placement-and-triangle-to-row map alone (<see cref="RowOf"/>'s), for a reader that outlives the rest of the data.</summary>
+    public int[][] RowMap => rowsByPlacement;
+
     private int[][] rowsByPlacement = Array.Empty<int[]>();
 
     private readonly (TriangleBvh Bvh, uint TriangleBase)[] distinct;

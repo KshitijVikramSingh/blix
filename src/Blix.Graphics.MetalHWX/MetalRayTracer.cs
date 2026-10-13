@@ -247,11 +247,14 @@ public sealed class MetalRayTracer : IDisposable
     /// from <paramref name="lift"/> off it, each as far as <paramref name="reach"/>, buried when <paramref name="threshold"/> of them first meet a
     /// back face of a placement not flagged
     /// in <paramref name="doubleSided"/> (by placement; a double-sided sheet has no inside); or enclosed, when each of
-    /// <paramref name="enclosedTests"/> more cosine rays meets such a back face first at any distance. Waits for the GPU; touches no
+    /// <paramref name="enclosedTests"/> more cosine rays meets such a back face first at any distance. A front-face hit inside a
+    /// coplanar opposite partner (<paramref name="contactStart"/>: per triangle row, the first index into
+    /// <paramref name="contactTris"/>, rows + 1 of them; three float4s a partner, the first's w its placement) counts as that
+    /// partner's back face; on a row with partners none of which holds the point, four jittered re-asks. Waits for the GPU; touches no
     /// device buffer, so it can run off the frame's thread. Returns one flag per record, and the GPU time.
     /// </summary>
     public unsafe bool[] TestBuried(ReadOnlySpan<Vector4> records, int tests, int threshold, float reach, float lift, uint seed, ReadOnlySpan<bool> doubleSided,
-        int enclosedTests, out double gpuMs)
+        int enclosedTests, ReadOnlySpan<uint> contactStart, ReadOnlySpan<Vector4> contactTris, out double gpuMs)
     {
         ObjectDisposedException.ThrowIf(ctx == 0, this);
         var count = records.Length / 2;
@@ -262,8 +265,11 @@ public sealed class MetalRayTracer : IDisposable
         fixed (Vector4* r = records)
         fixed (byte* sp = sided)
         fixed (byte* fp = flags)
+        fixed (uint* cs = contactStart)
+        fixed (Vector4* ct = contactTris)
         {
-            if (HwxNative.hwx_buried(ctx, (float*)r, (uint)count, (uint)tests, (uint)threshold, seed, reach, lift, (uint)enclosedTests, sp, (uint)doubleSided.Length, fp, &ms) != 0)
+            if (HwxNative.hwx_buried(ctx, (float*)r, (uint)count, (uint)tests, (uint)threshold, seed, reach, lift, (uint)enclosedTests, sp, (uint)doubleSided.Length,
+                    cs, (uint)contactStart.Length, (float*)ct, (uint)(contactTris.Length / 3), fp, &ms) != 0)
                 throw new InvalidOperationException($"Metal buried test: {Error}");
         }
         gpuMs = ms;

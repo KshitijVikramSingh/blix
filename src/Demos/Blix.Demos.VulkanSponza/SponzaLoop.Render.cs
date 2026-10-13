@@ -941,7 +941,7 @@ internal sealed partial class SponzaLoop
         WriteLevelProbeDumps();
         SampleWatch();
         if (shotPath is { } path && !shotWritten && fullyLoaded && !AbOffPhase
-            && framePeriodCount >= 60 && measuredFrames >= shotFrame)
+            && framePeriodCount >= 60 && (measuredFrames >= shotFrame || ShotReady()))
         {
             shotWritten = true;
             if (shotResized)
