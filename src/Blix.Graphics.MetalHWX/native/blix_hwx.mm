@@ -369,6 +369,84 @@ kernel void blix_buried(device const float4* records [[buffer(0)]],
     buried[i] = back >= p.threshold || enclosed ? 1u : 0u;
 }
 
+// A cook's candidate search (hwx_candidates; VulkanSponza's CollectCandidates, the same rule): for each query point
+// (two float4s: position, normal) its `c` nearest patches in the 27 grid cells around it, by distance plus the angle
+// penalty (facing ones: their normals within the facing cut; or any, `anyFacing`), cells nearest first and skipped
+// once no nearer than the last candidate; how many of them to try (the first 4 when the nearest is past the far
+// cutoff); the nearest within the fallback's reach. Plain compute: no rays.
+struct CandidateParams {
+    uint count; uint c; uint anyFacing; uint pad;
+    float cell, facingCos, penalty, farCutoff;
+    float ownReach, pad1, pad2, pad3;
+    int minX, minY, minZ, pad4;
+    int dimX, dimY, dimZ, pad5;
+};
+
+kernel void blix_candidates(device const float4* queries [[buffer(0)]],
+                            device const float4* patches [[buffer(1)]],
+                            device const uint* cellStart [[buffer(2)]],
+                            device const uint* cellItems [[buffer(3)]],
+                            constant CandidateParams& p [[buffer(4)]],
+                            device int* candidates [[buffer(5)]],
+                            device uint2* triedNearest [[buffer(6)]],
+                            uint i [[thread_position_in_grid]])
+{
+    if (i >= p.count) return;
+    float3 q = queries[i * 2u].xyz;
+    float3 n = queries[i * 2u + 1u].xyz;
+    int best[16];
+    float bestD[16];
+    uint c = min(p.c, 16u);
+    for (uint k = 0u; k < c; ++k) { best[k] = -1; bestD[k] = INFINITY; }
+    int kx = int(floor(q.x / p.cell)), ky = int(floor(q.y / p.cell)), kz = int(floor(q.z / p.cell));
+    float cellD[27];
+    int order[27];
+    for (int k = 0; k < 27; ++k) {
+        int ox = k % 3 - 1, oy = k / 3 % 3 - 1, oz = k / 9 - 1;
+        float gx = ox == 0 ? 0.0f : ox < 0 ? q.x - float(kx) * p.cell : float(kx + 1) * p.cell - q.x;
+        float gy = oy == 0 ? 0.0f : oy < 0 ? q.y - float(ky) * p.cell : float(ky + 1) * p.cell - q.y;
+        float gz = oz == 0 ? 0.0f : oz < 0 ? q.z - float(kz) * p.cell : float(kz + 1) * p.cell - q.z;
+        cellD[k] = gx * gx + gy * gy + gz * gz;
+        order[k] = k;
+    }
+    for (int a = 1; a < 27; ++a) {
+        int key = order[a];
+        int b = a - 1;
+        while (b >= 0 && cellD[order[b]] > cellD[key]) { order[b + 1] = order[b]; b--; }
+        order[b + 1] = key;
+    }
+    for (int oc = 0; oc < 27; ++oc) {
+        int k = order[oc];
+        if (cellD[k] >= bestD[c - 1u]) break;
+        int gx = kx + k % 3 - 1 - p.minX, gy = ky + k / 3 % 3 - 1 - p.minY, gz = kz + k / 9 - 1 - p.minZ;
+        if (gx < 0 || gy < 0 || gz < 0 || gx >= p.dimX || gy >= p.dimY || gz >= p.dimZ) continue;
+        uint cellIndex = uint((gz * p.dimY + gy) * p.dimX + gx);
+        for (uint e = cellStart[cellIndex]; e < cellStart[cellIndex + 1u]; ++e) {
+            uint j = cellItems[e];
+            float3 pj = patches[j * 2u].xyz;
+            float3 nj = patches[j * 2u + 1u].xyz;
+            float facing = dot(nj, n);
+            if (p.anyFacing == 0u && facing < p.facingCos) continue;
+            float turn = p.anyFacing != 0u ? 0.0f : p.penalty * (1.0f - facing);
+            float3 dd = pj - q;
+            float d2 = dot(dd, dd) + turn * turn;
+            if (d2 >= bestD[c - 1u]) continue;
+            int at = int(c) - 1;
+            while (at > 0 && bestD[at - 1] > d2) { bestD[at] = bestD[at - 1]; best[at] = best[at - 1]; at--; }
+            bestD[at] = d2;
+            best[at] = int(j);
+        }
+    }
+    float first2 = INFINITY;
+    if (best[0] >= 0) { float3 dd = patches[uint(best[0]) * 2u].xyz - q; first2 = dot(dd, dd); }
+    int nearest = first2 <= p.ownReach * p.ownReach ? best[0] : -1;
+    uint count = 0u;
+    while (count < c && best[count] >= 0) count++;
+    uint tried = first2 > p.farCutoff * p.farCutoff ? min(count, 4u) : count;
+    for (uint k = 0u; k < c; ++k) candidates[i * c + k] = best[k];
+    triedNearest[i] = uint2(tried, as_type<uint>(nearest));
+}
+
 // The closest hit with contacts (hwx_contact_trace): per ray (two float4s: origin + unused, direction + tMax) what
 // blix_buried_hit answers -- 0 nothing, 1 a front face, 2 a back face (a contact read as one) -- and the face's
 // placement. The demo's inside-a-solid tests (patches, hashed texels) ask exactly this, on the CPU as
@@ -460,13 +538,20 @@ kernel void blix_lightlet_rings(device const float4* points [[buffer(0)]],
 struct HwxContext {
     id<MTLDevice> device;
     id<MTLCommandQueue> queue;
-    id<MTLCommandQueue> ownQueue;   // the one it was created with (hwx_use_queue(ctx, NULL) returns to it)
+    // The one it was created with (hwx_use_queue(ctx, NULL) returns to it). The calls from host memory (a cook's:
+    // hwx_trace_host, hwx_contact_trace, hwx_candidates, hwx_buried, the lightlet passes, hwx_shadow_host) submit
+    // here even while `queue` is the frame's: they do not follow the frame's work, and on the frame's queue each of a
+    // cook's ~1,400 command buffers waited behind the frames in line (Sponza's couplings waited 54 s on Metal for 5 s
+    // of GPU work, 2026-10-13).
+    id<MTLCommandQueue> ownQueue;
     id<MTLComputePipelineState> pso;
     id<MTLIntersectionFunctionTable> table;
     id<MTLComputePipelineState> shadowPso;
     id<MTLComputePipelineState> buriedPso;            // blix_buried, with its own table
     id<MTLIntersectionFunctionTable> buriedTable;
     id<MTLComputePipelineState> contactPso;           // blix_contact_trace, with its own table
+    id<MTLComputePipelineState> candidatesPso;        // blix_candidates (plain compute)
+    id<MTLBuffer> candidatePatches, candidateStart, candidateItems;   // hwx_candidates_setup's
     id<MTLIntersectionFunctionTable> contactTable;
     id<MTLComputePipelineState> lightletDensePso, lightletRingsPso;   // the lightlet bake, each with its own table
     id<MTLIntersectionFunctionTable> lightletDenseTable, lightletRingsTable;
@@ -548,6 +633,8 @@ HWX_EXPORT HwxContext* hwx_create(void* mtlDevice, char* err, int errLength) {
         id<MTLIntersectionFunctionTable> contactTable;
         id<MTLComputePipelineState> contactPso = pipeline(@"blix_contact_trace", &contactTable);
         if (!contactPso) return report([@"contact-trace pipeline: " stringByAppendingString:error.localizedDescription]);
+        id<MTLComputePipelineState> candidatesPso = [device newComputePipelineStateWithFunction:[library newFunctionWithName:@"blix_candidates"] error:&error];
+        if (!candidatesPso) return report([@"candidates pipeline: " stringByAppendingString:error.localizedDescription]);
         id<MTLIntersectionFunctionTable> lightletDenseTable, lightletRingsTable;
         id<MTLComputePipelineState> lightletDensePso = pipeline(@"blix_lightlet_dense", &lightletDenseTable);
         if (!lightletDensePso) return report([@"lightlet pipeline: " stringByAppendingString:error.localizedDescription]);
@@ -572,6 +659,7 @@ HWX_EXPORT HwxContext* hwx_create(void* mtlDevice, char* err, int errLength) {
         ctx->buriedTable = buriedTable;
         ctx->contactPso = contactPso;
         ctx->contactTable = contactTable;
+        ctx->candidatesPso = candidatesPso;
         ctx->lightletDensePso = lightletDensePso;
         ctx->lightletDenseTable = lightletDenseTable;
         ctx->lightletRingsPso = lightletRingsPso;
@@ -783,6 +871,62 @@ HWX_EXPORT int hwx_trace(HwxContext* ctx, void* rays, void* hits, uint32_t count
     }
 }
 
+// The patches (two float4s each) and their dense grid (cell start offsets, cells + 1 of them; patch ids) for
+// hwx_candidates, kept until the next setup.
+HWX_EXPORT int hwx_candidates_setup(HwxContext* ctx, const float* patches, uint32_t patchCount, const uint32_t* cellStart,
+                                    uint32_t cells, const uint32_t* cellItems, uint32_t items) {
+    @autoreleasepool {
+        id<MTLDevice> device = ctx->device;
+        ctx->candidatePatches = [device newBufferWithBytes:patches length:std::max<uint64_t>(uint64_t(patchCount) * 32, 32) options:MTLResourceStorageModeShared];
+        ctx->candidateStart = [device newBufferWithBytes:cellStart length:uint64_t(cells + 1) * 4 options:MTLResourceStorageModeShared];
+        uint32_t none = 0;
+        ctx->candidateItems = [device newBufferWithBytes:(items > 0 ? cellItems : &none) length:std::max<uint64_t>(uint64_t(items) * 4, 4) options:MTLResourceStorageModeShared];
+        return 0;
+    }
+}
+
+// blix_candidates over `count` query points in host memory (two float4s each): `c` candidates each into
+// `candidates`, (tried, nearest) into `triedNearest`; `params` as CandidateParams. In chunks, each waited for.
+HWX_EXPORT int hwx_candidates(HwxContext* ctx, const float* queries, uint32_t count, const void* params, int32_t* candidates,
+                              uint32_t* triedNearest, double* gpuMs) {
+    @autoreleasepool {
+        if (!ctx->candidatePatches) return Fail(ctx, "candidates before setup");
+        id<MTLDevice> device = ctx->device;
+        uint8_t local[80];
+        memcpy(local, params, 80);
+        uint32_t c = ((const uint32_t*)params)[1];
+        const uint32_t chunk = 1u << 20;
+        if (gpuMs) *gpuMs = 0.0;
+        for (uint32_t first = 0; first < count; first += chunk) {
+            uint32_t n = std::min(chunk, count - first);
+            ((uint32_t*)local)[0] = n;
+            id<MTLBuffer> in = [device newBufferWithBytes:queries + uint64_t(first) * 8 length:uint64_t(n) * 32 options:MTLResourceStorageModeShared];
+            id<MTLBuffer> outCand = [device newBufferWithLength:uint64_t(n) * c * 4 options:MTLResourceStorageModeShared];
+            id<MTLBuffer> outTried = [device newBufferWithLength:uint64_t(n) * 8 options:MTLResourceStorageModeShared];
+            id<MTLCommandBuffer> cb = [ctx->ownQueue commandBuffer];
+            cb.label = @"blix-hwx candidates";
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:ctx->candidatesPso];
+            [enc setBuffer:in offset:0 atIndex:0];
+            [enc setBuffer:ctx->candidatePatches offset:0 atIndex:1];
+            [enc setBuffer:ctx->candidateStart offset:0 atIndex:2];
+            [enc setBuffer:ctx->candidateItems offset:0 atIndex:3];
+            [enc setBytes:local length:80 atIndex:4];
+            [enc setBuffer:outCand offset:0 atIndex:5];
+            [enc setBuffer:outTried offset:0 atIndex:6];
+            [enc dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+            [enc endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
+            if (!Completed(ctx, cb, "candidates")) return 1;
+            if (gpuMs) *gpuMs += (cb.GPUEndTime - cb.GPUStartTime) * 1e3;
+            memcpy(candidates + uint64_t(first) * c, outCand.contents, uint64_t(n) * c * 4);
+            memcpy(triedNearest + uint64_t(first) * 2, outTried.contents, uint64_t(n) * 8);
+        }
+        return 0;
+    }
+}
+
 // blix_contact_trace over `count` rays in host memory into `answers` (two uints each: 0 nothing, 1 front, 2 back; the
 // placement), in chunks, each waited for; the contact table as hwx_buried's. Callable off the frame's thread.
 HWX_EXPORT int hwx_contact_trace(HwxContext* ctx, const float* rays, uint32_t count, uint32_t seed,
@@ -801,7 +945,7 @@ HWX_EXPORT int hwx_contact_trace(HwxContext* ctx, const float* rays, uint32_t co
             uint32_t n = std::min(chunk, count - first);
             id<MTLBuffer> in = [device newBufferWithBytes:rays + uint64_t(first) * 8 length:uint64_t(n) * 32 options:MTLResourceStorageModeShared];
             id<MTLBuffer> out = [device newBufferWithLength:uint64_t(n) * 8 options:MTLResourceStorageModeShared];
-            id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
+            id<MTLCommandBuffer> cb = [ctx->ownQueue commandBuffer];
             cb.label = @"blix-hwx contact trace";
             id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
             [enc setComputePipelineState:ctx->contactPso];
@@ -847,7 +991,7 @@ HWX_EXPORT int hwx_trace_host(HwxContext* ctx, const float* rays, uint32_t count
             uint32_t n = std::min(chunk, count - first);
             id<MTLBuffer> rayBuffer = [device newBufferWithBytes:rays + uint64_t(first) * 8 length:uint64_t(n) * 32 options:MTLResourceStorageModeShared];
             id<MTLBuffer> hitBuffer = [device newBufferWithLength:uint64_t(n) * 48 options:MTLResourceStorageModeShared];
-            id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
+            id<MTLCommandBuffer> cb = [ctx->ownQueue commandBuffer];
             cb.label = @"blix-hwx trace (host)";
             id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
             [enc setComputePipelineState:ctx->pso];
@@ -1096,7 +1240,7 @@ HWX_EXPORT int hwx_buried(HwxContext* ctx, const float* records, uint32_t count,
             uint32_t n = std::min(chunk, count - first);
             id<MTLBuffer> in = [device newBufferWithBytes:records + uint64_t(first) * 8 length:uint64_t(n) * 32 options:MTLResourceStorageModeShared];
             id<MTLBuffer> out = [device newBufferWithLength:std::max<uint32_t>(n, 4) options:MTLResourceStorageModeShared];
-            id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
+            id<MTLCommandBuffer> cb = [ctx->ownQueue commandBuffer];
             cb.label = @"blix-hwx buried";
             id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
             [enc setComputePipelineState:ctx->buriedPso];
@@ -1136,7 +1280,7 @@ HWX_EXPORT int hwx_buried(HwxContext* ctx, const float* records, uint32_t count,
 static int LightletDispatch(HwxContext* ctx, id<MTLComputePipelineState> pso, id<MTLIntersectionFunctionTable> table, const char* what,
                             id<MTLBuffer> points, id<MTLBuffer> out, const void* params, uint32_t paramBytes,
                             id<MTLBuffer> b5, id<MTLBuffer> b6, id<MTLBuffer> b7, MTLSize grid, double* gpuMs) {
-    id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
+    id<MTLCommandBuffer> cb = [ctx->ownQueue commandBuffer];
     cb.label = [NSString stringWithUTF8String:what];
     id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
     [enc setComputePipelineState:pso];
@@ -1234,7 +1378,7 @@ HWX_EXPORT int hwx_shadow_host(HwxContext* ctx, const float* origins, uint32_t c
             uint32_t n = std::min(chunk, count - first);
             id<MTLBuffer> in = [device newBufferWithBytes:origins + uint64_t(first) * 4 length:uint64_t(n) * 16 options:MTLResourceStorageModeShared];
             id<MTLBuffer> out = [device newBufferWithLength:uint64_t(n) * 4 options:MTLResourceStorageModeShared];
-            id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
+            id<MTLCommandBuffer> cb = [ctx->ownQueue commandBuffer];
             cb.label = @"blix-hwx host shadow";
             id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
             [enc setComputePipelineState:ctx->shadowPso];

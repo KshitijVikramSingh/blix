@@ -60,9 +60,54 @@ internal sealed partial class SponzaLoop
     private int transportFillRays = 32, transportFillPasses = 2;
     // --transport-cpu-sunvis: the sun visibility bins on the CPU, not Metal; --transport-sunvis-check: both, compared.
     private bool transportCpuSunVis, transportSunVisCheck;
-    // --transport-cpu-couplings: the couplings' rays on the CPU, not Metal (CouplingsOnMetal), and its block of patches.
+    // --transport-cpu-couplings: the couplings' rays on the CPU, not Metal (CouplingsOnMetal); its blocks of patches,
+    // and how many run side by side (one waits on Metal while another runs on the CPU).
     private bool transportCpuCouplings;
-    private const int CouplingBlock = 4096;
+    private const int CouplingBlock = 2048, CouplingWorkers = 2;
+
+    // A Metal couplings worker's block arrays, made once and reused block after block.
+    private sealed class CouplingWorker
+    {
+        public readonly Vector4[] Rays, Vis;
+        public readonly Vector3[] Dirs, Hp, Hn;
+        public readonly int[] State, Inst, How, Cand, AnyCand, NearestOf, SunletOf, TriOf, SunOrder, CandOut, VisIds, VisTargets;
+        public readonly bool[] Front, VisNone;
+        public readonly byte[] Tried, AnyTried;
+        public readonly ulong[] SunKeys;
+        public readonly uint[] TriedOut, Hits, Answers;
+
+        public CouplingWorker(int maxTotal, int c)
+        {
+            Rays = new Vector4[maxTotal * 2]; Vis = new Vector4[maxTotal * 2];
+            Dirs = new Vector3[maxTotal]; Hp = new Vector3[maxTotal]; Hn = new Vector3[maxTotal];
+            State = new int[maxTotal]; Inst = new int[maxTotal]; How = new int[maxTotal];
+            Cand = new int[maxTotal * c]; AnyCand = new int[maxTotal * c]; NearestOf = new int[maxTotal];
+            SunletOf = new int[maxTotal]; TriOf = new int[maxTotal]; SunOrder = new int[maxTotal]; CandOut = new int[maxTotal * c];
+            VisIds = new int[maxTotal]; VisTargets = new int[maxTotal];
+            Front = new bool[maxTotal]; VisNone = new bool[maxTotal];
+            Tried = new byte[maxTotal]; AnyTried = new byte[maxTotal];
+            SunKeys = new ulong[maxTotal];
+            TriedOut = new uint[maxTotal * 2]; Hits = new uint[maxTotal * 12]; Answers = new uint[maxTotal * 12];
+        }
+    }
+
+    // A patch's couplings from its rays' targets: each distinct target and its share of the rays.
+    private static (int To, float W)[] Runs(Span<int> targets, int rays)
+    {
+        if (targets.Length == 0) return Array.Empty<(int, float)>();
+        targets.Sort();
+        var distinct = 1;
+        for (var k = 1; k < targets.Length; k++) if (targets[k] != targets[k - 1]) distinct++;
+        var result = new (int To, float W)[distinct];
+        int at = 0, run = 1;
+        for (var k = 1; k <= targets.Length; k++)
+        {
+            if (k < targets.Length && targets[k] == targets[k - 1]) { run++; continue; }
+            result[at++] = (targets[k - 1], run / (float)rays);
+            run = 1;
+        }
+        return result;
+    }
     private const int SunVisCheckPatches = 4096;
     private int transportRays = 512;
     private int transportVisRes = 32;
@@ -352,6 +397,10 @@ internal sealed partial class SponzaLoop
         // Cells twice the spacing, so the 3x3x3 search reaches past any gap between neighbouring patches.
         var cell = 2f * transportSpacing;
         var grid = new Dictionary<(int, int, int), List<int>>();
+        // The dense form of the grid (BuildDenseGrid), for the Metal path's candidate search.
+        Vector3[] densePos = Array.Empty<Vector3>(), denseNrm = Array.Empty<Vector3>();
+        int[] denseStart = Array.Empty<int>(), denseItems = Array.Empty<int>();
+        int denseX = 0, denseY = 0, denseZ = 0, denseMinX = 0, denseMinY = 0, denseMinZ = 0;
         (int, int, int) Key(Vector3 p) => ((int)MathF.Floor(p.X / cell), (int)MathF.Floor(p.Y / cell), (int)MathF.Floor(p.Z / cell));
         for (var i = 0; i < patches; i++)
         {
@@ -574,13 +623,20 @@ internal sealed partial class SponzaLoop
         const int SunletShards = 64;
         // Lookups take no lock (most hits find their sunlet made): neighbouring patches' rays land together, and a
         // lock on every lookup still had threads queued on the same few shards (38% of their time, 2026-10-13).
-        var sunletShardIndex = new ConcurrentDictionary<(int, int, int, int), int>[SunletShards];
+        var sunletShardIndex = new ConcurrentDictionary<ulong, int>[SunletShards];
         var sunletShardData = new List<(Vector3 P, Vector3 N, Vector3 A)>[SunletShards];
         for (var sh = 0; sh < SunletShards; sh++) { sunletShardIndex[sh] = new(); sunletShardData[sh] = new(); }
+        // A sunlet's key, packed: its cell (20 bits an axis, offset) and normal bin (4 bits); its shard from the key.
+        ulong SunletKey(Vector3 hp, Vector3 hn)
+        {
+            ulong Axis(float v) => (ulong)((long)MathF.Floor(v / transportSunlet) + (1L << 19)) & 0xFFFFFUL;
+            return Axis(hp.X) | (Axis(hp.Y) << 20) | (Axis(hp.Z) << 40) | ((ulong)OctBin(hn, 4) << 60);
+        }
+        static int SunletShard(ulong key) => (int)((key * 0x9E3779B97F4A7C15UL) >> 58);
         int SunletOf(Vector3 hp, Vector3 hn, Vector3 alb)
         {
-            var key = ((int)MathF.Floor(hp.X / transportSunlet), (int)MathF.Floor(hp.Y / transportSunlet), (int)MathF.Floor(hp.Z / transportSunlet), OctBin(hn, 4));
-            var shard = (int)((uint)HashCode.Combine(key.Item1, key.Item2, key.Item3, key.Item4) % SunletShards);
+            var key = SunletKey(hp, hn);
+            var shard = SunletShard(key);
             var index = sunletShardIndex[shard];
             if (index.TryGetValue(key, out var found)) return found;
             var data = sunletShardData[shard];
@@ -610,6 +666,51 @@ internal sealed partial class SponzaLoop
                 }
             });
             for (var sh = 0; sh < SunletShards; sh++) { sunletShardIndex[sh] = new(); sunletShardData[sh] = new(); }
+        }
+        // A block's sunlets at once (the Metal path): its hits' keys partitioned by shard in parallel, then each shard's
+        // hits by one task alone against its own table -- no locks, each task's lookups in one small table.
+        void AssignSunlets(int total, ulong[] keys, int[] instOf, int[] triOf, Vector3[] hpOf, Vector3[] hnOf, int[] stateOf, int[] into,
+            int[] order, int pendingState)
+        {
+            var ranges = Environment.ProcessorCount * 4;
+            var span = (total + ranges - 1) / ranges;
+            var counts = new int[ranges * SunletShards];
+            Parallel.For(0, ranges, g =>
+            {
+                for (var at = g * span; at < Math.Min(total, (g + 1) * span); at++)
+                    if (stateOf[at] == pendingState) counts[g * SunletShards + SunletShard(keys[at])]++;
+            });
+            var offsets = new int[ranges * SunletShards];
+            var shardStart = new int[SunletShards + 1];
+            var sum = 0;
+            for (var sh = 0; sh < SunletShards; sh++)
+            {
+                shardStart[sh] = sum;
+                for (var g = 0; g < ranges; g++) { offsets[g * SunletShards + sh] = sum; sum += counts[g * SunletShards + sh]; }
+            }
+            shardStart[SunletShards] = sum;
+            Parallel.For(0, ranges, g =>
+            {
+                for (var at = g * span; at < Math.Min(total, (g + 1) * span); at++)
+                    if (stateOf[at] == pendingState) order[offsets[g * SunletShards + SunletShard(keys[at])]++] = at;
+            });
+            Parallel.For(0, SunletShards, sh =>
+            {
+                var index = sunletShardIndex[sh];
+                var data = sunletShardData[sh];
+                lock (data)   // the other couplings worker may be in this shard too
+                for (var q = shardStart[sh]; q < shardStart[sh + 1]; q++)
+                {
+                    var at = order[q];
+                    if (!index.TryGetValue(keys[at], out var id))
+                    {
+                        id = data.Count * SunletShards + sh;
+                        data.Add((hpOf[at], hnOf[at], Albedo(instOf[at], triOf[at])));
+                        index[keys[at]] = id;
+                    }
+                    into[at] = id;
+                }
+            });
         }
         bool Cutout(RayHit h) => (surfaces[data.RowOf(h.Instance, h.Triangle)] >> 24) < 255u;
         if (sunVisStage is not null) sunVis = sunVisStage;
@@ -708,44 +809,52 @@ internal sealed partial class SponzaLoop
         {
             var metalClock = Stopwatch.StartNew();
             BuildDenseGrid();
+            // The candidate search on the GPU (blix_candidates): the patches and their dense grid up once.
+            {
+                var packed = new Vector4[densePos.Length * 2];
+                for (var j = 0; j < densePos.Length; j++) { packed[2 * j] = new Vector4(densePos[j], 0f); packed[2 * j + 1] = new Vector4(denseNrm[j], 0f); }
+                metal.CandidatesSetup(packed, MemoryMarshal.Cast<int, uint>(denseStart.AsSpan()), MemoryMarshal.Cast<int, uint>(denseItems.AsSpan()));
+            }
+            Blix.Graphics.MetalHWX.MetalRayTracer.CandidateParams CandidateParamsFor(bool anyFacing) => new()
+            {
+                C = (uint)transportCandidates, AnyFacing = anyFacing ? 1u : 0u, Cell = cell, FacingCos = transportFacingCos,
+                Penalty = anyFacing ? 0f : facingPenalty, FarCutoff = transportFarCutoff, OwnReach = OwnFallbackReach,
+                MinX = denseMinX, MinY = denseMinY, MinZ = denseMinZ, DimX = denseX, DimY = denseY, DimZ = denseZ,
+            };
             double gpuMs = 0;
             long rayCount = 0;
+            var gpuLock = new object();
+            void AddGpu(double ms) { lock (gpuLock) gpuMs += ms; }
             var R = transportRays;
             var C = transportCandidates;
             // Where the time goes: each phase's wall time, and the collector's pauses.
             var phase = new double[6];   // rays, trace (waiting on Metal), candidates, gather, accumulate, sort
-            var phaseNames = new[] { "rays", "Metal", "candidates", "gather", "accumulate", "classify" };
-            var phaseClock = new Stopwatch();
-            void Lap(int k) { phase[k] += phaseClock.Elapsed.TotalSeconds; phaseClock.Restart(); }
+            var phaseNames = new[] { "rays", "Metal", "candidates", "gather", "accumulate", "sunlets" };
+            // Two workers run blocks side by side, so a phase's figure is the workers' time in it summed (it can exceed
+            // the wall time), each worker lapping its own clock.
+            void LapOf(Stopwatch clock, int k) { lock (phase) phase[k] += clock.Elapsed.TotalSeconds; clock.Restart(); }
             var pauseBefore = GC.GetTotalPauseDuration();
             var gen2Before = GC.CollectionCount(2);
             // The block's arrays, made once and reused: each block made hundreds of MB anew, and the collector's full
             // passes over a heap holding the contact table, couplings and sunlets stalled every thread.
             var maxTotal = Math.Min(CouplingBlock, patches) * R;
-            var rays = new Vector4[maxTotal * 2];
-            var dirs = new Vector3[maxTotal];
-            var state = new int[maxTotal];
-            var hp = new Vector3[maxTotal];
-            var hn = new Vector3[maxTotal];
-            var inst = new int[maxTotal];
-            var front = new bool[maxTotal];
-            var how = new int[maxTotal];
-            var cand = new int[maxTotal * C];
-            var anyCand = new int[maxTotal * C];
-            var nearestOf = new int[maxTotal];
-            var tried = new byte[maxTotal];
-            var anyTried = new byte[maxTotal];
-            var sunletOf = new int[maxTotal];
-            var visIds = new int[maxTotal];
-            var visTargets = new int[maxTotal];
-            var vis = new Vector4[maxTotal * 2];
-            var visNone = new bool[maxTotal];
-            var hits = new uint[maxTotal * 12];
-            var answers = new uint[maxTotal * 12];
+            var workers = new System.Collections.Concurrent.ConcurrentBag<CouplingWorker>();
+            for (var w = 0; w < CouplingWorkers; w++) workers.Add(new CouplingWorker(maxTotal, C));
             ProgressBegin("transport: couplings (Metal)", patches);
-            phaseClock.Start();
-            for (var first = 0; first < patches; first += CouplingBlock)
+            var blockStarts = Enumerable.Range(0, (patches + CouplingBlock - 1) / CouplingBlock).Select(b => b * CouplingBlock).ToArray();
+            Parallel.ForEach(blockStarts, new ParallelOptions { MaxDegreeOfParallelism = CouplingWorkers }, first =>
             {
+                workers.TryTake(out var w);
+                ProcessBlock(w!, first);
+                workers.Add(w!);
+            });
+            void ProcessBlock(CouplingWorker w, int first)
+            {
+                var (rays, dirs, state, hp, hn, inst, front, how) = (w.Rays, w.Dirs, w.State, w.Hp, w.Hn, w.Inst, w.Front, w.How);
+                var (cand, anyCand, nearestOf, tried, anyTried, sunletOf, sunKeys, triOf) = (w.Cand, w.AnyCand, w.NearestOf, w.Tried, w.AnyTried, w.SunletOf, w.SunKeys, w.TriOf);
+                var (sunOrder, candOut, triedOut, visIds, visTargets, vis, visNone, hits, answers) = (w.SunOrder, w.CandOut, w.TriedOut, w.VisIds, w.VisTargets, w.Vis, w.VisNone, w.Hits, w.Answers);
+                var clock = Stopwatch.StartNew();
+                void Lap(int k) => LapOf(clock, k);
                 var n = Math.Min(CouplingBlock, patches - first);
                 var total = n * R;
                 // 1. The patches' rays, closest hits.
@@ -766,8 +875,8 @@ internal sealed partial class SponzaLoop
                 });
                 Lap(0);
                 metal.TraceFromHost(rays.AsSpan(0, total * 2), hits, (uint)(first * R), closestOnly: true, out var ms);
-                gpuMs += ms;
-                rayCount += total;
+                AddGpu(ms);
+                Interlocked.Add(ref rayCount, total);
                 Lap(1);
                 // 2. Each hit: sky, foliage, or a hit on architecture with its candidates.
                 const int Sky = -3, Leaf = -4, Pending = -1;
@@ -786,12 +895,35 @@ internal sealed partial class SponzaLoop
                     var faceN = Vector3.Normalize(Vector3.Cross(b - a, c - a));
                     front[at] = Vector3.Dot(faceN, d) < 0f;
                     var nn = front[at] ? faceN : -faceN;
-                    hp[at] = p; hn[at] = nn; inst[at] = placement;
-                    if (useSunlets) sunletOf[at] = SunletOf(p, nn, Albedo(placement, triangle));
+                    hp[at] = p; hn[at] = nn; inst[at] = placement; triOf[at] = triangle;
+                    if (useSunlets) sunKeys[at] = SunletKey(p, nn);
                     state[at] = Pending;
                     how[at] = HowMiss;
-                    tried[at] = (byte)CollectCandidates(p, nn, anyFacing: false, cand.AsSpan(at * C, C), out nearestOf[at]);
                 });
+                if (useSunlets) AssignSunlets(total, sunKeys, inst, triOf, hp, hn, state, sunletOf, sunOrder, Pending);
+                Lap(5);
+                // The pending hits' candidates, on the GPU (as CollectCandidates), scattered back.
+                void CandidatesOnGpu(bool anyFacing, int[] intoCand, byte[] intoTried, int[]? intoNearest)
+                {
+                    var count = Gather(_ => 0);
+                    if (count == 0) return;
+                    Parallel.For(0, count, q =>
+                    {
+                        var at = visIds[q];
+                        vis[2 * q] = new Vector4(hp[at], 0f);
+                        vis[2 * q + 1] = new Vector4(hn[at], 0f);
+                    });
+                    metal.Candidates(vis.AsSpan(0, count * 2), CandidateParamsFor(anyFacing), candOut.AsSpan(0, count * C), triedOut.AsSpan(0, count * 2), out var cms);
+                    AddGpu(cms);
+                    Parallel.For(0, count, q =>
+                    {
+                        var at = visIds[q];
+                        Array.Copy(candOut, q * C, intoCand, at * C, C);
+                        intoTried[at] = (byte)triedOut[2 * q];
+                        if (intoNearest is not null) intoNearest[at] = (int)triedOut[2 * q + 1];
+                    });
+                }
+                CandidatesOnGpu(false, cand, tried, nearestOf);
                 Lap(2);
                 // 3. The visibility rounds.
                 // The pending hits whose candidate exists, gathered in parallel (per range, then concatenated in order).
@@ -840,9 +972,8 @@ internal sealed partial class SponzaLoop
                     });
                     Lap(3);
                     var answer = answers;
-                    metal.TraceFromHost(vis.AsSpan(0, count * 2), answer, (uint)(rayCount + first), closestOnly: true, out var vms);
-                    gpuMs += vms;
-                    rayCount += count;
+                    metal.TraceFromHost(vis.AsSpan(0, count * 2), answer, (uint)(Interlocked.Add(ref rayCount, count) + first), closestOnly: true, out var vms);
+                    AddGpu(vms);
                     Lap(1);
                     Parallel.For(0, count, q =>
                     {
@@ -851,24 +982,66 @@ internal sealed partial class SponzaLoop
                     });
                     Lap(3);
                 }
-                for (var rank = 0; rank < C; rank++)
+                // Ranks from `fromRank` up, every pending hit's at once: each hit takes the lowest rank its line reaches
+                // (as rank by rank would).
+                void RoundAll(int[] cands, byte[] counts, int fromRank, Func<int, int> howOf)
                 {
-                    var rk = rank;
-                    Round(at => rk < tried[at] ? cand[at * C + rk] : -1, rk);
+                    var pendingCount = Gather(_ => 0);
+                    if (pendingCount == 0) return;
+                    // Each pending hit's rays: its candidates from fromRank to its count, laid out one after another.
+                    var start = new int[pendingCount + 1];
+                    for (var q = 0; q < pendingCount; q++) start[q + 1] = start[q] + Math.Max(0, counts[visIds[q]] - fromRank);
+                    var rays = start[pendingCount];
+                    if (rays == 0) return;
+                    var hitsOf = (int[])visIds.Clone();
+                    var batch = new Vector4[rays * 2];
+                    var none = new bool[rays];
+                    var target = new int[rays];
+                    Parallel.For(0, pendingCount, q =>
+                    {
+                        var at = hitsOf[q];
+                        for (var k = 0; k < start[q + 1] - start[q]; k++)
+                        {
+                            var r = start[q] + k;
+                            var j = cands[at * C + fromRank + k];
+                            target[r] = j;
+                            var origin = hp[at] + hn[at] * transportVisLift;
+                            var to = pos[j] + nrm[j] * transportVisLift - origin;
+                            var len = to.Length();
+                            none[r] = len < 1e-4f;
+                            batch[2 * r] = new Vector4(origin, 0f);
+                            batch[2 * r + 1] = none[r] ? new Vector4(0f, 1f, 0f, 0f) : new Vector4(to / len, len * 0.999f);
+                        }
+                    });
+                    Lap(3);
+                    var answer = rays * 12 <= answers.Length ? answers : new uint[rays * 12];
+                    metal.TraceFromHost(batch, answer, (uint)(Interlocked.Add(ref rayCount, rays) + first), closestOnly: true, out var ams);
+                    AddGpu(ams);
+                    Lap(1);
+                    Parallel.For(0, pendingCount, q =>
+                    {
+                        var at = hitsOf[q];
+                        for (var k = 0; k < start[q + 1] - start[q]; k++)
+                        {
+                            var r = start[q] + k;
+                            if (!none[r] && (answer[r * 12 + 3] & 1u) != 0) continue;
+                            state[at] = target[r];
+                            how[at] = howOf(fromRank + k);
+                            break;
+                        }
+                    });
+                    Lap(3);
                 }
+                // The first rank alone (it settles most hits), then every later rank in one batch: each round trip waits
+                // behind the frames' GPU work (a cook runs while the demo renders), so fewer of them, a few more rays.
+                Round(at => 0 < tried[at] ? cand[at * C] : -1, 0);
+                RoundAll(cand, tried, 1, rk => rk);
                 if (useSunlets)
                 {
-                    Parallel.For(0, total, at =>
-                    {
-                        if (state[at] != Pending) return;
-                        anyTried[at] = (byte)CollectCandidates(hp[at], hn[at], anyFacing: true, anyCand.AsSpan(at * C, C), out _);
-                    });
+                    Array.Clear(anyTried, 0, total);
+                    CandidatesOnGpu(true, anyCand, anyTried, null);
                     Lap(2);
-                    for (var rank = 0; rank < C; rank++)
-                    {
-                        var rk = rank;
-                        Round(at => rk < anyTried[at] ? anyCand[at * C + rk] : -1, HowAnyFacing);
-                    }
+                    RoundAll(anyCand, anyTried, 0, _ => HowAnyFacing);
                 }
                 if (transportOwnFallback)
                 {
@@ -889,9 +1062,8 @@ internal sealed partial class SponzaLoop
                         });
                         Lap(3);
                         var answer = answers;
-                        metal.TraceFromHost(vis.AsSpan(0, count * 2), answer, (uint)(rayCount + first), closestOnly: true, out var fms);
-                        gpuMs += fms;
-                        rayCount += count;
+                        metal.TraceFromHost(vis.AsSpan(0, count * 2), answer, (uint)(Interlocked.Add(ref rayCount, count) + first), closestOnly: true, out var fms);
+                        AddGpu(fms);
                         Lap(1);
                         Parallel.For(0, count, q =>
                         {
@@ -906,8 +1078,10 @@ internal sealed partial class SponzaLoop
                 Parallel.For(0, n, ii =>
                 {
                     var i = first + ii;
-                    var acc = new Dictionary<int, int>();
-                    var accSun = new Dictionary<int, int>();
+                    // The patch's targets and sunlets, sorted and counted in runs (no dictionary a patch).
+                    Span<int> targets = R <= 2048 ? stackalloc int[R] : new int[R];
+                    Span<int> suns = R <= 2048 ? stackalloc int[R] : new int[R];
+                    int nt = 0, ns = 0;
                     var lost = 0;
                     for (var k = 0; k < R; k++)
                     {
@@ -921,7 +1095,7 @@ internal sealed partial class SponzaLoop
                                 Interlocked.Increment(ref foliageHits);
                                 continue;
                         }
-                        if (sunletOf[at] >= 0) accSun[sunletOf[at]] = accSun.GetValueOrDefault(sunletOf[at]) + 1;
+                        if (sunletOf[at] >= 0) suns[ns++] = sunletOf[at];
                         var j = state[at];
                         if (transportMissWhy && front[at])
                         {
@@ -937,10 +1111,10 @@ internal sealed partial class SponzaLoop
                             else if (missSamples is not null && (k & 15) == 0) missSamples.Add((hp[at], hn[at], inst[at], i));
                             continue;
                         }
-                        acc[j] = acc.GetValueOrDefault(j) + 1;
+                        targets[nt++] = j;
                     }
-                    couplings[i] = acc.Select(e => (e.Key, e.Value / (float)R)).ToArray();
-                    sunletCouplings[i] = accSun.Select(e => (e.Key, e.Value / (float)R)).ToArray();
+                    couplings[i] = Runs(targets[..nt], R);
+                    sunletCouplings[i] = Runs(suns[..ns], R);
                     Interlocked.Add(ref dropped, lost);
                 });
                 Lap(4);
@@ -954,9 +1128,6 @@ internal sealed partial class SponzaLoop
         // The patches as flat arrays and their grid as a dense index (cell -> a range of patch ids), for the Metal path's
         // candidate search: the dictionary of lists, looked up 27 times for each of Sponza's ~85M hits, was most of its
         // couplings' 200 s (2026-10-13). Built once the patches are final (after the fill).
-        Vector3[] densePos = Array.Empty<Vector3>(), denseNrm = Array.Empty<Vector3>();
-        int[] denseStart = Array.Empty<int>(), denseItems = Array.Empty<int>();
-        int denseX = 0, denseY = 0, denseZ = 0, denseMinX = 0, denseMinY = 0, denseMinZ = 0;
         void BuildDenseGrid()
         {
             densePos = pos.ToArray();

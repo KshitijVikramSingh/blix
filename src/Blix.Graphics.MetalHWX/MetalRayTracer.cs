@@ -220,6 +220,52 @@ public sealed class MetalRayTracer : IDisposable
         gpuMs = ms;
     }
 
+    /// <summary>The parameters of <see cref="Candidates"/>: as the demo's candidate search reads them.</summary>
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    public struct CandidateParams
+    {
+        public uint Count, C, AnyFacing, Pad0;
+        public float Cell, FacingCos, Penalty, FarCutoff;
+        public float OwnReach, Pad1, Pad2, Pad3;
+        public int MinX, MinY, MinZ, Pad4;
+        public int DimX, DimY, DimZ, Pad5;
+    }
+
+    /// <summary>Uploads the patches (two float4s each: position, normal) and their dense grid for <see cref="Candidates"/>.</summary>
+    public unsafe void CandidatesSetup(ReadOnlySpan<Vector4> patches, ReadOnlySpan<uint> cellStart, ReadOnlySpan<uint> cellItems)
+    {
+        ObjectDisposedException.ThrowIf(ctx == 0, this);
+        fixed (Vector4* p = patches)
+        fixed (uint* s = cellStart)
+        fixed (uint* it = cellItems)
+        {
+            if (HwxNative.hwx_candidates_setup(ctx, (float*)p, (uint)(patches.Length / 2), s, (uint)(cellStart.Length - 1), it, (uint)cellItems.Length) != 0)
+                throw new InvalidOperationException($"Metal candidates setup: {Error}");
+        }
+    }
+
+    /// <summary>
+    /// A cook's candidate search on the GPU, for query points (two float4s each: position, normal): each one's
+    /// <c>C</c> candidates into <paramref name="candidates"/>, and (how many to try, the nearest within reach) into
+    /// <paramref name="triedNearest"/>. Waits for the GPU; touches no device buffer.
+    /// </summary>
+    public unsafe void Candidates(ReadOnlySpan<Vector4> queries, CandidateParams parameters, Span<int> candidates, Span<uint> triedNearest, out double gpuMs)
+    {
+        ObjectDisposedException.ThrowIf(ctx == 0, this);
+        var count = queries.Length / 2;
+        double ms = 0;
+        if (count > 0)
+            fixed (Vector4* q = queries)
+            fixed (int* c = candidates)
+            fixed (uint* t = triedNearest)
+            {
+                parameters.Count = (uint)count;
+                if (HwxNative.hwx_candidates(ctx, (float*)q, (uint)count, &parameters, c, t, &ms) != 0)
+                    throw new InvalidOperationException($"Metal candidates: {Error}");
+            }
+        gpuMs = ms;
+    }
+
     /// <summary>
     /// The closest hit with coplanar contacts read as back faces (as <see cref="TestBuried"/> reads them), for rays in
     /// host memory (two float4s each: origin; direction and tMax): into <paramref name="answers"/>, two uints a ray --
