@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Numerics;
 using System.Runtime.InteropServices;
+using Blix.Diagnostics;
 using Blix.Graphics;
 using Blix.Graphics.MetalHWX;
 
@@ -39,7 +40,10 @@ internal sealed partial class SponzaLoop
     private static readonly float[] LightletLevels = { 0f, 0.25f, 0.5f, 0.75f, 1f, 1.5f, 2f, 3f };
     private const float LightletLift = 0.002f;
     private const uint LightletSeed = 0x7A3E11u;
-    private const int LightletSlice = 65536;
+    // 16,384 texels a slice: ~190 M dense rays, ~0.3 s a command buffer. At 65,536 (~1.1 s a slice) the bake under the
+    // cook screen crossed the GPU's watchdog -- a frame's command buffer queued behind it timed out and the device was
+    // lost (2026-10-14).
+    private const int LightletSlice = 16384;
     // The footprint: a texel's centre and corners, in atlas cells (4 cm; curtains' 2 cm cells are over-covered: safe).
     private const float LightletCell = 0.04f;
     private const int Footprint = 5;
@@ -319,10 +323,12 @@ internal sealed partial class SponzaLoop
                 pool.AddRange(built[p]);
             }
             refinedCells += sliceRefined;
-            if (first / LightletSlice % 32 == 0)
+            DebugProgress.Set("lightlets: sun records", first + n, live.Length);
+            if (first / LightletSlice % 128 == 0)
                 Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                     $"[VulkanSponza] lightlets: {100.0 * (first + n) / live.Length:0}% ({clock.Elapsed.TotalMinutes:0.0} min)."));
         }
+        DebugProgress.End("lightlets: sun records");
         var nonUniform = Math.Max(1, live.Length - uniformCount);
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] lightlets: {live.Length:N0} texels baked in {clock.Elapsed.TotalMinutes:0.0} min ({(denseRays + ringRays) / 1e9:0.0} G rays, {gpuMs / 1000:0} s GPU): " +

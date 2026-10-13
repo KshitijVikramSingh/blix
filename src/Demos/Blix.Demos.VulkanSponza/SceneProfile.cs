@@ -36,7 +36,8 @@ internal sealed record SceneProfile(
     Vector3 StartPosition,
     float StartYaw,
     float StartPitch,
-    float MoveSpeed)
+    float MoveSpeed,
+    Vector2? DefaultSunDegrees = null)
 {
     /// <summary>Intel Sponza (Khronos New Sponza): the atrium, ~30 m, and the packs it was built around.</summary>
     public static readonly SceneProfile Sponza = new(
@@ -71,7 +72,11 @@ internal sealed record SceneProfile(
         StartPosition: new Vector3(-9f, 3f, 0f),
         StartYaw: 90f,
         StartPitch: 0f,
-        MoveSpeed: 4.5f);
+        MoveSpeed: 4.5f,
+        // The sun across the hall, not down it (yaw 180, pitch -72, as --sun takes them): it lights the curtains from
+        // behind and through, and the colonnade's arches side-on -- the user's pick (2026-10-13). The probe's sun stays
+        // where the sky has it; --sun overrides this, --sun-authored keeps the authored direction.
+        DefaultSunDegrees: new Vector2(180f, -72f));
 
     /// <summary>Amazon Lumberyard Bistro, exterior (ORCA, CC-BY 4.0): a street ~170 m by 180 m, 2.8M triangles.</summary>
     /// <remarks>

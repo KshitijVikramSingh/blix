@@ -28,16 +28,22 @@ internal sealed partial class SponzaLoop
 {
     private Vector2? sunOverrideDegrees;
     private float transportSpacing = 0.25f;
-    // --transport-candidates N: how many of a hit's nearest patches NearestVisible tries (4). Rays that found none,
+    // --transport-candidates N: how many of a hit's nearest patches NearestVisible tries (8). Rays that found none,
     // cornell / crevices: 0.36% / 0.41% at 4, 0.19 / 0.23 at 8, 0.09 / 0.14 at 16, 0.02 / 0.07 at 64 -- most of them
-    // inside a slab, their light not real. Sponza's cook: 363 s at 4, 915 s at 16 (2026-10-13).
-    private int transportCandidates = 4;
+    // inside a slab, their light not real. Sponza's cook: 363 s at 4, 915 s at 16 on the CPU (2026-10-13). On Metal, with
+    // the fill, 8 against 4: 74 s against 78 s (fewer fill patches), visible wrong-facing hits 0.72% against 1.02%, visible
+    // misses 0.12% against 0.22% (2026-10-13).
+    private int transportCandidates = 8;
     // --transport-vis-lift M: how far off the surfaces NearestVisible's ray runs, at the hit and at the patch (0.02 m). At
     // 1 mm it grazed the surface: Sponza's rays with no patch 7.99% at 1 mm, 6.14% at 2 cm (4 candidates). It passes over
     // obstacles under 2 cm, far below the patches' spacing.
     private float transportVisLift = 0.02f;
     // --transport-own-fallback (SponzaLoop.Transport.cs, OwnFallback), and how near its patch must be.
     private bool transportOwnFallback;
+    // --transport-seed N (0): the couplings' rays drawn from another sequence -- the cook's noise measured by recooking
+    // the same scene (0: the seeds as always; another, its own couplings cache).
+    private int transportSeed;
+    private int CouplingSeed(int patch) => 1000 + patch + transportSeed * 7_368_787;
     // --transport-miss-why's accounting of how hits found their patch (NearestVisibleOr, OwnFallback): the rank seen,
     // HowAnyFacing, HowFallback or HowMiss; and the time spent past BaseCandidates and in the fallback.
     private const int BaseCandidates = 4, HowAnyFacing = 64, HowFallback = 65, HowMiss = 66;
@@ -132,6 +138,7 @@ internal sealed partial class SponzaLoop
         // The cook's diagnostics are on unless asked off: what they cost is worth paying while its rules are settled.
         transportMissWhy = !args.Flag("no-transport-miss-why");
         transportOwnFallback = args.Flag("transport-own-fallback");
+        transportSeed = args.Int("transport-seed") ?? 0;
         if (args.Float("transport-far-cutoff") is { } fc) transportFarCutoff = Math.Max(0f, fc);
         transportFill = args.Flag("transport-fill");
         if (args.Int("transport-fill-rays") is { } fr) transportFillRays = Math.Clamp(fr, 1, 4096);
@@ -733,7 +740,7 @@ internal sealed partial class SponzaLoop
         Parallel.For(0, patches, i =>
         {
             ProgressAdd("transport: couplings");
-            var r = new Random(1000 + i);
+            var r = new Random(CouplingSeed(i));
             var p = pos[i] + nrm[i] * 1e-3f;
             var n = nrm[i];
             var acc = new Dictionary<int, int>();
@@ -863,7 +870,7 @@ internal sealed partial class SponzaLoop
                 Parallel.For(0, n, ii =>
                 {
                     var i = first + ii;
-                    var r = new Random(1000 + i);
+                    var r = new Random(CouplingSeed(i));
                     var origin = pos[i] + nrm[i] * 1e-3f;
                     for (var k = 0; k < R; k++)
                     {

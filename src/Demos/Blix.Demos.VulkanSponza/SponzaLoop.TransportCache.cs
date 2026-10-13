@@ -105,7 +105,7 @@ internal sealed partial class SponzaLoop
             $"patches;spacing {transportSpacing};reach {TexelOpenReach};{(transportFill ? $"fill {transportFillRays} x{transportFillPasses} {finding}" : "no fill")}"));
         var sunVis = Hash(patches + string.Create(CultureInfo.InvariantCulture, $";sun vis {transportVisRes}"));
         var couplings = Hash(patches + string.Create(CultureInfo.InvariantCulture,
-            $";couplings;rays {transportRays};sunlet {transportSunlet};{finding}{(transportOwnFallback ? " own fallback" : "")}"));
+            $";couplings;rays {transportRays};sunlet {transportSunlet};{finding}{(transportOwnFallback ? " own fallback" : "")}{(transportSeed != 0 ? $" seed {transportSeed}" : "")}"));
         var texels = Hash(scenePart + string.Create(CultureInfo.InvariantCulture,
             $"texels {transportTexels};texel {texelSpacing};levels {texelLevels};reach {TexelOpenReach};lightmap {lightmapEnabled} (the atlas is level 0);"));
         return new TransportStageKeys(patches, sunVis, couplings, texels, Hash($"{patches};{sunVis};{couplings};{texels}"));

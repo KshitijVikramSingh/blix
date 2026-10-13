@@ -101,10 +101,13 @@ internal sealed partial class SponzaLoop
             var referenceReady = !gpuReference || referenceMonolithic
                 ? !gpuReference || gpuReferencePaths >= GpuReferenceTarget
                 : gateWave is { } w && w.Dispatch >= ReferenceWaveFrames(w);
-            if (!lightReady || !referenceReady) return false;
+            // The sun records when asked (--lightlets, --lightlet-sun): a shot of them before they land measured the
+            // traced shadows instead (2026-10-14: a bake closed at 0%).
+            var recordsReady = !lightletsAsked || lightlets is not null;
+            if (!lightReady || !referenceReady || !recordsReady) return false;
             shotReadyFrame = postLoadFrames;
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                $"[VulkanSponza] shot: ready at post-load frame {postLoadFrames} (light {(transportTexels ? "at rest" : "not cooked")}, reference {(gpuReference ? "complete" : "none")}); writing in {ShotReadyMargin} frames."));
+                $"[VulkanSponza] shot: ready at post-load frame {postLoadFrames} (light {(transportTexels ? "at rest" : "not cooked")}, reference {(gpuReference ? "complete" : "none")}{(lightletsAsked ? ", sun records up" : "")}); writing in {ShotReadyMargin} frames."));
         }
         return postLoadFrames >= shotReadyFrame + ShotReadyMargin;
     }

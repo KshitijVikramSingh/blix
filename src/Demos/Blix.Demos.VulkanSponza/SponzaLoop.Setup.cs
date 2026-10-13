@@ -111,6 +111,8 @@ internal sealed partial class SponzaLoop
         // cascade fit handles the vertical-light up-vector degeneracy.
         if (args.Flag("sun-overhead")) sunOverhead = true;
         if (args.Values("sun", 2) is [var sy, var sp]) sunOverrideDegrees = new Vector2(float.Parse(sy, System.Globalization.CultureInfo.InvariantCulture), float.Parse(sp, System.Globalization.CultureInfo.InvariantCulture));
+        // The scene's own sun (SceneProfile.DefaultSunDegrees) where --sun, --sun-authored and --sun-overhead say none.
+        else if (scene.DefaultSunDegrees is { } sceneSun && !args.Flag("sun-authored") && !args.Flag("sun-overhead")) sunOverrideDegrees = sceneSun;
         // --sun-change F yaw pitch: turn the sun at post-load frame F (degrees, as --sun) -- what following the sun is
         // measured against (SponzaLoop.Texels.cs, FollowSun).
         if (args.Values("sun-change", 3) is [var cf, var cy, var cp]) sunChange = (int.Parse(cf, System.Globalization.CultureInfo.InvariantCulture), new Vector2(float.Parse(cy, System.Globalization.CultureInfo.InvariantCulture), float.Parse(cp, System.Globalization.CultureInfo.InvariantCulture)));
@@ -157,6 +159,7 @@ internal sealed partial class SponzaLoop
         if (args.Flag("settle-log")) settleLogEvery = Math.Max(1, args.Int("settle-every") ?? 60);
         if (args.String("settle-dir") is { } settleAt) { settleDir = settleAt; Directory.CreateDirectory(settleAt); }
         lightletsAsked = args.Flag("lightlets");
+        if (args.Int("coupling-census") is { } cc) couplingCensus = Math.Max(0, cc);
         // --lightlets-then-exit: close as asked once the sun records are baked and up (a scripted bake).
         lightletsThenExit = args.Flag("lightlets-then-exit");
         ReadSunSweepArgs(args);
@@ -374,7 +377,11 @@ internal sealed partial class SponzaLoop
             sunYaw = sunDeg.X * MathF.PI / 180f;
             sunPitch = sunDeg.Y * MathF.PI / 180f;
             UpdateSunDirection();
-            Console.WriteLine($"[VulkanSponza]   sun set by --sun: {sunDirection}");
+            Console.WriteLine($"[VulkanSponza]   sun set to {sunDeg.X:0.##}, {sunDeg.Y:0.##} (yaw, pitch; {(args.Values("sun", 2) is not null ? "--sun" : "the scene's default")}): {sunDirection}");
+            // The scene's default sun is its authored one: the band (BandNorth) is fitted around it, as it was around the
+            // probe's. --sun is a measurement and leaves the band where it was. (The default (180, -72) lay at
+            // declination 29.2 of a band fitted to the probe's sun, +-28.4: the records answered nothing, 2026-10-14.)
+            if (args.Values("sun", 2) is null) authoredSunDirection = sunDirection;
         }
 
         // --- Render graph ------------------------------------------------

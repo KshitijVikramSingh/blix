@@ -19,9 +19,11 @@ internal sealed partial class SponzaLoop : IUiSource
 
     public string UiName => "vulkan-sponza";
 
-    // A cook on: the transport's (in the background), or the split light's (its sweep and refining rounds).
+    // A cook on: the transport's (in the background), the split light's (its sweep and refining rounds), or the sun
+    // records' (lightlets). The records' bake beside full frames waited on Metal behind each frame's traced shadows: 43%
+    // of its thread in LightletVisibility / LightletRings, 25 min for 347 s of GPU work (2026-10-14).
     private bool SplitCookRunning => splitLight && texelsUploaded && sunNodeStage is not (SunNodeStage.Off or SunNodeStage.Done);
-    private bool CookScreenNow => !cookScreenOff && (transportCookTask is { IsCompleted: false } || SplitCookRunning);
+    private bool CookScreenNow => !cookScreenOff && (transportCookTask is { IsCompleted: false } || SplitCookRunning || LightletBakePending);
 
     // The cook screen's frame (RenderFrame, while CookScreenNow): the cook's needs, a cleared screen, the cap.
     // The split cook's sweep of Sponza's 14.8M texels is ~3,800 frames: at full frames (3 fps) ~1,600 s. The cap is
@@ -30,11 +32,23 @@ internal sealed partial class SponzaLoop : IUiSource
     // refresh held the cook to it), and back on after (RestoreVsyncAfterCook).
     private bool cookTurnedVsyncOff;
 
-    private void RestoreVsyncAfterCook()
+    // A vsync change recreates the swapchain and drops the frame recorded beside it (VulkanGraphicsDevice), so that frame
+    // is a cleared screen alone: a split-cook pass or the compose in it would be lost (the compose was: every texel's
+    // light left zero, 2026-10-13).
+    private bool RestoreVsyncAfterCook(RenderCommandList commandList)
     {
-        if (!cookTurnedVsyncOff || CookScreenNow) return;
+        if (!cookTurnedVsyncOff || CookScreenNow) return false;
         cookTurnedVsyncOff = false;
         device.VsyncEnabled = true;
+        RecordClearedFrame(commandList);
+        return true;
+    }
+
+    private void RecordClearedFrame(RenderCommandList commandList)
+    {
+        graph.Pass(litPassHandle, _ => { }, clearColor: new GraphicsColor(0.03f, 0.04f, 0.06f, 1f));
+        graph.Execute(commandList);
+        RecordPresentPass(commandList);
     }
 
     private void RecordCookFrame(RenderCommandList commandList)
@@ -43,11 +57,19 @@ internal sealed partial class SponzaLoop : IUiSource
         {
             device.VsyncEnabled = false;
             cookTurnedVsyncOff = true;
+            RecordClearedFrame(commandList);
+            return;
         }
         RecordRaySurfaceBake();
         UpdateBakeScene();
         EnsureFrameTracer();
         CookTransportWhenReady();
+        // A sun relight that lands while the screen is up is taken here (its patches' light, the split's new sun part):
+        // the split cook waits for no relight in flight (BeginSunNodes), and only FollowSun clears one. Without it a sun
+        // moved twice left the cook at Waiting for good (2026-10-13).
+        if (texelsUploaded) FollowSun();
+        // The sun records' bake starts on a tracer and lands here as it does in RecordTexels.
+        if (texelsUploaded) LightletBakeWhenReady();
         // Up to SunNodePassCopies of the split cook's passes a frame, each in its own copy of the passes (a frame-graph
         // Metal pass takes one piece a frame), stopping at a slice's readback (it needs the frame's GPU work done).
         var splitCooking = SplitCookRunning && rayBlockBuffers.Length > 0;
