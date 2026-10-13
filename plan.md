@@ -6,6 +6,87 @@ its history in git.
 
 ---
 
+## Surface light: one design (2026-10-14, with the user)
+
+Supersedes DECIDE (b) below (potential suns), the SURFACE TRANSFER ATLAS, and texels as stored light. It is §5's
+invariant ("Cooked light transport", in the arc below) carried all the way down to what a pixel reads.
+
+**The invariant.** What is stored is a function of static geometry and of where sources may be -- never of a source's
+state (the sun's direction inside its band, intensity, colour), the sky's radiance, albedo or time. Light is computed at
+run time from what is stored; computed light may be kept as a run-time cache, never as an asset keyed by a light.
+
+**Where it broke (why the work felt incoherent).** Four surface discretizations made by unrelated cooks and tied by
+nearest-search: atlas texels (4 cm), hashed texels (5 cm with 10 / 20 cm levels), sunlets (4 cm cells x a normal bin),
+patches (0.25 m). And the texels' light stored per sun three times over: the light bake, the split cook's sun part on
+disk, and DECIDE (b)'s potential suns. Every sun move became a recook (Sponza ~7 min) and a file.
+
+**Three levels, one job each.**
+
+| Level | What it is | Stores (geometry only) | Computed at run time |
+|---|---|---|---|
+| SURFACE CELL | atlas texel (4 cm, curtains 2 cm) where the atlas covers; a hashed cell (5 / 10 / 20 cm) elsewhere | position, normal, the index map; visibility over the sun band (the lightlet record); later each lamp's | its direct light (a lookup; uncertain cells trace); its indirect light (the gather) |
+| PATCH | the 0.25 m transport element | couplings patch -> patch, patch -> cell (the first bounce, today's sunlets), sky bins | the bounce solve |
+| SOURCE | sun (in its band), sky, lamps | where they may be (the band, the lamp positions) | state each frame |
+
+The plan said it already ("an atlas texel and a sunlet are the same thing and share one record", LIGHTLETS); built that
+way, a patch's first-bounce couplings point at cells, and a sun change lights them from their records -- no 8.3 M
+sunlet sun rays a relight, no per-patch 32 x 32 sun maps.
+
+**A source change, end to end** (the sun moves, the sky changes, a lamp switches):
+1. Cells' direct light: the sun from the records (lit / shadowed / uncertain -> a ray), lamps from theirs.
+2. Patches' first bounce: patch -> cell couplings x the cells' direct light x albedo.
+3. Bounce: patch -> patch, solved on the GPU (today 3-7 s on the CPU).
+4. Cells' indirect light, the GATHER: each cell's rays read the patch light at their hits, the hit cell's direct light
+   (its record), the sky where they escape. It is the split cook's trace, run at run time on the host Metal path, the
+   cells the image reads first. Nothing is written per light.
+5. A pixel: direct sun from its cell's record (traced where uncertain, compacted), indirect from its cell; hashed cells
+   and the clipmap where no atlas cell is.
+
+**Why the gather is recomputed and not stored** (`--coupling-census 20000`, Sponza, 512 rays a cell, 2026-10-14): a
+cell's rays reach 155 distinct patches (p90 391) -- the couplings ARE the rays: 9.2 GB raw for 14.8 M cells. Far hits
+merged into cells (raw < 1 m, 0.5 m to 4, 2 m to 16, 8 m beyond): 93 entries, 5.5 GB, error 4.7% of the light against
+the 512-ray estimate's own noise of 4.1%. Coarser merges 3.4 GB at 7-8%. Inheriting the far field from the nearest
+patch: 16% (p90 > 100%) -- §5's near/far split was rejected for the same reason (28%): the far light a point gets
+depends on its own near occluders. Recomputing costs ~7.6 G closest rays for all of Sponza (estimated ~1 min on the
+host Metal path; the visible cells, ~1-2 M, seconds). Stored couplings stay the measured alternative if a global
+relight must land in ~1 s (5.5 GB, streamed through per change).
+
+**Measured on the way (2026-10-14).** Sun records for Sponza: 233 G rays, 13.5 min under the cook screen (24.8 beside
+full frames), 60.4% of cells uniform over the band, 894 MB + 62 MB index. At (180, -72) they answer 71.8% of pixels
+(28.2% trace: 17.8% uncertain, 10.1% no atlas cell). The frame did NOT get faster (100.8 ms both ways): the Metal shadow
+kernel is a thread a pixel, as the stack's assessment found (43 ms at 27.5% traced) -- compact the traced pixels first.
+
+**Retired by this** (each deleted when its step lands, not kept behind a switch): potential suns (DECIDE (b),
+SponzaLoop.PotentialSuns.cs, `--potential-suns`); the split light's parts as files keyed by a sun (the sky / sun split
+stays, as a run-time cache: the sky's part recomputes when the sky changes); the old light bake (SponzaLoop.LightBake.cs);
+the separate sunlet set and the per-patch sun maps once cells are sunlets; the surface transfer atlas (its code is
+already gone).
+
+**The concrete win, in order, each with its gate.**
+- W1 The gather off the frame: the split cook's passes on the host Metal path, as the couplings went (1000 s -> 28 s);
+  a source change recomputes, visible cells first. Gate: the GI gate holds; Sponza's cell light matches today's cook
+  within its noise (4.1%); a sun change settles on screen in < 10 s and everywhere in < 90 s.
+- W2 No light stored per source: the split parts become a run-time cache; potential suns and the light bake deleted.
+- W3 The frame: shadows traced only where the records are uncertain, and compacted. Gate: frame time at the default
+  camera (100.8 ms today, no vsync), the scene image against the full trace.
+- W4 Resolution by distance through LOD and streaming, not a cooked hierarchy (the user, 2026-10-14: lean on the
+  runtime; the streaming and LOD systems are the backbone that scales this past a courtyard). The cook stores per
+  region and LOD level what is expensive and static -- geometry, the atlas's cells, the source visibility records --
+  and streaming brings a region in at the level its distance calls for. The LOD chains already index ONE atlas (chart
+  borders locked), so a coarser cell is a mip of the atlas: cells, records and gathered light take levels the same way.
+  Rays run against the ray scene at its LOD (`--ray-lod-error`), so distant geometry is coarse in light as in image and
+  far shadowing needs no far-field machinery. Open within it: the gather's per-frame budget (visible first, or a big
+  world's relight never ends), a streamed-out region's light (recompute, or a disk cache invalidated by a source
+  change), and blending across a mip change (no pops).
+- Considered and NOT taken (2026-10-14): a cooked element hierarchy with couplings at adaptive levels (hierarchical
+  radiosity) -- it rebuilds in the cook what LOD and streaming already do. Patches stay as the bounce solve's element
+  (0.25 m is Sponza's policy, not a law: Cornell wanted 0.125); sunlets stay until a measurement says cells should
+  carry the first bounce. The band is a policy, not the mechanism: visibility over a source's direction domain, the
+  band one choice of domain (the hemisphere above a minimum elevation the safer default; a whole sphere for a region
+  that rotates). Area lights and emissive geometry need no records: they are cells and patches, carried by transport.
+
+---
+
 ## The stack, defined (assessment 2026-10-12) -- the user's call on the decisions marked DECIDE
 
 **Why.** The renderer is convincing, but it is a buffet: 222 flags (5 of them the stack the user runs; 21 alternative
@@ -60,7 +141,7 @@ settled image ~120 s with every cache warm. Caches 4.9 GB on disk (~2 GB of it s
 | Term | Static, atlas surface | No atlas (foliage, small) | Moved / near a mover |
 |---|---|---|---|
 | Direct sun visibility | lightlet record; trace only the uncertain | trace | trace |
-| Indirect diffuse | atlas texel (baked per sun) | hashed texel, else clipmap | clipmap (later screen probes) |
+| Indirect diffuse | atlas texel (gathered at run time; "Surface light: one design") | hashed texel, else clipmap | clipmap (later screen probes) |
 | Sky visibility, specular occlusion | clipmap .a x GTAO spec | same | same |
 | Bounce source | transport patches (cook) re-solved per sun (seconds) | same | -- |
 
@@ -110,7 +191,8 @@ DECIDE (c): the budget. Proposed: 33 ms (30 fps) at 2880x1620 on the M4, full-re
   once the gather's hits no longer need them.
 - (a) The fitted transfer: parked, then cleaned out. Texels are the indirect for static surfaces.
 - (b) The sun model: potential suns -- the texels' light baked at the band's nodes at cook time, compressed, and
-  interpolated; a sun change is a lookup. Feasibility first (storage per texel per node, interpolation error).
+  interpolated; a sun change is a lookup. SUPERSEDED 2026-10-14 ("Surface light: one design"): nothing is stored per
+  light; the cells' light is gathered at run time from stored geometry.
 - (c) The budget: 33 ms at 2880x1620 on the M4, full-res direct, sun moving; 4 GB GPU.
 
 ### Order
