@@ -37,7 +37,11 @@ internal sealed partial class SponzaLoop
 
     // The wavefront: lanes per point, each running whole paths one bounce a frame, up to its share of the paths.
     private bool referenceMonolithic;
-    private const int ReferenceLanesPerPoint = 256;
+    // --gpu-ref-lanes N: lanes a point (256). The wave runs a bounce a frame, so its frames go as paths over lanes: more
+    // lanes, more paths before the same shot. The dark crevices' corridor needs them: two 16,384-path references with
+    // different seeds sat 0.037 apart there (|diff| over the mean), as far as the field from either (2026-10-13).
+    private int referenceLanesPerPoint = 256;
+    private int ReferenceLanesPerPoint => referenceLanesPerPoint;
     private ShaderInterface referenceWaveInterface = null!;
     private PipelineHandle referenceWavePipeline;
     private PassHandle referenceWaveStepPass, referenceWaveShadePass, referenceWaveResolvePass;

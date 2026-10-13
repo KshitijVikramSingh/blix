@@ -77,8 +77,9 @@ def main():
          lambda v: abs(v - 1) <= 0.03, '|x - 1| <= 0.03', lambda v: abs(v - 1) <= 0.05, '|x - 1| <= 0.05',
          'the dark crevices\' L corridor, lit by bounce through a doorway alone: shade from rare paths (2026-10-13: 0.986)'),
         ('crevices corridor |error|', mean(abs(f - r) for f, r in corridor) / corridor_ref,
-         lambda v: v <= 0.05, '<= 0.05', lambda v: v <= 0.06, '<= 0.06',
-         'how far each corridor point is, over its mean light: the gather\'s noise there (2026-10-13: 0.036)'),
+         lambda v: v <= 0.015, '<= 0.015', lambda v: v <= 0.035, '<= 0.035',
+         'how far each corridor point is, over its mean light: the gather\'s noise there (2026-10-13: 0.036 against a 16,384-path '
+         'reference, itself 0.026 off; against 262,144 (0.007 off): the gather 0.021, the split cook 0.025)'),
     ]
 
     failed = 0
