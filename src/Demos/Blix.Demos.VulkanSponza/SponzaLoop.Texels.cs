@@ -289,21 +289,48 @@ internal sealed partial class SponzaLoop
         var pos = new Vector3[placed];
         var nrm = new Vector3[placed];
         for (var i = 0; i < placed; i++) { pos[i] = sumPos[i] / hits[i]; nrm[i] = Vector3.Normalize(sumNrm[i]); }
+        // Also dropped when enclosed, as the lightmap's records are (SponzaLoop.Lightmap.cs, LightmapEnclosedTests): three
+        // quarters of the rays meet a single-sided back face. A texel pressed against a solid (the crevices' roof over
+        // its corner block) loses about half the rays that reach the solid's contact with the next (coplanar faces, the
+        // other's front one answering), and kept 13-14 of 16: 12k such texels lived in the crevices, traced and never
+        // settled. How many only this drops, and how many of those the camera sees, is reported.
         var keep = new bool[placed];
+        var enclosedOnly = new bool[placed];
         Parallel.For(0, placed, i =>
         {
             var r = new Random(91 + i);
-            var back = 0;
+            int back = 0, solid = 0;
             const int tests = 16;
             for (var k = 0; k < tests; k++)
             {
                 var d = CosineHemisphereCpu(nrm[i], r);
-                if (scene.Closest(new Ray(pos[i] + nrm[i] * 1e-3f, d), 0f, float.PositiveInfinity, (uint)r.Next()) is { } h && !h.FrontFace) back++;
+                if (scene.Closest(new Ray(pos[i] + nrm[i] * 1e-3f, d), 0f, float.PositiveInfinity, (uint)r.Next()) is { } h && !h.FrontFace)
+                {
+                    back++;
+                    if (!rayPlacementDoubleSided[h.Instance]) solid++;
+                }
             }
-            keep[i] = back < tests - 1;
+            var enclosed = solid * 4 >= tests * 3;
+            keep[i] = back < tests - 1 && !enclosed;
+            enclosedOnly[i] = back < tests - 1 && enclosed;
         });
         var kept = new List<int>(placed);
         for (var i = 0; i < placed; i++) if (keep[i]) kept.Add(i);
+        {
+            var eye = cameraPosition;
+            int only = 0, seen = 0;
+            for (var i = 0; i < placed; i++)
+            {
+                if (!enclosedOnly[i]) continue;
+                only++;
+                var toward = pos[i] + nrm[i] * 0.01f - eye;
+                var dist = toward.Length();
+                if (dist < 0.1f || dist > 12f || Vector3.Dot(toward, nrm[i]) >= 0f) continue;
+                if (scene.Closest(new Ray(eye, toward / dist), 0f, dist, 1u) is null) seen++;
+            }
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza] texels: {only:N0} dropped as enclosed alone (12 of 16 rays meet a single-sided back face), {seen:N0} of them in the camera's sight within 12 m."));
+        }
         texelCount = kept.Count;
         texelCapacity = 1;
         while (texelCapacity < 2 * texelCount) texelCapacity <<= 1;

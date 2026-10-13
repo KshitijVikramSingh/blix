@@ -52,6 +52,7 @@ internal sealed partial class SponzaLoop
         lightmapBuriedWhy = args.Flag("lightmap-buried-why");
         if (args.Float("lightmap-buried-lift") is { } bl) lightmapBuriedLiftAsked = Math.Clamp(bl, 0f, 1f);
         if (args.Float("lightmap-buried-reach") is { } br) lightmapBuriedReach = Math.Clamp(br, 0.01f, 1000f);
+        if (args.Int("lightmap-enclosed") is { } le) lightmapEnclosedTests = Math.Clamp(le, 0, 64);
         // --texel-inspect [N | x,y;...]: at the shot, what the darkest-against-their-surroundings pixels (or these, in
         // frame fractions) read from the atlas (SponzaLoop.TexelInspect.cs).
         texelInspect = args.String("texel-inspect");

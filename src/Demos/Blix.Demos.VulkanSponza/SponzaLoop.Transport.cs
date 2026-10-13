@@ -28,6 +28,14 @@ internal sealed partial class SponzaLoop
 {
     private Vector2? sunOverrideDegrees;
     private float transportSpacing = 0.25f;
+    // --transport-candidates N: how many of a hit's nearest patches NearestVisible tries (4). Rays that found none,
+    // cornell / crevices: 0.36% / 0.41% at 4, 0.19 / 0.23 at 8, 0.09 / 0.14 at 16, 0.02 / 0.07 at 64 -- most of them
+    // inside a slab, their light not real. Sponza's cook: 363 s at 4, 915 s at 16 (2026-10-13).
+    private int transportCandidates = 4;
+    // --transport-vis-lift M: how far off the surfaces NearestVisible's ray runs, at the hit and at the patch (0.02 m). At
+    // 1 mm it grazed the surface: Sponza's rays with no patch 7.99% at 1 mm, 6.14% at 2 cm (4 candidates). It passes over
+    // obstacles under 2 cm, far below the patches' spacing.
+    private float transportVisLift = 0.02f;
     private int transportRays = 512;
     private int transportVisRes = 32;
     // --transport-sunlet S: the first bounce of direct sun resolved at sunlets of S metres (0: at patch centres, as
@@ -47,6 +55,8 @@ internal sealed partial class SponzaLoop
         if (args.Int("transport-rays") is { } r) transportRays = Math.Clamp(r, 16, 8192);
         if (args.Int("transport-vis") is { } v) transportVisRes = Math.Clamp(v, 4, 256);
         if (args.Float("transport-sunlet") is { } sl) transportSunlet = Math.Max(0f, sl);
+        if (args.Int("transport-candidates") is { } tc) transportCandidates = Math.Clamp(tc, 1, 64);
+        if (args.Float("transport-vis-lift") is { } vl) transportVisLift = Math.Clamp(vl, 0.0005f, 0.2f);
     }
 
     // OctEncode is SponzaLoop.ClipmapTwin's (the same mapping as Blix.Shaders/octahedral.glsl).
@@ -298,24 +308,38 @@ internal sealed partial class SponzaLoop
         // dropping the ray dropped its light, energy -4%), nearest first, each taken only when a ray from the hit reaches
         // it. Nearest by distance alone handed a hit at the foot of a wall the patch across it -- floors either side of a
         // wall are one plane: the thin wall's sealed room read the open room's sunlit floor at its corners (the truth
-        // there is black), Sponza's atrium under the lavabo the courtyard's. None visible: none.
+        // there is black), Sponza's atrium under the lavabo the courtyard's. None visible: none. Only the
+        // transportCandidates nearest are tried: every patch in the 27 cells, sorted and each tried, took Sponza's cook
+        // past 20 minutes (217 s before visibility) where none was visible.
         int NearestVisible(Vector3 p, Vector3 n, uint seed, bool anyFacing)
         {
             var (kx, ky, kz) = Key(p);
-            var candidates = new List<(float D, int J)>();
+            var candidates = transportCandidates;
+            Span<int> best = stackalloc int[candidates];
+            Span<float> bestD = stackalloc float[candidates];
+            best.Fill(-1);
+            bestD.Fill(float.MaxValue);
             for (var dz = -1; dz <= 1; dz++)
             for (var dy = -1; dy <= 1; dy++)
             for (var dx = -1; dx <= 1; dx++)
             {
                 if (!grid.TryGetValue((kx + dx, ky + dy, kz + dz), out var list)) continue;
                 foreach (var j in list)
-                    if (anyFacing || Vector3.Dot(nrm[j], n) >= 0.5f) candidates.Add((Vector3.DistanceSquared(pos[j], p), j));
+                {
+                    if (!anyFacing && Vector3.Dot(nrm[j], n) < 0.5f) continue;
+                    var d2 = Vector3.DistanceSquared(pos[j], p);
+                    if (d2 >= bestD[candidates - 1]) continue;
+                    var at = candidates - 1;
+                    while (at > 0 && bestD[at - 1] > d2) { bestD[at] = bestD[at - 1]; best[at] = best[at - 1]; at--; }
+                    bestD[at] = d2;
+                    best[at] = j;
+                }
             }
-            candidates.Sort((x, y) => x.D.CompareTo(y.D));
-            var origin = p + n * 1e-3f;
-            foreach (var (_, j) in candidates)
+            var origin = p + n * transportVisLift;
+            foreach (var j in best)
             {
-                var target = pos[j] + nrm[j] * 1e-3f;
+                if (j < 0) break;
+                var target = pos[j] + nrm[j] * transportVisLift;
                 var d = target - origin;
                 var length = d.Length();
                 if (length < 1e-4f) return j;
@@ -343,6 +367,9 @@ internal sealed partial class SponzaLoop
         var visWords = (transportVisRes * transportVisRes + 63) / 64;
         var sunVis = new ulong[patches * visWords];
         long dropped = 0;
+        // Of those, the hits on a back face: rays travelling inside a solid (from a patch at a joint between two), whose
+        // light is not real anyway -- nearly all of the Cornell box's 0.36% at 4 candidates, against a slab's far side.
+        long droppedInside = 0;
         long foliageHits = 0;
         // Sunlets: where cooked rays hit architecture, a cell of transportSunlet metres AND a coarse normal bin (so a
         // corner's two walls, or a sheet's two sides, never share one) -- position, normal and albedo of its first hit.
@@ -395,7 +422,7 @@ internal sealed partial class SponzaLoop
                         accSun[sl] = accSun.GetValueOrDefault(sl) + 1;
                     }
                     var j = useSunlets ? NearestAny(hp, hn, (uint)r.Next()) : Nearest(hp, hn, (uint)r.Next());
-                    if (j < 0) { lost++; continue; }
+                    if (j < 0) { lost++; if (!h.FrontFace) Interlocked.Increment(ref droppedInside); continue; }
                     acc[j] = acc.GetValueOrDefault(j) + 1;
                 }
                 else
@@ -492,7 +519,7 @@ internal sealed partial class SponzaLoop
         var solveSeconds = clock.Elapsed.TotalSeconds - cookSeconds;
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] transport spike: {patches:N0} patches at {transportSpacing:0.###} m, {nonzero:N0} couplings ({nonzero / (double)Math.Max(1, patches):0.0} a patch), "
-            + $"{dropped / (double)Math.Max(1, (long)patches * transportRays) * 100:0.00}% of rays found no patch, {foliageHits / (double)Math.Max(1, (long)patches * transportRays) * 100:0.00}% met foliage (absorbed); {bytes / 1048576.0:0.0} MB "
+            + $"{dropped / (double)Math.Max(1, (long)patches * transportRays) * 100:0.00}% of rays found no patch ({(dropped - droppedInside) / (double)Math.Max(1, (long)patches * transportRays) * 100:0.00}% on a front face), {foliageHits / (double)Math.Max(1, (long)patches * transportRays) * 100:0.00}% met foliage (absorbed); {bytes / 1048576.0:0.0} MB "
             + $"(couplings {nonzero * 8 / 1048576.0:0.0}, sky bins {sky.LongLength * 4 / 1048576.0:0.0}, sun visibility {sunVis.LongLength * 8 / 1048576.0:0.0}, "
             + $"sunlets {sunlets:N0} at {transportSunlet * 100:0} cm {sunlets * 36L / 1048576.0:0.0} + their couplings {sunletNonzero:N0} {sunletNonzero * 8 / 1048576.0:0.0}); "
             + $"cooked in {cookSeconds:0.0} s (patches {cookPatches:0.0} s), solved {iterations} bounces in {solveSeconds * 1000:0} ms."));

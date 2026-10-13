@@ -55,9 +55,11 @@ internal sealed partial class SponzaLoop
     // slab -- looks into it, and a solid 1.5-4 m across has its far faces well past lightmapBuriedReach: such texels
     // gathered the inside of the solid, never settled, and sent rays onto inner faces with no texels or patches. A visible
     // texel under open-bottomed stone (what the reach is short for) has some rays that get out.
-    private const int LightmapEnclosedTests = 16;
+    // --lightmap-enclosed N: those rays (16; 0: not tested).
+    private int lightmapEnclosedTests = 16;
+    private int LightmapEnclosedTests => lightmapEnclosedTests;
     // What the buried flags depend on, for the caches that hold them or what was gathered with them.
-    private string LightmapBuriedRule => string.Create(CultureInfo.InvariantCulture, $"{LightmapBuriedThreshold}/{LightmapBuriedTests} within {lightmapBuriedReach} m from {LightmapBuriedLift} m off, single-sided; enclosed {LightmapEnclosedTests * 3 / 4}/{LightmapEnclosedTests}; edges inset {LightmapEdgeInset} m");
+    private string LightmapBuriedRule => string.Create(CultureInfo.InvariantCulture, $"{LightmapBuriedThreshold}/{LightmapBuriedTests} within {lightmapBuriedReach} m from {LightmapBuriedLift} m off, single-sided; {(LightmapEnclosedTests > 0 ? $"enclosed {LightmapEnclosedTests * 3 / 4}/{LightmapEnclosedTests}; " : "")}edges inset {LightmapEdgeInset} m");
     private int lightmapFirstRecord;
 
     // What one texel record costs on the GPU: its two vec4s (position, normal) and the light state UploadTexels makes
@@ -230,6 +232,12 @@ internal sealed partial class SponzaLoop
                     CollectionsMarshal.AsSpan(rayPlacementDoubleSided), LightmapEnclosedTests, out var buriedGpuMs);
                 Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                     $"[VulkanSponza] lightmap buried test on Metal ({LightmapBuriedRule}): {count:N0} records in {buriedClock.Elapsed.TotalSeconds:0.0} s ({buriedGpuMs:0} ms GPU)."));
+                if (lightmapBuriedWhy && LightmapEnclosedTests > 0)
+                {
+                    var without = metal.TestBuried(texels.AsSpan(0, count * 2), LightmapBuriedTests, LightmapBuriedThreshold, lightmapBuriedReach, LightmapBuriedLift, 173u,
+                        CollectionsMarshal.AsSpan(rayPlacementDoubleSided), 0, out _);
+                    ExplainEnclosed(scene, texels, flags, without);
+                }
             }
             else if (!buriedCached)
             Parallel.For(0, count, k =>
@@ -392,6 +400,34 @@ internal sealed partial class SponzaLoop
         }
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] buried, why ({picked.Count:N0} records the camera sees within 12 m, {hits:N0} back-face hits): met at < 1 cm {distances[0]:N0}, < 5 cm {distances[1]:N0}, < 10 cm {distances[2]:N0}, < 30 cm {distances[3]:N0}; straight behind each: its own front face {behindFront:N0}, a back face {behindBack:N0}, nothing within 2 cm {behindNone:N0}."));
+        foreach (var (name, c) in byName.OrderByDescending(x => x.Value).Take(12))
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {c,7:N0}  {name}"));
+    }
+
+    // --lightmap-buried-why: the records only the enclosed rule buries, and of those the ones the camera sees (within
+    // 12 m, facing it, nothing in the way), by the placement under them.
+    private void ExplainEnclosed(RayQueryScene scene, Vector4[] texels, bool[] with, bool[] without)
+    {
+        var eye = cameraPosition;
+        int only = 0, seen = 0;
+        var byName = new Dictionary<string, int>();
+        for (var k = 0; k < with.Length; k++)
+        {
+            if (!with[k] || without[k]) continue;
+            only++;
+            var p = new Vector3(texels[2 * k].X, texels[2 * k].Y, texels[2 * k].Z);
+            var n = Vector3.Normalize(new Vector3(texels[2 * k + 1].X, texels[2 * k + 1].Y, texels[2 * k + 1].Z));
+            var toward = p + n * 0.01f - eye;
+            var d = toward.Length();
+            if (d < 0.1f || d > 12f || Vector3.Dot(toward, n) >= 0f) continue;
+            if (scene.Closest(new Ray(eye, toward / d), 0f, d, 1u) is not null) continue;
+            seen++;
+            var under = scene.Closest(new Ray(p + n * 0.01f, -n), 0f, 0.05f, 1u);
+            var name = under is { } h ? rayPlacementNames[h.Instance] : "(nothing under it)";
+            byName[name] = byName.GetValueOrDefault(name) + 1;
+        }
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[VulkanSponza] buried as enclosed alone: {only:N0} records; {seen:N0} of them in the camera's sight within 12 m."));
         foreach (var (name, c) in byName.OrderByDescending(x => x.Value).Take(12))
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {c,7:N0}  {name}"));
     }

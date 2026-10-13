@@ -17,7 +17,8 @@ internal sealed partial class SponzaLoop
 {
     // Bump when the cook's output changes meaning (a new sampling rule, a new field).
     // 3: a hit's patch the nearest it can see (NearestVisible), not the nearest: the couplings leaked through walls.
-    private const int TransportCacheVersion = 3;
+    // 5 (4 was a reverted experiment's): NearestVisible tries the transportCandidates nearest patches only; a hashed texel enclosed in a solid (12 of 16 rays meeting a single-sided back face) dropped (CookTexels).
+    private const int TransportCacheVersion = 5;
     private string? sceneAssetsRoot;
 
     internal sealed class TransportCache
@@ -67,7 +68,7 @@ internal sealed partial class SponzaLoop
             sb.Append(Convert.ToHexString(sha.GetHashAndReset())).Append(';');
         }
         sb.Append(CultureInfo.InvariantCulture, $"v{TransportCacheVersion};{scene.Name};");
-        sb.Append(CultureInfo.InvariantCulture, $"spacing {transportSpacing};rays {transportRays};vis {transportVisRes};sunlet {transportSunlet};charts False;");
+        sb.Append(CultureInfo.InvariantCulture, $"spacing {transportSpacing};rays {transportRays};vis {transportVisRes};sunlet {transportSunlet};charts False;candidates {transportCandidates} lift {transportVisLift};");
         sb.Append(CultureInfo.InvariantCulture, $"texels {transportTexels};texel {texelSpacing};levels {texelLevels};reach {TexelOpenReach};lightmap {lightmapEnabled} (the atlas is level 0);");
         sb.Append(CultureInfo.InvariantCulture, $"bounds {sceneBoundsMin};{sceneBoundsSpan};");
         if (sceneAssetsRoot is { } root && Directory.Exists(root))
