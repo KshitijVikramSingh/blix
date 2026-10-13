@@ -48,8 +48,16 @@ internal sealed partial class SponzaLoop
     // on the CPU; the threshold the same share of them as lightmapBackface is of 16.
     private int LightmapBuriedTests => FrameRaysOnHardware ? 64 : 16;
     private int LightmapBuriedThreshold => (LightmapBuriedTests * lightmapBackface + 15) / 16;
+    // Enclosed: also buried when three quarters of this many more rays, at any distance, meet a back face first (not
+    // all: where that solid touches another, a ray reaching the contact meets two coplanar faces and the other's front
+    // face answers about half the time -- the corner block against the right wall, floor and roof). A face pressed
+    // flat against a solid -- the crevices' floor under its blocks, a wall against the next box, a lintel against its
+    // slab -- looks into it, and a solid 1.5-4 m across has its far faces well past lightmapBuriedReach: such texels
+    // gathered the inside of the solid, never settled, and sent rays onto inner faces with no texels or patches. A visible
+    // texel under open-bottomed stone (what the reach is short for) has some rays that get out.
+    private const int LightmapEnclosedTests = 16;
     // What the buried flags depend on, for the caches that hold them or what was gathered with them.
-    private string LightmapBuriedRule => string.Create(CultureInfo.InvariantCulture, $"{LightmapBuriedThreshold}/{LightmapBuriedTests} within {lightmapBuriedReach} m from {LightmapBuriedLift} m off, single-sided; edges inset {LightmapEdgeInset} m");
+    private string LightmapBuriedRule => string.Create(CultureInfo.InvariantCulture, $"{LightmapBuriedThreshold}/{LightmapBuriedTests} within {lightmapBuriedReach} m from {LightmapBuriedLift} m off, single-sided; enclosed {LightmapEnclosedTests * 3 / 4}/{LightmapEnclosedTests}; edges inset {LightmapEdgeInset} m");
     private int lightmapFirstRecord;
 
     // What one texel record costs on the GPU: its two vec4s (position, normal) and the light state UploadTexels makes
@@ -219,7 +227,7 @@ internal sealed partial class SponzaLoop
             if (metal is not null)
             {
                 flags = metal.TestBuried(texels.AsSpan(0, count * 2), LightmapBuriedTests, LightmapBuriedThreshold, lightmapBuriedReach, LightmapBuriedLift, 173u,
-                    CollectionsMarshal.AsSpan(rayPlacementDoubleSided), out var buriedGpuMs);
+                    CollectionsMarshal.AsSpan(rayPlacementDoubleSided), LightmapEnclosedTests, out var buriedGpuMs);
                 Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                     $"[VulkanSponza] lightmap buried test on Metal ({LightmapBuriedRule}): {count:N0} records in {buriedClock.Elapsed.TotalSeconds:0.0} s ({buriedGpuMs:0} ms GPU)."));
             }
@@ -235,7 +243,15 @@ internal sealed partial class SponzaLoop
                 for (var t = 0; t < tests && back < threshold; t++)
                     if (scene.Closest(new Ray(origin, CosineHemisphereCpu(n, r)), 0f, lightmapBuriedReach, (uint)r.Next()) is { FrontFace: false } hit
                         && !rayPlacementDoubleSided[hit.Instance]) back++;
-                flags[k] = back >= threshold;
+                var enclosed = back < threshold;
+                var escaped = 0;
+                for (var t = 0; t < LightmapEnclosedTests && enclosed; t++)
+                {
+                    if (!(scene.Closest(new Ray(origin, CosineHemisphereCpu(n, r)), 0f, float.PositiveInfinity, (uint)r.Next()) is { FrontFace: false } hit
+                        && !rayPlacementDoubleSided[hit.Instance])) escaped++;
+                    enclosed = escaped * 4 <= LightmapEnclosedTests;
+                }
+                flags[k] = back >= threshold || enclosed;
             });
             if (!buriedCached) WriteBuriedCache(cacheKey, flags, LightmapBuriedRule);
             if (lightmapBuriedWhy) ExplainBuried(scene, texels!, flags);

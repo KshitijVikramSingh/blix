@@ -242,8 +242,11 @@ kernel void blix_trace(device const float4* rays [[buffer(0)]],
 // The lightmap's buried test (hwx_buried): per record (two float4s: position, normal), `tests` cosine rays from just
 // `lift` off it, each as far as `reach`; buried when `threshold` of them first meet a single-sided triangle's back face. A
 // double-sided placement's back face (doubleSided[placement] != 0) is the far side of a sheet with no inside, and does
-// not count.
-struct BuriedParams { uint count; uint tests; uint threshold; uint seed; float reach; float lift; uint pad0, pad1; };
+// not count. Also buried when enclosed: three quarters of `enclosedTests` more cosine rays, at any distance, meet such
+// a back face first -- a face pressed flat against a solid (a floor under a block, a wall against the next) looks into
+// it, and the solid's far faces lie further than `reach`. Not all of them: where that solid touches another, a ray
+// reaching the contact meets two coplanar faces, and about half the time the other's front face answers.
+struct BuriedParams { uint count; uint tests; uint threshold; uint seed; float reach; float lift; uint enclosedTests; uint pad1; };
 
 kernel void blix_buried(device const float4* records [[buffer(0)]],
                         device uchar* buried [[buffer(1)]],
@@ -281,7 +284,26 @@ kernel void blix_buried(device const float4* records [[buffer(0)]],
         if (placement == 0xFFFFFFFFu) placement = owners[triangles[row].w].x;
         if (doubleSided[placement] == 0u) back++;
     }
-    buried[i] = back >= p.threshold ? 1u : 0u;
+    uint escaped = 0u;
+    bool enclosed = back < p.threshold && p.enclosedTests > 0u;
+    for (uint k = 0u; k < p.enclosedTests && enclosed; ++k) {
+        uint h = blix_pcg(~(p.seed + i * p.enclosedTests + k));
+        float u1 = float(h & 0xFFFFu) / 65536.0f, u2 = float(h >> 16) / 65536.0f;
+        float r = sqrt(u1), phi = 6.28318530718f * u2;
+        float3 d = t * (r * cos(phi)) + b * (r * sin(phi)) + n * sqrt(max(0.0f, 1.0f - u1));
+        uint seed = blix_pcg(h);
+        auto res = isect.intersect(ray(o, d, 0.0f, INFINITY), tlas, 0xFFu, table, seed);
+        bool into = res.type == intersection_type::triangle && !res.triangle_front_facing;
+        if (into) {
+            uint row = blix_row(primRows, entryRows, res.instance_id, res.geometry_id, res.primitive_id);
+            uint placement = instances[res.instance_id].info.y;
+            if (placement == 0xFFFFFFFFu) placement = owners[triangles[row].w].x;
+            into = doubleSided[placement] == 0u;
+        }
+        if (!into) escaped++;
+        enclosed = escaped * 4u <= p.enclosedTests;
+    }
+    buried[i] = back >= p.threshold || enclosed ? 1u : 0u;
 }
 
 // Lightlets (VulkanSponza, SponzaLoop.LightletBake): visibility of surface points toward directions, as bits (1: the point
@@ -863,7 +885,7 @@ HWX_EXPORT int hwx_set_alpha(HwxContext* ctx, void* const* textures, const float
 // The lightmap's buried test (blix_buried) over `count` records in host memory (two float4s each), into one byte each
 // (1: buried). In chunks, each waited for; callable off the frame's thread (its own command buffers on the queue).
 HWX_EXPORT int hwx_buried(HwxContext* ctx, const float* records, uint32_t count, uint32_t tests, uint32_t threshold, uint32_t seed,
-                          float reach, float lift, const uint8_t* doubleSided, uint32_t placementCount, uint8_t* buried, double* gpuMs) {
+                          float reach, float lift, uint32_t enclosedTests, const uint8_t* doubleSided, uint32_t placementCount, uint8_t* buried, double* gpuMs) {
     @autoreleasepool {
         if (!ctx->tlas) return Fail(ctx, "buried test before build");
         id<MTLDevice> device = ctx->device;
@@ -882,8 +904,8 @@ HWX_EXPORT int hwx_buried(HwxContext* ctx, const float* records, uint32_t count,
             [enc setBuffer:out offset:0 atIndex:1];
             [enc setAccelerationStructure:ctx->tlas atBufferIndex:2];
             [enc setIntersectionFunctionTable:ctx->buriedTable atBufferIndex:3];
-            struct { uint32_t count, tests, threshold, seed; float reach, lift; uint32_t pad[2]; } params =
-                {n, tests, threshold, seed + first * tests, reach, lift, {0, 0}};
+            struct { uint32_t count, tests, threshold, seed; float reach, lift; uint32_t enclosedTests, pad; } params =
+                {n, tests, threshold, seed + first * tests, reach, lift, enclosedTests, 0};
             [enc setBytes:&params length:sizeof(params) atIndex:4];
             [enc setBuffer:sided offset:0 atIndex:5];
             [enc setBuffer:ctx->primRows offset:0 atIndex:6];
