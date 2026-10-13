@@ -140,6 +140,7 @@ internal sealed partial class SponzaLoop
         transportSunVisCheck = args.Flag("transport-sunvis-check");
         transportCpuCouplings = args.Flag("transport-cpu-couplings");
         cookCpuTests = args.Flag("cook-cpu-tests");
+        cookScreenOff = args.Flag("no-cook-screen");
         if (args.Float("transport-facing-cos") is { } fcos) transportFacingCos = Math.Clamp(fcos, -1f, 1f);
         if (args.Float("transport-facing-weight") is { } fw) transportFacingWeight = Math.Max(0f, fw);
         if (args.Float("transport-vis-lift") is { } vl) transportVisLift = Math.Clamp(vl, 0.0005f, 0.2f);

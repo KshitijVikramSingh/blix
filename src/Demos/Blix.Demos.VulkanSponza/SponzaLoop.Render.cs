@@ -563,6 +563,13 @@ internal sealed partial class SponzaLoop
             return;
         }
 
+        // A transport cook in the background: only what it waits on, and the cook screen (SponzaLoop.CookScreen.cs).
+        if (CookScreenNow)
+        {
+            RecordCookFrame(commandList);
+            return;
+        }
+
         // The mover's pose for this frame, before the cascades and the camera cull read the transforms.
         UpdateMover();
 
