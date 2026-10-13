@@ -13,8 +13,12 @@ namespace Blix.Demos.VulkanSponza;
 //   Progress: the CPU stages that report through Progress* (the transport cook's couplings, the hashed texels, the
 //   exposure diagnostics), and the GPU cooks read from their own counters (the split cook's sweep and refine rounds,
 //   the old gather's light bake).
-//   Memory: this process's resident size, the GPU's allocation (Metal's count, every client's), the kernel's memory
-//   pressure level and swap in use; read once a second.
+//   Memory: this process's resident size, the GPU's allocation (Metal's count, every client's), what is available, and
+//   whether pages are going to swap now; read once a second. The verdict is ours, not the kernel's pressure level: the
+//   kernel sits at "warning" whenever free pages are low and anything is compressed or swapped -- other apps' old pages
+//   included -- so it read "warning" through whole runs that pressed on nothing (the swap total falling, not rising).
+//   Red: pages going out to swap now (or the kernel at critical). Yellow: little left available. The kernel's level
+//   stays on the line, dimmed.
 internal sealed partial class SponzaLoop : IDebugLogsSection
 {
     // The cook's CPU stages report through the engine's registry (DebugProgress), the Logs tab and the cook screen
@@ -54,8 +58,10 @@ internal sealed partial class SponzaLoop : IDebugLogsSection
     }
 
     private readonly Stopwatch memoryClock = new();
-    private string memoryLine = "", pressureLine = "";
-    private bool pressureHigh;
+    private string memoryLine = "", pressureLine = "", kernelLine = "";
+    private int pressureVerdict;   // 0 fine, 1 tight (little available), 2 pressing (swapping out now)
+    private (ulong SwapIns, ulong SwapOuts, long Ticks)? vmLast;
+    private double swapInRate, swapOutRate;   // MB/s, smoothed over a few seconds
 
     public void OnLogsSection() => DrawMemory();
 
@@ -71,8 +77,11 @@ internal sealed partial class SponzaLoop : IDebugLogsSection
         ImGui.TextUnformatted(memoryLine);
         ImGui.SameLine();
         if (ImGui.SmallButton("inventory")) LogMemoryInventory("asked");
-        if (pressureHigh) ImGui.TextColored(new System.Numerics.Vector4(1f, 0.45f, 0.45f, 1f), pressureLine);
+        if (pressureVerdict == 2) ImGui.TextColored(new System.Numerics.Vector4(1f, 0.45f, 0.45f, 1f), pressureLine);
+        else if (pressureVerdict == 1) ImGui.TextColored(new System.Numerics.Vector4(1f, 0.85f, 0.35f, 1f), pressureLine);
         else ImGui.TextUnformatted(pressureLine);
+        ImGui.SameLine();
+        ImGui.TextDisabled(kernelLine);
     }
 
     private void ReadMemory()
@@ -87,8 +96,63 @@ internal sealed partial class SponzaLoop : IDebugLogsSection
         var level = SysctlInt("kern.memorystatus_vm_pressure_level");
         var swap = SwapUsage();
         var levelName = level switch { 1 => "normal", 2 => "warning", 4 => "critical", _ => $"level {level}" };
-        pressureHigh = level >= 2;
-        pressureLine = $"pressure {levelName}" + (swap is { } sw ? $"; swap {sw.Used / 1048576.0:N0} of {sw.Total / 1048576.0:N0} MB" : "");
+        kernelLine = $"(kernel: {levelName})";
+        var vm = VmStatistics();
+        double? availableMb = null;
+        if (vm is { } v)
+        {
+            var now = Stopwatch.GetTimestamp();
+            if (vmLast is { } last && now > last.Ticks)
+            {
+                var seconds = (now - last.Ticks) / (double)Stopwatch.Frequency;
+                // Smoothed over ~3 reads: one burst of a few pages does not turn the line red.
+                swapInRate += ((double)(v.SwapIns - last.SwapIns) * v.PageBytes / 1048576.0 / seconds - swapInRate) * 0.4;
+                swapOutRate += ((double)(v.SwapOuts - last.SwapOuts) * v.PageBytes / 1048576.0 / seconds - swapOutRate) * 0.4;
+            }
+            vmLast = (v.SwapIns, v.SwapOuts, now);
+            availableMb = v.AvailablePages * (double)v.PageBytes / 1048576.0;
+        }
+        var totalMb = SysctlLong("hw.memsize") / 1048576.0;
+        var pressing = level >= 4 || swapOutRate >= 4.0;
+        var tight = availableMb is { } a && totalMb > 0 && a < 0.08 * totalMb;
+        pressureVerdict = pressing ? 2 : tight ? 1 : 0;
+        var verdict = pressing ? "pressing: pages going to swap" : tight ? "tight" : "ok";
+        pressureLine = $"memory {verdict}"
+            + (availableMb is { } av ? $"; {av:N0} MB available" : "")
+            + (swap is { } sw ? $"; swap {sw.Used / 1048576.0:N0} MB in use (in {swapInRate:0.0}, out {swapOutRate:0.0} MB/s)" : "");
+    }
+
+    // host_statistics64(HOST_VM_INFO64): vm_statistics64, 38 natural_t words. Available: free (offset 0; it counts the
+    // speculative pages already -- vm_stat prints it without them), inactive (8), purgeable (88). Counters: swapins (112),
+    // swapouts (120).
+    [DllImport("libSystem.dylib", EntryPoint = "mach_host_self")]
+    private static extern uint MachHostSelf();
+
+    [DllImport("libSystem.dylib", EntryPoint = "host_statistics64")]
+    private static extern int HostStatistics64(uint host, int flavor, [Out] byte[] info, ref uint count);
+
+    private static (ulong AvailablePages, ulong SwapIns, ulong SwapOuts, long PageBytes)? VmStatistics()
+    {
+        if (!OperatingSystem.IsMacOS()) return null;
+        var info = new byte[38 * 4];
+        uint count = 38;
+        if (HostStatistics64(MachHostSelf(), 4, info, ref count) != 0) return null;
+        uint U32(int o) => BitConverter.ToUInt32(info, o);
+        ulong U64(int o) => BitConverter.ToUInt64(info, o);
+        var available = (ulong)U32(0) + U32(8) + U32(88);
+        var page = SysctlLong("hw.pagesize");
+        return (available, U64(112), U64(120), page > 0 ? page : 16384);
+    }
+
+    [DllImport("libc", EntryPoint = "sysctlbyname")]
+    private static extern int SysctlLong(string name, ref long value, ref nint length, nint newValue, nint newLength);
+
+    private static long SysctlLong(string name)
+    {
+        if (!OperatingSystem.IsMacOS()) return 0;
+        long value = 0;
+        nint length = sizeof(long);
+        return SysctlLong(name, ref value, ref length, 0, 0) == 0 ? value : 0;
     }
 
     // proc_pid_rusage(pid, RUSAGE_INFO_V0, &info): ri_phys_footprint is the eighth 64-bit word after the 16-byte uuid.
