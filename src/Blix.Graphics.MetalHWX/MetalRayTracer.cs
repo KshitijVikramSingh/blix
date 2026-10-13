@@ -191,6 +191,61 @@ public sealed class MetalRayTracer : IDisposable
     }
 
     /// <summary>
+    /// <see cref="Trace"/> from host memory: rays (two float4s each: origin and tMin, direction and tMax) in, hits (three
+    /// uint4s, twelve uints, each: t, barycentrics, flags -- 1 found, 2 front face, 4 any; placement, triangle; normal,
+    /// albedo) out. Waits for the GPU; touches no device buffer, so it can run off the frame's thread (a cook's).
+    /// </summary>
+    public uint[] TraceFromHost(ReadOnlySpan<Vector4> rays, uint seedBase, bool closestOnly, out double gpuMs)
+    {
+        var hits = new uint[Math.Max(rays.Length / 2 * 12, 1)];
+        TraceFromHost(rays, hits, seedBase, closestOnly, out gpuMs);
+        return hits;
+    }
+
+    /// <summary>As <see cref="TraceFromHost(ReadOnlySpan{Vector4}, uint, bool, out double)"/>, into the caller's
+    /// <paramref name="hits"/> (twelve uints a ray), so a caller tracing batch after batch reuses one.</summary>
+    public unsafe void TraceFromHost(ReadOnlySpan<Vector4> rays, Span<uint> hits, uint seedBase, bool closestOnly, out double gpuMs)
+    {
+        ObjectDisposedException.ThrowIf(ctx == 0, this);
+        var count = rays.Length / 2;
+        if (hits.Length < count * 12) throw new ArgumentException($"{hits.Length} uints for {count} rays' hits.", nameof(hits));
+        double ms = 0;
+        if (count > 0)
+            fixed (Vector4* r = rays)
+            fixed (uint* h = hits)
+            {
+                if (HwxNative.hwx_trace_host(ctx, (float*)r, (uint)count, seedBase, closestOnly ? 1u : 0u, h, &ms) != 0)
+                    throw new InvalidOperationException($"Metal trace (host): {Error}");
+            }
+        gpuMs = ms;
+    }
+
+    /// <summary>
+    /// The closest hit with coplanar contacts read as back faces (as <see cref="TestBuried"/> reads them), for rays in
+    /// host memory (two float4s each: origin; direction and tMax): into <paramref name="answers"/>, two uints a ray --
+    /// 0 nothing, 1 a front face, 2 a back face -- and the face's placement. The contact table as TestBuried's. Waits for
+    /// the GPU; touches no device buffer, so it can run off the frame's thread (a cook's).
+    /// </summary>
+    public unsafe void ContactTrace(ReadOnlySpan<Vector4> rays, Span<uint> answers, uint seed, ReadOnlySpan<uint> contactStart,
+        ReadOnlySpan<Vector4> contactTris, out double gpuMs)
+    {
+        ObjectDisposedException.ThrowIf(ctx == 0, this);
+        var count = rays.Length / 2;
+        if (answers.Length < count * 2) throw new ArgumentException($"{answers.Length} uints for {count} rays' answers.", nameof(answers));
+        double ms = 0;
+        if (count > 0)
+            fixed (Vector4* r = rays)
+            fixed (uint* a = answers)
+            fixed (uint* cs = contactStart)
+            fixed (Vector4* ct = contactTris)
+            {
+                if (HwxNative.hwx_contact_trace(ctx, (float*)r, (uint)count, seed, cs, (uint)contactStart.Length, (float*)ct, (uint)(contactTris.Length / 3), a, &ms) != 0)
+                    throw new InvalidOperationException($"Metal contact trace: {Error}");
+            }
+        gpuMs = ms;
+    }
+
+    /// <summary>
     /// The lightlet bake's dense pass: for every point (two float4s: position, normal) and every direction of
     /// <paramref name="directions"/>, whether the point faces it and nothing is in the way (from <paramref name="lift"/> off the
     /// surface, as far as <paramref name="reach"/>), as bits, <paramref name="words"/> uints a point. One coverage coin seed for

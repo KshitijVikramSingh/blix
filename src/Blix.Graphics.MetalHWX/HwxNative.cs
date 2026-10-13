@@ -88,6 +88,13 @@ internal static unsafe class HwxNative
     public static extern void hwx_memory(nint ctx, ulong* allocated, ulong* recommended);
 
     [DllImport(Library)]
+    public static extern int hwx_contact_trace(nint ctx, float* rays, uint count, uint seed, uint* contactStart, uint contactRows, float* contactTris,
+        uint contactCount, uint* answers, double* gpuMs);
+
+    [DllImport(Library)]
+    public static extern int hwx_trace_host(nint ctx, float* rays, uint count, uint seedBase, uint closestOnly, uint* hits, double* gpuMs);
+
+    [DllImport(Library)]
     public static extern int hwx_buried(nint ctx, float* records, uint count, uint tests, uint threshold, uint seed, float reach,
         float lift, uint enclosedTests, byte* doubleSided, uint placementCount, uint* contactStart, uint contactRows, float* contactTris,
         uint contactCount, byte* buried, double* gpuMs);

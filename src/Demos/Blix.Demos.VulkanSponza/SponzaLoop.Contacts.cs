@@ -223,3 +223,88 @@ internal sealed partial class SponzaLoop
         return (count, partners);
     }
 }
+
+// The cook's inside-a-solid tests on Metal (ContactTraceAll): the patches', the hashed texels' (their samples' and
+// their own) and the patches' openness asked the CPU's ClosestThroughContacts for tens of millions of rays a cook --
+// Sponza's hashed samples and texels alone ~110M, about a quarter of an hour. Metal answers what it does (the contact
+// table, then the jittered re-asks: blix_contact_trace) for rays built in parallel, in chunks, into reused arrays.
+internal sealed partial class SponzaLoop
+{
+    private const int ContactChunk = 1 << 22;
+    // --cook-cpu-tests: those tests on the CPU, not Metal.
+    private bool cookCpuTests;
+    private (Blix.Graphics.MetalHWX.MetalRayTracer Metal, uint[] Start, Vector4[] Tris)? cookContactTracer;
+    private RayQueryScene? cookContactScene;
+
+    // The tracer the cook's tests use (the bake scene's when it has one, else the frame's) and the contact table by its
+    // rows; null on the CPU.
+    private (Blix.Graphics.MetalHWX.MetalRayTracer Metal, uint[] Start, Vector4[] Tris)? CookContactTracer(RayQueryScene scene)
+    {
+        if (cookCpuTests) return null;
+        lock (contactGate)
+            if (cookContactTracer is not null && ReferenceEquals(cookContactScene, scene)) return cookContactTracer;
+        var metal = WaitForBakeTracer();
+        if (metal is null) return null;
+        var onBake = ReferenceEquals(metal, BakeTracer);
+        (int[][] Map, int Rows)? rowMap = onBake ? bakeSceneRowMap : rayGpuData is { } frameData ? (frameData.RowMap, frameData.RowPlacements.Length) : null;
+        if (rowMap is null) return null;
+        var (start, tris) = GpuContacts(scene, rowMap.Value);
+        lock (contactGate)
+        {
+            cookContactTracer = (metal, start, tris);
+            cookContactScene = scene;
+            return cookContactTracer;
+        }
+    }
+
+    // `count` rays (rayOf: origin, direction, reach) through blix_contact_trace; onAnswer(ray, kind -- 0 nothing, 1 a
+    // front face, 2 a back face --, the face's placement), in parallel. False when there is no Metal tracer: the caller
+    // asks the CPU.
+    private bool ContactTraceAll(RayQueryScene scene, long count, Func<long, (Vector3 O, Vector3 D, float TMax)> rayOf,
+        Action<long, uint, int> onAnswer, uint seed, string? progress = null)
+    {
+        if (CookContactTracer(scene) is not { } tracer) return false;
+        var chunk = (int)Math.Min(ContactChunk, Math.Max(1, count));
+        var rays = new Vector4[chunk * 2];
+        var answers = new uint[chunk * 2];
+        if (progress is not null) ProgressBegin(progress, count);
+        for (long first = 0; first < count; first += chunk)
+        {
+            var n = (int)Math.Min(chunk, count - first);
+            var at0 = first;
+            Parallel.For(0, n, q =>
+            {
+                var (o, d, tMax) = rayOf(at0 + q);
+                rays[2 * q] = new Vector4(o, 0f);
+                rays[2 * q + 1] = new Vector4(d, tMax);
+            });
+            tracer.Metal.ContactTrace(rays.AsSpan(0, n * 2), answers, seed + (uint)first, tracer.Start, tracer.Tris, out _);
+            Parallel.For(0, n, q => onAnswer(at0 + q, answers[2 * q], (int)answers[2 * q + 1]));
+            if (progress is not null) ProgressAdd(progress, n);
+        }
+        if (progress is not null) ProgressEnd(progress);
+        return true;
+    }
+
+    // A cosine-weighted direction about n from a hash (each ray built on its own, in parallel).
+    private static Vector3 CosineHashed(Vector3 n, uint h)
+    {
+        static uint Pcg(uint v)
+        {
+            var state = v * 747796405u + 2891336453u;
+            var word = ((state >> (int)((state >> 28) + 4u)) ^ state) * 277803737u;
+            return (word >> 22) ^ word;
+        }
+        var h1 = Pcg(h);
+        var h2 = Pcg(h1 ^ 0x9E3779B9u);
+        var u1 = (h1 >> 8) / 16777216f;
+        var u2 = (h2 >> 8) / 16777216f;
+        var t = Vector3.Normalize(MathF.Abs(n.Y) < 0.999f ? Vector3.Cross(Vector3.UnitY, n) : Vector3.Cross(Vector3.UnitX, n));
+        var b = Vector3.Cross(n, t);
+        var r = MathF.Sqrt(u1);
+        var phi = 2f * MathF.PI * u2;
+        return t * (r * MathF.Cos(phi)) + b * (r * MathF.Sin(phi)) + n * MathF.Sqrt(MathF.Max(0f, 1f - u1));
+    }
+
+    private static uint RayHash(long item, int k, uint salt) => (uint)(item * 0x9E3779B1L) ^ ((uint)k * 0x85EBCA77u) ^ salt;
+}

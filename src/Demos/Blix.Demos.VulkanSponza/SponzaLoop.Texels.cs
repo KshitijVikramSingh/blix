@@ -222,6 +222,9 @@ internal sealed partial class SponzaLoop
         long samples = 0, hidden = 0;
         // --lightmap-buried-why: every 64th dropped sample side, and whether what its ray met was a double-sided sheet.
         var sampleDrops = lightmapBuriedWhy ? new ConcurrentBag<(Vector3 P, Vector3 N, bool DoubleSided)>() : null;
+        if (CookContactTracer(scene) is not null) SamplesOnMetal();
+        else
+        {
         ProgressBegin("hashed texels: surface samples", triangleList.Count);
         Parallel.For(0, triangleList.Count,
             () => new Dictionary<ulong, (Vector3 Pos, Vector3 Nrm, int Hits)>(),
@@ -274,6 +277,113 @@ internal sealed partial class SponzaLoop
             },
             local => locals.Add(local));
         ProgressEnd("hashed texels: surface samples");
+        }
+
+        // The samples on Metal (SponzaLoop.Contacts.cs, ContactTraceAll): the same samples, in batches of triangles, each
+        // side's ray along its normal traced there; the kept sides into the cells as above.
+        void SamplesOnMetal()
+        {
+            var n = triangleList.Count;
+            var counts = new int[n];
+            var u0s = new float[n];
+            var v0s = new float[n];
+            Parallel.For(0, n, ti =>
+            {
+                var (i, t) = triangleList[ti];
+                var (a, b, c) = tri(i, t);
+                var area = Vector3.Cross(b - a, c - a).Length() * 0.5f;
+                if (area <= 0f) return;
+                counts[ti] = Math.Max(1, (int)MathF.Ceiling(area / (sample * sample)));
+                var rng = new Random(11 + ti);
+                u0s[ti] = (float)rng.NextDouble();
+                v0s[ti] = (float)rng.NextDouble();
+            });
+            var budget = Math.Max(ContactChunk / 2, counts.Length > 0 ? counts.Max() : 1);
+            var sp = new Vector3[budget];
+            var sn = new Vector3[budget];
+            var drop = new byte[budget * 2];
+            var dropSheet = new bool[budget * 2];
+            ProgressBegin("hashed texels: surface samples (Metal)", n);
+            for (var t0 = 0; t0 < n;)
+            {
+                var t1 = t0;
+                long sum = 0;
+                while (t1 < n && (sum + counts[t1] <= budget || t1 == t0)) { sum += counts[t1]; t1++; }
+                var offsets = new int[t1 - t0 + 1];
+                for (var q = t0; q < t1; q++) offsets[q - t0 + 1] = offsets[q - t0] + counts[q];
+                var total = offsets[^1];
+                var start = t0;
+                Parallel.For(t0, t1, ti =>
+                {
+                    if (counts[ti] == 0) return;
+                    var (i, t) = triangleList[ti];
+                    var (a, b, c) = tri(i, t);
+                    var front = Vector3.Normalize(Vector3.Cross(b - a, c - a));
+                    var o = offsets[ti - start];
+                    for (var k = 0; k < counts[ti]; k++)
+                    {
+                        var u = (u0s[ti] + k * 0.7548777f) % 1f;
+                        var v = (v0s[ti] + k * 0.5698403f) % 1f;
+                        if (u + v > 1f) { u = 1f - u; v = 1f - v; }
+                        sp[o + k] = a + (b - a) * u + (c - a) * v;
+                        sn[o + k] = front;
+                    }
+                });
+                Array.Clear(drop, 0, total * 2);
+                ContactTraceAll(scene, total * 2L, r =>
+                {
+                    var q = (int)(r >> 1);
+                    var nn = (r & 1) == 0 ? sn[q] : -sn[q];
+                    return (sp[q] + nn * 1e-3f, nn, float.PositiveInfinity);
+                }, (r, kind, placement) =>
+                {
+                    if (kind != 2) return;
+                    drop[r] = 1;
+                    dropSheet[r] = placement >= 0 && placement < rayPlacementDoubleSided.Count && rayPlacementDoubleSided[placement];
+                }, (uint)t0 * 2654435761u);
+                Parallel.For(t0, t1,
+                    () => new Dictionary<ulong, (Vector3 Pos, Vector3 Nrm, int Hits)>(),
+                    (ti, _, local) =>
+                    {
+                        if (counts[ti] == 0) return local;
+                        var (i, t) = triangleList[ti];
+                        var firstLevelHere = firstLevel?.Invoke(i, t) ?? 0;
+                        var o = offsets[ti - start];
+                        long mine = 0, mineHidden = 0;
+                        for (var k = 0; k < counts[ti]; k++)
+                        {
+                            var at = sp[o + k];
+                            for (var side = 0; side < 2; side++)
+                            {
+                                var nn = side == 0 ? sn[o + k] : -sn[o + k];
+                                var r = (o + k) * 2 + side;
+                                if (drop[r] != 0)
+                                {
+                                    mineHidden++;
+                                    if (sampleDrops is not null && ((ti * 31 + k * 2 + side) & 63) == 0) sampleDrops.Add((at, nn, dropSheet[r]));
+                                    continue;
+                                }
+                                for (var level = firstLevelHere; level < texelLevels; level++)
+                                {
+                                    var cell = (at - min) / (s * (1 << level));
+                                    int cx = (int)MathF.Floor(cell.X), cy = (int)MathF.Floor(cell.Y), cz = (int)MathF.Floor(cell.Z);
+                                    var packed = (ulong)(uint)cx | ((ulong)(uint)cy << 16) | ((ulong)(uint)cz << 32) | ((ulong)(uint)TexelBin(nn) << 48) | ((ulong)(uint)level << 56);
+                                    var e = local.GetValueOrDefault(packed);
+                                    local[packed] = (e.Pos + at, e.Nrm + nn, e.Hits + 1);
+                                }
+                            }
+                            mine++;
+                        }
+                        Interlocked.Add(ref samples, mine);
+                        Interlocked.Add(ref hidden, mineHidden);
+                        return local;
+                    },
+                    local => locals.Add(local));
+                ProgressAdd("hashed texels: surface samples (Metal)", t1 - t0);
+                t0 = t1;
+            }
+            ProgressEnd("hashed texels: surface samples (Metal)");
+        }
         var merged = new Dictionary<ulong, (Vector3 Pos, Vector3 Nrm, int Hits)>();
         foreach (var local in locals)
             foreach (var (key, e) in local)
@@ -304,6 +414,31 @@ internal sealed partial class SponzaLoop
         var keep = new bool[placed];
         var enclosedOnly = new bool[placed];
         var sheetsOnly = new bool[placed];   // dropped by the 15-of-16 rule with double-sided sheets' back faces counted, not enclosed
+        // On Metal when it is there: 16 rays a texel, their back faces counted (any; and single-sided).
+        var metalBacks = new int[placed];
+        var metalSolids = new int[placed];
+        var onMetal = ContactTraceAll(scene, placed * 16L, r =>
+        {
+            var i = (int)(r / 16);
+            return (pos[i] + nrm[i] * 1e-3f, CosineHashed(nrm[i], RayHash(i, (int)(r % 16), 91u)), float.PositiveInfinity);
+        }, (r, kind, placement) =>
+        {
+            if (kind != 2) return;
+            var i = (int)(r / 16);
+            Interlocked.Increment(ref metalBacks[i]);
+            if (placement >= 0 && placement < rayPlacementDoubleSided.Count && !rayPlacementDoubleSided[placement]) Interlocked.Increment(ref metalSolids[i]);
+        }, 91u, "hashed texels: inside a solid? (Metal)");
+        if (onMetal)
+            Parallel.For(0, placed, i =>
+            {
+                const int tests = 16;
+                var enclosed = metalSolids[i] * 4 >= tests * 3;
+                keep[i] = metalBacks[i] < tests - 1 && !enclosed;
+                enclosedOnly[i] = metalBacks[i] < tests - 1 && enclosed;
+                sheetsOnly[i] = metalBacks[i] >= tests - 1 && !enclosed;
+            });
+        else
+        {
         ProgressBegin("hashed texels: inside a solid?", placed);
         Parallel.For(0, placed, i =>
         {
@@ -326,6 +461,7 @@ internal sealed partial class SponzaLoop
             sheetsOnly[i] = back >= tests - 1 && !enclosed;
         });
         ProgressEnd("hashed texels: inside a solid?");
+        }
         var kept = new List<int>(placed);
         for (var i = 0; i < placed; i++) if (keep[i]) kept.Add(i);
         {

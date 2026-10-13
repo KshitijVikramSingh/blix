@@ -55,6 +55,15 @@ internal sealed partial class SponzaLoop
     private float transportFacingCos = 0.5f, transportFacingWeight = 0f;
     // --transport-far-cutoff M: a hit whose nearest facing patch is farther tries only BaseCandidates of them (1 m).
     private float transportFarCutoff = 1f;
+    // --transport-fill [--transport-fill-rays N]: patches added where hits find none facing their way (FillPatches).
+    private bool transportFill;
+    private int transportFillRays = 32, transportFillPasses = 2;
+    // --transport-cpu-sunvis: the sun visibility bins on the CPU, not Metal; --transport-sunvis-check: both, compared.
+    private bool transportCpuSunVis, transportSunVisCheck;
+    // --transport-cpu-couplings: the couplings' rays on the CPU, not Metal (CouplingsOnMetal), and its block of patches.
+    private bool transportCpuCouplings;
+    private const int CouplingBlock = 4096;
+    private const int SunVisCheckPatches = 4096;
     private int transportRays = 512;
     private int transportVisRes = 32;
     // --transport-sunlet S: the first bounce of direct sun resolved at sunlets of S metres (0: at patch centres, as
@@ -75,9 +84,17 @@ internal sealed partial class SponzaLoop
         if (args.Int("transport-vis") is { } v) transportVisRes = Math.Clamp(v, 4, 256);
         if (args.Float("transport-sunlet") is { } sl) transportSunlet = Math.Max(0f, sl);
         if (args.Int("transport-candidates") is { } tc) transportCandidates = Math.Clamp(tc, 1, 64);
-        transportMissWhy = args.Flag("transport-miss-why");
+        // The cook's diagnostics are on unless asked off: what they cost is worth paying while its rules are settled.
+        transportMissWhy = !args.Flag("no-transport-miss-why");
         transportOwnFallback = args.Flag("transport-own-fallback");
         if (args.Float("transport-far-cutoff") is { } fc) transportFarCutoff = Math.Max(0f, fc);
+        transportFill = args.Flag("transport-fill");
+        if (args.Int("transport-fill-rays") is { } fr) transportFillRays = Math.Clamp(fr, 1, 4096);
+        if (args.Int("transport-fill-passes") is { } fp) transportFillPasses = Math.Clamp(fp, 1, 8);
+        transportCpuSunVis = args.Flag("transport-cpu-sunvis");
+        transportSunVisCheck = args.Flag("transport-sunvis-check");
+        transportCpuCouplings = args.Flag("transport-cpu-couplings");
+        cookCpuTests = args.Flag("cook-cpu-tests");
         if (args.Float("transport-facing-cos") is { } fcos) transportFacingCos = Math.Clamp(fcos, -1f, 1f);
         if (args.Float("transport-facing-weight") is { } fw) transportFacingWeight = Math.Max(0f, fw);
         if (args.Float("transport-vis-lift") is { } vl) transportVisLift = Math.Clamp(vl, 0.0005f, 0.2f);
@@ -238,16 +255,21 @@ internal sealed partial class SponzaLoop
         }
 
         // The cook's cache (SponzaLoop.TransportCache.cs): a run whose inputs match reads what the cook would make.
-        var cacheKey = TransportCacheKey(scene, surfaces);
+        var stageKeys = TransportCacheKeys(scene, surfaces);
+        var cacheKey = stageKeys.Combined;
         DecideBakeScene(cacheKey);
-        var cached = LoadTransportCache(cacheKey);
+        // Each stage from its own cache; the couplings and the sun visibility only over the patches they were made for.
+        var patchStage = LoadPatches(stageKeys.Patches);
+        var couplingStage = patchStage is null ? null : LoadCouplings(stageKeys.Couplings);
+        var sunVisStage = patchStage is null ? null : LoadSunVis(stageKeys.SunVis);
+        var texelStage = LoadTexels(stageKeys.Texels);
 
         // ---- R1: patches ------------------------------------------------------------------------------------------
         var patchArea = transportSpacing * transportSpacing;
         var pos = new List<Vector3>();
         var nrm = new List<Vector3>();
         var albedo = new List<Vector3>();
-        if (cached is null)
+        if (patchStage is null)
         {
         var rng = new Random(5);
         for (var i = 0; i < scene.Instances.Count; i++)
@@ -294,6 +316,15 @@ internal sealed partial class SponzaLoop
         // Drop sides inside something: a patch whose rays mostly meet back faces sits in a solid (a probe's "buried").
         {
             var keep = new bool[pos.Count];
+            // On Metal when it is there (SponzaLoop.Contacts.cs, ContactTraceAll), else the CPU.
+            var backs = new int[pos.Count];
+            if (ContactTraceAll(scene, pos.Count * 16L, r =>
+                {
+                    var i = (int)(r / 16);
+                    return (pos[i] + nrm[i] * 1e-3f, CosineHashed(nrm[i], RayHash(i, (int)(r % 16), 77u)), float.PositiveInfinity);
+                }, (r, kind, _) => { if (kind == 2) Interlocked.Increment(ref backs[(int)(r / 16)]); }, 77u, "transport: patches, inside a solid? (Metal)"))
+                for (var i = 0; i < pos.Count; i++) keep[i] = backs[i] * 2 < 16;
+            else
             Parallel.For(0, pos.Count, i =>
             {
                 var r = new Random(77 + i);
@@ -314,7 +345,7 @@ internal sealed partial class SponzaLoop
         }
         else
         {
-            pos = cached.Pos.ToList(); nrm = cached.Nrm.ToList(); albedo = cached.Albedo.ToList();
+            pos = patchStage.Pos.ToList(); nrm = patchStage.Nrm.ToList(); albedo = patchStage.Albedo.ToList();
         }
         var patches = pos.Count;
         // A hash grid over the patches: a ray's hit finds the nearest patch facing the way the hit surface faces.
@@ -428,7 +459,89 @@ internal sealed partial class SponzaLoop
             var n = Vector3.Normalize(Vector3.Cross(b - a, c - a));
             return Vector3.Dot(n, dir) > 0f ? -n : n;
         }
+        for (var pass = 1; transportFill && patchStage is null && pass <= transportFillPasses; pass++)
+            if (FillPatches(pass) == 0) break;
         var cookPatches = clock.Elapsed.TotalSeconds;
+
+        // --transport-fill: patches where hits find none facing their way that they can see. A discovery pass of
+        // transportFillRays rays a patch (the couplings take transportRays) finds front-face hits whose facing pass
+        // failed -- the back of a curtain whose facing patches lie past its folds, a door's carving -- one a cell of
+        // the spacing and coarse normal bin; each becomes a patch there (its hit's position, normal and albedo) when
+        // open air sees it (a hidden cavity gets none: SponzaLoop.TransportDiag.cs) and it is not inside a solid (the
+        // patches' rule). The couplings then run with them: hits there find a patch facing their way.
+        // In passes (--transport-fill-passes, 2): one patch a cell can sit on the near side of a curtain's fold or a
+        // carving's lip, and the hits past it still see none; the next pass's discovery finds them and adds theirs.
+        // Returns the patches added.
+        int FillPatches(int pass)
+        {
+            var fillClock = Stopwatch.StartNew();
+            var found = new ConcurrentDictionary<(int, int, int, int), (Vector3 P, Vector3 N, Vector3 A, int Instance)>();
+            var stage = $"transport: fill pass {pass}";
+            ProgressBegin(stage + ", discovery", patches);
+            Parallel.For(0, patches, i =>
+            {
+                ProgressAdd(stage + ", discovery");
+                var r = new Random(5000 + i + pass * 7919);
+                var origin = pos[i] + nrm[i] * 1e-3f;
+                for (var k = 0; k < transportFillRays; k++)
+                {
+                    var d = CosineHemisphereCpu(nrm[i], r);
+                    if (scene.Closest(new Ray(origin, d), 0f, float.PositiveInfinity, (uint)r.Next()) is not { FrontFace: true } h) continue;
+                    if ((surfaces[data.RowOf(h.Instance, h.Triangle)] >> 24) < 255u) continue;
+                    var hp = origin + d * h.T;
+                    var hn = HitNormal(h, d);
+                    if (NearestVisibleOr(hp, hn, (uint)r.Next(), anyFacing: false, out _) >= 0) continue;
+                    var key = ((int)MathF.Floor(hp.X / transportSpacing), (int)MathF.Floor(hp.Y / transportSpacing), (int)MathF.Floor(hp.Z / transportSpacing), OctBin(hn, 4));
+                    found.TryAdd(key, (hp, hn, Albedo(h.Instance, h.Triangle), h.Instance));
+                }
+            });
+            ProgressEnd(stage + ", discovery");
+            if (diagViews is null) BuildDiagViews(scene, pos, nrm);
+            var spots = found.Values.ToArray();
+            var take = new bool[spots.Length];
+            int hidden = 0, inside = 0;
+            ProgressBegin(stage + ", spots", spots.Length);
+            Parallel.For(0, spots.Length, s =>
+            {
+                ProgressAdd(stage + ", spots");
+                var (sp, sn, _, _) = spots[s];
+                if (!Exposed(scene, sp, sn, (uint)s)) { Interlocked.Increment(ref hidden); return; }
+                var r = new Random(77 + s);
+                var back = 0;
+                const int tests = 16;
+                // A double-sided sheet's back is the far side of a curtain, not the inside of a solid (the lightmap's
+                // rule): a spot behind a fold is not buried by it.
+                for (var k = 0; k < tests; k++)
+                    if (ClosestThroughContacts(scene, new Ray(sp + sn * 1e-3f, CosineHemisphereCpu(sn, r)), 0f, float.PositiveInfinity, (uint)r.Next()) is { FrontFace: false } b
+                        && !rayPlacementDoubleSided[b.Instance])
+                        back++;
+                if (back * 2 >= tests) { Interlocked.Increment(ref inside); return; }
+                take[s] = true;
+            });
+            ProgressEnd(stage + ", spots");
+            var byName = new Dictionary<string, int>();
+            for (var s = 0; s < spots.Length; s++)
+            {
+                if (!take[s]) continue;
+                var (sp, sn, sa, inst) = spots[s];
+                var at = pos.Count;
+                pos.Add(sp); nrm.Add(sn); albedo.Add(sa);
+                var key = Key(sp);
+                if (!grid.TryGetValue(key, out var list)) grid[key] = list = new List<int>();
+                list.Add(at);
+                var name = rayPlacementNames[inst];
+                byName[name] = byName.GetValueOrDefault(name) + 1;
+            }
+            var added = pos.Count - patches;
+            patches = pos.Count;
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza] transport fill, pass {pass}: {spots.Length:N0} spots where hits found no patch facing their way ({transportFillRays} rays a patch); {added:N0} patches added, {hidden:N0} hidden from open air, {inside:N0} inside a solid; {fillClock.Elapsed.TotalSeconds:0.0} s."));
+            foreach (var (name, c) in byName.OrderByDescending(x => x.Value).Take(12))
+                Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {c,7:N0}  {name}"));
+            var families = byName.GroupBy(x => x.Key.Split('_')[0]).Select(g => (g.Key, g.Sum(x => x.Value))).OrderByDescending(x => x.Item2).Take(10);
+            Console.WriteLine("    by family: " + string.Join(", ", families.Select(f => string.Create(CultureInfo.InvariantCulture, $"{f.Key} {f.Item2:N0}"))));
+            return added;
+        }
 
         // ---- R2 couplings + R3 sky bins + R3 sun visibility -------------------------------------------------------
         var couplings = new (int To, float W)[patches][];
@@ -451,29 +564,66 @@ internal sealed partial class SponzaLoop
         // corner's two walls, or a sheet's two sides, never share one) -- position, normal and albedo of its first hit.
         // A patch's first bounce of direct light is read through them; everything after through the patch couplings.
         var useSunlets = transportSunlet > 0f;
-        var sunletIndex = new ConcurrentDictionary<(int, int, int, int), int>();
         var sunletPos = new List<Vector3>(); var sunletNrm = new List<Vector3>(); var sunletAlbedo = new List<Vector3>();
-        var sunletLock = new object();
+        var sunletCouplings = new (int To, float W)[patches][];
+        // Made in SunletShards shards, each its own index, lists and lock (by a hash of the sunlet's key): one table
+        // behind one lock serialized the couplings -- every hit asks for its sunlet, 7.7M of Sponza's are new, and the
+        // profile had the cook's threads waiting on that lock (38%) or idle (44%), the candidate search 6% (2026-10-13).
+        // A sunlet's id while the couplings are made is its index in its shard times SunletShards plus its shard;
+        // FinalizeSunlets lays the shards end to end and renumbers the couplings to them.
+        const int SunletShards = 64;
+        // Lookups take no lock (most hits find their sunlet made): neighbouring patches' rays land together, and a
+        // lock on every lookup still had threads queued on the same few shards (38% of their time, 2026-10-13).
+        var sunletShardIndex = new ConcurrentDictionary<(int, int, int, int), int>[SunletShards];
+        var sunletShardData = new List<(Vector3 P, Vector3 N, Vector3 A)>[SunletShards];
+        for (var sh = 0; sh < SunletShards; sh++) { sunletShardIndex[sh] = new(); sunletShardData[sh] = new(); }
         int SunletOf(Vector3 hp, Vector3 hn, Vector3 alb)
         {
             var key = ((int)MathF.Floor(hp.X / transportSunlet), (int)MathF.Floor(hp.Y / transportSunlet), (int)MathF.Floor(hp.Z / transportSunlet), OctBin(hn, 4));
-            if (sunletIndex.TryGetValue(key, out var found)) return found;
-            lock (sunletLock)
+            var shard = (int)((uint)HashCode.Combine(key.Item1, key.Item2, key.Item3, key.Item4) % SunletShards);
+            var index = sunletShardIndex[shard];
+            if (index.TryGetValue(key, out var found)) return found;
+            var data = sunletShardData[shard];
+            lock (data)
             {
-                if (sunletIndex.TryGetValue(key, out found)) return found;
-                var id = sunletPos.Count;
-                sunletPos.Add(hp); sunletNrm.Add(hn); sunletAlbedo.Add(alb);
-                sunletIndex[key] = id;
+                if (index.TryGetValue(key, out found)) return found;
+                var id = data.Count * SunletShards + shard;
+                data.Add((hp, hn, alb));
+                index[key] = id;
                 return id;
             }
         }
-        var sunletCouplings = new (int To, float W)[patches][];
-        bool Cutout(RayHit h) => (surfaces[data.RowOf(h.Instance, h.Triangle)] >> 24) < 255u;
-        if (cached is not null)
+        void FinalizeSunlets()
         {
-            couplings = cached.Couplings; sunletCouplings = cached.SunletCouplings; sky = cached.Sky; sunVis = cached.SunVis;
-            sunletPos.AddRange(cached.SunletPos); sunletNrm.AddRange(cached.SunletNrm); sunletAlbedo.AddRange(cached.SunletAlbedo);
+            var offsets = new int[SunletShards + 1];
+            for (var sh = 0; sh < SunletShards; sh++) offsets[sh + 1] = offsets[sh] + sunletShardData[sh].Count;
+            for (var sh = 0; sh < SunletShards; sh++)
+                foreach (var (sp, sn, sa) in sunletShardData[sh]) { sunletPos.Add(sp); sunletNrm.Add(sn); sunletAlbedo.Add(sa); }
+            Parallel.For(0, sunletCouplings.Length, i =>
+            {
+                var row = sunletCouplings[i];
+                if (row is null) return;
+                for (var k = 0; k < row.Length; k++)
+                {
+                    var id = row[k].To;
+                    row[k] = (offsets[id % SunletShards] + id / SunletShards, row[k].W);
+                }
+            });
+            for (var sh = 0; sh < SunletShards; sh++) { sunletShardIndex[sh] = new(); sunletShardData[sh] = new(); }
         }
+        bool Cutout(RayHit h) => (surfaces[data.RowOf(h.Instance, h.Triangle)] >> 24) < 255u;
+        if (sunVisStage is not null) sunVis = sunVisStage;
+        var sunVisWithCouplings = false;   // the CPU couplings' loop made them, patch by patch
+        var sunVisMetal = sunVisStage is not null || transportCpuSunVis ? null : WaitForBakeTracer();
+        if (couplingStage is not null)
+        {
+            couplings = couplingStage.Couplings; sunletCouplings = couplingStage.SunletCouplings; sky = couplingStage.Sky;
+            sunletPos.AddRange(couplingStage.SunletPos); sunletNrm.AddRange(couplingStage.SunletNrm); sunletAlbedo.AddRange(couplingStage.SunletAlbedo);
+        }
+        else
+        {
+        var couplingsMetal = transportCpuCouplings ? null : WaitForBakeTracer();
+        if (couplingsMetal is not null) CouplingsOnMetal(couplingsMetal);
         else
         {
         ProgressBegin("transport: couplings", patches);
@@ -526,17 +676,423 @@ internal sealed partial class SponzaLoop
             couplings[i] = acc.Select(e => (e.Key, e.Value / (float)transportRays)).ToArray();
             sunletCouplings[i] = accSun.Select(e => (e.Key, e.Value / (float)transportRays)).ToArray();
             Interlocked.Add(ref dropped, lost);
-            for (var b = 0; b < transportVisRes * transportVisRes; b++)
-            {
-                var uv = new Vector2((b % transportVisRes + 0.5f) / transportVisRes, (b / transportVisRes + 0.5f) / transportVisRes) * 2f - Vector2.One;
-                var d = OctDecode(uv);
-                if (Vector3.Dot(d, n) <= 0f) continue;
-                if (!scene.Any(new Ray(p, d), 0f, float.PositiveInfinity, (uint)(i * 7919 + b))) sunVis[i * visWords + b / 64] |= 1UL << (b % 64);
-            }
+            if (sunVisStage is null && sunVisMetal is null) SunVisCpu(i, sunVis);
         });
         ProgressEnd("transport: couplings");
+        sunVisWithCouplings = sunVisStage is null && sunVisMetal is null;
         }
+        }
+        if (couplingStage is null && useSunlets) FinalizeSunlets();
+        if (sunVisStage is null && !sunVisWithCouplings)
+        {
+            if (sunVisMetal is not null) SunVisOnMetal(sunVisMetal);
+            else Parallel.For(0, patches, i => SunVisCpu(i, sunVis));
+        }
+        // Each stage cached as soon as it is made, under its own key: a run that closes early (--texel-dump) keeps them.
+        if (transportGpu && couplingStage is null)
+            SaveCouplings(stageKeys.Couplings, new CouplingStage
+            {
+                Couplings = couplings, SunletCouplings = sunletCouplings,
+                SunletPos = sunletPos.ToArray(), SunletNrm = sunletNrm.ToArray(), SunletAlbedo = sunletAlbedo.ToArray(), Sky = sky,
+            });
+        if (transportGpu && sunVisStage is null) SaveSunVis(stageKeys.SunVis, sunVis);
         var cookSeconds = clock.Elapsed.TotalSeconds;
+
+        // R2 + R3 sky bins on Metal, in blocks of CouplingBlock patches: the patches' rays (as the CPU path draws them)
+        // traced for their closest hits; each hit on architecture its sunlet and its candidates, nearest first (as
+        // NearestVisibleOr ranks them); then the visibility rays in rounds, one batch a rank -- the facing candidates,
+        // the ones facing either way (with sunlets), then the own fallback's closest-hit ray -- each hit taking the first
+        // its line reaches. The hits' front faces and normals are the CPU's (its world triangles), not the kernel's
+        // (a region's mirrored triangles are stored with their winding swapped). The same accounting as the CPU path.
+        void CouplingsOnMetal(Blix.Graphics.MetalHWX.MetalRayTracer metal)
+        {
+            var metalClock = Stopwatch.StartNew();
+            BuildDenseGrid();
+            double gpuMs = 0;
+            long rayCount = 0;
+            var R = transportRays;
+            var C = transportCandidates;
+            // Where the time goes: each phase's wall time, and the collector's pauses.
+            var phase = new double[6];   // rays, trace (waiting on Metal), candidates, gather, accumulate, sort
+            var phaseNames = new[] { "rays", "Metal", "candidates", "gather", "accumulate", "classify" };
+            var phaseClock = new Stopwatch();
+            void Lap(int k) { phase[k] += phaseClock.Elapsed.TotalSeconds; phaseClock.Restart(); }
+            var pauseBefore = GC.GetTotalPauseDuration();
+            var gen2Before = GC.CollectionCount(2);
+            // The block's arrays, made once and reused: each block made hundreds of MB anew, and the collector's full
+            // passes over a heap holding the contact table, couplings and sunlets stalled every thread.
+            var maxTotal = Math.Min(CouplingBlock, patches) * R;
+            var rays = new Vector4[maxTotal * 2];
+            var dirs = new Vector3[maxTotal];
+            var state = new int[maxTotal];
+            var hp = new Vector3[maxTotal];
+            var hn = new Vector3[maxTotal];
+            var inst = new int[maxTotal];
+            var front = new bool[maxTotal];
+            var how = new int[maxTotal];
+            var cand = new int[maxTotal * C];
+            var anyCand = new int[maxTotal * C];
+            var nearestOf = new int[maxTotal];
+            var tried = new byte[maxTotal];
+            var anyTried = new byte[maxTotal];
+            var sunletOf = new int[maxTotal];
+            var visIds = new int[maxTotal];
+            var visTargets = new int[maxTotal];
+            var vis = new Vector4[maxTotal * 2];
+            var visNone = new bool[maxTotal];
+            var hits = new uint[maxTotal * 12];
+            var answers = new uint[maxTotal * 12];
+            ProgressBegin("transport: couplings (Metal)", patches);
+            phaseClock.Start();
+            for (var first = 0; first < patches; first += CouplingBlock)
+            {
+                var n = Math.Min(CouplingBlock, patches - first);
+                var total = n * R;
+                // 1. The patches' rays, closest hits.
+                Parallel.For(0, n, ii =>
+                {
+                    var i = first + ii;
+                    var r = new Random(1000 + i);
+                    var origin = pos[i] + nrm[i] * 1e-3f;
+                    for (var k = 0; k < R; k++)
+                    {
+                        var d = CosineHemisphereCpu(nrm[i], r);
+                        r.Next();
+                        var at = ii * R + k;
+                        dirs[at] = d;
+                        rays[2 * at] = new Vector4(origin, 0f);
+                        rays[2 * at + 1] = new Vector4(d, float.PositiveInfinity);
+                    }
+                });
+                Lap(0);
+                metal.TraceFromHost(rays.AsSpan(0, total * 2), hits, (uint)(first * R), closestOnly: true, out var ms);
+                gpuMs += ms;
+                rayCount += total;
+                Lap(1);
+                // 2. Each hit: sky, foliage, or a hit on architecture with its candidates.
+                const int Sky = -3, Leaf = -4, Pending = -1;
+                Parallel.For(0, total, at =>
+                {
+                    sunletOf[at] = -1;
+                    if ((hits[at * 12 + 3] & 1u) == 0) { state[at] = Sky; return; }
+                    var placement = (int)hits[at * 12 + 4];
+                    var triangle = (int)hits[at * 12 + 5];
+                    if ((surfaces[data.RowOf(placement, triangle)] >> 24) < 255u) { state[at] = Leaf; return; }
+                    var t = BitConverter.UInt32BitsToSingle(hits[at * 12]);
+                    var i = first + at / R;
+                    var d = dirs[at];
+                    var p = pos[i] + nrm[i] * 1e-3f + d * t;
+                    var (a, b, c) = Tri(placement, triangle);
+                    var faceN = Vector3.Normalize(Vector3.Cross(b - a, c - a));
+                    front[at] = Vector3.Dot(faceN, d) < 0f;
+                    var nn = front[at] ? faceN : -faceN;
+                    hp[at] = p; hn[at] = nn; inst[at] = placement;
+                    if (useSunlets) sunletOf[at] = SunletOf(p, nn, Albedo(placement, triangle));
+                    state[at] = Pending;
+                    how[at] = HowMiss;
+                    tried[at] = (byte)CollectCandidates(p, nn, anyFacing: false, cand.AsSpan(at * C, C), out nearestOf[at]);
+                });
+                Lap(2);
+                // 3. The visibility rounds.
+                // The pending hits whose candidate exists, gathered in parallel (per range, then concatenated in order).
+                int Gather(Func<int, int> candidateOf)
+                {
+                    var ranges = Environment.ProcessorCount * 4;
+                    var span = (total + ranges - 1) / ranges;
+                    var counts = new int[ranges];
+                    Parallel.For(0, ranges, g =>
+                    {
+                        var c = 0;
+                        for (var at = g * span; at < Math.Min(total, (g + 1) * span); at++)
+                            if (state[at] == Pending && candidateOf(at) >= 0) c++;
+                        counts[g] = c;
+                    });
+                    var offsets = new int[ranges];
+                    var sum = 0;
+                    for (var g = 0; g < ranges; g++) { offsets[g] = sum; sum += counts[g]; }
+                    Parallel.For(0, ranges, g =>
+                    {
+                        var o = offsets[g];
+                        for (var at = g * span; at < Math.Min(total, (g + 1) * span); at++)
+                        {
+                            if (state[at] != Pending) continue;
+                            var j = candidateOf(at);
+                            if (j < 0) continue;
+                            visIds[o] = at; visTargets[o] = j; o++;
+                        }
+                    });
+                    return sum;
+                }
+                void Round(Func<int, int> candidateOf, int howIfSeen)
+                {
+                    var count = Gather(candidateOf);
+                    if (count == 0) return;
+                    Parallel.For(0, count, q =>
+                    {
+                        var at = visIds[q];
+                        var j = visTargets[q];
+                        var origin = hp[at] + hn[at] * transportVisLift;
+                        var to = pos[j] + nrm[j] * transportVisLift - origin;
+                        var len = to.Length();
+                        visNone[q] = len < 1e-4f;
+                        vis[2 * q] = new Vector4(origin, 0f);
+                        vis[2 * q + 1] = visNone[q] ? new Vector4(0f, 1f, 0f, 0f) : new Vector4(to / len, len * 0.999f);
+                    });
+                    Lap(3);
+                    var answer = answers;
+                    metal.TraceFromHost(vis.AsSpan(0, count * 2), answer, (uint)(rayCount + first), closestOnly: true, out var vms);
+                    gpuMs += vms;
+                    rayCount += count;
+                    Lap(1);
+                    Parallel.For(0, count, q =>
+                    {
+                        var at = visIds[q];
+                        if (visNone[q] || (answer[q * 12 + 3] & 1u) == 0) { state[at] = visTargets[q]; how[at] = howIfSeen; }
+                    });
+                    Lap(3);
+                }
+                for (var rank = 0; rank < C; rank++)
+                {
+                    var rk = rank;
+                    Round(at => rk < tried[at] ? cand[at * C + rk] : -1, rk);
+                }
+                if (useSunlets)
+                {
+                    Parallel.For(0, total, at =>
+                    {
+                        if (state[at] != Pending) return;
+                        anyTried[at] = (byte)CollectCandidates(hp[at], hn[at], anyFacing: true, anyCand.AsSpan(at * C, C), out _);
+                    });
+                    Lap(2);
+                    for (var rank = 0; rank < C; rank++)
+                    {
+                        var rk = rank;
+                        Round(at => rk < anyTried[at] ? anyCand[at * C + rk] : -1, HowAnyFacing);
+                    }
+                }
+                if (transportOwnFallback)
+                {
+                    // One closest-hit ray to the nearest candidate: taken when what blocks it is the hit's own placement.
+                    var count = Gather(at => nearestOf[at]);
+                    if (count > 0)
+                    {
+                        Parallel.For(0, count, q =>
+                        {
+                            var at = visIds[q];
+                            var j = visTargets[q];
+                            var origin = hp[at] + hn[at] * transportVisLift;
+                            var to = pos[j] + nrm[j] * transportVisLift - origin;
+                            var len = to.Length();
+                            visNone[q] = len < 1e-4f;
+                            vis[2 * q] = new Vector4(origin, 0f);
+                            vis[2 * q + 1] = visNone[q] ? new Vector4(0f, 1f, 0f, 0f) : new Vector4(to / len, len * 0.999f);
+                        });
+                        Lap(3);
+                        var answer = answers;
+                        metal.TraceFromHost(vis.AsSpan(0, count * 2), answer, (uint)(rayCount + first), closestOnly: true, out var fms);
+                        gpuMs += fms;
+                        rayCount += count;
+                        Lap(1);
+                        Parallel.For(0, count, q =>
+                        {
+                            var at = visIds[q];
+                            var found = (answer[q * 12 + 3] & 1u) != 0;
+                            if (visNone[q] || found && (int)answer[q * 12 + 4] == inst[at]) { state[at] = visTargets[q]; how[at] = HowFallback; }
+                        });
+                        Lap(3);
+                    }
+                }
+                // 4. Per patch: its couplings, sunlets, sky bins and the accounting.
+                Parallel.For(0, n, ii =>
+                {
+                    var i = first + ii;
+                    var acc = new Dictionary<int, int>();
+                    var accSun = new Dictionary<int, int>();
+                    var lost = 0;
+                    for (var k = 0; k < R; k++)
+                    {
+                        var at = ii * R + k;
+                        switch (state[at])
+                        {
+                            case Sky:
+                                sky[i * TransportSkyRes * TransportSkyRes + OctBin(dirs[at], TransportSkyRes)] += 1f / R;
+                                continue;
+                            case Leaf:
+                                Interlocked.Increment(ref foliageHits);
+                                continue;
+                        }
+                        if (sunletOf[at] >= 0) accSun[sunletOf[at]] = accSun.GetValueOrDefault(sunletOf[at]) + 1;
+                        var j = state[at];
+                        if (transportMissWhy && front[at])
+                        {
+                            Interlocked.Increment(ref nearestHows[Math.Min(how[at], nearestHows.Length - 1)]);
+                            if (j >= 0 && (k & 15) == 0 && (how[at] is >= BaseCandidates and < HowAnyFacing || how[at] is HowFallback or HowAnyFacing))
+                                recoveredSamples!.Add((hp[at], hn[at], how[at] >= HowAnyFacing ? how[at] : BaseCandidates));
+                            if (j >= 0 && (k & 15) == 0 && how[at] == HowAnyFacing) eitherSamples!.Add((hp[at], hn[at], inst[at]));
+                        }
+                        if (j < 0)
+                        {
+                            lost++;
+                            if (!front[at]) Interlocked.Increment(ref droppedInside);
+                            else if (missSamples is not null && (k & 15) == 0) missSamples.Add((hp[at], hn[at], inst[at], i));
+                            continue;
+                        }
+                        acc[j] = acc.GetValueOrDefault(j) + 1;
+                    }
+                    couplings[i] = acc.Select(e => (e.Key, e.Value / (float)R)).ToArray();
+                    sunletCouplings[i] = accSun.Select(e => (e.Key, e.Value / (float)R)).ToArray();
+                    Interlocked.Add(ref dropped, lost);
+                });
+                Lap(4);
+                ProgressAdd("transport: couplings (Metal)", n);
+            }
+            ProgressEnd("transport: couplings (Metal)");
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza] transport: couplings on Metal, {patches:N0} patches, {rayCount:N0} rays in {metalClock.Elapsed.TotalSeconds:0.0} s ({gpuMs / 1000:0.0} s GPU); by phase {string.Join(", ", phase.Select((v, k) => $"{phaseNames[k]} {v:0.0} s"))}; collector paused {(GC.GetTotalPauseDuration() - pauseBefore).TotalSeconds:0.0} s in {GC.CollectionCount(2) - gen2Before} full collections."));
+        }
+
+        // The patches as flat arrays and their grid as a dense index (cell -> a range of patch ids), for the Metal path's
+        // candidate search: the dictionary of lists, looked up 27 times for each of Sponza's ~85M hits, was most of its
+        // couplings' 200 s (2026-10-13). Built once the patches are final (after the fill).
+        Vector3[] densePos = Array.Empty<Vector3>(), denseNrm = Array.Empty<Vector3>();
+        int[] denseStart = Array.Empty<int>(), denseItems = Array.Empty<int>();
+        int denseX = 0, denseY = 0, denseZ = 0, denseMinX = 0, denseMinY = 0, denseMinZ = 0;
+        void BuildDenseGrid()
+        {
+            densePos = pos.ToArray();
+            denseNrm = nrm.ToArray();
+            int minX = int.MaxValue, minY = int.MaxValue, minZ = int.MaxValue, maxX = int.MinValue, maxY = int.MinValue, maxZ = int.MinValue;
+            foreach (var (x, y, z) in grid.Keys)
+            {
+                minX = Math.Min(minX, x); minY = Math.Min(minY, y); minZ = Math.Min(minZ, z);
+                maxX = Math.Max(maxX, x); maxY = Math.Max(maxY, y); maxZ = Math.Max(maxZ, z);
+            }
+            if (grid.Count == 0) { minX = minY = minZ = 0; maxX = maxY = maxZ = 0; }
+            denseMinX = minX; denseMinY = minY; denseMinZ = minZ;
+            denseX = maxX - minX + 1; denseY = maxY - minY + 1; denseZ = maxZ - minZ + 1;
+            var cells = denseX * denseY * denseZ;
+            denseStart = new int[cells + 1];
+            foreach (var ((x, y, z), list) in grid) denseStart[((z - minZ) * denseY + (y - minY)) * denseX + (x - minX) + 1] = list.Count;
+            for (var c = 0; c < cells; c++) denseStart[c + 1] += denseStart[c];
+            denseItems = new int[denseStart[cells]];
+            foreach (var ((x, y, z), list) in grid)
+                list.CopyTo(denseItems, denseStart[((z - minZ) * denseY + (y - minY)) * denseX + (x - minX)]);
+        }
+
+        // The candidates NearestVisibleOr would try, nearest first (by its ranking), into `into`; returns how many to try
+        // (the far cutoff's limit); nearest: the nearest within OwnFallbackReach (-1: none). Reads the dense grid.
+        int CollectCandidates(Vector3 p, Vector3 n, bool anyFacing, Span<int> into, out int nearest)
+        {
+            var (kx, ky, kz) = Key(p);
+            var candidates = into.Length;
+            Span<float> bestD = stackalloc float[candidates];
+            into.Fill(-1);
+            bestD.Fill(float.MaxValue);
+            // The 27 cells nearest first (by the point's distance to each), and a cell no nearer than the current last
+            // candidate skipped: the distance is a lower bound on every key in it (the angle penalty only adds).
+            Span<float> cellD = stackalloc float[27];
+            Span<int> order = stackalloc int[27];
+            for (var c = 0; c < 27; c++)
+            {
+                int ox = c % 3 - 1, oy = c / 3 % 3 - 1, oz = c / 9 - 1;
+                float Gap(float v, int k, int o) => o == 0 ? 0f : o < 0 ? v - k * cell : (k + 1) * cell - v;
+                var gx = Gap(p.X, kx, ox); var gy = Gap(p.Y, ky, oy); var gz = Gap(p.Z, kz, oz);
+                cellD[c] = gx * gx + gy * gy + gz * gz;
+                order[c] = c;
+            }
+            for (var a = 1; a < 27; a++)
+            {
+                var key = order[a];
+                var b = a - 1;
+                while (b >= 0 && cellD[order[b]] > cellD[key]) { order[b + 1] = order[b]; b--; }
+                order[b + 1] = key;
+            }
+            for (var oc = 0; oc < 27; oc++)
+            {
+                var c = order[oc];
+                if (cellD[c] >= bestD[candidates - 1]) break;
+                int gx2 = kx + c % 3 - 1 - denseMinX, gy2 = ky + c / 3 % 3 - 1 - denseMinY, gz2 = kz + c / 9 - 1 - denseMinZ;
+                if ((uint)gx2 >= (uint)denseX || (uint)gy2 >= (uint)denseY || (uint)gz2 >= (uint)denseZ) continue;
+                var ci = (gz2 * denseY + gy2) * denseX + gx2;
+                for (var q = denseStart[ci]; q < denseStart[ci + 1]; q++)
+                {
+                    var j = denseItems[q];
+                    var facing = Vector3.Dot(denseNrm[j], n);
+                    if (!anyFacing && facing < transportFacingCos) continue;
+                    var turn = anyFacing ? 0f : facingPenalty * (1f - facing);
+                    var d2 = Vector3.DistanceSquared(densePos[j], p) + turn * turn;
+                    if (d2 >= bestD[candidates - 1]) continue;
+                    var at = candidates - 1;
+                    while (at > 0 && bestD[at - 1] > d2) { bestD[at] = bestD[at - 1]; into[at] = into[at - 1]; at--; }
+                    bestD[at] = d2;
+                    into[at] = j;
+                }
+            }
+            var firstDistance2 = into[0] >= 0 ? Vector3.DistanceSquared(densePos[into[0]], p) : float.MaxValue;
+            nearest = firstDistance2 <= OwnFallbackReach * OwnFallbackReach ? into[0] : -1;
+            var count = 0;
+            while (count < candidates && into[count] >= 0) count++;
+            return firstDistance2 > transportFarCutoff * transportFarCutoff ? Math.Min(count, BaseCandidates) : count;
+        }
+
+        // R3 sun visibility, one patch on the CPU: whether each direction bin it faces reaches the sky.
+        void SunVisCpu(int i, ulong[] into)
+        {
+            var p = pos[i] + nrm[i] * 1e-3f;
+            var n = nrm[i];
+            for (var b = 0; b < transportVisRes * transportVisRes; b++)
+            {
+                var d = SunVisDirection(b);
+                if (Vector3.Dot(d, n) <= 0f) continue;
+                if (!scene.Any(new Ray(p, d), 0f, float.PositiveInfinity, (uint)(i * 7919 + b))) into[i * visWords + b / 64] |= 1UL << (b % 64);
+            }
+        }
+        Vector3 SunVisDirection(int b)
+        {
+            var uv = new Vector2((b % transportVisRes + 0.5f) / transportVisRes, (b / transportVisRes + 0.5f) / transportVisRes) * 2f - Vector2.One;
+            return OctDecode(uv);
+        }
+        // R3 on Metal (the lightlet bake's dense pass: the point faces the direction and nothing is in the way, from
+        // 1 mm off, one coverage coin for every ray): about half the cook before the patches' visibility tests was
+        // these rays on the CPU. --transport-sunvis-check: the first SunVisCheckPatches on the CPU too, the bits that
+        // differ reported.
+        void SunVisOnMetal(Blix.Graphics.MetalHWX.MetalRayTracer metal)
+        {
+            var sunClock = Stopwatch.StartNew();
+            var bins = transportVisRes * transportVisRes;
+            var words32 = (bins + 31) / 32;
+            var points = new Vector4[patches * 2];
+            for (var i = 0; i < patches; i++) { points[2 * i] = new Vector4(pos[i], 0f); points[2 * i + 1] = new Vector4(nrm[i], 0f); }
+            var dirs = new Vector4[bins];
+            for (var b = 0; b < bins; b++) dirs[b] = new Vector4(SunVisDirection(b), 0f);
+            ProgressBegin("transport: sun visibility (Metal)", 0);
+            var bits = metal.LightletVisibility(points, dirs, words32, 7919u, 1e-3f, float.PositiveInfinity, out var gpuMs);
+            ProgressEnd("transport: sun visibility (Metal)");
+            for (var i = 0; i < patches; i++)
+                for (var w = 0; w < words32; w++)
+                {
+                    var word = bits[i * words32 + w];
+                    if (word == 0) continue;
+                    var b0 = w * 32;
+                    sunVis[i * visWords + b0 / 64] |= (ulong)word << (b0 % 64);
+                }
+            var line = string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza] transport: sun visibility on Metal, {patches:N0} patches x {bins} directions in {sunClock.Elapsed.TotalSeconds:0.0} s ({gpuMs:0} ms GPU)");
+            if (transportSunVisCheck)
+            {
+                var check = Math.Min(patches, SunVisCheckPatches);
+                var cpu = new ulong[check * visWords];
+                Parallel.For(0, check, i => SunVisCpu(i, cpu));
+                long differ = 0, set = 0;
+                for (var k = 0; k < check * visWords; k++)
+                {
+                    differ += System.Numerics.BitOperations.PopCount(cpu[k] ^ sunVis[k]);
+                    set += System.Numerics.BitOperations.PopCount(cpu[k]);
+                }
+                line += string.Create(CultureInfo.InvariantCulture, $"; against the CPU on {check:N0} patches: {differ:N0} bits differ of {set:N0} set on the CPU");
+            }
+            Console.WriteLine(line + ".");
+        }
         // Why a front-face hit found no patch it could see: no patch facing its way within the 27 cells, or the nearest
         // ones blocked -- by the hit's own placement (a fold, a moulding: the patch behind a bump of the same piece) or
         // another; how far the nearest was; by the hit's placement.
@@ -922,7 +1478,14 @@ internal sealed partial class SponzaLoop
         // own openness is held against (texel_gather.comp): the patches' light, scaled by how much more or less open
         // the texel is than the patches around it.
         var openness = new float[patches];
-        if (cached is not null) openness = cached.Openness;
+        var opennessFree = new int[patches];
+        if (patchStage is not null) openness = patchStage.Openness;
+        else if (transportGpu && ContactTraceAll(scene, patches * 256L, r =>
+                 {
+                     var i = (int)(r / 256);
+                     return (pos[i] + nrm[i] * 0.01f, CosineHashed(nrm[i], RayHash(i, (int)(r % 256), 6151u)), TexelOpenReach);
+                 }, (r, kind, _) => { if (kind == 0) Interlocked.Increment(ref opennessFree[(int)(r / 256)]); }, 6151u, "transport: openness (Metal)"))
+            for (var i = 0; i < patches; i++) openness[i] = opennessFree[i] / 256f;
         else if (transportGpu)
             Parallel.For(0, patches, i =>
             {
@@ -933,6 +1496,8 @@ internal sealed partial class SponzaLoop
                     if (!scene.Any(new Ray(pos[i] + nrm[i] * 0.01f, CosineHemisphereCpu(nrm[i], r)), 0f, TexelOpenReach, (uint)r.Next())) free++;
                 openness[i] = free / (float)tests;
             });
+        if (transportGpu && patchStage is null)
+            SavePatches(stageKeys.Patches, new PatchStage { Pos = pos.ToArray(), Nrm = nrm.ToArray(), Albedo = albedo.ToArray(), Openness = openness });
         var guides = BuildGuides(outgoing, sunletOut);
         OnMain(() =>
         {
@@ -1027,19 +1592,22 @@ internal sealed partial class SponzaLoop
             Console.WriteLine("    exposed, by the hit's placement:");
             foreach (var (name, c) in byName.OrderByDescending(x => x.Value).Take(12))
                 Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {c,7:N0}  {name}"));
+            var eitherFamilies = byName.GroupBy(x => x.Key.Split('_')[0]).Select(g => (g.Key, g.Sum(x => x.Value))).OrderByDescending(x => x.Item2).Take(10);
+            Console.WriteLine("    exposed, by family: " + string.Join(", ", eitherFamilies.Select(f => string.Create(CultureInfo.InvariantCulture, $"{f.Key} {f.Item2:N0}"))));
             Console.WriteLine("    exposed, by what blocks the line:");
             foreach (var (name, c) in blockers.OrderByDescending(x => x.Value).Take(12))
                 Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {c,7:N0}  {name}"));
         }
         var lightmapBake = lightmapEnabled && transportTexels && lightmapSources.Count > 0 ? BakeLightmapTexels(scene, cacheKey) : null;
         TexelBake? texelBake;
-        if (cached?.Texels is { } cachedTexels)
+        if (texelStage is { } cachedTexels)
         {
             texelBake = cachedTexels;
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] texels: {cachedTexels.Count:N0} from the cache."));
         }
         else texelBake = CookTexels(scene, Tri, (i, t) => (surfaces[data.RowOf(i, t)] >> 24) < 255u,
             (i, t) => lightmapBake is not null && rayPlacementLightmapped[(int)data.RowPlacements[data.RowOf(i, t)]] ? 1 : 0);
+        if (transportGpu && texelStage is null && transportTexels && texelBake is not null) SaveTexels(stageKeys.Texels, texelBake);
         if (texelBake is { } hashed)
         {
             // The baked light (SponzaLoop.LightBake.cs), read here off the frame thread; without it, the bake begins
@@ -1064,17 +1632,12 @@ internal sealed partial class SponzaLoop
                 resolved = null;
             });
         }
-        if (transportGpu && (cached is null || (transportTexels && cached.Texels is null)))
-            SaveTransportCache(cacheKey, new TransportCache
-            {
-                Pos = pos.ToArray(), Nrm = nrm.ToArray(), Albedo = albedo.ToArray(), Openness = openness,
-                Couplings = couplings, SunletCouplings = sunletCouplings,
-                SunletPos = sunletPos.ToArray(), SunletNrm = sunletNrm.ToArray(), SunletAlbedo = sunletAlbedo.ToArray(),
-                Sky = sky, SunVis = sunVis, Texels = texelBake,
-            });
         // transportRelight (above) closes over this method's locals, and a closure keeps every local it shares a scope
-        // with: drop the big ones it never reads (the cache as read, the texels and the atlas's records, both uploaded).
-        cached = null;
+        // with: drop the big ones it never reads (the stages as read, the texels and the atlas's records, both uploaded).
+        patchStage = null;
+        couplingStage = null;
+        sunVisStage = null;
+        texelStage = null;
         texelBake = null;
         lightmapBake = null;
     }

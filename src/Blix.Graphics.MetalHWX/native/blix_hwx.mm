@@ -369,6 +369,32 @@ kernel void blix_buried(device const float4* records [[buffer(0)]],
     buried[i] = back >= p.threshold || enclosed ? 1u : 0u;
 }
 
+// The closest hit with contacts (hwx_contact_trace): per ray (two float4s: origin + unused, direction + tMax) what
+// blix_buried_hit answers -- 0 nothing, 1 a front face, 2 a back face (a contact read as one) -- and the face's
+// placement. The demo's inside-a-solid tests (patches, hashed texels) ask exactly this, on the CPU as
+// ClosestThroughContacts; the same coverage coin as the buried test (no texture alpha).
+kernel void blix_contact_trace(device const float4* rays [[buffer(0)]],
+                               device uint2* answers [[buffer(1)]],
+                               instance_acceleration_structure tlas [[buffer(2)]],
+                               intersection_function_table<triangle_data, instancing> table [[buffer(3)]],
+                               constant uint4& p [[buffer(4)]],
+                               device const uint* primRows [[buffer(5)]],
+                               device const uint2* entryRows [[buffer(6)]],
+                               device const BlixRayInstance* instances [[buffer(7)]],
+                               device const uint4* triangles [[buffer(8)]],
+                               device const uint2* owners [[buffer(9)]],
+                               device const uint* contactStart [[buffer(10)]],
+                               device const float4* contactTris [[buffer(11)]],
+                               uint i [[thread_position_in_grid]])
+{
+    if (i >= p.x) return;
+    BuriedScene sc = { primRows, entryRows, instances, triangles, owners, contactStart, contactTris, p.z };
+    float4 d = rays[i * 2u + 1u];
+    uint placement = 0xFFFFFFFFu;
+    uint kind = blix_buried_hit(rays[i * 2u].xyz, d.xyz, d.w, tlas, table, blix_pcg(p.y + i), sc, placement);
+    answers[i] = uint2(kind, placement);
+}
+
 // Lightlets (VulkanSponza, SponzaLoop.LightletBake): visibility of surface points toward directions, as bits (1: the point
 // faces the direction and nothing is in the way). One coverage coin seed for the whole bake, so a partly covered
 // triangle is opaque or clear the same way in every direction from a point: visibility over directions is coherent.
@@ -440,6 +466,8 @@ struct HwxContext {
     id<MTLComputePipelineState> shadowPso;
     id<MTLComputePipelineState> buriedPso;            // blix_buried, with its own table
     id<MTLIntersectionFunctionTable> buriedTable;
+    id<MTLComputePipelineState> contactPso;           // blix_contact_trace, with its own table
+    id<MTLIntersectionFunctionTable> contactTable;
     id<MTLComputePipelineState> lightletDensePso, lightletRingsPso;   // the lightlet bake, each with its own table
     id<MTLIntersectionFunctionTable> lightletDenseTable, lightletRingsTable;
     id<MTLIntersectionFunctionTable> shadowTable;       // the coverage coin, as the software batch
@@ -517,6 +545,9 @@ HWX_EXPORT HwxContext* hwx_create(void* mtlDevice, char* err, int errLength) {
         id<MTLIntersectionFunctionTable> buriedTable;
         id<MTLComputePipelineState> buriedPso = pipeline(@"blix_buried", &buriedTable);
         if (!buriedPso) return report([@"buried-test pipeline: " stringByAppendingString:error.localizedDescription]);
+        id<MTLIntersectionFunctionTable> contactTable;
+        id<MTLComputePipelineState> contactPso = pipeline(@"blix_contact_trace", &contactTable);
+        if (!contactPso) return report([@"contact-trace pipeline: " stringByAppendingString:error.localizedDescription]);
         id<MTLIntersectionFunctionTable> lightletDenseTable, lightletRingsTable;
         id<MTLComputePipelineState> lightletDensePso = pipeline(@"blix_lightlet_dense", &lightletDenseTable);
         if (!lightletDensePso) return report([@"lightlet pipeline: " stringByAppendingString:error.localizedDescription]);
@@ -539,6 +570,8 @@ HWX_EXPORT HwxContext* hwx_create(void* mtlDevice, char* err, int errLength) {
         ctx->shadowAlphaTable = shadowAlphaTable;
         ctx->buriedPso = buriedPso;
         ctx->buriedTable = buriedTable;
+        ctx->contactPso = contactPso;
+        ctx->contactTable = contactTable;
         ctx->lightletDensePso = lightletDensePso;
         ctx->lightletDenseTable = lightletDenseTable;
         ctx->lightletRingsPso = lightletRingsPso;
@@ -588,7 +621,7 @@ HWX_EXPORT int hwx_build(HwxContext* ctx,
         ctx->alphaOn = nil;
         ctx->rowMaterial = ctx->materials = ctx->uvs = ctx->alphaOff;
         for (id<MTLIntersectionFunctionTable> table : {ctx->table, ctx->shadowTable, ctx->shadowAlphaTable, ctx->buriedTable,
-                                                       ctx->lightletDenseTable, ctx->lightletRingsTable}) {
+                                                       ctx->contactTable, ctx->lightletDenseTable, ctx->lightletRingsTable}) {
             [table setBuffer:ctx->primRows offset:0 atIndex:0];
             [table setBuffer:ctx->entryRows offset:0 atIndex:1];
             [table setBuffer:ctx->instances offset:0 atIndex:2];
@@ -745,6 +778,103 @@ HWX_EXPORT int hwx_trace(HwxContext* ctx, void* rays, void* hits, uint32_t count
             [cbs[k] waitUntilCompleted];
             if (!Completed(ctx, cbs[k], "trace")) return 1;
             if (gpuMs) gpuMs[k] = (cbs[k].GPUEndTime - cbs[k].GPUStartTime) * 1e3;
+        }
+        return 0;
+    }
+}
+
+// blix_contact_trace over `count` rays in host memory into `answers` (two uints each: 0 nothing, 1 front, 2 back; the
+// placement), in chunks, each waited for; the contact table as hwx_buried's. Callable off the frame's thread.
+HWX_EXPORT int hwx_contact_trace(HwxContext* ctx, const float* rays, uint32_t count, uint32_t seed,
+                                 const uint32_t* contactStart, uint32_t contactRows, const float* contactTris, uint32_t contactCount,
+                                 uint32_t* answers, double* gpuMs) {
+    @autoreleasepool {
+        if (!ctx->tlas) return Fail(ctx, "contact trace before build");
+        id<MTLDevice> device = ctx->device;
+        uint32_t noStart[2] = {0, 0};
+        float noTris[12] = {0};
+        id<MTLBuffer> starts = [device newBufferWithBytes:(contactRows > 0 ? contactStart : noStart) length:uint64_t(std::max<uint32_t>(contactRows, 2)) * 4 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> tris = [device newBufferWithBytes:(contactCount > 0 ? contactTris : noTris) length:uint64_t(std::max<uint32_t>(contactCount, 1)) * 48 options:MTLResourceStorageModeShared];
+        const uint32_t chunk = 1u << 20;   // as hwx_trace_host's
+        if (gpuMs) *gpuMs = 0.0;
+        for (uint32_t first = 0; first < count; first += chunk) {
+            uint32_t n = std::min(chunk, count - first);
+            id<MTLBuffer> in = [device newBufferWithBytes:rays + uint64_t(first) * 8 length:uint64_t(n) * 32 options:MTLResourceStorageModeShared];
+            id<MTLBuffer> out = [device newBufferWithLength:uint64_t(n) * 8 options:MTLResourceStorageModeShared];
+            id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
+            cb.label = @"blix-hwx contact trace";
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:ctx->contactPso];
+            [enc setBuffer:in offset:0 atIndex:0];
+            [enc setBuffer:out offset:0 atIndex:1];
+            [enc setAccelerationStructure:ctx->tlas atBufferIndex:2];
+            [enc setIntersectionFunctionTable:ctx->contactTable atBufferIndex:3];
+            uint32_t params[4] = {n, seed + first, contactRows > 0 ? contactRows : 2u, 0};
+            [enc setBytes:params length:sizeof(params) atIndex:4];
+            [enc setBuffer:ctx->primRows offset:0 atIndex:5];
+            [enc setBuffer:ctx->entryRows offset:0 atIndex:6];
+            [enc setBuffer:ctx->instances offset:0 atIndex:7];
+            [enc setBuffer:ctx->triangles offset:0 atIndex:8];
+            [enc setBuffer:ctx->owners offset:0 atIndex:9];
+            [enc setBuffer:starts offset:0 atIndex:10];
+            [enc setBuffer:tris offset:0 atIndex:11];
+            [enc useResources:ctx->blas.data() count:ctx->blas.size() usage:MTLResourceUsageRead];
+            id<MTLResource> tableBuffers[] = {ctx->surfaces, ctx->alphaOff, ctx->rowMaterial, ctx->materials, ctx->uvs};
+            [enc useResources:tableBuffers count:5 usage:MTLResourceUsageRead];
+            [enc dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+            [enc endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
+            if (!Completed(ctx, cb, "contact trace")) return 1;
+            if (gpuMs) *gpuMs += (cb.GPUEndTime - cb.GPUStartTime) * 1e3;
+            memcpy(answers + uint64_t(first) * 2, out.contents, uint64_t(n) * 8);
+        }
+        return 0;
+    }
+}
+
+// hwx_trace from host memory: `count` rays (two float4s each: origin + tMin, direction + tMax) in, their hits (three
+// uint4s each, as hwx_trace writes them) out, in chunks, each waited for. Touches no device buffer: callable off the
+// frame's thread (a cook's), as hwx_buried.
+HWX_EXPORT int hwx_trace_host(HwxContext* ctx, const float* rays, uint32_t count, uint32_t seedBase, uint32_t closestOnly,
+                              uint32_t* hits, double* gpuMs) {
+    @autoreleasepool {
+        if (!ctx->tlas) return Fail(ctx, "trace before build");
+        id<MTLDevice> device = ctx->device;
+        const uint32_t chunk = 1u << 20;   // a command buffer short of the GPU watchdog, beside a frame on the same queue
+        if (gpuMs) *gpuMs = 0.0;
+        for (uint32_t first = 0; first < count; first += chunk) {
+            uint32_t n = std::min(chunk, count - first);
+            id<MTLBuffer> rayBuffer = [device newBufferWithBytes:rays + uint64_t(first) * 8 length:uint64_t(n) * 32 options:MTLResourceStorageModeShared];
+            id<MTLBuffer> hitBuffer = [device newBufferWithLength:uint64_t(n) * 48 options:MTLResourceStorageModeShared];
+            id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
+            cb.label = @"blix-hwx trace (host)";
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:ctx->pso];
+            [enc setBuffer:rayBuffer offset:0 atIndex:0];
+            [enc setBuffer:hitBuffer offset:0 atIndex:1];
+            [enc setAccelerationStructure:ctx->tlas atBufferIndex:2];
+            [enc setIntersectionFunctionTable:ctx->table atBufferIndex:3];
+            uint32_t params[4] = {n, seedBase + first, closestOnly, 0};
+            [enc setBytes:params length:sizeof(params) atIndex:4];
+            [enc setBuffer:ctx->primRows offset:0 atIndex:5];
+            [enc setBuffer:ctx->entryRows offset:0 atIndex:6];
+            [enc setBuffer:ctx->instances offset:0 atIndex:7];
+            [enc setBuffer:ctx->triangles offset:0 atIndex:8];
+            [enc setBuffer:ctx->positions offset:0 atIndex:9];
+            [enc setBuffer:ctx->owners offset:0 atIndex:10];
+            [enc setBuffer:ctx->surfaces offset:0 atIndex:11];
+            [enc setBuffer:rayBuffer offset:0 atIndex:12];
+            [enc useResources:ctx->blas.data() count:ctx->blas.size() usage:MTLResourceUsageRead];
+            id<MTLResource> alphaBuffers[] = {ctx->alphaOff, ctx->rowMaterial, ctx->materials, ctx->uvs};
+            [enc useResources:alphaBuffers count:4 usage:MTLResourceUsageRead];
+            [enc dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+            [enc endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
+            if (!Completed(ctx, cb, "trace (host)")) return 1;
+            if (gpuMs) *gpuMs += (cb.GPUEndTime - cb.GPUStartTime) * 1e3;
+            memcpy(hits + uint64_t(first) * 12, hitBuffer.contents, uint64_t(n) * 48);
         }
         return 0;
     }

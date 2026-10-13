@@ -21,26 +21,40 @@ internal sealed partial class SponzaLoop
     // 6: the patches' and the hashed texels' inside-a-solid tests read a coplanar contact as the back face it also is
     // (ClosestThroughContacts): patches had survived inside the crevices' corner block.
     // 7: contacts read from a table of coplanar opposite faces, not by jittered retries.
-    private const int TransportCacheVersion = 7;
+    // 8: the cache by stage (patches, sun visibility, couplings, texels), each under its own key.
+    private const int TransportCacheVersion = 8;
     private string? sceneAssetsRoot;
 
-    internal sealed class TransportCache
+    // The cook's stages, each cached on its own under a key of what it depends on (TransportStageKeys): a change to how
+    // hits find patches re-cooks the couplings alone, not the patches, the sun visibility or the texels.
+    //   patches      positions, normals, albedos, openness   the scene, the spacing, the fill
+    //   sun vis      the sun-visibility bins                 the patches, the bins' resolution
+    //   couplings    couplings to patches and sunlets, the sunlets, the sky bins
+    //                                                        the patches, the rays and every rule a hit finds its patch by
+    //   texels       the hashed texels                       the scene, the texel settings
+    // Combined: all four, the key what is made from the cook downstream is filed under (light bakes, buried flags, the
+    // split light's parts).
+    internal sealed record TransportStageKeys(string Patches, string SunVis, string Couplings, string Texels, string Combined);
+
+    internal sealed class PatchStage
     {
         public Vector3[] Pos = Array.Empty<Vector3>(), Nrm = Array.Empty<Vector3>(), Albedo = Array.Empty<Vector3>();
         public float[] Openness = Array.Empty<float>();
+    }
+
+    internal sealed class CouplingStage
+    {
         public (int To, float W)[][] Couplings = Array.Empty<(int, float)[]>();
         public (int To, float W)[][] SunletCouplings = Array.Empty<(int, float)[]>();
         public Vector3[] SunletPos = Array.Empty<Vector3>(), SunletNrm = Array.Empty<Vector3>(), SunletAlbedo = Array.Empty<Vector3>();
         public float[] Sky = Array.Empty<float>();
-        public ulong[] SunVis = Array.Empty<ulong>();
-        public TexelBake? Texels;
     }
 
     // Everything the cook reads: what is TRACED -- every instance's transform, triangle and vertex counts and sampled
     // positions, and the surface table (albedo, alpha coverage) in full -- the scene's files (path, size, time), the
     // settings it is cooked under, the version. Hashing the traced scene rather than listing the flags that shape it
     // (--ray-lod-error, --no-foliage, any to come) keeps an A/B from reading another configuration's cook.
-    private string TransportCacheKey(RayQueryScene traced, uint[] surfaces)
+    private TransportStageKeys TransportCacheKeys(RayQueryScene traced, uint[] surfaces)
     {
         var sb = new StringBuilder();
         sb.Append(CultureInfo.InvariantCulture, $"instances {traced.Instances.Count};");
@@ -71,8 +85,6 @@ internal sealed partial class SponzaLoop
             sb.Append(Convert.ToHexString(sha.GetHashAndReset())).Append(';');
         }
         sb.Append(CultureInfo.InvariantCulture, $"v{TransportCacheVersion};{scene.Name};");
-        sb.Append(CultureInfo.InvariantCulture, $"spacing {transportSpacing};rays {transportRays};vis {transportVisRes};sunlet {transportSunlet};charts False;candidates {transportCandidates} lift {transportVisLift}{(transportOwnFallback ? " own fallback" : "")} far {transportFarCutoff} facing {transportFacingCos} {transportFacingWeight};");
-        sb.Append(CultureInfo.InvariantCulture, $"texels {transportTexels};texel {texelSpacing};levels {texelLevels};reach {TexelOpenReach};lightmap {lightmapEnabled} (the atlas is level 0);");
         sb.Append(CultureInfo.InvariantCulture, $"bounds {sceneBoundsMin};{sceneBoundsSpan};");
         if (sceneAssetsRoot is { } root && Directory.Exists(root))
             foreach (var f in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
@@ -84,71 +96,102 @@ internal sealed partial class SponzaLoop
                 var info = new FileInfo(f);
                 sb.Append(CultureInfo.InvariantCulture, $"{Path.GetRelativePath(root, f)}:{info.Length}:{info.LastWriteTimeUtc.Ticks};");
             }
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString())))[..24].ToLowerInvariant();
+        var scenePart = sb.ToString();
+        static string Hash(string text) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)))[..24].ToLowerInvariant();
+        // How a hit finds its patch: the couplings depend on it, and the fill (which asks the same question) too.
+        var finding = string.Create(CultureInfo.InvariantCulture,
+            $"candidates {transportCandidates} lift {transportVisLift} far {transportFarCutoff} facing {transportFacingCos} {transportFacingWeight}");
+        var patches = Hash(scenePart + string.Create(CultureInfo.InvariantCulture,
+            $"patches;spacing {transportSpacing};reach {TexelOpenReach};{(transportFill ? $"fill {transportFillRays} x{transportFillPasses} {finding}" : "no fill")}"));
+        var sunVis = Hash(patches + string.Create(CultureInfo.InvariantCulture, $";sun vis {transportVisRes}"));
+        var couplings = Hash(patches + string.Create(CultureInfo.InvariantCulture,
+            $";couplings;rays {transportRays};sunlet {transportSunlet};{finding}{(transportOwnFallback ? " own fallback" : "")}"));
+        var texels = Hash(scenePart + string.Create(CultureInfo.InvariantCulture,
+            $"texels {transportTexels};texel {texelSpacing};levels {texelLevels};reach {TexelOpenReach};lightmap {lightmapEnabled} (the atlas is level 0);"));
+        return new TransportStageKeys(patches, sunVis, couplings, texels, Hash($"{patches};{sunVis};{couplings};{texels}"));
     }
 
     private static string TransportCachePath(string key) =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".cache", "blix", "transport", key + ".bin");
 
-    private static TransportCache? LoadTransportCache(string key)
+    private static string TransportStagePath(string key, string stage) =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".cache", "blix", "transport", $"{key}.{stage}");
+
+    // A stage's file: its name, the version and its key, then what `read` reads; null when absent, another version's
+    // or another key's, or unreadable.
+    private static T? LoadStage<T>(string key, string stage, Func<BinaryReader, T> read) where T : class
     {
-        var path = TransportCachePath(key);
+        var path = TransportStagePath(key, stage);
         if (!File.Exists(path)) return null;
         var clock = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             using var stream = new BufferedStream(File.OpenRead(path), 1 << 22);
             using var r = new BinaryReader(stream);
-            if (r.ReadString() != "blix-transport-cache" || r.ReadInt32() != TransportCacheVersion || r.ReadString() != key) return null;
-            var c = new TransportCache
-            {
-                Pos = ReadArray<Vector3>(r), Nrm = ReadArray<Vector3>(r), Albedo = ReadArray<Vector3>(r), Openness = ReadArray<float>(r),
-                Couplings = ReadJagged(r), SunletCouplings = ReadJagged(r),
-                SunletPos = ReadArray<Vector3>(r), SunletNrm = ReadArray<Vector3>(r), SunletAlbedo = ReadArray<Vector3>(r),
-                Sky = ReadArray<float>(r), SunVis = ReadArray<ulong>(r),
-            };
-            if (r.ReadBoolean())
-            {
-                var table = ReadArray<uint>(r);
-                var texels = ReadArray<Vector4>(r);
-                var count = r.ReadInt32(); var capacity = r.ReadInt32();
-                var grid = new Vector4(r.ReadSingle(), r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
-                c.Texels = new TexelBake(table, texels, count, capacity, grid);
-            }
+            if (r.ReadString() != "blix-transport-" + stage || r.ReadInt32() != TransportCacheVersion || r.ReadString() != key) return null;
+            var value = read(r);
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                $"[VulkanSponza] transport: cooked data read from the cache ({new FileInfo(path).Length / 1048576.0:0} MB, {clock.Elapsed.TotalSeconds:0.0} s): {path}"));
-            return c;
+                $"[VulkanSponza] transport: {stage} read from the cache ({new FileInfo(path).Length / 1048576.0:0} MB, {clock.Elapsed.TotalSeconds:0.0} s)."));
+            return value;
         }
         catch (Exception e) when (e is IOException or EndOfStreamException or InvalidDataException)
         {
-            Console.WriteLine($"[VulkanSponza] transport: the cache at {path} could not be read ({e.Message}); cooking.");
+            Console.WriteLine($"[VulkanSponza] transport: the {stage} cache at {path} could not be read ({e.Message}); cooking it.");
             return null;
         }
     }
 
-    private static void SaveTransportCache(string key, TransportCache c)
+    private static void SaveStage(string key, string stage, Action<BinaryWriter> write)
     {
-        var path = TransportCachePath(key);
+        var path = TransportStagePath(key, stage);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         var temp = path + ".partial";
         using (var stream = new BufferedStream(File.Create(temp), 1 << 22))
         using (var w = new BinaryWriter(stream))
         {
-            w.Write("blix-transport-cache"); w.Write(TransportCacheVersion); w.Write(key);
-            WriteArray(w, c.Pos); WriteArray(w, c.Nrm); WriteArray(w, c.Albedo); WriteArray(w, c.Openness);
-            WriteJagged(w, c.Couplings); WriteJagged(w, c.SunletCouplings);
-            WriteArray(w, c.SunletPos); WriteArray(w, c.SunletNrm); WriteArray(w, c.SunletAlbedo);
-            WriteArray(w, c.Sky); WriteArray(w, c.SunVis);
-            w.Write(c.Texels is not null);
-            if (c.Texels is { } t)
-            {
-                WriteArray(w, t.Table); WriteArray(w, t.Texels); w.Write(t.Count); w.Write(t.Capacity);
-                w.Write(t.Grid.X); w.Write(t.Grid.Y); w.Write(t.Grid.Z); w.Write(t.Grid.W);
-            }
+            w.Write("blix-transport-" + stage); w.Write(TransportCacheVersion); w.Write(key);
+            write(w);
         }
         File.Move(temp, path, overwrite: true);
-        Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] transport: cooked data cached ({new FileInfo(path).Length / 1048576.0:0} MB): {path}"));
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] transport: {stage} cached ({new FileInfo(path).Length / 1048576.0:0} MB)."));
     }
+
+    private static PatchStage? LoadPatches(string key) => LoadStage(key, "patches", r => new PatchStage
+        { Pos = ReadArray<Vector3>(r), Nrm = ReadArray<Vector3>(r), Albedo = ReadArray<Vector3>(r), Openness = ReadArray<float>(r) });
+
+    private static void SavePatches(string key, PatchStage p) => SaveStage(key, "patches", w =>
+        { WriteArray(w, p.Pos); WriteArray(w, p.Nrm); WriteArray(w, p.Albedo); WriteArray(w, p.Openness); });
+
+    private static CouplingStage? LoadCouplings(string key) => LoadStage(key, "couplings", r => new CouplingStage
+    {
+        Couplings = ReadJagged(r), SunletCouplings = ReadJagged(r),
+        SunletPos = ReadArray<Vector3>(r), SunletNrm = ReadArray<Vector3>(r), SunletAlbedo = ReadArray<Vector3>(r), Sky = ReadArray<float>(r),
+    });
+
+    private static void SaveCouplings(string key, CouplingStage c) => SaveStage(key, "couplings", w =>
+    {
+        WriteJagged(w, c.Couplings); WriteJagged(w, c.SunletCouplings);
+        WriteArray(w, c.SunletPos); WriteArray(w, c.SunletNrm); WriteArray(w, c.SunletAlbedo); WriteArray(w, c.Sky);
+    });
+
+    private static ulong[]? LoadSunVis(string key) => LoadStage(key, "sunvis", r => ReadArray<ulong>(r));
+
+    private static void SaveSunVis(string key, ulong[] bits) => SaveStage(key, "sunvis", w => WriteArray(w, bits));
+
+    private static TexelBake? LoadTexels(string key) => LoadStage(key, "texels", r =>
+    {
+        var table = ReadArray<uint>(r);
+        var texels = ReadArray<Vector4>(r);
+        var count = r.ReadInt32(); var capacity = r.ReadInt32();
+        var grid = new Vector4(r.ReadSingle(), r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
+        return new TexelBake(table, texels, count, capacity, grid);
+    });
+
+    private static void SaveTexels(string key, TexelBake t) => SaveStage(key, "texels", w =>
+    {
+        WriteArray(w, t.Table); WriteArray(w, t.Texels); w.Write(t.Count); w.Write(t.Capacity);
+        w.Write(t.Grid.X); w.Write(t.Grid.Y); w.Write(t.Grid.Z); w.Write(t.Grid.W);
+    });
 
     private static void WriteArray<T>(BinaryWriter w, T[] a) where T : unmanaged
     {
