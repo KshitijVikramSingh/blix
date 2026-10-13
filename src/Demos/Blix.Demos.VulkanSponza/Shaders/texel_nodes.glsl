@@ -13,6 +13,12 @@
 #define NODE_HASH_PROBES 64
 #define NODE_CANDIDATES 8
 
+// The cook's hash (SunNodeHash) holds two words a slot: the texel id, and its key's fingerprint, so a probe passes a
+// slot by comparing one word -- it had worked the slot's texel's key out again from its position and normal (two
+// scattered reads and a bin) on every probe, ~30 a hit: most of the shade's cost (2026-10-14). A matching fingerprint is
+// confirmed against the texel, so the answer is the same.
+uint nodeFingerprint(uvec2 key) { return key.x * 0x2C1B3C6Du ^ (key.y + 0x9E3779B9u) * 0x297A2D39u; }
+
 // A texel's key in the cook's hash: its position's finest cell and its normal's bin (level 0).
 bool nodeTexelKey(uint id, vec4 grid, out uvec2 key) {
     vec3 n = texels[2u * id + 1u].xyz;
@@ -29,7 +35,7 @@ bool nodeTexelKey(uint id, vec4 grid, out uvec2 key) {
 // FoliageHash: SponzaLoop.SunNodesFoliage.cs) -- the includer declares both.
 vec4 nodePosition(int set, uint id) { return set == 0 ? texels[2u * id] : foliagePoints[2u * id]; }
 vec4 nodeNormal(int set, uint id) { return set == 0 ? texels[2u * id + 1u] : foliagePoints[2u * id + 1u]; }
-uint nodeSlot(int set, uint slot) { return set == 0 ? cookHash[slot] : foliageHash[slot]; }
+uint nodeSlot(int set, uint slot) { return set == 0 ? cookHash[2u * slot] : foliageHash[slot]; }
 
 bool nodeKeyOf(int set, uint id, vec4 grid, out uvec2 key) {
     vec3 n = nodeNormal(set, id).xyz;
@@ -45,11 +51,12 @@ int nodeFind(int set, ivec3 cell, uint bin, vec4 grid, uint slots) {
     if (any(lessThan(cell, ivec3(0))) || any(greaterThan(cell, ivec3(65535)))) return -1;
     uvec2 key = texelKey(cell, bin, 0u);
     uint slot = texelMix(key) & (slots - 1u);
+    uint fingerprint = nodeFingerprint(key);
     for (int probe = 0; probe < NODE_HASH_PROBES; ++probe) {
         uint e = nodeSlot(set, slot);
         if (e == NODE_EMPTY) return -1;
         uvec2 k;
-        if (nodeKeyOf(set, e, grid, k) && k == key) return int(e);
+        if ((set != 0 || cookHash[2u * slot + 1u] == fingerprint) && nodeKeyOf(set, e, grid, k) && k == key) return int(e);
         slot = (slot + 1u) & (slots - 1u);
     }
     return -1;

@@ -1071,8 +1071,6 @@ internal sealed class AmbientSettings
 
 // Misc render tunables (overlay "Render" group). Vsync stays a manual toggle —
 // it's a device property, not a field.
-internal enum PotentialSunsView { Light, AgainstBake, Coefficient, Blocks }
-
 internal sealed class RenderSettings
 {
     // Display exposure, independent from measured sun/sky energy. Two is the current authored
@@ -1100,14 +1098,6 @@ internal sealed class RenderSettings
     [Tune]             public bool LightletSun = false;
     // How far (degrees) from its visibility boundary a record must put the sun to answer (phase 0b: 2 -> 0.001% wrong).
     [Tune(0.25f, 4f)]  public float LightletTau = 2f;
-    // --potential-suns: a sun inside the band answered from the cooked nodes at once (SponzaLoop.PotentialSuns), no
-    // re-bake. Off: the bake answers, as before (a re-bake for the sun as it is, the nodes' light shown meanwhile).
-    [Tune]             public bool PotentialSuns = true;
-    // What the nodes write into the texels' light (viz channel 10 shows it unexposed): the light; against the boot
-    // sun's bake (red brighter, blue darker, full at Heat); a coefficient (Coefficient), signed; the blocks.
-    [Tune]             public PotentialSunsView PotentialSunsView = PotentialSunsView.Light;
-    [Tune(0f, 7f)]     public float PotentialSunsCoefficient = 0f;
-    [Tune(0.01f, 1f)]  public float PotentialSunsHeat = 0.1f;
     // --split-light: the sky's part of the texels' light times this (SponzaLoop.SplitLight.cs: a compose, no solve).
     [Tune(0f, 4f)]     public float SkyStrength = 1f;
     // History weight for the full-screen resolve; zero is the current-frame reference. History is

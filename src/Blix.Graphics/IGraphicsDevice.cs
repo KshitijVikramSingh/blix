@@ -47,6 +47,27 @@ public interface IGraphicsDevice : IDisposable
     /// </remarks>
     byte[] ReadGpuBuffer(GpuBufferHandle handle, int offset, int length);
 
+    /// <summary>Writes <paramref name="data"/> into a GPU buffer from <paramref name="offset"/>, after everything already
+    /// submitted and before anything submitted later.</summary>
+    /// <remarks>
+    /// A buffer's contents replaced in place while the frames reading it keep their handle -- for results that land a
+    /// piece at a time (a cook's). It waits for the device, like <see cref="ReadGpuBuffer"/>: not for every frame.
+    /// </remarks>
+    void WriteGpuBuffer(GpuBufferHandle handle, int offset, ReadOnlySpan<byte> data) =>
+        throw new NotSupportedException("this device cannot write into a GPU buffer after creating it.");
+
+    /// <summary>Runs compute dispatches now, outside the frame graph, in order, each seeing the last one's writes; returns
+    /// when they are done.</summary>
+    /// <remarks>
+    /// For work that is not a frame's: a cook's batches between frames, a tool's pass. Everything already submitted
+    /// finishes first (the device waits), so a dispatch reads what earlier frames wrote and a later frame what it
+    /// writes. Called on the thread that renders, between frames, never while a frame is being recorded into the
+    /// device. A dispatch here binds GPU buffers and sampled textures as a frame's would; it has no render-target
+    /// reads to declare (nothing of the frame graph's is current).
+    /// </remarks>
+    void DispatchNow(IReadOnlyList<DispatchCommand> dispatches, string name = "dispatch-now") =>
+        throw new NotSupportedException("this device cannot dispatch outside a frame.");
+
     /// <summary>The MTLDevice this device runs on, as a raw id&lt;MTLDevice&gt;, not retained.</summary>
     /// <remarks>Only with <see cref="GraphicsFeatures.MetalObjects"/>. It lives as long as this device.</remarks>
     nint ExportMetalDevice() => throw new NotSupportedException("this device has no Metal objects to export (GraphicsFeatures.MetalObjects).");

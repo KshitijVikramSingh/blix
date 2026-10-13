@@ -18,6 +18,7 @@ layout(location = 0) out vec4 outNormal;
 #include "texel_bin.glsl"
 #include "lightmap_frame.glsl"
 layout(location = 6) flat in uint vSurfaceKey;
+layout(location = 5) flat in uint vLod;
 layout(location = 7) in vec4 vClipNow;
 layout(location = 8) in vec4 vClipPrev;
 layout(location = 9) in vec3 vWorldMotion;
@@ -38,7 +39,9 @@ void main() {
     // --lightmap: LOD 0's normal through the atlas (lightmap_frame.glsl), as lit.frag shades with it.
     vec3 lodZeroN;
     vec4 lodZeroT;
-    if (lightmapShadingFrame(vLightmapTexel, lodZeroN, lodZeroT)) n = lodZeroN;
+    // LOD 0's frame through the atlas only on a coarse level: on LOD 0 the mesh's own normal is exact, and the atlas's
+    // 4 cm frames smeared its fine geometry (a joint's chamfer) over the face (2026-10-14).
+    if (vLod > 0u && lightmapShadingFrame(vLightmapTexel, lodZeroN, lodZeroT)) n = lodZeroN;
     vec3 shading = gl_FrontFacing ? n : -n;
     // w: the texel bins (texel_bin.glsl, texelFaceBins) of this pixel's FACE normal -- the plane of the triangle, from the world
     // position's screen derivatives (one triangle's within a quad), turned to the shading normal's side. The texels

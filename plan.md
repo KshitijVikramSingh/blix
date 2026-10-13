@@ -85,6 +85,34 @@ already gone).
   band one choice of domain (the hemisphere above a minimum elevation the safer default; a whole sphere for a region
   that rotates). Area lights and emissive geometry need no records: they are cells and patches, carried by transport.
 
+**Probes after the cells (designed 2026-10-14, with the user).** On static surfaces the clipmap's probes had become a
+second, coarser answer to questions the cells answer: the fallback light where no cell answered, the sky visibility
+(specular occlusion, glass, the light behind a sheet, fog), the normal map's relief in the indirect light (a gradient
+from probes 0.5 m apart -- the wrong scale for a per-pixel term), and the light of what moves. Measured cost: 512
+probes re-solved a frame, and the incident pass sampling the clipmap at every pixel (13.7 ms, often twice a frame).
+They move to the cells, and the probes keep only what cells cannot be: points in empty space.
+- P1 The incident pass skips the clipmap where the cells answer with full confidence (at rest: nearly every static
+  pixel), and reads it only where they do not (no cell, low confidence, a mover). Gate: frame time, the scene image.
+- P2 Sky visibility per cell, from the gather: the share of a cell's rays that escape, which the cook already counts,
+  stored beside its light (a byte). The lit pass's specular occlusion, glass and the light behind a sheet read it. Gate:
+  the reference's sky visibility at its points.
+- P3 Direction per cell: the light's first moment (L1, three values a part beside the light), composed as the light
+  is (sky + sun x irradiance), so the normal map's relief in the indirect light comes from the cell's own light, at the
+  cell's scale, not from probes'. Gate: the relief against the path trace at normal-mapped points.
+- P4 Probes on the same machinery, activated on demand: a probe is a cell in the volume -- placed per region and LOD
+  level like the cells (fine near, coarse far, streamed with the region), gathered by the same kernel (rays reading the
+  patches' light and the cells' direct light at their hits), its light computed at run time. Placed only where
+  something needs light in empty space: movers, fog, particles, a camera in open air. Static scenes with no movers
+  run none.
+Order: P1 (the cost, alone), P2, P3, then P4 when something moves. The clipmap's self-reading loop, leak fixes and
+screen probes retire with P4.
+Built (P1-P3 together, the user's call): the sweep's rays give each cell, per part, its sky visibility (the share of
+rays that escape, cosine-weighted) and its light's relative change as the normal tilts toward its two tangents
+(texel_nodes_shade.glsl, NodeDetail) -- one word a cell a part (texelDetailPack), cached beside the part (".detail"),
+composed with the light (texel_compose.comp). At rest, where the texels a pixel reads are whole and all carry detail,
+the incident pass answers from them alone (incident_clipmap.frag); the overlay's "Cells answer alone" and
+--no-texel-detail turn it off. P3 stores the tilt's two derivatives, not L1: the relief is all the lit pass reads.
+
 ---
 
 ## The stack, defined (assessment 2026-10-12) -- the user's call on the decisions marked DECIDE

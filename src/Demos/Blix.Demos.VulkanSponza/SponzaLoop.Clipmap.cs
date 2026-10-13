@@ -164,7 +164,7 @@ internal sealed partial class SponzaLoop
                 new("uTexelParams", new Vector4Uniform(texel.Params)),
                 new("uReference", new Vector4Uniform(reference.Params)),
                 new("uClipExact", new Vector4Uniform(new Vector4(incidentExactVisibility ? 1f : 0f, 0f, 0f, 0f))),
-                new("uTexelDebug", new Vector4Uniform(new Vector4(texelFrame, texelResting ? 1f : 0f, 0f, 0f))),
+                new("uTexelDebug", new Vector4Uniform(new Vector4(texelFrame, texelResting ? 1f : 0f, texelDetailOn && TexelDetailUp ? 1f : 0f, 0f))),
                 new("uLightmap", new Vector4Uniform(LightmapUniform)),
                 new("uTexelLevels", new Vector4Uniform(TexelLevelsUniform(frameHeight))),
                 new("uHalf", new Vector4Uniform(new Vector4(half ? 1f : 0f, sub.X, sub.Y, 0f))),

@@ -39,7 +39,8 @@ layout(set = 0, binding = 0) uniform IncidentClipmap {
     vec4 uTexelGrid;     // the texels (texel.glsl, stage 5a): the cells' origin xyz, spacing w
     vec4 uTexelParams;   // x hash capacity, y 1 when on, z the rays at which a texel's answer is trusted whole, w 1:
                          // read the spatially filtered light (texel_gather.comp)
-    vec4 uTexelDebug;    // x the texel frame (the debug view's stamp test); y 1: the texels at rest (TexelResolved)
+    vec4 uTexelDebug;    // x the texel frame (the debug view's stamp test); y 1: the texels at rest (TexelResolved); z 1:
+                         // the cells' detail answers (TexelDetail: P1-P3, the clipmap skipped where the cells are whole)
     vec4 uLightmap;      // --lightmap: x 1 when the atlas's texels are on (texel.glsl), yz the atlas size, w its first record
     vec4 uTexelLevels;   // x levels, y a pixel's width at unit depth, z / w the pixels a texel should span in sun / in shade
     vec4 uTexelSun;      // xyz the direction the sun travels (texelLevelFor's sunlit)
@@ -148,6 +149,12 @@ layout(std430, set = 0, binding = 17) readonly buffer TexelStamp { uint texelSta
 // At rest (uTexelDebug.y): each texel's answer resolved once (texel_resolve.comp) -- RGB9E5, then a 16-bit confidence and a
 // valid bit -- and the buffers above are placeholders.
 layout(std430, set = 0, binding = 34) readonly buffer TexelResolved { uvec2 texelResolved[]; };
+// At rest with uTexelDebug.z: each texel's detail (texel.glsl, texelDetailPack; texel_compose.comp): its sky visibility and
+// its light's change as the normal tilts. Summed over the texels read (detailSum: xy the tilt, z the sky visibility, w the
+// weight), and detailMissing where a texel with light had none.
+layout(std430, set = 0, binding = 35) readonly buffer TexelDetail { uint texelDetail[]; };
+vec4 detailSum;
+bool detailMissing;
 vec3 unpackRgb9e5(uint v) {
     float scale = exp2(float(int(v >> 27) - 15 - 9));
     return vec3(float(v & 511u), float((v >> 9) & 511u), float((v >> 18) & 511u)) * scale;
@@ -214,6 +221,11 @@ bool texelsAtLevel(vec3 worldPos, vec3 n, float faceBin, uint level, out vec3 ir
             debugLit += 1.0;
             sum += weights[i] * unpackRgb9e5(r.x);
             weight += weights[i];
+            if (g.uTexelDebug.z > 0.5) {
+                uint d = texelDetail[ids[i]];
+                if ((d >> 24) == 0u) detailMissing = true;
+                else detailSum += weights[i] * vec4(texelDetailUnpack(d), 1.0);
+            }
             raysWeighted += weights[i] * float(r.y & 0xFFFFu) / 65535.0;
             continue;
         }
@@ -290,6 +302,27 @@ void main() {
         ? normalize(nSample.xyz)
         : normalize((g.uInvView * vec4(0.0, 0.0, 1.0, 0.0)).xyz);
 
+    // The cells first (P1): at rest, where their light is whole and every texel read carries its detail, they answer
+    // alone -- the light, the sky visibility (P2), the normal map's direction (P3) -- and the clipmap and the surface
+    // probes are not read. Elsewhere (moving things have no texels, a cell not landed, a cook from before the detail) the
+    // probes as before, the texels blended over them.
+    vec3 gathered;
+    float confidence;
+    detailSum = vec4(0.0);
+    detailMissing = false;
+    pixelLightmapTexel = g.uLightmap.x > 0.5 ? texelFetch(uLightmapTexel, pixel, 0).r : 0u;
+    bool texelFound = g.uTexelParams.y > 0.5 && g.uClipParams.y < 0.5 && texelsAt(worldPos, N, nSample.w, viewDepth, gathered, confidence);
+    vec3 t1 = normalize(cross(abs(N.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0), N));
+    vec3 t2 = cross(N, t1);
+    if (texelFound && g.uTexelDebug.y > 0.5 && g.uTexelDebug.z > 0.5 && !detailMissing && detailSum.w > 1e-6
+        && confidence > 0.999 && g.uReference.w < 0.5 && g.uScreen.x < 0.5 && g.uReference.x < 0.5) {
+        vec3 d = detailSum.xyz / detailSum.w;
+        outIncident = vec4(gathered, d.z);
+        float lum = dot(gathered, vec3(0.2126, 0.7152, 0.0722));
+        outIncidentGradient = g.uScreen.w < 0.5 ? vec4((t1 * d.x + t2 * d.y) * lum, 0.0) : vec4(0.0);
+        return;
+    }
+
     BlixClipmap c;
     c.dims = ivec3(g.uClipDims.xyz);
     c.baseSpacing = g.uClipDims.w;
@@ -300,8 +333,6 @@ void main() {
     c.origin[3] = ivec3(g.uOrigin3.xyz);
     bool found;
     // Tangents, and two normals tilted along them; s is how far each moves the normal along its tangent.
-    vec3 t1 = normalize(cross(abs(N.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0), N));
-    vec3 t2 = cross(N, t1);
     const float tilt = 0.35;
     const float s = tilt / 1.0595;   // tilt / sqrt(1 + tilt^2)
     vec3 e1, e2;
@@ -329,14 +360,7 @@ void main() {
     float surfaceWeight, surfaceConfidence;
     vec4 surfaceField = blix_surfaceSample(sg, worldPos, N, surfaceWeight, surfaceConfidence);
     if (surfaceWeight > 0.0) outIncident = found ? mix(outIncident, surfaceField, surfaceConfidence) : surfaceField;
-    vec3 gathered;
-    float confidence;
-    bool texelFound = false;
-    pixelLightmapTexel = g.uLightmap.x > 0.5 ? texelFetch(uLightmapTexel, pixel, 0).r : 0u;
-    if (g.uTexelParams.y > 0.5 && g.uClipParams.y < 0.5 && texelsAt(worldPos, N, nSample.w, viewDepth, gathered, confidence)) {
-        outIncident.rgb = mix(outIncident.rgb, gathered, confidence);
-        texelFound = true;
-    }
+    if (texelFound) outIncident.rgb = mix(outIncident.rgb, gathered, confidence);
     if (g.uReference.w > 1.5) {
         // Which record each of the pixel's four lightmap texels gives it (texelsAroundLightmap's choice), by weight.
         vec2 at;

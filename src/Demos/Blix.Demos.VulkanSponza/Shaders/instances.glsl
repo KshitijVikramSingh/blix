@@ -26,9 +26,13 @@ layout(std430, set = 3, binding = 4) readonly buffer ScenePreviousTransforms { m
 
 layout(std430, set = 3, binding = 5) readonly buffer SceneLightmapTexels { vec2 lightmapTexelOf[]; };
 
-mat4 instanceWorld() { return transforms[visible[gl_InstanceIndex]]; }
+// A visible entry: the transform row in its low 24 bits, the LOD level drawn in its top 8 (scene_cull.glsl's scatter,
+// SponzaLoop.Render.cs's FillIndirect) -- so a fragment knows whether it lies on LOD 0's exact surface.
+uint instanceRow() { return visible[gl_InstanceIndex] & 0x00FFFFFFu; }
+uint instanceLod() { return visible[gl_InstanceIndex] >> 24u; }
+mat4 instanceWorld() { return transforms[instanceRow()]; }
 vec2 vertexLightmapTexel() { return lightmapTexelOf[gl_VertexIndex]; }
-uint instanceSurfaceKey() { return surfaceKeyOf[visible[gl_InstanceIndex]]; }
-mat4 instancePreviousWorld() { return previousTransforms[visible[gl_InstanceIndex]]; }
+uint instanceSurfaceKey() { return surfaceKeyOf[instanceRow()]; }
+mat4 instancePreviousWorld() { return previousTransforms[instanceRow()]; }
 
 #endif

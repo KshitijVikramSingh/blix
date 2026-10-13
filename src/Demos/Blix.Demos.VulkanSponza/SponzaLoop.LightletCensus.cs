@@ -40,6 +40,14 @@ internal sealed partial class SponzaLoop
         return new Vector3(east, north, up);   // (east, north, up)
     }
 
+    // The hour angle (degrees) at which a sun of this declination sets below the band's least elevation, at its latitude.
+    private static float DayHalfSpan(float decDeg)
+    {
+        float r(float d) => d * MathF.PI / 180f;
+        var c = (MathF.Sin(r(BandMinElevation)) - MathF.Sin(r(BandLatitude)) * MathF.Sin(r(decDeg))) / (MathF.Cos(r(BandLatitude)) * MathF.Cos(r(decDeg)));
+        return MathF.Acos(Math.Clamp(c, -1f, 1f)) * 180f / MathF.PI;
+    }
+
     // Scene direction (y up) of a local (east, north, up), north at angle theta in the x-z plane.
     private static Vector3 ToScene(Vector3 enu, float theta) =>
         Vector3.Normalize(new Vector3(

@@ -21,6 +21,9 @@ layout(std430, set = 0, binding = 2) readonly buffer SunNodesLive { uint liveIds
 layout(std430, set = 0, binding = 3) writeonly buffer NodeRays { vec4 nodeRays[]; };   // 2 a ray: origin, tMin; dir, tMax
 layout(std430, set = 0, binding = 4) writeonly buffer NodeRayWeights { float nodeRayWeight[]; };
 layout(std430, set = 0, binding = 5) readonly buffer NodeGuides { float cookedGuide[]; };   // per patch, a CDF over 64 bins
+// Each texel's guide patch (its cookedNearest), once: 0 not yet, else the patch + 2 (1: none). Worked out again on every
+// pass, the search of up to 125 cells a texel made the rays as dear as the trace (11.6 ms a pass of 1 M, 2026-10-14).
+layout(std430, set = 0, binding = 9) buffer NodeGuidePatch { uint guidePatch[]; };
 
 #define COOKED_BINDING 6
 #define COOKED_GRID u.uCookedGrid
@@ -84,7 +87,15 @@ void main() {
     uint id = liveIds[uint(u.uSlice.x) + group];
     vec3 position = texels[2u * id].xyz;
     vec3 n = normalize(texels[2u * id + 1u].xyz);
-    if (ray == 0u) sGuide = u.uSlice.w > 0.5 ? cookedNearest(position, n) : -1;
+    if (ray == 0u) {
+        int g = -1;
+        if (u.uSlice.w > 0.5) {
+            uint known = guidePatch[id];
+            if (known == 0u) { g = cookedNearest(position, n); guidePatch[id] = uint(g + 2); }
+            else g = int(known) - 2;
+        }
+        sGuide = g;
+    }
     barrier();
     int guide = sGuide;
     uint pass = uint(u.uSlice.z);

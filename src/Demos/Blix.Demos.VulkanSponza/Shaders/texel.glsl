@@ -35,6 +35,27 @@ TexelGrid texelLevelGrid(TexelGrid finest, uint level) {
 
 #include "texel_bin.glsl"
 
+// A cell's frame for its detail (texel_nodes_shade.glsl writes, texel_compose.comp and incident_clipmap.frag read): its
+// normal and two tangents, built as the incident pass tilts the normal, so the cook's direction and the pixel's agree.
+void texelDetailFrame(vec3 n, out vec3 nn, out vec3 t1, out vec3 t2) {
+    nn = n;
+    t1 = normalize(cross(abs(n.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0), n));
+    t2 = cross(n, t1);
+}
+
+// A cell's detail word: x, y its light's relative change as the normal tilts toward t1, t2 (snorm8, over +-2); z its sky
+// visibility (unorm8); w 255 when present (0: none -- a cook from before it, or not landed).
+uint texelDetailPack(vec2 tilt, float skyVisibility) {
+    vec2 t = clamp(tilt * 0.5, vec2(-1.0), vec2(1.0));
+    uvec2 q = uvec2(ivec2(round(t * 127.0)) & 0xFF);
+    return q.x | (q.y << 8) | (uint(round(clamp(skyVisibility, 0.0, 1.0) * 255.0)) << 16) | (255u << 24);
+}
+
+vec3 texelDetailUnpack(uint w) {
+    ivec2 q = ivec2(int(w << 24) >> 24, int(w << 16) >> 24);
+    return vec3(vec2(q) / 127.0 * 2.0, float((w >> 16) & 0xFFu) / 255.0);
+}
+
 uvec2 texelKey(ivec3 cell, uint bin, uint level) {
     return uvec2(uint(cell.x) | (uint(cell.y) << 16), uint(cell.z) | (bin << 16) | (level << 21));
 }
@@ -157,6 +178,22 @@ void texelsAroundLightmap(vec2 texel, vec3 n, ivec2 atlasSize, out int ids[4], o
     vec2 f = texel - 0.5;
     ivec2 base = ivec2(floor(f));
     vec2 t = f - vec2(base);
+    // The pixel's own texel -- the one its atlas coordinate lies in, so on its own chart -- and the way it faces (its
+    // face normal, as every record's): a bilinear neighbour facing another way is another surface. The gutter around a
+    // chart points each empty texel at the first filled neighbour it finds (SponzaLoop.Lightmap.cs), which can lie in the
+    // next chart over -- around a column's corner, the face lit from another side: lines of the wrong light along the
+    // rectangular columns' arrises (the user, 2026-10-14). Against the pixel's VERTEX normal instead, a smoothed edge
+    // dropped its own texels and lit the edges from the probes (worse); face against face, a flat face agrees exactly.
+    vec3 ownNormal = vec3(0.0);
+    ivec2 own = ivec2(floor(texel));
+    if (all(greaterThanEqual(own, ivec2(0))) && all(lessThan(own, atlasSize))) {
+        uint oid = TEXEL_INDEX_MAP(own.y * atlasSize.x + own.x);
+        if (oid != 0xFFFFFFFFu) {
+            if (TEXEL_POSITION(oid).w < 0.0 && dot(TEXEL_NORMAL(oid).xyz, n) < 0.0) oid += 1u;
+            ownNormal = TEXEL_NORMAL(oid).xyz;
+        }
+    }
+    float ownLength = length(ownNormal);
     for (int i = 0; i < 4; ++i) {
         ivec2 o = ivec2(i & 1, i >> 1);
         ivec2 at = base + o;
@@ -170,6 +207,8 @@ void texelsAroundLightmap(vec2 texel, vec3 n, ivec2 atlasSize, out int ids[4], o
         if (TEXEL_POSITION(id).w < 0.0 && dot(TEXEL_NORMAL(id).xyz, n) < 0.0) id += 1u;
         // |w| 1: buried in a solid (the bake's test), never gathered; its neighbours answer.
         if (abs(TEXEL_POSITION(id).w) < 2.0) continue;
+        vec3 tn = TEXEL_NORMAL(id).xyz;
+        if (ownLength > 1e-6 && dot(tn, ownNormal) < 0.9 * length(tn) * ownLength) continue;
         ids[i] = int(id);
         weights[i] = (o.x == 1 ? t.x : 1.0 - t.x) * (o.y == 1 ? t.y : 1.0 - t.y);
     }

@@ -48,7 +48,7 @@ internal sealed partial class SponzaLoop
         if (Interlocked.Exchange(ref bakeSceneSource, null) is not { } source) return;
         var lightPath = LightBakePathFor(cacheKey, (-Vector3.Normalize(sunDirection), EffectiveSunIrradiance));
         var light = lightBakeOff || File.Exists(lightPath) || File.Exists(ResolvedPathFor(lightPath));
-        var buried = !lightmapEnabled || File.Exists(BuriedCachePath(cacheKey));
+        var buried = !lightmapEnabled || texelsStageKey is { } tk && File.Exists(BuriedCachePath(tk));
         if (light && buried)
         {
             bakeSceneSkipped = true;

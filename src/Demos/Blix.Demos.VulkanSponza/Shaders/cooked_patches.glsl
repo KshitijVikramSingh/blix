@@ -40,6 +40,34 @@ int cookedNearest(vec3 p, vec3 n) {
     return best;
 }
 
+// The nearest patch on the same placement (its position's w, the raw bits: SponzaLoop.Transport.cs, UploadCookedPatches)
+// facing within 60 degrees of n, or -1: where a texel saw none of its own candidates (texel_nodes_shade.glsl). Nearest by
+// distance alone takes a patch across a wall at a wall's foot; on the same surface it cannot.
+int cookedNearestOn(vec3 p, vec3 n, uint placement) {
+    if (COOKED_DIMS.w < 0.5 || placement == 0xFFFFFFFFu) return -1;
+    ivec3 dims = ivec3(COOKED_DIMS.xyz);
+    ivec3 c = ivec3(floor((p - COOKED_GRID.xyz) / COOKED_GRID.w));
+    float bestD = 1e30;
+    int best = -1;
+    for (int radius = 1; radius <= 2 && best < 0; ++radius)
+    for (int dz = -radius; dz <= radius; ++dz)
+    for (int dy = -radius; dy <= radius; ++dy)
+    for (int dx = -radius; dx <= radius; ++dx) {
+        if (radius == 2 && max(abs(dx), max(abs(dy), abs(dz))) < 2) continue;
+        ivec3 cc = c + ivec3(dx, dy, dz);
+        if (any(lessThan(cc, ivec3(0))) || any(greaterThanEqual(cc, dims))) continue;
+        int cell = (cc.z * dims.y + cc.y) * dims.x + cc.x;
+        for (uint k = cookedCellStart[cell]; k < cookedCellStart[cell + 1]; ++k) {
+            int j = int(cookedId[k]);
+            if (floatBitsToUint(cookedPatch[3 * j].w) != placement || dot(cookedPatch[3 * j + 1].xyz, n) < 0.5) continue;
+            vec3 d = cookedPatch[3 * j].xyz - p;
+            float d2 = dot(d, d);
+            if (d2 < bestD) { bestD = d2; best = j; }
+        }
+    }
+    return best;
+}
+
 // The patches' light interpolated at p (facing within 60 degrees, Gaussian in distance over one spacing): rgb the
 // indirect irradiance, a their openness (normal.w, SponzaLoop.Transport.cs) with the same weights; weight their sum.
 vec4 cookedInterp(vec3 p, vec3 n, out float weight) {

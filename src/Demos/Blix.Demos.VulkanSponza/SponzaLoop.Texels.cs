@@ -103,6 +103,8 @@ internal sealed partial class SponzaLoop
     private uint texelEpoch;
     private readonly List<(GpuBufferHandle Buffer, uint Frame)> retiredBuffers = new();
     private (int Frame, Vector2 Degrees)? sunChange;
+    private bool sunChangeApplied;
+    private int sunChangeAppliedAt;
     private ShaderInterface texelMarkInterface = null!, texelGatherInterface = null!, texelFilterInterface = null!;
     private PassHandle texelMarkPassHandle, texelGatherPassHandle, texelFilterPassHandle;
     private PipelineHandle texelMarkPipeline, texelGatherPipeline, texelFilterPipeline;
@@ -616,7 +618,17 @@ internal sealed partial class SponzaLoop
         }
         // A resolved cache: at rest from the first frame. A full-state cache (LightBakeVersion 4, settled by its refining):
         // filtered once, then at rest, resolved -- and saved in that form for the next run. Neither: the bake begins.
-        if (lean) texelGatherFreed = true;
+        if (lean)
+        {
+            // At rest from the first frame on an empty resolved light: every texel's answer invalid until the split cook
+            // lands it (SplitLanding), so the probes light the scene meanwhile; the mark and the gather never wake.
+            texelGatherFreed = true;
+            texelResting = true;
+            texelResolveCurrent = true;
+            texelsSettled = true;
+            texelSettledEpoch = texelEpoch;
+            filterSweepIssued = -1;
+        }
         if (atRest && !lean) StartTexelsAtRest(resolved!);
         else if (light is not null)
         {
@@ -636,8 +648,11 @@ internal sealed partial class SponzaLoop
     private void FollowSun()
     {
         StepSunSweep();
-        if (sunChange is { } change && postLoadFrames == change.Frame)
+        // At or after its frame, once: FollowSun runs only once the texels are up, which can be after the frame named.
+        if (sunChange is { } change && !sunChangeApplied && postLoadFrames >= change.Frame)
         {
+            sunChangeApplied = true;
+            sunChangeAppliedAt = postLoadFrames;
             sunYaw = change.Degrees.X * MathF.PI / 180f;
             sunPitch = change.Degrees.Y * MathF.PI / 180f;
             UpdateSunDirection();
@@ -661,8 +676,7 @@ internal sealed partial class SponzaLoop
             transportRelightSun = relightTaskSun;
             // The split light: the new sun's part read or cooked, the sky's kept (SponzaLoop.SplitLight.cs).
             if (splitLight) SplitSunChanged(transportRelightSun.ToSun);
-            // The potential suns answer a sun in the band (RecordPotentialSuns): nothing to bake.
-            else if (!PotentialSunsAnswer(transportRelightSun.ToSun))
+            else
             {
                 texelEpoch++;
                 RebakeForSun(transportRelightSun);
@@ -741,6 +755,7 @@ internal sealed partial class SponzaLoop
             new ShaderBufferBinding("TexelBlend", texelBlendBuffer),
             new ShaderBufferBinding("TexelStamp", texelStampBuffer.Equals(default(GpuBufferHandle)) ? texelBlendBuffer : texelStampBuffer),
             new ShaderBufferBinding("TexelResolved", texelResolvedBuffer.Equals(default(GpuBufferHandle)) ? texelBlendBuffer : texelResolvedBuffer),
+            new ShaderBufferBinding("TexelDetail", TexelDetailForIncident()),
         });
     }
 
@@ -775,8 +790,19 @@ internal sealed partial class SponzaLoop
     private void RecordTexels(Matrix4x4 invProjection, Matrix4x4 invView, int width, int height)
     {
         if (!texelsUploaded || rayBlockBuffers.Length == 0) return;
-        if (sunNodeStage != SunNodeStage.Off) RecordSunNodes();
-        RecordPotentialSuns();
+        RecordTexelVisible(invProjection, invView, width, height);
+        // A live split cook (SponzaLoop.SplitLanding.cs) takes --split-passes-per-frame passes of the frame, as the cook
+        // screen does, each in its own copy of the passes; one pass a frame for everything else.
+        if (sunNodeStage != SunNodeStage.Off)
+        {
+            var copies = splitCooking && sunNodeStage == SunNodeStage.Tracing ? sunNodePassesPerFrame : 1;
+            for (sunNodeCopy = 0; sunNodeCopy < copies; sunNodeCopy++)
+            {
+                RecordSunNodes();
+                if (sunNodeStage != SunNodeStage.Tracing || sunNodeReadback) break;
+            }
+            sunNodeCopy = 0;
+        }
         RecordPatchSplitCheck();
         RecordSplitCompose();
         FollowSun();

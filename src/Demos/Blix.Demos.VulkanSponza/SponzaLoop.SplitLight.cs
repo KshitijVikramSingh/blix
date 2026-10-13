@@ -21,7 +21,8 @@ internal sealed partial class SponzaLoop
     private bool splitLight;
     // The sky the sky's part is for (the probe loaded, else the procedural sky): in its cache's key.
     private string skyIdentity = "procedural";
-    private const int SplitLightVersion = 2;   // 2: refined until settled (SponzaLoop.SunNodesRefine.cs)
+    // 2: refined until settled (SponzaLoop.SunNodesRefine.cs). 3: the cells' detail cooked beside each part (SplitDetail).
+    private const int SplitLightVersion = 3;
     private ShaderInterface texelComposeInterface = null!;
     private PassHandle texelComposePass, texelComposeFilterPass;
     private PipelineHandle texelComposePipeline;
@@ -50,11 +51,15 @@ internal sealed partial class SponzaLoop
         texelComposePass = graph.ComputePass("texel-compose").Shader(texelComposeInterface).Handle;
         // The filter over the composed light (mode 1), a pass of its own: it reads the neighbours mode 0 wrote.
         texelComposeFilterPass = graph.ComputePass("texel-compose-filter").Shader(texelComposeInterface).Handle;
+        DeclareTexelVisiblePass(reflect);
     }
 
-    private void CreateSplitLightPipeline(string shaderDir) =>
+    private void CreateSplitLightPipeline(string shaderDir)
+    {
         texelComposePipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "texel_compose.comp.spv")), texelComposeInterface, "texel_compose")), "texel_compose"));
+        CreateTexelVisiblePipeline(shaderDir);
+    }
 
     // A part's cache: the transport's key, which part (and for the sun its direction), and how it was solved.
     private string SplitPathFor(string transportKey, Vector3? toSun)
@@ -80,8 +85,8 @@ internal sealed partial class SponzaLoop
         var toSun = transportRelightSun.ToSun;
         var skyPath = SplitPathFor(lightBakeKey, null);
         var sunPath = SplitPathFor(lightBakeKey, toSun);
-        if (ReadResolved(skyPath, texelCount) is { } sky) UploadSplitPart(sky, sunPart: false);
-        if (ReadResolved(sunPath, texelCount) is { } sun) { UploadSplitPart(sun, sunPart: true); splitSunSolved = toSun; }
+        if (ReadResolved(skyPath, texelCount) is { } sky) { UploadSplitPart(sky, sunPart: false); ReadPartDetail(skyPath, sunPart: false); }
+        if (ReadResolved(sunPath, texelCount) is { } sun) { UploadSplitPart(sun, sunPart: true); ReadPartDetail(sunPath, sunPart: true); splitSunSolved = toSun; }
         var columns = new List<(Vector3? ToSun, string Path)>();
         if (!splitSkyUp) columns.Add((null, skyPath));
         if (!splitSunUp) columns.Add((toSun, sunPath));
@@ -95,6 +100,7 @@ internal sealed partial class SponzaLoop
     private void StartSplitCook(List<(Vector3? ToSun, string Path)> columns)
     {
         splitCooking = true;
+        BeginSplitCookLanding();
         splitCookPaths = columns.Select(c => (string?)c.Path).ToArray();
         sunNodeSuns = columns.Select(_ => (0f, 0f)).ToArray();
         sunNodeKinds = columns.Select(c => c.ToSun is null ? 2 : 1).ToArray();
@@ -124,6 +130,8 @@ internal sealed partial class SponzaLoop
             if (splitCookPaths[k] is { } path) WriteResolved(path, words);
             UploadSplitPart(words, sunPart);
         }
+        FlushSplitDetail();
+        SaveSplitDetail();
         sunNodeResults = Array.Empty<uint[]>();
         sunNodeDirsAsked = null;
         splitCooking = false;
@@ -142,12 +150,14 @@ internal sealed partial class SponzaLoop
             if (!splitSunBuffer.Equals(default(GpuBufferHandle))) RetireGpuBuffer(splitSunBuffer);
             splitSunBuffer = buffer;
             splitSunUp = true;
+            splitSunWords = words;   // what landing writes a relight's slices into (SponzaLoop.SplitLanding.cs)
         }
         else
         {
             if (!splitSkyBuffer.Equals(default(GpuBufferHandle))) RetireGpuBuffer(splitSkyBuffer);
             splitSkyBuffer = buffer;
             splitSkyUp = true;
+            splitSkyWords = words;
         }
         splitComposeDirty = true;
     }
@@ -161,6 +171,7 @@ internal sealed partial class SponzaLoop
         if (ReadResolved(path, texelCount) is { } sun)
         {
             UploadSplitPart(sun, sunPart: true);
+            ReadPartDetail(path, sunPart: true);
             splitSunSolved = toSun;
             Console.WriteLine("[VulkanSponza] split light: the new sun's part read from its cache.");
             return;
@@ -205,7 +216,7 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("TexelHash", texelHashBuffer),
                     new ShaderBufferBinding("Texels", texelBuffer),
                     new ShaderBufferBinding("LightmapIndexMap", LightmapIndexMap()),
-                }));
+                }.Concat(SeamBindings()).Concat(DetailBindings()).ToArray()));
         texelResting = true;
         texelResolveCurrent = true;
         texelsSettled = true;

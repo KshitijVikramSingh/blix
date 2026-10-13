@@ -91,7 +91,7 @@ internal sealed partial class SponzaLoop
         if (!lightletsAsked || lightBakeKey is null) return;
         var north = BandNorth(out _);
         lightletNorth = north;
-        var path = LightletPathFor(lightBakeKey, north);
+        var path = LightletPathFor(texelsStageKey ?? lightBakeKey, north);
         if (ReadLightlets(path, count) is { } read)
         {
             UploadLightlets(read, "read from the cache");

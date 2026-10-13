@@ -184,7 +184,8 @@ void scatter(uint i) {
     for (uint l = 0u; l < lod; ++l) start += args[(first + l) * 5u + 1u];
     // Every placement at this level writes the same value.
     args[(first + lod) * 5u + 4u] = start;
-    visible[start + atomicAdd(cursor[first + lod], 1u)] = p.transform;
+    // The level rides in the top 8 bits (instances.glsl, instanceLod): the atlas's LOD 0 frames apply only to coarse levels.
+    visible[start + atomicAdd(cursor[first + lod], 1u)] = p.transform | (min(lod, 255u) << 24u);
 }
 
 #endif

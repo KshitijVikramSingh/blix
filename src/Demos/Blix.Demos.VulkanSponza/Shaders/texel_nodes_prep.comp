@@ -2,7 +2,7 @@
 // Sun nodes (SponzaLoop.SunNodes.cs), once before the trace: one thread a live texel, into the cook's hash -- every live
 // texel, the atlas's and the hashed ones, keyed as the hashed texels are (texel.glsl: the finest cell of its position,
 // the bin of its normal), so a gather ray's hit finds the texels it landed among. A slot holds a texel id; its key is
-// the texel's own, worked out again on a probe. The first texel of a key keeps it (a cell an atlas chart crosses
+// the texel's own, its fingerprint beside it (texel_nodes.glsl, nodeFind). The first texel of a key keeps it (a cell an atlas chart crosses
 // obliquely can hold two). The texels' sun bits come from Metal (SunNodeBitsFor).
 
 layout(local_size_x = 64) in;
@@ -28,8 +28,11 @@ void main() {
     uint mask = uint(u.uPrep.w) - 1u;
     uint slot = texelMix(key) & mask;
     for (int probe = 0; probe < NODE_HASH_PROBES; ++probe) {
-        uint prev = atomicCompSwap(cookHash[slot], NODE_EMPTY, id);
-        if (prev == NODE_EMPTY) return;
+        uint prev = atomicCompSwap(cookHash[2u * slot], NODE_EMPTY, id);
+        if (prev == NODE_EMPTY) {
+            cookHash[2u * slot + 1u] = nodeFingerprint(key);   // read only after this pass (the shade, a later dispatch)
+            return;
+        }
         uvec2 other;
         if (nodeTexelKey(prev, u.uTexelGrid, other) && other == key) return;
         slot = (slot + 1u) & mask;

@@ -97,7 +97,10 @@ internal sealed partial class SponzaLoop
         if (!shotWhenReady) return false;
         if (shotReadyFrame < 0)
         {
-            var lightReady = !transportTexels || texelsRestReported;
+            // And no light on its way: a --sun-change still to come or relighting, the split light still cooking (a shot
+            // of a sun change taken before its relight measured the old sun, 2026-10-14).
+            var lightReady = (!transportTexels || texelsRestReported) && relightTask is null && !splitCooking
+                && (sunChange is null || sunChangeApplied && postLoadFrames > sunChangeAppliedAt + 1);
             var referenceReady = !gpuReference || referenceMonolithic
                 ? !gpuReference || gpuReferencePaths >= GpuReferenceTarget
                 : gateWave is { } w && w.Dispatch >= ReferenceWaveFrames(w);

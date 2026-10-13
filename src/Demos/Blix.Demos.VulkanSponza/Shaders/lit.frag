@@ -184,6 +184,7 @@ layout(location = 2) in vec3 vWorldPos;
 layout(location = 3) in vec3 vTangentWorld;   // world-space tangent (forwarded glTF TANGENT.xyz)
 layout(location = 4) in float vTangentSign;   // glTF TANGENT.w handedness
 layout(location = 10) in vec2 vLightmapTexel; // --lightmap: the lightmap atlas texel (lit.vert, instances.glsl)
+layout(location = 5) flat in uint vLod;        // the LOD level drawn (instances.glsl): LOD 0 keeps its own frame
 
 // Viz 25, the lightmap's parameterization: a checker one texel wide, tinted per 64-texel block of the atlas -- seams
 // show where the tint or the checker breaks, stretch where the cells are not square, density by their size on
@@ -323,7 +324,7 @@ void main() {
     {
         vec3 lodZeroN;
         vec4 lodZeroT;
-        if (lightmapShadingFrame(vLightmapTexel, lodZeroN, lodZeroT)) { N = lodZeroN; tangentWorld = lodZeroT.xyz; tangentSign = lodZeroT.w; }
+        if (vLod > 0u && lightmapShadingFrame(vLightmapTexel, lodZeroN, lodZeroT)) { N = lodZeroN; tangentWorld = lodZeroT.xyz; tangentSign = lodZeroT.w; }
     }
     if (!gl_FrontFacing) N = -N;
     // Build TBN from the authored glTF tangent. Gram-Schmidt removes interpolation drift and

@@ -85,6 +85,53 @@ public sealed partial class VulkanGraphicsDevice
         DestroyVkBufferEntry(entry);
     }
 
+    // IGraphicsDevice.DispatchNow: the dispatches recorded as a compute pass's are (RecordComputeDispatch), into the frame
+    // slot the next frame will use. Safe because the device is idle first -- no frame in flight still reads that slot's
+    // uniform buffers or transient sets -- and this returns only when the GPU is done, before the next frame rewinds
+    // and resets them.
+    public void DispatchNow(IReadOnlyList<DispatchCommand> dispatches, string name = "dispatch-now")
+    {
+        ThrowIfDisposed();
+        if (dispatches.Count == 0) return;
+        ThrowIfNotSuccess(Vk.DeviceWaitIdle(Device), "vkDeviceWaitIdle(dispatch-now)");
+        var cmd = BeginSingleTimeCommands();
+        foreach (var d in dispatches) RecordComputeDispatch(cmd, d, name, currentFrame);
+        EndSingleTimeCommands(cmd);
+    }
+
+    public unsafe void WriteGpuBuffer(GpuBufferHandle handle, int offset, ReadOnlySpan<byte> data)
+    {
+        ThrowIfDisposed();
+        var entry = GetGpuBuffer(handle);
+        if (offset < 0 || data.Length <= 0 || (ulong)offset + (ulong)data.Length > entry.Size)
+        {
+            throw new ArgumentOutOfRangeException(nameof(data),
+                $"{data.Length} bytes at {offset} is outside GPU buffer '{entry.Name}' ({entry.Size} bytes).");
+        }
+
+        var staging = CreateHostVisibleBuffer(data, BufferUsageFlags.TransferSrcBit, $"{entry.Name}.write");
+        var cmd = BeginSingleTimeCommands();
+        // Every earlier command's reads and writes of it done before the copy; the copy's write seen by every later one.
+        var before = new MemoryBarrier
+        {
+            SType = StructureType.MemoryBarrier,
+            SrcAccessMask = AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit | AccessFlags.TransferReadBit | AccessFlags.TransferWriteBit,
+            DstAccessMask = AccessFlags.TransferWriteBit,
+        };
+        Vk.CmdPipelineBarrier(cmd, PipelineStageFlags.AllCommandsBit, PipelineStageFlags.TransferBit, 0, 1, &before, 0, null, 0, null);
+        var region = new BufferCopy { SrcOffset = 0, DstOffset = (ulong)offset, Size = (ulong)data.Length };
+        Vk.CmdCopyBuffer(cmd, staging.Buffer, entry.Buffer, 1, &region);
+        var after = new MemoryBarrier
+        {
+            SType = StructureType.MemoryBarrier,
+            SrcAccessMask = AccessFlags.TransferWriteBit,
+            DstAccessMask = AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit | AccessFlags.TransferReadBit,
+        };
+        Vk.CmdPipelineBarrier(cmd, PipelineStageFlags.TransferBit, PipelineStageFlags.AllCommandsBit, 0, 1, &after, 0, null, 0, null);
+        EndSingleTimeCommands(cmd);
+        DestroyVkBufferEntry(staging);
+    }
+
     public unsafe byte[] ReadGpuBuffer(GpuBufferHandle handle, int offset, int length)
     {
         ThrowIfDisposed();

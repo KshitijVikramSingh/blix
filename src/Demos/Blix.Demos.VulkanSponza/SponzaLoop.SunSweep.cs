@@ -5,7 +5,7 @@ using Blix.Core;
 namespace Blix.Demos.VulkanSponza;
 
 // --sun-sweep FILE: the texels' light baked at a list of suns in one run, for studying the light across the band
-// (plan.md, potential suns: baked at band nodes, interpolated between). FILE holds one sun a line, "hour dec" in
+// (a study: potential suns, retired 2026-10-14, are not built on it). FILE holds one sun a line, "hour dec" in
 // degrees at the band's latitude, north as the lightlets set it (BandNorth); '#' starts a comment. Once the boot's
 // texels are at rest, each sun in turn: turned to (FollowSun re-solves the patches, the light re-bakes, RestTexels
 // resolves and saves it), and when its resolved file is on disk a line goes to the manifest (--sun-sweep-out, default

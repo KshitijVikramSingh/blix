@@ -1680,54 +1680,61 @@ public sealed partial class VulkanGraphicsDevice
                 throw new InvalidOperationException(
                     $"Compute pass '{pass.Name}' contains a {rc.GetType().Name}; compute passes may only contain DispatchCommands.");
             }
-            CountDispatch(pass.Name);
-            var pipe = GetPipeline(d.Pipeline);
-            if (!pipe.IsCompute)
-            {
-                throw new InvalidOperationException(
-                    $"Dispatch in compute pass '{pass.Name}' bound a graphics pipeline '{pipe.Name}'. Use a compute pipeline (CreateComputePipeline).");
-            }
-            var prog = shaderProgramTable[pipe.ShaderProgram.Id];
+            RecordComputeDispatch(cmd, d, pass.Name, frameSlot);
+        }
+    }
 
-            RenderCommandDiagnostics.VerifyUniforms(nameof(DispatchCommand), pass.Name, d.Uniforms, d.UniformFingerprint);
-            RenderCommandDiagnostics.VerifyTextures(nameof(DispatchCommand), pass.Name, d.Textures, d.TextureFingerprint);
+    // One dispatch of a compute pass (TranslateComputePass) or of DispatchNow: its storage images' layouts, its GPU
+    // buffers fenced on both sides, its uniforms, sets and push constants, the dispatch.
+    private unsafe void RecordComputeDispatch(CommandBuffer cmd, DispatchCommand d, string passName, int frameSlot)
+    {
+        CountDispatch(passName);
+        var pipe = GetPipeline(d.Pipeline);
+        if (!pipe.IsCompute)
+        {
+            throw new InvalidOperationException(
+                $"Dispatch in compute pass '{passName}' bound a graphics pipeline '{pipe.Name}'. Use a compute pipeline (CreateComputePipeline).");
+        }
+        var prog = shaderProgramTable[pipe.ShaderProgram.Id];
 
-            for (var i = 0; i < d.Textures.Count; i++)
-            {
-                var b = d.Textures[i];
-                if (!IsStorageBinding(prog, b)) continue;
-                // From where a storage image rests (created there, and returned there after every dispatch below),
-                // not from Undefined: Undefined lets the driver discard the contents, and a field kept across frames
-                // (a probe atlas updated in place, uProbeUsage's marks) is read back by the next dispatch. The
-                // dispatch reads as well as writes, so both are in the second scope.
-                RecordStorageBarrier(cmd, textureTable[b.Texture.Id],
-                    ImageLayout.ShaderReadOnlyOptimal, ImageLayout.General,
-                    PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.ComputeShaderBit, AccessFlags.ShaderReadBit,
-                    PipelineStageFlags.ComputeShaderBit, AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit);
-            }
+        RenderCommandDiagnostics.VerifyUniforms(nameof(DispatchCommand), passName, d.Uniforms, d.UniformFingerprint);
+        RenderCommandDiagnostics.VerifyTextures(nameof(DispatchCommand), passName, d.Textures, d.TextureFingerprint);
 
-            var bindsGpuBuffers = d.Buffers is { Count: > 0 };
-            if (bindsGpuBuffers) FenceGpuBuffers(cmd, beforeDispatch: true);
+        for (var i = 0; i < d.Textures.Count; i++)
+        {
+            var b = d.Textures[i];
+            if (!IsStorageBinding(prog, b)) continue;
+            // From where a storage image rests (created there, and returned there after every dispatch below),
+            // not from Undefined: Undefined lets the driver discard the contents, and a field kept across frames
+            // (a probe atlas updated in place, uProbeUsage's marks) is read back by the next dispatch. The
+            // dispatch reads as well as writes, so both are in the second scope.
+            RecordStorageBarrier(cmd, textureTable[b.Texture.Id],
+                ImageLayout.ShaderReadOnlyOptimal, ImageLayout.General,
+                PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.ComputeShaderBit, AccessFlags.ShaderReadBit,
+                PipelineStageFlags.ComputeShaderBit, AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit);
+        }
 
-            if (d.Uniforms.Count > 0) WriteUniformsAcrossSets(prog, frameSlot, d.Uniforms);
-            Vk.CmdBindPipeline(cmd, PipelineBindPoint.Compute, pipe.Pipeline);
-            BindTransientDescriptorSets(cmd, prog, pipe.Layout, frameSlot, d.Textures, PipelineBindPoint.Compute, gpuBuffers: d.Buffers);
-            if (d.PushConstants is { } pc)
-            {
-                PushConstantsToCommandBuffer(cmd, pipe.Layout, prog.Interface.PushConstants, pc);
-            }
-            Vk.CmdDispatch(cmd, (uint)d.GroupsX, (uint)d.GroupsY, (uint)d.GroupsZ);
-            if (bindsGpuBuffers) FenceGpuBuffers(cmd, beforeDispatch: false);
+        var bindsGpuBuffers = d.Buffers is { Count: > 0 };
+        if (bindsGpuBuffers) FenceGpuBuffers(cmd, beforeDispatch: true);
 
-            for (var i = 0; i < d.Textures.Count; i++)
-            {
-                var b = d.Textures[i];
-                if (!IsStorageBinding(prog, b)) continue;
-                RecordStorageBarrier(cmd, textureTable[b.Texture.Id],
-                    ImageLayout.General, ImageLayout.ShaderReadOnlyOptimal,
-                    PipelineStageFlags.ComputeShaderBit, AccessFlags.ShaderWriteBit,
-                    PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.ComputeShaderBit, AccessFlags.ShaderReadBit);
-            }
+        if (d.Uniforms.Count > 0) WriteUniformsAcrossSets(prog, frameSlot, d.Uniforms);
+        Vk.CmdBindPipeline(cmd, PipelineBindPoint.Compute, pipe.Pipeline);
+        BindTransientDescriptorSets(cmd, prog, pipe.Layout, frameSlot, d.Textures, PipelineBindPoint.Compute, gpuBuffers: d.Buffers);
+        if (d.PushConstants is { } pc)
+        {
+            PushConstantsToCommandBuffer(cmd, pipe.Layout, prog.Interface.PushConstants, pc);
+        }
+        Vk.CmdDispatch(cmd, (uint)d.GroupsX, (uint)d.GroupsY, (uint)d.GroupsZ);
+        if (bindsGpuBuffers) FenceGpuBuffers(cmd, beforeDispatch: false);
+
+        for (var i = 0; i < d.Textures.Count; i++)
+        {
+            var b = d.Textures[i];
+            if (!IsStorageBinding(prog, b)) continue;
+            RecordStorageBarrier(cmd, textureTable[b.Texture.Id],
+                ImageLayout.General, ImageLayout.ShaderReadOnlyOptimal,
+                PipelineStageFlags.ComputeShaderBit, AccessFlags.ShaderWriteBit,
+                PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.ComputeShaderBit, AccessFlags.ShaderReadBit);
         }
     }
 

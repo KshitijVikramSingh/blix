@@ -23,6 +23,8 @@ layout(location = 3) out vec3 vTangentWorld;
 layout(location = 4) out float vTangentSign;
 // Stage 4e, for the pre-pass: the surface this is, and where this vertex is now and was last frame (un-jittered
 // clip space; the fragment divides, so the velocity is exact per pixel rather than interpolated after division).
+// The LOD level this placement is drawn at (instances.glsl): the fragment applies the atlas's LOD 0 frame only above 0.
+layout(location = 5) flat out uint vLod;
 layout(location = 6) flat out uint vSurfaceKey;
 layout(location = 7) out vec4 vClipNow;
 layout(location = 8) out vec4 vClipPrev;
@@ -51,6 +53,7 @@ void main() {
     vUv = inUv;
     vWorldPos = world.xyz;
     vSurfaceKey = instanceSurfaceKey();
+    vLod = instanceLod();
     vClipNow = frame.uViewProjUnjittered * world;
     vec4 previousWorld = instancePreviousWorld() * vec4(inPosition, 1.0);
     vClipPrev = frame.uPrevViewProjUnjittered * previousWorld;

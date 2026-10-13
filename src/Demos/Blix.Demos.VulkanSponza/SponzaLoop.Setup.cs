@@ -673,7 +673,6 @@ internal sealed partial class SponzaLoop
         }
         // --sun-nodes: the texels' light for many suns from one trace (SponzaLoop.SunNodes.cs), among the texels' passes.
         DeclareSunNodePasses(stages => Reflect(stages));
-        DeclarePotentialSunsPass(stages => Reflect(stages));
         DeclareSplitLightPass(stages => Reflect(stages));
 
         // --rt-shadows: the shadow rays as soon as the pre-pass has the depth and normals they start from, and the Metal
@@ -1083,7 +1082,6 @@ internal sealed partial class SponzaLoop
         lightBakePipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "texel_bake.comp.spv")), lightBakeInterface, "texel_bake")), "texel_bake"));
         CreateSunNodePipelines(shaderDir);
-        CreatePotentialSunsPipeline(shaderDir);
         CreateSplitLightPipeline(shaderDir);
         texelGatherPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "texel_gather.comp.spv")), texelGatherInterface, "texel_gather")), "texel_gather"));

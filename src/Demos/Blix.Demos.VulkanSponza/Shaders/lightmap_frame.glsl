@@ -35,6 +35,21 @@ bool lightmapShadingFrame(vec2 texel, out vec3 normal, out vec4 tangent) {
     vec3 n = vec3(0.0);
     vec3 tg = vec3(0.0);
     float handed = 0.0, weight = 0.0;
+    // The pixel's own texel's normal: a bilinear neighbour facing another way is another surface's. The gutter around a
+    // chart points each empty texel at the first filled neighbour it finds (SponzaLoop.Lightmap.cs), which can be the
+    // next chart's -- a block's top, the next stone: blended in, it tilted the normal at every joint and edge, and the
+    // sun's n.l drew a crevice along flush joints on the lit faces (the user, 2026-10-14).
+    vec3 ownN = vec3(0.0);
+    {
+        ivec2 own = ivec2(floor(texel));
+        if (all(greaterThanEqual(own, ivec2(0))) && all(lessThan(own, ivec2(size)))) {
+            uint oid = lightmapCellOf[own.y * int(size.x) + own.x];
+            if (oid != 0xFFFFFFFFu) {
+                uvec2 op = lightmapFrames[1u + oid];
+                if (op.x != 0u || op.y != 0u) ownN = lightmapOctDecode(op.x);
+            }
+        }
+    }
     for (int i = 0; i < 4; ++i) {
         ivec2 o = ivec2(i & 1, i >> 1);
         ivec2 at = base + o;
@@ -43,6 +58,7 @@ bool lightmapShadingFrame(vec2 texel, out vec3 normal, out vec4 tangent) {
         if (id == 0xFFFFFFFFu) continue;
         uvec2 packed = lightmapFrames[1u + id];
         if (packed.x == 0u && packed.y == 0u) continue;
+        if (dot(ownN, ownN) > 0.5 && dot(lightmapOctDecode(packed.x), ownN) < 0.9) continue;
         float w = (o.x == 1 ? t.x : 1.0 - t.x) * (o.y == 1 ? t.y : 1.0 - t.y);
         n += w * lightmapOctDecode(packed.x);
         tg += w * lightmapOctDecode(packed.y & ~1u);

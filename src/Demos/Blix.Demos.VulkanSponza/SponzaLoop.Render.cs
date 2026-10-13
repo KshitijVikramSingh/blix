@@ -91,7 +91,7 @@ internal sealed partial class SponzaLoop
             for (var k = 0; k < d.PlacementCount; k++)
             {
                 if (levelScratch[k] < 0) continue;
-                visibleScratch[fill[levelScratch[k]]++] = (uint)placements[d.PlacementStart + k].Transform;
+                visibleScratch[fill[levelScratch[k]]++] = (uint)placements[d.PlacementStart + k].Transform | ((uint)Math.Min(levelScratch[k], 255) << 24);   // the level in the top 8 bits (instances.glsl)
             }
 
             for (var l = 0; l < lodSlots; l++)
@@ -932,6 +932,7 @@ internal sealed partial class SponzaLoop
         graph.Execute(commandList);
 
         RecordPresentPass(commandList);
+        sceneFrameDrawn = true;
         taaWrite = taaWriteNext;
         // The camera this frame's velocity was measured against becomes the next frame's "previous".
         velocityPrevViewProj = viewProj;

@@ -22,7 +22,14 @@ internal sealed partial class SponzaLoop
     // (ClosestThroughContacts): patches had survived inside the crevices' corner block.
     // 7: contacts read from a table of coplanar opposite faces, not by jittered retries.
     // 8: the cache by stage (patches, sun visibility, couplings, texels), each under its own key.
-    private const int TransportCacheVersion = 8;
+    // 9: patches carry their placement (PatchStage.Placement), for the gather's same-surface fallback.
+    private const int TransportCacheVersion = 9;
+    // Each stage's own version, on top of that shared one (which every stage file's header checks and every key holds):
+    // bump the stage whose output or format changed, and only its key -- and what is made from it -- moves. The shared
+    // version moved for one stage's format re-cooked every stage, the texels and the sun records with them (2026-10-14).
+    // 0 adds nothing to a key, so the keys from before these existed still answer.
+    private const int PatchesStageVersion = 0, SunVisStageVersion = 0, CouplingsStageVersion = 0, TexelsStageVersion = 0;
+    private static string StageVersion(int v) => v == 0 ? "" : string.Create(CultureInfo.InvariantCulture, $";stage v{v}");
     private string? sceneAssetsRoot;
 
     // The cook's stages, each cached on its own under a key of what it depends on (TransportStageKeys): a change to how
@@ -40,6 +47,7 @@ internal sealed partial class SponzaLoop
     {
         public Vector3[] Pos = Array.Empty<Vector3>(), Nrm = Array.Empty<Vector3>(), Albedo = Array.Empty<Vector3>();
         public float[] Openness = Array.Empty<float>();
+        public uint[] Placement = Array.Empty<uint>();   // the placement each patch lies on (the ray scene's numbering)
     }
 
     internal sealed class CouplingStage
@@ -102,12 +110,12 @@ internal sealed partial class SponzaLoop
         var finding = string.Create(CultureInfo.InvariantCulture,
             $"candidates {transportCandidates} lift {transportVisLift} far {transportFarCutoff} facing {transportFacingCos} {transportFacingWeight}");
         var patches = Hash(scenePart + string.Create(CultureInfo.InvariantCulture,
-            $"patches;spacing {transportSpacing};reach {TexelOpenReach};{(transportFill ? $"fill {transportFillRays} x{transportFillPasses} {finding}" : "no fill")}"));
-        var sunVis = Hash(patches + string.Create(CultureInfo.InvariantCulture, $";sun vis {transportVisRes}"));
+            $"patches;spacing {transportSpacing};reach {TexelOpenReach};{(transportFill ? $"fill {transportFillRays} x{transportFillPasses} {finding}" : "no fill")}{StageVersion(PatchesStageVersion)}"));
+        var sunVis = Hash(patches + string.Create(CultureInfo.InvariantCulture, $";sun vis {transportVisRes}{StageVersion(SunVisStageVersion)}"));
         var couplings = Hash(patches + string.Create(CultureInfo.InvariantCulture,
-            $";couplings;rays {transportRays};sunlet {transportSunlet};{finding}{(transportOwnFallback ? " own fallback" : "")}{(transportSeed != 0 ? $" seed {transportSeed}" : "")}"));
+            $";couplings;rays {transportRays};sunlet {transportSunlet};{finding}{(transportOwnFallback ? " own fallback" : "")}{(transportSeed != 0 ? $" seed {transportSeed}" : "")}{StageVersion(CouplingsStageVersion)}"));
         var texels = Hash(scenePart + string.Create(CultureInfo.InvariantCulture,
-            $"texels {transportTexels};texel {texelSpacing};levels {texelLevels};reach {TexelOpenReach};lightmap {lightmapEnabled} (the atlas is level 0);"));
+            $"texels {transportTexels};texel {texelSpacing};levels {texelLevels};reach {TexelOpenReach};lightmap {lightmapEnabled} (the atlas is level 0);{(texelFoliage ? "foliage;" : "")}{StageVersion(TexelsStageVersion)}"));
         return new TransportStageKeys(patches, sunVis, couplings, texels, Hash($"{patches};{sunVis};{couplings};{texels}"));
     }
 
@@ -157,10 +165,10 @@ internal sealed partial class SponzaLoop
     }
 
     private static PatchStage? LoadPatches(string key) => LoadStage(key, "patches", r => new PatchStage
-        { Pos = ReadArray<Vector3>(r), Nrm = ReadArray<Vector3>(r), Albedo = ReadArray<Vector3>(r), Openness = ReadArray<float>(r) });
+        { Pos = ReadArray<Vector3>(r), Nrm = ReadArray<Vector3>(r), Albedo = ReadArray<Vector3>(r), Openness = ReadArray<float>(r), Placement = ReadArray<uint>(r) });
 
     private static void SavePatches(string key, PatchStage p) => SaveStage(key, "patches", w =>
-        { WriteArray(w, p.Pos); WriteArray(w, p.Nrm); WriteArray(w, p.Albedo); WriteArray(w, p.Openness); });
+        { WriteArray(w, p.Pos); WriteArray(w, p.Nrm); WriteArray(w, p.Albedo); WriteArray(w, p.Openness); WriteArray(w, p.Placement); });
 
     private static CouplingStage? LoadCouplings(string key) => LoadStage(key, "couplings", r => new CouplingStage
     {

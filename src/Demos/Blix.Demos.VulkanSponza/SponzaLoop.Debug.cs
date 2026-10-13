@@ -104,6 +104,8 @@ internal sealed partial class SponzaLoop
             // Toggle the incident field under a still camera: off, the lit pass uses the open-sky cube
             // with no clipmap light, the diagnostic --no-incident is.
             incidentField = debug.Controls.Toggle("Incident field (off: open sky cube)", incidentField);
+            // The cells' detail (SponzaLoop.SplitDetail.cs): off, the probes answer everywhere, as before the detail.
+            texelDetailOn = debug.Controls.Toggle("Cells answer alone (sky visibility, direction)", texelDetailOn);
         }
 
         // The clipmap's levels, live (stage 4g-v): answer from one level alone or the blend, and the knobs the level
@@ -121,18 +123,23 @@ internal sealed partial class SponzaLoop
 
         // Spatial gizmos: sun direction + the three cascade ortho boxes.
         // Every primitive below belongs to the main view; the scope supplies its matrix.
+        // A layer that starts hidden (the Layers tab): drawn always, they crossed every view as long diagonal lines (the
+        // cascades' frusta) and an arrow at the origin, the tree's foot in Sponza.
         using var view = debug.Draw.In("main", viewProj);
-        debug.Draw.Arrow("sun/dir", -sunDirection * 6f, Vector3.Zero,
-            new GraphicsColor(1f, 0.92f, 0.3f, 1f));
-        var cascadeTints = new[]
+        if (debug.Draw.Layer("gizmos", visible: false))
         {
-            new GraphicsColor(1f, 0.35f, 0.35f, 0.8f),
-            new GraphicsColor(0.35f, 1f, 0.35f, 0.8f),
-            new GraphicsColor(0.4f, 0.5f, 1f, 0.8f),
-        };
-        for (var c = 0; c < CascadeCount; c++)
-        {
-            debug.Draw.Frustum($"cascade/{c}", cascadeViewProj[c], cascadeTints[c]);
+            debug.Draw.Arrow("sun/dir", -sunDirection * 6f, Vector3.Zero,
+                new GraphicsColor(1f, 0.92f, 0.3f, 1f));
+            var cascadeTints = new[]
+            {
+                new GraphicsColor(1f, 0.35f, 0.35f, 0.8f),
+                new GraphicsColor(0.35f, 1f, 0.35f, 0.8f),
+                new GraphicsColor(0.4f, 0.5f, 1f, 0.8f),
+            };
+            for (var c = 0; c < CascadeCount; c++)
+            {
+                debug.Draw.Frustum($"cascade/{c}", cascadeViewProj[c], cascadeTints[c]);
+            }
         }
 
         // Outlines every opaque primitive NOT at full detail, tinted by how coarse it is, and flashes
@@ -162,7 +169,6 @@ internal sealed partial class SponzaLoop
     private void ReportValues(DebugContext debug)
     {
         ReportReference(debug);
-        ReportPotentialSuns(debug);
         using (debug.Scope("Sun"))
         {
             debug.Values.Value("sun-irradiance",

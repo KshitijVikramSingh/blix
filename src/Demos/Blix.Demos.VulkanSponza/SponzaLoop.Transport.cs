@@ -43,6 +43,10 @@ internal sealed partial class SponzaLoop
     // --transport-seed N (0): the couplings' rays drawn from another sequence -- the cook's noise measured by recooking
     // the same scene (0: the seeds as always; another, its own couplings cache).
     private int transportSeed;
+    // The texels stage's key (TransportCacheKeys): what geometry-only caches are filed under.
+    private string? texelsStageKey;
+    // --no-texel-foliage: leaves and ivy without texels (the incident pass lights them from the clipmap), as before.
+    private bool texelFoliage = true;
     private int CouplingSeed(int patch) => 1000 + patch + transportSeed * 7_368_787;
     // --transport-miss-why's accounting of how hits found their patch (NearestVisibleOr, OwnFallback): the rank seen,
     // HowAnyFacing, HowFallback or HowMiss; and the time spent past BaseCandidates and in the fallback.
@@ -139,6 +143,8 @@ internal sealed partial class SponzaLoop
         transportMissWhy = !args.Flag("no-transport-miss-why");
         transportOwnFallback = args.Flag("transport-own-fallback");
         transportSeed = args.Int("transport-seed") ?? 0;
+        texelFoliage = !args.Flag("no-texel-foliage");
+        texelDetailOn = !args.Flag("no-texel-detail");
         if (args.Float("transport-far-cutoff") is { } fc) transportFarCutoff = Math.Max(0f, fc);
         transportFill = args.Flag("transport-fill");
         if (args.Int("transport-fill-rays") is { } fr) transportFillRays = Math.Clamp(fr, 1, 4096);
@@ -243,7 +249,8 @@ internal sealed partial class SponzaLoop
         cookedGuideBuffer = Own(device.CreateGpuBuffer(cdf.Length * 4, MemoryMarshal.AsBytes(cdf.AsSpan()), "sponza.cooked.guides"));
     }
 
-    private void UploadCookedPatches(List<Vector3> pos, List<Vector3> nrm, Vector3[] incident, float[] openness, float cell)
+    // placement: each patch's, carried in its position's w as raw bits (cooked_patches.glsl, cookedNearestOn).
+    private void UploadCookedPatches(List<Vector3> pos, List<Vector3> nrm, Vector3[] incident, float[] openness, float cell, List<uint> placement)
     {
         if (!transportGpu) return;
         var min = sceneBoundsMin - new Vector3(cell);
@@ -265,7 +272,7 @@ internal sealed partial class SponzaLoop
         var packed = new Vector4[pos.Count * 3];
         for (var i = 0; i < pos.Count; i++)
         {
-            packed[3 * i] = new Vector4(pos[i], 0f);
+            packed[3 * i] = new Vector4(pos[i], BitConverter.UInt32BitsToSingle(i < placement.Count ? placement[i] : 0xFFFFFFFFu));
             packed[3 * i + 1] = new Vector4(nrm[i], openness[i]);
             packed[3 * i + 2] = new Vector4(incident[i], 0f);
         }
@@ -311,6 +318,10 @@ internal sealed partial class SponzaLoop
         // The cook's cache (SponzaLoop.TransportCache.cs): a run whose inputs match reads what the cook would make.
         var stageKeys = TransportCacheKeys(scene, surfaces);
         var cacheKey = stageKeys.Combined;
+        // What depends on geometry alone -- the lightmap's buried flags, the sun records -- is filed under the texels' key
+        // (the scene, its lightmap, the texel layout), not the combined one: a change to how hits find patches re-cooks the
+        // couplings and the light made from them, not those (a 13.5-min sun-record bake each time, before).
+        texelsStageKey = stageKeys.Texels;
         DecideBakeScene(cacheKey);
         // Each stage from its own cache; the couplings and the sun visibility only over the patches they were made for.
         var patchStage = LoadPatches(stageKeys.Patches);
@@ -323,6 +334,7 @@ internal sealed partial class SponzaLoop
         var pos = new List<Vector3>();
         var nrm = new List<Vector3>();
         var albedo = new List<Vector3>();
+        var placement = new List<uint>();   // each patch's placement (the hit records' numbering)
         if (patchStage is null)
         {
         var rng = new Random(5);
@@ -344,6 +356,7 @@ internal sealed partial class SponzaLoop
                 var count = (int)expected + (rng.NextDouble() < expected - (int)expected ? 1 : 0);
                 var front = Vector3.Normalize(cross);
                 var alb = Albedo(i, t);
+                var onPlacement = data.RowPlacements[data.RowOf(i, t)];
                 // Stratified, not uniform: the R2 low-discrepancy sequence from a random start, folded into the triangle.
                 // Uniform random placement clustered some patches and left holes between others, which the
                 // interpolation then read across (and a hit found no patch near it: 5.25% of rays at 0.125 m).
@@ -363,6 +376,7 @@ internal sealed partial class SponzaLoop
                         pos.Add(at);
                         nrm.Add(side == 0 ? front : -front);
                         albedo.Add(alb);
+                        placement.Add(onPlacement);
                     }
                 }
             }
@@ -391,15 +405,16 @@ internal sealed partial class SponzaLoop
                 }
                 keep[i] = back * 2 < tests;
             });
-            var p2 = new List<Vector3>(); var n2 = new List<Vector3>(); var a2 = new List<Vector3>();
-            for (var i = 0; i < pos.Count; i++) if (keep[i]) { p2.Add(pos[i]); n2.Add(nrm[i]); a2.Add(albedo[i]); }
+            var p2 = new List<Vector3>(); var n2 = new List<Vector3>(); var a2 = new List<Vector3>(); var o2 = new List<uint>();
+            for (var i = 0; i < pos.Count; i++) if (keep[i]) { p2.Add(pos[i]); n2.Add(nrm[i]); a2.Add(albedo[i]); o2.Add(placement[i]); }
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] transport: {pos.Count:N0} patch sides placed, {p2.Count:N0} kept (the rest inside a solid)."));
-            pos = p2; nrm = n2; albedo = a2;
+            pos = p2; nrm = n2; albedo = a2; placement = o2;
         }
         }
         else
         {
             pos = patchStage.Pos.ToList(); nrm = patchStage.Nrm.ToList(); albedo = patchStage.Albedo.ToList();
+            placement = patchStage.Placement.ToList();
         }
         var patches = pos.Count;
         // A hash grid over the patches: a ray's hit finds the nearest patch facing the way the hit surface faces.
@@ -533,7 +548,7 @@ internal sealed partial class SponzaLoop
         int FillPatches(int pass)
         {
             var fillClock = Stopwatch.StartNew();
-            var found = new ConcurrentDictionary<(int, int, int, int), (Vector3 P, Vector3 N, Vector3 A, int Instance)>();
+            var found = new ConcurrentDictionary<(int, int, int, int), (Vector3 P, Vector3 N, Vector3 A, int Instance, uint Placement)>();
             var stage = $"transport: fill pass {pass}";
             ProgressBegin(stage + ", discovery", patches);
             Parallel.For(0, patches, i =>
@@ -550,7 +565,7 @@ internal sealed partial class SponzaLoop
                     var hn = HitNormal(h, d);
                     if (NearestVisibleOr(hp, hn, (uint)r.Next(), anyFacing: false, out _) >= 0) continue;
                     var key = ((int)MathF.Floor(hp.X / transportSpacing), (int)MathF.Floor(hp.Y / transportSpacing), (int)MathF.Floor(hp.Z / transportSpacing), OctBin(hn, 4));
-                    found.TryAdd(key, (hp, hn, Albedo(h.Instance, h.Triangle), h.Instance));
+                    found.TryAdd(key, (hp, hn, Albedo(h.Instance, h.Triangle), h.Instance, data.RowPlacements[data.RowOf(h.Instance, h.Triangle)]));
                 }
             });
             ProgressEnd(stage + ", discovery");
@@ -562,7 +577,7 @@ internal sealed partial class SponzaLoop
             Parallel.For(0, spots.Length, s =>
             {
                 ProgressAdd(stage + ", spots");
-                var (sp, sn, _, _) = spots[s];
+                var (sp, sn, _, _, _) = spots[s];
                 if (!Exposed(scene, sp, sn, (uint)s)) { Interlocked.Increment(ref hidden); return; }
                 var r = new Random(77 + s);
                 var back = 0;
@@ -581,9 +596,9 @@ internal sealed partial class SponzaLoop
             for (var s = 0; s < spots.Length; s++)
             {
                 if (!take[s]) continue;
-                var (sp, sn, sa, inst) = spots[s];
+                var (sp, sn, sa, inst, onPlacement) = spots[s];
                 var at = pos.Count;
-                pos.Add(sp); nrm.Add(sn); albedo.Add(sa);
+                pos.Add(sp); nrm.Add(sn); albedo.Add(sa); placement.Add(onPlacement);
                 var key = Key(sp);
                 if (!grid.TryGetValue(key, out var list)) grid[key] = list = new List<int>();
                 list.Add(at);
@@ -1677,11 +1692,11 @@ internal sealed partial class SponzaLoop
                 openness[i] = free / (float)tests;
             });
         if (transportGpu && patchStage is null)
-            SavePatches(stageKeys.Patches, new PatchStage { Pos = pos.ToArray(), Nrm = nrm.ToArray(), Albedo = albedo.ToArray(), Openness = openness });
+            SavePatches(stageKeys.Patches, new PatchStage { Pos = pos.ToArray(), Nrm = nrm.ToArray(), Albedo = albedo.ToArray(), Openness = openness, Placement = placement.ToArray() });
         var guides = BuildGuides(outgoing, sunletOut);
         OnMain(() =>
         {
-            UploadCookedPatches(pos, nrm, incident, openness, transportSpacing);
+            UploadCookedPatches(pos, nrm, incident, openness, transportSpacing, placement);
             UploadCookedGuides(guides);
         });
         // --lightmap: the lightmap atlas's texels are the finest level of the surfaces in the atlas (SponzaLoop.Lightmap.cs),
@@ -1778,14 +1793,17 @@ internal sealed partial class SponzaLoop
             foreach (var (name, c) in blockers.OrderByDescending(x => x.Value).Take(12))
                 Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {c,7:N0}  {name}"));
         }
-        var lightmapBake = lightmapEnabled && transportTexels && lightmapSources.Count > 0 ? BakeLightmapTexels(scene, cacheKey) : null;
+        var lightmapBake = lightmapEnabled && transportTexels && lightmapSources.Count > 0 ? BakeLightmapTexels(scene, stageKeys.Texels) : null;
         TexelBake? texelBake;
         if (texelStage is { } cachedTexels)
         {
             texelBake = cachedTexels;
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] texels: {cachedTexels.Count:N0} from the cache."));
         }
-        else texelBake = CookTexels(scene, Tri, (i, t) => (surfaces[data.RowOf(i, t)] >> 24) < 255u,
+        // --texel-foliage (on): the partly covered triangles -- leaves, ivy -- get hashed texels too, so their light is
+        // gathered as every other surface's; off, they had none and the incident pass lit them from the clipmap's 0.5 m
+        // probes (the tree's leaf litter one flat bright green, no shade under the canopy, 2026-10-14).
+        else texelBake = CookTexels(scene, Tri, (i, t) => !texelFoliage && (surfaces[data.RowOf(i, t)] >> 24) < 255u,
             (i, t) => lightmapBake is not null && rayPlacementLightmapped[(int)data.RowPlacements[data.RowOf(i, t)]] ? 1 : 0);
         if (transportGpu && texelStage is null && transportTexels && texelBake is not null) SaveTexels(stageKeys.Texels, texelBake);
         if (texelBake is { } hashed)
