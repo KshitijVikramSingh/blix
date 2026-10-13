@@ -563,6 +563,7 @@ internal sealed partial class SponzaLoop
             return;
         }
 
+        RestoreVsyncAfterCook();
         // A transport cook in the background: only what it waits on, and the cook screen (SponzaLoop.CookScreen.cs).
         if (CookScreenNow)
         {

@@ -168,6 +168,7 @@ internal sealed partial class SponzaLoop
         // from the command line here).
         if (args.Flag("lightlet-sun")) { render.LightletSun = true; lightletsAsked = true; }
         // RenderSettings.HalfResLighting / HalfResShadows from the command line, for scripted runs.
+        if (args.Flag("half-res-lighting")) render.HalfResLighting = true;
         if (args.Flag("full-res-lighting")) render.HalfResLighting = false;
         if (args.Flag("half-res-shadows")) render.HalfResShadows = true;
         metalDeviceQueue = args.Flag("metal-device-queue");

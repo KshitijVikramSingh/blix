@@ -24,8 +24,10 @@ internal sealed partial class SponzaLoop
         if (sceneLoaded && !fullyLoaded)
         {
             textureLoader.Drain(budgetMillis: 6.0);
+            DebugProgress.Set("textures", textureLoader.UploadedCount, textureLoader.UploadedCount + textureLoader.PendingCount, "stream");
             if (textureLoader.PendingCount == 0)
             {
+                DebugProgress.End("textures");
                 fullyLoaded = true;
                 // Steady state starts here, so every measurement window does too: the streaming
                 // frames rendered a different (flat) path entirely, and counting them diluted the

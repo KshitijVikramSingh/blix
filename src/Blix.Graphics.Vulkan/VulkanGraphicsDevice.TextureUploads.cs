@@ -40,7 +40,32 @@ public sealed partial class VulkanGraphicsDevice
     // Per-slot capacity. Today's whole-frame traffic is one fog mask plus one wear mask,
     // both single-channel and well under a hundred kilobytes; 4 MiB leaves room for a
     // full 1024x1024 RGBA mask per frame without a resize path.
-    private const int TextureUploadSlotBytes = 4 * 1024 * 1024;
+    // A streaming application asks for more (ReserveTextureUploadRing) before the ring is first made.
+    private int TextureUploadSlotBytes = 4 * 1024 * 1024;
+
+    /// <summary>
+    /// Asks for at least <paramref name="bytesPerFrame"/> of staging a frame before the ring is first made (a texture
+    /// streamer's per-frame budget); ignored once it exists.
+    /// </summary>
+    public void ReserveTextureUploadRing(int bytesPerFrame)
+    {
+        if (textureUploadSlots.Length > 0) return;
+        TextureUploadSlotBytes = Math.Max(TextureUploadSlotBytes, bytesPerFrame);
+    }
+
+    /// <summary>
+    /// <see cref="QueueTextureUpload"/>, unless this frame's slot of the ring cannot take the bytes: then false, and
+    /// nothing queued (a streamer stops for the frame).
+    /// </summary>
+    public bool TryQueueTextureUpload(TextureHandle handle, int mipLevel, ReadOnlySpan<byte> bytes)
+    {
+        ThrowIfDisposed();
+        CreateTextureUploadRing();
+        var slot = textureUploadBump[textureUploadSlot];
+        if (bytes.Length + TextureUploadAlignment > TextureUploadSlotBytes - slot.Used) return false;
+        QueueTextureUpload(handle, mipLevel, bytes);
+        return true;
+    }
 
     // Copy offsets satisfy the device's optimalBufferCopyOffsetAlignment and texel block size.
     // 256 covers every alignment reported by the drivers this

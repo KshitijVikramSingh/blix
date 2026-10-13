@@ -50,9 +50,20 @@ internal sealed partial class SponzaLoop
     private uint[] sunNodeTraceIds = Array.Empty<uint>();
     private GpuBufferHandle sunNodeTraceBuffer;
     private ShaderInterface sunNodePrepInterface = null!, sunNodeRaysInterface = null!, sunNodeShadeInterface = null!;
-    private PassHandle sunNodePrepPass, sunNodeRaysPass, sunNodeShadePass;
+    private PassHandle sunNodePrepPass;
+    // A pass of the trace, SunNodePassCopies times over (each copy its own passes): a frame graph pass takes one piece of
+    // external (Metal) work a frame, so one set of passes held the cook to a pass a frame -- frames spinning for the
+    // cook, ~3,800 of them for Sponza's sweep. Under the cook screen a frame records a copy a pass, up to the slice's
+    // readback (SponzaLoop.CookScreen.cs). sunNodeCopy: the copy the next pass records into (0 outside it).
+    // --split-passes-per-frame N (1, up to SunNodePassCopies): how many a cook-screen frame records. More is a heavier
+    // command buffer: held at 1 while Sponza's split cook still meets the GPU's watchdog (2026-10-13).
+    private const int SunNodePassCopies = 4;
+    private int sunNodePassesPerFrame = 1;
+    private readonly PassHandle[] sunNodeRaysPasses = new PassHandle[SunNodePassCopies], sunNodeShadePasses = new PassHandle[SunNodePassCopies],
+        sunNodeExactOriginsPasses = new PassHandle[SunNodePassCopies];
+    private readonly RayBatchPasses[] sunNodeClosestBatches = new RayBatchPasses[SunNodePassCopies], sunNodeExactBatches = new RayBatchPasses[SunNodePassCopies];
+    private int sunNodeCopy;
     private PipelineHandle sunNodePrepPipeline, sunNodeRaysPipeline, sunNodeShadePipeline;
-    private RayBatchPasses sunNodeClosestBatch;
     // Each texel's nearest visible patch (texel_nodes_patch.comp), before the trace: PatchCandidates rays a texel.
     private const int PatchCandidates = 4;
     private ShaderInterface sunNodePatchInterface = null!;
@@ -68,8 +79,6 @@ internal sealed partial class SponzaLoop
     private bool sunNodeGuide = true;
     private bool sunNodeGuided;
     private GpuBufferHandle sunNodeGuideBuffer, sunNodeRayWeights;
-    private PassHandle sunNodeExactOriginsPass;
-    private RayBatchPasses sunNodeExactBatch;
     private GpuBufferHandle sunNodeExactOrigins, sunNodeExactOccluded;
 
     private enum SunNodeStage { Off, Waiting, Relighting, Prep, PatchPick, Discover, Merge, Tracing, Done }
@@ -110,6 +119,7 @@ internal sealed partial class SponzaLoop
         // The cook's settings, read for both the study (--sun-nodes) and the band's grid (--potential-suns).
         if (args.Int("sun-nodes-rays") is { } r) sunNodeRays = Math.Max(32, r / 32 * 32);
         if (args.Int("sun-nodes-slice") is { } s) sunNodeSlice = Math.Clamp(s, 1024, 65535);
+        if (args.Int("split-passes-per-frame") is { } ppf) sunNodePassesPerFrame = Math.Clamp(ppf, 1, SunNodePassCopies);
         if (args.Int("sun-nodes-discover-stride") is { } ds) sunNodeDiscoverStride = Math.Max(0, ds);
         if (args.Float("sun-nodes-lift") is { } lift) sunNodeLift = Math.Max(0f, lift);
         if (args.Float("sun-nodes-unknown-sun") is { } us) sunNodeUnknownSun = Math.Clamp(us, 0f, 1f);
@@ -166,16 +176,21 @@ internal sealed partial class SponzaLoop
         sunNodePrepInterface = reflect(new[] { "texel_nodes_prep.comp" });
         sunNodePrepPass = graph.ComputePass("sun-nodes-prep").Shader(sunNodePrepInterface).Handle;
         sunNodeRaysInterface = reflect(new[] { "texel_nodes_rays.comp" });
-        sunNodeRaysPass = graph.ComputePass("sun-nodes-rays").Shader(sunNodeRaysInterface).Handle;
+
         sunNodePatchInterface = reflect(new[] { "texel_nodes_patch.comp" });
         sunNodePatchAPass = graph.ComputePass("sun-nodes-patch-a").Shader(sunNodePatchInterface).Handle;
         sunNodePatchBatch = DeclareClosestBatch("sun-nodes-patch-closest");
         sunNodePatchBPass = graph.ComputePass("sun-nodes-patch-b").Shader(sunNodePatchInterface).Handle;
-        sunNodeClosestBatch = DeclareClosestBatch("sun-nodes-closest");
-        sunNodeExactOriginsPass = graph.ComputePass("sun-nodes-exact-origins").Shader(reflect(new[] { "texel_nodes_shade.comp" })).Handle;
-        sunNodeExactBatch = DeclareShadowBatch("sun-nodes-exact");
         sunNodeShadeInterface = reflect(new[] { "texel_nodes_shade.comp" });
-        sunNodeShadePass = graph.ComputePass("sun-nodes-shade").Shader(sunNodeShadeInterface).Handle;
+        for (var c = 0; c < SunNodePassCopies; c++)
+        {
+            var tag = c == 0 ? "" : $"-{c}";
+            sunNodeRaysPasses[c] = graph.ComputePass("sun-nodes-rays" + tag).Shader(sunNodeRaysInterface).Handle;
+            sunNodeClosestBatches[c] = DeclareClosestBatch("sun-nodes-closest" + tag);
+            sunNodeExactOriginsPasses[c] = graph.ComputePass("sun-nodes-exact-origins" + tag).Shader(sunNodeShadeInterface).Handle;
+            sunNodeExactBatches[c] = DeclareShadowBatch("sun-nodes-exact" + tag);
+            sunNodeShadePasses[c] = graph.ComputePass("sun-nodes-shade" + tag).Shader(sunNodeShadeInterface).Handle;
+        }
     }
 
     private void CreateSunNodePipelines(string shaderDir)
@@ -600,7 +615,8 @@ internal sealed partial class SponzaLoop
     {
         if (seedPass < 0) seedPass = pass;
         var raysDeclared = sunNodeRaysInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
-        graph.Dispatch(sunNodeRaysPass, new DispatchCommand(sunNodeRaysPipeline, slice, 1, 1,
+        var copy = sunNodeCopy;
+        graph.Dispatch(sunNodeRaysPasses[copy], new DispatchCommand(sunNodeRaysPipeline, slice, 1, 1,
             new ShaderUniform[]
             {
                 new("uSlice", new Vector4Uniform(new Vector4(first, slice, seedPass, sunNodeGuided ? 1f : 0f))),
@@ -619,16 +635,16 @@ internal sealed partial class SponzaLoop
         var seed = unchecked((uint)(first * 2654435761L) ^ (uint)seedPass * 0x9E3779B9u ^ (discover > 0 ? 0xD15C0u : 0u));
         // The frame's tracer: cook with --ray-lod-error 0, so it is the LOD 0 the texels sit on (UploadSunNodes warns). The
         // bake scene's tracer read the light 28% dark on Cornell, the same 120 triangles (its hits' albedo; open).
-        RecordClosestBatch(sunNodeClosestBatch, sunNodeRaysBuffer, sunNodeHits, slice * 32, seed);
+        RecordClosestBatch(sunNodeClosestBatches[copy], sunNodeRaysBuffer, sunNodeHits, slice * 32, seed);
         var declared = sunNodeShadeInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
         var exact = sunNodeExact && discover == 0;
         if (exact)
         {
-            graph.Dispatch(sunNodeExactOriginsPass, ShadeCommand(1f));
-            RecordShadowBatch(sunNodeExactBatch, sunNodeExactOrigins, sunNodeExactOccluded, slice * 32,
+            graph.Dispatch(sunNodeExactOriginsPasses[copy], ShadeCommand(1f));
+            RecordShadowBatch(sunNodeExactBatches[copy], sunNodeExactOrigins, sunNodeExactOccluded, slice * 32,
                 new Vector3(sunNodeDirs[0].X, sunNodeDirs[0].Y, sunNodeDirs[0].Z), seed ^ 0x5bd1e995u);
         }
-        graph.Dispatch(sunNodeShadePass, ShadeCommand(exact ? 2f : 0f));
+        graph.Dispatch(sunNodeShadePasses[copy], ShadeCommand(exact ? 2f : 0f));
         DispatchCommand ShadeCommand(float exactMode) => new DispatchCommand(sunNodeShadePipeline, slice, 1, 1,
             new ShaderUniform[]
             {

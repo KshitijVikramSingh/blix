@@ -197,6 +197,18 @@ public interface IGraphicsDevice : IDisposable
     // UploadTextureMip instead.
     void QueueTextureUpload(TextureHandle handle, int mipLevel, ReadOnlySpan<byte> bytes);
 
+    // QueueTextureUpload, unless this frame's staging cannot take the bytes: then false and nothing queued (a texture
+    // streamer stops for the frame and goes on next). A device without a per-frame staging ring always takes it.
+    bool TryQueueTextureUpload(TextureHandle handle, int mipLevel, ReadOnlySpan<byte> bytes)
+    {
+        QueueTextureUpload(handle, mipLevel, bytes);
+        return true;
+    }
+
+    // Asks for at least this much per-frame upload staging, before it is first made (a texture streamer's budget a
+    // frame). A device that stages otherwise ignores it.
+    void ReserveTextureUploadRing(int bytesPerFrame) { }
+
     // Allocates a multi-mip texture with all storage reserved but no pixel
     // data uploaded -- every level's contents are undefined until filled via
     // UploadTextureMip. Used by the streamed-upload path: ResourceUploader

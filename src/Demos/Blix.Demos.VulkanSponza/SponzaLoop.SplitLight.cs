@@ -34,7 +34,15 @@ internal sealed partial class SponzaLoop
     private Vector3? splitSunWanted;
     private Vector3 splitSunSolved = new(float.NaN);
 
-    private void ReadSplitLightArgs(AppArgs args) => splitLight = args.Flag("split-light");
+    // --split-refine-min-share S (0.1): the refining rounds stop after one that settles under this share of what it
+    // traced (SponzaLoop.SunNodesRefine.cs).
+    private float splitRefineMinShare = 0.1f;
+
+    private void ReadSplitLightArgs(AppArgs args)
+    {
+        splitLight = args.Flag("split-light");
+        if (args.Float("split-refine-min-share") is { } share) splitRefineMinShare = Math.Clamp(share, 0f, 1f);
+    }
 
     private void DeclareSplitLightPass(Func<string[], ShaderInterface> reflect)
     {
@@ -53,7 +61,7 @@ internal sealed partial class SponzaLoop
     {
         var part = toSun is { } d ? string.Create(CultureInfo.InvariantCulture, $"sun {d.X:F5},{d.Y:F5},{d.Z:F5} per unit irradiance") : "sky";
         var spec = string.Create(CultureInfo.InvariantCulture,
-            $"{transportKey};{part};sky {skyIdentity};rays {sunNodeRays} {(sunNodeGuide ? "guided" : "cosine")};lift {sunNodeLift:G4};lookup {sunNodePlane:G3} {sunNodeSigma:G3};discover {sunNodeDiscoverStride};unknown {sunNodeUnknownSun:G3};settled {texelNoise:G6} {texelMaxRays};patches seen of {PatchCandidates};buried {LightmapBuriedRule};v{SplitLightVersion}");
+            $"{transportKey};{part};sky {skyIdentity};rays {sunNodeRays} {(sunNodeGuide ? "guided" : "cosine")};lift {sunNodeLift:G4};lookup {sunNodePlane:G3} {sunNodeSigma:G3};discover {sunNodeDiscoverStride};unknown {sunNodeUnknownSun:G3};settled {texelNoise:G6} {texelMaxRays} stop {splitRefineMinShare:G3};patches seen of {PatchCandidates};buried {LightmapBuriedRule};v{SplitLightVersion}");
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(spec)))[..16].ToLowerInvariant();
         return Path.ChangeExtension(TransportCachePath(transportKey), $".{(toSun is null ? "sky" : "sun")}-{hash}");
     }
@@ -171,6 +179,8 @@ internal sealed partial class SponzaLoop
         splitComposeDirty = false;
         splitComposedSky = sky;
         splitComposedSun = sun;
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[VulkanSponza] split light: composed at frame {framesRendered} (post-load {postLoadFrames}): sky {sky.X:G4}, sun {sun.X:G4},{sun.Y:G4},{sun.Z:G4}{(splitSunUp ? "" : " (no sun part yet)")}."));
         var live = texelLiveIds!.Length;
         foreach (var mode in texelFilter ? new[] { 0, 1 } : new[] { 0 })
             graph.Dispatch(mode == 0 ? texelComposePass : texelComposeFilterPass, new DispatchCommand(texelComposePipeline, (live + 63) / 64, 1, 1,

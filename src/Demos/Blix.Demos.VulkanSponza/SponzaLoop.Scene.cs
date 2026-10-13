@@ -147,29 +147,38 @@ internal sealed partial class SponzaLoop
     private void TryFinishLoad()
     {
         if (sceneLoaded) return;
-        if (meshLoad.IsFaulted)
+        if (rayBuildTask is null)
         {
-            Console.WriteLine($"[VulkanSponza] load failed: {meshLoad.Fault?.Message}");
-            sceneLoaded = true; // give up → render the empty clear
-            return;
+            if (meshLoad.IsFaulted)
+            {
+                Console.WriteLine($"[VulkanSponza] load failed: {meshLoad.Fault?.Message}");
+                sceneLoaded = true; // give up → render the empty clear
+                return;
+            }
+            DebugProgress.Set("geometry", 0, 0, "load");
+
+            // Stage primitives within the per-frame budget; false while still parsing
+            // off-thread or with more to stage. True once every primitive is staged.
+            if (!meshLoad.Drain(LoadBudgetMs, StageDrawable)) return;
+            DebugProgress.End("geometry");
+
+            // Everything staged → build the shared buffers; the ray scene's build and packing go to the background
+            // (StartRayScene), the window going on meanwhile -- it froze ~30 s on Sponza for them.
+            ConsolidateBuffers();
+            // After ConsolidateBuffers: it selects the mover, whose reach the bounds include. Without the bounds caster
+            // culling and the orbit read a zero box, and offscreen casters lost their shadows.
+            FitSceneVolumeToDrawables();
+            RegisterSelectables();
+            BuildCullBuffers();
+            Console.WriteLine(
+                $"[VulkanSponza] total: {opaqueDrawables.Count} opaque/mask + {blendDrawables.Count} blend unique primitives, "
+                + $"placed {opaquePlacements.Count} + {blendPlacements.Count} times.");
+            LogPrimitiveSizeHistogram();
+            UpdateCamera();
+            if (rayBuildTask is not null) return;
         }
-
-        // Stage primitives within the per-frame budget; false while still parsing
-        // off-thread or with more to stage. True once every primitive is staged.
-        if (!meshLoad.Drain(LoadBudgetMs, StageDrawable)) return;
-
-        // Everything staged → build the shared buffers + finish.
-        ConsolidateBuffers();
-        // After ConsolidateBuffers: it selects the mover, whose reach the bounds include. Without the bounds caster
-        // culling and the orbit read a zero box, and offscreen casters lost their shadows.
-        FitSceneVolumeToDrawables();
-        RegisterSelectables();
-        BuildCullBuffers();
-        Console.WriteLine(
-            $"[VulkanSponza] total: {opaqueDrawables.Count} opaque/mask + {blendDrawables.Count} blend unique primitives, "
-            + $"placed {opaquePlacements.Count} + {blendPlacements.Count} times.");
-        LogPrimitiveSizeHistogram();
-        UpdateCamera();
+        if (rayBuildTask is { IsCompleted: false }) return;
+        FinishRayScene();
         sceneLoaded = true;
     }
 
@@ -414,7 +423,7 @@ internal sealed partial class SponzaLoop
         }
 
         SelectMover(rayInstances);
-        BuildRayScene(rayMeshes, rayInstances);
+        StartRayScene(rayMeshes, rayInstances);
         // The bake scene waits for the transport cook's key: built only if a cache it would fill is missing.
         if (BakeSceneWanted) bakeSceneSource = ordered;
         WriteSurfaceKeyCensus(ordered, surfaceKeys.Count);

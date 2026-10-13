@@ -633,6 +633,9 @@ public sealed class DebugOverlayUi
 
     private void DrawLogsTab(DebugSystem debugSystem)
     {
+        // The run's long jobs (loading, streaming, cooking), then the producers' own sections, then the log.
+        if (DebugProgress.Snapshot().Count > 0 && ImGui.CollapsingHeader("progress##logs-progress", ImGuiTreeNodeFlags.DefaultOpen))
+            DebugProgressUi.Draw();
         var contributors = debugSystem.Contributors;
         for (var i = 0; i < contributors.Count; i++)
         {

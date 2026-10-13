@@ -566,6 +566,12 @@ internal sealed partial class SponzaLoop
         // The gather's buffers (zeroed by CreateGpuBuffer where nothing is given); with a resolved cache, placeholders
         // until a light change wakes them (SponzaLoop.TexelRest.cs).
         var atRest = resolved is not null;
+        // Under the split light (no single light cached) with the cook screen up, the gather's buffers are never read
+        // before the split lands and puts the texels at rest -- which then let them go: placeholders from the start,
+        // marked freed, so a light change wakes them (WakeTexels) as it does after a rest. Sponza: ~1.5 GB of texel
+        // state not made, beside a split cook at 87% of Metal's recommended working set (a GPU timeout, 2026-10-13).
+        var lean = !atRest && splitLight && !cookScreenOff && light is null && bakePath is not null;
+        atRest |= lean;
         if (atRest && texelRestPlaceholder.Equals(default(GpuBufferHandle)))
             texelRestPlaceholder = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.texels.rest-placeholder"));
         GpuBufferHandle Gather(int bytes, ReadOnlySpan<byte> initial, string name) =>
@@ -610,7 +616,8 @@ internal sealed partial class SponzaLoop
         }
         // A resolved cache: at rest from the first frame. A full-state cache (LightBakeVersion 4, settled by its refining):
         // filtered once, then at rest, resolved -- and saved in that form for the next run. Neither: the bake begins.
-        if (atRest) StartTexelsAtRest(resolved!);
+        if (lean) texelGatherFreed = true;
+        if (atRest && !lean) StartTexelsAtRest(resolved!);
         else if (light is not null)
         {
             SettleTexels("the baked light loaded");
@@ -1039,6 +1046,19 @@ internal sealed partial class SponzaLoop
         if (texelGatherFreed)
         {
             Console.WriteLine("[VulkanSponza] texels: at rest at the shot -- every live texel settled; no gather state to count.");
+            if (!texelResolvedBuffer.Equals(default(GpuBufferHandle)))
+            {
+                var words = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(texelResolvedBuffer, 0, texelCount * 8).AsSpan());
+                double sum = 0;
+                foreach (var id in texelLiveIds ?? Array.Empty<uint>())
+                {
+                    var p = words[(int)id * 2];
+                    var scale = MathF.Pow(2f, (int)(p >> 27) - 15 - 9);
+                    sum += (0.2126 * (p & 511u) + 0.7152 * ((p >> 9) & 511u) + 0.0722 * ((p >> 18) & 511u)) * scale;
+                }
+                Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                    $"[VulkanSponza] texels: the resolved light at the shot, mean luminance {sum / Math.Max(1, texelLiveIds?.Length ?? 1):G5} over {texelLiveIds?.Length ?? 0:N0} live texels."));
+            }
             return;
         }
         var light = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(texelLightBuffer, 0, texelCount * 16).AsSpan()).ToArray();

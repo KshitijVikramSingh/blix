@@ -21,10 +21,8 @@
   </ItemGroup>
 
   <PropertyGroup>
-    <!-- The cook's collections run on every core (a single-threaded collector paused Sponza's Metal couplings 21 s in 24
-         full collections, 2026-10-13). -->
-    <ServerGarbageCollector>true</ServerGarbageCollector>
-    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <!-- Not the server collector: a heap a core held more memory than this 16 GB machine could spare beside Sponza's
+         split cook (2026-10-13), for a few seconds' gain in the cook. -->
     <!-- Reflects its binding model out of the SPIR-V; the shared targets do both. -->
     <BlixShaderReflect>true</BlixShaderReflect>
     <OutputType>Exe</OutputType>

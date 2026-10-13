@@ -306,5 +306,24 @@ internal sealed partial class SponzaLoop
         return t * (r * MathF.Cos(phi)) + b * (r * MathF.Sin(phi)) + n * MathF.Sqrt(MathF.Max(0f, 1f - u1));
     }
 
+    // The cook landed: let go of what only its tests read -- the contact table (Sponza: 2.36M triangles' partner lists)
+    // and its rows for Metal -- and compact the heap. Both are made again on demand (Contacts, CookContactTracer).
+    // Sponza's split cook timed the GPU out twice with this machine's memory at 9% free (2026-10-13).
+    private void ReleaseCookMemory()
+    {
+        var before = GC.GetTotalMemory(false);
+        lock (contactGate)
+        {
+            contactTable = null;
+            contactScene = null;
+            cookContactTracer = null;
+            cookContactScene = null;
+        }
+        System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+        GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+        Console.WriteLine(string.Create(System.Globalization.CultureInfo.InvariantCulture,
+            $"[VulkanSponza] cook: its tests' data let go; the managed heap {before / 1048576.0:N0} -> {GC.GetTotalMemory(false) / 1048576.0:N0} MB."));
+    }
+
     private static uint RayHash(long item, int k, uint salt) => (uint)(item * 0x9E3779B1L) ^ ((uint)k * 0x85EBCA77u) ^ salt;
 }

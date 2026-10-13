@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using Blix.Diagnostics;
 using Blix.Diagnostics.Overlay;
 using ImGuiNET;
 
@@ -16,77 +17,51 @@ namespace Blix.Demos.VulkanSponza;
 //   pressure level and swap in use; read once a second.
 internal sealed partial class SponzaLoop : IDebugLogsSection
 {
-    private sealed class CookTask
-    {
-        public long Done, Total;
-        public readonly Stopwatch Clock = Stopwatch.StartNew();
-        public double? EndedSeconds;
-    }
+    // The cook's CPU stages report through the engine's registry (DebugProgress), the Logs tab and the cook screen
+    // drawing them; the "cook" group.
+    private static void ProgressBegin(string name, long total) => DebugProgress.Begin(name, total, "cook");
+    private static void ProgressAdd(string name, long units = 1) => DebugProgress.Add(name, units);
+    private static void ProgressEnd(string name) => DebugProgress.End(name);
 
-    private readonly ConcurrentDictionary<string, CookTask> cookTasks = new(StringComparer.Ordinal);
-    private readonly List<string> cookTaskOrder = new();
-
-    /// <summary>A CPU stage starts (thread-safe): <paramref name="total"/> units, 0 when unknown.</summary>
-    private void ProgressBegin(string name, long total)
+    // Each frame: the GPU cooks' own counters into the registry (the split cook's sweep and rounds, the light bake).
+    private string? splitProgressName;
+    private void ReportCookProgress()
     {
-        cookTasks[name] = new CookTask { Total = total };
-        lock (cookTaskOrder) { cookTaskOrder.Remove(name); cookTaskOrder.Add(name); }
-    }
-
-    private void ProgressAdd(string name, long units = 1)
-    {
-        if (cookTasks.TryGetValue(name, out var task)) Interlocked.Add(ref task.Done, units);
-    }
-
-    private void ProgressEnd(string name)
-    {
-        if (cookTasks.TryGetValue(name, out var task)) task.EndedSeconds = task.Clock.Elapsed.TotalSeconds;
+        if (sunNodeStage is not (SunNodeStage.Off or SunNodeStage.Done) && sunNodeSuns is not null)
+        {
+            var refining = sunNodeRefineRound > 0;
+            var name = sunNodeStage != SunNodeStage.Tracing ? $"split cook: {sunNodeStage}"
+                : refining ? $"split cook: refining round {sunNodeRefineRound}" : "split cook: sweep";
+            if (splitProgressName != name && splitProgressName is not null) DebugProgress.End(splitProgressName);
+            splitProgressName = name;
+            if (sunNodeStage == SunNodeStage.Tracing)
+            {
+                var live = refining ? sunNodeRefineIds.Length : sunNodeTraceIds.Length;
+                var passes = refining ? RefinePasses : sunNodeRays / 32;
+                var slice = Math.Min(sunNodeSlice, Math.Max(0, live - sunNodeFirst));
+                DebugProgress.Set(name, sunNodeFirst + (long)((double)sunNodePass / passes * slice), live);
+            }
+            else DebugProgress.Set(name, 0, 0);
+        }
+        else if (splitProgressName is not null)
+        {
+            DebugProgress.End(splitProgressName);
+            splitProgressName = null;
+        }
+        if (lightBakeTotal > 0 && lightBakeIssued > 0 && lightBakeIssued < lightBakeTotal)
+            DebugProgress.Set("light bake (the old gather)", lightBakeIssued, lightBakeTotal);
+        else DebugProgress.End("light bake (the old gather)");
     }
 
     private readonly Stopwatch memoryClock = new();
     private string memoryLine = "", pressureLine = "";
     private bool pressureHigh;
 
-    public void OnLogsSection()
-    {
-        ImGui.TextDisabled("progress");
-        var any = false;
-        // The GPU cooks, from their own counters.
-        if (sunNodeStage is not (SunNodeStage.Off or SunNodeStage.Done) && sunNodeSuns is not null)
-        {
-            any = true;
-            if (sunNodeStage == SunNodeStage.Tracing)
-            {
-                var refining = sunNodeRefineRound > 0;
-                var live = refining ? sunNodeRefineIds.Length : sunNodeTraceIds.Length;
-                var passes = refining ? RefinePasses : sunNodeRays / 32;
-                var slice = Math.Min(sunNodeSlice, Math.Max(0, live - sunNodeFirst));
-                var done = live > 0 ? (sunNodeFirst + (double)sunNodePass / passes * slice) / live : 0;
-                Bar(refining ? $"split cook, refine round {sunNodeRefineRound}" : "split cook, sweep", done,
-                    $"{sunNodeFirst:N0} of {live:N0} texels", sunNodeClock.Elapsed.TotalSeconds, finished: false);
-            }
-            else ImGui.Text($"split cook: {sunNodeStage} ({sunNodeClock.Elapsed.TotalSeconds:0} s)");
-        }
-        if (lightBakeTotal > 0 && lightBakeIssued > 0 && lightBakeIssued < lightBakeTotal)
-        {
-            any = true;
-            Bar("light bake (the old gather)", (double)lightBakeIssued / lightBakeTotal, $"{lightBakeIssued:N0} of {lightBakeTotal:N0} texel passes", null, finished: false);
-        }
-        // The CPU stages, newest last; finished ones stay listed with their time.
-        string[] order;
-        lock (cookTaskOrder) order = cookTaskOrder.ToArray();
-        foreach (var name in order)
-        {
-            if (!cookTasks.TryGetValue(name, out var task)) continue;
-            any = true;
-            var done = Interlocked.Read(ref task.Done);
-            var fraction = task.Total > 0 ? Math.Min(1.0, (double)done / task.Total) : task.EndedSeconds is null ? 0 : 1;
-            Bar(name, fraction, task.Total > 0 ? $"{done:N0} of {task.Total:N0}" : "", task.EndedSeconds ?? task.Clock.Elapsed.TotalSeconds,
-                finished: task.EndedSeconds is not null);
-        }
-        if (!any) ImGui.TextDisabled("  nothing cooking");
+    public void OnLogsSection() => DrawMemory();
 
-        ImGui.Separator();
+    // The machine's memory, read once a second: this process's footprint, the GPU's allocation, pressure and swap.
+    private void DrawMemory()
+    {
         ImGui.TextDisabled("memory");
         if (!memoryClock.IsRunning || memoryClock.Elapsed.TotalSeconds >= 1)
         {
@@ -94,25 +69,17 @@ internal sealed partial class SponzaLoop : IDebugLogsSection
             ReadMemory();
         }
         ImGui.TextUnformatted(memoryLine);
+        ImGui.SameLine();
+        if (ImGui.SmallButton("inventory")) LogMemoryInventory("asked");
         if (pressureHigh) ImGui.TextColored(new System.Numerics.Vector4(1f, 0.45f, 0.45f, 1f), pressureLine);
         else ImGui.TextUnformatted(pressureLine);
     }
 
-    // One progress row: a bar, what it counts, and elapsed and left (from the rate so far).
-    private static void Bar(string name, double fraction, string counts, double? seconds, bool finished)
-    {
-        var left = !finished && seconds is { } s && fraction > 0.01 ? s * (1 - fraction) / fraction : (double?)null;
-        var time = seconds is { } e
-            ? finished ? $"{e:0} s" : left is { } l ? $"{e:0} s, ~{l:0} s left" : $"{e:0} s"
-            : "";
-        ImGui.ProgressBar((float)fraction, new System.Numerics.Vector2(160f, 0f), $"{fraction * 100:0}%");
-        ImGui.SameLine();
-        ImGui.TextUnformatted($"{name}  {counts}  {time}");
-    }
-
     private void ReadMemory()
     {
-        var rss = Process.GetCurrentProcess().WorkingSet64 / 1048576.0;
+        // The kernel's footprint of the process (what Activity Monitor shows as its memory): .NET's working set on macOS
+        // counted a fraction of it (169 MB beside 9 GB of GPU allocations, 2026-10-13).
+        var rss = (OperatingSystem.IsMacOS() && ProcessFootprint() is { } bytes ? bytes : Process.GetCurrentProcess().WorkingSet64) / 1048576.0;
         var gpu = frameTracer is { } tracer ? tracer.Memory : (AllocatedMb: 0.0, RecommendedMb: 0.0);
         memoryLine = gpu.RecommendedMb > 0
             ? $"process {rss:N0} MB; GPU {gpu.AllocatedMb:N0} of {gpu.RecommendedMb:N0} MB recommended"
@@ -122,6 +89,17 @@ internal sealed partial class SponzaLoop : IDebugLogsSection
         var levelName = level switch { 1 => "normal", 2 => "warning", 4 => "critical", _ => $"level {level}" };
         pressureHigh = level >= 2;
         pressureLine = $"pressure {levelName}" + (swap is { } sw ? $"; swap {sw.Used / 1048576.0:N0} of {sw.Total / 1048576.0:N0} MB" : "");
+    }
+
+    // proc_pid_rusage(pid, RUSAGE_INFO_V0, &info): ri_phys_footprint is the eighth 64-bit word after the 16-byte uuid.
+    [DllImport("libproc", EntryPoint = "proc_pid_rusage")]
+    private static extern int ProcPidRusage(int pid, int flavor, [Out] ulong[] info);
+
+    private static long? ProcessFootprint()
+    {
+        var info = new ulong[32];
+        if (ProcPidRusage(Environment.ProcessId, 0, info) != 0) return null;
+        return (long)info[2 + 7];
     }
 
     [DllImport("libc", EntryPoint = "sysctlbyname")]

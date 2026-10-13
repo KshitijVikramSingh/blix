@@ -1085,9 +1085,10 @@ internal sealed class RenderSettings
     [Tune(0f, 8f)]     public float LodErrorPixels = 2.0f;
     // The incident light and the traced sun shadows at half resolution, each half-res pixel standing for one of its
     // 2x2 (a different one each frame, TAA gathering all four), brought back to full resolution along the depth and
-    // normals (lighting_upsample.frag). Off: the incident light at full resolution -- 4x its cost, the frame's largest
-    // pass there (incident-light, Metal System Trace 2026-10-12). The indirect light is smooth; half res costs it little.
-    [Tune]             public bool HalfResLighting = true;
+    // normals (lighting_upsample.frag). Off (the default): the incident light at full resolution -- 4x its cost, the
+    // frame's largest pass there (incident-light, Metal System Trace 2026-10-12), but no upsample guessing across edges.
+    // On: --half-res-lighting.
+    [Tune]             public bool HalfResLighting = false;
     // The traced sun shadows at half resolution too (only with HalfResLighting: the upsample brings the mask back). Off
     // by default: half-res shadows left blocky patches the upsample could not hide, worst on cloth.
     [Tune]             public bool HalfResShadows = false;

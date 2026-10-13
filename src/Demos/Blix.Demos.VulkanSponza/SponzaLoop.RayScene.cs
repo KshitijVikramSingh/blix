@@ -4,6 +4,8 @@ using System.Runtime.InteropServices;
 using Blix.Geometry;
 using Blix.Graphics;
 
+using Blix.Diagnostics;
+
 namespace Blix.Demos.VulkanSponza;
 
 // The scene under CPU ray-query hierarchies (Blix.Geometry), built at load over every primitive's full-detail
@@ -75,17 +77,36 @@ internal sealed partial class SponzaLoop
         return meshes;
     }
 
-    private void BuildRayScene(RayMesh[] meshes, List<RayQueryScene.Instance> instances)
+    // The ray scene's build and its packing for the GPU, in the background (TryFinishLoad waits on the task, the window
+    // going on); FinishRayScene, on the frame thread, uploads it and makes the clipmap.
+    private Task<(RayQueryScene Scene, RayQueryGpuData? Data, double BuildMs, int Meshes, int Placements)>? rayBuildTask;
+
+    private void StartRayScene(RayMesh[] meshes, List<RayQueryScene.Instance> instances)
     {
-        var clock = Stopwatch.StartNew();
-        rayQueries = RayQueryScene.Build(instances, rayRegionTriangles);
+        DebugProgress.Begin("ray scene: build and pack", 0, "load");
+        var regionTriangles = rayRegionTriangles;
+        rayBuildTask = Task.Run(() =>
+        {
+            var clock = Stopwatch.StartNew();
+            var scene = RayQueryScene.Build(instances, regionTriangles);
+            var buildMs = clock.Elapsed.TotalMilliseconds;
+            var data = instances.Count > 0 ? RayQueryGpuData.Pack(scene) : null;
+            return (scene, data, buildMs, meshes.Length, instances.Count);
+        });
+    }
+
+    private void FinishRayScene()
+    {
+        DebugProgress.End("ray scene: build and pack");
+        var (scene, data, buildMs, meshCount, placements) = rayBuildTask!.Result;
+        rayQueries = scene;
         var nodes = rayQueries.MeshNodeCount;
         Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] ray scene: {instances.Count:N0} placements of {meshes.Length:N0} meshes as {rayQueries.RegionCount:N0} regions (at most {rayRegionTriangles:N0} triangles) and {rayQueries.InstanceEntryCount:N0} instances, {rayQueries.StoredTriangleCount:N0} triangles stored, built in {clock.Elapsed.TotalMilliseconds:0} ms on {Environment.ProcessorCount} threads; {nodes:N0} nodes ({nodes * BvhNode.SizeInBytes / 1048576.0:0.0} MB), top level {rayQueries.Nodes.Length:N0}."));
+            $"[VulkanSponza] ray scene: {placements:N0} placements of {meshCount:N0} meshes as {rayQueries.RegionCount:N0} regions (at most {rayRegionTriangles:N0} triangles) and {rayQueries.InstanceEntryCount:N0} instances, {rayQueries.StoredTriangleCount:N0} triangles stored, built in {buildMs:0} ms on {Environment.ProcessorCount} threads in the background; {nodes:N0} nodes ({nodes * BvhNode.SizeInBytes / 1048576.0:0.0} MB), top level {rayQueries.Nodes.Length:N0}."));
         // The GPU scene and the clipmap are the diffuse GI, so both are built whenever there is a scene.
-        if (instances.Count > 0) BuildRayGpu();
-        if (instances.Count > 0) CreateClipmap();
-        if (rayCheck && instances.Count > 0) BuildRayCheck();
+        if (data is not null) BuildRayGpu(data);
+        if (placements > 0) CreateClipmap();
+        if (rayCheck && placements > 0) BuildRayCheck();
     }
 
     // --ray-check. The scene packed for ray_query.glsl, and a fixed batch of rays: half from random points in the
@@ -129,9 +150,8 @@ internal sealed partial class SponzaLoop
     private bool SoftwareTraversalNeeded => keepRayNodes || !FrameRaysOnHardware || clipmapInline || clipmapExactVisibility || incidentExactVisibility || screenProbesEnabled
         || rayView || rayCheck || gpuReference || referenceMonolithic || referenceView;
 
-    private void BuildRayGpu()
+    private void BuildRayGpu(RayQueryGpuData data)
     {
-        var data = RayQueryGpuData.Pack(rayQueries!);
         rayGpuData = data;
         var blocks = data.Blocks();
         var buffers = new List<ShaderBufferBinding>();

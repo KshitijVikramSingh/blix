@@ -105,6 +105,8 @@ public sealed class MaterialTextureLoader : IDisposable
     // when every texture's mips have landed (callers gate their full-detail
     // render path on this).
     public int PendingCount => uploader.PendingCount;
+    /// <summary>Mips uploaded so far (with <see cref="PendingCount"/>, a streaming progress).</summary>
+    public long UploadedCount => uploader.UploadedCount;
     public void Drain(double budgetMillis) => uploader.Drain(budgetMillis);
 
     // Resolve a material's five textures to GPU handles (defaults where absent),
