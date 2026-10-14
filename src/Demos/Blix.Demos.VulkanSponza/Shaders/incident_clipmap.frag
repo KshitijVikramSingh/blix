@@ -49,7 +49,8 @@ layout(set = 0, binding = 0) uniform IncidentClipmap {
                          // w 1: the texel debug view (--texel-debug: r the texels' confidence, g 1 where any was found,
                          // b 1 where the lookup found none); w 2: the records view (--texel-debug-records)
     vec4 uClipExact;     // x 1: whether a point sees each probe, TRACED (--clipmap-exact-visibility): the ceiling a
-                         // cooked per-texel mask could reach, in place of the Chebyshev estimate; yzw unused
+                         // cooked per-texel mask could reach, in place of the Chebyshev estimate; y 1: count this
+                         // frame's pixels by the path they take (IncidentCensus, SponzaLoop.IncidentCensus.cs); zw unused
     vec4 uHalf;          // x 1: this target is half the frame (RenderSettings.HalfResLighting), each pixel standing for
                          // the full-res pixel 2p + yz of its 2x2 (a different one each frame; lighting_upsample.frag)
 } g;
@@ -155,6 +156,11 @@ layout(std430, set = 0, binding = 34) readonly buffer TexelResolved { uvec2 texe
 layout(std430, set = 0, binding = 35) readonly buffer TexelDetail { uint texelDetail[]; };
 vec4 detailSum;
 bool detailMissing;
+// The census (uClipExact.y): pixels by path -- 0 sky, 1 the cells alone, then why the probes were read: 2 no texel found,
+// 3 texels not at rest, 4 no detail up, 5 a texel read had no detail, 6 not whole (confidence), 7 a debug view or screen
+// probes; 8 the two levels read (finest < coarsest) among the cells-alone pixels.
+layout(std430, set = 0, binding = 36) buffer IncidentCensus { uint census[]; };
+void countPath(uint path) { if (g.uClipExact.y > 0.5) atomicAdd(census[path], 1u); }
 vec3 unpackRgb9e5(uint v) {
     float scale = exp2(float(int(v >> 27) - 15 - 9));
     return vec3(float(v & 511u), float((v >> 9) & 511u), float((v >> 18) & 511u)) * scale;
@@ -289,6 +295,7 @@ void main() {
         : clamp(ivec2(vUv * vec2(textureSize(uSceneDepth, 0))), ivec2(0), textureSize(uSceneDepth, 0) - 1);
     float raw = texelFetch(uSceneDepth, pixel, 0).r;
     if (raw >= 1.0 - 1e-6) {
+        countPath(0u);
         outIncident = vec4(0.0, 0.0, 0.0, 1.0);
         outIncidentGradient = vec4(0.0);
         return;
@@ -316,6 +323,11 @@ void main() {
     vec3 t2 = cross(N, t1);
     if (texelFound && g.uTexelDebug.y > 0.5 && g.uTexelDebug.z > 0.5 && !detailMissing && detailSum.w > 1e-6
         && confidence > 0.999 && g.uReference.w < 0.5 && g.uScreen.x < 0.5 && g.uReference.x < 0.5) {
+        countPath(1u);
+        if (g.uClipExact.y > 0.5) {
+            float lw = texelLevelFor(viewDepth, g.uTexelLevels, g.uTexelGrid.w, texelSunlit(worldPos, N));
+            if (int(floor(lw)) < min(int(floor(lw)) + 1, int(g.uTexelLevels.x) - 1)) countPath(8u);
+        }
         vec3 d = detailSum.xyz / detailSum.w;
         outIncident = vec4(gathered, d.z);
         float lum = dot(gathered, vec3(0.2126, 0.7152, 0.0722));
@@ -323,6 +335,8 @@ void main() {
         return;
     }
 
+    countPath(!texelFound ? 2u : g.uTexelDebug.y < 0.5 ? 3u : g.uTexelDebug.z < 0.5 ? 4u : detailMissing || detailSum.w <= 1e-6 ? 5u
+        : confidence <= 0.999 ? 6u : 7u);
     BlixClipmap c;
     c.dims = ivec3(g.uClipDims.xyz);
     c.baseSpacing = g.uClipDims.w;

@@ -175,6 +175,8 @@ internal sealed partial class SponzaLoop
         if (args.Flag("full-res-lighting")) render.HalfResLighting = false;
         if (args.Flag("half-res-shadows")) render.HalfResShadows = true;
         metalDeviceQueue = args.Flag("metal-device-queue");
+        tracerBatchesApart = args.Flag("tracer-batches-apart");
+        clipmapWaveInFrame = args.Flag("clipmap-wave-inframe");
         // --no-frame-chain: frames may overlap on the GPU again (the A/B for VulkanGraphicsDevice.ChainFrames).
         if (args.Flag("no-frame-chain") && device is Blix.Graphics.Vulkan.VulkanGraphicsDevice vulkan) vulkan.ChainFrames = false;
         if (args.Flag("no-pass-barriers") && device is Blix.Graphics.Vulkan.VulkanGraphicsDevice vk2) vk2.ExplicitPassBarriers = false;
@@ -513,6 +515,8 @@ internal sealed partial class SponzaLoop
         clipmapShadowBatch = DeclareShadowBatch("clipmap-shadow");
         // --clipmap-exact-visibility on the wavefront: the hits' rays to their probes, then their reads replayed.
         clipmapVisibilityBatch = DeclareClosestBatch("clipmap-visibility");
+        // After every deferred batch's producers (SponzaLoop.TracerGroup.cs): a frame without traced screen shadows.
+        tracerGroupPassHandle = graph.ExternalPass("tracer-group");
         var visibilityBuilder = graph.ComputePass("probe-clipmap-visibility").Shader(clipmapInterface);
         for (var c = 0; c < CascadeCount; c++) visibilityBuilder = visibilityBuilder.Read(cascadeHandles[c]);
         clipmapVisibilityPassHandle = visibilityBuilder.Handle;

@@ -163,13 +163,13 @@ internal sealed partial class SponzaLoop
                 new("uTexelGrid", new Vector4Uniform(texel.Grid)),
                 new("uTexelParams", new Vector4Uniform(texel.Params)),
                 new("uReference", new Vector4Uniform(reference.Params)),
-                new("uClipExact", new Vector4Uniform(new Vector4(incidentExactVisibility ? 1f : 0f, 0f, 0f, 0f))),
+                new("uClipExact", new Vector4Uniform(new Vector4(incidentExactVisibility ? 1f : 0f, IncidentCensusNow(half) ? 1f : 0f, 0f, 0f))),
                 new("uTexelDebug", new Vector4Uniform(new Vector4(texelFrame, texelResting ? 1f : 0f, texelDetailOn && TexelDetailUp ? 1f : 0f, 0f))),
                 new("uLightmap", new Vector4Uniform(LightmapUniform)),
                 new("uTexelLevels", new Vector4Uniform(TexelLevelsUniform(frameHeight))),
                 new("uHalf", new Vector4Uniform(new Vector4(half ? 1f : 0f, sub.X, sub.Y, 0f))),
             }.Concat(TexelSunUniforms()).ToArray(),
-            buffers: new[] { new ShaderBufferBinding("ClipmapState", clipmapState), new ShaderBufferBinding("ScreenProbeTiles", screen.Tiles), new ShaderBufferBinding("ScreenProbes", screen.Probes), new ShaderBufferBinding("SurfaceIndex", surfaceIndex) }.Concat(texel.Buffers).Append(reference.Buffer).Append(new ShaderBufferBinding("LightmapIndexMap", LightmapIndexMap()))
+            buffers: new[] { new ShaderBufferBinding("ClipmapState", clipmapState), new ShaderBufferBinding("ScreenProbeTiles", screen.Tiles), new ShaderBufferBinding("ScreenProbes", screen.Probes), new ShaderBufferBinding("SurfaceIndex", surfaceIndex) }.Concat(texel.Buffers).Append(reference.Buffer).Append(new ShaderBufferBinding("LightmapIndexMap", LightmapIndexMap())).Append(new ShaderBufferBinding("IncidentCensus", IncidentCensusBuffer()))
                 // The ray scene, for --clipmap-exact-visibility (declared always; read only then).
                 .Concat(rayBlockBuffers).ToArray()));
     }
@@ -282,7 +282,12 @@ internal sealed partial class SponzaLoop
     {
         if (clipmap is null || rayBlockBuffers.Length == 0 || !RaySurfacesReady) return;
         if (clipmapFrame >= clipmapFreeze) return;
-        clipmap.Follow(cameraPosition);
+        // Staged (ClipmapStaged): a wave in flight holds its blocks where they were when it started -- the slots it
+        // picked must still be the cells it traced when it resolves -- so the clipmap follows the camera only as a wave
+        // starts (frame A), and the wave's later phases run with its own origins, frame and seed.
+        var staged = ClipmapOnWavefront && ClipmapStaged;
+        var stageB = staged && clipmapWaveStage == 1;
+        if (!stageB) clipmap.Follow(cameraPosition);
         var origins = new Vector4[4];
         for (var l = 0; l < ClipmapLevels; l++) origins[l] = new Vector4(clipmap.Origins[l].X, clipmap.Origins[l].Y, clipmap.Origins[l].Z, 0f);
         var slots = ClipmapLevels * clipmap.ProbesPerLevel;
@@ -314,17 +319,18 @@ internal sealed partial class SponzaLoop
         var surface = SurfaceUniforms(slots);
         var wave = ClipmapOnWavefront;
         var staticFloor = ClipmapStaticFloor();
-        DispatchCommand Phase(int mode, int groups) => new(clipmapPipeline, groups, 1, 1, new ShaderUniform[]
+        DispatchCommand Phase(int mode, int groups) => PhaseOf(mode, groups, origins, clipmapFrame);
+        DispatchCommand PhaseOf(int mode, int groups, Vector4[] o, int solveFrame) => new(clipmapPipeline, groups, 1, 1, new ShaderUniform[]
         {
             new("uDims", new Vector4Uniform(new Vector4(ClipmapDims.X, ClipmapDims.Y, ClipmapDims.Z, clipmapSpacing))),
             new("uParams", new Vector4Uniform(new Vector4(ClipmapBlend, staticFloor, mode, clipmapBudget))),
-            new("uOrigin0", new Vector4Uniform(origins[0])),
-            new("uOrigin1", new Vector4Uniform(origins[1])),
-            new("uOrigin2", new Vector4Uniform(origins[2])),
-            new("uOrigin3", new Vector4Uniform(origins[3])),
+            new("uOrigin0", new Vector4Uniform(o[0])),
+            new("uOrigin1", new Vector4Uniform(o[1])),
+            new("uOrigin2", new Vector4Uniform(o[2])),
+            new("uOrigin3", new Vector4Uniform(o[3])),
             new("uSunDirection", new Vector4Uniform(new Vector4(sunDirection, 0f))),
             new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 1f))),
-            new("uFrame", new Vector4Uniform(new Vector4(clipmapFrame, 1f, 1f, ClipmapDepthLobe))),
+            new("uFrame", new Vector4Uniform(new Vector4(solveFrame, 1f, 1f, ClipmapDepthLobe))),
             new("uExact", new Vector4Uniform(new Vector4(clipmapExactVisibility ? 1f : 0f, 0f, 0f, 0f))),
             // y: the prefiltered sky's mip a probe ray reads, about a ray's 1/64 of the sphere (a ~15 degree cone).
             new("uSurfaceGrid", new Vector4Uniform(surface.Grid)),
@@ -339,6 +345,36 @@ internal sealed partial class SponzaLoop
             new("uCascadeReceivers", new Matrix4x4Uniform(CascadeReceivers)),
             new("uWave", new Vector4Uniform(new Vector4(wave ? 1f : 0f, clipmapYoungRays, 0f, 0f))),
         }, textures, Buffers: buffers);
+        if (staged)
+        {
+            // Frame B: the wave's hits shaded, its sun out (and its visibility rays) -- read next frame.
+            var w = clipmapWave;
+            if (stageB)
+            {
+                graph.Dispatch(clipmapShadePassHandle, PhaseOf(4, clipmapBudget, w.Origins, w.Frame));
+                RecordShadowBatch(clipmapShadowBatch, clipmapWaveOrigins, clipmapWaveOccluded, w.Rays, -Vector3.Normalize(sunDirection), w.Seed ^ 0x5bd1e995u, deferred: true);
+                if (ClipmapVisOnWavefront)
+                    RecordClosestBatch(clipmapVisibilityBatch, clipmapVisRays, clipmapVisHits, w.Rays * ClipmapVisSlots, w.Seed ^ 0x27d4eb2fu, deferred: true);
+                clipmapWaveStage = 2;
+                return;
+            }
+            // Frame A: the last wave resolved, then the next one started -- its probes picked, its rays out, read next frame.
+            if (clipmapWaveStage == 2)
+            {
+                if (ClipmapVisOnWavefront) graph.Dispatch(clipmapVisibilityPassHandle, PhaseOf(6, clipmapBudget, w.Origins, w.Frame));
+                graph.Dispatch(clipmapResolvePassHandle, PhaseOf(5, clipmapBudget, w.Origins, w.Frame));
+            }
+            var rays = clipmapBudget * 64 * clipmapYoungRays;
+            var waveSeed = unchecked((uint)clipmapFrame * 0x9E3779B9u);
+            graph.Dispatch(clipmapPassHandle, Phase(0, 1));
+            graph.Dispatch(clipmapPassHandle, Phase(1, (slots + surfaceCapacity + 63) / 64));
+            graph.Dispatch(clipmapPassHandle, Phase(3, clipmapBudget));
+            RecordClosestBatch(clipmapClosestBatch, clipmapWaveRays, clipmapWaveHits, rays, waveSeed, deferred: true);
+            clipmapWave = (origins, clipmapFrame, waveSeed, rays);
+            clipmapWaveStage = 1;
+            clipmapFrame++;
+            return;
+        }
         graph.Dispatch(clipmapPassHandle, Phase(0, 1));
         graph.Dispatch(clipmapPassHandle, Phase(1, (slots + surfaceCapacity + 63) / 64));
         if (wave)
@@ -364,6 +400,17 @@ internal sealed partial class SponzaLoop
         }
         clipmapFrame++;
     }
+
+    // The wavefront staged over frames (with the tracer's groups, SponzaLoop.TracerGroup.cs): frame A resolves the last
+    // wave and starts the next (its probes picked, its rays out), frame B shades its hits and sends its sun rays; every
+    // batch is read on the frame after, so none needs its own trip to Metal in the frame. In one frame, the chain went
+    // to Metal and back three times, the GPU idle between (~19 ms of Sponza's 103 ms frame). A probe update takes two
+    // frames instead of one; the cells answer 99.9% of Sponza's pixels at rest (the incident census), so the probes'
+    // pace shows little. --clipmap-wave-inframe: the whole chain in one frame, as before.
+    private bool clipmapWaveInFrame;
+    private bool ClipmapStaged => !clipmapWaveInFrame && TracerGroupsOn && frameTracer is not null;
+    private int clipmapWaveStage;
+    private (Vector4[] Origins, int Frame, uint Seed, int Rays) clipmapWave;
 
     // Stamps the probes this frame's image reads (clipmap_mark.comp), for the next solve's visible queue.
     private void RecordClipmapMark(Matrix4x4 invProjection, Matrix4x4 invView, int width, int height)

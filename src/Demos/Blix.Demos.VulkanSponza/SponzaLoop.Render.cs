@@ -738,6 +738,7 @@ internal sealed partial class SponzaLoop
         RecordRtShadows(frame.Width, frame.Height);
         CookTransportWhenReady();
         RecordClipmap();
+        FlushTracerGroup();
         PickWatchPoints();
         RecordClipmapWatch();
         RecordRayCheck();
@@ -868,6 +869,7 @@ internal sealed partial class SponzaLoop
                 // side faces half the texels pixels read had never been traced (texel debug view).
                 Matrix4x4.Invert(cameraProjection * cameraJitter, out var incidentInvProj);
                 Matrix4x4.Invert(cameraView, out var incidentInvView);
+                ReadIncidentCensus();
                 RecordSurfaceReclaim();
                 RecordClipmapMark(incidentInvProj, incidentInvView, frame.Width, frame.Height);
                 RecordScreenProbes(frame.Width, frame.Height);

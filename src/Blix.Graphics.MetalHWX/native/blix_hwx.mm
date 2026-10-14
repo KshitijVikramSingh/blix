@@ -559,6 +559,9 @@ struct HwxContext {
     id<MTLIntersectionFunctionTable> shadowAlphaTable;  // the alpha test (hwx_set_alpha), asked for per dispatch
     id<MTLCommandBuffer> lastShadow;  // waited on at destroy: its completion handler reads this context
     id<MTLCommandBuffer> lastTrace;   // likewise, for hwx_encode_trace
+    // Open between hwx_group_begin and hwx_group_end: the in-frame encodes go into this one command buffer, which waits
+    // once and signals once, instead of each committing its own -- a frame's batches as one trip to Metal and back.
+    id<MTLCommandBuffer> group;
     // By the caller's stats slot (hwx_encode_shadow), so a frame's kinds of shadow dispatch are read apart.
     static constexpr uint32_t kShadowSlots = 4;
     std::atomic<uint64_t> shadowDispatches[kShadowSlots]{}, shadowGpuNs[kShadowSlots]{}, shadowLastGpuNs[kShadowSlots]{}, shadowFailures[kShadowSlots]{};
@@ -1043,9 +1046,13 @@ HWX_EXPORT int hwx_encode_shadow(HwxContext* ctx, void* sharedEvent, uint64_t wa
         id<MTLBuffer> limitBuffer = (__bridge id<MTLBuffer>)limit;
         id<MTLBuffer> directionBuffer = (__bridge id<MTLBuffer>)directions;
         id<MTLBuffer> pixelBuffer = (__bridge id<MTLBuffer>)pixelOf;
-        id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
-        cb.label = @"blix-hwx shadow";
-        [cb encodeWaitForEvent:event value:waitValue];
+        // In a group (hwx_group_begin): its command buffer, which waited for the frame already and signals at the end.
+        bool grouped = ctx->group != nil;
+        id<MTLCommandBuffer> cb = grouped ? ctx->group : [ctx->queue commandBuffer];
+        if (!grouped) {
+            cb.label = @"blix-hwx shadow";
+            [cb encodeWaitForEvent:event value:waitValue];
+        }
         int result = 0;
         if (!ctx->tlas) result = Fail(ctx, "shadow trace before build");
         else if (!originBuffer || originBuffer.length < originsOffset + uint64_t(count) * (pixelBuffer ? 32 : 16)) result = Fail(ctx, "the origin buffer is smaller than its count");
@@ -1083,7 +1090,7 @@ HWX_EXPORT int hwx_encode_shadow(HwxContext* ctx, void* sharedEvent, uint64_t wa
             [enc dispatchThreads:MTLSizeMake(count, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
             [enc endEncoding];
         }
-        [cb encodeSignalEvent:event value:signalValue];
+        if (!grouped) [cb encodeSignalEvent:event value:signalValue];
         HwxContext* c = ctx;
         bool skipped = result != 0;
         uint32_t slot = std::min(statSlot, HwxContext::kShadowSlots - 1);
@@ -1094,8 +1101,10 @@ HWX_EXPORT int hwx_encode_shadow(HwxContext* ctx, void* sharedEvent, uint64_t wa
             c->shadowGpuNs[slot] += ns;
             c->shadowDispatches[slot]++;
         }];
-        [cb commit];
-        ctx->lastShadow = cb;
+        if (!grouped) {
+            [cb commit];
+            ctx->lastShadow = cb;
+        }
         return result;
     }
 }
@@ -1113,9 +1122,13 @@ HWX_EXPORT int hwx_encode_trace(HwxContext* ctx, void* sharedEvent, uint64_t wai
         id<MTLBuffer> rayBuffer = (__bridge id<MTLBuffer>)rays;
         id<MTLBuffer> hitBuffer = (__bridge id<MTLBuffer>)hits;
         id<MTLBuffer> limitBuffer = (__bridge id<MTLBuffer>)limit;
-        id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
-        cb.label = @"blix-hwx trace";
-        [cb encodeWaitForEvent:event value:waitValue];
+        // In a group (hwx_group_begin): its command buffer, which waited for the frame already and signals at the end.
+        bool grouped = ctx->group != nil;
+        id<MTLCommandBuffer> cb = grouped ? ctx->group : [ctx->queue commandBuffer];
+        if (!grouped) {
+            cb.label = @"blix-hwx trace";
+            [cb encodeWaitForEvent:event value:waitValue];
+        }
         int result = 0;
         if (!ctx->tlas) result = Fail(ctx, "trace before build");
         else if (!rayBuffer || rayBuffer.length < raysOffset + uint64_t(count) * 32) result = Fail(ctx, "the ray buffer is smaller than its count");
@@ -1145,7 +1158,7 @@ HWX_EXPORT int hwx_encode_trace(HwxContext* ctx, void* sharedEvent, uint64_t wai
             [enc dispatchThreads:MTLSizeMake(count, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
             [enc endEncoding];
         }
-        [cb encodeSignalEvent:event value:signalValue];
+        if (!grouped) [cb encodeSignalEvent:event value:signalValue];
         HwxContext* c = ctx;
         bool skipped = result != 0;
         [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
@@ -1155,8 +1168,10 @@ HWX_EXPORT int hwx_encode_trace(HwxContext* ctx, void* sharedEvent, uint64_t wai
             c->traceGpuNs += ns;
             c->traceDispatches++;
         }];
-        [cb commit];
-        ctx->lastTrace = cb;
+        if (!grouped) {
+            [cb commit];
+            ctx->lastTrace = cb;
+        }
         return result;
     }
 }
@@ -1421,4 +1436,35 @@ HWX_EXPORT void hwx_share_queue(HwxContext* ctx, HwxContext* from) {
 // synchronising across two. NULL: back to its own queue.
 HWX_EXPORT void hwx_use_queue(HwxContext* ctx, void* queue) {
     if (ctx) ctx->queue = queue ? (__bridge id<MTLCommandQueue>)queue : ctx->ownQueue;
+}
+
+// A frame's in-frame batches as one command buffer (SponzaLoop.TracerGroup.cs): begin waits for `waitValue` on the frame
+// timeline, the hwx_encode_shadow / hwx_encode_trace calls until end encode into it (in order, each a compute encoder
+// after the last), and end signals `signalValue` and commits. Each batch was its own command buffer, waiting and
+// signalling on its own: on Sponza a frame went to Metal and back three times, the GPU idle between (2026-10-15). In a
+// group each encode's completion handler reads the GROUP's GPU time (the stats per batch become the group's).
+HWX_EXPORT int hwx_group_begin(HwxContext* ctx, void* sharedEvent, uint64_t waitValue) {
+    @autoreleasepool {
+        if (ctx->group != nil) return Fail(ctx, "a group is already open");
+        id<MTLSharedEvent> event = (__bridge id<MTLSharedEvent>)sharedEvent;
+        id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
+        cb.label = @"blix-hwx group";
+        [cb encodeWaitForEvent:event value:waitValue];
+        ctx->group = cb;
+        return 0;
+    }
+}
+
+HWX_EXPORT int hwx_group_end(HwxContext* ctx, void* sharedEvent, uint64_t signalValue) {
+    @autoreleasepool {
+        id<MTLSharedEvent> event = (__bridge id<MTLSharedEvent>)sharedEvent;
+        id<MTLCommandBuffer> cb = ctx->group;
+        if (cb == nil) return Fail(ctx, "no group is open");
+        ctx->group = nil;
+        [cb encodeSignalEvent:event value:signalValue];
+        [cb commit];
+        ctx->lastShadow = cb;
+        ctx->lastTrace = cb;
+        return 0;
+    }
 }

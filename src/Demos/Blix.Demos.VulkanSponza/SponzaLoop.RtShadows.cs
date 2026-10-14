@@ -246,11 +246,21 @@ internal sealed partial class SponzaLoop
             var packed = rtShadowPacked[slot];
             var pixelOf = rtShadowPixelOf[slot];
             var counters = rtShadowCounters[slot];
-            graph.External(rtShadowTracePassHandle, sync => tracer.EncodeShadow(sync, packed, mask, 16, count, towardSun, seed, null,
-                alphaTest: kind == 2, statSlot: kind, limit: counters, limitOffset: counter * 4, pixelOf: pixelOf));
+            graph.External(rtShadowTracePassHandle, sync => tracer.EncodeGroup(sync, () =>
+            {
+                EncodeDeferredBatches(sync, tracer);
+                tracer.EncodeShadow(sync, packed, mask, 16, count, towardSun, seed, null,
+                    alphaTest: kind == 2, statSlot: kind, limit: counters, limitOffset: counter * 4, pixelOf: pixelOf);
+            }));
         }
-        else graph.External(rtShadowTracePassHandle, sync => tracer.EncodeShadow(sync, origins, mask, 16, count, towardSun, seed, sky,
-            alphaTest: kind == 2, statSlot: kind, directions: perRay));
+        else graph.External(rtShadowTracePassHandle, sync => tracer.EncodeGroup(sync, () =>
+        {
+            EncodeDeferredBatches(sync, tracer);
+            tracer.EncodeShadow(sync, origins, mask, 16, count, towardSun, seed, sky,
+                alphaTest: kind == 2, statSlot: kind, directions: perRay);
+        }));
+        // The frame's deferred batches go in this group (SponzaLoop.TracerGroup.cs).
+        tracerGroupRecorded = ReferenceEquals(tracer, frameTracer);
         rtShadowFrames++;
         if (filterPenumbra)
         {

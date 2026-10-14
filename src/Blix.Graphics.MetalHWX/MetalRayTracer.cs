@@ -525,6 +525,27 @@ public sealed class MetalRayTracer : IDisposable
             (uint)Math.Max(count, 0), seedBase, limit is { } l ? device.ExportMetalBuffer(l) : 0, (ulong)limitOffset);
     }
 
+    /// <summary>
+    /// Several in-frame batches as one external pass: one Metal command buffer that waits for the frame once, holds every
+    /// <see cref="EncodeTrace"/> / <see cref="EncodeShadow"/> <paramref name="encode"/> makes (in order, their own sync
+    /// values unused), and signals the frame on once. Each batch alone is a trip to Metal and back, the GPU idle at each
+    /// turn. Inside a group the per-batch stats read the group's GPU time.
+    /// </summary>
+    public void EncodeGroup(ExternalWorkSync sync, Action encode)
+    {
+        ObjectDisposedException.ThrowIf(ctx == 0, this);
+        if (HwxNative.hwx_group_begin(ctx, sync.MetalSharedEvent, sync.WaitValue) != 0)
+            throw new InvalidOperationException($"Metal batch group: {Error}");
+        try
+        {
+            encode();
+        }
+        finally
+        {
+            HwxNative.hwx_group_end(ctx, sync.MetalSharedEvent, sync.SignalValue);
+        }
+    }
+
     /// <summary>What the in-frame closest-hit dispatches (<see cref="EncodeTrace"/>) have cost, from their own GPU times.</summary>
     public unsafe MetalShadowStats TraceStats
     {

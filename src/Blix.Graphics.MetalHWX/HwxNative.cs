@@ -69,6 +69,12 @@ internal static unsafe class HwxNative
         nint rays, ulong raysOffset, nint hits, ulong hitsOffset, uint count, uint seedBase, nint limit, ulong limitOffset);
 
     [DllImport(Library)]
+    public static extern int hwx_group_begin(nint ctx, nint sharedEvent, ulong waitValue);
+
+    [DllImport(Library)]
+    public static extern int hwx_group_end(nint ctx, nint sharedEvent, ulong signalValue);
+
+    [DllImport(Library)]
     public static extern void hwx_trace_stats(nint ctx, ulong* dispatches, ulong* totalGpuNs, ulong* lastGpuNs, ulong* failures);
 
     [DllImport(Library)]
