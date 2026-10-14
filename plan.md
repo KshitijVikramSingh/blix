@@ -154,9 +154,77 @@ Revised (2026-10-14, with the user and a review of it): each quantity at the sca
   sampling error (falls with evidence; shared evidence is correlated -- counted once) and reuse error (grows with the
   footprint; more rays never fix it). Gate: an isolated smooth wall, a wall at a contact, the crevices -- spatial
   variation and reference error both. Report how many independent estimates the scene needed.
-- R3 Then sparse estimates reconstructed on the atlas (the atlas the addressing, not the grid of estimates); the far
+- R3 (superseded by "Cook the transport, not the light" below) Then sparse estimates reconstructed on the atlas (the atlas the addressing, not the grid of estimates); the far
   gather per patch (its cost by patches, not texels); settling resident on the GPU (242 s of Sponza's 15 min was
   reading slices back). 2-5 minutes for a fresh Sponza is a prediction until a fresh cook shows it.
+Built R1 (92157a4) and R2 (1ccf6ac): the gate's best (crevices |error| 0.0201, cornell 0.0182); the scenes need 7-9%
+as many independent estimates as texels. Sponza (live16): 10.06 M settled after the sweep (9.08 M before), refining
+settles 1.5-2x more a round -- but the cook took 29.4 min (the record 6.4 min, the shade 38 ms a pass from 16), and a
+sun moved recooks the sun's part from scratch (8.9 min of record alone). Which is the question below.
+
+**Cook the transport, not the light (decided 2026-10-14, with the user and a review).** The user: if lighting is
+computed at run time, why does a sun take half an hour? Because the cook stores LIGHT (each texel's sky part and sun
+part, 133 MB + 66 MB a part) and light depends on the sun: a new direction re-traces 16 M texels' gathers through
+geometry that did not change. Transport is linear in what the lights emit -- B = E + rho T B -- so cook T, the
+geometry's transport, once, and evaluate B for any lights at run time. Sky, sun and lamps are inputs to one chain:
+- Lights inject direct light into the fine elements (the 4 cm sunlets) at run time: a shadow sweep for the sun (one
+  orthographic pass is a shadow map for every element), the sunlets in range for a lamp, the cooked escape directions
+  times the sky's radiance for the sky. "The light format": direct light on sunlets, whatever the source.
+- Patches bounce it through the cooked couplings (they already do: any sun re-solved on the GPU in ~10-15 s), a few
+  iterations a frame within a fixed budget.
+- Texels read it through cooked texel transport -- no rays per texel per light. A light changes, the chain updates
+  progressively: injection, bounces, texels recomposed visible-first, each within its budget.
+THREE KINDS OF KNOWLEDGE, three owners:
+- Mesh-intrinsic (the asset cook, where formats become blixmesh): a rigid mesh's self-visibility -- its folds,
+  flutes, cavities -- and its internal transfer, in mesh texture space, before placement. Computed once at full
+  resolution, deterministically, analytically where it can be (truer); compressed as textures are, with mips for
+  LOD; one mesh placed 500 times stores it once. Not a finished answer but an operator with OPENINGS: the directions
+  open past the mesh, which the scene connects. (Prior art: Modular Radiance Transfer; Delta Radiance Transfer's
+  corrections for clutter.)
+- World-dependent (the scene / region cook): what placement adds -- other objects within reach of a surface (not only
+  contacts: a wall 30 cm off occludes as much), patch couplings, regional connectivity, LOD-dependent approximations,
+  and an explicit (approximate) account of what crosses a region's boundary: a streamed-out region still lights and
+  shadows its neighbours, and a coarser LOD is a different operator.
+- State-dependent (run time): emission, direction, sky radiance, reflectance -- the current light.
+RULES, from the review:
+- Visibility composes by intersection: V_scene = V_self x V_other. A mesh's cooked openness cannot be corrected by
+  adding a contact term; placement BLOCKS some of its open directions, and what blocks them also reflects into it.
+- The artifacts are light-independent; the sampler need not be: importance sampling by some light may build them if
+  its weights are accounted for and every direction stays covered.
+- No light means uniform accuracy: a weight onto a spot that is sunlit at run time multiplies its error by that spot's
+  brightness, so every relationship needs the tolerance of the brightest light that could reach it. The near/far
+  split (far at patch level, pooled) and analytic form factors (sampling only partial visibility) make that
+  affordable.
+- Visibility is discontinuous (narrow openings, contacts, thin occluders): pooling needs a geometric compatibility
+  test as well as the radiometric one.
+- Precomputing is not storing: for a unique, detailed scene the placement-dependent near view may be cheaper as short
+  coherent rays at run time (light-unbiased: they read the chain's current light at their hits) than as a stored
+  neighbour graph. Decide by measurement, per kind of knowledge.
+- Storage is the primary unsolved problem, not a detail: near transport raw is 16 M texels x 16-64 entries x 6 B =
+  1.5-6 GB, before sharing; patch couplings + first-bounce + sky ~0.7 GB measured. A construction method is judged by
+  useful relationships per second PER BYTE STORED.
+MEASUREMENTS, in order:
+- N1 The near-field census (--split-noise-census, with the far field's reach): a texel's view split into near on its
+  own primitive, near on another, past the reach, escaped; contact share; distinct patches. Sponza's primitives are
+  fragments by material (2,042, each placed once), so "another primitive" is an UPPER bound on what only the scene
+  knows -- part of it is one object's self-transport split by authoring.
+  Sponza, 2026-10-14 (15.9 M texels, reach 0.84 m on average): the view, cosine-weighted -- near on its own primitive
+  18.9%, near on another 27.6%, past the reach 52.2%, escaped 1.3%. Another primitive fills over 1% / 5% / 20% of the
+  view of 65.5% / 56.3% / 42.7% of the texels, and 61.6% of a texel's near light on average. So in Sponza (unique,
+  fragmented) the placement-dependent near view is the larger part, and half the view is far (patch level): the asset
+  cook pays off with real rigid objects and instancing, and Sponza's near view argues for short run-time rays over a
+  stored neighbour graph. Next for N1: primitives merged into connected rigid objects (shared or coincident edges), to
+  separate authoring fragments from real placement.
+- N2 P0a: a geometry-only transport cook from the trusted ray path (cosine-stratified, no guides): near weights onto
+  sunlets / patches, far onto patches per bin, sky bins. Entries per texel, bytes, sharing by pooled clusters.
+- N3 Evaluate with no rays under two lightings -- broad light, and a small source seen through a narrow opening -- and
+  a second sun: against the light cook and the path-trace reference (the gate), with the evaluation's time.
+- N4 Only then P0b, the global-line (ray-bundle) construction, as a microbenchmark emitting the same records: whether
+  its coherent sampling gives a more compressible transport graph, not merely faster segments.
+- N5 The asset-cook prototype: one carved mesh's self-transport in its texture space, and how much of its openness
+  survives placement in Sponza (the composition test).
+The step-3 ideas (per-patch far gather, settling by budget, GPU-resident settling) are re-thought on top of this once
+N2-N3 show it holds.
 
 ---
 

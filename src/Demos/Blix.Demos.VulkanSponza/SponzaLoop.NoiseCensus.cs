@@ -38,11 +38,17 @@ internal sealed partial class SponzaLoop
     private readonly long[,] censusNearSettles = new long[2, 3];
     private readonly long[,] censusNearEmpty = new long[2, 3];
     private readonly double[] censusFarSunVariance = new double[2];
+    // The near field's split by what fills a texel's view (with the far field: its reach): the mesh's own (its patch's
+    // placement) against another primitive's -- what an asset cook could carry, what only the scene knows.
+    private readonly double[] censusView = new double[4];          // near own, near other, past R, escaped
+    private readonly long[] censusContact = new long[3];            // texels whose view is > 1% / 5% / 20% another's near
+    private double censusOwnPatches, censusOtherPatches, censusOtherPasses, censusReach, censusNearOtherOfNear;
+    private long censusViewTexels, censusNearTexels;
 
     private void BeginNoiseCensus()
     {
         if (!noiseCensus || !splitCooking) return;
-        sunNodeCensus = Own(device.CreateGpuBuffer(checked(sunNodeSlice * 96), name: "sponza.sun-nodes.census"));
+        sunNodeCensus = Own(device.CreateGpuBuffer(checked(sunNodeSlice * 128), name: "sponza.sun-nodes.census"));
         Array.Clear(censusTexels);
         Array.Clear(censusVarianceShare);
         Array.Clear(censusLightShare);
@@ -55,6 +61,10 @@ internal sealed partial class SponzaLoop
         Array.Clear(censusNearSettles);
         Array.Clear(censusNearEmpty);
         Array.Clear(censusFarSunVariance);
+        Array.Clear(censusView);
+        Array.Clear(censusContact);
+        censusOwnPatches = censusOtherPatches = censusOtherPasses = censusReach = censusNearOtherOfNear = 0;
+        censusViewTexels = censusNearTexels = 0;
     }
 
     private bool CensusOn(int discover) =>
@@ -64,15 +74,15 @@ internal sealed partial class SponzaLoop
     private void ReadNoiseCensus(Vector4[] sums, int count, int suns, int passes)
     {
         if (!noiseCensus || sunNodeCensus.Equals(default(GpuBufferHandle))) return;
-        var census = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(sunNodeCensus, 0, count * 96).AsSpan()).ToArray();
+        var census = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(sunNodeCensus, 0, count * 128).AsSpan()).ToArray();
         for (var t = 0; t < count; t++)
         {
             float total = 0f;
             for (var k = 0; k < suns; k++) total += Luminance(new Vector3(sums[(long)t * suns + k].X, sums[(long)t * suns + k].Y, sums[(long)t * suns + k].Z));
             var mean = total / passes;
             var whole = MathF.Max(sums[(long)t * suns].W / passes - mean * mean, 0f);
-            var s = census[6 * t];
-            var q = census[6 * t + 1];
+            var s = census[8 * t];
+            var q = census[8 * t + 1];
             var m = s / passes;
             var v = Vector4.Max(q / passes - m * m, Vector4.Zero);
             var vSum = v.X + v.Y + v.Z + v.W;
@@ -97,10 +107,10 @@ internal sealed partial class SponzaLoop
                 censusLightShare[unsettled, 2] += m.Z / lightSum;
                 censusLightShare[unsettled, 3] += m.W / lightSum;
             }
-            var fm = census[6 * t + 2] / passes;
-            var fv = Vector4.Max(census[6 * t + 3] / passes - fm * fm, Vector4.Zero);
-            var nm = census[6 * t + 4] / passes;
-            var nv = Vector4.Max(census[6 * t + 5] / passes - nm * nm, Vector4.Zero);
+            var fm = census[8 * t + 2] / passes;
+            var fv = Vector4.Max(census[8 * t + 3] / passes - fm * fm, Vector4.Zero);
+            var nm = census[8 * t + 4] / passes;
+            var nv = Vector4.Max(census[8 * t + 5] / passes - nm * nm, Vector4.Zero);
             for (var i = 0; i < 3; i++)
             {
                 float F(Vector4 v) => i == 0 ? v.X : i == 1 ? v.Y : v.Z;
@@ -114,6 +124,18 @@ internal sealed partial class SponzaLoop
                 if (F(nm) <= 0f) censusNearEmpty[unsettled, i]++;
             }
             if (whole > 0f) censusFarSunVariance[unsettled] += Math.Min(fv.W / whole, 10f);
+            var view = census[8 * t + 6] / passes;
+            var kinds = census[8 * t + 7] / passes;
+            if (kinds.W > 0f)
+            {
+                censusViewTexels++;
+                censusView[0] += view.X; censusView[1] += view.Y; censusView[2] += view.Z; censusView[3] += view.W;
+                if (view.Y > 0.01f) censusContact[0]++;
+                if (view.Y > 0.05f) censusContact[1]++;
+                if (view.Y > 0.20f) censusContact[2]++;
+                censusOwnPatches += kinds.X; censusOtherPatches += kinds.Y; censusOtherPasses += kinds.Z; censusReach += kinds.W;
+                if (view.X + view.Y > 0f) { censusNearTexels++; censusNearOtherOfNear += view.Y / (view.X + view.Y); }
+            }
             // A pass's spread over its mean, times sqrt(32): one ray's (as if the rays were independent).
             if (mean > 0f && (t & 15) == 0) censusRaySpread[unsettled].Add(MathF.Sqrt(whole * 32f) / mean);
         }
@@ -123,6 +145,15 @@ internal sealed partial class SponzaLoop
     private void ReportNoiseCensus()
     {
         if (!noiseCensus || sunNodeCensus.Equals(default(GpuBufferHandle))) return;
+        if (censusViewTexels > 0)
+        {
+            double n = censusViewTexels;
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza] near-field census ({censusViewTexels:N0} texels; reach {censusReach / n:0.00} m on average): the view, cosine-weighted -- near on its own primitive {100 * censusView[0] / n:0.0}%, near on another {100 * censusView[1] / n:0.0}%, past the reach {100 * censusView[2] / n:0.0}%, escaped {100 * censusView[3] / n:0.0}%."));
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza]   contact texels (another primitive's near over 1% / 5% / 20% of the view): {100.0 * censusContact[0] / n:0.0}% / {100.0 * censusContact[1] / n:0.0}% / {100.0 * censusContact[2] / n:0.0}%; of a texel's near light, another primitive's {100 * censusNearOtherOfNear / Math.Max(censusNearTexels, 1):0.0}% on average; a pass's near hits land on {censusOwnPatches / n:0.0} own patches and {censusOtherPatches / n:0.0} others (32 rays: a floor on the count), another primitive met in {100 * censusOtherPasses / n:0.0}% of passes."));
+            Console.WriteLine("[VulkanSponza]   (own primitive = the texel's patch's placement: at a contact the two can differ.)");
+        }
         RetireGpuBuffer(sunNodeCensus);
         sunNodeCensus = default;
         string[] names = { "sky misses", "patch bounce", "sun at hits", "no-patch bounce" };

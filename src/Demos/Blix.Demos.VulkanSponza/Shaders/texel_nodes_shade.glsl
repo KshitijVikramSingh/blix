@@ -73,6 +73,11 @@ layout(std430, set = 0, binding = 23) readonly buffer NodeIds { uint nodeIds[]; 
 // at the hits, w the bounce a hit with no patch took): which source the texel's noise comes from; by the ray's length, the
 // light from beyond R (x 0.5 m, y 1 m, z 2 m; a miss is beyond all; w the sun at hits beyond 1 m) and from within it (xyz
 // the same R; w the sun at hits within 1 m): how much a texel's noise would fall if what lies beyond R came from its patch.
+// With the far field (its reach R and the texel's patch): the texel's view split by what fills it (the near field's
+// storage: what the mesh alone could cook, and what only the scene knows) -- [6] the cosine-weighted share of its rays
+// that hit within R on its own placement (its patch's: the primitive), on another placement, past R, and escaped;
+// [7] the distinct patches a pass's near hits landed on, own placement and other, the passes with any other-placement
+// near hit, and the reach.
 layout(std430, set = 0, binding = 24) buffer NodeCensus { vec4 nodeCensus[]; };
 // The far field (texel_far.glsl): each texel's guide patch (texel_nodes_rays.comp: the patch + 2), the record (written by
 // the record pass, read by the sweep), and per slice texel per bin its rays' weight and the share of it gone far (x all,
@@ -125,6 +130,7 @@ shared int sBin[RAYS * FAR_SET];   // each ray's bin in each blended patch's fra
 shared float sFar[RAYS];
 shared float sJoint[RAYS];         // every blended patch knows the ray's direction
 shared float sRayWeight[RAYS];
+shared uint sPlacement[RAYS];   // the census: each hit's placement (0xFFFFFFFF a miss)
 
 // The record pass: a far ray's light for a column into its patch's bin (c its weight x radiance, w its weight).
 void farRecordAdd(int patchIndex, int bin, int column, vec3 c, float w, uint slot) {
@@ -186,6 +192,7 @@ void main() {
         sDist[lid] = (h0.w & 1u) != 0u ? uintBitsToFloat(h0.x) : 1e30;
         sMiss[lid] = (h0.w & 1u) != 0u ? 0.0 : nodeRayWeight[slot] / PI;
         sRayWeight[lid] = nodeRayWeight[slot];
+        sPlacement[lid] = (h0.w & 1u) != 0u ? nodeHits[slot * 3u + 1u].x : 0xFFFFFFFFu;
         // A ray past the reach (a miss, or one texel_nodes_rays.comp cut at the reach) where every blended patch's
         // record knows its direction: the patches' light, not its own. Recording, every ray past the reach in any bin
         // above its own patch's horizon.
@@ -405,13 +412,43 @@ void main() {
             vec4 bySource = vec4(0.0), byFar = vec4(0.0), byNear = vec4(0.0);
             for (int k = 0; k < suns; ++k) { bySource += sColumnSource[k]; byFar += sColumnFar[k]; byNear += sColumnNear[k]; }
             bool first = u.uShade.w < 0.5;
-            uint at = 6u * group;
+            uint at = 8u * group;
             nodeCensus[at] = (first ? vec4(0.0) : nodeCensus[at]) + bySource;
             nodeCensus[at + 1u] = (first ? vec4(0.0) : nodeCensus[at + 1u]) + bySource * bySource;
             nodeCensus[at + 2u] = (first ? vec4(0.0) : nodeCensus[at + 2u]) + byFar;
             nodeCensus[at + 3u] = (first ? vec4(0.0) : nodeCensus[at + 3u]) + byFar * byFar;
             nodeCensus[at + 4u] = (first ? vec4(0.0) : nodeCensus[at + 4u]) + byNear;
             nodeCensus[at + 5u] = (first ? vec4(0.0) : nodeCensus[at + 5u]) + byNear * byNear;
+            vec4 view = vec4(0.0), kinds = vec4(0.0);
+            if (sFarPatch >= 0) {
+                uint own = floatBitsToUint(cookedPatch[3 * sFarPatch].w);
+                int seen[RAYS];
+                int seenCount = 0;
+                float weightSum = 0.0;
+                for (int r = 0; r < RAYS; ++r) {
+                    float w = sRayWeight[r];
+                    weightSum += w;
+                    bool hit = sPlacement[r] != 0xFFFFFFFFu;
+                    if (!hit) { view.w += w; continue; }
+                    if (sFar[r] > 0.5 || sDist[r] >= sFarReach) { view.z += w; continue; }
+                    bool same = sPlacement[r] == own;
+                    if (same) view.x += w; else view.y += w;
+                    int pw = int(sHit[r].w);
+                    if (pw < 0) continue;
+                    bool again = false;
+                    for (int k = 0; k < seenCount; ++k) again = again || seen[k] == pw;
+                    if (again) continue;
+                    seen[seenCount++] = pw;
+                    if (floatBitsToUint(cookedPatch[3 * pw].w) == own) kinds.x += 1.0; else kinds.y += 1.0;
+                }
+                // A shortened ray that met nothing went past R: it counted as escaped above; a far ray is past R.
+                for (int r = 0; r < RAYS; ++r) if (sPlacement[r] == 0xFFFFFFFFu && sFar[r] > 0.5) { view.w -= sRayWeight[r]; view.z += sRayWeight[r]; }
+                if (weightSum > 0.0) view /= weightSum;
+                kinds.z = view.y > 0.0 ? 1.0 : 0.0;
+                kinds.w = sFarReach;
+            }
+            nodeCensus[at + 6u] = (first ? vec4(0.0) : nodeCensus[at + 6u]) + view;
+            nodeCensus[at + 7u] = (first ? vec4(0.0) : nodeCensus[at + 7u]) + kinds;
         }
     }
 }
