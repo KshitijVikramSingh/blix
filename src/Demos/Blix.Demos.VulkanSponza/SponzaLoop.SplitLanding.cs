@@ -15,8 +15,9 @@ namespace Blix.Demos.VulkanSponza;
 //                  irradiance, as FinishSplitCook stores it), flushed to the GPU at most once a SplitLandSeconds and
 //                  whenever the visible texels are all in -- so the old light gives way texel by texel, where the cook
 //                  ran, and the image is never blank.
-//   LIVE           a relight is not behind the cook screen (CookScreenNow): the scene stays up, the cook takes
-//                  --split-passes-per-frame passes of each frame. A cook at boot, with no light at all, still is.
+//   LOCKED         once the visible order is read the cook holds the screen (CookScreenNow): the last frame stays up,
+//                  the camera locked, the cook taking the cook screen's budget (the user's call, 2026-10-14: live, at
+//                  50 ms of each ~150 ms frame, Sponza's sweep took ~23 min against 6).
 internal sealed partial class SponzaLoop
 {
     private const double SplitLandSeconds = 1.0;

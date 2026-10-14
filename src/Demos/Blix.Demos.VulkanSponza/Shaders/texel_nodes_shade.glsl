@@ -29,7 +29,7 @@ layout(set = 0, binding = 0) uniform SunNodesShade {
     vec4 uCookedDims;
     vec4 uSunIrradiance;  // rgb; w the visibility a hit among no texel takes (--sun-nodes-unknown-sun; 0 by default)
     vec4 uDetail;         // x the slice's first entry in NodeIds; y 1: write NodeDetail (the cells' sky visibility and
-                          // direction, SponzaLoop.SplitDetail.cs)
+                          // direction, SponzaLoop.SplitDetail.cs); z 1: write NodeCensus (--split-noise-census)
     vec4 uSky;            // x strength, y mip
     vec4 uLookup;         // x a sun bit candidate's plane distance at most (cells), y the distance weight's spread (cells)
     vec4 uFoliage;        // x the foliage hash's slots (0: no foliage points); y discovering: the list's room (0: off);
@@ -66,6 +66,10 @@ layout(std430, set = 0, binding = 21) readonly buffer TexelPatch { int texelPatc
 // summed; z (column 0) the share of rays that escape, cosine-weighted (the sky visibility), each pass's mean summed.
 layout(std430, set = 0, binding = 22) buffer NodeDetail { vec4 nodeDetail[]; };
 layout(std430, set = 0, binding = 23) readonly buffer NodeIds { uint nodeIds[]; };
+// --split-noise-census (SponzaLoop.NoiseCensus.cs): per slice texel two vec4s -- each pass's composed luminance by its
+// source (x the sky's misses, y the bounce from a patch, z the sun direct at the hits, w the bounce a hit with no patch
+// took), summed over passes, and their squares summed: which source the texel's noise comes from.
+layout(std430, set = 0, binding = 24) buffer NodeCensus { vec4 nodeCensus[]; };
 
 #define COOKED_BINDING 11
 #define COOKED_GRID u.uCookedGrid
@@ -87,6 +91,7 @@ shared float sExact[RAYS];   // the exact-sun experiment: sun 0's visibility at 
 shared float sWeight[RAYS * NODE_CANDIDATES];
 shared uint sBits[RAYS * NODE_CANDIDATES * MAX_WORDS];
 shared float sColumnLum[MAX_WORDS * 32];   // each column's pass mean's luminance
+shared vec4 sColumnSource[MAX_WORDS * 32]; // the census: each column's pass mean's luminance by source
 
 void main() {
     uint group = gl_WorkGroupID.x;
@@ -179,19 +184,36 @@ void main() {
         vec3 dn = vec3(0.0, 1.0, 0.0), dt1 = vec3(1.0, 0.0, 0.0), dt2 = vec3(0.0, 0.0, 1.0);
         if (detail) texelDetailFrame(normalize(texels[2u * nodeIds[uint(u.uDetail.x) + group] + 1u].xyz), dn, dt1, dt2);
         vec2 tilt = vec2(0.0);
+        const vec3 lumW = vec3(0.2126, 0.7152, 0.0722);
+        vec4 source = vec4(0.0);
+        // A hit with no patch (none seen, none on its placement facing its way: 4.5% of Sponza's hits, 2026-10-14) has no
+        // known bounce -- unknown, not dark. It took 0, and those hits gather where the light is darkest (crevices, under
+        // the canopy), so the dark was painted in. Now it takes the mean bounce of this texel's hits this pass that have
+        // one: the estimate over what is known. (None known: 0, as before.)
+        vec3 knownBounce = vec3(0.0);
+        float knownHits = 0.0;
+        for (int r = 0; r < RAYS; ++r) {
+            float pw = sHit[r].w;
+            if (pw < 0.0) continue;
+            uvec2 p = patchLight[uint(pw) * uint(suns) + uint(k)];
+            knownBounce += vec3(unpackHalf2x16(p.x), unpackHalf2x16(p.y).x);
+            knownHits += 1.0;
+        }
+        vec3 unknownBounce = knownHits > 0.0 ? knownBounce / knownHits : vec3(0.0);
         for (int r = 0; r < RAYS; ++r) {
             vec4 h = sHit[r];
             vec3 before = sum;
             if (h.w < -1.5) {
-                if (hasSky) sum += h.rgb;
+                if (hasSky) { sum += h.rgb; source.x += dot(h.rgb, lumW); }
                 if (detail) { float l = dot(sum - before, vec3(0.2126, 0.7152, 0.0722)); vec3 w = sDir[r]; tilt += l * vec2(dot(dt1, w), dot(dt2, w)) / max(dot(dn, w), 0.1); }
                 continue;
             }
-            vec3 light = vec3(0.0);
+            vec3 light = unknownBounce;
             if (h.w >= 0.0) {
                 uvec2 p = patchLight[uint(h.w) * uint(suns) + uint(k)];
                 light = vec3(unpackHalf2x16(p.x), unpackHalf2x16(p.y).x);
             }
+            if (h.w >= 0.0) source.y += dot(h.rgb * light, lumW); else source.w += dot(h.rgb * light, lumW);
             float ndotl = hasSun ? max(dot(sNormal[r], toSun), 0.0) : 0.0;
             if (ndotl > 0.0) {
                 float visible = sUnknown[r] * u.uSunIrradiance.w;
@@ -199,6 +221,7 @@ void main() {
                 for (int c = 0; c < NODE_CANDIDATES; ++c)
                     if ((sBits[(uint(r) * NODE_CANDIDATES + uint(c)) * MAX_WORDS + word] & bit) != 0u) visible += sWeight[r * NODE_CANDIDATES + c];
                 light += u.uSunIrradiance.rgb * ndotl * visible;
+                source.z += dot(h.rgb * u.uSunIrradiance.rgb * ndotl * visible, lumW);
             }
             sum += h.rgb * light;
             if (detail) { float l = dot(sum - before, vec3(0.2126, 0.7152, 0.0722)); vec3 w = sDir[r]; tilt += l * vec2(dot(dt1, w), dot(dt2, w)) / max(dot(dn, w), 0.1); }
@@ -214,6 +237,7 @@ void main() {
         vec4 before = u.uShade.w > 0.5 ? nodeAccum[at] : vec4(0.0);
         nodeAccum[at] = vec4(before.rgb + mean, before.w);
         sColumnLum[k] = dot(mean, vec3(0.2126, 0.7152, 0.0722));
+        sColumnSource[k] = source / float(RAYS);
     }
     barrier();
     // Thread 0 wrote column 0 above: the moment rides on it.
@@ -221,6 +245,13 @@ void main() {
         float composed = 0.0;
         for (int k = 0; k < suns; ++k) composed += sColumnLum[k];
         nodeAccum[group * uint(suns)].w += composed * composed;
+        if (u.uDetail.z > 0.5) {
+            vec4 bySource = vec4(0.0);
+            for (int k = 0; k < suns; ++k) bySource += sColumnSource[k];
+            bool first = u.uShade.w < 0.5;
+            nodeCensus[2u * group] = (first ? vec4(0.0) : nodeCensus[2u * group]) + bySource;
+            nodeCensus[2u * group + 1u] = (first ? vec4(0.0) : nodeCensus[2u * group + 1u]) + bySource * bySource;
+        }
     }
 }
 #endif

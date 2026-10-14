@@ -5,6 +5,12 @@
 // averaged over every node's sun, SunNodesSolve.cs), so one set of rays serves every sun -- each weighted by the
 // mixture's density (NodeRayWeights: the ray's weight on irradiance, pi for a cosine ray without a guide). Without
 // guides (uSlice.w 0) all cosine, as before.
+// THE LIGHT STRATEGY (uLights.x): with the guide patch's light list (BuildLights: the LIGHT_K patches it sees sending it
+// the most light), 16 cosine rays, 8 by the guide, 8 at a point on a listed patch's disk (picked by its share, a uniform
+// point on the disk). Every ray is weighted by multiple importance sampling -- the balance heuristic over the three
+// strategies' densities at its direction, by their ray counts -- and the light's density is exact for the disks (each
+// tested against the ray), so the estimate stays unbiased: only where the rays go changes. A sunlit patch a few cosine
+// rays in fifty found now takes a quarter of the rays, each carrying its share.
 
 #define RAYS 32
 #define PI 3.14159265359
@@ -14,6 +20,7 @@ layout(set = 0, binding = 0) uniform SunNodesRays {
     vec4 uSlice;   // x the slice's first live texel, y its texels, z the pass, w 1: guided
     vec4 uCookedGrid;
     vec4 uCookedDims;
+    vec4 uLights;  // x 1: the light strategy; y the patches' disk radius
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
@@ -24,6 +31,9 @@ layout(std430, set = 0, binding = 5) readonly buffer NodeGuides { float cookedGu
 // Each texel's guide patch (its cookedNearest), once: 0 not yet, else the patch + 2 (1: none). Worked out again on every
 // pass, the search of up to 125 cells a texel made the rays as dear as the trace (11.6 ms a pass of 1 M, 2026-10-14).
 layout(std430, set = 0, binding = 9) buffer NodeGuidePatch { uint guidePatch[]; };
+// Per patch LIGHT_K (index bits, cumulative share); index -1 empty (BuildLights).
+layout(std430, set = 0, binding = 10) readonly buffer NodeLights { vec2 lightList[]; };
+#define LIGHT_K 16
 
 #define COOKED_BINDING 6
 #define COOKED_GRID u.uCookedGrid
@@ -72,6 +82,46 @@ vec3 guideSample(int patchIndex, float u0, float u1, float u2) {
     return normalize(guideOctDecodeRaw(uv));
 }
 
+// The light strategy's density at a direction from origin: over the guide patch's list, each disk the ray crosses, its
+// share times its solid-angle density there (t^2 over the disk's area and the cosine at it).
+float lightPdf(int listPatch, vec3 origin, vec3 d) {
+    float radius = u.uLights.y;
+    float area = PI * radius * radius;
+    float pdf = 0.0, before = 0.0;
+    for (int k = 0; k < LIGHT_K; ++k) {
+        vec2 e = lightList[listPatch * LIGHT_K + k];
+        int j = floatBitsToInt(e.x);
+        float share = e.y - before;
+        before = e.y;
+        if (j < 0 || share <= 0.0) continue;
+        vec3 c = cookedPatch[3 * j].xyz;
+        vec3 nj = cookedPatch[3 * j + 1].xyz;
+        float denom = dot(d, nj);
+        if (abs(denom) < 1e-6) continue;
+        float t = dot(c - origin, nj) / denom;
+        if (t <= 0.0) continue;
+        vec3 q = origin + d * t - c;
+        if (dot(q, q) > radius * radius) continue;
+        pdf += share * t * t / (abs(denom) * area);
+    }
+    return pdf;
+}
+
+// A point on a listed patch's disk, the patch picked by u0 against the shares.
+vec3 lightSample(int listPatch, vec3 origin, float u0, float u1, float u2) {
+    int pick = LIGHT_K - 1;
+    for (int k = 0; k < LIGHT_K; ++k) if (u0 < lightList[listPatch * LIGHT_K + k].y) { pick = k; break; }
+    int j = floatBitsToInt(lightList[listPatch * LIGHT_K + pick].x);
+    if (j < 0) return vec3(0.0);
+    vec3 c = cookedPatch[3 * j].xyz;
+    vec3 nj = normalize(cookedPatch[3 * j + 1].xyz);
+    vec3 t = normalize(abs(nj.y) < 0.999 ? cross(vec3(0.0, 1.0, 0.0), nj) : cross(vec3(1.0, 0.0, 0.0), nj));
+    vec3 b = cross(nj, t);
+    float r = u.uLights.y * sqrt(u1), phi = 2.0 * PI * u2;
+    vec3 to = c + t * (r * cos(phi)) + b * (r * sin(phi)) - origin;
+    return dot(to, to) > 1e-10 ? normalize(to) : vec3(0.0);
+}
+
 shared int sGuide;
 
 void main() {
@@ -104,13 +154,24 @@ void main() {
     float rotation = float(blix_pcg(setSeed) & 0xFFFFu) / 65536.0;
     float jitter = float(blix_pcg(seed) & 0xFFFFu) / 65536.0;
     const uint halfRays = uint(RAYS) / 2u;
-    bool guided = guide >= 0 && ray >= halfRays;
-    float cosineCount = guide >= 0 ? float(halfRays) : float(RAYS);
-    uint stratum = guide >= 0 ? ray % halfRays : ray;
+    // The rays by strategy: cosine [0, cosineEnd), guide [cosineEnd, guideEnd), light [guideEnd, RAYS).
+    bool lit = guide >= 0 && u.uLights.x > 0.5 && lightList[guide * LIGHT_K + LIGHT_K - 1].y > 0.5;
+    uint cosineEnd = guide >= 0 ? halfRays : uint(RAYS);
+    uint guideEnd = lit ? halfRays + uint(RAYS) / 4u : uint(RAYS);
+    float cosineCount = float(cosineEnd);
+    float guideCount = float(guideEnd - cosineEnd);
+    float lightCount = float(uint(RAYS) - guideEnd);
+    bool guided = ray >= cosineEnd && ray < guideEnd;
+    bool aimed = ray >= guideEnd;
+    uint stratum = aimed ? ray - guideEnd : guided ? ray - cosineEnd : ray;
+    vec3 origin = position + n * 0.01;
     vec3 dir;
-    if (guided) {
+    if (aimed) {
+        uint s1 = blix_pcg(seed ^ 0x85EBCA77u), s2 = blix_pcg(s1);
+        dir = lightSample(guide, origin, (float(stratum) + jitter) / lightCount, float(s1 & 0xFFFFu) / 65536.0, float(s2 & 0xFFFFu) / 65536.0);
+    } else if (guided) {
         uint s1 = blix_pcg(seed ^ 0x9E3779B9u), s2 = blix_pcg(s1);
-        dir = guideSample(guide, (float(stratum) + jitter) / float(halfRays), float(s1 & 0xFFFFu) / 65536.0, float(s2 & 0xFFFFu) / 65536.0);
+        dir = guideSample(guide, (float(stratum) + jitter) / guideCount, float(s1 & 0xFFFFu) / 65536.0, float(s2 & 0xFFFFu) / 65536.0);
     } else {
         float r = sqrt((float(stratum) + jitter) / cosineCount);
         float phi = 2.0 * PI * fract(float(stratum) * 0.618034 + rotation);
@@ -118,9 +179,13 @@ void main() {
         vec3 b = cross(n, t);
         dir = normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + n * sqrt(max(0.0, 1.0 - r * r)));
     }
+    if (dot(dir, dir) < 0.5) dir = n * -1.0;   // a degenerate light sample: below the surface, weight 0
     float cosTheta = dot(dir, n);
-    float mixturePdf = guide >= 0 ? 0.5 * max(cosTheta, 0.0) / PI + 0.5 * guidePdf(guide, dir) : max(cosTheta, 0.0) / PI;
+    // The balance heuristic: the ray's weight over every strategy's density, each by its share of the rays.
+    float mixturePdf = cosineCount / float(RAYS) * max(cosTheta, 0.0) / PI;
+    if (guideCount > 0.0) mixturePdf += guideCount / float(RAYS) * guidePdf(guide, dir);
+    if (lightCount > 0.0 && cosTheta > 0.0) mixturePdf += lightCount / float(RAYS) * lightPdf(guide, origin, dir);
     nodeRayWeight[slot] = cosTheta > 0.0 && mixturePdf > 0.0 ? cosTheta / mixturePdf : 0.0;
-    nodeRays[slot * 2u] = vec4(position + n * 0.01, 0.0);
+    nodeRays[slot * 2u] = vec4(origin, 0.0);
     nodeRays[slot * 2u + 1u] = vec4(dir, uintBitsToFloat(0x7F800000u));
 }

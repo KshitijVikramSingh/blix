@@ -27,6 +27,9 @@ internal sealed partial class SponzaLoop
 {
     private TransportSolveData? transportSolve;
     private Func<Vector3[], Vector3[], float[]>? transportBuildGuides;
+    private Func<Vector3[], float[]>? transportBuildLights;
+    // The light lists built beside the guides (BuildLights), for the light strategy; null until built or with it off.
+    private float[]? sunNodeLightLists;
     // The band's averages (texel_nodes_solve.comp modes 6, 7), and the nodes' guides built from them (null: no guide,
     // --sun-nodes-no-guide or the CPU's solve).
     private GpuBufferHandle solveAvgPatch, solveAvgSunlet;
@@ -199,10 +202,13 @@ internal sealed partial class SponzaLoop
             var sOut = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(solveAvgSunlet, 0, solveSunlets * 16).AsSpan()).ToArray()
                 .Select(v => new Vector3(v.X, v.Y, v.Z)).ToArray();
             var clock = Stopwatch.StartNew();
+            var lights = sunNodeLights ? transportBuildLights : null;
+            sunNodeLightLists = null;
             sunNodeGuideTask = Task.Run(() =>
             {
                 var cdf = build(outg, sOut);
-                Console.WriteLine(string.Create(Inv, $"[VulkanSponza] sun nodes: the band's guides built in {clock.Elapsed.TotalSeconds:0.0} s ({cdf.Length / 64:N0} patches)."));
+                if (lights is not null) sunNodeLightLists = lights(outg);
+                Console.WriteLine(string.Create(Inv, $"[VulkanSponza] sun nodes: the band's guides{(lights is not null ? " and light lists" : "")} built in {clock.Elapsed.TotalSeconds:0.0} s ({cdf.Length / 64:N0} patches)."));
                 return cdf;
             });
         }

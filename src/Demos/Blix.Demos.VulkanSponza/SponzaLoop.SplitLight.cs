@@ -22,7 +22,9 @@ internal sealed partial class SponzaLoop
     // The sky the sky's part is for (the probe loaded, else the procedural sky): in its cache's key.
     private string skyIdentity = "procedural";
     // 2: refined until settled (SponzaLoop.SunNodesRefine.cs). 3: the cells' detail cooked beside each part (SplitDetail).
-    private const int SplitLightVersion = 3;
+    // 4: a hit with no patch takes its texel's known bounce, not 0 (texel_nodes_shade.glsl).
+    // 5: the light strategy and multiple importance sampling (texel_nodes_rays.comp).
+    private const int SplitLightVersion = 5;
     private ShaderInterface texelComposeInterface = null!;
     private PassHandle texelComposePass, texelComposeFilterPass;
     private PipelineHandle texelComposePipeline;
@@ -66,7 +68,7 @@ internal sealed partial class SponzaLoop
     {
         var part = toSun is { } d ? string.Create(CultureInfo.InvariantCulture, $"sun {d.X:F5},{d.Y:F5},{d.Z:F5} per unit irradiance") : "sky";
         var spec = string.Create(CultureInfo.InvariantCulture,
-            $"{transportKey};{part};sky {skyIdentity};rays {sunNodeRays} {(sunNodeGuide ? "guided" : "cosine")};lift {sunNodeLift:G4};lookup {sunNodePlane:G3} {sunNodeSigma:G3};discover {sunNodeDiscoverStride};unknown {sunNodeUnknownSun:G3};settled {texelNoise:G6} {texelMaxRays} stop {splitRefineMinShare:G3};patches seen of {PatchCandidates};buried {LightmapBuriedRule};v{SplitLightVersion}");
+            $"{transportKey};{part};sky {skyIdentity};rays {sunNodeRays} {(sunNodeGuide ? "guided" : "cosine")}{(sunNodeLights ? " lights" : "")};lift {sunNodeLift:G4};lookup {sunNodePlane:G3} {sunNodeSigma:G3};discover {sunNodeDiscoverStride};unknown {sunNodeUnknownSun:G3};settled {texelNoise:G6} {texelMaxRays} stop {splitRefineMinShare:G3} dark {texelDarkFloor:G3};patches seen of {PatchCandidates};buried {LightmapBuriedRule};v{SplitLightVersion}");
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(spec)))[..16].ToLowerInvariant();
         return Path.ChangeExtension(TransportCachePath(transportKey), $".{(toSun is null ? "sky" : "sun")}-{hash}");
     }

@@ -127,6 +127,8 @@ internal sealed partial class SponzaLoop
     private const int TransportSkyRes = 16;
     private const int TransportGuideRes = 8;
     private const int TransportGuideBins = TransportGuideRes * TransportGuideRes;
+    // Each patch's light list (BuildLights; texel_nodes_rays.comp's LIGHT_K).
+    private const int LightListSize = 16;
 
     private void ReadTransportArgs(AppArgs args)
     {
@@ -145,6 +147,7 @@ internal sealed partial class SponzaLoop
         transportSeed = args.Int("transport-seed") ?? 0;
         texelFoliage = !args.Flag("no-texel-foliage");
         texelDetailOn = !args.Flag("no-texel-detail");
+        if (args.Float("texel-dark-floor") is { } df) texelDarkFloor = Math.Max(0f, df);
         if (args.Float("transport-far-cutoff") is { } fc) transportFarCutoff = Math.Max(0f, fc);
         transportFill = args.Flag("transport-fill");
         if (args.Int("transport-fill-rays") is { } fr) transportFillRays = Math.Clamp(fr, 1, 4096);
@@ -1529,6 +1532,41 @@ internal sealed partial class SponzaLoop
             return cdf;
         }
 
+        // Light lists (texel_nodes_rays.comp, the light strategy): per patch, the LightListSize patches it sees that send it
+        // the most light -- form factor x outgoing luminance -- as (index, cumulative share) pairs, the index's bits in a
+        // float; an empty slot is index -1 at the last share. A texel aims a share of its rays at points on these patches'
+        // disks, each weighted by multiple importance sampling against its cosine and guide rays.
+        float[] BuildLights(Vector3[] outg)
+        {
+            var lists = new float[patches * LightListSize * 2];
+            Parallel.For(0, patches, i =>
+            {
+                var top = new (int To, float W)[LightListSize];
+                var n = 0;
+                foreach (var (to, w) in couplings[i])
+                {
+                    if (to == i) continue;
+                    var s = w * Lum3(outg[to]);
+                    if (s <= 0f) continue;
+                    if (n < LightListSize) { top[n++] = (to, s); continue; }
+                    var least = 0;
+                    for (var k = 1; k < n; k++) if (top[k].W < top[least].W) least = k;
+                    if (s > top[least].W) top[least] = (to, s);
+                }
+                var total = 0f;
+                for (var k = 0; k < n; k++) total += top[k].W;
+                var acc = 0f;
+                for (var k = 0; k < LightListSize; k++)
+                {
+                    var has = k < n && total > 0f;
+                    if (has) acc += top[k].W / total;
+                    lists[(i * LightListSize + k) * 2] = BitConverter.Int32BitsToSingle(has ? top[k].To : -1);
+                    lists[(i * LightListSize + k) * 2 + 1] = has ? (k == n - 1 ? 1f : acc) : (n > 0 ? 1f : 0f);
+                }
+            });
+            return lists;
+        }
+
         // The same solve for another sun (SponzaLoop.Texels.cs, FollowSun): only the sun's terms change -- its direct
         // light at patches (sun map) or sunlets (an exact ray each), and the bounces after. The couplings, sky bins and
         // sunlets are the cook's. Warm-started from the last answer. Off the frame thread: Sponza's ~9M sunlet rays and
@@ -1612,6 +1650,7 @@ internal sealed partial class SponzaLoop
                 albedo, skyIn, () => lastIncident, iterations);
         // The guides from given light (SponzaLoop.SunNodesSolve.cs: the nodes' band averages).
         transportBuildGuides = (outg, sOut) => BuildGuides(outg, sOut);
+        transportBuildLights = outg => BuildLights(outg);
         transportRelightMany = (toSuns, sunIrrNew) =>
         {
             const int group = 32;

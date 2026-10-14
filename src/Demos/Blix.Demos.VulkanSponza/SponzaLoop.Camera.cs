@@ -54,6 +54,13 @@ internal sealed partial class SponzaLoop
             UpdateCamera();
             return;
         }
+        // The camera is locked while a cook holds the screen (CookScreenNow): the screen keeps the last frame, and the view
+        // it shows is where the scene comes back.
+        if (CookScreenNow)
+        {
+            UpdateCamera();
+            return;
+        }
 
         // The engine's layout: right-drag looks (the wheel sets the speed meanwhile), WASD with Space and
         // Ctrl flies, Shift or Cmd sprints, left-drag orbits, the wheel zooms. Arrow keys stay Sponza's:

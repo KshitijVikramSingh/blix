@@ -32,6 +32,12 @@ internal sealed partial class SponzaLoop
     private static float Luminance(Vector3 c) => 0.2126f * c.X + 0.7152f * c.Y + 0.0722f * c.Z;
 
     // TexelSettled's rule over a texel's columns: past the most rays, or the composed light's standard error under the noise.
+    // The noise is judged against what the eye sees, not the texel's own light alone: under its own light a dark texel's
+    // bar shrinks with it, and proving a corner at 1% of the floor's light takes ~100x the floor's rays -- Sponza's dark
+    // texels ran every round to --texel-max-rays (512 + 12 x 128 = 2,048) and never settled (2026-10-14). So the bar is
+    // the noise share of the larger of its light and --texel-dark-floor (0.1) of the scene's median texel light
+    // (sunNodeLightHistogram, filled as the sweep's slices land): a texel far darker than the scene settles once its
+    // noise is small against that.
     private bool CookSettled(ReadOnlySpan<Vector3> sums, float squares, int passes)
     {
         if (passes * 32 >= texelMaxRays) return true;
@@ -39,7 +45,37 @@ internal sealed partial class SponzaLoop
         foreach (var s in sums) mean += Luminance(s);
         mean /= passes;
         var variance = MathF.Max(squares / passes - mean * mean, 0f);
-        return MathF.Sqrt(variance / passes) <= texelNoise * MathF.Max(mean, TexelNoiseFloor);
+        return MathF.Sqrt(variance / passes) <= texelNoise * MathF.Max(mean, MathF.Max(TexelNoiseFloor, sunNodeDarkBar));
+    }
+
+    // --texel-dark-floor: the share of the scene's median texel light under which a texel's noise is judged against that
+    // (0: against its own light alone, as before).
+    private float texelDarkFloor = 0.1f;
+    private float sunNodeDarkBar;
+    // The sweep's composed texel light, log2 bins of a quarter stop from 2^-24: its median sets the bar.
+    private readonly long[] sunNodeLightHistogram = new long[128];
+
+    private void CountSweepLight(ReadOnlySpan<Vector3> merged, int count, int suns, int passes)
+    {
+        if (texelDarkFloor <= 0f) return;
+        for (var t = 0; t < count; t += 7)
+        {
+            var mean = 0f;
+            for (var k = 0; k < suns; k++) mean += Luminance(merged[t * suns + k]);
+            mean /= passes;
+            var bin = mean > 0f ? (int)Math.Clamp((MathF.Log2(mean) + 24f) * 4f, 0f, sunNodeLightHistogram.Length - 1) : 0;
+            sunNodeLightHistogram[bin]++;
+        }
+        long total = 0;
+        foreach (var c in sunNodeLightHistogram) total += c;
+        long seen = 0;
+        for (var b = 0; b < sunNodeLightHistogram.Length; b++)
+        {
+            seen += sunNodeLightHistogram[b];
+            if (seen * 2 < total) continue;
+            sunNodeDarkBar = texelDarkFloor * MathF.Pow(2f, (b + 0.5f) / 4f - 24f);
+            return;
+        }
     }
 
     // A slice read back (the sweep's or a round's): each texel's light into the results, and the unsettled kept.
@@ -71,6 +107,7 @@ internal sealed partial class SponzaLoop
             }
             settled[t] = CookSettled(merged.AsSpan(t * suns, suns), squares[t], total[t]);
         });
+        if (!refining) CountSweepLight(merged, count, suns, passes);
         for (var t = 0; t < count; t++)
         {
             if (settled[t]) continue;
@@ -84,6 +121,9 @@ internal sealed partial class SponzaLoop
     // The sweep or a round is done: the next round over what is left unsettled. False when none is.
     private bool BeginSunNodeRefineRound()
     {
+        // After the sweep: the texels kept before the median was whole judged again against it.
+        if (sunNodeRefineRound == 0) ReportNoiseCensus();
+        if (sunNodeRefineRound == 0 && sunNodeDarkBar > 0f) RejudgeAfterSweep();
         var left = sunNodeNextIds.Count;
         var of = sunNodeRefineRound == 0 ? sunNodeTraceIds.Length : sunNodeRefineIds.Length;
         Console.WriteLine(string.Create(Inv,
@@ -112,9 +152,29 @@ internal sealed partial class SponzaLoop
         return true;
     }
 
+    private void RejudgeAfterSweep()
+    {
+        var suns = sunNodeSuns!.Length;
+        List<uint> ids = new(); List<Vector3> sums = new(); List<float> squares = new(); List<int> passes = new();
+        for (var i = 0; i < sunNodeNextIds.Count; i++)
+        {
+            var mine = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(sunNodeNextSums).Slice(i * suns, suns);
+            if (CookSettled(mine, sunNodeNextSquares[i], sunNodeNextPasses[i])) continue;
+            ids.Add(sunNodeNextIds[i]);
+            sums.AddRange(mine.ToArray());
+            squares.Add(sunNodeNextSquares[i]);
+            passes.Add(sunNodeNextPasses[i]);
+        }
+        Console.WriteLine(string.Create(Inv,
+            $"[VulkanSponza] sun nodes: the dark bar {sunNodeDarkBar:G3} ({texelDarkFloor:G2} of the median texel light); judged again, {sunNodeNextIds.Count - ids.Count:N0} more texels settled."));
+        sunNodeNextIds = ids; sunNodeNextSums = sums; sunNodeNextSquares = squares; sunNodeNextPasses = passes;
+    }
+
     // The cook's refinement state let go (FinishSunNodes, a new cook).
     private void ResetSunNodeRefine()
     {
+        Array.Clear(sunNodeLightHistogram);
+        sunNodeDarkBar = 0f;
         if (!sunNodeRefineBuffer.Equals(default(GpuBufferHandle))) RetireGpuBuffer(sunNodeRefineBuffer);
         sunNodeRefineBuffer = default;
         sunNodeRefineRound = 0;

@@ -23,11 +23,13 @@ internal sealed partial class SponzaLoop : IUiSource
     // records' (lightlets). The records' bake beside full frames waited on Metal behind each frame's traced shadows: 43%
     // of its thread in LightletVisibility / LightletRings, 25 min for 347 s of GPU work (2026-10-14).
     private bool SplitCookRunning => splitLight && texelsUploaded && sunNodeStage is not (SunNodeStage.Off or SunNodeStage.Done);
-    // A split cook with light already up (a relight) runs live, the old light giving way as it lands (SplitLanding).
-    // The split light's cook never holds the screen: it runs live (SponzaLoop.SplitLanding.cs), at boot too -- the probes
-    // light the scene until its texels land, what is on screen first. The transport cook and the sun records' bake do:
-    // their Metal round trips waited behind every full frame (35 s for 5 s of GPU; 25 min for 6).
-    private bool CookScreenNow => !cookScreenOff && (transportCookTask is { IsCompleted: false } || LightletBakePending);
+    // The transport cook, the sun records' bake and the split light's cook hold the screen: their Metal round trips waited
+    // behind every full frame (35 s for 5 s of GPU; 25 min for 6). The split cook ran live for a while (the scene up, its
+    // light landing as it went), at 50 ms of each ~150 ms frame: Sponza's sweep went from 6 min to ~23 (2026-10-14). The
+    // user's call: lock the frame and the camera while it cooks. It takes the screen once a scene frame is up and the
+    // visible-first order is read (one scene frame records it), so the texels on screen still go first.
+    private bool CookScreenNow => !cookScreenOff && (transportCookTask is { IsCompleted: false } || LightletBakePending
+        || (SplitCookRunning && sceneFrameDrawn && !SplitVisiblePending));
 
     // The cook screen's frame (RenderFrame, while CookScreenNow): the cook's needs, a cleared screen, the cap.
     // The split cook's sweep of Sponza's 14.8M texels is ~3,800 frames: at full frames (3 fps) ~1,600 s. The cap is
