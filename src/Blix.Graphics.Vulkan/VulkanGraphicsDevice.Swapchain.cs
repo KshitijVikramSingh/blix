@@ -1157,6 +1157,7 @@ public sealed partial class VulkanGraphicsDevice
 
             BeginGpuLabel(cmd, pass.Name);
             Vk.CmdBeginRenderPass(cmd, in rpBegin, SubpassContents.Inline);
+            ResetBoundGraphicsState();
             // Timestamps INSIDE the pass — MoltenVK resolves counter samplers
             // at draw boundaries; ColorAttachmentOutputBit pairs naturally.
             if (canTimePass)
@@ -1470,7 +1471,7 @@ public sealed partial class VulkanGraphicsDevice
 
         if (d.Uniforms.Count > 0) WriteUniformsAcrossSets(prog, frameSlot, d.Uniforms);
 
-        Vk.CmdBindPipeline(cmd, PipelineBindPoint.Graphics, pipe.Pipeline);
+        BindGraphicsPipeline(cmd, pipe.Pipeline);
         BindTransientDescriptorSets(cmd, prog, pipe.Layout, frameSlot, d.Textures,
             materialSet: d.PerDrawMaterial is { } covered ? materialTable[covered.Id].SetIndex : -1, gpuBuffers: d.Buffers);
 
@@ -1529,10 +1530,8 @@ public sealed partial class VulkanGraphicsDevice
         // Bind offset shifts the buffer's origin to a transient-arena slice
         // (base-0 indices then address the slice); 0 for ordinary whole-buffer
         // draws. Distinct from VertexOffset (index bias) on CmdDrawIndexed below.
-        ulong offset = d.VertexBufferByteOffset;
         var buffer = vb.Buffer;
-        Vk.CmdBindVertexBuffers(cmd, 0, 1, &buffer, &offset);
-        Vk.CmdBindIndexBuffer(cmd, ib.Buffer, 0, ib.IndexType);
+        BindGeometry(cmd, buffer, d.VertexBufferByteOffset, ib.Buffer, ib.IndexType);
         // vertexOffset (5th arg) lets concatenated ImGui cmd-lists index
         // per-list off one shared vertex buffer. instanceCount (3rd arg) is 1
         // for ordinary draws; >1 issues an instanced draw whose vertex shader
@@ -1544,6 +1543,45 @@ public sealed partial class VulkanGraphicsDevice
     // TranslateDrawIndexed (pipeline / set0 uniforms+textures / set2 material /
     // push / shared VB+IB), then one vkCmdDrawIndexedIndirect reading drawCount
     // commands from the current frame's slot of the indirect buffer.
+    // What the current render pass has bound, so a draw binding the same pipeline or geometry as the one before it does
+    // not bind it again. Consecutive draws in a pass mostly share both (a pass's indirect groups differ by material),
+    // and on MoltenVK each bind cost the CPU: vkCmdBindPipeline was 9.7% of the main thread on Sponza (2026-10-14).
+    // Cleared at every render pass's start (ResetBoundGraphicsState), the only scope these two sites bind in.
+    private Pipeline boundGraphicsPipeline;
+    private Silk.NET.Vulkan.Buffer boundVertexBuffer, boundIndexBuffer;
+    private ulong boundVertexOffset;
+    private IndexType boundIndexType;
+
+    internal void ResetBoundGraphicsState()
+    {
+        boundGraphicsPipeline = default;
+        boundVertexBuffer = default;
+        boundIndexBuffer = default;
+    }
+
+    private void BindGraphicsPipeline(CommandBuffer cmd, Pipeline pipeline)
+    {
+        if (pipeline.Handle != 0 && pipeline.Handle == boundGraphicsPipeline.Handle) return;
+        Vk.CmdBindPipeline(cmd, PipelineBindPoint.Graphics, pipeline);
+        boundGraphicsPipeline = pipeline;
+    }
+
+    private unsafe void BindGeometry(CommandBuffer cmd, Silk.NET.Vulkan.Buffer vertices, ulong vertexOffset, Silk.NET.Vulkan.Buffer indices, IndexType indexType)
+    {
+        if (vertices.Handle != boundVertexBuffer.Handle || vertexOffset != boundVertexOffset || vertices.Handle == 0)
+        {
+            Vk.CmdBindVertexBuffers(cmd, 0, 1, &vertices, &vertexOffset);
+            boundVertexBuffer = vertices;
+            boundVertexOffset = vertexOffset;
+        }
+        if (indices.Handle != boundIndexBuffer.Handle || indexType != boundIndexType || indices.Handle == 0)
+        {
+            Vk.CmdBindIndexBuffer(cmd, indices, 0, indexType);
+            boundIndexBuffer = indices;
+            boundIndexType = indexType;
+        }
+    }
+
     private unsafe void TranslateDrawIndexedIndirect(CommandBuffer cmd, DrawIndexedIndirectCommand d, int frameSlot)
     {
         var pipe = GetPipeline(d.Pipeline);
@@ -1561,7 +1599,7 @@ public sealed partial class VulkanGraphicsDevice
 
         if (d.Uniforms.Count > 0) WriteUniformsAcrossSets(prog, frameSlot, d.Uniforms);
 
-        Vk.CmdBindPipeline(cmd, PipelineBindPoint.Graphics, pipe.Pipeline);
+        BindGraphicsPipeline(cmd, pipe.Pipeline);
         // The per-draw material's set is the material's, so no transient set is allocated there: the
         // same rule as the direct draw (TranslateDrawIndexed).
         BindTransientDescriptorSets(cmd, prog, pipe.Layout, frameSlot, d.Textures,
@@ -1590,10 +1628,8 @@ public sealed partial class VulkanGraphicsDevice
             PushConstantsToCommandBuffer(cmd, pipe.Layout, prog.Interface.PushConstants, pcBytes);
         }
 
-        ulong offset = 0;
         var buffer = vb.Buffer;
-        Vk.CmdBindVertexBuffers(cmd, 0, 1, &buffer, &offset);
-        Vk.CmdBindIndexBuffer(cmd, ib.Buffer, 0, ib.IndexType);
+        BindGeometry(cmd, buffer, 0, ib.Buffer, ib.IndexType);
 
         // The records: a GPU buffer a compute pass wrote this frame (its dispatch fenced the write), or the
         // CPU-written ring slot.
@@ -2021,7 +2057,8 @@ public sealed partial class VulkanGraphicsDevice
             if (setIdx == MaterialOwnedSet || setIdx == materialSet) continue;
             if (sr.Slots.Count == 0) continue;
 
-            var ds = AllocateTransientSet(frameSlot, sr.Layout);
+            // The set is allocated once its writes are known: one with the same contents this frame is reused.
+            DescriptorSet ds = default;
             var writeIdx = 0;
 
             // <b>Dynamic offsets, in ASCENDING BINDING ORDER.</b> Vulkan does not label them: it
@@ -2180,10 +2217,7 @@ public sealed partial class VulkanGraphicsDevice
                 writeIdx++;
             }
 
-            if (writeIdx > 0)
-            {
-                Vk.UpdateDescriptorSets(Device, (uint)writeIdx, writes, 0, default(CopyDescriptorSet*));
-            }
+            ds = TransientSetFor(frameSlot, sr.Layout, writes, writeIdx);
 
             fixed (uint* offsets = dynamicOffsetScratch)
             {

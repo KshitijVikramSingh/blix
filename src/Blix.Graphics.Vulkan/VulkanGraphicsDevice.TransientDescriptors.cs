@@ -26,11 +26,20 @@ public sealed partial class VulkanGraphicsDevice
 
     private List<DescriptorPool>[] transientPools = Array.Empty<List<DescriptorPool>>();
     private int[] transientPoolAt = Array.Empty<int>();
+    // <b>Reused by contents.</b> A transient set is never written after its first write, so two draws whose writes
+    // are identical -- the same buffers, ranges, images and samplers at the same bindings -- can share one: the safety
+    // per-draw allocation gave (no draw's update clobbering another's) holds, and the allocation and the update are
+    // paid once a frame instead of once a draw (vkAllocateDescriptorSets + vkUpdateDescriptorSets were 8.8% of the
+    // main thread on Sponza, 2026-10-14). Dynamic uniform offsets are given at bind, not in the set. Keyed by the
+    // layout and two independent 64-bit hashes of the writes; cleared with the slot's pools.
+    private Dictionary<(ulong Layout, ulong A, ulong B), DescriptorSet>[] transientSetCache = Array.Empty<Dictionary<(ulong, ulong, ulong), DescriptorSet>>();
 
     private void CreateTransientDescriptorPools()
     {
         transientPools = new List<DescriptorPool>[MaxFramesInFlightConst];
         transientPoolAt = new int[MaxFramesInFlightConst];
+        transientSetCache = new Dictionary<(ulong, ulong, ulong), DescriptorSet>[MaxFramesInFlightConst];
+        for (var i = 0; i < transientSetCache.Length; i++) transientSetCache[i] = new Dictionary<(ulong, ulong, ulong), DescriptorSet>();
         for (var i = 0; i < transientPools.Length; i++) transientPools[i] = new List<DescriptorPool> { CreateTransientPool(i, 0) };
     }
 
@@ -74,6 +83,35 @@ public sealed partial class VulkanGraphicsDevice
         }
 
         transientPoolAt[frameSlot] = 0;
+        transientSetCache[frameSlot].Clear();
+    }
+
+    // The set holding these writes this frame: one already written with the same contents, else a new one written.
+    private unsafe DescriptorSet TransientSetFor(int frameSlot, DescriptorSetLayout layout, WriteDescriptorSet* writes, int count)
+    {
+        ulong a = 14695981039346656037UL, b = 0x9E3779B97F4A7C15UL;
+        void Mix(ulong v)
+        {
+            a = (a ^ v) * 1099511628211UL;
+            b = (b ^ (v + 0x632BE59BD9B4E019UL)) * 0xBF58476D1CE4E5B9UL;
+            b ^= b >> 31;
+        }
+        Mix((ulong)count);
+        for (var i = 0; i < count; i++)
+        {
+            ref var w = ref writes[i];
+            Mix(((ulong)w.DstBinding << 32) | ((ulong)w.DstArrayElement << 8) | (ulong)(uint)w.DescriptorType);
+            if (w.PBufferInfo != null) { Mix(w.PBufferInfo->Buffer.Handle); Mix(w.PBufferInfo->Offset); Mix(w.PBufferInfo->Range); }
+            if (w.PImageInfo != null) { Mix(w.PImageInfo->Sampler.Handle); Mix(w.PImageInfo->ImageView.Handle); Mix((ulong)w.PImageInfo->ImageLayout); }
+        }
+        var cache = transientSetCache[frameSlot];
+        var key = (layout.Handle, a, b);
+        if (cache.TryGetValue(key, out var ds)) return ds;
+        ds = AllocateTransientSet(frameSlot, layout);
+        for (var i = 0; i < count; i++) writes[i].DstSet = ds;
+        if (count > 0) Vk.UpdateDescriptorSets(Device, (uint)count, writes, 0, default(CopyDescriptorSet*));
+        cache[key] = ds;
+        return ds;
     }
 
     private unsafe DescriptorSet AllocateTransientSet(int frameSlot, DescriptorSetLayout layout)

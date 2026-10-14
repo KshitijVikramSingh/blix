@@ -1274,6 +1274,7 @@ internal sealed partial class VulkanRenderGraphBackend : IRenderGraphBackend
             PClearValues = &clearVal,
         };
         device.Vk.CmdBeginRenderPass(cmd, in rpBegin, SubpassContents.Inline);
+        device.ResetBoundGraphicsState();
         device.Vk.CmdEndRenderPass(cmd);
         device.EndSingleTimeCommands(cmd);
 
