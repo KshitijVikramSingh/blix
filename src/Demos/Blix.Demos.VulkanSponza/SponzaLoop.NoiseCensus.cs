@@ -195,7 +195,7 @@ internal sealed partial class SponzaLoop
     // Before the sweep's first pass (each texel's patch is picked by then): every patch's average direct, per column.
     private void PatchDirectNow()
     {
-        if (patchDirectDone || !noiseCensus || patchDirectSums.Equals(default(GpuBufferHandle)) || cookedPacked is null) return;
+        if (patchDirectDone || !(noiseCensus || farTransportMode) || patchDirectSums.Equals(default(GpuBufferHandle)) || cookedPacked is null) return;
         patchDirectDone = true;
         var live = texelLiveIds!;
         var suns = sunNodeSuns!.Length;

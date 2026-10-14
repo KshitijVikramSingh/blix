@@ -103,6 +103,7 @@ internal sealed partial class SponzaLoop
     private void StartSplitCook(List<(Vector3? ToSun, string Path)> columns)
     {
         splitCooking = true;
+        sunProvisionalDone = false;
         BeginSplitCookLanding();
         splitCookPaths = columns.Select(c => (string?)c.Path).ToArray();
         sunNodeSuns = columns.Select(_ => (0f, 0f)).ToArray();
@@ -169,7 +170,9 @@ internal sealed partial class SponzaLoop
     private void SplitSunChanged(Vector3 toSun)
     {
         splitSunWanted = toSun;
-        if (splitCooking || lightBakeKey is null) return;
+        // A sun-only cook already tracing gives way to the newest sun (SponzaLoop.SunProvisional.cs); any other waits.
+        if (splitCooking && !RestartSunCook()) return;
+        if (lightBakeKey is null) return;
         var path = SplitPathFor(lightBakeKey, toSun);
         if (ReadResolved(path, texelCount) is { } sun)
         {

@@ -1,0 +1,70 @@
+#version 450
+// A moved sun's provisional part (SponzaLoop.SunProvisional.cs): every live texel's sun part from the patches' light for
+// the NEW sun, the moment its patches are solved -- the incident light of its patch, blended over its patch's neighbours
+// as the far field blends (texel_far.glsl, farSet) where those are up, per unit of the sun's irradiance. The old sun's
+// part had stayed until the cook reached each texel: curtains and leaves kept the old sun's brightness for minutes after
+// it had moved away (2026-10-14). The cook's slices overwrite it as they land. A thread a live texel.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform SunProvisional {
+    vec4 uProvisional;    // x the live texels, y the first, z the column (the sun's), w the columns
+    vec4 uSunIrradiance;  // rgb
+    vec4 uCookedGrid;
+    vec4 uCookedDims;
+    vec4 uFar;            // texel_far.glsl's (y the patch spacing); x > 0: the neighbours are up -- blend
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 2) readonly buffer SunNodesLive { uint liveIds[]; };
+layout(std430, set = 0, binding = 3) readonly buffer TexelPatch { int texelPatch[]; };
+layout(std430, set = 0, binding = 4) readonly buffer SunNodePatchLight { uvec2 patchLight[]; };   // [patch][column]
+layout(std430, set = 0, binding = 5) writeonly buffer SunWords { uvec2 sunWords[]; };             // [texel id]
+
+#define COOKED_BINDING 6
+#define COOKED_GRID u.uCookedGrid
+#define COOKED_DIMS u.uCookedDims
+#include "cooked_patches.glsl"
+#define FAR_RECORD_BINDING 9
+#define FAR_RECORD_ACCESS readonly
+#define FAR_NEIGHBOURS_BINDING 10
+#include "texel_far.glsl"
+
+uint packRgb9e5(vec3 c) {
+    const float maxValue = 65408.0;
+    c = clamp(c, vec3(0.0), vec3(maxValue));
+    float maxC = max(c.r, max(c.g, c.b));
+    int e = max(-16, int(floor(log2(max(maxC, 1e-30))))) + 1;
+    float scale = exp2(float(e - 9));
+    if (int(floor(maxC / scale + 0.5)) == 512) { e += 1; scale *= 2.0; }
+    uvec3 m = uvec3(floor(c / scale + 0.5));
+    return m.r | (m.g << 9) | (m.b << 18) | (uint(e + 15) << 27);
+}
+
+vec3 incident(int p) {
+    uvec2 w = patchLight[uint(p) * uint(u.uProvisional.w) + uint(u.uProvisional.z)];
+    return vec3(unpackHalf2x16(w.x), unpackHalf2x16(w.y).x);
+}
+
+void main() {
+    uint t = gl_GlobalInvocationID.x;
+    if (t >= uint(u.uProvisional.x)) return;
+    uint id = liveIds[uint(u.uProvisional.y) + t];
+    vec3 x = texels[2u * id].xyz;
+    vec3 n = texels[2u * id + 1u].xyz;
+    if (dot(n, n) < 1e-12) return;
+    n = normalize(n);
+    int p = texelPatch[id];
+    if (p < 0) p = cookedNearest(x, n);
+    if (p < 0) return;   // no patch near: the old part stays (rare)
+    vec3 light;
+    if (u.uFar.x > 0.5) {
+        int ids[FAR_SET];
+        float ws[FAR_SET];
+        farSet(x, n, p, u.uFar, ids, ws);
+        light = vec3(0.0);
+        for (int i = 0; i < FAR_SET; ++i) if (ids[i] >= 0) light += ws[i] * incident(ids[i]);
+    } else light = incident(p);
+    vec3 irr = max(u.uSunIrradiance.rgb, vec3(1e-6));
+    sunWords[id] = uvec2(packRgb9e5(light / irr), 0xFFFFu | 0x10000u);
+}

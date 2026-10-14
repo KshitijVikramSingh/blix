@@ -39,6 +39,7 @@ layout(set = 0, binding = 0) uniform SunNodesShade {
                           // patch spacing; z a known bin's weight (fixed point); w the columns
     vec4 uTransport;      // the transport census (N2, SponzaLoop.TransportCensus.cs): x 1 on; y the patch spacing; z the
                           // patches; w 1: the near-field comparison (N3: PatchDirectSums read, census slot 9)
+    vec4 uFarTransport;   // the far field's light-free record (SponzaLoop.FarTransport.cs): x 1 recording it
 } u;
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
@@ -92,6 +93,13 @@ layout(std430, set = 0, binding = 31) buffer NodeTransport { uvec2 nodeTransport
 // The near-field comparison (texel_patch_direct.comp): each patch's n.l x visibility summed over its texels per column
 // (x 65536), then each patch's texel count -- a near hit's direct sun if near transport were stored at patch level.
 layout(std430, set = 0, binding = 32) readonly buffer PatchDirectSums { uint patchDirect[]; };
+// The far field's LIGHT-FREE record (plan.md N3; SponzaLoop.FarTransport.cs): per patch per bin, what its texels' far
+// rays met, not the light they brought -- FAR_SLOTS (patch + 1, weight) pairs, then the weight of the hits no slot held,
+// the weight that escaped (the sky), and the whole weight (fixed point). texel_far_relight.comp makes the radiance record
+// of it for whatever lights there are.
+layout(std430, set = 0, binding = 33) buffer FarTransport { uint farTransport[]; };
+#define FAR_SLOTS 3
+#define FAR_TRANSPORT_STRIDE (2 * FAR_SLOTS + 3)
 // [9] with the comparison: x each pass's composed (patch-level near - per-texel near) direct, summed; y the per-texel
 // near direct's luminance, summed; z the patch-level one's.
 // The far field (texel_far.glsl): each texel's guide patch (texel_nodes_rays.comp: the patch + 2), the record (written by
@@ -338,6 +346,27 @@ void main() {
             kind = 3u; what = pw >= 0 ? uint(pw) : 0x3FFFFFFEu;
         }
         nodeTransport[group * 256u + uint(u.uShade.w) * uint(RAYS) + lid] = uvec2((kind << 30) | (what & 0x3FFFFFFFu), nearPatch);
+    }
+    // The light-free record: each far ray's hit patch (or the sky) into its texel's patch's bin -- after the hits are
+    // shaded, so the hit's patch is known. Recording only.
+    if (farRecording && u.uFarTransport.x > 0.5 && lid < uint(RAYS) && sFar[lid] > 0.5 && sFarPatch >= 0) {
+        int bin = sBin[lid * uint(FAR_SET)];
+        uint base = (uint(sFarPatch) * uint(FAR_BINS) + uint(bin)) * uint(FAR_TRANSPORT_STRIDE);
+        uint slotIndex = group * uint(RAYS) + lid;
+        uint w = farFixed(sRayWeight[lid], fract(float(slotIndex) * 0.6180339887 + u.uShade.w * 0.7548776662));
+        atomicAdd(farTransport[base + uint(2 * FAR_SLOTS) + 2u], w);
+        float hw = sHit[lid].w;
+        if (hw < -1.5) atomicAdd(farTransport[base + uint(2 * FAR_SLOTS) + 1u], w);       // escaped
+        else if (hw < -0.5) atomicAdd(farTransport[base + uint(2 * FAR_SLOTS)], w);       // a hit with no patch
+        else {
+            uint id = uint(hw) + 1u;
+            bool placed = false;
+            for (int s = 0; s < FAR_SLOTS && !placed; ++s) {
+                uint was = atomicCompSwap(farTransport[base + uint(2 * s)], 0u, id);
+                if (was == 0u || was == id) { atomicAdd(farTransport[base + uint(2 * s) + 1u], w); placed = true; }
+            }
+            if (!placed) atomicAdd(farTransport[base + uint(2 * FAR_SLOTS)], w);
+        }
     }
     // The sweep: each bin's rays' weight, and how much of it went far -- the texel's own view of which directions are open
     // past its reach (texel_far_finish.comp weighs the record's light by it).

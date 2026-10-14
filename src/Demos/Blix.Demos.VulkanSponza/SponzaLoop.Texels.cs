@@ -101,7 +101,11 @@ internal sealed partial class SponzaLoop
     private Stopwatch? relightClock;
     private Vector4[]? cookedPacked;
     private uint texelEpoch;
-    private readonly List<(GpuBufferHandle Buffer, uint Frame)> retiredBuffers = new();
+    // Buffers let go, each with the frame it was let go at (framesRendered: every frame, the cook screen's too), destroyed
+    // four frames on. By texelFrame, which only the texel passes advance, nothing retired under the cook screen was
+    // destroyed until the cook ended: Sponza's solve inputs (2.1 GB at 1,024 rays a patch) and every superseded record held
+    // the GPU at 97% of its working set through the sweep, which ran 3.5x slower (2026-10-14).
+    private readonly List<(GpuBufferHandle Buffer, long Frame)> retiredBuffers = new();
     private (int Frame, Vector2 Degrees)? sunChange;
     private bool sunChangeApplied;
     private int sunChangeAppliedAt;
@@ -660,7 +664,7 @@ internal sealed partial class SponzaLoop
         }
         for (var i = retiredBuffers.Count - 1; i >= 0; i--)
         {
-            if (texelFrame - retiredBuffers[i].Frame < 4u) continue;
+            if (framesRendered - retiredBuffers[i].Frame < 4) continue;
             device.DestroyGpuBuffer(retiredBuffers[i].Buffer);
             ownedGpuBuffers.Remove(retiredBuffers[i].Buffer);
             retiredBuffers.RemoveAt(i);
@@ -728,7 +732,7 @@ internal sealed partial class SponzaLoop
     };
 
     // A buffer a frame in flight may still read: destroyed four frames on (FollowSun).
-    private void RetireGpuBuffer(GpuBufferHandle buffer) => retiredBuffers.Add((buffer, texelFrame));
+    private void RetireGpuBuffer(GpuBufferHandle buffer) => retiredBuffers.Add((buffer, framesRendered));
 
     private void EnsureTexelPlaceholders()
     {

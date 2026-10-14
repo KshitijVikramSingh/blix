@@ -138,6 +138,7 @@ internal sealed partial class SponzaLoop
         noiseCensus = args.Flag("split-noise-census");
         ReadFarArgs(args);
         ReadTransportCensusArgs(args);
+        ReadFarTransportArgs(args);
         if (args.Int("sun-nodes-bounces") is { } nb) sunNodeBouncesAsked = Math.Max(0, nb);
         if (args.Float("sun-nodes-plane") is { } pl) sunNodePlane = Math.Max(0.01f, pl);
         if (args.Float("sun-nodes-sigma") is { } sg) sunNodeSigma = Math.Max(0.05f, sg);
@@ -175,6 +176,8 @@ internal sealed partial class SponzaLoop
         DeclareFarPasses(reflect);
         DeclareTransportCensus(reflect);
         DeclarePatchDirect(reflect);
+        DeclareFarRelight(reflect);
+        DeclareSunProvisional(reflect);
         transportCensusPass = graph.ComputePass("sun-nodes-transport-census").Shader(transportCensusInterface).Handle;
         sunNodePrepInterface = reflect(new[] { "texel_nodes_prep.comp" });
         sunNodePrepPass = graph.ComputePass("sun-nodes-prep").Shader(sunNodePrepInterface).Handle;
@@ -205,6 +208,8 @@ internal sealed partial class SponzaLoop
         CreateFarPipeline(shaderDir);
         CreateTransportCensusPipeline(shaderDir);
         CreatePatchDirectPipeline(shaderDir);
+        CreateFarRelightPipeline(shaderDir);
+        CreateSunProvisionalPipeline(shaderDir);
         sunNodePrepPipeline = Make("texel_nodes_prep", sunNodePrepInterface);
         sunNodePatchPipeline = Make("texel_nodes_patch", sunNodePatchInterface);
         sunNodeRaysPipeline = Make("texel_nodes_rays", sunNodeRaysInterface);
@@ -424,6 +429,8 @@ internal sealed partial class SponzaLoop
             FarRecordStep(now: false);
             return;
         }
+        if (sunNodeRefineRound == 0) FarRelightNow();
+        if (sunNodeRefineRound == 0) SunProvisionalNow();
         var slice = Math.Min(sunNodeSlice, live.Length - sunNodeFirst);
         // A round's rays carry on each texel's pass numbering (its seeds): every round after the sweep gives RefinePasses.
         var seedPass = refining ? sweepPasses + (sunNodeRefineRound - 1) * RefinePasses + sunNodePass : sunNodePass;
@@ -735,6 +742,8 @@ internal sealed partial class SponzaLoop
                 continue;
             }
             if (sunNodeRefineRound == 0) PatchDirectNow();
+            if (sunNodeRefineRound == 0) FarRelightNow();
+            if (sunNodeRefineRound == 0) SunProvisionalNow();
             var refining = sunNodeRefineRound > 0;
             var live = refining ? sunNodeRefineIds : sunNodeTraceIds;
             var sweepPasses = sunNodeRays / 32;
@@ -801,6 +810,7 @@ internal sealed partial class SponzaLoop
                 new("uDetail", new Vector4Uniform(new Vector4(first, detail ? 1f : 0f, CensusOn(discover) ? 1f : 0f, censusPlacements))),
                 new("uFar", new Vector4Uniform(exactMode > 0f ? Vector4.Zero : FarUniform(discover))),
                 new("uTransport", new Vector4Uniform(TransportUniform(discover))),
+                new("uFarTransport", new Vector4Uniform(new Vector4(FarTransportUniform, 0f, 0f, 0f))),
             },
             new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
             Buffers: new[]
@@ -833,6 +843,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("CensusObjects", censusObjects.Equals(default(GpuBufferHandle)) ? sunNodeAccum : censusObjects),
                 new ShaderBufferBinding("NodeTransport", TransportRecordsBuffer),
                 new ShaderBufferBinding("PatchDirectSums", patchDirectSums.Equals(default(GpuBufferHandle)) ? sunNodeAccum : patchDirectSums),
+                new ShaderBufferBinding("FarTransport", farTransportRecord.Equals(default(GpuBufferHandle)) ? sunNodeAccum : farTransportRecord),
             }.Concat(CookedBuffers()).Where(b => declared.Contains(b.Name)).ToArray());
     }
 

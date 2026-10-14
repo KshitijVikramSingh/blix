@@ -28,6 +28,7 @@ internal sealed partial class SponzaLoop
     private TransportSolveData? transportSolve;
     private Func<Vector3[], Vector3[], float[]>? transportBuildGuides;
     private Func<Vector3[], float[]>? transportBuildLights;
+    private Func<float, (uint[] Start, uint[] Ids, float[] Weights)>? transportBuildFarLists;
     // The light lists built beside the guides (BuildLights), for the light strategy; null until built or with it off.
     private float[]? sunNodeLightLists;
     // The band's averages (texel_nodes_solve.comp modes 6, 7), and the nodes' guides built from them (null: no guide,
@@ -35,7 +36,14 @@ internal sealed partial class SponzaLoop
     private GpuBufferHandle solveAvgPatch, solveAvgSunlet;
     private Task<float[]>? sunNodeGuideTask;
     private const int SolveGroup = 32;
-    private const int SolveBouncesPerFrame = 6;
+    // Bounces a frame, by the couplings each reads: a frame's command buffer past macOS's GPU watchdog loses the device.
+    // Six a frame held at Sponza's 30 M couplings (512 rays a patch); at 80.6 M (2,048 rays) the frame timed out and the
+    // device was lost (2026-10-14). So a frame reads at most SolveReadsPerFrame couplings x components -- the six at 30 M
+    // and two components -- and at least one bounce.
+    private const long SolveReadsPerFrame = 360_000_000;
+    private int SolveBouncesPerFrame(int components) =>
+        (int)Math.Clamp(SolveReadsPerFrame / Math.Max(1L, (long)solveCouplings * Math.Max(1, components)), 1, 6);
+    private long solveCouplings;
     // --sun-nodes-bounces N: bounces after the warm start (the transport's own: 48). 0 leaves the boot sun's answer.
     private int? sunNodeBouncesAsked;
     private int SolveBounces => solveBouncesOverride ?? sunNodeBouncesAsked ?? transportSolve!.Iterations;
@@ -114,6 +122,7 @@ internal sealed partial class SponzaLoop
                 return (start, pairs);
             }
             var (start, pairs) = Csr(d.Couplings);
+            solveCouplings = pairs.Length / 2;
             var (sStart, sPairs) = Csr(d.SunletCouplings);
             var n = d.SunletPos.Count;
             var sunlets = new Vector4[n * 3];
@@ -181,7 +190,7 @@ internal sealed partial class SponzaLoop
             graph.Dispatch(sunNodeSolveBPass, SolveDispatch(2, group, 0, Vector3.Zero, items));
             solveBounce = 0;
         }
-        for (var b = 0; b < SolveBouncesPerFrame && solveBounce < SolveBounces; b++, solveBounce++)
+        for (var b = 0; b < SolveBouncesPerFrame(group) && solveBounce < SolveBounces; b++, solveBounce++)
         {
             graph.Dispatch(sunNodeSolveBPass, SolveDispatch(3, group, 0, Vector3.Zero, items));
             graph.Dispatch(sunNodeSolveBPass, SolveDispatch(4, group, 0, Vector3.Zero, items));

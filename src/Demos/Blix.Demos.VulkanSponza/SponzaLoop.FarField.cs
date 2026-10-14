@@ -55,7 +55,8 @@ internal sealed partial class SponzaLoop
     // 32-point spiral, neighbours counted once.
     // 3: judged against the first look's plane, no reach test, the trace in spatial order.
     // 4: the light test's sigma with the records' error and a 2% tolerance.
-    private const int FarPoolVersion = 4;
+    // 5: transport mode's relight from complete lists, its bins' spread kept and judged.
+    private const int FarPoolVersion = 5;
     private int farRecordPass, farRecordRound;
     private uint[] farRecordIds = Array.Empty<uint>();
     private GpuBufferHandle farRecordIdsBuffer, farVerdict;
@@ -78,7 +79,7 @@ internal sealed partial class SponzaLoop
     }
 
     // The cache's key: what changes the far field's answer.
-    private string FarKey => farField && sunNodeGuide ? string.Create(CultureInfo.InvariantCulture, $";far {farRecordRays} {farRecordMax} judged w2 blend pool v{FarPoolVersion}{(farDebug > 0 ? $" debug {farDebug}" : "")}") : "";
+    private string FarKey => farField && sunNodeGuide ? string.Create(CultureInfo.InvariantCulture, $";far {farRecordRays} {farRecordMax} judged w2 blend pool v{FarPoolVersion}{(farTransportMode ? " transport" : "")}{(farDebug > 0 ? $" debug {farDebug}" : "")}") : "";
 
     private void DeclareFarPasses(Func<string[], ShaderInterface> reflect)
     {
@@ -132,6 +133,12 @@ internal sealed partial class SponzaLoop
         farPoolStats = Own(device.CreateGpuBuffer(71 * 4, new byte[71 * 4], "sponza.far.pool-stats"));
         farSerial = 0;
         farClock.Restart();
+        // Transport mode with a record kept from an earlier cook: relit, not recorded.
+        if (BeginFarTransport(patches, suns))
+        {
+            farRecording = false;
+            return;
+        }
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] far field: on; recording {farRecordRays} rays a texel into {patches:N0} patches' records ({bytes / 1048576.0:0} MB) before the sweep."));
     }

@@ -244,6 +244,33 @@ MEASUREMENTS, in order:
   survives placement in Sponza (the composition test).
 The step-3 ideas (per-patch far gather, settling by budget, GPU-resident settling) are re-thought on top of this once
 N2-N3 show it holds.
+N3 built (--far-transport): the far field from the patch transport cook's couplings and sky escapes, binned per patch
+per direction (complete lists, no slots: 3 slots named ~14% of a bin's hits and left clouds on Cornell's ceiling), relit
+for each cook's lights in ~0.2 s, each bin's spread kept and judged (uncertain bins -- a doorway seen by a few rays -- left
+to the texels' own rays). Gate held at 2,048 rays a patch (crevices 0.0223, cornell 0.0190). No far ray traced per sun,
+no record pass: Sponza at 1,024 rays a patch -- the on-screen light 38 s after the trace began, the sweep 6.4 min, the
+cook 13.9 min (refining to the round cap); a sun move: the far field relit in 2.4 s, then the near sweep and refining
+again. Fixed on the way: the solve's bounces a frame by its couplings (6 a frame at 80 M couplings lost the device);
+retired buffers counted by frames rendered (by texelFrame, which the cook screen never advances, nothing retired during
+a cook was freed: 97% of the GPU's working set, the sweep 3.5x slower); the lists off the GPU after each relight.
+
+**Usable first (decided 2026-10-14, the user).** "A slow cook, a slow run, a slow cook on a small change means nothing
+can be tested." Before the open visual issues, the loop has to be fast: lighting dynamic as designed, nothing paid for
+that the frame does not need, the mechanisms tied together. Then perf where it pays, then the issues.
+- U1 Sun moves usable: no texel keeps the old sun (a provisional part from the new sun's patches, blended, the moment
+  they are solved), and a move during a sun-only cook restarts it for the newest sun (nothing partial cached).
+- U2 The near field at a budget, not refined to a bar by rounds: the far field is the patches' now, so a texel traces only
+  near rays (short), a fixed budget, pooled with its neighbours (R2), and stops by its pooled error -- no 12 rounds to a
+  ray cap. Target: a sun move's light whole in ~1-2 min, the provisional within seconds.
+- U3 The frame stops paying for probes where cells answer: the clipmap's 512 probes re-solved a frame and the incident
+  pass's clipmap reads (13.7 ms, often twice) only where no cell answers (P1's "cells answer alone" the default; probes
+  only for movers and empty space, P4). Measure the frame before and after.
+- U4 Tie the mechanisms: the transport cook's couplings serve the solve and the far lists as ONE structure (the lists
+  duplicate them: 0.45-0.67 GB), the lists cached beside the transport cook, the sky part relit like the far field.
+- U5 Then perf where it pays (the first cook: the transport cook 4.4 min at 2,048 rays, the sweep), then the issues:
+  the sun's jagged shadow edges (likely patch- or texel-level visibility where pixel-level is wanted), leaves and
+  curtains keeping light and not passing it, "duct-tape" patches on the upper columns, the mismatch, 3.4% of the patch
+  rays finding no patch in fresh transport cooks.
 
 ---
 

@@ -1651,6 +1651,69 @@ internal sealed partial class SponzaLoop
         // The guides from given light (SponzaLoop.SunNodesSolve.cs: the nodes' band averages).
         transportBuildGuides = (outg, sOut) => BuildGuides(outg, sOut);
         transportBuildLights = outg => BuildLights(outg);
+        // The far field's complete light-free lists (SponzaLoop.FarTransport.cs): per patch per far bin (texel_far.glsl's
+        // 36 hemispherical bins in the patch's frame), every coupling past the reach (to its patch's direction) and every
+        // sky direction its rays escaped into -- (id, weight) with the sky's bin flagged in the id's top bit -- in CSR.
+        // The couplings are the transport cook's: what the patches' solve already reads, binned, no new rays.
+        transportBuildFarLists = reach => BuildFarLists(reach);
+        (uint[] Start, uint[] Ids, float[] Weights) BuildFarLists(float reach)
+        {
+            const int bins = 36, res = 6;
+            static int FarBin(Vector3 d, Vector3 n, Vector3 t, Vector3 b)
+            {
+                var z = Vector3.Dot(d, n);
+                if (z <= 0f) return -1;
+                float x = Vector3.Dot(d, t), y = Vector3.Dot(d, b);
+                var s = MathF.Abs(x) + MathF.Abs(y) + z;
+                float px = x / s, py = y / s;
+                var u = (px + py) * 0.5f + 0.5f; var v = (px - py) * 0.5f + 0.5f;
+                var cx = Math.Clamp((int)(u * res), 0, res - 1); var cy = Math.Clamp((int)(v * res), 0, res - 1);
+                return cy * res + cx;
+            }
+            var skyBins = TransportSkyRes * TransportSkyRes;
+            var skyDir = Enumerable.Range(0, skyBins).Select(b => OctDecode(new Vector2((b % TransportSkyRes + 0.5f) / TransportSkyRes, (b / TransportSkyRes + 0.5f) / TransportSkyRes) * 2f - Vector2.One)).ToArray();
+            var lists = new List<(uint Id, float W)>[patches * bins];
+            Parallel.For(0, patches, i =>
+            {
+                var n = Vector3.Normalize(nrm[i]);
+                var t = Vector3.Normalize(MathF.Abs(n.Y) < 0.999f ? Vector3.Cross(Vector3.UnitY, n) : Vector3.Cross(Vector3.UnitX, n));
+                var b = Vector3.Cross(n, t);
+                void Add(int bin, uint id, float w)
+                {
+                    ref var l = ref lists[i * bins + bin];
+                    (l ??= new List<(uint, float)>()).Add((id, w));
+                }
+                foreach (var (to, w) in couplings[i])
+                {
+                    if (to == i) continue;
+                    var d = pos[to] - pos[i];
+                    var len = d.Length();
+                    if (len < reach) continue;
+                    var bin = FarBin(d / len, n, t, b);
+                    if (bin >= 0) Add(bin, (uint)to, w);
+                }
+                for (var s = 0; s < skyBins; s++)
+                {
+                    var f = sky[i * skyBins + s];
+                    if (f <= 0f) continue;
+                    var bin = FarBin(skyDir[s], n, t, b);
+                    if (bin >= 0) Add(bin, 0x80000000u | (uint)s, f);
+                }
+            });
+            var start = new uint[patches * bins + 1];
+            long total = 0;
+            for (var k = 0; k < lists.Length; k++) { start[k] = (uint)total; total += lists[k]?.Count ?? 0; }
+            start[^1] = (uint)total;
+            var ids = new uint[total];
+            var weights = new float[total];
+            Parallel.For(0, lists.Length, k =>
+            {
+                if (lists[k] is not { } l) return;
+                var at = (int)start[k];
+                foreach (var (id, w) in l) { ids[at] = id; weights[at] = w; at++; }
+            });
+            return (start, ids, weights);
+        }
         transportRelightMany = (toSuns, sunIrrNew) =>
         {
             const int group = 32;
