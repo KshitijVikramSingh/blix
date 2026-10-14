@@ -78,7 +78,9 @@ layout(std430, set = 0, binding = 24) buffer NodeCensus { vec4 nodeCensus[]; };
 // the record pass, read by the sweep), and per slice texel per bin its rays' weight and the share of it gone far (x all,
 // y far), summed over the slice's passes -- texel_far_finish.comp turns them and the record into the far light.
 layout(std430, set = 0, binding = 25) readonly buffer NodeGuidePatch { uint guidePatch[]; };
-layout(std430, set = 0, binding = 27) buffer NodeFarBins { vec4 farBins[]; };   // x weight, y far weight, z w^2, w far w^2
+// [slice texel][blended patch][bin] (texel_far.glsl, FAR_SET): x weight, y far weight, z w^2, w far w^2 -- the texel's
+// rays where every blended patch knows the direction, binned in each patch's own frame.
+layout(std430, set = 0, binding = 27) buffer NodeFarBins { vec4 farBins[]; };
 
 #define COOKED_BINDING 11
 #define COOKED_GRID u.uCookedGrid
@@ -88,6 +90,7 @@ layout(std430, set = 0, binding = 27) buffer NodeFarBins { vec4 farBins[]; };   
 #include "texel_nodes.glsl"
 #define FAR_RECORD_BINDING 26
 #define FAR_RECORD_ACCESS
+#define FAR_NEIGHBOURS_BINDING 28
 #include "texel_far.glsl"
 
 void nodeCount(uint k) {
@@ -112,9 +115,12 @@ shared vec4 sColumnNear[MAX_WORDS * 32];   // ... from within R
 // its weight.
 shared int sFarPatch;
 shared float sFarReach;
-shared vec3 sFarN, sFarT, sFarB;
-shared int sBin[RAYS];
+shared int sFarIds[FAR_SET];
+shared float sFarWeights[FAR_SET];
+shared vec3 sFarN[FAR_SET], sFarT[FAR_SET], sFarB[FAR_SET];
+shared int sBin[RAYS * FAR_SET];   // each ray's bin in each blended patch's frame (recording: [0] its own patch's)
 shared float sFar[RAYS];
+shared float sJoint[RAYS];         // every blended patch knows the ray's direction
 shared float sRayWeight[RAYS];
 
 // The record pass: a far ray's light for a column into its patch's bin (c its weight x radiance, w its weight).
@@ -146,10 +152,21 @@ void main() {
             fp = texelPatch[id];
             if (fp < 0) fp = int(guidePatch[id]) - 2;
             if (fp >= 0) {
-                reach = farReach(texels[2u * id].xyz, fp, u.uFar);
-                vec3 fn, ft, fb;
-                farFrame(fp, fn, ft, fb);
-                sFarN = fn; sFarT = ft; sFarB = fb;
+                vec3 x = texels[2u * id].xyz;
+                int ids[FAR_SET];
+                float ws[FAR_SET];
+                farSet(x, normalize(texels[2u * id + 1u].xyz), fp, u.uFar, ids, ws);
+                reach = farSetReach(x, ids, u.uFar);
+                // Recording, the rays go into the texel's own patch's record alone (slot 0), past the set's reach.
+                if (farRecording) { ids[0] = fp; ws[0] = 1.0; for (int i = 1; i < FAR_SET; ++i) { ids[i] = -1; ws[i] = 0.0; } }
+                for (int i = 0; i < FAR_SET; ++i) {
+                    sFarIds[i] = ids[i];
+                    sFarWeights[i] = ws[i];
+                    if (ids[i] < 0) continue;
+                    vec3 fn, ft, fb;
+                    farFrame(ids[i], fn, ft, fb);
+                    sFarN[i] = fn; sFarT[i] = ft; sFarB[i] = fb;
+                }
             }
         }
         sFarPatch = max(fp, -1);
@@ -166,11 +183,18 @@ void main() {
         sDist[lid] = (h0.w & 1u) != 0u ? uintBitsToFloat(h0.x) : 1e30;
         sMiss[lid] = (h0.w & 1u) != 0u ? 0.0 : nodeRayWeight[slot] / PI;
         sRayWeight[lid] = nodeRayWeight[slot];
-        // A ray past the reach (a miss, or one texel_nodes_rays.comp cut at the reach) in a bin the record knows: the
-        // patch's light, not its own. Recording, every ray past the reach in any bin above the patch's horizon.
-        int bin = sFarPatch >= 0 ? farBin(dir, sFarN, sFarT, sFarB) : -1;
-        bool far = bin >= 0 && sDist[lid] >= sFarReach && (farRecording || farKnown(sFarPatch, bin, u.uFar));
-        sBin[lid] = bin;
+        // A ray past the reach (a miss, or one texel_nodes_rays.comp cut at the reach) where every blended patch's
+        // record knows its direction: the patches' light, not its own. Recording, every ray past the reach in any bin
+        // above its own patch's horizon.
+        bool joint = sFarPatch >= 0;
+        for (int i = 0; i < FAR_SET; ++i) {
+            int b = sFarPatch >= 0 && sFarIds[i] >= 0 ? farBin(dir, sFarN[i], sFarT[i], sFarB[i]) : -1;
+            sBin[lid * uint(FAR_SET) + uint(i)] = b;
+            if (sFarIds[i] >= 0 && sFarPatch >= 0) joint = joint && b >= 0 && (farRecording || farKnown(sFarIds[i], b, u.uFar));
+        }
+        int bin = sBin[lid * uint(FAR_SET)];
+        bool far = joint && sDist[lid] >= sFarReach;
+        sJoint[lid] = joint ? 1.0 : 0.0;
         sFar[lid] = far ? 1.0 : 0.0;
         if (farRecording && far) {
             uint at = farBase(sFarPatch, bin, u.uFar);
@@ -183,7 +207,10 @@ void main() {
         if (far && !farRecording) {
             // Its light is the record's (the column loop); the sky visibility from the record's escaped share.
             sHit[lid] = vec4(0.0, 0.0, 0.0, -3.0);
-            sMiss[lid] = nodeRayWeight[slot] / PI * farEscape(sFarPatch, bin, u.uFar);
+            float escaped = 0.0;
+            for (int i = 0; i < FAR_SET; ++i)
+                if (sFarIds[i] >= 0) escaped += sFarWeights[i] * farEscape(sFarIds[i], sBin[lid * uint(FAR_SET) + uint(i)], u.uFar);
+            sMiss[lid] = nodeRayWeight[slot] / PI * escaped;
             sNormal[lid] = vec3(0.0);
             sUnknown[lid] = 0.0;
             sExact[lid] = -1.0;
@@ -252,15 +279,18 @@ void main() {
     barrier();
     // The sweep: each bin's rays' weight, and how much of it went far -- the texel's own view of which directions are open
     // past its reach (texel_far_finish.comp weighs the record's light by it).
+    // Per blended patch, in its own bins, over the rays every blended patch knows the direction of.
     if (farOn && !farRecording && sFarPatch >= 0)
-        for (int b = int(lid); b < FAR_BINS; b += SHADE_THREADS) {
+        for (int ib = int(lid); ib < FAR_SET * FAR_BINS; ib += SHADE_THREADS) {
+            int i = ib / FAR_BINS, b = ib % FAR_BINS;
+            if (sFarIds[i] < 0) continue;
             vec4 wf = vec4(0.0);
             for (int r = 0; r < RAYS; ++r)
-                if (sBin[r] == b) {
+                if (sJoint[r] > 0.5 && sBin[r * FAR_SET + i] == b) {
                     float w = sRayWeight[r];
                     wf += vec4(w, sFar[r] * w, w * w, sFar[r] * w * w);
                 }
-            uint at = group * uint(FAR_BINS) + uint(b);
+            uint at = (group * uint(FAR_SET) + uint(i)) * uint(FAR_BINS) + uint(b);
             farBins[at] = (u.uShade.w > 0.5 ? farBins[at] : vec4(0.0)) + wf;
         }
     for (int k = int(lid); k < suns; k += SHADE_THREADS) {
@@ -300,12 +330,15 @@ void main() {
             vec3 before = sum;
             if (h.w < -2.5) {
                 // Far: its light comes in with the record's (texel_far_finish.comp); the direction still counts it.
-                if (detail) { float l = dot(sRayWeight[r] * farLight(sFarPatch, sBin[r], k, u.uFar), lumW); vec3 w = sDir[r]; tilt += l * vec2(dot(dt1, w), dot(dt2, w)) / max(dot(dn, w), 0.1); }
+                vec3 fl = vec3(0.0);
+                for (int i = 0; i < FAR_SET; ++i)
+                    if (sFarIds[i] >= 0) fl += sFarWeights[i] * farLight(sFarIds[i], sBin[r * FAR_SET + i], k, u.uFar);
+                if (detail) { float l = dot(sRayWeight[r] * fl, lumW); vec3 w = sDir[r]; tilt += l * vec2(dot(dt1, w), dot(dt2, w)) / max(dot(dn, w), 0.1); }
                 continue;
             }
             if (h.w < -1.5) {
                 if (hasSky) { sum += h.rgb; source.x += dot(h.rgb, lumW); if (census) far.xyz += dot(h.rgb, lumW); }
-                if (farRecording && sFar[r] > 0.5) farRecordAdd(sFarPatch, sBin[r], k, sum - before, sRayWeight[r], group * uint(RAYS) + uint(r));
+                if (farRecording && sFar[r] > 0.5) farRecordAdd(sFarPatch, sBin[r * FAR_SET], k, sum - before, sRayWeight[r], group * uint(RAYS) + uint(r));
                 if (detail) { float l = dot(sum - before, vec3(0.2126, 0.7152, 0.0722)); vec3 w = sDir[r]; tilt += l * vec2(dot(dt1, w), dot(dt2, w)) / max(dot(dn, w), 0.1); }
                 continue;
             }
@@ -327,7 +360,7 @@ void main() {
                 if (census) { if (sDist[r] >= 1.0) far.w += sunHere; else near.w += sunHere; }
             }
             sum += h.rgb * light;
-            if (farRecording && sFar[r] > 0.5) farRecordAdd(sFarPatch, sBin[r], k, sum - before, sRayWeight[r], group * uint(RAYS) + uint(r));
+            if (farRecording && sFar[r] > 0.5) farRecordAdd(sFarPatch, sBin[r * FAR_SET], k, sum - before, sRayWeight[r], group * uint(RAYS) + uint(r));
             if (census) {
                 float l = dot(h.rgb * light, lumW);
                 vec3 beyond = vec3(greaterThanEqual(vec3(sDist[r]), vec3(0.5, 1.0, 2.0)));

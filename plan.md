@@ -134,6 +134,29 @@ patches already hold, bounce-aware and lit; a texel need trace only what its pat
 - Settling judges the near rays' noise alone; a texel with nothing near settles at once. Rays stop at R where the
   record knows the direction (the cost).
 Built (SponzaLoop.FarField.cs, texel_far.glsl, texel_far_finish.comp; --no-far-field for the A/B).
+First results (fe92c24): the gate held once (crevices |error| 0.0303) and then broke (0.0359); Sponza settled 9.70 M
+after the sweep against 9.08 M, the record alone 5.8 min. The user, looking at the crevices: an absolutely smooth wall
+has no business being blotchy or noisy. Right -- three choices made it so: a texel read ONE patch's record (0.25 m
+tiles), estimated its open share alone (grain), and its near light alone (grain). Every quantity was estimated at the
+texel's scale with independent rays, where it changes over metres.
+Revised (2026-10-14, with the user and a review of it): each quantity at the scale it changes.
+- R1 Blend the patches' far ESTIMATES, not their records: a texel takes its patch and its patch's neighbours seen
+  along the surface (texel_far_neighbours.comp -- never cookedInterp's set, which crosses thin walls), each weighted
+  smoothly, and each patch's far light is its own -- its record, in its bins, under the texel's open share in ITS
+  bins; a ray is far only where every blended patch knows its direction; the reach is the farthest blended patch's.
+  Gate: the ratchets, and the far light alone (--far-debug far) on a flat wall for steps -- continuity is not
+  correctness, so against the reference, not the last image.
+- R2 Pool EVIDENCE across a neighbourhood, not finished light: the per-bin sums (weight, w^2, far weight) and the near
+  rays' moments of neighbours that are compatible three ways -- geometry (same surface, normals), estimator (the same
+  near/far event: one common reach in a neighbourhood) and radiometric (their estimates agree within their errors).
+  Footprint from the harmonic mean of the real hit distances (Ward) -- a prediction, not a guarantee: a doorway's
+  light changes fast on a wall whose geometry is far, which is why the radiometric test. Stopping needs both budgets:
+  sampling error (falls with evidence; shared evidence is correlated -- counted once) and reuse error (grows with the
+  footprint; more rays never fix it). Gate: an isolated smooth wall, a wall at a contact, the crevices -- spatial
+  variation and reference error both. Report how many independent estimates the scene needed.
+- R3 Then sparse estimates reconstructed on the atlas (the atlas the addressing, not the grid of estimates); the far
+  gather per patch (its cost by patches, not texels); settling resident on the GPU (242 s of Sponza's 15 min was
+  reading slices back). 2-5 minutes for a fresh Sponza is a prediction until a fresh cook shows it.
 
 ---
 

@@ -22,6 +22,11 @@ namespace Blix.Demos.VulkanSponza;
 //                    far -- its light the record's. Each texel keeps, per bin, how much of its rays went far
 //                    (NodeFarBins); a slice's last step (texel_far_finish.comp) adds the far light to its sums. The settling
 //                    then judges the near rays' noise alone.
+//   THE BLEND        a texel reads its patch's and its patch's neighbours' records (texel_far_neighbours.comp: seen along
+//                    the surface), each patch's estimate in its own bins, weighted smoothly (texel_far.glsl, farSet): one
+//                    patch's record a texel stepped where the texel's patch changed -- 0.25 m tiles on a flat wall.
+// --far-debug far|assign: the cook lands the far light alone, or each texel's patches as colours (blended by their
+// weights) -- to see the blend's continuity on its own, against the reference. Never cached as the light.
 // --no-far-field: every ray its own, as before (the A/B). Only for the split cook (its few columns: the record is a
 // patch x 36 bins x (3 + 4 x columns) words -- Sponza's two columns 300 MB).
 internal sealed partial class SponzaLoop
@@ -33,6 +38,11 @@ internal sealed partial class SponzaLoop
     // A bin is known once its rays' weight sums to this (a cosine ray's weight is pi): a few rays' worth.
     private const float FarKnownWeight = 8f * MathF.PI;
     private bool farOn, farRecording, farJudgePending;
+    private int farDebug;   // 0 off, 1 the far light alone, 2 the patches as colours
+    private GpuBufferHandle farNeighbours;
+    private ShaderInterface farNeighboursInterface = null!;
+    private PipelineHandle farNeighboursPipeline;
+    private const int FarSet = 4, FarNeighbours = 8;
     private int farRecordPass, farRecordRound;
     private uint[] farRecordIds = Array.Empty<uint>();
     private GpuBufferHandle farRecordIdsBuffer, farVerdict;
@@ -51,15 +61,17 @@ internal sealed partial class SponzaLoop
         farField = !args.Flag("no-far-field");
         if (args.Int("far-record-rays") is { } fr) farRecordRays = Math.Max(32, fr / 32 * 32);
         if (args.Int("far-record-max") is { } fm) farRecordMax = Math.Max(farRecordRays, fm);
+        farDebug = args.String("far-debug") switch { "far" => 1, "assign" => 2, _ => 0 };
     }
 
     // The cache's key: what changes the far field's answer.
-    private string FarKey => farField && sunNodeGuide ? string.Create(CultureInfo.InvariantCulture, $";far {farRecordRays} {farRecordMax} judged w2") : "";
+    private string FarKey => farField && sunNodeGuide ? string.Create(CultureInfo.InvariantCulture, $";far {farRecordRays} {farRecordMax} judged w2 blend{(farDebug > 0 ? $" debug {farDebug}" : "")}") : "";
 
     private void DeclareFarPasses(Func<string[], ShaderInterface> reflect)
     {
         farFinishInterface = reflect(new[] { "texel_far_finish.comp" });
         farJudgeInterface = reflect(new[] { "texel_far_judge.comp" });
+        farNeighboursInterface = reflect(new[] { "texel_far_neighbours.comp" });
         farFinishPass = graph.ComputePass("sun-nodes-far-finish").Shader(farFinishInterface).Handle;
     }
 
@@ -69,12 +81,15 @@ internal sealed partial class SponzaLoop
             File.ReadAllBytes(Path.Combine(shaderDir, "texel_far_finish.comp.spv")), farFinishInterface, "texel_far_finish")), "texel_far_finish"));
         farJudgePipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "texel_far_judge.comp.spv")), farJudgeInterface, "texel_far_judge")), "texel_far_judge"));
+        farNeighboursPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
+            File.ReadAllBytes(Path.Combine(shaderDir, "texel_far_neighbours.comp.spv")), farNeighboursInterface, "texel_far_neighbours")), "texel_far_neighbours"));
     }
 
     // UploadSunNodes: on for a guided split cook of a few columns (the guide patch is the far field's when a texel saw none).
     private void BeginFarField(int suns)
     {
-        farOn = farField && splitCooking && sunNodeGuided && !sunNodeExact && sunNodeStride == 1 && suns <= 3 && cookedPacked is not null;
+        farOn = farField && splitCooking && sunNodeGuided && !sunNodeExact && sunNodeStride == 1 && suns <= 3 && cookedPacked is not null
+            && frameTracer is not null;
         farRecording = farOn;
         farRecordPass = 0;
         farRecordRound = 0;
@@ -92,18 +107,56 @@ internal sealed partial class SponzaLoop
         farVerdict = Own(device.CreateGpuBuffer(patches * 4, name: "sponza.far.verdict"));
         farRecordIds = sunNodeTraceIds;
         farRecordIdsBuffer = sunNodeTraceBuffer;
-        farBinsBuffer = Own(device.CreateGpuBuffer(checked(sunNodeSlice * FarBins * 16), name: "sponza.far.bins"));
+        farBinsBuffer = Own(device.CreateGpuBuffer(checked(sunNodeSlice * FarSet * FarBins * 16), name: "sponza.far.bins"));
+        FindFarNeighbours(patches);
         farClock.Restart();
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] far field: on; recording {farRecordRays} rays a texel into {patches:N0} patches' records ({bytes / 1048576.0:0} MB) before the sweep."));
     }
 
+    // Each patch's neighbours it can see along the surface, once a cook (texel_far_neighbours.comp), in chunks the rays'
+    // buffer holds (FarNeighbours rays a patch).
+    private void FindFarNeighbours(int patches)
+    {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        farNeighbours = Own(device.CreateGpuBuffer(checked(patches * FarNeighbours * 4), name: "sponza.far.neighbours"));
+        var declared = farNeighboursInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
+        var chunk = sunNodeSlice * 32 / FarNeighbours;
+        for (var first = 0; first < patches; first += chunk)
+        {
+            var count = Math.Min(chunk, patches - first);
+            DispatchCommand Pass(int mode) => new(farNeighboursPipeline, (count + 63) / 64, 1, 1,
+                new ShaderUniform[]
+                {
+                    new("uNeighbours", new Vector4Uniform(new Vector4(first, count, mode, transportSpacing))),
+                    new("uCookedGrid", new Vector4Uniform(cookedGrid)),
+                    new("uCookedDims", new Vector4Uniform(cookedDims)),
+                },
+                Array.Empty<ShaderTextureBinding>(),
+                Buffers: new[]
+                {
+                    new ShaderBufferBinding("NodeRays", sunNodeRaysBuffer),
+                    new ShaderBufferBinding("NodeHits", sunNodeHits),
+                    new ShaderBufferBinding("PatchNeighbours", farNeighbours),
+                }.Concat(CookedBuffers()).Where(b => declared.Contains(b.Name)).ToArray());
+            device.DispatchNow(new[] { Pass(0) }, "sun-nodes-far-neighbours");
+            frameTracer!.Trace(sunNodeRaysBuffer, sunNodeHits, count * FarNeighbours, 0x7E1Bu, closestOnly: true);
+            device.DispatchNow(new[] { Pass(1) }, "sun-nodes-far-neighbours-keep");
+        }
+        device.WaitIdle();
+        var list = MemoryMarshal.Cast<byte, int>(device.ReadGpuBuffer(farNeighbours, 0, patches * FarNeighbours * 4).AsSpan()).ToArray();
+        long kept = 0;
+        foreach (var n in list) if (n >= 0) kept++;
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[VulkanSponza] far field: each patch's neighbours seen along the surface, {kept / (double)patches:0.0} a patch, in {clock.Elapsed.TotalSeconds:0.0} s."));
+    }
+
     private void ReleaseFarField()
     {
-        foreach (var b in new[] { farRecord, farBinsBuffer, farVerdict })
+        foreach (var b in new[] { farRecord, farBinsBuffer, farVerdict, farNeighbours })
             if (!b.Equals(default(GpuBufferHandle))) RetireGpuBuffer(b);
         if (!farRecordIdsBuffer.Equals(sunNodeTraceBuffer) && !farRecordIdsBuffer.Equals(default(GpuBufferHandle))) RetireGpuBuffer(farRecordIdsBuffer);
-        farRecord = farBinsBuffer = farVerdict = farRecordIdsBuffer = default;
+        farRecord = farBinsBuffer = farVerdict = farRecordIdsBuffer = farNeighbours = default;
         farRecordIds = Array.Empty<uint>();
         farPatchOf = null;
         farOn = farRecording = false;
@@ -119,6 +172,7 @@ internal sealed partial class SponzaLoop
     // The record's buffer where a shader declares it (a placeholder when off: never indexed).
     private GpuBufferHandle FarRecordBuffer => farOn ? farRecord : sunNodeAccum;
     private GpuBufferHandle FarBinsBuffer => farOn ? farBinsBuffer : sunNodeAccum;
+    private GpuBufferHandle FarNeighboursBuffer => farOn ? farNeighbours : sunNodeAccum;
 
     // The record pass, a pass at a time (immediate or in the frame): a round's texels in slices, farRecordRays / 32 passes
     // each; nothing read back. A round done, the patches judged (the next call: the frame's passes run by then); those
@@ -216,10 +270,12 @@ internal sealed partial class SponzaLoop
                 new("uCookedGrid", new Vector4Uniform(cookedGrid)),
                 new("uCookedDims", new Vector4Uniform(cookedDims)),
                 new("uFar", new Vector4Uniform(FarUniform(0))),
+                new("uDebug", new Vector4Uniform(new Vector4(farDebug, 0f, 0f, 0f))),
             },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
             {
+                new ShaderBufferBinding("PatchNeighbours", farNeighbours),
                 new ShaderBufferBinding("Texels", texelBuffer),
                 new ShaderBufferBinding("NodeIds", ids),
                 new ShaderBufferBinding("TexelPatch", sunNodeTexelPatch),

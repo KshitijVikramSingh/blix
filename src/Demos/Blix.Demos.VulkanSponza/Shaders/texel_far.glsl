@@ -15,7 +15,15 @@
 //                record is refined until its error is small against the patch's far light (texel_far_judge.comp), then
 //                a bin still too uncertain is made unknown (its weight 0): a ray there is the texel's own, as before --
 //                the rare light (a doorway seen down a dark corridor) stays with the texel's rays, which refine.
-// The includer declares FarRecord at FAR_RECORD_BINDING (FAR_RECORD_ACCESS: readonly or not), includes cooked_patches.glsl
+//   THE BLEND    a texel reads not one patch's record but up to FAR_SET patches' (farSet): its own and its own's
+//                neighbours (texel_far_neighbours.comp: seen along the surface, so never across a thin wall), each
+//                weighted by a smooth kernel of its distance (zero at one spacing) and the normals' agreement. Each
+//                patch's far light is its own estimate, in its own bins: the texel's rays are binned in each patch's
+//                frame, so a patch's record is weighed by the texel's open share in THAT patch's directions -- blending
+//                the records under one patch's open share would hide the step and keep the bias (the user's review,
+//                2026-10-14). A ray is far only where every blended patch knows its direction; the reach is the
+//                farthest blended patch's.
+// The includer declares FarRecord at FAR_RECORD_BINDING and PatchNeighbours at FAR_NEIGHBOURS_BINDING (FAR_RECORD_ACCESS: readonly or not), includes cooked_patches.glsl
 // first, and passes uFar: x 0 off, 1 the record pass, 2 the sweep reads the record; y the patch spacing; z the weight a
 // bin needs to be known (fixed point); w the columns.
 
@@ -29,6 +37,11 @@
 #define FAR_HALF_BIN_TAN 0.2126
 
 layout(std430, set = 0, binding = FAR_RECORD_BINDING) FAR_RECORD_ACCESS buffer FarRecord { uint farRecord[]; };
+#ifdef FAR_NEIGHBOURS_BINDING
+layout(std430, set = 0, binding = FAR_NEIGHBOURS_BINDING) readonly buffer PatchNeighbours { int farNeighbours[]; };
+#endif
+#define FAR_SET 4
+#define FAR_NEIGHBOURS 8
 
 // A bin's words: weight, escaped weight, weight^2, rgb per column, weight x luminance^2 per column.
 uint farStride(vec4 far) { return 3u + 4u * uint(far.w + 0.5); }
@@ -75,6 +88,51 @@ float farEscape(int patchIndex, int bin, vec4 far) {
     uint at = farBase(patchIndex, bin, far);
     return float(farRecord[at + 1u]) / max(float(farRecord[at]), 1.0);
 }
+
+#ifdef FAR_NEIGHBOURS_BINDING
+// The patches a texel at x (normal nx), whose own patch is primary, blends: the FAR_SET heaviest of its own and its own's
+// neighbours, weights normalized. A kernel zero at one spacing holds at most four patches of a regular layout, and any
+// patch within one spacing of x is within 1.75 of its own patch -- among its neighbours -- so the set changes only
+// where the weights leaving it are zero: continuous. None weighing anything (the texel far from every patch): its own
+// alone, as before. Returns how many.
+void farSetConsider(int c, vec3 x, vec3 nx, vec4 far, inout int ids[FAR_SET], inout float ws[FAR_SET]) {
+    float d = length(x - cookedPatch[3 * c].xyz) / far.y;
+    float k = max(1.0 - d * d, 0.0);
+    float w = k * k * smoothstep(0.5, 0.9, dot(nx, normalize(cookedPatch[3 * c + 1].xyz)));
+    if (w <= ws[FAR_SET - 1]) return;
+    int at = FAR_SET - 1;
+    while (at > 0 && ws[at - 1] < w) { ws[at] = ws[at - 1]; ids[at] = ids[at - 1]; --at; }
+    ws[at] = w;
+    ids[at] = c;
+}
+
+int farSet(vec3 x, vec3 nx, int primary, vec4 far, out int ids[FAR_SET], out float ws[FAR_SET]) {
+    for (int i = 0; i < FAR_SET; ++i) { ids[i] = -1; ws[i] = 0.0; }
+    farSetConsider(primary, x, nx, far, ids, ws);
+    for (int i = 0; i < FAR_NEIGHBOURS; ++i) {
+        int c = farNeighbours[primary * FAR_NEIGHBOURS + i];
+        if (c >= 0) farSetConsider(c, x, nx, far, ids, ws);
+    }
+    float total = 0.0;
+    int count = 0;
+    for (int i = 0; i < FAR_SET; ++i) if (ids[i] >= 0) { total += ws[i]; count++; }
+    if (total <= 0.0) {
+        ids[0] = primary; ws[0] = 1.0;
+        for (int i = 1; i < FAR_SET; ++i) { ids[i] = -1; ws[i] = 0.0; }
+        return 1;
+    }
+    for (int i = 0; i < FAR_SET; ++i) ws[i] /= total;
+    return count;
+}
+
+// The reach for the set: past it the texel and every blended patch see a direction alike to within half a bin.
+float farSetReach(vec3 x, int ids[FAR_SET], vec4 far) {
+    float r = far.y;
+    for (int i = 0; i < FAR_SET; ++i)
+        if (ids[i] >= 0) r = max(r, length(x - cookedPatch[3 * ids[i]].xyz) / FAR_HALF_BIN_TAN);
+    return r;
+}
+#endif
 
 // Fixed point, rounded stochastically (u in [0, 1)): unbiased for the darkest light.
 uint farFixed(float v, float u) { return uint(max(v, 0.0) * FAR_FIXED + u); }

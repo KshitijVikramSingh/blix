@@ -44,6 +44,7 @@ layout(std430, set = 0, binding = 11) readonly buffer TexelPatch { int texelPatc
 #include "cooked_patches.glsl"
 #define FAR_RECORD_BINDING 12
 #define FAR_RECORD_ACCESS readonly
+#define FAR_NEIGHBOURS_BINDING 13
 #include "texel_far.glsl"
 
 #define GUIDE_RES 8
@@ -131,7 +132,8 @@ vec3 lightSample(int listPatch, vec3 origin, float u0, float u1, float u2) {
 shared int sGuide;
 shared int sFarPatch;
 shared float sFarReach;
-shared vec3 sFarN, sFarT, sFarB;
+shared int sFarIds[FAR_SET];
+shared vec3 sFarN[FAR_SET], sFarT[FAR_SET], sFarB[FAR_SET];
 
 void main() {
     uint group = gl_WorkGroupID.x;
@@ -162,10 +164,17 @@ void main() {
         }
         sFarPatch = max(fp, -1);
         if (fp >= 0) {
-            sFarReach = farReach(position, fp, u.uFar);
-            vec3 fn, ft, fb;
-            farFrame(fp, fn, ft, fb);
-            sFarN = fn; sFarT = ft; sFarB = fb;
+            int ids[FAR_SET];
+            float ws[FAR_SET];
+            farSet(position, n, fp, u.uFar, ids, ws);
+            sFarReach = farSetReach(position, ids, u.uFar);
+            for (int i = 0; i < FAR_SET; ++i) {
+                sFarIds[i] = ids[i];
+                if (ids[i] < 0) continue;
+                vec3 fn, ft, fb;
+                farFrame(ids[i], fn, ft, fb);
+                sFarN[i] = fn; sFarT[i] = ft; sFarB[i] = fb;
+            }
         }
     }
     barrier();
@@ -209,11 +218,16 @@ void main() {
     if (lightCount > 0.0 && cosTheta > 0.0) mixturePdf += lightCount / float(RAYS) * lightPdf(guide, origin, dir);
     nodeRayWeight[slot] = cosTheta > 0.0 && mixturePdf > 0.0 ? cosTheta / mixturePdf : 0.0;
     nodeRays[slot * 2u] = vec4(origin, 0.0);
-    // Short rays: where the record knows the direction, past the reach is the patch's -- the ray need go no further.
+    // Short rays: where every blended patch's record knows the direction, past the reach is the patch's -- the ray need go no further.
     float tMax = uintBitsToFloat(0x7F800000u);
     if (sFarPatch >= 0) {
-        int bin = farBin(dir, sFarN, sFarT, sFarB);
-        if (bin >= 0 && farKnown(sFarPatch, bin, u.uFar)) tMax = sFarReach;
+        bool known = true;
+        for (int i = 0; i < FAR_SET && known; ++i) {
+            if (sFarIds[i] < 0) continue;
+            int bin = farBin(dir, sFarN[i], sFarT[i], sFarB[i]);
+            known = bin >= 0 && farKnown(sFarIds[i], bin, u.uFar);
+        }
+        if (known) tMax = sFarReach;
     }
     nodeRays[slot * 2u + 1u] = vec4(dir, tMax);
 }

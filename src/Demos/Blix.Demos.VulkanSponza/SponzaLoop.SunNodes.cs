@@ -763,6 +763,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("NodeGuidePatch", sunNodeGuidePatch),
                 new ShaderBufferBinding("TexelPatch", sunNodeTexelPatch),
                 new ShaderBufferBinding("FarRecord", FarRecordBuffer),
+                new ShaderBufferBinding("PatchNeighbours", FarNeighboursBuffer),
             }.Concat(CookedBuffers()).Where(b => raysDeclared.Contains(b.Name)).ToArray());
     }
 
@@ -812,6 +813,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("NodeGuidePatch", sunNodeGuidePatch),
                 new ShaderBufferBinding("FarRecord", FarRecordBuffer),
                 new ShaderBufferBinding("NodeFarBins", FarBinsBuffer),
+                new ShaderBufferBinding("PatchNeighbours", FarNeighboursBuffer),
             }.Concat(CookedBuffers()).Where(b => declared.Contains(b.Name)).ToArray());
     }
 
