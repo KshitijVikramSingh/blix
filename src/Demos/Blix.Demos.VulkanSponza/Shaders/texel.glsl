@@ -178,19 +178,30 @@ void texelsAroundLightmap(vec2 texel, vec3 n, ivec2 atlasSize, out int ids[4], o
     vec2 f = texel - 0.5;
     ivec2 base = ivec2(floor(f));
     vec2 t = f - vec2(base);
-    // The pixel's own texel -- the one its atlas coordinate lies in, so on its own chart -- and the way it faces (its
-    // face normal, as every record's): a bilinear neighbour facing another way is another surface. The gutter around a
+    // A bilinear neighbour facing another way is another surface (records carry their face normal). The gutter around a
     // chart points each empty texel at the first filled neighbour it finds (SponzaLoop.Lightmap.cs), which can lie in the
     // next chart over -- around a column's corner, the face lit from another side: lines of the wrong light along the
     // rectangular columns' arrises (the user, 2026-10-14). Against the pixel's VERTEX normal instead, a smoothed edge
     // dropped its own texels and lit the edges from the probes (worse); face against face, a flat face agrees exactly.
+    // The reference: of the own texel and the four around it, the record facing most as the pixel does (n). The own
+    // texel alone was wrong where it straddles an arris -- its one record is one face's, and the other face's pixels in
+    // it took that face's light, a texel staircase along columns' and arches' edges at any LOD (2026-10-14). n turns
+    // smoothly, so the switch follows a smooth line; the best match is one of the five, so the pixel keeps its texels.
     vec3 ownNormal = vec3(0.0);
-    ivec2 own = ivec2(floor(texel));
-    if (all(greaterThanEqual(own, ivec2(0))) && all(lessThan(own, atlasSize))) {
-        uint oid = TEXEL_INDEX_MAP(own.y * atlasSize.x + own.x);
-        if (oid != 0xFFFFFFFFu) {
+    {
+        float bestDot = -2.0;
+        for (int i = 0; i < 5; ++i) {
+            ivec2 at = i == 4 ? ivec2(floor(texel)) : base + ivec2(i & 1, i >> 1);
+            if (any(lessThan(at, ivec2(0))) || any(greaterThanEqual(at, atlasSize))) continue;
+            uint oid = TEXEL_INDEX_MAP(at.y * atlasSize.x + at.x);
+            if (oid == 0xFFFFFFFFu) continue;
             if (TEXEL_POSITION(oid).w < 0.0 && dot(TEXEL_NORMAL(oid).xyz, n) < 0.0) oid += 1u;
-            ownNormal = TEXEL_NORMAL(oid).xyz;
+            if (abs(TEXEL_POSITION(oid).w) < 2.0) continue;
+            vec3 cn = TEXEL_NORMAL(oid).xyz;
+            float cl = length(cn);
+            if (cl < 1e-6) continue;
+            float d = dot(cn / cl, n);
+            if (d > bestDot) { bestDot = d; ownNormal = cn; }
         }
     }
     float ownLength = length(ownNormal);

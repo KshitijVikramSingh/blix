@@ -324,7 +324,7 @@ void main() {
     {
         vec3 lodZeroN;
         vec4 lodZeroT;
-        if (vLod > 0u && lightmapShadingFrame(vLightmapTexel, lodZeroN, lodZeroT)) { N = lodZeroN; tangentWorld = lodZeroT.xyz; tangentSign = lodZeroT.w; }
+        if (vLod > 0u && lightmapShadingFrame(vLightmapTexel, N, lodZeroN, lodZeroT)) { N = lodZeroN; tangentWorld = lodZeroT.xyz; tangentSign = lodZeroT.w; }
     }
     if (!gl_FrontFacing) N = -N;
     // Build TBN from the authored glTF tangent. Gram-Schmidt removes interpolation drift and

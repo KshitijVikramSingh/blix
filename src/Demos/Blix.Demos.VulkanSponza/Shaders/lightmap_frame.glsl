@@ -24,7 +24,7 @@ vec3 lightmapOctDecode(uint packed) {
 // The frame at `texel` (atlas units, centres at +0.5; the pre-pass's vLightmapTexel): world normal (the front side's:
 // the caller flips it for a back face, as it does its own), tangent xyz and handedness w. False where the pixel has no
 // atlas texel, or none of the four around it carries a frame.
-bool lightmapShadingFrame(vec2 texel, out vec3 normal, out vec4 tangent) {
+bool lightmapShadingFrame(vec2 texel, vec3 vertexN, out vec3 normal, out vec4 tangent) {
     normal = vec3(0.0, 0.0, 1.0);
     tangent = vec4(1.0, 0.0, 0.0, 1.0);
     uvec2 size = lightmapFrames[0];
@@ -35,19 +35,29 @@ bool lightmapShadingFrame(vec2 texel, out vec3 normal, out vec4 tangent) {
     vec3 n = vec3(0.0);
     vec3 tg = vec3(0.0);
     float handed = 0.0, weight = 0.0;
-    // The pixel's own texel's normal: a bilinear neighbour facing another way is another surface's. The gutter around a
-    // chart points each empty texel at the first filled neighbour it finds (SponzaLoop.Lightmap.cs), which can be the
-    // next chart's -- a block's top, the next stone: blended in, it tilted the normal at every joint and edge, and the
-    // sun's n.l drew a crevice along flush joints on the lit faces (the user, 2026-10-14).
+    // A bilinear neighbour facing another way is another surface's. The gutter around a chart points each empty texel
+    // at the first filled neighbour it finds (SponzaLoop.Lightmap.cs), which can be the next chart's -- a block's top,
+    // the next stone: blended in, it tilted the normal at every joint and edge, and the sun's n.l drew a crevice along
+    // flush joints on the lit faces (the user, 2026-10-14).
+    // The reference: of the pixel's own texel and the four around it, the frame agreeing best with the pixel's vertex
+    // normal. The own texel alone was wrong where it straddles an arris: its one record is one face's, and the other
+    // face's pixels in it took that face's normal, dropped their own face's texels and drew the arris as a texel
+    // staircase -- the arch mouldings' teeth on every coarse level (2026-10-14). The vertex normal turns smoothly, so
+    // the switch between faces follows a smooth line; the best match is always one of the five, so none is dropped.
     vec3 ownN = vec3(0.0);
     {
-        ivec2 own = ivec2(floor(texel));
-        if (all(greaterThanEqual(own, ivec2(0))) && all(lessThan(own, ivec2(size)))) {
-            uint oid = lightmapCellOf[own.y * int(size.x) + own.x];
-            if (oid != 0xFFFFFFFFu) {
-                uvec2 op = lightmapFrames[1u + oid];
-                if (op.x != 0u || op.y != 0u) ownN = lightmapOctDecode(op.x);
-            }
+        vec3 vn = dot(vertexN, vertexN) > 1e-12 ? normalize(vertexN) : vec3(0.0);
+        float bestDot = -2.0;
+        for (int i = 0; i < 5; ++i) {
+            ivec2 at = i == 4 ? ivec2(floor(texel)) : base + ivec2(i & 1, i >> 1);
+            if (any(lessThan(at, ivec2(0))) || any(greaterThanEqual(at, ivec2(size)))) continue;
+            uint oid = lightmapCellOf[at.y * int(size.x) + at.x];
+            if (oid == 0xFFFFFFFFu) continue;
+            uvec2 op = lightmapFrames[1u + oid];
+            if (op.x == 0u && op.y == 0u) continue;
+            vec3 cn = lightmapOctDecode(op.x);
+            float d = dot(cn, vn);
+            if (d > bestDot) { bestDot = d; ownN = cn; }
         }
     }
     for (int i = 0; i < 4; ++i) {

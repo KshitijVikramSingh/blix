@@ -50,7 +50,7 @@ void main() {
     vec4 lodZeroT;
     // LOD 0's frame through the atlas only on a coarse level: on LOD 0 the mesh's own normal is exact, and the atlas's
     // 4 cm frames smeared its fine geometry (a joint's chamfer) over the face (2026-10-14).
-    if (vLod > 0u && lightmapShadingFrame(vLightmapTexel, lodZeroN, lodZeroT)) n = lodZeroN;
+    if (vLod > 0u && lightmapShadingFrame(vLightmapTexel, n, lodZeroN, lodZeroT)) n = lodZeroN;
     vec3 shading = gl_FrontFacing ? n : -n;
     // w: the texel bins (texel_bin.glsl, texelFaceBins) of this pixel's FACE normal -- the plane of the triangle, from the world
     // position's screen derivatives (one triangle's within a quad), turned to the shading normal's side. The texels
