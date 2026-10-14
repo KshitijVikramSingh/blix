@@ -86,6 +86,8 @@
     <GlslShader Include="Shaders\texel_compose.comp" />
     <GlslShader Include="Shaders\texel_visible.comp" />
     <GlslShader Include="Shaders\texel_nodes_patch.comp" />
+    <GlslShader Include="Shaders\texel_far_finish.comp" />
+    <GlslShader Include="Shaders\texel_far_judge.comp" />
     <GlslShader Include="Shaders\texel_filter_fill.comp" />
     <GlslShader Include="Shaders\reference_trace.comp" />
     <GlslShader Include="Shaders\reference_points.comp" />

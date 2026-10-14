@@ -1,0 +1,108 @@
+#version 450
+// The far field (texel_far.glsl), a slice's last step before its sums are read back: each texel's light from beyond its
+// reach, added into its sums as if every pass had carried it -- so the refining, the settling and the landing read the
+// whole light, and the noise (column 0's w) stays the near rays' alone: the far light is the same every pass.
+//   far = sum over the bins the record knows of  L(bin) x C(bin) x V(bin)
+//     L  the record's mean radiance in the bin (the patch's texels' far rays, pooled)
+//     C  the bin's share of the texel's cosine-weighted hemisphere, in irradiance (integrated over 512 fixed directions:
+//        the same for every texel with the same frame, so no noise of its own)
+//     V  the share of the texel's own rays in the bin that went past its reach (NodeFarBins: its near geometry, which only
+//        it knows); a bin none of its rays fell in takes the texel's share over all known bins
+// So which bins a texel's rays happen to land in no longer matters -- that was the noise -- only what it sees near.
+// V is itself an estimate from the texel's few rays a bin: its error (a weighted binomial's: ((1 - V)^2 far w^2 +
+// V^2 near w^2) / (sum w)^2 -- the guided rays weigh less, and counting weight / pi had overstated it 3-10x) goes
+// into the noise the settling judges, so a texel whose far light is still uncertain refines -- each round a fresh V.
+// A thread a slice texel.
+
+#define PI 3.14159265359
+#define FAR_DIRECTIONS 512
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform FarFinish {
+    vec4 uFinish;   // x the slice's first entry in NodeIds, y its texels, z the passes, w the columns (suns)
+    vec4 uCookedGrid;
+    vec4 uCookedDims;
+    vec4 uFar;
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 2) readonly buffer NodeIds { uint nodeIds[]; };
+layout(std430, set = 0, binding = 3) readonly buffer TexelPatch { int texelPatch[]; };
+layout(std430, set = 0, binding = 4) readonly buffer NodeGuidePatch { uint guidePatch[]; };
+layout(std430, set = 0, binding = 5) readonly buffer NodeFarBins { vec4 farBins[]; };   // x weight, y far, z w^2, w far w^2
+layout(std430, set = 0, binding = 6) buffer NodeAccum { vec4 nodeAccum[]; };
+
+#define COOKED_BINDING 7
+#define COOKED_GRID u.uCookedGrid
+#define COOKED_DIMS u.uCookedDims
+#include "cooked_patches.glsl"
+#define FAR_RECORD_BINDING 10
+#define FAR_RECORD_ACCESS readonly
+#include "texel_far.glsl"
+
+void main() {
+    uint t = gl_GlobalInvocationID.x;
+    if (t >= uint(u.uFinish.y)) return;
+    uint id = nodeIds[uint(u.uFinish.x) + t];
+    int p = texelPatch[id];
+    if (p < 0) p = int(guidePatch[id]) - 2;
+    if (p < 0) return;
+    vec3 fn, ft, fb;
+    farFrame(p, fn, ft, fb);
+    // C: the texel's cosine lobe over the patch's bins (a direction below the patch's horizon is the texel's own rays').
+    float c[FAR_BINS];
+    for (int b = 0; b < FAR_BINS; ++b) c[b] = 0.0;
+    vec3 n = normalize(texels[2u * id + 1u].xyz);
+    vec3 tt = normalize(abs(n.y) < 0.999 ? cross(vec3(0.0, 1.0, 0.0), n) : cross(vec3(1.0, 0.0, 0.0), n));
+    vec3 tb = cross(n, tt);
+    for (int i = 0; i < FAR_DIRECTIONS; ++i) {
+        float r2 = (float(i) + 0.5) / float(FAR_DIRECTIONS);
+        float r = sqrt(r2), phi = float(i) * 2.39996323;
+        vec3 d = tt * (r * cos(phi)) + tb * (r * sin(phi)) + n * sqrt(1.0 - r2);
+        int b = farBin(d, fn, ft, fb);
+        if (b >= 0) c[b] += PI / float(FAR_DIRECTIONS);
+    }
+    // V: the texel's own share past its reach, per known bin; over all known bins for a bin none of its rays fell in.
+    float allW = 0.0, allF = 0.0;
+    for (int b = 0; b < FAR_BINS; ++b) {
+        if (!farKnown(p, b, u.uFar)) continue;
+        vec4 wf = farBins[t * uint(FAR_BINS) + uint(b)];
+        allW += wf.x; allF += wf.y;
+    }
+    float vAll = allW > 0.0 ? allF / allW : 0.0;
+    int columns = int(u.uFinish.w + 0.5);
+    float passes = u.uFinish.z;
+    const vec3 lumW = vec3(0.2126, 0.7152, 0.0722);
+    float farLum = 0.0, nearLum = 0.0;
+    for (int k = 0; k < columns; ++k) {
+        vec3 light = vec3(0.0);
+        for (int b = 0; b < FAR_BINS; ++b) {
+            if (c[b] <= 0.0 || !farKnown(p, b, u.uFar)) continue;
+            vec4 wf = farBins[t * uint(FAR_BINS) + uint(b)];
+            float v = wf.x > 0.0 ? wf.y / wf.x : vAll;
+            light += farLight(p, b, k, u.uFar) * c[b] * v;
+        }
+        uint at = t * uint(columns) + uint(k);
+        vec4 a = nodeAccum[at];
+        nearLum += dot(a.rgb, lumW);
+        farLum += dot(light, lumW);
+        nodeAccum[at] = vec4(a.rgb + light * passes, a.w);
+    }
+    // V's error, composed over the columns: the far light's variance (of its mean over the slice's passes).
+    float farVariance = 0.0;
+    for (int b = 0; b < FAR_BINS; ++b) {
+        if (c[b] <= 0.0 || !farKnown(p, b, u.uFar)) continue;
+        vec4 wf = farBins[t * uint(FAR_BINS) + uint(b)];
+        // A bin none of the texel's rays fell in: V is the texel's whole share, as uncertain as one ray.
+        float vVariance = wf.x > 0.0
+            ? ((1.0 - wf.y / wf.x) * (1.0 - wf.y / wf.x) * wf.w + (wf.y / wf.x) * (wf.y / wf.x) * (wf.z - wf.w)) / (wf.x * wf.x)
+            : vAll * (1.0 - vAll);
+        float l = 0.0;
+        for (int k = 0; k < columns; ++k) l += dot(farLight(p, b, k, u.uFar), lumW);
+        farVariance += (c[b] * l) * (c[b] * l) * max(vVariance, 0.0);
+    }
+    // Each pass's composed luminance was near alone; with the far light (the same every pass) it is near + far: the sum
+    // of squares grows by 2 far near-sum + passes far^2, and its spread about the mean is the near's, unchanged.
+    // The settling reads the mean's variance as (w / passes - mean^2) / passes: V's error enters as passes^2 x its own.
+    nodeAccum[t * uint(columns)].w += 2.0 * farLum * nearLum + passes * farLum * farLum + passes * passes * farVariance;
+}

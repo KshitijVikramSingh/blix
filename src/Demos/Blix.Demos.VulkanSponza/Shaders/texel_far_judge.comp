@@ -1,0 +1,87 @@
+#version 450
+// The far field's record judged (texel_far.glsl; SponzaLoop.FarField.cs), a thread a patch. Its error matters as its
+// texels read it: the far light at the patch's own normal, sum over bins of C(bin) x L(bin), against that light's error,
+// sqrt(sum of C(bin)^2 x se(bin)^2) -- se a bin's mean's standard error from its spread (the record's luminance^2 words)
+// over its effective rays ((sum w)^2 / sum w^2). A patch's error is shared by all its texels: a blotch the size of
+// a patch, not a grain, so its bar is half the texels' (uJudge.y).
+//   mode 0  the verdict: 1 where the patch needs more rays -- its far light's error over the bar, or under 80% of its
+//           lobe known -- else 0 (PatchVerdict)
+//   mode 1  the last word: a bin with too little weight, or whose error alone is over its share of the bar, made unknown
+//           (its weight 0) -- the texels' own rays answer there
+// Unknown bins add no error: their light comes from the texel's rays.
+
+#define PI 3.14159265359
+#define FAR_DIRECTIONS 512
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform FarJudge {
+    vec4 uJudge;    // x mode, y the bar (relative error), z patches, w the least weight a known bin carries (fixed)
+    vec4 uCookedGrid;
+    vec4 uCookedDims;
+    vec4 uFar;
+} u;
+
+layout(std430, set = 0, binding = 1) buffer PatchVerdict { uint verdict[]; };
+
+#define COOKED_BINDING 2
+#define COOKED_GRID u.uCookedGrid
+#define COOKED_DIMS u.uCookedDims
+#include "cooked_patches.glsl"
+#define FAR_RECORD_BINDING 5
+#define FAR_RECORD_ACCESS
+#include "texel_far.glsl"
+
+void main() {
+    uint pu = gl_GlobalInvocationID.x;
+    if (pu >= uint(u.uJudge.z)) return;
+    int p = int(pu);
+    vec3 n, t, b;
+    farFrame(p, n, t, b);
+    float c[FAR_BINS];
+    for (int i = 0; i < FAR_BINS; ++i) c[i] = 0.0;
+    for (int i = 0; i < FAR_DIRECTIONS; ++i) {
+        float r2 = (float(i) + 0.5) / float(FAR_DIRECTIONS);
+        float r = sqrt(r2), phi = float(i) * 2.39996323;
+        vec3 d = t * (r * cos(phi)) + b * (r * sin(phi)) + n * sqrt(1.0 - r2);
+        int bin = farBin(d, n, t, b);
+        if (bin >= 0) c[bin] += PI / float(FAR_DIRECTIONS);
+    }
+    int columns = int(u.uFar.w + 0.5);
+    const vec3 lumW = vec3(0.2126, 0.7152, 0.0722);
+    float se[FAR_BINS];
+    float light = 0.0, error2 = 0.0, lobe = 0.0, known = 0.0;
+    int knownBins = 0;
+    for (int i = 0; i < FAR_BINS; ++i) {
+        uint base = farBase(p, i, u.uFar);
+        float w = float(farRecord[base]);
+        lobe += c[i];
+        se[i] = -1.0;
+        if (w < u.uJudge.w) continue;
+        float mean = 0.0, variance = 0.0;
+        for (int k = 0; k < columns; ++k) {
+            uint at = farRgbAt(base, k);
+            float m = dot(vec3(float(farRecord[at]), float(farRecord[at + 1u]), float(farRecord[at + 2u])) / w, lumW);
+            float q = float(farRecord[farSquareAt(base, k, u.uFar)]) / w;
+            mean += m;
+            variance += max(q - m * m, 0.0);
+        }
+        float rays = farRays(base);
+        se[i] = sqrt(variance / max(rays, 1.0));
+        light += c[i] * mean;
+        error2 += c[i] * c[i] * se[i] * se[i];
+        known += c[i];
+        knownBins++;
+    }
+    float bar = u.uJudge.y * light;
+    if (u.uJudge.x < 0.5) {
+        bool good = known >= 0.8 * lobe && error2 <= bar * bar;
+        verdict[pu] = good ? 0u : 1u;
+        return;
+    }
+    // The last word: each bin within its share of the bar (as if the errors of the known bins were alike), else unknown.
+    float share = bar / sqrt(float(max(knownBins, 1)));
+    for (int i = 0; i < FAR_BINS; ++i) {
+        uint base = farBase(p, i, u.uFar);
+        if (se[i] < 0.0 || c[i] * se[i] > share) farRecord[base] = 0u;
+    }
+}

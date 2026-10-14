@@ -113,6 +113,28 @@ composed with the light (texel_compose.comp). At rest, where the texels a pixel 
 the incident pass answers from them alone (incident_clipmap.frag); the overlay's "Cells answer alone" and
 --no-texel-detail turn it off. P3 stores the tilt's two derivatives, not L1: the relief is all the lit pass reads.
 
+**Short rays, then ask the patch (designed 2026-10-14, with the user).** The split cook's sweep left 7 M of Sponza's 16 M
+texels unsettled, and refining settled ~3% a round. The noise census (--split-noise-census) found why: the sun at the
+rays' hits carried 55% of the unsettled texels' variance -- shaded texels (arcade walls, gallery soffits) whose rays now
+and then find a little of the sunlit floor across the hall; one ray's spread 3x the mean, so 5% wanted ~3,600 rays.
+Not the dark: a dark floor on the bar settled 380 more. Not where the rays aim: MIS at the brightest patches, and at
+the sunlit ones, settled none more. Split by the ray's length: 85% of their variance came from beyond 1 m, and 80% of
+them would settle on their near rays alone. The user's reading: the rays push into the geometry to fetch light the
+patches already hold, bounce-aware and lit; a texel need trace only what its patch cannot know -- what is near it.
+- The texel traces out to its reach R = max(the patch spacing, d / tan 12 deg), d its distance from its patch's centre:
+  no number picked -- past R the texel and its patch see a direction alike to within half a bin, and nearer than a
+  spacing the patch knows nothing finer than itself.
+- Past R it reads its patch's record: the light arriving at the patch from beyond, per direction (36 hemispherical
+  bins, per column), pooled from all the patch's texels' far rays in a record pass before the sweep (128 rays a
+  texel: ~10,000 a patch). Not the patch cook's own 512 rays: those are as noisy as one texel, shared by ~40 texels --
+  the grain would have become 0.25 m blotches.
+- A texel's far light = the record's light per bin x the bin's share of its cosine lobe x the share of its own rays
+  in that bin that got past R (its near geometry, which only it knows). Which bins its rays happen to land in no longer
+  matters -- that was the noise. A bin the record does not know: the texel's own rays, to their end.
+- Settling judges the near rays' noise alone; a texel with nothing near settles at once. Rays stop at R where the
+  record knows the direction (the cost).
+Built (SponzaLoop.FarField.cs, texel_far.glsl, texel_far_finish.comp; --no-far-field for the A/B).
+
 ---
 
 ## The stack, defined (assessment 2026-10-12) -- the user's call on the decisions marked DECIDE
