@@ -788,7 +788,7 @@ internal sealed partial class SponzaLoop
                 new("uSky", new Vector4Uniform(new Vector4(1f, 1f, 0f, 0f))),
                 new("uLookup", new Vector4Uniform(new Vector4(sunNodePlane, sunNodeSigma, 0f, 0f))),
                 new("uFoliage", new Vector4Uniform(new Vector4(sunNodeFoliageSlots, discover, exactMode, 0f))),
-                new("uDetail", new Vector4Uniform(new Vector4(first, detail ? 1f : 0f, CensusOn(discover) ? 1f : 0f, 0f))),
+                new("uDetail", new Vector4Uniform(new Vector4(first, detail ? 1f : 0f, CensusOn(discover) ? 1f : 0f, censusPlacements))),
                 new("uFar", new Vector4Uniform(exactMode > 0f ? Vector4.Zero : FarUniform(discover))),
             },
             new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
@@ -819,6 +819,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("NodeFarBins", FarBinsBuffer),
                 new ShaderBufferBinding("PatchNeighbours", FarNeighboursBuffer),
                 new ShaderBufferBinding("NodeHarmonic", FarHarmonicBuffer),
+                new ShaderBufferBinding("CensusObjects", censusObjects.Equals(default(GpuBufferHandle)) ? sunNodeAccum : censusObjects),
             }.Concat(CookedBuffers()).Where(b => declared.Contains(b.Name)).ToArray());
     }
 

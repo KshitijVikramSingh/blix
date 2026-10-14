@@ -44,11 +44,18 @@ internal sealed partial class SponzaLoop
     private readonly long[] censusContact = new long[3];            // texels whose view is > 1% / 5% / 20% another's near
     private double censusOwnPatches, censusOtherPatches, censusOtherPasses, censusReach, censusNearOtherOfNear;
     private long censusViewTexels, censusNearTexels;
+    // The primitives merged into objects (placements sharing a welded vertex): another primitive of the same object (an
+    // authoring fragment) against another object -- what placement really adds.
+    private GpuBufferHandle censusObjects;
+    private int censusPlacements;
+    private readonly double[] censusObjectView = new double[2];
+    private readonly long[] censusObjectContact = new long[3];
+    private double censusOtherObjectPasses, censusNearOtherObjectOfNear;
 
     private void BeginNoiseCensus()
     {
         if (!noiseCensus || !splitCooking) return;
-        sunNodeCensus = Own(device.CreateGpuBuffer(checked(sunNodeSlice * 128), name: "sponza.sun-nodes.census"));
+        sunNodeCensus = Own(device.CreateGpuBuffer(checked(sunNodeSlice * 144), name: "sponza.sun-nodes.census"));
         Array.Clear(censusTexels);
         Array.Clear(censusVarianceShare);
         Array.Clear(censusLightShare);
@@ -65,6 +72,10 @@ internal sealed partial class SponzaLoop
         Array.Clear(censusContact);
         censusOwnPatches = censusOtherPatches = censusOtherPasses = censusReach = censusNearOtherOfNear = 0;
         censusViewTexels = censusNearTexels = 0;
+        Array.Clear(censusObjectView);
+        Array.Clear(censusObjectContact);
+        censusOtherObjectPasses = censusNearOtherObjectOfNear = 0;
+        if (censusObjects.Equals(default(GpuBufferHandle))) BuildCensusObjects();
     }
 
     private bool CensusOn(int discover) =>
@@ -74,15 +85,15 @@ internal sealed partial class SponzaLoop
     private void ReadNoiseCensus(Vector4[] sums, int count, int suns, int passes)
     {
         if (!noiseCensus || sunNodeCensus.Equals(default(GpuBufferHandle))) return;
-        var census = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(sunNodeCensus, 0, count * 128).AsSpan()).ToArray();
+        var census = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(sunNodeCensus, 0, count * 144).AsSpan()).ToArray();
         for (var t = 0; t < count; t++)
         {
             float total = 0f;
             for (var k = 0; k < suns; k++) total += Luminance(new Vector3(sums[(long)t * suns + k].X, sums[(long)t * suns + k].Y, sums[(long)t * suns + k].Z));
             var mean = total / passes;
             var whole = MathF.Max(sums[(long)t * suns].W / passes - mean * mean, 0f);
-            var s = census[8 * t];
-            var q = census[8 * t + 1];
+            var s = census[9 * t];
+            var q = census[9 * t + 1];
             var m = s / passes;
             var v = Vector4.Max(q / passes - m * m, Vector4.Zero);
             var vSum = v.X + v.Y + v.Z + v.W;
@@ -107,10 +118,10 @@ internal sealed partial class SponzaLoop
                 censusLightShare[unsettled, 2] += m.Z / lightSum;
                 censusLightShare[unsettled, 3] += m.W / lightSum;
             }
-            var fm = census[8 * t + 2] / passes;
-            var fv = Vector4.Max(census[8 * t + 3] / passes - fm * fm, Vector4.Zero);
-            var nm = census[8 * t + 4] / passes;
-            var nv = Vector4.Max(census[8 * t + 5] / passes - nm * nm, Vector4.Zero);
+            var fm = census[9 * t + 2] / passes;
+            var fv = Vector4.Max(census[9 * t + 3] / passes - fm * fm, Vector4.Zero);
+            var nm = census[9 * t + 4] / passes;
+            var nv = Vector4.Max(census[9 * t + 5] / passes - nm * nm, Vector4.Zero);
             for (var i = 0; i < 3; i++)
             {
                 float F(Vector4 v) => i == 0 ? v.X : i == 1 ? v.Y : v.Z;
@@ -124,8 +135,8 @@ internal sealed partial class SponzaLoop
                 if (F(nm) <= 0f) censusNearEmpty[unsettled, i]++;
             }
             if (whole > 0f) censusFarSunVariance[unsettled] += Math.Min(fv.W / whole, 10f);
-            var view = census[8 * t + 6] / passes;
-            var kinds = census[8 * t + 7] / passes;
+            var view = census[9 * t + 6] / passes;
+            var kinds = census[9 * t + 7] / passes;
             if (kinds.W > 0f)
             {
                 censusViewTexels++;
@@ -135,9 +146,78 @@ internal sealed partial class SponzaLoop
                 if (view.Y > 0.20f) censusContact[2]++;
                 censusOwnPatches += kinds.X; censusOtherPatches += kinds.Y; censusOtherPasses += kinds.Z; censusReach += kinds.W;
                 if (view.X + view.Y > 0f) { censusNearTexels++; censusNearOtherOfNear += view.Y / (view.X + view.Y); }
+                var objects = census[9 * t + 8] / passes;
+                censusObjectView[0] += objects.X; censusObjectView[1] += objects.Y;
+                if (objects.Y > 0.01f) censusObjectContact[0]++;
+                if (objects.Y > 0.05f) censusObjectContact[1]++;
+                if (objects.Y > 0.20f) censusObjectContact[2]++;
+                censusOtherObjectPasses += objects.Z;
+                if (view.X + view.Y > 0f) censusNearOtherObjectOfNear += objects.Y / (view.X + view.Y);
             }
             // A pass's spread over its mean, times sqrt(32): one ray's (as if the rays were independent).
             if (mean > 0f && (t & 15) == 0) censusRaySpread[unsettled].Add(MathF.Sqrt(whole * 32f) / mean);
+        }
+    }
+
+    // The placements merged into connected objects: every placement's vertices in the world, welded at a millimetre,
+    // sorted, and placements sharing one united (union-find). A carved column split by material into five primitives is
+    // one object; a column standing on a floor shares no vertex with it and stays two.
+    private void BuildCensusObjects()
+    {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var instances = rayQueries?.Instances;
+        var count = instances?.Count ?? 0;
+        var parent = new int[Math.Max(count, 1)];
+        for (var i = 0; i < parent.Length; i++) parent[i] = i;
+        int Find(int x) { while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
+        if (instances is not null)
+        {
+            long total = 0;
+            foreach (var inst in instances) total += inst.Mesh.Positions.Length;
+            var keys = new ulong[total];
+            var owners = new int[total];
+            long at = 0;
+            for (var p = 0; p < count; p++)
+            {
+                var inst = instances[p];
+                foreach (var v in inst.Mesh.Positions)
+                {
+                    var w = Vector3.Transform(v, inst.World);
+                    static ulong Q(float x) => (ulong)((long)MathF.Round(x * 1000f) + (1L << 20)) & 0x1FFFFFUL;
+                    keys[at] = Q(w.X) | (Q(w.Y) << 21) | (Q(w.Z) << 42);
+                    owners[at++] = p;
+                }
+            }
+            Array.Sort(keys, owners);
+            for (long i = 1; i < total; i++)
+                if (keys[i] == keys[i - 1])
+                {
+                    var a = Find(owners[i]);
+                    var b = Find(owners[i - 1]);
+                    if (a != b) parent[a] = b;
+                }
+        }
+        var objectOf = new uint[Math.Max(count, 1)];
+        var distinct = new HashSet<int>();
+        for (var p = 0; p < count; p++) { var r = Find(p); objectOf[p] = (uint)r; distinct.Add(r); }
+        censusPlacements = count;
+        censusObjects = Own(device.CreateGpuBuffer(objectOf.Length * 4, MemoryMarshal.AsBytes(objectOf.AsSpan()), "sponza.census.objects"));
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[VulkanSponza] near-field census: {count:N0} primitives welded into {distinct.Count:N0} connected objects in {clock.Elapsed.TotalSeconds:0.0} s."));
+        // The largest objects: a building welded into one would make "another object" small for the wrong reason.
+        if (instances is not null)
+        {
+            var tris = new Dictionary<uint, (long Tris, int Prims, int First)>();
+            long all = 0;
+            for (var p = 0; p < count; p++)
+            {
+                var t = instances[p].Mesh.TriangleCount;
+                all += t;
+                tris[objectOf[p]] = tris.TryGetValue(objectOf[p], out var e) ? (e.Tris + t, e.Prims + 1, e.First) : (t, 1, p);
+            }
+            foreach (var (o, e) in tris.OrderByDescending(kv => kv.Value.Tris).Take(8))
+                Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                    $"[VulkanSponza]   object {o}: {100.0 * e.Tris / Math.Max(all, 1):0.0}% of the triangles, {e.Prims:N0} primitives (e.g. {(e.First < rayPlacementNames.Count ? rayPlacementNames[e.First] : "?")})."));
         }
     }
 
@@ -152,6 +232,8 @@ internal sealed partial class SponzaLoop
                 $"[VulkanSponza] near-field census ({censusViewTexels:N0} texels; reach {censusReach / n:0.00} m on average): the view, cosine-weighted -- near on its own primitive {100 * censusView[0] / n:0.0}%, near on another {100 * censusView[1] / n:0.0}%, past the reach {100 * censusView[2] / n:0.0}%, escaped {100 * censusView[3] / n:0.0}%."));
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza]   contact texels (another primitive's near over 1% / 5% / 20% of the view): {100.0 * censusContact[0] / n:0.0}% / {100.0 * censusContact[1] / n:0.0}% / {100.0 * censusContact[2] / n:0.0}%; of a texel's near light, another primitive's {100 * censusNearOtherOfNear / Math.Max(censusNearTexels, 1):0.0}% on average; a pass's near hits land on {censusOwnPatches / n:0.0} own patches and {censusOtherPatches / n:0.0} others (32 rays: a floor on the count), another primitive met in {100 * censusOtherPasses / n:0.0}% of passes."));
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza]   merged into objects ({censusPlacements:N0} primitives): of the near on another primitive, {100 * censusObjectView[0] / n:0.0}% of the view is the same object's other primitives (authoring fragments) and {100 * censusObjectView[1] / n:0.0}% another object's; another object's near over 1% / 5% / 20% of the view: {100.0 * censusObjectContact[0] / n:0.0}% / {100.0 * censusObjectContact[1] / n:0.0}% / {100.0 * censusObjectContact[2] / n:0.0}% of the texels; of a texel's near light, another object's {100 * censusNearOtherObjectOfNear / Math.Max(censusNearTexels, 1):0.0}%; another object met in {100 * censusOtherObjectPasses / n:0.0}% of passes."));
             Console.WriteLine("[VulkanSponza]   (own primitive = the texel's patch's placement: at a contact the two can differ.)");
         }
         RetireGpuBuffer(sunNodeCensus);

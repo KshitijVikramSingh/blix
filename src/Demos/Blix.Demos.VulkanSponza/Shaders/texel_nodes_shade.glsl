@@ -77,8 +77,11 @@ layout(std430, set = 0, binding = 23) readonly buffer NodeIds { uint nodeIds[]; 
 // storage: what the mesh alone could cook, and what only the scene knows) -- [6] the cosine-weighted share of its rays
 // that hit within R on its own placement (its patch's: the primitive), on another placement, past R, and escaped;
 // [7] the distinct patches a pass's near hits landed on, own placement and other, the passes with any other-placement
-// near hit, and the reach.
+// near hit, and the reach; [8] the primitives merged into connected objects (CensusObjects: placements sharing a
+// welded vertex) -- x the share of the view near on another primitive of the SAME object (an authoring fragment), y
+// near on another object, z the passes with any other-object near hit.
 layout(std430, set = 0, binding = 24) buffer NodeCensus { vec4 nodeCensus[]; };
+layout(std430, set = 0, binding = 30) readonly buffer CensusObjects { uint censusObject[]; };   // [placement]: its object
 // The far field (texel_far.glsl): each texel's guide patch (texel_nodes_rays.comp: the patch + 2), the record (written by
 // the record pass, read by the sweep), and per slice texel per bin its rays' weight and the share of it gone far (x all,
 // y far), summed over the slice's passes -- texel_far_finish.comp turns them and the record into the far light.
@@ -412,16 +415,18 @@ void main() {
             vec4 bySource = vec4(0.0), byFar = vec4(0.0), byNear = vec4(0.0);
             for (int k = 0; k < suns; ++k) { bySource += sColumnSource[k]; byFar += sColumnFar[k]; byNear += sColumnNear[k]; }
             bool first = u.uShade.w < 0.5;
-            uint at = 8u * group;
+            uint at = 9u * group;
             nodeCensus[at] = (first ? vec4(0.0) : nodeCensus[at]) + bySource;
             nodeCensus[at + 1u] = (first ? vec4(0.0) : nodeCensus[at + 1u]) + bySource * bySource;
             nodeCensus[at + 2u] = (first ? vec4(0.0) : nodeCensus[at + 2u]) + byFar;
             nodeCensus[at + 3u] = (first ? vec4(0.0) : nodeCensus[at + 3u]) + byFar * byFar;
             nodeCensus[at + 4u] = (first ? vec4(0.0) : nodeCensus[at + 4u]) + byNear;
             nodeCensus[at + 5u] = (first ? vec4(0.0) : nodeCensus[at + 5u]) + byNear * byNear;
-            vec4 view = vec4(0.0), kinds = vec4(0.0);
+            vec4 view = vec4(0.0), kinds = vec4(0.0), objects = vec4(0.0);
             if (sFarPatch >= 0) {
                 uint own = floatBitsToUint(cookedPatch[3 * sFarPatch].w);
+                uint placements = uint(u.uDetail.w);
+                uint ownObject = own < placements ? censusObject[own] : own;
                 int seen[RAYS];
                 int seenCount = 0;
                 float weightSum = 0.0;
@@ -433,6 +438,10 @@ void main() {
                     if (sFar[r] > 0.5 || sDist[r] >= sFarReach) { view.z += w; continue; }
                     bool same = sPlacement[r] == own;
                     if (same) view.x += w; else view.y += w;
+                    if (!same) {
+                        uint hitObject = sPlacement[r] < placements ? censusObject[sPlacement[r]] : sPlacement[r];
+                        if (hitObject == ownObject) objects.x += w; else objects.y += w;
+                    }
                     int pw = int(sHit[r].w);
                     if (pw < 0) continue;
                     bool again = false;
@@ -443,12 +452,14 @@ void main() {
                 }
                 // A shortened ray that met nothing went past R: it counted as escaped above; a far ray is past R.
                 for (int r = 0; r < RAYS; ++r) if (sPlacement[r] == 0xFFFFFFFFu && sFar[r] > 0.5) { view.w -= sRayWeight[r]; view.z += sRayWeight[r]; }
-                if (weightSum > 0.0) view /= weightSum;
+                if (weightSum > 0.0) { view /= weightSum; objects.xy /= weightSum; }
+                objects.z = objects.y > 0.0 ? 1.0 : 0.0;
                 kinds.z = view.y > 0.0 ? 1.0 : 0.0;
                 kinds.w = sFarReach;
             }
             nodeCensus[at + 6u] = (first ? vec4(0.0) : nodeCensus[at + 6u]) + view;
             nodeCensus[at + 7u] = (first ? vec4(0.0) : nodeCensus[at + 7u]) + kinds;
+            nodeCensus[at + 8u] = (first ? vec4(0.0) : nodeCensus[at + 8u]) + objects;
         }
     }
 }

@@ -213,8 +213,13 @@ MEASUREMENTS, in order:
   view of 65.5% / 56.3% / 42.7% of the texels, and 61.6% of a texel's near light on average. So in Sponza (unique,
   fragmented) the placement-dependent near view is the larger part, and half the view is far (patch level): the asset
   cook pays off with real rigid objects and instancing, and Sponza's near view argues for short run-time rays over a
-  stored neighbour graph. Next for N1: primitives merged into connected rigid objects (shared or coincident edges), to
-  separate authoring fragments from real placement.
+  stored neighbour graph.
+  Merged (5,450 primitives welded at 1 mm into 408 connected objects; the largest the ivy and hanging curtains, 40% of
+  the triangles, then the cypresses -- the building's walls, columns and arches stay separate pieces): of the 27.6%
+  near on another primitive, 13.1% is the same object's other primitives (authoring fragments) and 14.5% another
+  object's. So the near view is ~two thirds intrinsic (18.9 + 13.1 = 32.0%: the asset cook's) and ~one third placement
+  (14.5%); another object fills >5% / >20% of the view of 33% / 23% of the texels, 35% of a texel's near light. Still
+  an upper bound on placement: welding joins shared vertices only (T-junctions and gaps stay apart).
 - N2 P0a: a geometry-only transport cook from the trusted ray path (cosine-stratified, no guides): near weights onto
   sunlets / patches, far onto patches per bin, sky bins. Entries per texel, bytes, sharing by pooled clusters.
 - N3 Evaluate with no rays under two lightings -- broad light, and a small source seen through a narrow opening -- and
