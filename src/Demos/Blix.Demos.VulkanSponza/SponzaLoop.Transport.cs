@@ -739,10 +739,12 @@ internal sealed partial class SponzaLoop
                 }
             });
         }
+        // The couplings and the sun visibility trace the frame's scene -- the one the patches sit on and RowOf and Tri
+        // read: the bake scene's hits are indices into another (they threw at RowOf, 2026-10-14).
         bool Cutout(RayHit h) => (surfaces[data.RowOf(h.Instance, h.Triangle)] >> 24) < 255u;
         if (sunVisStage is not null) sunVis = sunVisStage;
         var sunVisWithCouplings = false;   // the CPU couplings' loop made them, patch by patch
-        var sunVisMetal = sunVisStage is not null || transportCpuSunVis ? null : WaitForBakeTracer();
+        var sunVisMetal = sunVisStage is not null || transportCpuSunVis ? null : WaitForFrameTracer();
         if (couplingStage is not null)
         {
             couplings = couplingStage.Couplings; sunletCouplings = couplingStage.SunletCouplings; sky = couplingStage.Sky;
@@ -750,7 +752,7 @@ internal sealed partial class SponzaLoop
         }
         else
         {
-        var couplingsMetal = transportCpuCouplings ? null : WaitForBakeTracer();
+        var couplingsMetal = transportCpuCouplings ? null : WaitForFrameTracer();
         if (couplingsMetal is not null) CouplingsOnMetal(couplingsMetal);
         else
         {

@@ -924,6 +924,10 @@ internal sealed partial class SponzaLoop
         sunNodeStats = Own(device.CreateGpuBuffer(48, new byte[48], "sponza.sun-nodes.stats"));
         sunNodeClock.Restart();
         sunNodeStage = SunNodeStage.Tracing;
+        // The sun moved during the setup (the solve, the bits, the lists: ~1.5 min on Sponza): no tracing a sun that
+        // is gone -- the newest's cook starts now (2026-10-14: a second move waited out the first's whole 3.3-min trace).
+        if (SunOnlyCook && splitSunWanted is { } wanted && sunNodeDirsAsked is [var asked] && Vector3.Distance(wanted, asked) > 1e-5f)
+            SplitSunChanged(wanted);
     }
 
     // Each live texel's nearest patch it can see, a slice a frame (as many texels as the rays buffer holds PatchCandidates
