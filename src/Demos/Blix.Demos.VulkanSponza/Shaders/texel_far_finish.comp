@@ -26,7 +26,7 @@ layout(set = 0, binding = 0) uniform FarFinish {
     vec4 uCookedGrid;
     vec4 uCookedDims;
     vec4 uFar;
-    vec4 uDebug;    // x 1: land the far light alone; 2: the blended patches as colours (--far-debug)
+    vec4 uDebug;    // x 1: land the far light alone; 2: the blended patches as colours (--far-debug); y the slice's serial
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
@@ -36,6 +36,12 @@ layout(std430, set = 0, binding = 4) readonly buffer NodeGuidePatch { uint guide
 // [slice texel][blended patch][bin]: x weight, y far, z w^2, w far w^2 (texel_nodes_shade.glsl).
 layout(std430, set = 0, binding = 5) readonly buffer NodeFarBins { vec4 farBins[]; };
 layout(std430, set = 0, binding = 6) buffer NodeAccum { vec4 nodeAccum[]; };
+// The pooling's inputs (texel_far_pool.comp): each slice texel's evidence, where its id's evidence lies this slice, and
+// its rays' harmonic sums (texel_nodes_shade.glsl: x sum of 1 / hit distance, y rays).
+layout(std430, set = 0, binding = 12) writeonly buffer FarEvidence { vec4 evidence[]; };
+layout(std430, set = 0, binding = 13) writeonly buffer FarSliceMap { uint sliceMap[]; };
+layout(std430, set = 0, binding = 14) readonly buffer NodeHarmonic { vec2 harmonic[]; };
+#define EVIDENCE 7
 
 #define COOKED_BINDING 7
 #define COOKED_GRID u.uCookedGrid
@@ -52,7 +58,11 @@ void main() {
     uint id = nodeIds[uint(u.uFinish.x) + t];
     int p = texelPatch[id];
     if (p < 0) p = int(guidePatch[id]) - 2;
-    if (p < 0) return;
+    sliceMap[id] = (uint(u.uDebug.y) & 0xFFFFu) << 16 | t;
+    if (p < 0) {
+        evidence[t * uint(EVIDENCE) + 6u] = vec4(0.0);   // no patch: no evidence, its sums stand
+        return;
+    }
     vec3 x = texels[2u * id].xyz;
     vec3 n = normalize(texels[2u * id + 1u].xyz);
     int ids[FAR_SET];
@@ -84,7 +94,7 @@ void main() {
     float passes = u.uFinish.z;
     const vec3 lumW = vec3(0.2126, 0.7152, 0.0722);
     vec3 light[4] = vec3[4](vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0));   // per column (a split cook: up to 3)
-    float spread = 0.0;
+    float spread = 0.0, recordSpread = 0.0;
     for (int i = 0; i < FAR_SET; ++i) {
         if (ids[i] < 0) continue;
         uint row = (t * uint(FAR_SET) + uint(i)) * uint(FAR_BINS);
@@ -92,7 +102,7 @@ void main() {
         float allW = 0.0, allF = 0.0;
         for (int b = 0; b < FAR_BINS; ++b) { vec4 wf = farBins[row + uint(b)]; allW += wf.x; allF += wf.y; }
         float vAll = allW > 0.0 ? allF / allW : 0.0;
-        float variance = 0.0;
+        float variance = 0.0, recordVariance = 0.0;
         for (int b = 0; b < FAR_BINS; ++b) {
             float cb = c[i * FAR_BINS + b];
             if (cb <= 0.0) continue;
@@ -108,8 +118,11 @@ void main() {
                 l += dot(L, lumW);
             }
             variance += (cb * l) * (cb * l) * max(vVariance, 0.0);
+            float se = farBinError(ids[i], b, u.uFar);
+            recordVariance += (cb * v * se) * (cb * v * se);
         }
         spread += ws[i] * sqrt(variance);
+        recordSpread += ws[i] * sqrt(recordVariance);
     }
     if (u.uDebug.x > 0.5) {
         // The diagnostic: the far light alone, or each blended patch's colour by its weight -- landed in place of the
@@ -129,17 +142,21 @@ void main() {
         nodeAccum[t * uint(columns)].w = passes * lum * lum;
         return;
     }
-    float farLum = 0.0, nearLum = 0.0;
-    for (int k = 0; k < columns; ++k) {
-        uint at = t * uint(columns) + uint(k);
-        vec4 a = nodeAccum[at];
-        nearLum += dot(a.rgb, lumW);
-        farLum += dot(light[k], lumW);
-        nodeAccum[at] = vec4(a.rgb + light[k] * passes, a.w);
+    // The evidence: near light per column (the mean of its passes) and its mean's variance; the far light and its variance;
+    // the harmonic mean hit distance (a ray cut at the reach counted at the reach: errs small); the reach.
+    int cols = min(columns, 3);
+    float nearMean = 0.0;
+    for (int k = 0; k < 3; ++k) {
+        vec3 near = k < cols ? nodeAccum[t * uint(columns) + uint(k)].rgb / passes : vec3(0.0);
+        nearMean += dot(near, lumW);
+        // Slot 0's w: the far light's error from its patches' records -- not the texel's to refine (more of its rays do
+        // not move it), but what makes two texels reading different patches differ: the pooling's light test needs it.
+        evidence[t * uint(EVIDENCE) + uint(k)] = vec4(near, k == 0 ? recordSpread * recordSpread : 0.0);
+        evidence[t * uint(EVIDENCE) + 3u + uint(k)] = vec4(k < cols ? light[k] : vec3(0.0), 0.0);
     }
-    // Each pass's composed luminance was near alone; with the far light (the same every pass) it is near + far: the sum
-    // of squares grows by 2 far near-sum + passes far^2, and its spread about the mean is the near's, unchanged. The
-    // settling reads the mean's variance as (w / passes - mean^2) / passes: the far light's own error enters as passes^2
-    // x its variance.
-    nodeAccum[t * uint(columns)].w += 2.0 * farLum * nearLum + passes * farLum * farLum + passes * passes * spread * spread;
+    float squares = nodeAccum[t * uint(columns)].w;
+    float nearVariance = max(squares / passes - nearMean * nearMean, 0.0) / passes;
+    vec2 hs = harmonic[t];
+    float h = hs.x > 0.0 ? min(hs.y / hs.x, 8.0) : 8.0;
+    evidence[t * uint(EVIDENCE) + 6u] = vec4(nearVariance, spread * spread, h, max(farSetReach(x, ids, u.uFar), 1e-3));
 }

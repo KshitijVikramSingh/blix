@@ -89,6 +89,7 @@
     <GlslShader Include="Shaders\texel_far_finish.comp" />
     <GlslShader Include="Shaders\texel_far_judge.comp" />
     <GlslShader Include="Shaders\texel_far_neighbours.comp" />
+    <GlslShader Include="Shaders\texel_far_pool.comp" />
     <GlslShader Include="Shaders\texel_filter_fill.comp" />
     <GlslShader Include="Shaders\reference_trace.comp" />
     <GlslShader Include="Shaders\reference_points.comp" />

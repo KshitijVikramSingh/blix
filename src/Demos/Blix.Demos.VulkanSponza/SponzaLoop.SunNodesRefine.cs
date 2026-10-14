@@ -123,6 +123,7 @@ internal sealed partial class SponzaLoop
     {
         // After the sweep: the texels kept before the median was whole judged again against it.
         if (sunNodeRefineRound == 0) ReportNoiseCensus();
+        if (sunNodeRefineRound == 0) ReportFarPool("after the sweep");
         if (sunNodeRefineRound == 0 && sunNodeDarkBar > 0f) RejudgeAfterSweep();
         var left = sunNodeNextIds.Count;
         var of = sunNodeRefineRound == 0 ? sunNodeTraceIds.Length : sunNodeRefineIds.Length;

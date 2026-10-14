@@ -84,6 +84,20 @@ vec3 farLight(int patchIndex, int bin, int column, vec4 far) {
     return vec3(float(farRecord[c]), float(farRecord[c + 1u]), float(farRecord[c + 2u])) / w;
 }
 
+// A bin's mean's standard error, composed over the columns: its spread (the luminance^2 words) over its effective rays.
+float farBinError(int patchIndex, int bin, vec4 far) {
+    uint base = farBase(patchIndex, bin, far);
+    float w = float(farRecord[base]);
+    if (w <= 0.0) return 0.0;
+    float variance = 0.0;
+    for (int k = 0; k < int(far.w + 0.5); ++k) {
+        uint at = farRgbAt(base, k);
+        float m = dot(vec3(float(farRecord[at]), float(farRecord[at + 1u]), float(farRecord[at + 2u])) / w, vec3(0.2126, 0.7152, 0.0722));
+        variance += max(float(farRecord[farSquareAt(base, k, far)]) / w - m * m, 0.0);
+    }
+    return sqrt(variance / max(farRays(base), 1.0));
+}
+
 float farEscape(int patchIndex, int bin, vec4 far) {
     uint at = farBase(patchIndex, bin, far);
     return float(farRecord[at + 1u]) / max(float(farRecord[at]), 1.0);

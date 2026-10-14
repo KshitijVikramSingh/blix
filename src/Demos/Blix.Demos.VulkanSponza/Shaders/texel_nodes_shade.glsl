@@ -81,6 +81,9 @@ layout(std430, set = 0, binding = 25) readonly buffer NodeGuidePatch { uint guid
 // [slice texel][blended patch][bin] (texel_far.glsl, FAR_SET): x weight, y far weight, z w^2, w far w^2 -- the texel's
 // rays where every blended patch knows the direction, binned in each patch's own frame.
 layout(std430, set = 0, binding = 27) buffer NodeFarBins { vec4 farBins[]; };
+// [slice texel]: x the sum of 1 / its rays' hit distances (a ray cut at the reach: the reach; a miss: nothing), y its
+// rays -- the harmonic mean distance, the pooling's footprint (texel_far_pool.comp).
+layout(std430, set = 0, binding = 29) buffer NodeHarmonic { vec2 nodeHarmonic[]; };
 
 #define COOKED_BINDING 11
 #define COOKED_GRID u.uCookedGrid
@@ -279,6 +282,14 @@ void main() {
     barrier();
     // The sweep: each bin's rays' weight, and how much of it went far -- the texel's own view of which directions are open
     // past its reach (texel_far_finish.comp weighs the record's light by it).
+    if (farOn && !farRecording && lid == 0u) {
+        vec2 hs = vec2(0.0, float(RAYS));
+        for (int r = 0; r < RAYS; ++r) {
+            float d = sFar[r] > 0.5 ? sFarReach : sDist[r];
+            if (d < 1e29) hs.x += 1.0 / max(d, 1e-3);
+        }
+        nodeHarmonic[group] = (u.uShade.w > 0.5 ? nodeHarmonic[group] : vec2(0.0)) + hs;
+    }
     // Per blended patch, in its own bins, over the rays every blended patch knows the direction of.
     if (farOn && !farRecording && sFarPatch >= 0)
         for (int ib = int(lid); ib < FAR_SET * FAR_BINS; ib += SHADE_THREADS) {

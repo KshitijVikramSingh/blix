@@ -310,6 +310,9 @@ internal sealed partial class SponzaLoop
         sunNodeLive = Own(device.CreateGpuBuffer(live.Length * 4, MemoryMarshal.AsBytes(live.AsSpan()), "sponza.sun-nodes.live"));
         // A live split cook traces what the image reads first (SponzaLoop.SplitLanding.cs); otherwise the live order.
         sunNodeTraceIds = sunNodeStride == 1 ? SplitTraceOrder(live) : live.Where((_, i) => i % sunNodeStride == 0).ToArray();
+        // The far field pools a slice's texels with their neighbours: neighbours trace together (SponzaLoop.FarField.cs).
+        if (farField && splitCooking && sunNodeStride == 1)
+            sunNodeTraceIds = FarSpatialOrder(sunNodeTraceIds, ReferenceEquals(sunNodeTraceIds, live) ? 0 : splitVisibleCount);
         sunNodeTraceBuffer = ReferenceEquals(sunNodeTraceIds, live) ? sunNodeLive
             : Own(device.CreateGpuBuffer(sunNodeTraceIds.Length * 4, MemoryMarshal.AsBytes(sunNodeTraceIds.AsSpan()), "sponza.sun-nodes.traced"));
         sunNodeSunsBuffer = Own(device.CreateGpuBuffer(sunNodeDirs.Length * 16, MemoryMarshal.AsBytes(sunNodeDirs.AsSpan()), "sponza.sun-nodes.suns"));
@@ -489,6 +492,7 @@ internal sealed partial class SponzaLoop
         var suns = sunNodeSuns!;
         var trace = sunNodeClock.Elapsed.TotalMinutes;
         var words = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(sunNodeStats, 0, 48).AsSpan()).ToArray();
+        ReportFarPool("over the refining rounds");
         var stats = Enumerable.Range(0, 6).Select(k => (ulong)words[2 * k] | ((ulong)words[2 * k + 1] << 32)).ToArray();
         var hits = Math.Max(stats[0], 1ul);
         Console.WriteLine(string.Create(Inv,
@@ -814,6 +818,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("FarRecord", FarRecordBuffer),
                 new ShaderBufferBinding("NodeFarBins", FarBinsBuffer),
                 new ShaderBufferBinding("PatchNeighbours", FarNeighboursBuffer),
+                new ShaderBufferBinding("NodeHarmonic", FarHarmonicBuffer),
             }.Concat(CookedBuffers()).Where(b => declared.Contains(b.Name)).ToArray());
     }
 
