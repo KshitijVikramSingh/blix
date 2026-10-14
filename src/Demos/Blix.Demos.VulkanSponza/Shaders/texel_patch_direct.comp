@@ -1,0 +1,40 @@
+#version 450
+// The near-field comparison (plan.md N3; SponzaLoop.NoiseCensus.cs): each patch's AVERAGE direct sun over its texels,
+// per sun column -- what a near hit would read if near transport were stored at patch level (a near hit's light from its
+// patch alone), where the sweep's rays read the hit texel's own sun bits. A thread a live texel: its n.l x visibility
+// (its sun bits) for each column with a sun, added into its patch's sum (fixed point), and one into its patch's count.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform PatchDirect {
+    vec4 uDirect;   // x the live texels, y the columns (suns), z the sun-bit words a texel, w the first live texel
+    vec4 uPatches;  // x the patches
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 2) readonly buffer SunNodesLive { uint liveIds[]; };
+layout(std430, set = 0, binding = 3) readonly buffer TexelPatch { int texelPatch[]; };
+layout(std430, set = 0, binding = 4) readonly buffer SunNodes { vec4 sunNodes[]; };
+layout(std430, set = 0, binding = 5) readonly buffer SunNodeBits { uint sunBits[]; };
+// [patch][column]: n.l x visibility summed (x 65536); [patches x columns + patch]: its texels.
+layout(std430, set = 0, binding = 6) buffer PatchDirectSums { uint patchDirect[]; };
+
+void main() {
+    uint t = gl_GlobalInvocationID.x;
+    if (t >= uint(u.uDirect.x)) return;
+    uint id = liveIds[uint(u.uDirect.w) + t];
+    int p = texelPatch[id];
+    if (p < 0) return;
+    vec3 n = texels[2u * id + 1u].xyz;
+    if (dot(n, n) < 1e-12) return;
+    n = normalize(n);
+    uint columns = uint(u.uDirect.y), words = uint(u.uDirect.z);
+    for (uint k = 0u; k < columns; ++k) {
+        uint kind = uint(sunNodes[k].w + 0.5);
+        if ((kind & 1u) == 0u) continue;
+        float ndotl = max(dot(n, sunNodes[k].xyz), 0.0);
+        bool lit = (sunBits[id * words + k / 32u] & (1u << (k % 32u))) != 0u;
+        if (lit && ndotl > 0.0) atomicAdd(patchDirect[uint(p) * columns + k], uint(ndotl * 65536.0 + 0.5));
+    }
+    atomicAdd(patchDirect[uint(u.uPatches.x) * columns + uint(p)], 1u);
+}

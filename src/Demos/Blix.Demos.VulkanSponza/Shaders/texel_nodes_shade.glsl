@@ -37,6 +37,8 @@ layout(set = 0, binding = 0) uniform SunNodesShade {
                           // ray toward sun 0 (ExactOrigins) and stop; 2 shade sun 0 by that ray's answer (ExactOccluded)
     vec4 uFar;            // the far field (texel_far.glsl): x 0 off, 1 the record pass, 2 the sweep reads the record; y the
                           // patch spacing; z a known bin's weight (fixed point); w the columns
+    vec4 uTransport;      // the transport census (N2, SponzaLoop.TransportCensus.cs): x 1 on; y the patch spacing; z the
+                          // patches; w 1: the near-field comparison (N3: PatchDirectSums read, census slot 9)
 } u;
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
@@ -82,6 +84,16 @@ layout(std430, set = 0, binding = 23) readonly buffer NodeIds { uint nodeIds[]; 
 // near on another object, z the passes with any other-object near hit.
 layout(std430, set = 0, binding = 24) buffer NodeCensus { vec4 nodeCensus[]; };
 layout(std430, set = 0, binding = 30) readonly buffer CensusObjects { uint censusObject[]; };   // [placement]: its object
+// The transport census (plan.md N2): each ray of a slice texel's sweep as a light-free relationship -- [slice texel]
+// [pass x 32 + ray]: x its kind (bits 30-31: 0 the sky, 1 near on its own object, 2 near on another object, 3 past the
+// reach) and what (the sky's octahedral bin of 64; the near hit's texel, or its patch | 1 << 29 among no texel; the far
+// hit's patch), y the near hit's patch (else 0xFFFFFFFF). texel_transport_census.comp counts them.
+layout(std430, set = 0, binding = 31) buffer NodeTransport { uvec2 nodeTransport[]; };
+// The near-field comparison (texel_patch_direct.comp): each patch's n.l x visibility summed over its texels per column
+// (x 65536), then each patch's texel count -- a near hit's direct sun if near transport were stored at patch level.
+layout(std430, set = 0, binding = 32) readonly buffer PatchDirectSums { uint patchDirect[]; };
+// [9] with the comparison: x each pass's composed (patch-level near - per-texel near) direct, summed; y the per-texel
+// near direct's luminance, summed; z the patch-level one's.
 // The far field (texel_far.glsl): each texel's guide patch (texel_nodes_rays.comp: the patch + 2), the record (written by
 // the record pass, read by the sweep), and per slice texel per bin its rays' weight and the share of it gone far (x all,
 // y far), summed over the slice's passes -- texel_far_finish.comp turns them and the record into the far light.
@@ -121,6 +133,7 @@ shared float sColumnLum[MAX_WORDS * 32];   // each column's pass mean's luminanc
 shared vec4 sColumnSource[MAX_WORDS * 32]; // the census: each column's pass mean's luminance by source
 shared vec4 sColumnFar[MAX_WORDS * 32];    // ... from beyond R
 shared vec4 sColumnNear[MAX_WORDS * 32];   // ... from within R
+shared vec4 sColumnCompare[MAX_WORDS * 32]; // the near-field comparison: (A - B, B, A, 0) of the near hits' direct
 // The far field: the texel's patch (-1: none, or the far field off), its reach, the patch's frame; each ray's bin (-1:
 // below the patch's horizon), whether it is far (past the reach, in a bin the record knows -- or, recording, any bin),
 // its weight.
@@ -134,6 +147,9 @@ shared float sFar[RAYS];
 shared float sJoint[RAYS];         // every blended patch knows the ray's direction
 shared float sRayWeight[RAYS];
 shared uint sPlacement[RAYS];   // the census: each hit's placement (0xFFFFFFFF a miss)
+shared int sNearTexel[RAYS];    // the transport census: each hit's likeliest texel (-1: among none)
+shared float sTransportReach;
+shared uint sTransportObject;
 
 // The record pass: a far ray's light for a column into its patch's bin (c its weight x radiance, w its weight).
 void farRecordAdd(int patchIndex, int bin, int column, vec3 c, float w, uint slot) {
@@ -184,6 +200,15 @@ void main() {
         sFarPatch = max(fp, -1);
         sFarReach = reach;
     }
+    // The transport census: the texel's reach (as the far field's, from its own patch alone) and its object.
+    if (lid == 0u && u.uTransport.x > 0.5) {
+        uint id = nodeIds[uint(u.uDetail.x) + group];
+        int tp = texelPatch[id];
+        sTransportReach = tp >= 0 ? max(u.uTransport.y, length(texels[2u * id].xyz - cookedPatch[3 * tp].xyz) / 0.2126) : 4.0 * u.uTransport.y;
+        uint own = tp >= 0 ? floatBitsToUint(cookedPatch[3 * tp].w) : 0xFFFFFFFFu;
+        uint placements = uint(u.uDetail.w);
+        sTransportObject = own < placements ? censusObject[own] : own;
+    }
     barrier();
     if (lid < uint(RAYS)) {
         uint slot = group * uint(RAYS) + lid;
@@ -196,6 +221,7 @@ void main() {
         sMiss[lid] = (h0.w & 1u) != 0u ? 0.0 : nodeRayWeight[slot] / PI;
         sRayWeight[lid] = nodeRayWeight[slot];
         sPlacement[lid] = (h0.w & 1u) != 0u ? nodeHits[slot * 3u + 1u].x : 0xFFFFFFFFu;
+        sNearTexel[lid] = -1;
         // A ray past the reach (a miss, or one texel_nodes_rays.comp cut at the reach) where every blended patch's
         // record knows its direction: the patches' light, not its own. Recording, every ray past the reach in any bin
         // above its own patch's horizon.
@@ -253,6 +279,7 @@ void main() {
                 float most = 0.0;
                 for (int c = 0; c < NODE_CANDIDATES; ++c) if (ids[c] >= 0 && weights[c] > most) { most = weights[c]; likeliest = ids[c]; }
                 patchIndex = max(texelPatch[likeliest], -1);
+                sNearTexel[lid] = likeliest;
                 // The texel saw none of its candidate patches (texel_nodes_patch.comp: 22.5% of Sponza's texels, so a
                 // quarter of all hits brought no bounce at all -- dark and blotchy where geometry is busy, 2026-10-14):
                 // the nearest patch on the hit's own placement facing within 60 degrees (the user's rule: not the nearest
@@ -290,6 +317,28 @@ void main() {
     // Writing the exact-sun experiment's origins: nothing to shade (the whole workgroup leaves, before any barrier).
     if (u.uFoliage.z > 0.5 && u.uFoliage.z < 1.5) return;
     barrier();
+    // The transport census: each ray as a relationship, no light in it.
+    if (u.uTransport.x > 0.5 && lid < uint(RAYS) && u.uShade.w < 7.5) {
+        uint kind, what, nearPatch = 0xFFFFFFFFu;
+        if (sPlacement[lid] == 0xFFFFFFFFu) {
+            vec3 d = sDir[lid];
+            d /= abs(d.x) + abs(d.y) + abs(d.z);
+            vec2 o = d.z >= 0.0 ? d.xy : (1.0 - abs(d.yx)) * vec2(d.x >= 0.0 ? 1.0 : -1.0, d.y >= 0.0 ? 1.0 : -1.0);
+            ivec2 b = clamp(ivec2((o * 0.5 + 0.5) * 8.0), ivec2(0), ivec2(7));
+            kind = 0u; what = uint(b.y * 8 + b.x);
+        } else if (sDist[lid] < sTransportReach) {
+            uint placements = uint(u.uDetail.w);
+            uint hitObject = sPlacement[lid] < placements ? censusObject[sPlacement[lid]] : sPlacement[lid];
+            kind = hitObject == sTransportObject ? 1u : 2u;
+            int pw = int(sHit[lid].w);
+            nearPatch = pw >= 0 ? uint(pw) : 0xFFFFFFFEu;
+            what = sNearTexel[lid] >= 0 ? uint(sNearTexel[lid]) : (pw >= 0 ? uint(pw) | (1u << 29) : 0x1FFFFFFFu);
+        } else {
+            int pw = int(sHit[lid].w);
+            kind = 3u; what = pw >= 0 ? uint(pw) : 0x3FFFFFFEu;
+        }
+        nodeTransport[group * 256u + uint(u.uShade.w) * uint(RAYS) + lid] = uvec2((kind << 30) | (what & 0x3FFFFFFFu), nearPatch);
+    }
     // The sweep: each bin's rays' weight, and how much of it went far -- the texel's own view of which directions are open
     // past its reach (texel_far_finish.comp weighs the record's light by it).
     if (farOn && !farRecording && lid == 0u) {
@@ -330,7 +379,7 @@ void main() {
         vec2 tilt = vec2(0.0);
         const vec3 lumW = vec3(0.2126, 0.7152, 0.0722);
         vec4 source = vec4(0.0);
-        vec4 far = vec4(0.0), near = vec4(0.0);
+        vec4 far = vec4(0.0), near = vec4(0.0), compare = vec4(0.0);
         bool census = u.uDetail.z > 0.5;
         // A hit with no patch (none seen, none on its placement facing its way: 4.5% of Sponza's hits, 2026-10-14) has no
         // known bounce -- unknown, not dark. It took 0, and those hits gather where the light is darkest (crevices, under
@@ -370,6 +419,16 @@ void main() {
             }
             if (h.w >= 0.0) source.y += dot(h.rgb * light, lumW); else source.w += dot(h.rgb * light, lumW);
             float ndotl = hasSun ? max(dot(sNormal[r], toSun), 0.0) : 0.0;
+            // The near-field comparison: this near hit's direct as the patch level would give it (its patch's average
+            // n.l x visibility), against the per-texel one below.
+            bool comparing = census && u.uTransport.w > 0.5 && hasSun && sFarPatch >= 0 && sDist[r] < sFarReach && int(h.w) >= 0;
+            float patchLevel = 0.0, texelLevel = 0.0;
+            if (comparing) {
+                uint columnsAll = uint(suns), patches = uint(u.uTransport.z);
+                uint hp = uint(h.w);
+                float texelsThere = float(patchDirect[patches * columnsAll + hp]);
+                patchLevel = texelsThere > 0.0 ? float(patchDirect[hp * columnsAll + uint(k)]) / 65536.0 / texelsThere : 0.0;
+            }
             if (ndotl > 0.0) {
                 float visible = sUnknown[r] * u.uSunIrradiance.w;
                 if (k == 0 && sExact[r] >= 0.0) { light += u.uSunIrradiance.rgb * ndotl * sExact[r]; sum += h.rgb * light; continue; }
@@ -377,8 +436,13 @@ void main() {
                     if ((sBits[(uint(r) * NODE_CANDIDATES + uint(c)) * MAX_WORDS + word] & bit) != 0u) visible += sWeight[r * NODE_CANDIDATES + c];
                 light += u.uSunIrradiance.rgb * ndotl * visible;
                 float sunHere = dot(h.rgb * u.uSunIrradiance.rgb * ndotl * visible, lumW);
+                texelLevel = ndotl * visible;
                 source.z += sunHere;
                 if (census) { if (sDist[r] >= 1.0) far.w += sunHere; else near.w += sunHere; }
+            }
+            if (comparing) {
+                float a = dot(h.rgb * u.uSunIrradiance.rgb * patchLevel, lumW), b = dot(h.rgb * u.uSunIrradiance.rgb * texelLevel, lumW);
+                compare += vec4(a - b, b, a, 0.0);
             }
             sum += h.rgb * light;
             if (farRecording && sFar[r] > 0.5) farRecordAdd(sFarPatch, sBin[r * FAR_SET], k, sum - before, sRayWeight[r], group * uint(RAYS) + uint(r));
@@ -404,6 +468,7 @@ void main() {
         sColumnSource[k] = source / float(RAYS);
         sColumnFar[k] = far / float(RAYS);
         sColumnNear[k] = near / float(RAYS);
+        sColumnCompare[k] = compare / float(RAYS);
     }
     barrier();
     // Thread 0 wrote column 0 above: the moment rides on it.
@@ -415,7 +480,7 @@ void main() {
             vec4 bySource = vec4(0.0), byFar = vec4(0.0), byNear = vec4(0.0);
             for (int k = 0; k < suns; ++k) { bySource += sColumnSource[k]; byFar += sColumnFar[k]; byNear += sColumnNear[k]; }
             bool first = u.uShade.w < 0.5;
-            uint at = 9u * group;
+            uint at = 10u * group;
             nodeCensus[at] = (first ? vec4(0.0) : nodeCensus[at]) + bySource;
             nodeCensus[at + 1u] = (first ? vec4(0.0) : nodeCensus[at + 1u]) + bySource * bySource;
             nodeCensus[at + 2u] = (first ? vec4(0.0) : nodeCensus[at + 2u]) + byFar;
@@ -460,6 +525,9 @@ void main() {
             nodeCensus[at + 6u] = (first ? vec4(0.0) : nodeCensus[at + 6u]) + view;
             nodeCensus[at + 7u] = (first ? vec4(0.0) : nodeCensus[at + 7u]) + kinds;
             nodeCensus[at + 8u] = (first ? vec4(0.0) : nodeCensus[at + 8u]) + objects;
+            vec4 compare = vec4(0.0);
+            for (int k = 0; k < suns; ++k) compare += sColumnCompare[k];
+            nodeCensus[at + 9u] = (first ? vec4(0.0) : nodeCensus[at + 9u]) + compare;
         }
     }
 }

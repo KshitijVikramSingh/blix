@@ -45,12 +45,13 @@ public sealed class VkImGuiRenderer : IDisposable
     // validation said nothing either, which is expected — overwriting a host-visible buffer that is
     // still being read is a synchronisation hazard, not an API misuse.
     //
-    // Rotated internally rather than asking the device which slot it is on: Render is called once
-    // per frame, so a local counter and the device's frame index advance in lockstep, and the
-    // renderer does not grow a dependency on swapchain internals to fix its own buffer.
+    // <b>The slot is the device's frame slot, not a counter of our own.</b> A local counter that
+    // alternates on every upload was safe too (two consecutive uploads never share a slot, and with two
+    // frames in flight the other slot's frame is fenced), but only by that argument; the device has just
+    // waited on CurrentFrameSlot's fence when the overlay pass records, so that slot is free by
+    // construction, whatever frames upload nothing.
     private readonly VertexBufferHandle[] vertexBuffers;
     private readonly IndexBufferHandle[] indexBuffers;
-    private int bufferSlot;
     private readonly ShaderProgramHandle shader;
     private readonly PipelineHandle pipeline;
     private readonly TextureHandle fontTexture;
@@ -242,8 +243,8 @@ public sealed class VkImGuiRenderer : IDisposable
         }
         if (vtxBase == 0) return;
 
-        // Advanced BEFORE the upload, so this frame writes the slot the GPU is not reading.
-        bufferSlot = (bufferSlot + 1) % vertexBuffers.Length;
+        // The slot the device has just fenced for this frame: the GPU is not reading it.
+        var bufferSlot = device.CurrentFrameSlot % vertexBuffers.Length;
         var vertexBuffer = vertexBuffers[bufferSlot];
         var indexBuffer = indexBuffers[bufferSlot];
 

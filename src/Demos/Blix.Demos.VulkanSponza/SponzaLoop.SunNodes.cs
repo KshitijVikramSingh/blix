@@ -137,6 +137,7 @@ internal sealed partial class SponzaLoop
         sunNodeLights = !args.Flag("sun-nodes-no-lights");
         noiseCensus = args.Flag("split-noise-census");
         ReadFarArgs(args);
+        ReadTransportCensusArgs(args);
         if (args.Int("sun-nodes-bounces") is { } nb) sunNodeBouncesAsked = Math.Max(0, nb);
         if (args.Float("sun-nodes-plane") is { } pl) sunNodePlane = Math.Max(0.01f, pl);
         if (args.Float("sun-nodes-sigma") is { } sg) sunNodeSigma = Math.Max(0.05f, sg);
@@ -172,6 +173,9 @@ internal sealed partial class SponzaLoop
     {
         DeclareSunNodeSolvePasses(reflect);
         DeclareFarPasses(reflect);
+        DeclareTransportCensus(reflect);
+        DeclarePatchDirect(reflect);
+        transportCensusPass = graph.ComputePass("sun-nodes-transport-census").Shader(transportCensusInterface).Handle;
         sunNodePrepInterface = reflect(new[] { "texel_nodes_prep.comp" });
         sunNodePrepPass = graph.ComputePass("sun-nodes-prep").Shader(sunNodePrepInterface).Handle;
         sunNodeRaysInterface = reflect(new[] { "texel_nodes_rays.comp" });
@@ -199,6 +203,8 @@ internal sealed partial class SponzaLoop
             File.ReadAllBytes(Path.Combine(shaderDir, name + ".comp.spv")), si, name)), name));
         CreateSunNodeSolvePipeline(shaderDir);
         CreateFarPipeline(shaderDir);
+        CreateTransportCensusPipeline(shaderDir);
+        CreatePatchDirectPipeline(shaderDir);
         sunNodePrepPipeline = Make("texel_nodes_prep", sunNodePrepInterface);
         sunNodePatchPipeline = Make("texel_nodes_patch", sunNodePatchInterface);
         sunNodeRaysPipeline = Make("texel_nodes_rays", sunNodeRaysInterface);
@@ -355,6 +361,7 @@ internal sealed partial class SponzaLoop
         var keep = Math.Min(sunNodeKeep, suns);
         if (splitCooking) BeginSplitDetail(suns, keep);
         BeginFarField(suns);
+        BeginTransportCensus();
         BeginNoiseCensus();
         sunNodeResults = new uint[keep][];
         for (var k = 0; k < keep; k++) sunNodeResults[k] = new uint[texelCount * 2];
@@ -425,6 +432,7 @@ internal sealed partial class SponzaLoop
         {
             sunNodePass = 0;
             FarFinish(now: false, refining ? sunNodeRefineBuffer : sunNodeTraceBuffer, sunNodeFirst, slice, passes);
+            TransportCensusFinish(now: false, slice, passes);
             sunNodeReadback = true;
         }
     }
@@ -726,6 +734,7 @@ internal sealed partial class SponzaLoop
                 FarRecordStep(now: true);
                 continue;
             }
+            if (sunNodeRefineRound == 0) PatchDirectNow();
             var refining = sunNodeRefineRound > 0;
             var live = refining ? sunNodeRefineIds : sunNodeTraceIds;
             var sweepPasses = sunNodeRays / 32;
@@ -737,6 +746,7 @@ internal sealed partial class SponzaLoop
             {
                 sunNodePass = 0;
                 FarFinish(now: true, refining ? sunNodeRefineBuffer : sunNodeTraceBuffer, sunNodeFirst, slice, passes);
+                TransportCensusFinish(now: true, slice, passes);
                 sunNodeReadback = true;
             }
         }
@@ -790,6 +800,7 @@ internal sealed partial class SponzaLoop
                 new("uFoliage", new Vector4Uniform(new Vector4(sunNodeFoliageSlots, discover, exactMode, 0f))),
                 new("uDetail", new Vector4Uniform(new Vector4(first, detail ? 1f : 0f, CensusOn(discover) ? 1f : 0f, censusPlacements))),
                 new("uFar", new Vector4Uniform(exactMode > 0f ? Vector4.Zero : FarUniform(discover))),
+                new("uTransport", new Vector4Uniform(TransportUniform(discover))),
             },
             new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
             Buffers: new[]
@@ -820,6 +831,8 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("PatchNeighbours", FarNeighboursBuffer),
                 new ShaderBufferBinding("NodeHarmonic", FarHarmonicBuffer),
                 new ShaderBufferBinding("CensusObjects", censusObjects.Equals(default(GpuBufferHandle)) ? sunNodeAccum : censusObjects),
+                new ShaderBufferBinding("NodeTransport", TransportRecordsBuffer),
+                new ShaderBufferBinding("PatchDirectSums", patchDirectSums.Equals(default(GpuBufferHandle)) ? sunNodeAccum : patchDirectSums),
             }.Concat(CookedBuffers()).Where(b => declared.Contains(b.Name)).ToArray());
     }
 

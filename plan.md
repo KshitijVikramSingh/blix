@@ -222,6 +222,20 @@ MEASUREMENTS, in order:
   an upper bound on placement: welding joins shared vertices only (T-junctions and gaps stay apart).
 - N2 P0a: a geometry-only transport cook from the trusted ray path (cosine-stratified, no guides): near weights onto
   sunlets / patches, far onto patches per bin, sky bins. Entries per texel, bytes, sharing by pooled clusters.
+  N2 measured (--transport-census, 256 light-free cosine rays a texel, Sponza 16.0 M texels): distinct relationships a
+  texel -- sky bins 6.1, near own object 15.2, near another object 19.3, FAR PATCHES 79.7 (p90 210, and rising with
+  rays: distant geometry is wide), the near hits' patches 11.0. Stored per texel: 703 B, ~11.7 GB; near capped at 8
+  (the rest into patches) still ~9.8 GB. So the far part never belongs per texel -- patch level, shared (~0.2 GB).
+  Near + sky per texel: ~225 B (3.6 GB), capped ~115 B (1.8 GB); skewed (median ~2 near entries, p90 50-150 in carved
+  geometry): a fixed per-texel budget is the wrong shape.
+  Near stored at patch level against runtime near rays (--split-noise-census: each near hit's direct sun as its
+  patch's average against the hit texel's own sun bits, one sweep): the near hits' direct is 4% of a texel's light (6%
+  in contact texels), but patch-level near is off by p50 0%, p90 30%, p99 1149% and +56% on average (contact texels:
+  p90 157%, +74%) -- a patch straddles a sharp sun shadow, and near hits sit in the shadows (under arches, at column
+  feet), reading their patch's sunlit part. Decided: the near field's direct light needs sub-patch resolution; for a
+  unique scene the placement-dependent near view is SHORT RUN-TIME RAYS reading texel-resolution visibility, not a
+  stored graph. The architecture: far = cooked patch transport; intrinsic near = the asset cook (real reusable meshes);
+  placement near = short rays within a budget; light injected at fine resolution at run time.
 - N3 Evaluate with no rays under two lightings -- broad light, and a small source seen through a narrow opening -- and
   a second sun: against the light cook and the path-trace reference (the gate), with the evaluation's time.
 - N4 Only then P0b, the global-line (ray-bundle) construction, as a microbenchmark emitting the same records: whether
