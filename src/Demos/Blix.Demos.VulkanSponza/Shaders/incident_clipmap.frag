@@ -227,8 +227,17 @@ bool texelsAtLevel(vec3 worldPos, vec3 n, float faceBin, uint level, out vec3 ir
             }
         }
         for (int i = 0; i < 4; ++i) { ids[i] = lm[i]; weights[i] = lw[i]; }
-    } else
-    texelsAround(tg, worldPos, n, faceBin, ids, weights);
+    } else {
+        texelsAround(tg, worldPos, n, faceBin, ids, weights);
+        // The face's own bins found nothing: a thin stem turning through bins its cell holds no record in (few records a
+        // cell on a stem) -- the pixel took the probes' light, white specks along the ivy's and the tree's branches
+        // (2026-10-15). The five bins about the normal instead, as without the face's bins.
+        if (faceBin >= 1.0) {
+            bool none = true;
+            for (int i = 0; i < TEXEL_CANDIDATES; ++i) none = none && ids[i] < 0;
+            if (none) texelsAround(tg, worldPos, n, 0.0, ids, weights);
+        }
+    }
     vec3 sum = vec3(0.0);
     float weight = 0.0, raysWeighted = 0.0, located = 0.0;
     float count = 0.0;
