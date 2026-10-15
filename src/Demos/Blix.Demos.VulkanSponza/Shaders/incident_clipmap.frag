@@ -174,6 +174,7 @@ layout(std430, set = 0, binding = 20) readonly buffer LightmapIndexMap { uint li
 // This pixel's packed atlas texel (main sets it): not 0, the atlas's texels are its level 0 and the hashed cells its
 // coarser levels; 0 (no lightmap, or a surface the atlas leaves out), the hashed cells at every level.
 uint pixelLightmapTexel;
+ivec2 pixelAt;   // the pixel whose lightmap texel pixelLightmapTexel is (uLightmapTexel's)
 #define TEXEL_HASH(i) texelHash[i]
 #define TEXEL_POSITION(i) texels[2 * (i)]
 #define TEXEL_NORMAL(i) texels[2 * (i) + 1]
@@ -210,6 +211,21 @@ bool texelsAtLevel(vec3 worldPos, vec3 n, float faceBin, uint level, out vec3 ir
         int lm[4];
         float lw[4];
         texelsAroundLightmap(atlasTexel, n, ivec2(g.uLightmap.yz), lm, lw);
+        // None of the four answers: a layer under another, nearly coplanar (Sponza's door ornaments are stacked so), wins
+        // the depth test along thin lines, and its texels are rightly buried -- the pixel read nothing and took the
+        // probes' light, bright dashes along the ornaments (2026-10-15). The neighbours' lightmap texels instead, out to
+        // two pixels: mostly the layer on top, and texelsAroundLightmap keeps only the ones facing as this pixel does.
+        if (lm[0] < 0 && lm[1] < 0 && lm[2] < 0 && lm[3] < 0) {
+            ivec2 size = textureSize(uLightmapTexel, 0);
+            for (int k = 0; k < 16 && lm[0] < 0 && lm[1] < 0 && lm[2] < 0 && lm[3] < 0; ++k) {
+                int r = k < 8 ? 1 : 2;
+                ivec2 o = ivec2(k % 8 < 3 ? -1 : k % 8 == 5 || k % 8 == 7 ? 0 : 1, k % 8 == 0 || k % 8 == 3 || k % 8 == 5 ? -1 : k % 8 == 2 || k % 8 == 4 || k % 8 == 7 ? 1 : 0) * r;
+                ivec2 q = clamp(pixelAt + o, ivec2(0), size - 1);
+                vec2 other;
+                if (texelLightmapUnpack(texelFetch(uLightmapTexel, q, 0).r, other))
+                    texelsAroundLightmap(other, n, ivec2(g.uLightmap.yz), lm, lw);
+            }
+        }
         for (int i = 0; i < 4; ++i) { ids[i] = lm[i]; weights[i] = lw[i]; }
     } else
     texelsAround(tg, worldPos, n, faceBin, ids, weights);
@@ -326,6 +342,7 @@ void main() {
     detailSum = vec4(0.0);
     detailMissing = false;
     pixelLightmapTexel = g.uLightmap.x > 0.5 ? texelFetch(uLightmapTexel, pixel, 0).r : 0u;
+    pixelAt = pixel;
     bool texelFound = g.uTexelParams.y > 0.5 && g.uClipParams.y < 0.5 && texelsAt(worldPos, N, nSample.w, viewDepth, gathered, confidence);
     vec3 t1 = normalize(cross(abs(N.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0), N));
     vec3 t2 = cross(N, t1);
