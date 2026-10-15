@@ -46,6 +46,6 @@ internal sealed partial class SponzaLoop
         string Pct(long n) => (100.0 * n / surface).ToString("0.0", CultureInfo.InvariantCulture) + "%";
         var probes = string.Join(", ", Enumerable.Range(2, IncidentPaths.Length - 2).Where(i => c[i] > 0).Select(i => $"{IncidentPaths[i]} {Pct(c[i])}"));
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[VulkanSponza] incident census (frame {framesRendered}): {surface:N0} surface pixels -- the cells alone {Pct(c[1])} (two levels read at {Pct(c[8])}); the probes read: {(probes.Length > 0 ? probes : "none")}."));
+            $"[VulkanSponza] incident census (frame {framesRendered}): {surface:N0} surface pixels -- the cells alone {Pct(c[1])} (two levels read at {Pct(c[8])}; lightmapped {Pct(c[11])}, of them past the atlas {Pct(c[9])}); the probes read: {(probes.Length > 0 ? probes : "none")}."));
     }
 }

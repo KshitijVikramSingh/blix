@@ -158,7 +158,8 @@ vec4 detailSum;
 bool detailMissing;
 // The census (uClipExact.y): pixels by path -- 0 sky, 1 the cells alone, then why the probes were read: 2 no texel found,
 // 3 texels not at rest, 4 no detail up, 5 a texel read had no detail, 6 not whole (confidence), 7 a debug view or screen
-// probes; 8 the two levels read (finest < coarsest) among the cells-alone pixels.
+// probes; 8 the two levels read (the coarser's weight above zero), 9 lightmapped past the atlas, 11 lightmapped -- among
+// the cells-alone pixels.
 layout(std430, set = 0, binding = 36) buffer IncidentCensus { uint census[]; };
 void countPath(uint path) { if (g.uClipExact.y > 0.5) atomicAdd(census[path], 1u); }
 vec3 unpackRgb9e5(uint v) {
@@ -259,29 +260,36 @@ bool texelsAtLevel(vec3 worldPos, vec3 n, float faceBin, uint level, out vec3 ir
 // level taking over by its confidence -- the pixel's own level by its share of the blend with the next (the fraction
 // of its level), so a level changes smoothly across depth. A new view shows the coarse texels' light within frames
 // (there are few of them) and the fine ones fill in where they have rays.
+// The coarser level blends in over the last TEXEL_LEVEL_BAND of each level's band only, not across all of it: across
+// all of it 99.9% of pixels read two levels, and the second -- hashed cells, up to 8 corners x bins -- was ~26 ms of
+// Sponza's frame (a Metal System Trace with the finest level alone, 2026-10-15). The finest is read first, and the coarse
+// only where its weight is above zero or the finest is not whole.
+#define TEXEL_LEVEL_BAND 0.25
 bool texelsAt(vec3 worldPos, vec3 n, float faceBin, float viewDepth, out vec3 irradiance, out float confidence) {
     float levelWanted = texelLevelFor(viewDepth, g.uTexelLevels, g.uTexelGrid.w, texelSunlit(worldPos, n));
     int finest = int(floor(levelWanted));
-    float fraction = levelWanted - float(finest);
+    float fraction = clamp((levelWanted - float(finest) - (1.0 - TEXEL_LEVEL_BAND)) / TEXEL_LEVEL_BAND, 0.0, 1.0);
     int coarsest = min(finest + 1, int(g.uTexelLevels.x) - 1);
     irradiance = vec3(0.0);
     confidence = 0.0;
-    bool any = false;
-    float stampedSum = 0.0, litSum = 0.0;
-    for (int level = coarsest; level >= finest; --level) {
-        vec3 value;
-        float c;
-        if (!texelsAtLevel(worldPos, n, faceBin, uint(level), value, c)) continue;
-        if (level == finest) { stampedSum = debugStamped; litSum = debugLit; }
-        float take = level == finest && finest < coarsest ? c * (1.0 - fraction) : c;
-        // The first level found is the answer so far, its confidence its own (accumulating it again here, as this did,
-        // read one level at 0.5 as 0.75 -- and let half-gathered texels push the clipmap out early).
-        if (!any) { irradiance = value; confidence = c; any = true; continue; }
-        irradiance = mix(irradiance, value, take);
-        confidence = confidence + (1.0 - confidence) * c;
-    }
+    vec3 fineValue;
+    float fineC;
+    bool fine = texelsAtLevel(worldPos, n, faceBin, uint(finest), fineValue, fineC);
+    float stampedSum = debugStamped, litSum = debugLit;
+    bool needCoarse = finest < coarsest && (!fine || fineC <= 0.999 || fraction > 0.0);
+    vec3 coarseValue;
+    float coarseC;
+    bool coarse = needCoarse && texelsAtLevel(worldPos, n, faceBin, uint(coarsest), coarseValue, coarseC);
     debugStamped = stampedSum; debugLit = litSum;
-    return any;
+    // As before: the coarse level's answer first, the finer taking over by its confidence (its share of the blend with
+    // the next, at the pixel's own level).
+    if (!fine && !coarse) return false;
+    if (!coarse) { irradiance = fineValue; confidence = fineC; return true; }
+    if (!fine) { irradiance = coarseValue; confidence = coarseC; return true; }
+    float take = fineC * (1.0 - fraction);
+    irradiance = mix(coarseValue, fineValue, take);
+    confidence = coarseC + (1.0 - coarseC) * fineC;
+    return true;
 }
 
 void main() {
@@ -326,7 +334,9 @@ void main() {
         countPath(1u);
         if (g.uClipExact.y > 0.5) {
             float lw = texelLevelFor(viewDepth, g.uTexelLevels, g.uTexelGrid.w, texelSunlit(worldPos, N));
-            if (int(floor(lw)) < min(int(floor(lw)) + 1, int(g.uTexelLevels.x) - 1)) countPath(8u);
+            if (int(floor(lw)) < min(int(floor(lw)) + 1, int(g.uTexelLevels.x) - 1) && fract(lw) > 1.0 - TEXEL_LEVEL_BAND) countPath(8u);
+            if (pixelLightmapTexel != 0u && lw >= 1.0) countPath(9u);         // a lightmapped pixel past the atlas
+            if (pixelLightmapTexel != 0u) countPath(11u);
         }
         vec3 d = detailSum.xyz / detailSum.w;
         outIncident = vec4(gathered, d.z);
