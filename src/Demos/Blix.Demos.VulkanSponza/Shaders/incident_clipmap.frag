@@ -308,7 +308,22 @@ bool texelsAt(vec3 worldPos, vec3 n, float faceBin, float viewDepth, out vec3 ir
     debugStamped = stampedSum; debugLit = litSum;
     // As before: the coarse level's answer first, the finer taking over by its confidence (its share of the blend with
     // the next, at the pixel's own level).
-    if (!fine && !coarse) return false;
+    if (!fine && !coarse) {
+        // Neither level answers: the coarser levels up to the last, the first that does taking the pixel whole. Left to
+        // the probes these pixels found none (the clipmap had no answer there either) and took the open-sky cube, full
+        // sky in the shade: ~700 pixels a frame along the ivy's and the tree's stems, white specks and orange branches
+        // (the census, 2026-10-15).
+        for (int level = max(finest, coarsest) + 1; level < int(g.uTexelLevels.x); ++level) {
+            vec3 value;
+            float c;
+            if (!texelsAtLevel(worldPos, n, faceBin, uint(level), value, c)) continue;
+            irradiance = value;
+            confidence = 1.0;
+            debugStamped = stampedSum; debugLit = litSum;
+            return true;
+        }
+        return false;
+    }
     if (!coarse) { irradiance = fineValue; confidence = fineC; return true; }
     if (!fine) { irradiance = coarseValue; confidence = coarseC; return true; }
     float take = fineC * (1.0 - fraction);
@@ -397,6 +412,7 @@ void main() {
     }
     vec4 field = blix_clipmapSampleDirs(c, worldPos, N, normalize(N + tilt * t1), normalize(N + tilt * t2), found, e1, e2);
     outIncident = found ? field : vec4(texture(uIrradiance, N).rgb, 1.0);
+    if (texelFound) countPath(14u);
     // The surface probes answer where they exist: the same surface keeps the same probes wherever the camera stands.
     // The gradient below stays the clipmap's (relative, applied to whatever light the pixel ends with).
     BlixSurfaceGrid sg;
@@ -410,6 +426,10 @@ void main() {
     float surfaceWeight, surfaceConfidence;
     vec4 surfaceField = blix_surfaceSample(sg, worldPos, N, surfaceWeight, surfaceConfidence);
     if (surfaceWeight > 0.0) outIncident = found ? mix(outIncident, surfaceField, surfaceConfidence) : surfaceField;
+    // The census: what answered a pixel the texels did not answer alone -- 12 the open-sky cube (no probe at all), 13 the
+    // surface probes (14, counted above: texels found, but mixed with these).
+    if (!found && surfaceWeight <= 0.0) countPath(12u);
+    if (surfaceWeight > 0.0) countPath(13u);
     if (texelFound) outIncident.rgb = mix(outIncident.rgb, gathered, confidence);
     if (g.uReference.w > 1.5) {
         // Which record each of the pixel's four lightmap texels gives it (texelsAroundLightmap's choice), by weight.

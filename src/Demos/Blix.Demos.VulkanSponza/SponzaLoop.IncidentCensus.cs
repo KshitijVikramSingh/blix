@@ -44,8 +44,9 @@ internal sealed partial class SponzaLoop
         for (var i = 1; i < IncidentPaths.Length; i++) surface += c[i];
         if (surface == 0) return;
         string Pct(long n) => (100.0 * n / surface).ToString("0.0", CultureInfo.InvariantCulture) + "%";
+        string Fine(long n) => $"{n:N0} ({(100.0 * n / surface).ToString("0.000", CultureInfo.InvariantCulture)}%)";
         var probes = string.Join(", ", Enumerable.Range(2, IncidentPaths.Length - 2).Where(i => c[i] > 0).Select(i => $"{IncidentPaths[i]} {Pct(c[i])}"));
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[VulkanSponza] incident census (frame {framesRendered}): {surface:N0} surface pixels -- the cells alone {Pct(c[1])} (two levels read at {Pct(c[8])}; lightmapped {Pct(c[11])}, of them past the atlas {Pct(c[9])}); the probes read: {(probes.Length > 0 ? probes : "none")}."));
+            $"[VulkanSponza] incident census (frame {framesRendered}): {surface:N0} surface pixels -- the cells alone {Pct(c[1])} (two levels read at {Pct(c[8])}; lightmapped {Pct(c[11])}, of them past the atlas {Pct(c[9])}); the probes read: {(probes.Length > 0 ? probes : "none")}; of those, the open-sky cube alone (no probe answered) {Fine(c[12])}, the surface probes {Fine(c[13])}, texels found but mixed with the probes {Fine(c[14])}."));
     }
 }
