@@ -73,6 +73,12 @@ internal sealed partial class SponzaLoop
     private bool frameTracerFailed;
     private GpuBufferHandle[] rtShadowOrigins = Array.Empty<GpuBufferHandle>();
     private GpuBufferHandle[] rtShadowMasks = Array.Empty<GpuBufferHandle>();
+    // The mask's planes after its header, a uint a pixel each: the words; the light the sheets a ray went through send the
+    // pixel (rgb8, sqrt-encoded fraction of the sun's: the Metal pass, rt_shadow_fill.comp); that light filtered
+    // (rt_shadow_filter.comp, which lit.frag reads with the header's z at 2).
+    private const int RtMaskPlanes = 3;
+    // Triangle rows of sheets that transmit (RtRowTransmit); none: the trace writes no sheet light.
+    private int rtSheetRows;
     // Per ray, its own direction toward the sun's disc (ShadowsSettings.SunDiscDegrees), per frame slot.
     private GpuBufferHandle[] rtShadowDirections = Array.Empty<GpuBufferHandle>();
     // Per pixel the lightlets' answer (0 lit, 1 shadowed, 2 traced: rt_shadow_rays.comp), per frame slot.
@@ -179,7 +185,7 @@ internal sealed partial class SponzaLoop
             rtShadowOrigins = Enumerable.Range(0, RtPerPixel ? slots : 0)
                 .Select(s => Own(device.CreateGpuBuffer(width * height * 16, name: $"sponza.rt-shadow.origins{s}"))).ToArray();
             rtShadowMasks = Enumerable.Range(0, slots)
-                .Select(s => Own(device.CreateGpuBuffer(16 + width * height * 4, header, $"sponza.rt-shadow.mask{s}"))).ToArray();
+                .Select(s => Own(device.CreateGpuBuffer(16 + width * height * 4 * RtMaskPlanes, header, $"sponza.rt-shadow.mask{s}"))).ToArray();
             rtShadowBaked = Enumerable.Range(0, slots)
                 .Select(s => Own(device.CreateGpuBuffer(width * height * 4, name: $"sponza.rt-shadow.baked{s}"))).ToArray();
             rtShadowDirections = Enumerable.Range(0, RtPerPixel ? slots : 0)
@@ -262,6 +268,8 @@ internal sealed partial class SponzaLoop
         var kind = rtCoverageCoin ? 1 : rtAlphaAb ? 1 + (int)(rtShadowFrame % 2) : 2;
         var seed = unchecked(rtShadowFrame++ * 0x9E3779B9u);
         GpuBufferHandle? perRay = discTangent > 0f ? directions : null;
+        // Through sheets that transmit (the curtains): their light on the points behind them, past the words (RtMaskPlanes).
+        uint? throughAt = rtSheetRows > 0 ? (uint)count : null;
         if (pack)
         {
             var packed = rtShadowPacked[slot];
@@ -271,14 +279,14 @@ internal sealed partial class SponzaLoop
             {
                 EncodeDeferredBatches(sync, tracer);
                 tracer.EncodeShadow(sync, packed, mask, 16, count, towardSun, seed, null,
-                    alphaTest: kind == 2, statSlot: kind, limit: counters, limitOffset: counter * 4, pixelOf: pixelOf);
+                    alphaTest: kind == 2, statSlot: kind, limit: counters, limitOffset: counter * 4, pixelOf: pixelOf, throughAt: throughAt);
             }));
         }
         else graph.External(rtShadowTracePassHandle, sync => tracer.EncodeGroup(sync, () =>
         {
             EncodeDeferredBatches(sync, tracer);
             tracer.EncodeShadow(sync, origins, mask, 16, count, towardSun, seed, sky,
-                alphaTest: kind == 2, statSlot: kind, directions: perRay);
+                alphaTest: kind == 2, statSlot: kind, directions: perRay, throughAt: throughAt);
         }));
         // The frame's deferred batches go in this group (SponzaLoop.TracerGroup.cs).
         tracerGroupRecorded = ReferenceEquals(tracer, frameTracer);
@@ -365,12 +373,60 @@ internal sealed partial class SponzaLoop
         // (SponzaLoop.BakeScene.cs).
         if (metalDeviceQueue) tracer.UseDeviceQueue();
         tracerOnDeviceQueue = metalDeviceQueue;
+        // Sheets that transmit (KHR_materials_diffuse_transmission, --cloth-transmission: the curtains): the sun's shadow
+        // rays go through them (MetalRayTracer.SetTransmit), so they are built non-opaque with the alpha-tested.
+        var rowTransmit = RtRowTransmit(surfaceWords, out rtSheetRows);
+        if (rtSheetRows > 0)
+        {
+            if (alphaTested.Length == 0) alphaTested = new bool[rowTransmit.Length];
+            for (var row = 0; row < rowTransmit.Length; row++) if (rowTransmit[row] != 0u) alphaTested[row] = true;
+        }
         rtBuild = tracer.Build(rayGpuData, blocks, surfaceWords, alphaTested);
         if (!rtCoverageCoin) tracer.SetAlpha(alphaMaterials, rowMaterial, raySurfaceBakeBuffers.First(b => b.Name == "BlixRayUvs").Buffer, rtAlphaMip);
+        if (rtSheetRows > 0) tracer.SetTransmit(rowTransmit);
         frameTracer = tracer;
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] metal tracer: {rtBuild.Value.SolidTriangles + rtBuild.Value.PartialTriangles:N0} triangles ({rtBuild.Value.PartialTriangles:N0} partly covered, {(rtCoverageCoin ? "by the coverage coin" : string.Create(Inv, $"alpha-tested by {alphaMaterials.Count} materials' textures"))}) in {rtBuild.Value.Hierarchies} bottom-level structures, built in {rtBuild.Value.CpuPrepareMs + rtBuild.Value.BlasGpuMs + rtBuild.Value.CompactTlasGpuMs:0} ms; {rtBuild.Value.CompactedBytes / 1048576.0:0} MB."));
         return true;
+    }
+
+    // Per triangle row, its placement's diffuse transmission as rgb8 (MetalRayTracer.SetTransmit; 0: none): the factor in
+    // the cloth's own hue, one colour a sheet -- its rows' mean albedo (the surface bake's, sRGB in the words' low bytes)
+    // over its brightest channel. Per triangle, the albedo printed the fabric's pattern into the light behind it, a
+    // stained-glass copy of the cloth (2026-10-15); what lands behind a sheet is its glow summed over a curtain's width.
+    private uint[] RtRowTransmit(uint[] surfaceWords, out int sheetRows)
+    {
+        var data = rayGpuData!;
+        var rows = new uint[data.RowPlacements.Length];
+        sheetRows = 0;
+        var sums = new Dictionary<int, (Vector3 Sum, int Count)>();
+        for (var row = 0; row < rows.Length; row++)
+        {
+            var placement = (int)data.RowPlacements[row];
+            var t = rayPlacementTransmission[placement];
+            if (t.X <= 0f && t.Y <= 0f && t.Z <= 0f) continue;
+            static float Linear(uint b) { var c = b / 255f; return c <= 0.04045f ? c / 12.92f : MathF.Pow((c + 0.055f) / 1.055f, 2.4f); }
+            var w = surfaceWords[row];
+            var a = new Vector3(Linear(w & 255u), Linear((w >> 8) & 255u), Linear((w >> 16) & 255u));
+            sums[placement] = sums.TryGetValue(placement, out var v) ? (v.Sum + a, v.Count + 1) : (a, 1);
+        }
+        var doubleSidedRows = 0;
+        for (var row = 0; row < rows.Length; row++)
+        {
+            var placement = (int)data.RowPlacements[row];
+            if (!sums.TryGetValue(placement, out var v)) continue;
+            var mean = v.Sum / v.Count;
+            var hue = mean / MathF.Max(MathF.Max(mean.X, MathF.Max(mean.Y, mean.Z)), 1e-3f);
+            var t = rayPlacementTransmission[placement] * hue;
+            uint Byte(float x) => (uint)Math.Clamp(MathF.Round(x * 255f), 0f, 255f);
+            // The top byte: a double-sided sheet counts every crossing, a closed one the faces a ray enters by.
+            rows[row] = Math.Max(1u, Byte(t.X) | Byte(t.Y) << 8 | Byte(t.Z) << 16) | (rayPlacementDoubleSided[placement] ? 1u << 24 : 0u);
+            sheetRows++;
+            if (rayPlacementDoubleSided[placement]) doubleSidedRows++;
+        }
+        if (sheetRows > 0)
+            Console.WriteLine(string.Create(Inv, $"[VulkanSponza] metal tracer: {sheetRows:N0} triangles of {sums.Count} sheets that transmit ({doubleSidedRows:N0} double-sided) -- the sun's shadow rays go through them, and the sunlit sheet's glow lights what is behind."));
+        return rows;
     }
 
     // The shadow trace's alpha test: each cut-out material's albedo, cutoff and alpha factor (what the raster's mask

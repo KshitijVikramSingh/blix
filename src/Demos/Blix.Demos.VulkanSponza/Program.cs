@@ -744,7 +744,10 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
         Vector4 BaseColor,
         // With --lightmap: each vertex's texel in the scene's lightmap atlas (the vertices and LODs are then the
         // lightmap file's split ones). Null: no lightmap for this primitive.
-        Vector2[]? LightmapTexels = null);
+        Vector2[]? LightmapTexels = null,
+        // KHR_materials_diffuse_transmission: its factor times its colour factor (zero: none) -- what a sheet of it lets
+        // through to its far side, which the bounce light will read as the sheet's glow (rayPlacementTransmission).
+        Vector3 Transmission = default);
 
     /// <summary>One placement of a unique primitive: which drawable, its row in the transform table, and its world AABB.</summary>
     /// <remarks>

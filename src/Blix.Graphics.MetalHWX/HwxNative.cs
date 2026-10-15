@@ -59,7 +59,7 @@ internal static unsafe class HwxNative
     [DllImport(Library)]
     public static extern int hwx_encode_shadow(nint ctx, nint sharedEvent, ulong waitValue, ulong signalValue,
         nint origins, ulong originsOffset, nint occluded, ulong occludedOffset, uint count, float* direction, uint seedBase, nint skyRays,
-        uint alphaTest, uint statSlot, nint limit, ulong limitOffset, nint directions, nint pixelOf);
+        uint alphaTest, uint statSlot, nint limit, ulong limitOffset, nint directions, nint pixelOf, uint throughAt);
 
     [DllImport(Library)]
     public static extern void hwx_shadow_stats(nint ctx, uint slot, ulong* dispatches, ulong* totalGpuNs, ulong* lastGpuNs, ulong* failures);
@@ -76,6 +76,9 @@ internal static unsafe class HwxNative
 
     [DllImport(Library)]
     public static extern void hwx_trace_stats(nint ctx, ulong* dispatches, ulong* totalGpuNs, ulong* lastGpuNs, ulong* failures);
+
+    [DllImport(Library)]
+    public static extern int hwx_set_transmit(nint ctx, uint* rowTransmit, uint rowCount);
 
     [DllImport(Library)]
     public static extern int hwx_set_alpha(nint ctx, nint* textures, float* cutoffs, float* alphaFactors, uint materialCount,

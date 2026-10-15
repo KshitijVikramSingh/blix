@@ -59,6 +59,7 @@ internal sealed partial class SponzaLoop
         // paired run attributes the HORIZON SEARCH specifically rather than the whole feature.
         if (args.Flag("no-ao")) ambient.Enabled = false;
         if (args.Flag("no-shadow")) shadows.Enabled = false;
+        if (args.Float("cloth-transmission") is { } cloth) clothTransmission = Math.Clamp(cloth, 0f, 1f);
         // --rt-shadow-full: every pixel traced every frame (ShadowsSettings.Interleave off).
         if (args.Flag("rt-shadow-full")) shadows.Interleave = false;
         if (args.Flag("ao-fullres")) aoScale = 1f;

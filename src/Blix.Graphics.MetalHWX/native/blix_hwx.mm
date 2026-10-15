@@ -80,17 +80,12 @@ struct BlixAlphaParams { uint enabled; float mip; uint pad1; uint pad2; };   // 
 // the point hit, as the raster's alpha test decides it: what a leaf card's shadow should be. Otherwise blix_covered:
 // met when the ray's coin, keyed on the triangle's identity in the scene (placement, and index in that placement's
 // mesh), lands under its coverage, which is what the software traversal and the CPU oracle do.
-[[intersection(triangle, triangle_data, instancing)]]
-bool blix_coverage(uint primitive [[primitive_id]], uint geometry [[geometry_id]], uint instance [[instance_id]],
-                   float2 bary [[barycentric_coord]],
-                   ray_data uint& seed [[payload]],
-                   device const uint* primRows [[buffer(0)]], device const uint2* entryRows [[buffer(1)]],
-                   device const BlixRayInstance* instances [[buffer(2)]], device const uint4* triangles [[buffer(3)]],
-                   device const uint2* owners [[buffer(4)]], device const uint* surfaces [[buffer(5)]],
-                   device const BlixAlphaParams& alpha [[buffer(6)]], device const uint* rowMaterial [[buffer(7)]],
-                   device const BlixAlphaMaterial* materials [[buffer(8)]], device const float2* uvs [[buffer(9)]])
+static bool blix_cover(uint row, uint instance, float2 bary, uint seed,
+                       device const BlixRayInstance* instances, device const uint4* triangles,
+                       device const uint2* owners, device const uint* surfaces,
+                       device const BlixAlphaParams& alpha, device const uint* rowMaterial,
+                       device const BlixAlphaMaterial* materials, device const float2* uvs)
 {
-    uint row = blix_row(primRows, entryRows, instance, geometry, primitive);
     if (alpha.enabled != 0u) {
         uint m = rowMaterial[row];
         if (m != 0xFFFFFFFFu) {
@@ -114,12 +109,94 @@ bool blix_coverage(uint primitive [[primitive_id]], uint geometry [[geometry_id]
     return (blix_pcg(seed + blix_pcg(placement * 0x9E3779B9u + triangle)) >> 24u) < coverage;
 }
 
+[[intersection(triangle, triangle_data, instancing)]]
+bool blix_coverage(uint primitive [[primitive_id]], uint geometry [[geometry_id]], uint instance [[instance_id]],
+                   float2 bary [[barycentric_coord]],
+                   ray_data uint& seed [[payload]],
+                   device const uint* primRows [[buffer(0)]], device const uint2* entryRows [[buffer(1)]],
+                   device const BlixRayInstance* instances [[buffer(2)]], device const uint4* triangles [[buffer(3)]],
+                   device const uint2* owners [[buffer(4)]], device const uint* surfaces [[buffer(5)]],
+                   device const BlixAlphaParams& alpha [[buffer(6)]], device const uint* rowMaterial [[buffer(7)]],
+                   device const BlixAlphaMaterial* materials [[buffer(8)]], device const float2* uvs [[buffer(9)]])
+{
+    return blix_cover(blix_row(primRows, entryRows, instance, geometry, primitive), instance, bary, seed,
+                      instances, triangles, owners, surfaces, alpha, rowMaterial, materials, uvs);
+}
+
+// The sun's shadow rays (blix_shadow, flag 8): a sheet that lets light through (hwx_set_transmit: its row's
+// transmittance, rgb8 -- the cloth's factor in its own hue, flat over the sheet -- 0 for none) is not met; the ray goes
+// on, and what it crossed rides the payload: the transmittances multiplied, and the nearest sheet's distance and the
+// cosine between the ray and that sheet. Where the ray then reaches the sun, the sheet is sunlit there and glows on its
+// far side, and blix_shadow turns that into the diffuse light the point receives from it (not a beam: the cloth
+// scatters what it passes, 2026-10-15). Every other triangle as blix_coverage.
+struct BlixShadowRay { uint seed; uint sheets; uint lastSheet; float nearest; float3 transmit; float cosine; };   // sheets 0: met as any other triangle
+
+// A sheet crossed this close to the ray's start is the surface the ray left -- its own cloth, where the pixel's normal
+// (the fabric's normal map) put the lift on the wrong side -- and stops it as any surface would. Counted as glow, at
+// d ~ 0 it lit those pixels with the full transmittance: a cross-hatch of the weave over the folds (2026-10-16).
+constant float BlixSheetMinDistance = 0.05f;
+
+[[intersection(triangle, triangle_data, instancing)]]
+bool blix_shadow_cover(uint primitive [[primitive_id]], uint geometry [[geometry_id]], uint instance [[instance_id]],
+                       float2 bary [[barycentric_coord]], bool front [[front_facing]], float distance [[distance]],
+                       float3 direction [[direction]],
+                       ray_data BlixShadowRay& r [[payload]],
+                       device const uint* primRows [[buffer(0)]], device const uint2* entryRows [[buffer(1)]],
+                       device const BlixRayInstance* instances [[buffer(2)]], device const uint4* triangles [[buffer(3)]],
+                       device const uint2* owners [[buffer(4)]], device const uint* surfaces [[buffer(5)]],
+                       device const BlixAlphaParams& alpha [[buffer(6)]], device const uint* rowMaterial [[buffer(7)]],
+                       device const BlixAlphaMaterial* materials [[buffer(8)]], device const float2* uvs [[buffer(9)]],
+                       device const uint* rowTransmit [[buffer(10)]], device const float4* positions [[buffer(11)]])
+{
+    uint row = blix_row(primRows, entryRows, instance, geometry, primitive);
+    uint through = rowTransmit[row];
+    if (through != 0u && r.sheets != 0u && distance >= BlixSheetMinDistance) {
+        // The nearest sheet crossed sets how far the glow is and how squarely the sun meets it (object space: the
+        // triangle's own normal against the ray's direction there; a rotation keeps the cosine).
+        if (distance < r.nearest) {
+            uint4 tri = triangles[row];
+            float3 p0 = positions[tri.x].xyz;
+            float3 nn = cross(positions[tri.y].xyz - p0, positions[tri.z].xyz - p0);
+            float len = length(nn) * length(direction);
+            r.nearest = distance;
+            r.cosine = len > 0.0f ? abs(dot(nn, direction)) / len : 0.0f;
+        }
+        // Once a sheet, not once a surface: cloth modelled with thickness (a front and a back) is crossed through two
+        // surfaces. A closed (single-sided) sheet counts the face the ray enters by; a double-sided one, a surface with
+        // no back, every crossing (the word's top byte, 1).
+        bool everyCrossing = (through >> 24) != 0u;
+        if (!everyCrossing && !front) return false;
+        // Once a curtain, not once a fold: a high sun's ray crosses one curtain's folds three and four times
+        // (2026-10-15). The instance it last went through is not counted again.
+        if (instance == r.lastSheet) return false;
+        r.lastSheet = instance;
+        r.transmit *= unpack_unorm4x8_to_float(through).rgb;
+        return max(r.transmit.r, max(r.transmit.g, r.transmit.b)) < 0.005f;
+    }
+    return blix_cover(row, instance, bary, r.seed, instances, triangles, owners, surfaces, alpha, rowMaterial, materials, uvs);
+}
+
 // flags (in-frame batches): 1 the live count is limit[0] (a wavefront's pass wrote it), the threads past it idle.
 struct Params { uint count; uint seedBase; uint closestOnly; uint flags; };
 
 // flags: 1 the live count is limit[0], as Params'; 2 each ray's own direction (directions[i].xyz), not `direction`;
-// 4 packed: ray i is origins[2i] (origin, tMax) and origins[2i + 1] (direction), its answer written to occluded[pixelOf[i]].
-struct ShadowParams { float4 direction; uint count; uint seedBase; uint sky; uint flags; };
+// 4 packed: ray i is origins[2i] (origin, tMax) and origins[2i + 1] (direction), its answer written to occluded[pixelOf[i]];
+// 8 through sheets that transmit (blix_shadow_cover): a ray that crossed one and reached the sun is answered occluded with
+// bit 2 and the sheet's distance (the sun itself is stopped there), and occluded[throughAt + its word] holds the light the
+// sunlit sheet sends it, sqrt-encoded rgb8, as a fraction of the sun's.
+struct ShadowParams { float4 direction; uint count; uint seedBase; uint sky; uint flags; uint throughAt; uint pad0, pad1, pad2; };
+
+// The light a point gets from the sheet its sun ray crossed, as a fraction of the sun's own on it (which carries the
+// point's cosine): the sheet's far side is a Lambertian glow, pi L = T E cos_s; seen from the point as a disc of radius
+// BlixSheetRadius centred where the ray crossed, at distance d, square to the ray within cos_s, it lands
+// pi L cos_s R^2 / (R^2 + d^2) (the coaxial disc's exact form at cos_s 1). At the curtain's foot about T cos_s^2 -- the
+// floor beside a hanging curtain sees half its sky as sheet, the half-plane's view factor -- and falling off a curtain's
+// width away. One lit disc per ray: the sheet beyond its radius, and where it is shaded, are not asked.
+constant float BlixSheetRadius = 0.6f;
+static float3 blix_sheet_light(float3 transmit, float cosine, float d) {
+    float r2 = BlixSheetRadius * BlixSheetRadius;
+    return transmit * cosine * cosine * (r2 / (r2 + d * d));
+}
 
 // Sun shadows: one ray per origin, every one toward the same direction. An origin is (position, tMax); tMax 0 means
 // no ray, answered unoccluded; tMax < 0 no ray, answered OCCLUDED (the caller knew: a baked record, say). Writes 1 where anything, met as coverage (or the alpha test, by the table bound) allows,
@@ -147,20 +224,27 @@ kernel void blix_shadow(device const float4* origins [[buffer(0)]],
     isect.assume_geometry_type(geometry_type::triangle);
     isect.accept_any_intersection(true);
     if (o.w > 0.0f) {
-        uint seed = p.seedBase + i;
+        BlixShadowRay sr = { p.seedBase + i, p.flags & 8u, 0xFFFFFFFFu, INFINITY, float3(1.0f), 0.0f };
         float3 direction = packed ? origins[2u * i + 1u].xyz : (p.flags & 2u) != 0u ? directions[i].xyz : p.direction.xyz;
-        auto res = isect.intersect(ray(o.xyz, direction, 0.0f, o.w), tlas, 0xFFu, table, seed);
+        auto res = isect.intersect(ray(o.xyz, direction, 0.0f, o.w), tlas, 0xFFu, table, sr);
         // Occluded, and how far along the ray it met something (the upper 16 bits, a half): with per-ray directions the
         // caller sizes a penumbra from it. Any hit, not the nearest -- an estimate, as a penumbra filter needs.
         if (res.type != intersection_type::none)
             word |= 1u | (uint(as_type<ushort>(half(min(res.distance, 60000.0f)))) << 16);
+        // Through a sheet (blix_shadow_cover) to the sun: the sun stopped at the sheet (occluded, its distance, as the
+        // penumbra filter reads any blocker's) and bit 2; the sheet's glow on the point beside the words.
+        else if (sr.nearest < INFINITY) {
+            word |= 1u | 4u | (uint(as_type<ushort>(half(min(sr.nearest, 60000.0f)))) << 16);
+            float3 glow = sqrt(saturate(blix_sheet_light(sr.transmit, sr.cosine, sr.nearest)));
+            occluded[p.throughAt + (packed ? pixelOf[i] : i)] = pack_float_to_unorm4x8(float4(glow, 0.0f));
+        }
     }
     else if (o.w < 0.0f) word |= 1u;
     if (p.sky != 0u) {
         float4 s = skyRays[i * 2u];
         if (s.w > 0.0f) {
-            uint seed = p.seedBase + i + 0x68E31DA4u;
-            auto res = isect.intersect(ray(s.xyz, skyRays[i * 2u + 1u].xyz, 0.0f, s.w), tlas, 0xFFu, table, seed);
+            BlixShadowRay sr = { p.seedBase + i + 0x68E31DA4u, 0u, 0xFFFFFFFFu, INFINITY, float3(1.0f), 0.0f };
+            auto res = isect.intersect(ray(s.xyz, skyRays[i * 2u + 1u].xyz, 0.0f, s.w), tlas, 0xFFu, table, sr);
             if (res.type != intersection_type::none) word |= 2u;
         }
     }
@@ -557,6 +641,7 @@ struct HwxContext {
     id<MTLIntersectionFunctionTable> lightletDenseTable, lightletRingsTable;
     id<MTLIntersectionFunctionTable> shadowTable;       // the coverage coin, as the software batch
     id<MTLIntersectionFunctionTable> shadowAlphaTable;  // the alpha test (hwx_set_alpha), asked for per dispatch
+    id<MTLBuffer> rowTransmit;                           // per triangle row, the sheet's transmittance (hwx_set_transmit)
     id<MTLCommandBuffer> lastShadow;  // waited on at destroy: its completion handler reads this context
     id<MTLCommandBuffer> lastTrace;   // likewise, for hwx_encode_trace
     // Open between hwx_group_begin and hwx_group_end: the in-frame encodes go into this one command buffer, which waits
@@ -609,10 +694,13 @@ HWX_EXPORT HwxContext* hwx_create(void* mtlDevice, char* err, int errLength) {
         id<MTLLibrary> library = [device newLibraryWithSource:kSource options:options error:&error];
         if (!library) return report([@"trace kernel: " stringByAppendingString:error.localizedDescription]);
         id<MTLFunction> coverage = [library newFunctionWithName:@"blix_coverage"];
+        // The sun's shadow rays go through sheets that transmit (blix_shadow_cover); every other trace meets them.
+        id<MTLFunction> shadowCoverage = [library newFunctionWithName:@"blix_shadow_cover"];
         // A pipeline and its own intersection function table (a table belongs to the pipeline it was made from).
-        auto pipeline = [&](NSString* kernel, id<MTLIntersectionFunctionTable> __strong* table) -> id<MTLComputePipelineState> {
+        auto pipeline = [&](NSString* kernel, id<MTLIntersectionFunctionTable> __strong* table, id<MTLFunction> cover = nil) -> id<MTLComputePipelineState> {
+            if (!cover) cover = coverage;
             MTLLinkedFunctions* linked = [MTLLinkedFunctions linkedFunctions];
-            linked.functions = @[ coverage ];
+            linked.functions = @[ cover ];
             MTLComputePipelineDescriptor* pd = [MTLComputePipelineDescriptor new];
             pd.computeFunction = [library newFunctionWithName:kernel];
             pd.linkedFunctions = linked;
@@ -622,13 +710,13 @@ HWX_EXPORT HwxContext* hwx_create(void* mtlDevice, char* err, int errLength) {
             MTLIntersectionFunctionTableDescriptor* td = [MTLIntersectionFunctionTableDescriptor new];
             td.functionCount = 1;
             *table = [pso newIntersectionFunctionTableWithDescriptor:td];
-            [*table setFunction:[pso functionHandleWithFunction:coverage] atIndex:0];
+            [*table setFunction:[pso functionHandleWithFunction:cover] atIndex:0];
             return pso;
         };
         id<MTLIntersectionFunctionTable> table, shadowTable;
         id<MTLComputePipelineState> pso = pipeline(@"blix_trace", &table);
         if (!pso) return report([@"trace pipeline: " stringByAppendingString:error.localizedDescription]);
-        id<MTLComputePipelineState> shadowPso = pipeline(@"blix_shadow", &shadowTable);
+        id<MTLComputePipelineState> shadowPso = pipeline(@"blix_shadow", &shadowTable, shadowCoverage);
         if (!shadowPso) return report([@"shadow pipeline: " stringByAppendingString:error.localizedDescription]);
         id<MTLIntersectionFunctionTable> buriedTable;
         id<MTLComputePipelineState> buriedPso = pipeline(@"blix_buried", &buriedTable);
@@ -646,7 +734,7 @@ HWX_EXPORT HwxContext* hwx_create(void* mtlDevice, char* err, int errLength) {
         MTLIntersectionFunctionTableDescriptor* alphaTd = [MTLIntersectionFunctionTableDescriptor new];
         alphaTd.functionCount = 1;
         id<MTLIntersectionFunctionTable> shadowAlphaTable = [shadowPso newIntersectionFunctionTableWithDescriptor:alphaTd];
-        [shadowAlphaTable setFunction:[shadowPso functionHandleWithFunction:coverage] atIndex:0];
+        [shadowAlphaTable setFunction:[shadowPso functionHandleWithFunction:shadowCoverage] atIndex:0];
 
         auto* ctx = new HwxContext();
         ctx->device = device;
@@ -723,6 +811,13 @@ HWX_EXPORT int hwx_build(HwxContext* ctx,
             [table setBuffer:ctx->alphaOff offset:0 atIndex:7];
             [table setBuffer:ctx->alphaOff offset:0 atIndex:8];
             [table setBuffer:ctx->alphaOff offset:0 atIndex:9];
+        }
+        // No sheet transmits until hwx_set_transmit says which do: a zero per triangle row.
+        ctx->rowTransmit = [device newBufferWithLength:std::max<uint64_t>(ctx->triangles.length / 16, 1) * 4 options:MTLResourceStorageModeShared];
+        // And the triangles' corners, for the sheet's cosine to the sun (blix_shadow_cover).
+        for (id<MTLIntersectionFunctionTable> table : {ctx->shadowTable, ctx->shadowAlphaTable}) {
+            [table setBuffer:ctx->rowTransmit offset:0 atIndex:10];
+            [table setBuffer:ctx->positions offset:0 atIndex:11];
         }
 
         // Bottom level: one structure per hierarchy, built uncompacted, then compacted below.
@@ -1037,7 +1132,8 @@ HWX_EXPORT int hwx_trace_host(HwxContext* ctx, const float* rays, uint32_t count
 HWX_EXPORT int hwx_encode_shadow(HwxContext* ctx, void* sharedEvent, uint64_t waitValue, uint64_t signalValue,
                                  void* origins, uint64_t originsOffset, void* occluded, uint64_t occludedOffset,
                                  uint32_t count, const float* direction, uint32_t seedBase, void* skyRays, uint32_t alphaTest,
-                                 uint32_t statSlot, void* limit, uint64_t limitOffset, void* directions, void* pixelOf) {
+                                 uint32_t statSlot, void* limit, uint64_t limitOffset, void* directions, void* pixelOf,
+                                 uint32_t throughAt) {
     @autoreleasepool {
         id<MTLSharedEvent> event = (__bridge id<MTLSharedEvent>)sharedEvent;
         id<MTLBuffer> originBuffer = (__bridge id<MTLBuffer>)origins;
@@ -1061,6 +1157,8 @@ HWX_EXPORT int hwx_encode_shadow(HwxContext* ctx, void* sharedEvent, uint64_t wa
         else if (skyBuffer && skyBuffer.length < uint64_t(count) * 32) result = Fail(ctx, "the sky ray buffer is smaller than its count");
         else if (limitBuffer && limitBuffer.length < limitOffset + 4) result = Fail(ctx, "the limit buffer is smaller than its offset");
         else if (directionBuffer && directionBuffer.length < uint64_t(count) * 16) result = Fail(ctx, "the direction buffer is smaller than its count");
+        else if ((alphaTest & 2u) != 0 && occludedBuffer.length < occludedOffset + (uint64_t(throughAt) + (pixelBuffer ? throughAt : count)) * 4)
+            result = Fail(ctx, "the occlusion buffer has no room for the sheets' light past throughAt");
         if (result == 0 && count > 0) {
             id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
             [enc setComputePipelineState:ctx->shadowPso];
@@ -1068,11 +1166,13 @@ HWX_EXPORT int hwx_encode_shadow(HwxContext* ctx, void* sharedEvent, uint64_t wa
             [enc setBuffer:occludedBuffer offset:occludedOffset atIndex:1];
             [enc setAccelerationStructure:ctx->tlas atBufferIndex:2];
             // The alpha test only where asked and set up; otherwise the coin, as the software batch meets cut-outs.
-            bool alpha = alphaTest != 0 && ctx->alphaOn != nil;
+            // alphaTest: bit 0 the alpha test, bit 1 through sheets that transmit (hwx_set_transmit).
+            bool alpha = (alphaTest & 1u) != 0 && ctx->alphaOn != nil;
             [enc setIntersectionFunctionTable:alpha ? ctx->shadowAlphaTable : ctx->shadowTable atBufferIndex:3];
-            struct { float direction[4]; uint32_t count, seedBase, sky, flags; } params = {
+            struct { float direction[4]; uint32_t count, seedBase, sky, flags, throughAt, pad0, pad1, pad2; } params = {
                 {direction[0], direction[1], direction[2], 0.0f}, count, seedBase, skyBuffer ? 1u : 0u,
-                (limitBuffer ? 1u : 0u) | (directionBuffer ? 2u : 0u) | (pixelBuffer ? 4u : 0u)};
+                (limitBuffer ? 1u : 0u) | (directionBuffer ? 2u : 0u) | (pixelBuffer ? 4u : 0u) | ((alphaTest & 2u) != 0 ? 8u : 0u),
+                throughAt, 0u, 0u, 0u};
             [enc setBytes:&params length:sizeof(params) atIndex:4];
             [enc setBuffer:skyBuffer ? skyBuffer : originBuffer offset:skyBuffer ? 0 : originsOffset atIndex:5];
             // Unread without their flags; bound anyway, as every argument must be.
@@ -1082,8 +1182,9 @@ HWX_EXPORT int hwx_encode_shadow(HwxContext* ctx, void* sharedEvent, uint64_t wa
             // Reached only through the top level and the function table, so not resident unless named here.
             [enc useResources:ctx->blas.data() count:ctx->blas.size() usage:MTLResourceUsageRead];
             id<MTLResource> tableBuffers[] = {ctx->primRows, ctx->entryRows, ctx->instances, ctx->triangles, ctx->owners, ctx->surfaces,
-                                              alpha ? ctx->alphaOn : ctx->alphaOff, ctx->rowMaterial, ctx->materials, ctx->uvs};
-            [enc useResources:tableBuffers count:10 usage:MTLResourceUsageRead];
+                                              alpha ? ctx->alphaOn : ctx->alphaOff, ctx->rowMaterial, ctx->materials, ctx->uvs,
+                                              ctx->rowTransmit, ctx->positions};
+            [enc useResources:tableBuffers count:12 usage:MTLResourceUsageRead];
             // The materials' textures are reached through the argument buffer alone.
             if (alpha && !ctx->alphaTextures.empty())
                 [enc useResources:ctx->alphaTextures.data() count:ctx->alphaTextures.size() usage:MTLResourceUsageRead];
@@ -1230,6 +1331,18 @@ HWX_EXPORT int hwx_set_alpha(HwxContext* ctx, void* const* textures, const float
             [table setBuffer:ctx->materials offset:0 atIndex:8];
             [table setBuffer:ctx->uvs offset:0 atIndex:9];
         }
+        return 0;
+    }
+}
+
+// Which triangle rows the sun's shadow rays go through, and how much of each channel (blix_shadow_cover): one uint a
+// row, rgb8 (0: none). The rows must be in a non-opaque geometry (hwx_build's partial ones) for the function to see them.
+HWX_EXPORT int hwx_set_transmit(HwxContext* ctx, const uint32_t* rowTransmit, uint32_t rowCount) {
+    @autoreleasepool {
+        if (!ctx->shadowTable) return Fail(ctx, "transmission before create");
+        ctx->rowTransmit = [ctx->device newBufferWithBytes:rowTransmit length:std::max<uint32_t>(rowCount, 1) * 4 options:MTLResourceStorageModeShared];
+        for (id<MTLIntersectionFunctionTable> table : {ctx->shadowTable, ctx->shadowAlphaTable})
+            [table setBuffer:ctx->rowTransmit offset:0 atIndex:10];
         return 0;
     }
 }
@@ -1401,16 +1514,16 @@ HWX_EXPORT int hwx_shadow_host(HwxContext* ctx, const float* origins, uint32_t c
             [enc setBuffer:out offset:0 atIndex:1];
             [enc setAccelerationStructure:ctx->tlas atBufferIndex:2];
             [enc setIntersectionFunctionTable:ctx->shadowTable atBufferIndex:3];
-            struct { float direction[4]; uint32_t count, seedBase, sky, pad1; } params =
-                {{direction[0], direction[1], direction[2], 0.0f}, n, seedBase + first, 0u, 0u};
+            struct { float direction[4]; uint32_t count, seedBase, sky, pad1, throughAt, pad2, pad3, pad4; } params =
+                {{direction[0], direction[1], direction[2], 0.0f}, n, seedBase + first, 0u, 0u, 0u, 0u, 0u, 0u};
             [enc setBytes:&params length:sizeof(params) atIndex:4];
             [enc setBuffer:in offset:0 atIndex:5];
             [enc setBuffer:in offset:0 atIndex:6];   // the limit's and directions' slots, unread (flags 0)
             [enc setBuffer:in offset:0 atIndex:7];
             [enc useResources:ctx->blas.data() count:ctx->blas.size() usage:MTLResourceUsageRead];
             id<MTLResource> tableBuffers[] = {ctx->primRows, ctx->entryRows, ctx->instances, ctx->triangles, ctx->owners, ctx->surfaces,
-                                              ctx->alphaOff, ctx->rowMaterial, ctx->materials, ctx->uvs};
-            [enc useResources:tableBuffers count:10 usage:MTLResourceUsageRead];
+                                              ctx->alphaOff, ctx->rowMaterial, ctx->materials, ctx->uvs, ctx->rowTransmit, ctx->positions};
+            [enc useResources:tableBuffers count:12 usage:MTLResourceUsageRead];
             [enc dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
             [enc endEncoding];
             [cb commit];

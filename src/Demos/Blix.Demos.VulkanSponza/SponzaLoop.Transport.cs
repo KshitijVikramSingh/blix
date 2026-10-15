@@ -1648,8 +1648,34 @@ internal sealed partial class SponzaLoop
         // The same solve's inputs for the GPU (SponzaLoop.SunNodesSolve.cs): the sun nodes' patch light for many suns.
         // References, not copies: the relight closures keep them alive anyway.
         if (useSunlets)
+        {
+            // Sheets that transmit: each patch's placement's transmittance, and its twin -- the cook makes a point's two
+            // sides one after the other (front, back) and drops only sides inside a solid, so a twin is a neighbour at
+            // the same point facing the other way.
+            Vector3[]? transmit = null;
+            int[]? twin = null;
+            if (rayPlacementTransmission.Any(t => t != Vector3.Zero))
+            {
+                transmit = new Vector3[patches];
+                twin = new int[patches];
+                Array.Fill(twin, -1);
+                var sheets = 0;
+                for (var i = 0; i < patches; i++)
+                {
+                    var t = rayPlacementTransmission[(int)placement[i]];
+                    if (t == Vector3.Zero) continue;
+                    transmit[i] = t;
+                    foreach (var j in new[] { i - 1, i + 1 })
+                        if (j >= 0 && j < patches && placement[j] == placement[i] && pos[j] == pos[i] && Vector3.Dot(nrm[j], nrm[i]) < -0.99f)
+                            twin[i] = j;
+                    if (twin[i] >= 0) sheets++;
+                }
+                Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                    $"[VulkanSponza] transport: {sheets:N0} patches on sheets that transmit, with their twin on the other side."));
+            }
             transportSolve = new TransportSolveData(patches, couplings, sunletCouplings, sunletPos, sunletNrm, sunletAlbedo,
-                albedo, skyIn, () => lastIncident, iterations);
+                albedo, skyIn, () => lastIncident, iterations, transmit, twin);
+        }
         // The guides from given light (SponzaLoop.SunNodesSolve.cs: the nodes' band averages).
         transportBuildGuides = (outg, sOut) => BuildGuides(outg, sOut);
         transportBuildLights = outg => BuildLights(outg);

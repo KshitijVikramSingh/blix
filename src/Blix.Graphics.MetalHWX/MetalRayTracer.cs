@@ -474,6 +474,22 @@ public sealed class MetalRayTracer : IDisposable
     }
 
     /// <summary>
+    /// Which triangle rows the sun's shadow rays go through (<see cref="EncodeShadow"/>'s <c>throughSheets</c>): per row,
+    /// the sheet's transmittance as rgb8 (r in the low byte; the top byte 1 for a double-sided sheet, every crossing
+    /// counted), 0 for none. The ray goes on through such a row (<see cref="EncodeShadow"/>'s throughAt). The rows must have
+    /// been built non-opaque (<see cref="Build"/>'s alpha-tested flag), or the trace never asks.
+    /// </summary>
+    public unsafe void SetTransmit(ReadOnlySpan<uint> rowTransmit)
+    {
+        ObjectDisposedException.ThrowIf(ctx == 0, this);
+        fixed (uint* rp = rowTransmit)
+        {
+            if (HwxNative.hwx_set_transmit(ctx, rp, (uint)rowTransmit.Length) != 0)
+                throw new InvalidOperationException($"Metal transmission: {Error}");
+        }
+    }
+
+    /// <summary>
     /// Sun shadows as a frame's external pass (<see cref="RenderGraph.External"/>): waits for what the frame recorded
     /// before the pass, traces one ray per origin toward <paramref name="towardLight"/>, and signals the rest of the
     /// frame on. Returns without waiting.
@@ -497,17 +513,24 @@ public sealed class MetalRayTracer : IDisposable
     /// <paramref name="towardLight"/>.</param>
     /// <param name="pixelOf">Optional: packed rays -- ray i is two float4s in <paramref name="origins"/> (origin + tMax, direction)
     /// and its answer goes to the word pixelOf[i] (a uint per ray), not i.</param>
+    /// <param name="throughAt">Through the rows <see cref="SetTransmit"/> names, when set: a ray that crossed such a sheet and
+    /// reached the sun is answered occluded (the sheet's distance in the upper 16 bits, as any blocker's) with bit 2, and the
+    /// word throughAt words past its own holds the light the sunlit sheet sends its point -- rgb8, each channel the square
+    /// root of a fraction of the sun's. The occlusion buffer must hold those words too.</param>
     public unsafe void EncodeShadow(ExternalWorkSync sync, GpuBufferHandle origins, GpuBufferHandle occluded, long occludedOffset,
         int count, Vector3 towardLight, uint seedBase, GpuBufferHandle? skyRays = null, bool alphaTest = false, int statSlot = 0,
-        GpuBufferHandle? limit = null, long limitOffset = 0, GpuBufferHandle? directions = null, GpuBufferHandle? pixelOf = null)
+        GpuBufferHandle? limit = null, long limitOffset = 0, GpuBufferHandle? directions = null, GpuBufferHandle? pixelOf = null,
+        uint? throughAt = null)
     {
         ObjectDisposedException.ThrowIf(ctx == 0, this);
         var direction = stackalloc float[3] { towardLight.X, towardLight.Y, towardLight.Z };
         HwxNative.hwx_encode_shadow(ctx, sync.MetalSharedEvent, sync.WaitValue, sync.SignalValue,
             device.ExportMetalBuffer(origins), 0, device.ExportMetalBuffer(occluded), (ulong)occludedOffset,
-            (uint)Math.Max(count, 0), direction, seedBase, skyRays is { } sky ? device.ExportMetalBuffer(sky) : 0, alphaTest ? 1u : 0u,
+            (uint)Math.Max(count, 0), direction, seedBase, skyRays is { } sky ? device.ExportMetalBuffer(sky) : 0,
+            (alphaTest ? 1u : 0u) | (throughAt is not null ? 2u : 0u),
             (uint)Math.Clamp(statSlot, 0, 3), limit is { } l ? device.ExportMetalBuffer(l) : 0, (ulong)limitOffset,
-            directions is { } d ? device.ExportMetalBuffer(d) : 0, pixelOf is { } px ? device.ExportMetalBuffer(px) : 0);
+            directions is { } d ? device.ExportMetalBuffer(d) : 0, pixelOf is { } px ? device.ExportMetalBuffer(px) : 0,
+            throughAt ?? 0u);
     }
 
     /// <summary>

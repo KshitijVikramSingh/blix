@@ -21,7 +21,12 @@ internal sealed record TransportSolveData(
     List<Vector3> Albedo,
     Vector3[] SkyIn,
     Func<Vector3[]> BootIncident,
-    int Iterations);
+    int Iterations,
+    // Sheets that transmit (KHR_materials_diffuse_transmission, --cloth-transmission): per patch, its placement's
+    // transmittance (zero: none) and its twin -- the patch on the sheet's other side, at the same point (-1: none).
+    // The sheet's far side glows with the bounce light reaching its near side (texel_nodes_solve.comp).
+    Vector3[]? Transmit = null,
+    int[]? Twin = null);
 
 internal sealed partial class SponzaLoop
 {
@@ -59,10 +64,13 @@ internal sealed partial class SponzaLoop
     private PipelineHandle sunNodeSolvePipeline;
     private RayBatchPasses sunNodeSunletBatch;
 
-    private Task<(uint[] Start, uint[] Pairs, uint[] SunletStart, uint[] SunletPairs, Vector4[] Sunlets, Vector4[] Terms)>? solvePack;
+    private Task<(uint[] Start, uint[] Pairs, uint[] SunletStart, uint[] SunletPairs, Vector4[] Sunlets, Vector4[] Terms,
+        Vector4[] Transmit)>? solvePack;
     private GpuBufferHandle[] solveBuffers = Array.Empty<GpuBufferHandle>();
     private GpuBufferHandle solveFirst, solveIn, solveOut, solveOrigins, solveOccluded;
     private int solveGroupStart, solveSun, solveBounce = -1, solveSunlets;
+    // Sheets that transmit (TransportSolveData.Transmit): per patch what its sheet passes and its twin.
+    private GpuBufferHandle solveTransmit;
     private bool solveActive;
     private readonly Stopwatch solveClock = new();
 
@@ -140,7 +148,28 @@ internal sealed partial class SponzaLoop
                 terms[3 * p + 1] = new Vector4(d.SkyIn[p], 0f);
                 terms[3 * p + 2] = new Vector4(boot[p], 0f);
             }
-            return (start, pairs, sStart, sPairs, sunlets, terms);
+            // Sheets: per patch what of the light on its twin's side it passes, per unit of its own albedo -- the
+            // readers multiply its albedo in, so the light through is the factor (times its colour factor: white for
+            // the curtains, whose colour is their texture) in the cloth's own hue. Dividing the transmittance by the
+            // albedo channel by channel (the first try) multiplied green cloth's light by (7, 1.75, 12): magenta and far
+            // too bright (2026-10-15). And its twin.
+            var transmit = new Vector4[d.Patches];
+            var sheets = 0;
+            if (d.Transmit is { } tr && d.Twin is { } tw)
+                for (var p = 0; p < d.Patches; p++)
+                {
+                    if (tw[p] < 0 || tr[p] == Vector3.Zero) continue;
+                    // The cloth's hue at the factor's strength: its albedo over its brightest channel -- one number a
+                    // patch (the factor over that channel), so no channel is lifted alone. The albedo as it is (0.35 x
+                    // 0.05-0.2) passed 2-7% of the sun: opaque again by eye (2026-10-15).
+                    var a = d.Albedo[p];
+                    var scale = 1f / MathF.Max(MathF.Max(a.X, MathF.Max(a.Y, a.Z)), 0.05f);
+                    transmit[p] = new Vector4(tr[p] * scale, BitConverter.Int32BitsToSingle(tw[p]));
+                    sheets++;
+                }
+            if (sheets > 0)
+                Console.WriteLine(string.Create(Inv, $"[VulkanSponza] sun nodes: {sheets:N0} patches on sheets that transmit -- their far sides glow with the bounce light through them."));
+            return (start, pairs, sStart, sPairs, sunlets, terms, transmit);
         });
     }
 
@@ -259,10 +288,12 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("PatchAverage", solveAvgPatch),
                 new ShaderBufferBinding("SunletAverage", solveAvgSunlet),
                 new ShaderBufferBinding("SolveSkyWeights", solveSkyWeights),
+                new ShaderBufferBinding("PatchTransmit", solveTransmit),
             });
     }
 
-    private void UploadGpuSolve((uint[] Start, uint[] Pairs, uint[] SunletStart, uint[] SunletPairs, Vector4[] Sunlets, Vector4[] Terms) packed)
+    private void UploadGpuSolve((uint[] Start, uint[] Pairs, uint[] SunletStart, uint[] SunletPairs, Vector4[] Sunlets, Vector4[] Terms,
+        Vector4[] Transmit) packed)
     {
         var d = transportSolve!;
         var n = solveSunlets;
@@ -287,6 +318,7 @@ internal sealed partial class SponzaLoop
         solveOut = Own(device.CreateGpuBuffer(items, name: "sponza.sun-nodes.solve.out"));
         solveOrigins = Own(device.CreateGpuBuffer(Math.Max(16, n * 16), name: "sponza.sun-nodes.solve.origins"));
         solveOccluded = Own(device.CreateGpuBuffer(Math.Max(16, n * 4), name: "sponza.sun-nodes.solve.occluded"));
+        solveTransmit = Up(packed.Transmit, "sponza.sun-nodes.solve.transmit");
         solveAvgPatch = Own(device.CreateGpuBuffer(d.Patches * 16, new byte[d.Patches * 16], "sponza.sun-nodes.solve.patch-average"));
         solveAvgSunlet = Own(device.CreateGpuBuffer(Math.Max(16, n * 16), new byte[Math.Max(16, n * 16)], "sponza.sun-nodes.solve.sunlet-average"));
         EnsureSolveTable();
@@ -299,9 +331,11 @@ internal sealed partial class SponzaLoop
     // The solve's buffers, once the nodes' table is filled.
     private void ReleaseGpuSolve()
     {
-        foreach (var b in solveBuffers.Append(solveFirst).Append(solveIn).Append(solveOut).Append(solveOrigins).Append(solveOccluded).Append(solveAvgPatch).Append(solveAvgSunlet).Append(solveSkyWeights))
+        foreach (var b in solveBuffers.Append(solveFirst).Append(solveIn).Append(solveOut).Append(solveOrigins).Append(solveOccluded).Append(solveAvgPatch).Append(solveAvgSunlet).Append(solveSkyWeights)
+                     .Append(solveTransmit))
             if (!b.Equals(default(GpuBufferHandle))) RetireGpuBuffer(b);
         solveBuffers = Array.Empty<GpuBufferHandle>();
         solveFirst = solveIn = solveOut = solveOrigins = solveOccluded = solveAvgPatch = solveAvgSunlet = solveSkyWeights = default;
+        solveTransmit = default;
     }
 }

@@ -325,7 +325,9 @@ internal sealed partial class SponzaLoop
                 albedo, alphaCutoff, baseColorAlpha,
                 new[] { new ShaderTextureBinding("uAlbedo", albedo) }, isBlend,
                 string.IsNullOrEmpty(mesh.Name) ? "primitive" : mesh.Name, placed.Worlds, placed.Instances, prim.Source,
-                pm?.BaseColorFactor ?? Vector4.One, placed.LightmapTexels));
+                pm?.BaseColorFactor ?? Vector4.One, placed.LightmapTexels,
+                ClothTransmission(pm) is { } cloth ? cloth.Factor * cloth.Colour
+                    : pm?.Ext is { } ext ? ext.DiffuseTransmissionFactor * ext.DiffuseTransmissionColorFactor : Vector3.Zero));
         }
     }
 
@@ -410,6 +412,7 @@ internal sealed partial class SponzaLoop
                 rayPlacementMaterials.Add(new RayMaterial(s.Albedo, s.BaseColor, s.AlphaCutoff, s.IsBlend));
                 rayPlacementLightmapped.Add(s.LightmapTexels is not null);
                 rayPlacementDoubleSided.Add(s.Pipeline == opaqueDoubleSidedPipeline || s.Pipeline == blendDoubleSidedPipeline);
+                rayPlacementTransmission.Add(s.Transmission);
                 rayPlacementNames.Add(s.Name);
                 if (!UniformScale(world)) nonUniform++;
             }
@@ -655,6 +658,10 @@ internal sealed partial class SponzaLoop
         var sheenRoughness = ext.SheenRoughnessFactor;
         var diffuseTransmission = ext.DiffuseTransmissionFactor;
         var diffuseTransmissionColor = ext.DiffuseTransmissionColorFactor;
+        var diffuseTransmissionTexture = tex.DiffuseTransmissionColor;
+        // --cloth-transmission (ClothTransmission): the curtains' factor, their light through in their own colour.
+        if (ClothTransmission(gm) is { } cloth)
+            (diffuseTransmission, diffuseTransmissionColor, diffuseTransmissionTexture) = (cloth.Factor, cloth.Colour, tex.Albedo);
 
         return Own(device.CreateMaterial(litProgram, name: "sponza.material")
             .SetUniform(binding: 0, "uBaseColorFactor", baseColorFactor)
@@ -674,15 +681,25 @@ internal sealed partial class SponzaLoop
             .SetUniform(binding: 0, "uSheenColor", new Vector4(sheen.X, sheen.Y, sheen.Z, 0f))
             .SetUniform(binding: 0, "uDiffuseTransmissionColor",
                 new Vector4(diffuseTransmissionColor.X, diffuseTransmissionColor.Y,
-                            diffuseTransmissionColor.Z, 0f))
+                            diffuseTransmissionColor.Z, ClothTransmission(gm) is not null ? 1f : 0f))
             .SetTexture(binding: 1, tex.Albedo)
             .SetTexture(binding: 2, tex.Normal)
             .SetTexture(binding: 3, tex.Emissive)
             .SetTexture(binding: 4, tex.MetallicRoughness)
             .SetTexture(binding: 5, tex.Occlusion)
-            .SetTexture(binding: 6, tex.DiffuseTransmissionColor)
+            .SetTexture(binding: 6, diffuseTransmissionTexture)
             .Handle);
     }
+
+    // --cloth-transmission F: the curtains' KHR_materials_diffuse_transmission, which Sponza does not author -- factor F,
+    // the light through them in their own colour (the base colour factor; the albedo texture as the colour texture).
+    // An earlier cook set 0.35 and then 0, because the light through a curtain went unshadowed then; the traced shadows
+    // now shadow it (lit.frag's far-side answer: the sun on the curtain's back lights its front).
+    private float clothTransmission = -1f;
+    private (float Factor, Vector3 Colour)? ClothTransmission(PbrMaterial? gm) =>
+        clothTransmission >= 0f && gm is not null && gm.Name.Contains("curtain", StringComparison.OrdinalIgnoreCase)
+            ? (clothTransmission, new Vector3(gm.BaseColorFactor.X, gm.BaseColorFactor.Y, gm.BaseColorFactor.Z))
+            : null;
 
     private PipelineHandle PickPipeline(AlphaMode mode, bool doubleSided) =>
         (mode, doubleSided) switch

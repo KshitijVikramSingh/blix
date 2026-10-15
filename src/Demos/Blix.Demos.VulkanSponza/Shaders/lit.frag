@@ -132,6 +132,28 @@ float rtSunVisibility(vec2 fragCoord) {
     return (word & 1u) != 0u ? 0.0 : 1.0;
 }
 
+// The light sunlit sheets (curtains) send the pixel through them, a fraction of the sun's on it (the Metal pass's sheet
+// light: SponzaLoop.RtShadows.cs RtMaskPlanes): the filter's spread third plane where it ran (bit 3), the ray's own
+// second plane otherwise (bit 2 with the blocked bit). None at half res. Diffuse light from the cloth, not the sun's
+// beam: it lights the diffuse lobe alone.
+vec3 rtSheetGlow(vec2 fragCoord) {
+    if (frame.uIncident.w > 0.5) return vec3(0.0);
+    uvec2 px = uvec2(fragCoord);
+    if (px.x >= rtShadowHeader.x || px.y >= rtShadowHeader.y) return vec3(0.0);
+    uint index = px.y * rtShadowHeader.x + px.x;
+    uint plane = rtShadowHeader.x * rtShadowHeader.y;
+    uint word = rtShadowWords[index];
+    vec3 g;
+    if (rtShadowHeader.z == 2u) {
+        if ((word & 8u) == 0u) return vec3(0.0);
+        g = unpackUnorm4x8(rtShadowWords[2u * plane + index]).rgb;
+    } else {
+        if ((word & 5u) != 5u) return vec3(0.0);
+        g = unpackUnorm4x8(rtShadowWords[plane + index]).rgb;
+    }
+    return g * g;
+}
+
 // This frame's traced sky ray at the pixel: 1 where it reached the sky. One cosine-weighted ray a frame, so TAA's
 // history is what makes it the sky visibility.
 float rtSkyVisibility(vec2 fragCoord) {
@@ -159,7 +181,7 @@ layout(set = 2, binding = 0) uniform Material {
     //   See SponzaLoop.Scene.cs, which packs it, and depth_prepass_mask.frag, which reads it.
     vec4 uMaterialParams2;
     vec4 uSheenColor;              // KHR_materials_sheen colour factor
-    vec4 uDiffuseTransmissionColor;// KHR_materials_diffuse_transmission colour
+    vec4 uDiffuseTransmissionColor;// KHR_materials_diffuse_transmission colour; w 1: the colour texture's hue (--cloth-transmission)
 } mat;
 
 layout(set = 2, binding = 1) uniform sampler2D uAlbedo;
@@ -332,6 +354,9 @@ void main() {
         }
     }
     if (!gl_FrontFacing) N = -N;
+    // Before the normal map: the sheets' glow (rtSheetGlow) is light from across a curtain, not along one line, and
+    // the weave's normal map under the sun's line printed a cross-hatch into it (2026-10-16).
+    vec3 Nsmooth = N;
     // Build TBN from the authored glTF tangent. Gram-Schmidt removes interpolation drift and
     // TANGENT.w supplies bitangent handedness, including mirrored UVs.
     vec3 T = normalize(tangentWorld - N * dot(N, tangentWorld));
@@ -423,6 +448,7 @@ void main() {
     // texel-space filter radius, keeping the two units and cascade footprints distinct.
     int shadowCascade = -1;
     float sunShadow = 1.0;
+    vec3 sheetGlow = vec3(0.0);   // through sunlit curtains (rtSheetGlow), on the diffuse lobe beside sunShadow
     // Pay for shadow filtering only when front-side reflection or back-side diffuse transmission
     // can consume it. Fragments needing neither leave cascade index -1, which diagnostics render as
     // outside the cascades because no lookup was requested.
@@ -431,6 +457,7 @@ void main() {
     if (frame.uShadowStrength > 0.0 && shadowNeed > 0.0 && rtShadowHeader.z != 0u) {
         sunShadow = rtSunVisibility(gl_FragCoord.xy);
         sunShadow = mix(1.0, sunShadow, frame.uShadowStrength);
+        sheetGlow = rtSheetGlow(gl_FragCoord.xy) * frame.uShadowStrength;
     } else if (frame.uShadowStrength > 0.0 && shadowNeed > 0.0) {
         sunShadow = blix_sun_shadow_cascaded(
             uCascadeShadowMaps[0], uCascadeShadowMaps[1], uCascadeShadowMaps[2], uLinearClamp,
@@ -487,8 +514,12 @@ void main() {
     // above already declines to pay for shadow filtering.
     vec3 dtColor = vec3(0.0);
     if (diffTrans > 0.0) {
-        dtColor = mat.uDiffuseTransmissionColor.rgb
-                * texture(uDiffuseTransmissionColorTex, uv).rgb;
+        vec3 dtTex = texture(uDiffuseTransmissionColorTex, uv).rgb;
+        // --cloth-transmission: the texture is the cloth's albedo, and the light through is its hue at the factor's
+        // strength (over its brightest channel), as the cooked bounce has it (SponzaLoop.SunNodesSolve.cs). The albedo
+        // as it is passed 2-7% of the sun: the sheet's glow read as opaque cloth (2026-10-16).
+        if (mat.uDiffuseTransmissionColor.w > 0.5) dtTex /= max(max(dtTex.r, max(dtTex.g, dtTex.b)), 0.05);
+        dtColor = mat.uDiffuseTransmissionColor.rgb * dtTex;
     }
     // A probe older than v4 has no Charlie cube, so sheen is off rather than approximated.
     bool  hasSheen       = dot(sheenColor, vec3(1.0)) > 0.0 && frame.uSheenMipCount > 0.0;
@@ -527,8 +558,8 @@ void main() {
     // with sheen.glsl, which says in as many words that the factor is what the BASE layer is
     // multiplied by. On the curtains it read as a rim slightly too dim under direct sun and a
     // fabric slightly too bright, which is the size of mistake that survives being looked at.
-    vec3 direct = ((kDsun * albedo / PI * transScale + sunSpecular)
-                      * NdotL * frame.uSunIrradiance * sunShadow
+    vec3 direct = ((kDsun * albedo / PI * transScale + sunSpecular) * NdotL * frame.uSunIrradiance * sunShadow
+                   + kDsun * albedo / PI * transScale * sheetGlow * max(dot(Nsmooth, L), 0.0) * frame.uSunIrradiance
                    + sunTransmission) * sheenScale
                 + sunSheen;
 

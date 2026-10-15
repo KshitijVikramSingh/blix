@@ -16,6 +16,10 @@
 // band, so one set of rays serves every sun.
 // A component is a sun with or without the sky, or the sky alone (SponzaLoop.SunNodesSolve.cs): light is linear, so a
 // sun's light and the sky's, solved apart, sum to the two together.
+// Sheets that transmit (a curtain: TransportSolveData.Transmit): a patch on one has a twin on the sheet's other side,
+// and glows with the bounce light reaching that side (the twin's incoming: modes 3, 5, 6) times the sheet's
+// transmittance. The SUN through a sheet is the frame's (the traced shadows: rt_shadow_filter.comp, lit.frag's
+// sheet glow), as the sun on any surface is: cooked here too, the curtains' shadows got it twice (2026-10-16).
 // Modes 2-5 run a thread a (patch, sun of the group), the sun fastest: a patch's group of suns is one run in memory, so
 // a gather over couplings reads runs of G.
 
@@ -45,8 +49,21 @@ layout(std430, set = 0, binding = 14) buffer SunNodePatchLight { uvec2 patchLigh
 layout(std430, set = 0, binding = 15) buffer PatchAverage { vec4 patchAverage[]; };
 layout(std430, set = 0, binding = 16) buffer SunletAverage { vec4 sunletAverage[]; };
 layout(std430, set = 0, binding = 17) readonly buffer SolveSkyWeights { float skyWeight[]; };   // per component, all of them
+// Per patch: rgb what of the light on its twin's side its sheet passes, per unit of its albedo (zero: none), w its twin
+// (int bits).
+layout(std430, set = 0, binding = 18) readonly buffer PatchTransmit { vec4 patchTransmit[]; };
 
 #define PI 3.14159265359
+
+// A patch's incoming light with what comes through its sheet from the twin's side (per unit of its own albedo).
+// The sun's components alone (no sky in them: the split light's sun part) take it; the sky part's cache key has no
+// transmission in it (SponzaLoop.SplitLight.cs, SplitPathFor).
+vec3 incomingThrough(uint p, uint k, uint G) {
+    vec3 own = nodeIn[p * G + k].rgb;
+    vec4 t = patchTransmit[p];
+    if (t.r + t.g + t.b <= 0.0 || skyWeight[uint(u.uCount.y) + k] > 0.0) return own;
+    return own + t.rgb * nodeIn[uint(floatBitsToInt(t.w)) * G + k].rgb;
+}
 
 void main() {
     int mode = int(u.uSolve.x);
@@ -81,7 +98,7 @@ void main() {
     if (mode == 6) {
         if (i >= patches) return;
         vec3 s = vec3(0.0);
-        for (uint k = 0u; k < G; ++k) s += nodeIn[i * G + k].rgb;
+        for (uint k = 0u; k < G; ++k) s += incomingThrough(i, k, G);
         patchAverage[i] += vec4(patchTerms[3u * i].rgb / PI * s * u.uCount.w, 0.0);
         return;
     }
@@ -90,14 +107,14 @@ void main() {
     if (mode == 2) {
         nodeIn[i] = vec4(u.uIrr.w > 0.5 ? patchTerms[3u * p + 2u].rgb : vec3(0.0), 0.0);
     } else if (mode == 3) {
-        nodeOut[i] = vec4(patchTerms[3u * p].rgb / PI * nodeIn[i].rgb, 0.0);
+        nodeOut[i] = vec4(patchTerms[3u * p].rgb / PI * incomingThrough(p, k, G), 0.0);
     } else if (mode == 4) {
         vec3 h = vec3(0.0);
         for (uint c = couplingStart[p]; c < couplingStart[p + 1u]; ++c)
             h += uintBitsToFloat(coupling[c].y) * nodeOut[coupling[c].x * G + k].rgb;
         nodeIn[i] = vec4(skyWeight[uint(u.uCount.y) + k] * patchTerms[3u * p + 1u].rgb + nodeFirst[i].rgb + h * PI, 0.0);
     } else if (mode == 5) {
-        vec3 c = nodeIn[i].rgb;
+        vec3 c = incomingThrough(p, k, G);
         patchLight[p * uint(u.uCount.z) + uint(u.uCount.y) + k] = uvec2(packHalf2x16(c.rg), packHalf2x16(vec2(c.b, 0.0)));
     }
 }

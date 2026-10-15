@@ -68,6 +68,9 @@ internal sealed partial class SponzaLoop
     private string SplitPathFor(string transportKey, Vector3? toSun)
     {
         var part = toSun is { } d ? string.Create(CultureInfo.InvariantCulture, $"sun {d.X:F5},{d.Y:F5},{d.Z:F5} per unit irradiance") : "sky";
+        // The sun's part through sheets that transmit (texel_nodes_solve.comp; --cloth-transmission): its factor, the
+        // bounce light alone through them (the sun through them is the frame's).
+        if (toSun is not null && clothTransmission >= 0f) part += string.Create(CultureInfo.InvariantCulture, $";cloth {clothTransmission:G3} x hue, bounce");
         var spec = string.Create(CultureInfo.InvariantCulture,
             $"{transportKey};{part};sky {skyIdentity};rays {sunNodeRays} {(sunNodeGuide ? "guided" : "cosine")}{(sunNodeLights ? " lights" : "")};lift {sunNodeLift:G4};lookup {sunNodePlane:G3} {sunNodeSigma:G3};discover {sunNodeDiscoverStride};unknown {sunNodeUnknownSun:G3};settled {texelNoise:G6} {texelMaxRays} stop {splitRefineMinShare:G3} dark {texelDarkFloor:G3};patches seen of {PatchCandidates};buried {LightmapBuriedRule}{FarKey};v{SplitLightVersion}");
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(spec)))[..16].ToLowerInvariant();

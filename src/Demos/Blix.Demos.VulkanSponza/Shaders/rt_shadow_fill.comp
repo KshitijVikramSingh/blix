@@ -11,7 +11,8 @@
 //   the neighbours     otherwise: the traced pixels around it on its own surface (plane and normal agree), blocked if
 //                      most of them are; with none on its surface, the nearest traced pixel's.
 //
-// Every pixel's depth is written for the next frame's test. A traced pixel's word is left as traced.
+// Every pixel's depth is written for the next frame's test. A traced pixel's word is left as traced. A word taken from
+// another pixel brings that pixel's sheet light with it (the mask's second plane: a ray through a curtain, bit 2).
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -67,6 +68,8 @@ void main() {
                 float tolerance = 0.02 + 0.03 * (1.0 - abs(dot(nQ, view)));
                 if (seen > 0.0 && abs(seen - clip.w) <= tolerance * clip.w) {
                     maskWords[index] = prevWords[pi] & ~0xFF00u;
+                    uint n = uint(size.x) * uint(size.y);
+                    if ((prevWords[pi] & 4u) != 0u) maskWords[n + index] = prevWords[n + pi];
                     return;
                 }
             }
@@ -76,7 +79,7 @@ void main() {
     // Disoccluded, or no history: this frame's traced pixels in the 3x3 around it.
     float tolerance = 0.005 + 0.004 * length(pQ - u.uCamera.xyz);
     int onSurface = 0, blocked = 0;
-    uint blockedWord = 1u, nearestWord = 0u;
+    uint blockedWord = 1u, nearestWord = 0u, blockedAt = 0u, nearestAt = 0u;
     float nearest = 1e9;
     for (int dy = -1; dy <= 1; ++dy) {
         for (int dx = -1; dx <= 1; ++dx) {
@@ -85,16 +88,20 @@ void main() {
             if (uint(t.x & 1) + 2u * uint(t.y & 1) != phase) continue;
             float tRaw = texelFetch(uSceneDepth, t, 0).r;
             if (tRaw >= 1.0 - 1e-6) continue;
-            uint word = maskWords[uint(t.y) * uint(size.x) + uint(t.x)];
+            uint at = uint(t.y) * uint(size.x) + uint(t.x);
+            uint word = maskWords[at];
             vec3 pT = surfaceAt(t, tRaw).xyz;
             float d = length(pT - pQ);
-            if (d < nearest) { nearest = d; nearestWord = word; }
+            if (d < nearest) { nearest = d; nearestWord = word; nearestAt = at; }
             vec4 nT = texelFetch(uPrepassNormal, t, 0);
             if (abs(dot(nQ, pT - pQ)) > tolerance || dot(nT.xyz, nT.xyz) < 1e-6 || dot(normalize(nT.xyz), nQ) < 0.8) continue;
             onSurface++;
-            if ((word & 1u) != 0u) { blocked++; blockedWord = word; }
+            if ((word & 1u) != 0u) { blocked++; blockedWord = word; blockedAt = at; }
         }
     }
-    uint word = onSurface == 0 ? nearestWord : 2 * blocked > onSurface ? blockedWord : 0u;
+    bool fromBlocked = onSurface != 0 && 2 * blocked > onSurface;
+    uint word = onSurface == 0 ? nearestWord : fromBlocked ? blockedWord : 0u;
     maskWords[index] = word & ~0xFF00u;
+    uint n = uint(size.x) * uint(size.y);
+    if ((word & 4u) != 0u) maskWords[n + index] = maskWords[n + (fromBlocked ? blockedAt : nearestAt)];
 }
