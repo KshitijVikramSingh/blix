@@ -21,6 +21,18 @@ vec3 lightmapOctDecode(uint packed) {
     return normalize(v);
 }
 
+// What a coarse level's pixel judges LOD 0's frames against, and takes when none agree: its triangle's FACE normal
+// (the world position's screen derivatives), turned to the vertex normal's side -- not the vertex normal. The cooked
+// chains collapse to fixed ratios, and a pier's joint vertices, their normals smoothed up and down the groove, spread
+// those normals over the flat face (the geometric-normal view showed the smear, 2026-10-15). A column's coarse facet
+// stays within ~20 degrees of its fine normals, so it still takes them.
+vec3 lodFrameReference(vec3 worldPos, vec3 vertexN) {
+    vec3 face = cross(dFdx(worldPos), dFdy(worldPos));
+    if (dot(face, face) < 1e-20) return vertexN;
+    face = normalize(face);
+    return dot(face, vertexN) < 0.0 ? -face : face;
+}
+
 // The frame at `texel` (atlas units, centres at +0.5; the pre-pass's vLightmapTexel): world normal (the front side's:
 // the caller flips it for a back face, as it does its own), tangent xyz and handedness w. False where the pixel has no
 // atlas texel, or none of the four around it carries a frame.
@@ -59,6 +71,11 @@ bool lightmapShadingFrame(vec2 texel, vec3 vertexN, out vec3 normal, out vec4 ta
             float d = dot(cn, vn);
             if (d > bestDot) { bestDot = d; ownN = cn; }
         }
+        // Even the best of the five turned more than 25 degrees from the drawn face (lodFrameReference): a coarse level
+        // drawn flat over a joint its simplification collapsed (inside one chart, so the seam locks keep it), its texels
+        // the groove's walls -- their normals drew bright and dark bands along the piers' joints at LOD error 2
+        // (2026-10-15). The caller's own instead.
+        if (bestDot < 0.9) return false;
     }
     for (int i = 0; i < 4; ++i) {
         ivec2 o = ivec2(i & 1, i >> 1);

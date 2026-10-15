@@ -324,7 +324,12 @@ void main() {
     {
         vec3 lodZeroN;
         vec4 lodZeroT;
-        if (vLod > 0u && lightmapShadingFrame(vLightmapTexel, N, lodZeroN, lodZeroT)) { N = lodZeroN; tangentWorld = lodZeroT.xyz; tangentSign = lodZeroT.w; }
+        // Judged against the drawn face, and the face where none agrees (lodFrameReference), as the pre-pass does.
+        if (vLod > 0u) {
+            vec3 reference = lodFrameReference(vWorldPos, N);
+            if (lightmapShadingFrame(vLightmapTexel, reference, lodZeroN, lodZeroT)) { N = lodZeroN; tangentWorld = lodZeroT.xyz; tangentSign = lodZeroT.w; }
+            else if (dot(vLightmapTexel, vLightmapTexel) > 1e-6) N = reference;
+        }
     }
     if (!gl_FrontFacing) N = -N;
     // Build TBN from the authored glTF tangent. Gram-Schmidt removes interpolation drift and

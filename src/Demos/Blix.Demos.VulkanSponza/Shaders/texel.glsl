@@ -188,8 +188,8 @@ void texelsAroundLightmap(vec2 texel, vec3 n, ivec2 atlasSize, out int ids[4], o
     // it took that face's light, a texel staircase along columns' and arches' edges at any LOD (2026-10-14). n turns
     // smoothly, so the switch follows a smooth line; the best match is one of the five, so the pixel keeps its texels.
     vec3 ownNormal = vec3(0.0);
+    float bestDot = -2.0;
     {
-        float bestDot = -2.0;
         for (int i = 0; i < 5; ++i) {
             ivec2 at = i == 4 ? ivec2(floor(texel)) : base + ivec2(i & 1, i >> 1);
             if (any(lessThan(at, ivec2(0))) || any(greaterThanEqual(at, atlasSize))) continue;
@@ -202,6 +202,33 @@ void texelsAroundLightmap(vec2 texel, vec3 n, ivec2 atlasSize, out int ids[4], o
             if (cl < 1e-6) continue;
             float d = dot(cn / cl, n);
             if (d > bestDot) { bestDot = d; ownNormal = cn; }
+        }
+    }
+    // Even the best of the five turned more than 25 degrees from the pixel: a coarse level drawn flat over a joint its
+    // simplification collapsed, the texels under it the groove's walls (lightmap_frame.glsl drops their frame too). The
+    // ring of twelve around instead -- the faces either side of the groove, in the same chart -- the nearest four facing
+    // as the pixel does; none there, the five's best as before.
+    if (bestDot > -2.0 && bestDot < 0.9) {
+        int found = 0;
+        for (int k = 0; k < 16 && found < 4; ++k) {
+            ivec2 o = ivec2(k & 3, k >> 2) - 1;
+            if (o.x >= 0 && o.x <= 1 && o.y >= 0 && o.y <= 1) continue;
+            ivec2 at = base + o;
+            if (any(lessThan(at, ivec2(0))) || any(greaterThanEqual(at, atlasSize))) continue;
+            uint id = TEXEL_INDEX_MAP(at.y * atlasSize.x + at.x);
+            if (id == 0xFFFFFFFFu) continue;
+            if (TEXEL_POSITION(id).w < 0.0 && dot(TEXEL_NORMAL(id).xyz, n) < 0.0) id += 1u;
+            if (abs(TEXEL_POSITION(id).w) < 2.0) continue;
+            vec3 tn = TEXEL_NORMAL(id).xyz;
+            if (dot(tn, n) < 0.9 * length(tn)) continue;
+            vec2 d = vec2(at) + 0.5 - texel;
+            ids[found] = int(id);
+            weights[found] = 1.0 / (1.0 + dot(d, d));
+            found++;
+        }
+        if (found > 0) {
+            for (int i = found; i < 4; ++i) { ids[i] = -1; weights[i] = 0.0; }
+            return;
         }
     }
     float ownLength = length(ownNormal);
