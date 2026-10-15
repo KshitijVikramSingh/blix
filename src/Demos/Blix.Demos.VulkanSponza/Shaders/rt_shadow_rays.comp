@@ -31,7 +31,9 @@ layout(set = 0, binding = 0) uniform RtShadowRays {
                          // node coordinates, z 1 when they answer, w tau (degrees): a record under it is not certain
     vec4 uLightmap;      // the atlas (texel.glsl): x 1 when on, yz its size
     vec4 uCompact;       // x 1: the traced rays packed (below); y which of the two counters is this frame's; z 1: the
-                         // per-pixel origins and directions written too (unpacked, or a census reads them)
+                         // per-pixel origins and directions written too (unpacked, or a census reads them); w > 0:
+                         // interleaved (ShadowsSettings.Interleave), only the pixels of each 2x2 at w - 1 (x + 2y)
+                         // trace, the rest left to rt_shadow_fill.comp
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -130,6 +132,11 @@ void main() {
         baked[index] = 3u;
         if (packing) maskWords[index] = 0u;
         if (sky) skyRays[index * 2u] = vec4(0.0);
+        return;
+    }
+    // Interleaved: not this frame's pixel of its 2x2 -- no ray, no word (the fill writes it). Packed only, never per pixel.
+    if (u.uCompact.w > 0.5 && (p.x & 1u) + 2u * (p.y & 1u) != uint(u.uCompact.w) - 1u) {
+        baked[index] = 2u;
         return;
     }
     vec2 ndc = (vec2(q) + 0.5) / vec2(fullSize) * 2.0 - 1.0;

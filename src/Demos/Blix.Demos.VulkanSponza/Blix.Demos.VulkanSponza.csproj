@@ -67,6 +67,7 @@
     <GlslShader Include="Shaders\ray_check.comp" />
     <GlslShader Include="Shaders\rt_shadow_rays.comp" />
     <GlslShader Include="Shaders\rt_shadow_filter.comp" />
+    <GlslShader Include="Shaders\rt_shadow_fill.comp" />
     <GlslShader Include="Shaders\ray_view.comp" />
     <GlslShader Include="Shaders\ray_surface_bake.comp" />
     <GlslShader Include="Shaders\clipmap_inject.comp" />

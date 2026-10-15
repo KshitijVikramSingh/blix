@@ -59,6 +59,8 @@ internal sealed partial class SponzaLoop
         // paired run attributes the HORIZON SEARCH specifically rather than the whole feature.
         if (args.Flag("no-ao")) ambient.Enabled = false;
         if (args.Flag("no-shadow")) shadows.Enabled = false;
+        // --rt-shadow-full: every pixel traced every frame (ShadowsSettings.Interleave off).
+        if (args.Flag("rt-shadow-full")) shadows.Interleave = false;
         if (args.Flag("ao-fullres")) aoScale = 1f;
         // The incident-light field ships on. --no-incident is a diagnostic: the lit pass then uses the open-sky
         // irradiance cube with sky visibility 1, no clipmap light at all.
@@ -790,6 +792,10 @@ internal sealed partial class SponzaLoop
 
         // The traced shadows are needed from here on.
         if (!rtNoOverlap) graph.ExternalJoin(rtShadowTracePassHandle, "rt-shadow-join");
+        // Interleaved (ShadowsSettings.Interleave): the untraced pixels' words, before the filter reads the mask.
+        rtShadowFillInterface = Reflect("rt_shadow_fill.comp");
+        rtShadowFillPassHandle = graph.ComputePass("rt-shadow-fill").Shader(rtShadowFillInterface)
+            .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
         // The penumbra filtered in space (ShadowsSettings.PenumbraFilter): after the trace, before anything reads the mask.
         rtShadowFilterInterface = Reflect("rt_shadow_filter.comp");
         rtShadowFilterPassHandle = graph.ComputePass("rt-shadow-filter").Shader(rtShadowFilterInterface)
@@ -1061,6 +1067,8 @@ internal sealed partial class SponzaLoop
             File.ReadAllBytes(Path.Combine(shaderDir, "rt_shadow_rays.comp.spv")), rtShadowRaysInterface, "rt_shadow_rays")), "rt_shadow_rays"));
         rtShadowFilterPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "rt_shadow_filter.comp.spv")), rtShadowFilterInterface, "rt_shadow_filter")), "rt_shadow_filter"));
+        rtShadowFillPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
+            File.ReadAllBytes(Path.Combine(shaderDir, "rt_shadow_fill.comp.spv")), rtShadowFillInterface, "rt_shadow_fill")), "rt_shadow_fill"));
         var clipmapSpv = File.ReadAllBytes(Path.Combine(shaderDir, "clipmap_inject.comp.spv"));
         clipmapPipeline = Own(device.CreateComputePipeline(
             Own(device.CreateComputeShaderProgramFromSpv(clipmapSpv, clipmapInterface, "clipmap_inject")), "clipmap_inject"));

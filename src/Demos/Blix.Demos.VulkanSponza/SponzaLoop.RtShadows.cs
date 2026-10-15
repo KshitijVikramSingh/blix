@@ -56,6 +56,18 @@ internal sealed partial class SponzaLoop
     private PassHandle rtShadowRaysPassHandle, rtShadowTracePassHandle, rtShadowFilterPassHandle;
     private PipelineHandle rtShadowRaysPipeline, rtShadowFilterPipeline;
     private ShaderInterface rtShadowFilterInterface = null!;
+    // Interleaved (ShadowsSettings.Interleave): a pixel of each 2x2 traced a frame, rt-shadow-fill writing the others
+    // from the last frame's mask (reprojected; each pixel's depth per slot, for its disocclusion test) or the neighbours.
+    // A frame with no good history -- the first, after a resize, the sun moved -- traces every pixel.
+    private ShaderInterface rtShadowFillInterface = null!;
+    private PassHandle rtShadowFillPassHandle;
+    private PipelineHandle rtShadowFillPipeline;
+    private GpuBufferHandle[] rtShadowDepths = Array.Empty<GpuBufferHandle>();
+    private int rtShadowPrevSlot = -1;
+    private Matrix4x4 rtShadowPrevViewProj;
+    private Vector3 rtShadowPrevSun;
+    private uint rtShadowPhase;
+    private static readonly uint[] RtShadowPhases = { 0u, 3u, 1u, 2u };
     // The frame's Metal tracer, shared by every wavefront (SponzaLoop.RayBatch.cs): built once, after the surface bake.
     private MetalRayTracer? frameTracer;
     private bool frameTracerFailed;
@@ -132,6 +144,7 @@ internal sealed partial class SponzaLoop
         if (abMode == "rtshadow" && AbOffPhase)
         {
             // The A/B's OFF phase: the cascades shade, and no external pass splits the frame.
+            rtShadowPrevSlot = -1;
             if (!rtShadowBound.Equals(default(GpuBufferHandle)))
             {
                 rtShadowBound = default;
@@ -159,6 +172,8 @@ internal sealed partial class SponzaLoop
             foreach (var b in rtShadowPacked) device.DestroyGpuBuffer(b);
             foreach (var b in rtShadowPixelOf) device.DestroyGpuBuffer(b);
             foreach (var b in rtShadowCounters) device.DestroyGpuBuffer(b);
+            foreach (var b in rtShadowDepths) device.DestroyGpuBuffer(b);
+            rtShadowPrevSlot = -1;
             var slots = device.MaxFramesInFlightCount;
             var header = MemoryMarshal.AsBytes(new uint[] { (uint)width, (uint)height, 1u, RtSkyRays ? 1u : 0u }.AsSpan()).ToArray();
             rtShadowOrigins = Enumerable.Range(0, RtPerPixel ? slots : 0)
@@ -177,6 +192,8 @@ internal sealed partial class SponzaLoop
                 .Select(s => Own(device.CreateGpuBuffer(width * height * 4, name: $"sponza.rt-shadow.pixel-of{s}"))).ToArray();
             rtShadowCounters = Enumerable.Range(0, RtPack ? slots : 0)
                 .Select(s => Own(device.CreateGpuBuffer(16, new byte[16], $"sponza.rt-shadow.counters{s}"))).ToArray();
+            rtShadowDepths = Enumerable.Range(0, RtPack ? slots : 0)
+                .Select(s => Own(device.CreateGpuBuffer(width * height * 4, name: $"sponza.rt-shadow.depth{s}"))).ToArray();
             rtShadowSlotUses = new uint[slots];
             rtShadowSize = (width, height);
         }
@@ -195,6 +212,10 @@ internal sealed partial class SponzaLoop
         var filterPenumbra = shadows.PenumbraFilter && !halfShadowsNow && SunDiscTangent > 0f;
         var discTangent = filterPenumbra ? 0f : SunDiscTangent;
         var directions = rtShadowDirections.Length > 0 ? rtShadowDirections[slot] : RtShadowPlaceholder;
+        // Interleaved: packed rays only, one per full-res pixel (no half res, no sky rays, no census reading every pixel's).
+        var interleave = shadows.Interleave && pack && !halfShadowsNow && sky is null && !RtPerPixel;
+        var historyGood = interleave && rtShadowPrevSlot >= 0 && rtShadowPrevSlot != slot && rtShadowPrevSun == towardSun;
+        var phase = historyGood ? RtShadowPhases[rtShadowPhase++ & 3u] : 0u;
         var bounds = rayQueries.Nodes[0].Bounds;
         var reach = (bounds.Max - bounds.Min).Length();
         Matrix4x4.Invert(viewProjJittered, out var invViewProj);
@@ -211,7 +232,7 @@ internal sealed partial class SponzaLoop
                 new("uDisc", new Vector4Uniform(new Vector4(discTangent, rtShadowFrame % 65536u, 0f, 0f))),
                 new("uLightlet", new Vector4Uniform(LightletUniform(towardSun))),
                 new("uLightmap", new Vector4Uniform(LightmapUniform)),
-                new("uCompact", new Vector4Uniform(new Vector4(pack ? 1f : 0f, counter, rtShadowOrigins.Length > 0 ? 1f : 0f, 0f))),
+                new("uCompact", new Vector4Uniform(new Vector4(pack ? 1f : 0f, counter, rtShadowOrigins.Length > 0 ? 1f : 0f, historyGood ? 1f + phase : 0f))),
             },
             new[]
             {
@@ -262,10 +283,39 @@ internal sealed partial class SponzaLoop
         // The frame's deferred batches go in this group (SponzaLoop.TracerGroup.cs).
         tracerGroupRecorded = ReferenceEquals(tracer, frameTracer);
         rtShadowFrames++;
+        if (interleave)
+        {
+            var prev = historyGood ? rtShadowPrevSlot : slot;
+            graph.Dispatch(rtShadowFillPassHandle, new DispatchCommand(rtShadowFillPipeline, (width + 7) / 8, (height + 7) / 8, 1,
+                new ShaderUniform[]
+                {
+                    new("uInvViewProj", new Matrix4x4Uniform(invViewProj)),
+                    new("uPrevViewProj", new Matrix4x4Uniform(historyGood ? rtShadowPrevViewProj : viewProjJittered)),
+                    new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, 0f))),
+                    new("uSize", new Vector4Uniform(new Vector4(width, height, 0f, 0f))),
+                    new("uFill", new Vector4Uniform(new Vector4(phase, historyGood ? 1f : 0f, historyGood ? 0f : 1f, 0f))),
+                },
+                new[]
+                {
+                    new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
+                    new ShaderTextureBinding("uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
+                },
+                Buffers: new[]
+                {
+                    new ShaderBufferBinding("RtShadowMask", mask),
+                    new ShaderBufferBinding("RtShadowPrevMask", rtShadowMasks[prev]),
+                    new ShaderBufferBinding("RtShadowDepth", rtShadowDepths[slot]),
+                    new ShaderBufferBinding("RtShadowPrevDepth", rtShadowDepths[prev]),
+                }));
+            rtShadowPrevSlot = slot;
+            rtShadowPrevViewProj = viewProjJittered;
+            rtShadowPrevSun = towardSun;
+        }
+        else rtShadowPrevSlot = -1;
         if (filterPenumbra)
         {
             var pixelAngle = 2f / (MathF.Max(MathF.Abs(cameraProjection.M22), 1e-6f) * Math.Max(height, 1));
-            graph.Dispatch(rtShadowFilterPassHandle, new DispatchCommand(rtShadowFilterPipeline, (width + 7) / 8, (height + 7) / 8, 1,
+            graph.Dispatch(rtShadowFilterPassHandle, new DispatchCommand(rtShadowFilterPipeline, (width + 15) / 16, (height + 15) / 16, 1,
                 new ShaderUniform[]
                 {
                     new("uInvViewProj", new Matrix4x4Uniform(invViewProj)),

@@ -1049,6 +1049,9 @@ internal sealed class ShadowsSettings
     // direction per pixel), the hard shadow widened by blocker distance x the disc. Stable without TAA. Off: each ray
     // toward its own point of the disc, a different one each frame, and TAA averages them (noisy, incoherent rays).
     [Tune]            public bool PenumbraFilter = true;
+    // --rt-shadows: a quarter of the pixels traced a frame, one of each 2x2 in turn (rt_shadow_fill.comp fills the
+    // rest from last frame's mask, reprojected, or this frame's neighbours). Off: every pixel every frame.
+    [Tune]            public bool Interleave = true;
 }
 
 // Ambient-visibility tunables (overlay "Ambient" group).

@@ -12,7 +12,10 @@
 // half-res upsample, the audits) sees what it saw. A neighbour's word may be rewritten while read; only its bits 8-15
 // change, which this pass does not read.
 
-layout(local_size_x = 8, local_size_y = 8) in;
+// A 16x16 group reads the mask once into shared memory with the widest radius around it (40x40 words): every tap
+// reads the tile, and a group whose tile is all lit or all blocked writes its words and stops (most of a frame). It
+// read each tap from the buffer before (2026-10-15: 9.7 ms at 2880x1620).
+layout(local_size_x = 16, local_size_y = 16) in;
 
 layout(set = 0, binding = 0) uniform RtShadowFilter {
     mat4 uInvViewProj;
@@ -26,6 +29,11 @@ layout(set = 0, binding = 2) uniform sampler2D uPrepassNormal;
 layout(std430, set = 0, binding = 3) buffer RtShadowMask { uvec4 rtShadowHeader; uint rtShadowWords[]; };
 
 const int MaxRadius = 12;
+const int Group = 16;
+const int Tile = Group + 2 * MaxRadius;
+shared uint tile[Tile * Tile];
+shared uint tileLit, tileBlocked;
+ivec2 tileOrigin;
 
 vec3 worldAt(ivec2 pixel, float raw) {
     vec2 ndc = (vec2(pixel) + 0.5) / u.uSize.xy * 2.0 - 1.0;
@@ -34,8 +42,10 @@ vec3 worldAt(ivec2 pixel, float raw) {
 }
 
 // 1 where the sun reached; the blocker's distance where it did not (0 when unknown: a baked answer, no ray).
+// p within MaxRadius of the group's pixels (every tap is).
 vec2 tapAt(ivec2 p) {
-    uint word = rtShadowWords[uint(p.y) * uint(u.uSize.x) + uint(p.x)];
+    ivec2 t = p - tileOrigin;
+    uint word = tile[t.y * Tile + t.x];
     return (word & 1u) != 0u ? vec2(0.0, unpackHalf2x16(word >> 16).x) : vec2(1.0, 0.0);
 }
 
@@ -52,13 +62,30 @@ void main() {
     ivec2 q = ivec2(gl_GlobalInvocationID.xy);
     ivec2 size = ivec2(u.uSize.xy);
     if (q.x == 0 && q.y == 0) rtShadowHeader.z = 2u;
+    // The tile: the group's pixels and MaxRadius around, clamped to the mask's edge as the taps are.
+    tileOrigin = ivec2(gl_WorkGroupID.xy) * Group - MaxRadius;
+    if (gl_LocalInvocationIndex == 0u) { tileLit = 0u; tileBlocked = 0u; }
+    barrier();
+    uint lit0 = 0u, blocked0 = 0u;
+    for (uint i = gl_LocalInvocationIndex; i < uint(Tile * Tile); i += uint(Group * Group)) {
+        ivec2 at = clamp(tileOrigin + ivec2(int(i) % Tile, int(i) / Tile), ivec2(0), size - 1);
+        uint w = rtShadowWords[uint(at.y) * uint(size.x) + uint(at.x)];
+        tile[i] = w;
+        if ((w & 1u) != 0u) blocked0 = 1u; else lit0 = 1u;
+    }
+    if (lit0 != 0u) atomicOr(tileLit, 1u);
+    if (blocked0 != 0u) atomicOr(tileBlocked, 1u);
+    barrier();
     if (q.x >= size.x || q.y >= size.y) return;
     uint index = uint(q.y) * uint(size.x) + uint(q.x);
-    uint word = rtShadowWords[index];
+    ivec2 own2 = q - tileOrigin;
+    uint word = tile[own2.y * Tile + own2.x];
     float own = (word & 1u) != 0u ? 0.0 : 1.0;
     float result = own;
 
-    float raw = texelFetch(uSceneDepth, q, 0).r;
+    // Every tap would agree (an umbra, or open sun): nothing to soften.
+    bool mixed = tileLit != 0u && tileBlocked != 0u;
+    float raw = mixed ? texelFetch(uSceneDepth, q, 0).r : 1.0;
     if (raw < 1.0 - 1e-6 && u.uDisc.x > 0.0) {
         vec3 pQ = worldAt(q, raw);
         float viewDistance = length(pQ - u.uCamera.xyz);
@@ -85,13 +112,16 @@ void main() {
                 vec4 nSample = texelFetch(uPrepassNormal, q, 0);
                 vec3 nQ = dot(nSample.xyz, nSample.xyz) > 1e-6 ? normalize(nSample.xyz) : normalize(u.uCamera.xyz - pQ);
                 float tolerance = 0.005 + 0.004 * viewDistance;
-                // A sparse kernel: at most 7 x 7 taps over the radius.
+                // A sparse kernel: at most 7 x 7 taps over the radius, k of them a side, spaced r / k (a step of r / 3
+                // rounded down had radii 3-5 at every pixel, 121 taps).
                 int r = int(ceil(radius));
-                int step = max(1, r / 3);
+                int k = min(r, 3);
+                float spacing = float(r) / float(k);
                 float sigma = 0.5 * radius + 0.5;
                 float sum = 0.0, weight = 0.0;
-                for (int dy = -r; dy <= r; dy += step) {
-                    for (int dx = -r; dx <= r; dx += step) {
+                for (int iy = -k; iy <= k; ++iy) {
+                    for (int ix = -k; ix <= k; ++ix) {
+                        int dx = int(round(float(ix) * spacing)), dy = int(round(float(iy) * spacing));
                         ivec2 t = q + ivec2(dx, dy);
                         if (any(lessThan(t, ivec2(0))) || any(greaterThanEqual(t, size))) continue;
                         vec2 d = vec2(dx, dy);

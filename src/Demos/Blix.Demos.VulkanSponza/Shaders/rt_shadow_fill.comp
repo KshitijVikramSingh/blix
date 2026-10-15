@@ -1,0 +1,100 @@
+#version 450
+
+// The traced sun shadows, interleaved (ShadowsSettings.Interleave): rt_shadow_rays.comp traced one pixel of each 2x2
+// this frame (uFill.x), a different one each frame; this writes the other three's words, before the penumbra filter or
+// anything else reads the mask.
+//
+//   last frame's word  where the pixel's surface was there last frame: its point reprojected into last frame's mask,
+//                      and the depth last frame saw there (RtShadowDepth, written here for every pixel) within a few
+//                      percent of the point's own -- not disoccluded. A pixel is retraced every fourth frame, so a
+//                      reused word is at most three frames old.
+//   the neighbours     otherwise: the traced pixels around it on its own surface (plane and normal agree), blocked if
+//                      most of them are; with none on its surface, the nearest traced pixel's.
+//
+// Every pixel's depth is written for the next frame's test. A traced pixel's word is left as traced.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform RtShadowFill {
+    mat4 uInvViewProj;   // this frame's (jittered), as the rays pass took
+    mat4 uPrevViewProj;  // last frame's (jittered): where last frame's mask was traced
+    vec4 uCamera;        // xyz the camera
+    vec4 uSize;          // xy the mask's size
+    vec4 uFill;          // x this frame's traced pixel of each 2x2 (x + 2y); y 1: last frame's mask and depth are good;
+                         // z 1: every pixel was traced (the depth alone written, for the next frame)
+} u;
+
+layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
+layout(set = 0, binding = 2) uniform sampler2D uPrepassNormal;
+layout(std430, set = 0, binding = 3) buffer RtShadowMask { uvec4 maskHeader; uint maskWords[]; };
+layout(std430, set = 0, binding = 4) readonly buffer RtShadowPrevMask { uvec4 prevHeader; uint prevWords[]; };
+layout(std430, set = 0, binding = 5) writeonly buffer RtShadowDepth { float depths[]; };
+layout(std430, set = 0, binding = 6) readonly buffer RtShadowPrevDepth { float prevDepths[]; };
+
+// The surface point at a pixel, and its depth (clip w) in this frame's view.
+vec4 surfaceAt(ivec2 pixel, float raw) {
+    vec2 ndc = (vec2(pixel) + 0.5) / u.uSize.xy * 2.0 - 1.0;
+    vec4 w = u.uInvViewProj * vec4(ndc, raw, 1.0);
+    return vec4(w.xyz / w.w, 1.0 / w.w);
+}
+
+void main() {
+    ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = ivec2(u.uSize.xy);
+    if (q.x >= size.x || q.y >= size.y) return;
+    uint index = uint(q.y) * uint(size.x) + uint(q.x);
+    float raw = texelFetch(uSceneDepth, q, 0).r;
+    vec4 nSample = texelFetch(uPrepassNormal, q, 0);
+    bool surface = raw < 1.0 - 1e-6 && dot(nSample.xyz, nSample.xyz) >= 1e-6;
+    vec4 here = surface ? surfaceAt(q, raw) : vec4(0.0);
+    depths[index] = here.w;
+    if (u.uFill.z > 0.5) return;
+    uint phase = uint(u.uFill.x);
+    if (uint(q.x & 1) + 2u * uint(q.y & 1) == phase || !surface) return;   // traced, or no surface (the rays pass wrote 0)
+
+    vec3 pQ = here.xyz;
+    vec3 nQ = normalize(nSample.xyz);
+    if (u.uFill.y > 0.5) {
+        vec4 clip = u.uPrevViewProj * vec4(pQ, 1.0);
+        if (clip.w > 1e-4) {
+            vec2 prev = (clip.xy / clip.w * 0.5 + 0.5) * u.uSize.xy;
+            ivec2 pp = ivec2(floor(prev));
+            if (all(greaterThanEqual(pp, ivec2(0))) && all(lessThan(pp, size))) {
+                uint pi = uint(pp.y) * uint(size.x) + uint(pp.x);
+                float seen = prevDepths[pi];
+                // Grazing surfaces change depth fast across a pixel: the tolerance widens as the normal turns from the view.
+                vec3 view = normalize(u.uCamera.xyz - pQ);
+                float tolerance = 0.02 + 0.03 * (1.0 - abs(dot(nQ, view)));
+                if (seen > 0.0 && abs(seen - clip.w) <= tolerance * clip.w) {
+                    maskWords[index] = prevWords[pi] & ~0xFF00u;
+                    return;
+                }
+            }
+        }
+    }
+
+    // Disoccluded, or no history: this frame's traced pixels in the 3x3 around it.
+    float tolerance = 0.005 + 0.004 * length(pQ - u.uCamera.xyz);
+    int onSurface = 0, blocked = 0;
+    uint blockedWord = 1u, nearestWord = 0u;
+    float nearest = 1e9;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            ivec2 t = q + ivec2(dx, dy);
+            if (any(lessThan(t, ivec2(0))) || any(greaterThanEqual(t, size))) continue;
+            if (uint(t.x & 1) + 2u * uint(t.y & 1) != phase) continue;
+            float tRaw = texelFetch(uSceneDepth, t, 0).r;
+            if (tRaw >= 1.0 - 1e-6) continue;
+            uint word = maskWords[uint(t.y) * uint(size.x) + uint(t.x)];
+            vec3 pT = surfaceAt(t, tRaw).xyz;
+            float d = length(pT - pQ);
+            if (d < nearest) { nearest = d; nearestWord = word; }
+            vec4 nT = texelFetch(uPrepassNormal, t, 0);
+            if (abs(dot(nQ, pT - pQ)) > tolerance || dot(nT.xyz, nT.xyz) < 1e-6 || dot(normalize(nT.xyz), nQ) < 0.8) continue;
+            onSurface++;
+            if ((word & 1u) != 0u) { blocked++; blockedWord = word; }
+        }
+    }
+    uint word = onSurface == 0 ? nearestWord : 2 * blocked > onSurface ? blockedWord : 0u;
+    maskWords[index] = word & ~0xFF00u;
+}
