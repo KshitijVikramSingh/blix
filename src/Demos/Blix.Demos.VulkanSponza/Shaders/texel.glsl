@@ -221,7 +221,11 @@ void texelsAroundLightmap(vec2 texel, vec3 n, ivec2 atlasSize, out int ids[4], o
         vec3 tn = TEXEL_NORMAL(id).xyz;
         if (ownLength > 1e-6 && dot(tn, ownNormal) < 0.9 * length(tn) * ownLength) continue;
         ids[i] = int(id);
-        weights[i] = (o.x == 1 ? t.x : 1.0 - t.x) * (o.y == 1 ? t.y : 1.0 - t.y);
+        // A floor under the bilinear weight: the reference can be a texel the bilinear gives nothing (the pixel on another
+        // texel's centre), and the one texel it does weigh can face the other way -- every weight then 0, the lookup
+        // "found nothing", and the pixel took the probes' light instead: bright dashes along the vaults' creases
+        // (2026-10-15: texels at 0.03, the pixels at 0.6-0.7).
+        weights[i] = max((o.x == 1 ? t.x : 1.0 - t.x) * (o.y == 1 ? t.y : 1.0 - t.y), 1.0 / 64.0);
     }
 }
 

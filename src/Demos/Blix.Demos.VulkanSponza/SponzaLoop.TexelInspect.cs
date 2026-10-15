@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Blix.Geometry;
+using Blix.Graphics;
 
 namespace Blix.Demos.VulkanSponza;
 
@@ -17,6 +18,14 @@ internal sealed partial class SponzaLoop
     private string? texelInspect;
 
     private static float HalfAt(byte[] bytes, int index) => (float)BitConverter.ToHalf(bytes, index * 2);
+
+    // A resolved answer (texelResolved: rgb9e5, then the rays share and the lit flag): its light and rays share.
+    private static string ResolvedText(ReadOnlySpan<uint> r)
+    {
+        var scale = MathF.Pow(2f, (int)(r[0] >> 27) - 15 - 9);
+        var lum = ((r[0] & 511u) + ((r[0] >> 9) & 511u) + ((r[0] >> 18) & 511u)) * scale / 3f;
+        return string.Create(CultureInfo.InvariantCulture, $"{lum:0.000} (rays {(r[1] & 0xFFFFu) / 65535f:0.00}{((r[1] >> 16) == 0u ? ", unlit" : "")})");
+    }
 
     private void WriteTexelInspect()
     {
@@ -99,11 +108,15 @@ internal sealed partial class SponzaLoop
                 var pos = new Vector3(rec[0].X, rec[0].Y, rec[0].Z);
                 var nrm = new Vector3(rec[1].X, rec[1].Y, rec[1].Z);
                 var bits = BitConverter.SingleToUInt32Bits(rec[1].W);
-                var light = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(texelLightBuffer, (int)id * 16, 16).AsSpan())[0];
-                var filtered = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(texelFilteredBuffer, (int)id * 16, 16).AsSpan())[0];
+                // At rest (split light) the working buffers are placeholders: the resolved answer is what the pixel reads.
+                var working = !texelLightBuffer.Equals(texelRestPlaceholder);
+                var light = working ? MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(texelLightBuffer, (int)id * 16, 16).AsSpan())[0] : default;
+                var filtered = working ? MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(texelFilteredBuffer, (int)id * 16, 16).AsSpan())[0] : default;
+                var resolved = texelResolvedBuffer.Equals(default(GpuBufferHandle)) ? "-"
+                    : ResolvedText(MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(texelResolvedBuffer, (int)id * 8, 8).AsSpan()));
                 var buried = MathF.Abs(rec[0].W) < 2f;
                 Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                    $"    [{i}] cell ({ax},{ay}) w {weight:0.00} -> record {id:N0} at cell ({bits & 0xFFFF},{bits >> 16}){(buried ? " BURIED" : "")}: {(point == Vector3.Zero ? "" : $"{Vector3.Distance(pos, point) * 100f:0.0} cm from the point, ")}n.pixelN {Vector3.Dot(nrm, pixelN):0.00}, rays {light.W:0}, light {(light.X + light.Y + light.Z) * Lum:0.000}, filtered {(filtered.W > 0f ? ((filtered.X + filtered.Y + filtered.Z) * Lum).ToString("0.000", CultureInfo.InvariantCulture) : "-")}"));
+                    $"    [{i}] cell ({ax},{ay}) w {weight:0.00} -> record {id:N0} at cell ({bits & 0xFFFF},{bits >> 16}){(buried ? " BURIED" : "")}: {(point == Vector3.Zero ? "" : $"{Vector3.Distance(pos, point) * 100f:0.0} cm from the point, ")}n.pixelN {Vector3.Dot(nrm, pixelN):0.00}, n ({nrm.X:0.00},{nrm.Y:0.00},{nrm.Z:0.00}), rays {light.W:0}, light {(light.X + light.Y + light.Z) * Lum:0.000}, filtered {(filtered.W > 0f ? ((filtered.X + filtered.Y + filtered.Z) * Lum).ToString("0.000", CultureInfo.InvariantCulture) : "-")}, resolved {resolved}"));
             }
         }
     }

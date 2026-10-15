@@ -69,7 +69,9 @@ bool lightmapShadingFrame(vec2 texel, vec3 vertexN, out vec3 normal, out vec4 ta
         uvec2 packed = lightmapFrames[1u + id];
         if (packed.x == 0u && packed.y == 0u) continue;
         if (dot(ownN, ownN) > 0.5 && dot(lightmapOctDecode(packed.x), ownN) < 0.9) continue;
-        float w = (o.x == 1 ? t.x : 1.0 - t.x) * (o.y == 1 ? t.y : 1.0 - t.y);
+        // A floor under the bilinear weight, as texelsAroundLightmap has (texel.glsl): the reference can be a texel the
+        // bilinear gives nothing.
+        float w = max((o.x == 1 ? t.x : 1.0 - t.x) * (o.y == 1 ? t.y : 1.0 - t.y), 1.0 / 64.0);
         n += w * lightmapOctDecode(packed.x);
         tg += w * lightmapOctDecode(packed.y & ~1u);
         handed += w * ((packed.y & 1u) != 0u ? -1.0 : 1.0);
