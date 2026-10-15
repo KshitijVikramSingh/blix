@@ -322,7 +322,7 @@ public sealed partial class VulkanGraphicsDevice
 
     // Must equal Swapchain.cs MaxFramesInFlight — UBO storage is sized off
     // this, and the transient pool count comes from here.
-    internal const int MaxFramesInFlightConst = 2;
+    internal const int MaxFramesInFlightConst = 3;
 
     // Builds the per-set DescriptorSetLayout + per-frame UBO storage for
     // every set the interface declares (plus empty-layout placeholders for

@@ -11,7 +11,9 @@ namespace Blix.Graphics.Vulkan;
 // long-lived and live in Init.cs.
 public sealed partial class VulkanGraphicsDevice
 {
-    private const int MaxFramesInFlight = 2;
+    // Three, not two: MoltenVK encodes the frame's Metal inside vkQueueSubmit, so with two the CPU's encode and the
+    // GPU's frame took turns (Sponza, 2026-10-15: ~98 ms median on two, 70.7 ms on three).
+    private const int MaxFramesInFlight = 3;
 
     // Per-frame-replicated payloads (e.g. bone palettes) write into
     // CurrentFrameSlot during OnRender; the bind path reads from the
