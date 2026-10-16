@@ -416,8 +416,11 @@ internal sealed partial class SponzaLoop
             var placement = (int)data.RowPlacements[row];
             if (!sums.TryGetValue(placement, out var v)) continue;
             var mean = v.Sum / v.Count;
-            var hue = mean / MathF.Max(MathF.Max(mean.X, MathF.Max(mean.Y, mean.Z)), 1e-3f);
-            var t = rayPlacementTransmission[placement] * hue;
+            var top = MathF.Max(MathF.Max(mean.X, MathF.Max(mean.Y, mean.Z)), 1e-3f);
+            var hue = mean / top;
+            // Capped at what its lit face reflects, as lit.frag caps it.
+            var factor = MathF.Max(rayPlacementTransmission[placement].X, MathF.Max(rayPlacementTransmission[placement].Y, rayPlacementTransmission[placement].Z));
+            var t = rayPlacementTransmission[placement] * hue * MathF.Min(1f, (1f - factor) * top / MathF.Max(factor, 1e-4f));
             uint Byte(float x) => (uint)Math.Clamp(MathF.Round(x * 255f), 0f, 255f);
             // The top byte: a double-sided sheet counts every crossing, a closed one the faces a ray enters by.
             rows[row] = Math.Max(1u, Byte(t.X) | Byte(t.Y) << 8 | Byte(t.Z) << 16) | (rayPlacementDoubleSided[placement] ? 1u << 24 : 0u);

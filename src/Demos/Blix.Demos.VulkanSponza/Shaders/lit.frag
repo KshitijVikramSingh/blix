@@ -134,11 +134,11 @@ float rtSunVisibility(vec2 fragCoord) {
 
 // The light sunlit sheets (curtains) send the pixel through them, a fraction of the sun's on it (the Metal pass's sheet
 // light: SponzaLoop.RtShadows.cs RtMaskPlanes): the filter's spread third plane where it ran (bit 3), the ray's own
-// second plane otherwise (bit 2 with the blocked bit). None at half res. Diffuse light from the cloth, not the sun's
-// beam: it lights the diffuse lobe alone.
+// second plane otherwise (bit 2 with the blocked bit). At half res (RenderSettings.HalfResShadows) the half-res pixel
+// under this one: the glow is spread over a curtain's width, so its nearest half-res answer is as good as an upsample.
+// Diffuse light from the cloth, not the sun's beam: it lights the diffuse lobe alone.
 vec3 rtSheetGlow(vec2 fragCoord) {
-    if (frame.uIncident.w > 0.5) return vec3(0.0);
-    uvec2 px = uvec2(fragCoord);
+    uvec2 px = frame.uIncident.w > 0.5 ? uvec2(fragCoord) / 2u : uvec2(fragCoord);
     if (px.x >= rtShadowHeader.x || px.y >= rtShadowHeader.y) return vec3(0.0);
     uint index = px.y * rtShadowHeader.x + px.x;
     uint plane = rtShadowHeader.x * rtShadowHeader.y;
@@ -152,6 +152,20 @@ vec3 rtSheetGlow(vec2 fragCoord) {
         g = unpackUnorm4x8(rtShadowWords[plane + index]).rgb;
     }
     return g * g;
+}
+
+// The shadow terminator (Chiang, Li and Burley 2019, "Taming the Shadow Terminator"): a mesh shaded by normals that
+// are not its triangles' -- smooth vertex normals over coarse facets, a normal map over those -- is lit by the shading
+// normal Ns out to where the flat triangle Ng turns from the light, and there the light ended in jagged facet-shaped
+// blocks: the sun's rays from the flat triangles meet the next facets, and the shading has no falloff to hide it (the
+// curtains' folds, 2026-10-16). G is the share of a microfacet surface tilted to Ns that Ng's plane leaves lit, smoothed
+// to a C1 falloff; 1 wherever the two agree.
+float blix_terminator(vec3 Ns, vec3 Ng, vec3 L) {
+    float cg = dot(Ng, L), cs = dot(Ns, L), cd = dot(Ng, Ns);
+    if (cg <= 0.0 || cs <= 0.0) return 0.0;
+    if (cd <= 1e-4) return 1.0;
+    float g = min(1.0, cg / (cs * cd));
+    return g * (1.0 + g - g * g);
 }
 
 // This frame's traced sky ray at the pixel: 1 where it reached the sky. One cosine-weighted ray a frame, so TAA's
@@ -442,6 +456,12 @@ void main() {
     vec3 L = -normalize(frame.uSunDirection);
     vec3 H = normalize(V + L);
     float NdotL = max(dot(N, L), 0.0);
+    // The triangle's own plane (the world position's screen derivatives, turned to the shading side), for the terminator.
+    vec3 Ngeo = cross(dFdx(vWorldPos), dFdy(vWorldPos));
+    Ngeo = dot(Ngeo, Ngeo) > 1e-20 ? normalize(Ngeo) : Nsmooth;
+    if (dot(Ngeo, Nsmooth) < 0.0) Ngeo = -Ngeo;
+    float terminatorFront = blix_terminator(N, Ngeo, L);
+    float terminatorBack = blix_terminator(-N, -Ngeo, L);
     float NdotH = max(dot(N, H), 0.0);
     float VdotH = max(dot(V, H), 0.0);
     // The shared shadow path chooses the cascade before applying its world-space normal offset and
@@ -518,7 +538,14 @@ void main() {
         // --cloth-transmission: the texture is the cloth's albedo, and the light through is its hue at the factor's
         // strength (over its brightest channel), as the cooked bounce has it (SponzaLoop.SunNodesSolve.cs). The albedo
         // as it is passed 2-7% of the sun: the sheet's glow read as opaque cloth (2026-10-16).
-        if (mat.uDiffuseTransmissionColor.w > 0.5) dtTex /= max(max(dtTex.r, max(dtTex.g, dtTex.b)), 0.05);
+        // Capped at what the cloth's lit face reflects ((1 - t) x its brightest channel): through at t in its full hue,
+        // dark cloth (0.2-0.3) passed more than it sent back, and every fold's shaded side outshone its lit side -- a
+        // bright rim along each edge where a fold turned from the sun (2026-10-16). Heavy cloth passes less than it
+        // reflects. The cook and the shadow rays' sheets cap alike (SunNodesSolve, RtRowTransmit).
+        if (mat.uDiffuseTransmissionColor.w > 0.5) {
+            float m = max(max(dtTex.r, max(dtTex.g, dtTex.b)), 0.05);
+            dtTex *= min(1.0, (1.0 - diffTrans) * m / max(diffTrans, 1e-4)) / m;
+        }
         dtColor = mat.uDiffuseTransmissionColor.rgb * dtTex;
     }
     // A probe older than v4 has no Charlie cube, so sheen is off rather than approximated.
@@ -534,7 +561,7 @@ void main() {
     vec3 sunSheen = vec3(0.0);
     if (hasSheen) {
         sunSheen = blix_sheenBrdf(sheenColor, sheenRoughness, NdotH, NdotL, NdotV)
-                 * NdotL * frame.uSunIrradiance * sunShadow;
+                 * NdotL * frame.uSunIrradiance * sunShadow * terminatorFront;
     }
 
     // The sun through the cloth. Its own shadow term is deliberately the SAME sunShadow: a curtain
@@ -542,7 +569,7 @@ void main() {
     vec3 sunTransmission = vec3(0.0);
     if (diffTrans > 0.0) {
         sunTransmission = blix_diffuseTransmission(
-            N, L, frame.uSunIrradiance * sunShadow, dtColor, diffTrans);
+            N, L, frame.uSunIrradiance * sunShadow * terminatorBack, dtColor, diffTrans);
         // A curtain whose sun side is behind another sunlit curtain: that one's glow on its far side passes through it
         // as the sun would (its far-side ray crossed the other: rtSheetGlow), by the smooth normal as the diffuse
         // lobe takes it.
@@ -563,7 +590,7 @@ void main() {
     // with sheen.glsl, which says in as many words that the factor is what the BASE layer is
     // multiplied by. On the curtains it read as a rim slightly too dim under direct sun and a
     // fabric slightly too bright, which is the size of mistake that survives being looked at.
-    vec3 direct = ((kDsun * albedo / PI * transScale + sunSpecular) * NdotL * frame.uSunIrradiance * sunShadow
+    vec3 direct = ((kDsun * albedo / PI * transScale + sunSpecular) * NdotL * frame.uSunIrradiance * sunShadow * terminatorFront
                    + kDsun * albedo / PI * transScale * sheetGlow * max(dot(Nsmooth, L), 0.0) * frame.uSunIrradiance
                    + sunTransmission) * sheenScale
                 + sunSheen;

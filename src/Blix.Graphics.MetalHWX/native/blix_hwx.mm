@@ -131,9 +131,11 @@ bool blix_coverage(uint primitive [[primitive_id]], uint geometry [[geometry_id]
 // scatters what it passes, 2026-10-15). Every other triangle as blix_coverage.
 struct BlixShadowRay { uint seed; uint sheets; uint lastSheet; float nearest; float3 transmit; float cosine; };   // sheets 0: met as any other triangle
 
-// A sheet crossed this close to the ray's start is the surface the ray left -- its own cloth, where the pixel's normal
-// (the fabric's normal map) put the lift on the wrong side -- and stops it as any surface would. Counted as glow, at
-// d ~ 0 it lit those pixels with the full transmittance: a cross-hatch of the weave over the folds (2026-10-16).
+// A sheet crossed this close to the ray's start is the cloth the ray left: a curtain is a coarse mesh shaded by smooth
+// normals, and near the line where a fold turns from the sun the ray, lifted off its flat triangle along the smooth
+// normal, runs into the next facets of the same fold. Counted as glow (d ~ 0: the full transmittance) it was a
+// cross-hatch over the folds; met as a blocker, jagged facet-shaped shade along every fold (2026-10-16). It is passed
+// by: no shade, no glow -- a terminator offset for sheets.
 constant float BlixSheetMinDistance = 0.05f;
 
 [[intersection(triangle, triangle_data, instancing)]]
@@ -150,7 +152,8 @@ bool blix_shadow_cover(uint primitive [[primitive_id]], uint geometry [[geometry
 {
     uint row = blix_row(primRows, entryRows, instance, geometry, primitive);
     uint through = rowTransmit[row];
-    if (through != 0u && r.sheets != 0u && distance >= BlixSheetMinDistance) {
+    if (through != 0u && r.sheets != 0u && distance < BlixSheetMinDistance) return false;
+    if (through != 0u && r.sheets != 0u) {
         // The nearest sheet crossed sets how far the glow is and how squarely the sun meets it (object space: the
         // triangle's own normal against the ray's direction there; a rotation keeps the cosine).
         if (distance < r.nearest) {

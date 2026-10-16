@@ -163,7 +163,10 @@ internal sealed partial class SponzaLoop
                     // patch (the factor over that channel), so no channel is lifted alone. The albedo as it is (0.35 x
                     // 0.05-0.2) passed 2-7% of the sun: opaque again by eye (2026-10-15).
                     var a = d.Albedo[p];
-                    var scale = 1f / MathF.Max(MathF.Max(a.X, MathF.Max(a.Y, a.Z)), 0.05f);
+                    var top = MathF.Max(MathF.Max(a.X, MathF.Max(a.Y, a.Z)), 0.05f);
+                    // Capped at what its lit face reflects, as lit.frag caps it.
+                    var factor = MathF.Max(tr[p].X, MathF.Max(tr[p].Y, tr[p].Z));
+                    var scale = MathF.Min(1f, (1f - factor) * top / MathF.Max(factor, 1e-4f)) / top;
                     transmit[p] = new Vector4(tr[p] * scale, BitConverter.Int32BitsToSingle(tw[p]));
                     sheets++;
                 }
