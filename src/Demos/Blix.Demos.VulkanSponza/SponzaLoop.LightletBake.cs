@@ -82,7 +82,7 @@ internal sealed partial class SponzaLoop
     // not by a solved sun's light bake: the records are the band's, the same for every sun in it. (Hung off the light
     // bake's path, each solved sun baked and stored its own copy.)
     private string LightletPathFor(string transportKey, float north) =>
-        Path.ChangeExtension(TransportCachePath(transportKey), ".lightlets") + string.Create(CultureInfo.InvariantCulture,
+        Path.ChangeExtension(LightCachePath(transportKey), ".lightlets") + string.Create(CultureInfo.InvariantCulture,
             $".sun-v{LightletVersion}-{BandLatitude:0}n{Obliquity + 5f:0.0}d{RecordHourSpan:0}h{RecordNodesHour}x{RecordNodesDec}-north{north * 180f / MathF.PI:0.00}");
 
     // UploadTexels, with --lightlets: the records from their file, or a bake once the tracer is there.

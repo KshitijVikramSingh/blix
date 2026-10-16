@@ -95,6 +95,10 @@
     <GlslShader Include="Shaders\texel_patch_direct.comp" />
     <GlslShader Include="Shaders\texel_far_relight.comp" />
     <GlslShader Include="Shaders\texel_sun_provisional.comp" />
+    <GlslShader Include="Shaders\texel_live_sun.comp" />
+    <GlslShader Include="Shaders\texel_live_direct.comp" />
+    <GlslShader Include="Shaders\texel_live_guides.comp" />
+    <GlslShader Include="Shaders\split_scatter.comp" />
     <GlslShader Include="Shaders\texel_filter_fill.comp" />
     <GlslShader Include="Shaders\reference_trace.comp" />
     <GlslShader Include="Shaders\reference_points.comp" />

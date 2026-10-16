@@ -24,7 +24,33 @@ internal sealed partial class SponzaLoop
     private bool transportMissWhy;
 
     // The open-air points, from the cook's patches (positions, normals). Built when a diagnostic asks.
-    private void BuildDiagViews(RayQueryScene scene, IReadOnlyList<Vector3> pos, IReadOnlyList<Vector3> nrm)
+    // A stage of the GI bundle (--cook-gi) under the patches' key: the geometry's alone, and the one thing a boot from
+    // the bundle still asked the contacts table for (~9 s).
+    private void BuildDiagViews(RayQueryScene scene, IReadOnlyList<Vector3> pos, IReadOnlyList<Vector3> nrm, string patchesKey)
+    {
+        var stored = LoadStage(patchesKey, "open-air", r => r.ReadSingle() != ViewLift ? null : ReadArray<Vector3>(r));
+        IEnumerable<Vector3> kept = stored is not null ? stored : FindOpenAir(scene, pos, nrm);
+        if (stored is null)
+        {
+            var found = kept.ToArray();
+            kept = found;
+            SaveStage(patchesKey, "open-air", w => { w.Write(ViewLift); WriteArray(w, found); });
+        }
+        var count = 0;
+        var grid = new Dictionary<(int, int, int), List<Vector3>>();
+        foreach (var v in kept)
+        {
+            var key = ViewKey(v);
+            if (!grid.TryGetValue(key, out var list)) grid[key] = list = new List<Vector3>();
+            list.Add(v);
+            count++;
+        }
+        diagViews = grid;
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[VulkanSponza] diagnostics: {count:N0} open-air points of {pos.Count:N0} patches, {ViewLift} m up."));
+    }
+
+    private ConcurrentBag<Vector3> FindOpenAir(RayQueryScene scene, IReadOnlyList<Vector3> pos, IReadOnlyList<Vector3> nrm)
     {
         var kept = new ConcurrentBag<Vector3>();
         Parallel.For(0, pos.Count, i =>
@@ -37,16 +63,7 @@ internal sealed partial class SponzaLoop
                 if (ClosestThroughContacts(scene, new Ray(v, axis), 0f, float.PositiveInfinity, (uint)i) is { FrontFace: false }) return;
             kept.Add(v);
         });
-        var grid = new Dictionary<(int, int, int), List<Vector3>>();
-        foreach (var v in kept)
-        {
-            var key = ViewKey(v);
-            if (!grid.TryGetValue(key, out var list)) grid[key] = list = new List<Vector3>();
-            list.Add(v);
-        }
-        diagViews = grid;
-        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[VulkanSponza] diagnostics: {kept.Count:N0} open-air points of {pos.Count:N0} patches, {ViewLift} m up."));
+        return kept;
     }
 
     private static (int, int, int) ViewKey(Vector3 p) =>

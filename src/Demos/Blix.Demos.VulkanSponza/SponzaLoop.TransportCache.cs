@@ -119,11 +119,38 @@ internal sealed partial class SponzaLoop
         return new TransportStageKeys(patches, sunVis, couplings, texels, Hash($"{patches};{sunVis};{couplings};{texels}"));
     }
 
-    private static string TransportCachePath(string key) =>
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".cache", "blix", "transport", key + ".bin");
+    // Where the stages live: the scene's GI bundle -- a "gi" directory beside its packs, which --cook-gi makes and fills
+    // with everything that depends on the geometry alone, so a boot only loads it -- or, without one, the user's cache.
+    private static string transportCacheDir =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".cache", "blix", "transport");
+    private static bool giBundle;
 
-    private static string TransportStagePath(string key, string stage) =>
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".cache", "blix", "transport", $"{key}.{stage}");
+    private void ChooseGiBundle(string assetsRoot)
+    {
+        var bundle = Path.Combine(assetsRoot, "gi");
+        if (cookGi)
+        {
+            Directory.CreateDirectory(bundle);
+            // Nothing light-dependent: no split light's parts, no light bake (the runtime's, once it lights).
+            splitLight = false;
+            lightBakeOff = true;
+        }
+        giBundle = Directory.Exists(bundle);
+        if (giBundle) transportCacheDir = bundle;
+        Console.WriteLine(giBundle
+            ? $"[VulkanSponza] GI bundle: {bundle}{(cookGi ? " (cooking it: the geometry's stages, then exit)" : "")}."
+            : $"[VulkanSponza] GI bundle: none beside the packs ({bundle}); the stages come from the user's cache, or are cooked here. Run once with --cook-gi to make it.");
+    }
+
+    private static string TransportCachePath(string key) => Path.Combine(transportCacheDir, key + ".bin");
+
+    // What depends on the light -- the split light's parts, the one light's bake, the sun records -- stays in the user's
+    // cache, never the bundle: the bundle is the geometry's alone (and these go once the light is the runtime's).
+    private static readonly string LightCacheDir =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".cache", "blix", "transport");
+    private static string LightCachePath(string key) => Path.Combine(LightCacheDir, key + ".bin");
+
+    private static string TransportStagePath(string key, string stage) => Path.Combine(transportCacheDir, $"{key}.{stage}");
 
     // A stage's file: its name, the version and its key, then what `read` reads; null when absent, another version's
     // or another key's, or unreadable.

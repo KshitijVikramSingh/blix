@@ -141,7 +141,7 @@ internal sealed partial class SponzaLoop
 
     private void RecordRtShadows(int width, int height)
     {
-        if (!rtShadows || rayQueries is null || rayGpuData is null) return;
+        if (!rtShadows || rayGpuData is null) return;
         if (!EnsureFrameTracer())
         {
             if (frameTracerFailed) rtShadows = false;
@@ -222,8 +222,7 @@ internal sealed partial class SponzaLoop
         var interleave = shadows.Interleave && pack && !halfShadowsNow && sky is null && !RtPerPixel;
         var historyGood = interleave && rtShadowPrevSlot >= 0 && rtShadowPrevSlot != slot && rtShadowPrevSun == towardSun;
         var phase = historyGood ? RtShadowPhases[rtShadowPhase++ & 3u] : 0u;
-        var bounds = rayQueries.Nodes[0].Bounds;
-        var reach = (bounds.Max - bounds.Min).Length();
+        var reach = rayReach;
         Matrix4x4.Invert(viewProjJittered, out var invViewProj);
         graph.Dispatch(rtShadowRaysPassHandle, new DispatchCommand(rtShadowRaysPipeline, (width + 7) / 8, (height + 7) / 8, 1,
             new ShaderUniform[]

@@ -1,0 +1,74 @@
+#version 450
+// The live patch light's sun (SponzaLoop.LivePatchLight.cs): the patches' first bounce from the texels' own sun bits
+// (texel_live_sun.comp, shot in the frame), not from the transport's sunlets -- 9.5 M sunlets and 97 M couplings to
+// them were 1.3 GB of GPU memory and a 9.5 M-ray shadow batch at every sun change, and on 16 GB shared with the CPU the
+// boot paged until the device was lost (2026-10-16). A texel is a finer sample of the surface than a sunlet.
+//   mode 0  a thread a patch: its sums cleared
+//   mode 1  a thread a live texel: its patch (the cook's pick, else the nearest facing patch) gains the texel's direct
+//           sun (n.l where its sun bit is set) and one texel -- fixed point, by atomics
+//   mode 2  a thread a patch: its first bounce of the sun, Sum_j w_ij albedo_j E D_j over its couplings, D_j patch j's
+//           mean direct n.l over its texels -- texel_nodes_solve.comp mode 1's form with patches for sunlets
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform LiveDirect {
+    vec4 uDirect;      // x mode, y the threads, z the first live texel (mode 1), w the components (G)
+    vec4 uToSun;       // xyz toward the sun; w the sun's component (its column, its bit)
+    vec4 uIrr;         // rgb the sun's irradiance; w the bit words a texel
+    vec4 uCookedGrid;
+    vec4 uCookedDims;
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 2) readonly buffer LiveIds { uint liveIds[]; };
+layout(std430, set = 0, binding = 3) readonly buffer TexelPatch { int texelPatch[]; };
+layout(std430, set = 0, binding = 4) readonly buffer SunNodeBits { uint sunBits[]; };
+layout(std430, set = 0, binding = 5) buffer PatchDirect { uint patchDirect[]; };   // 2 a patch: sum of n.l x 4096, texels
+layout(std430, set = 0, binding = 6) readonly buffer CouplingStart { uint couplingStart[]; };
+layout(std430, set = 0, binding = 7) readonly buffer Couplings { uvec2 coupling[]; };   // (to, weight bits)
+layout(std430, set = 0, binding = 8) readonly buffer PatchTerms { vec4 patchTerms[]; };  // 3 a patch: albedo, sky, boot
+layout(std430, set = 0, binding = 9) buffer NodeFirst { vec4 nodeFirst[]; };
+
+#define COOKED_BINDING 10
+#define COOKED_GRID u.uCookedGrid
+#define COOKED_DIMS u.uCookedDims
+#include "cooked_patches.glsl"
+
+const float Fixed = 4096.0;
+
+void main() {
+    uint t = gl_GlobalInvocationID.x;
+    if (t >= uint(u.uDirect.y)) return;
+    int mode = int(u.uDirect.x);
+    if (mode == 0) {
+        patchDirect[2u * t] = 0u;
+        patchDirect[2u * t + 1u] = 0u;
+        return;
+    }
+    if (mode == 1) {
+        uint id = liveIds[uint(u.uDirect.z) + t];
+        vec3 n = texels[2u * id + 1u].xyz;
+        if (dot(n, n) < 1e-12 || abs(texels[2u * id].w) < 2.0) return;   // no normal, or buried
+        n = normalize(n);
+        int p = texelPatch[id];
+        if (p < 0) p = cookedNearest(texels[2u * id].xyz, n);
+        if (p < 0) return;
+        uint bit = uint(u.uToSun.w);
+        uint words = uint(u.uIrr.w);
+        bool lit = (sunBits[id * words + bit / 32u] & (1u << (bit % 32u))) != 0u;
+        float nl = lit ? max(dot(n, u.uToSun.xyz), 0.0) : 0.0;
+        if (nl > 0.0) atomicAdd(patchDirect[2u * uint(p)], uint(nl * Fixed + 0.5));
+        atomicAdd(patchDirect[2u * uint(p) + 1u], 1u);
+        return;
+    }
+    // mode 2: patch t's first bounce.
+    vec3 s = vec3(0.0);
+    for (uint c = couplingStart[t]; c < couplingStart[t + 1u]; ++c) {
+        uint j = coupling[c].x;
+        uint texelsThere = patchDirect[2u * j + 1u];
+        if (texelsThere == 0u) continue;
+        float d = float(patchDirect[2u * j]) / Fixed / float(texelsThere);
+        s += uintBitsToFloat(coupling[c].y) * patchTerms[3u * j].rgb * d;
+    }
+    nodeFirst[t * uint(u.uDirect.w) + uint(u.uToSun.w)] = vec4(s * u.uIrr.rgb, 0.0);
+}

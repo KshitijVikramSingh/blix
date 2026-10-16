@@ -77,6 +77,31 @@ internal sealed partial class SponzaLoop
     // the count is allocated; the second fills the records the first claimed. Null when over the budget.
     private (Vector4[] Texels, uint[] IndexMap, uint[] Frames, int Count)? BakeLightmapTexels(RayQueryScene scene, string cacheKey)
     {
+        lightmapRecordsKey = cacheKey;
+        var stored = LoadStage(cacheKey, "lightmap-records", r => r.ReadString() != LightmapRecordsRule ? null
+            : new LightmapRecords(ReadArray<Vector4>(r), ReadArray<uint>(r), ReadArray<uint>(r), r.ReadInt32()));
+        if (stored is { } done) return (done.Texels, done.IndexMap, done.Frames, done.Count);
+        var baked = BakeLightmapTexelsNow(scene, cacheKey);
+        if (baked is { } b)
+            SaveStage(cacheKey, "lightmap-records", wr =>
+            {
+                wr.Write(LightmapRecordsRule);
+                WriteArray(wr, b.Texels); WriteArray(wr, b.IndexMap); WriteArray(wr, b.Frames); wr.Write(b.Count);
+            });
+        return baked;
+    }
+
+    // The lightmap's records as the bake leaves them -- rasterized, gutter filled, buried and moved off contacts -- a
+    // stage of the GI bundle (--cook-gi): what they depend on beyond the texels key (which names the scene, its
+    // .blixlightmap files and the texel settings).
+    private sealed record LightmapRecords(Vector4[] Texels, uint[] IndexMap, uint[] Frames, int Count);
+    private const int LightmapRecordsVersion = 1;
+    private string? lightmapRecordsKey;
+    private string LightmapRecordsRule => string.Create(CultureInfo.InvariantCulture,
+        $"records v{LightmapRecordsVersion};atlas {lightmapAtlasWidth}x{lightmapAtlasHeight};{LightmapBuriedRule};contacts {ContactRays} {ContactShare} {ContactStep};budget {LightmapRecordBudgetBytes}");
+
+    private (Vector4[] Texels, uint[] IndexMap, uint[] Frames, int Count)? BakeLightmapTexelsNow(RayQueryScene scene, string cacheKey)
+    {
         var clock = Stopwatch.StartNew();
         int w = lightmapAtlasWidth, h = lightmapAtlasHeight;
         var map = new uint[(long)w * h];
@@ -619,7 +644,7 @@ internal sealed partial class SponzaLoop
         for (var i = 0; i < map.Length; i++)
             if (map[i] != 0xFFFFFFFFu) map[i] += (uint)first;
         UploadTexels(hashed with { Texels = texels, Count = first + atlas.Count }, light, bakePath, first, resolved);
-        if (splitLight) BuildSeamNeighbours(texels, first + atlas.Count, first);
+        if (splitLight || cookGi) BuildSeamNeighbours(texels, first + atlas.Count, first);
         lightmapIndexMapBuffer = Own(device.CreateGpuBuffer(map.Length * 4, MemoryMarshal.AsBytes(map.AsSpan()), "sponza.lightmap.index-map"));
         // The frames by absolute record id, after a one-entry header with the atlas size (zero: none).
         var frames = new uint[2 * (1 + first + atlas.Count)];

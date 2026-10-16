@@ -56,6 +56,20 @@ public interface IGraphicsDevice : IDisposable
     void WriteGpuBuffer(GpuBufferHandle handle, int offset, ReadOnlySpan<byte> data) =>
         throw new NotSupportedException("this device cannot write into a GPU buffer after creating it.");
 
+    /// <summary>A GPU buffer the CPU can also read where it lies, without a copy or a wait (<see cref="ReadMappedGpuBuffer"/>):
+    /// zero-filled, the same storage buffer to every pass.</summary>
+    /// <remarks>
+    /// For results read back every few frames from a frame loop. The reader knows when the GPU is done with what it reads
+    /// -- the frame that wrote it is past the frames in flight -- and reads nothing sooner. A device that cannot map its
+    /// buffers makes an ordinary one, and its <see cref="ReadMappedGpuBuffer"/> waits as <see cref="ReadGpuBuffer"/> does.
+    /// </remarks>
+    GpuBufferHandle CreateReadableGpuBuffer(int sizeBytes, string? name = null) => CreateGpuBuffer(sizeBytes, default, name);
+
+    /// <summary>Copies <paramref name="destination"/>'s length of a <see cref="CreateReadableGpuBuffer"/> buffer from
+    /// <paramref name="offset"/>, as it is in memory now: no wait for the device.</summary>
+    void ReadMappedGpuBuffer(GpuBufferHandle handle, int offset, Span<byte> destination) =>
+        ReadGpuBuffer(handle, offset, destination.Length).CopyTo(destination);
+
     /// <summary>Runs compute dispatches now, outside the frame graph, in order, each seeing the last one's writes; returns
     /// when they are done.</summary>
     /// <remarks>

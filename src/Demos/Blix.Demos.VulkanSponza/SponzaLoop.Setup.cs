@@ -358,6 +358,16 @@ internal sealed partial class SponzaLoop
         if (args.Int("shot-frames") is { } sf) shotFrame = sf;
         shotWhenReady = args.Flag("shot-when-ready");
         framesAfterLoad = args.Int("frames-after-load");
+        // --cook-gi: cook the scene's GI bundle -- what depends on the geometry alone -- and exit (SponzaLoop.CookGi.cs).
+        cookGi = args.Flag("cook-gi");
+        // --live-patch-light: the patches' light solved at runtime for the lights as they are (SponzaLoop.LivePatchLight.cs).
+        // --live-texels: the texels' gather (the split light's cook) lit by the live patch light, with no light cached on
+        // disk -- stage 3 of the real-time GI (SponzaLoop.LivePatchLight.cs).
+        liveTexels = args.Flag("live-texels");
+        livePatchLight = args.Flag("live-patch-light") || args.Flag("live-patch-always") || liveTexels;
+        if (liveTexels) splitLight = true;
+        liveAlways = args.Flag("live-patch-always");
+        keepCpuScene = args.Flag("keep-cpu-scene");
 
         // Seed sun yaw/pitch from the default direction so the Sun controls
         // start matching the baked look.
@@ -374,6 +384,7 @@ internal sealed partial class SponzaLoop
         }
         LoadIbl(assetsRoot);
         sceneAssetsRoot = assetsRoot;
+        ChooseGiBundle(assetsRoot);
         // The band's north is set from this sun (BandNorth), whatever --sun or a sweep turns it to.
         authoredSunDirection = sunDirection;
         // --sun yaw,pitch (degrees; pitch negative, below the horizon of travel): a fixed sun for a measurement -- the

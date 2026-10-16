@@ -33,6 +33,7 @@ internal sealed partial class SponzaLoop
     private PipelineHandle texelComposePipeline;
     private GpuBufferHandle splitSkyBuffer, splitSunBuffer, splitLiveBuffer, splitComposedBuffer;
     private bool splitSkyUp, splitSunUp, splitComposeDirty;
+    private long splitComposeAgainFrame = -1;
     private Vector3 splitComposedSky = new(float.NaN), splitComposedSun = new(float.NaN);
     // The cook under way for the split (its columns' cache paths, by column), and a sun asked for while it ran.
     private string?[] splitCookPaths = Array.Empty<string?>();
@@ -76,7 +77,7 @@ internal sealed partial class SponzaLoop
         var spec = string.Create(CultureInfo.InvariantCulture,
             $"{transportKey};{part};sky {skyIdentity};rays {sunNodeRays} {(sunNodeGuide ? "guided" : "cosine")}{(sunNodeLights ? " lights" : "")};lift {sunNodeLift:G4};lookup {sunNodePlane:G3} {sunNodeSigma:G3};discover {sunNodeDiscoverStride};unknown {sunNodeUnknownSun:G3};settled {texelNoise:G6} {texelMaxRays} stop {splitRefineMinShare:G3} dark {texelDarkFloor:G3};patches seen of {PatchCandidates};buried {LightmapBuriedRule}{FarKey};v{SplitLightVersion}");
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(spec)))[..16].ToLowerInvariant();
-        return Path.ChangeExtension(TransportCachePath(transportKey), $".{(toSun is null ? "sky" : "sun")}-{hash}");
+        return Path.ChangeExtension(LightCachePath(transportKey), $".{(toSun is null ? "sky" : "sun")}-{hash}");
     }
 
     // UploadTexels with no single light cached, under --split-light: each part read from its cache, or cooked (both
@@ -91,6 +92,15 @@ internal sealed partial class SponzaLoop
         // Composed, then filtered into the resolved light (texel_compose.comp); without the filter, composed straight in.
         splitComposedBuffer = texelFilter ? Own(device.CreateGpuBuffer(texelCount * 8, name: "sponza.split.composed")) : texelResolvedBuffer;
         var toSun = transportRelightSun.ToSun;
+        if (liveTexels)
+        {
+            // The live light (SponzaLoop.LivePatchLight.cs): both columns gathered for the lights as they are, read from
+            // no cache and written to none -- the sky's part and the sun's, as the cook lands them.
+            StartSplitCook(new List<(Vector3? ToSun, string Path)> { (null, ""), (toSun, "") });
+            splitCookPaths = new string?[] { null, null };
+            Console.WriteLine("[VulkanSponza] split light: live -- the sky's part and the sun's gathered from the live patch light, no light cached.");
+            return true;
+        }
         var skyPath = SplitPathFor(lightBakeKey, null);
         var sunPath = SplitPathFor(lightBakeKey, toSun);
         if (ReadResolved(skyPath, texelCount) is { } sky) { UploadSplitPart(sky, sunPart: false); ReadPartDetail(skyPath, sunPart: false); }
@@ -100,7 +110,7 @@ internal sealed partial class SponzaLoop
         if (!splitSunUp) columns.Add((toSun, sunPath));
         if (columns.Count > 0) StartSplitCook(columns);
         Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] split light: sky {(splitSkyUp ? "read" : "to cook")}, sun {(splitSunUp ? "read" : "to cook")}{(columns.Count > 0 ? "; the texels gather as they are seen until the cook lands" : "")}."));
+            $"[VulkanSponza] split light: sky {(splitSkyUp ? "read" : "to cook")}, sun {(splitSunUp ? "read" : "to cook")}{(columns.Count > 0 ? "; the texels gather as they are seen until the cook lands" : "")} ({Path.GetFileName(skyPath)}, {Path.GetFileName(sunPath)})."));
         return true;
     }
 
@@ -140,12 +150,16 @@ internal sealed partial class SponzaLoop
             UploadSplitPart(words, sunPart);
         }
         FlushSplitDetail();
-        SaveSplitDetail();
-        sunNodeResults = Array.Empty<uint[]>();
-        sunNodeDirsAsked = null;
+        if (!liveTexels) SaveSplitDetail();
         splitCooking = false;
         sunNodeStage = SunNodeStage.Off;
-        ReleaseSunNodeCook();
+        // --live-texels keeps the cook's setup for the next sun (LiveRetarget): it is the geometry's.
+        if (!liveTexels)
+        {
+            sunNodeResults = Array.Empty<uint[]>();
+            sunNodeDirsAsked = null;
+            ReleaseSunNodeCook();
+        }
         Console.WriteLine("[VulkanSponza] split light: the cook landed; the texels rest on the sky's part and the sun's.");
         // A sun asked for while the cook ran: its part next.
         if (splitSunWanted is { } wanted && Vector3.Distance(wanted, splitSunSolved) > 1e-5f) SplitSunChanged(wanted);
@@ -197,7 +211,9 @@ internal sealed partial class SponzaLoop
         if (!splitLight || !splitSkyUp) return;
         var sky = new Vector3(render.SkyStrength);
         var sun = EffectiveSunIrradiance;
-        if (!splitComposeDirty && sky == splitComposedSky && sun == splitComposedSun) return;
+        // A live write (a scatter, an in-place provisional) is a pass of this frame that may run after the compose: composed
+        // again the next frame too.
+        if (!splitComposeDirty && sky == splitComposedSky && sun == splitComposedSun && splitComposeAgainFrame < framesRendered) return;
         splitComposeDirty = false;
         splitComposedSky = sky;
         splitComposedSun = sun;

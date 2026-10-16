@@ -1,0 +1,38 @@
+#version 450
+// --live-texels (SponzaLoop.LivePatchLight.cs): the texels' sun bits for the sun as it is, on the GPU in the frame --
+// what SunNodeBitsFor shot through the host (16 M texels read back, packed on the CPU: 17 s for two suns, 1.5 s of it
+// the GPU's). The rule is blix_lightlet_visible's: lit when the texel faces the sun and nothing is in the way of a ray
+// from it, lifted along its normal, out to the scene's reach. A thread a live texel of the chunk.
+//   mode 0  each texel's ray, for the frame's shadow batch: (point + n lift, reach); facing away, answered occluded (-1)
+//   mode 1  the batch's answers into the bits: the sun's column's bit set where nothing met the ray, the rest cleared
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform LiveSun {
+    vec4 uChunk;   // x the chunk's texels, y its first among the live, z the mode, w the bit words a texel
+    vec4 uToSun;   // xyz toward the sun; w the sun's column (its bit)
+    vec4 uRay;     // x the lift, y the reach
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 2) readonly buffer LiveIds { uint liveIds[]; };
+layout(std430, set = 0, binding = 3) buffer LiveSunOrigins { vec4 origins[]; };
+layout(std430, set = 0, binding = 4) readonly buffer LiveSunOccluded { uint occluded[]; };
+layout(std430, set = 0, binding = 5) buffer SunNodeBits { uint sunBits[]; };
+
+void main() {
+    uint t = gl_GlobalInvocationID.x;
+    if (t >= uint(u.uChunk.x)) return;
+    uint id = liveIds[uint(u.uChunk.y) + t];
+    if (int(u.uChunk.z) == 0) {
+        vec4 p = texels[2u * id];
+        vec3 n = texels[2u * id + 1u].xyz;
+        bool facing = dot(n, n) > 1e-12 && dot(normalize(n), u.uToSun.xyz) > 0.0;
+        origins[t] = facing ? vec4(p.xyz + normalize(n) * u.uRay.x, u.uRay.y) : vec4(p.xyz, -1.0);
+        return;
+    }
+    uint words = uint(u.uChunk.w);
+    uint bit = uint(u.uToSun.w);
+    for (uint w = 0u; w < words; ++w) sunBits[id * words + w] = 0u;
+    if ((occluded[t] & 1u) == 0u) sunBits[id * words + bit / 32u] = 1u << (bit % 32u);
+}

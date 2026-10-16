@@ -103,10 +103,21 @@ internal sealed partial class SponzaLoop
         // The inputs once: a later solve on them (another set of components) keeps them.
         if (solveBuffers.Length > 0)
         {
+            EnsureBandState();
             EnsureSolveTable();
             return;
         }
-        solveSunlets = d.SunletPos.Count;
+        StartSolvePack();
+    }
+
+    // The solve's inputs packed off the frame thread (CSR couplings, the sunlets, a patch's terms): the band's solve and
+    // the live one (SponzaLoop.LivePatchLight.cs) share them.
+    // sunlets false (--live-texels: the sun's first bounce from the texels, texel_live_direct.comp): none packed.
+    private void StartSolvePack(bool withSunlets = true)
+    {
+        var d = transportSolve!;
+        if (solvePack is not null || solveBuffers.Length > 0) return;
+        solveSunlets = withSunlets ? d.SunletPos.Count : 0;
         solvePack = Task.Run(() =>
         {
             (uint[], uint[]) Csr((int To, float W)[][] rows)
@@ -131,8 +142,8 @@ internal sealed partial class SponzaLoop
             }
             var (start, pairs) = Csr(d.Couplings);
             solveCouplings = pairs.Length / 2;
-            var (sStart, sPairs) = Csr(d.SunletCouplings);
-            var n = d.SunletPos.Count;
+            var (sStart, sPairs) = withSunlets ? Csr(d.SunletCouplings) : (new uint[] { 0u }, Array.Empty<uint>());
+            var n = withSunlets ? d.SunletPos.Count : 0;
             var sunlets = new Vector4[n * 3];
             for (var s = 0; s < n; s++)
             {
@@ -198,6 +209,12 @@ internal sealed partial class SponzaLoop
             UploadGpuSolve(solvePack.Result);
             solvePack = null;
             return false;
+        }
+        // The inputs came up for the live solve before this band began: its own state now.
+        if (solveFirst.Equals(default(GpuBufferHandle)))
+        {
+            EnsureBandState();
+            EnsureSolveTable();
         }
         var d = transportSolve!;
         var suns = solveComps.Length;
@@ -270,6 +287,7 @@ internal sealed partial class SponzaLoop
                 new("uSun", new Vector4Uniform(new Vector4(toSun, noSun ? 1f : 0f))),
                 new("uIrr", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, solveWarm ? 1f : 0f))),
                 new("uCount", new Vector4Uniform(new Vector4(solveSunlets, solveGroupStart, solveComps.Length, 1f / solveComps.Length))),
+                new("uLive", new Vector4Uniform(Vector4.Zero)),
             },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
@@ -316,24 +334,47 @@ internal sealed partial class SponzaLoop
             Up(packed.Terms, "sponza.sun-nodes.solve.terms"),
         };
         var items = checked(d.Patches * SolveGroup * 16);
-        solveFirst = Own(device.CreateGpuBuffer(items, name: "sponza.sun-nodes.solve.first"));
-        solveIn = Own(device.CreateGpuBuffer(items, name: "sponza.sun-nodes.solve.in"));
-        solveOut = Own(device.CreateGpuBuffer(items, name: "sponza.sun-nodes.solve.out"));
-        solveOrigins = Own(device.CreateGpuBuffer(Math.Max(16, n * 16), name: "sponza.sun-nodes.solve.origins"));
-        solveOccluded = Own(device.CreateGpuBuffer(Math.Max(16, n * 4), name: "sponza.sun-nodes.solve.occluded"));
+        // Packed for the live solve alone (no band running): the band's state waits for a band.
+        liveOnlyPack = !solveActive;
+        if (!liveOnlyPack) EnsureBandState();
         solveTransmit = Up(packed.Transmit, "sponza.sun-nodes.solve.transmit");
         solveAvgPatch = Own(device.CreateGpuBuffer(d.Patches * 16, new byte[d.Patches * 16], "sponza.sun-nodes.solve.patch-average"));
         solveAvgSunlet = Own(device.CreateGpuBuffer(Math.Max(16, n * 16), new byte[Math.Max(16, n * 16)], "sponza.sun-nodes.solve.sunlet-average"));
-        EnsureSolveTable();
+        if (!liveOnlyPack) EnsureSolveTable();
         var bytes = n * 48L + (packed.SunletStart.Length + packed.SunletPairs.Length + packed.Start.Length + packed.Pairs.Length) * 4L
             + packed.Terms.Length * 16L + 3L * items + n * 20L;
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] sun nodes: the solve's inputs packed and up in {solveClock.Elapsed.TotalSeconds:0.0} s ({bytes / 1048576.0:0} MB: {packed.Pairs.Length / 2:N0} couplings, {packed.SunletPairs.Length / 2:N0} sunlet couplings, {n:N0} sunlets)."));
     }
 
+    // The band's own state (a group of suns' first bounce, incoming and outgoing light; the sunlets' rays): made with the
+    // inputs, or again for a later band once the live solve kept the inputs past the last one.
+    private void EnsureBandState()
+    {
+        if (!solveFirst.Equals(default(GpuBufferHandle))) return;
+        var d = transportSolve!;
+        var n = solveSunlets;
+        var items = checked(d.Patches * SolveGroup * 16);
+        solveFirst = Own(device.CreateGpuBuffer(items, name: "sponza.sun-nodes.solve.first"));
+        solveIn = Own(device.CreateGpuBuffer(items, name: "sponza.sun-nodes.solve.in"));
+        solveOut = Own(device.CreateGpuBuffer(items, name: "sponza.sun-nodes.solve.out"));
+        solveOrigins = Own(device.CreateGpuBuffer(Math.Max(16, n * 16), name: "sponza.sun-nodes.solve.origins"));
+        solveOccluded = Own(device.CreateGpuBuffer(Math.Max(16, n * 4), name: "sponza.sun-nodes.solve.occluded"));
+    }
+    // The live solve packed the inputs (no band asked): the band's state waits for one.
+    private bool liveOnlyPack;
+
     // The solve's buffers, once the nodes' table is filled.
     private void ReleaseGpuSolve()
     {
+        if (livePatchLight)
+        {
+            // The live solve reads the inputs on: only the band's own state goes.
+            foreach (var b in new[] { solveFirst, solveIn, solveOut, solveOrigins, solveOccluded, solveSkyWeights })
+                if (!b.Equals(default(GpuBufferHandle))) RetireGpuBuffer(b);
+            solveFirst = solveIn = solveOut = solveOrigins = solveOccluded = solveSkyWeights = default;
+            return;
+        }
         foreach (var b in solveBuffers.Append(solveFirst).Append(solveIn).Append(solveOut).Append(solveOrigins).Append(solveOccluded).Append(solveAvgPatch).Append(solveAvgSunlet).Append(solveSkyWeights)
                      .Append(solveTransmit))
             if (!b.Equals(default(GpuBufferHandle))) RetireGpuBuffer(b);

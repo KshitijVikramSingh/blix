@@ -106,8 +106,9 @@ internal sealed partial class SponzaLoop
     // UploadSunNodes: on for a guided split cook of a few columns (the guide patch is the far field's when a texel saw none).
     private void BeginFarField(int suns)
     {
+        // --live-texels: off -- its record is a pass over every texel before the sweep (minutes), per light.
         farOn = farField && splitCooking && sunNodeGuided && !sunNodeExact && sunNodeStride == 1 && suns <= 3 && cookedPacked is not null
-            && frameTracer is not null;
+            && frameTracer is not null && !liveTexels;
         farRecording = farOn;
         farRecordPass = 0;
         farRecordRound = 0;
@@ -145,9 +146,16 @@ internal sealed partial class SponzaLoop
 
     // Each patch's neighbours it can see along the surface, once a cook (texel_far_neighbours.comp), in chunks the rays'
     // buffer holds (FarNeighbours rays a patch).
+    // A stage of the GI bundle (--cook-gi's, under the patches' key): the geometry's alone.
     private void FindFarNeighbours(int patches)
     {
         var clock = System.Diagnostics.Stopwatch.StartNew();
+        var header = string.Create(CultureInfo.InvariantCulture, $"neighbours {FarNeighbours} spacing {transportSpacing:G6} patches {patches}");
+        if (transportPatchesKey is { } key && LoadStage(key, "far-neighbours", r => r.ReadString() != header ? null : ReadArray<int>(r)) is { } stored)
+        {
+            farNeighbours = Own(device.CreateGpuBuffer(checked(patches * FarNeighbours * 4), MemoryMarshal.AsBytes(stored.AsSpan()), "sponza.far.neighbours"));
+            return;
+        }
         farNeighbours = Own(device.CreateGpuBuffer(checked(patches * FarNeighbours * 4), name: "sponza.far.neighbours"));
         var declared = farNeighboursInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
         var chunk = sunNodeSlice * 32 / FarNeighbours;
@@ -176,6 +184,7 @@ internal sealed partial class SponzaLoop
         var list = MemoryMarshal.Cast<byte, int>(device.ReadGpuBuffer(farNeighbours, 0, patches * FarNeighbours * 4).AsSpan()).ToArray();
         long kept = 0;
         foreach (var n in list) if (n >= 0) kept++;
+        if (transportPatchesKey is { } saveKey) SaveStage(saveKey, "far-neighbours", w => { w.Write(header); WriteArray(w, list); });
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] far field: each patch's neighbours seen along the surface, {kept / (double)patches:0.0} a patch, in {clock.Elapsed.TotalSeconds:0.0} s."));
     }
@@ -183,9 +192,35 @@ internal sealed partial class SponzaLoop
     // The trace's order made spatial (Morton over half-metre cells, then the normal's major axis), within the texels on
     // screen and within the rest -- so a texel's neighbours trace in its slice and the pooling finds their evidence. In
     // the visible-first order 41% of the neighbours the crevices' texels found were in another slice (2026-10-14).
+    // Each texel's place key, and every texel in its order, once a session: a texel does not move, so a cook after the
+    // first (a live restart, SponzaLoop.LivePatchLight.cs) orders only the texels on screen -- the rest come in the
+    // whole order with those left out. It read the texels back and sorted 16 M keys again each time (~8 s).
+    private uint[]? farPlaceKey, farPlaceOrder;
+
     private uint[] FarSpatialOrder(uint[] order, int front)
     {
         var clock = System.Diagnostics.Stopwatch.StartNew();
+        if (farPlaceKey is { } placeKey && farPlaceOrder is { } placeOrder && placeKey.Length == texelCount)
+        {
+            var head = order.AsSpan(0, front).ToArray();
+            var headKeys = head.Select(id => placeKey[id]).ToArray();
+            Array.Sort(headKeys, head);
+            var onScreen = new bool[texelCount];
+            foreach (var id in head) onScreen[id] = true;
+            var inOrder = new bool[texelCount];
+            for (var i = front; i < order.Length; i++) inOrder[order[i]] = true;
+            var ordered = new uint[order.Length];
+            head.CopyTo(ordered, 0);
+            var at = front;
+            foreach (var id in placeOrder)
+                if (inOrder[id] && !onScreen[id]) ordered[at++] = id;
+            if (at == order.Length)
+            {
+                Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                    $"[VulkanSponza] far field: the trace ordered by place ({front:N0} on screen, then {order.Length - front:N0}; the place order kept) in {clock.Elapsed.TotalSeconds:0.0} s."));
+                return ordered;
+            }
+        }
         var key = new uint[texelCount];
         var grid = texelGrid;
         const int chunk = 1 << 20;
@@ -210,6 +245,12 @@ internal sealed partial class SponzaLoop
         for (var i = 0; i < ids.Length; i++) keys[i] = ((ulong)key[ids[i]] << 32) | (uint)i;   // stable: ties keep the old order
         Array.Sort(keys, ids, 0, front);
         Array.Sort(keys, ids, front, ids.Length - front);
+        // Kept for the next cook: every texel of this order by its key alone.
+        farPlaceKey = key;
+        var all = (uint[])order.Clone();
+        var allKeys = all.Select(id => key[id]).ToArray();
+        Array.Sort(allKeys, all);
+        farPlaceOrder = all;
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] far field: the trace ordered by place ({front:N0} on screen, then {ids.Length - front:N0}) in {clock.Elapsed.TotalSeconds:0.0} s."));
         return ids;

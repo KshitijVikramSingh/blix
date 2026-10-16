@@ -79,6 +79,54 @@ public sealed partial class VulkanGraphicsDevice
         return new GpuBufferHandle(id);
     }
 
+    // A storage buffer in host-visible, coherent memory (device-local too where there is such a type: Apple's unified
+    // memory has one), mapped for its life: the CPU reads it in place (ReadMappedGpuBuffer). A sweep read a slice's sums
+    // back with ReadGpuBuffer -- the device idled, a copy submitted and waited on -- every slice (2026-10-16).
+    public unsafe GpuBufferHandle CreateReadableGpuBuffer(int sizeBytes, string? name = null)
+    {
+        ThrowIfDisposed();
+        if (sizeBytes <= 0) throw new ArgumentOutOfRangeException(nameof(sizeBytes), $"a GPU buffer needs a positive size; got {sizeBytes}.");
+        var label = name ?? "gpu-buffer.readable";
+        var ci = new BufferCreateInfo
+        {
+            SType = StructureType.BufferCreateInfo,
+            Size = (ulong)sizeBytes,
+            Usage = BufferUsageFlags.StorageBufferBit | BufferUsageFlags.TransferDstBit | BufferUsageFlags.TransferSrcBit,
+            SharingMode = SharingMode.Exclusive,
+        };
+        VkBuffer buffer;
+        ThrowIfNotSuccess(Vk.CreateBuffer(Device, in ci, null, &buffer), $"vkCreateBuffer({label})");
+        Vk.GetBufferMemoryRequirements(Device, buffer, out var req);
+        const MemoryPropertyFlags host = MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit;
+        uint type;
+        try { type = FindMemoryTypeIndex(req.MemoryTypeBits, host | MemoryPropertyFlags.DeviceLocalBit); }
+        catch (InvalidOperationException) { type = FindMemoryTypeIndex(req.MemoryTypeBits, host); }
+        var ai = new MemoryAllocateInfo { SType = StructureType.MemoryAllocateInfo, AllocationSize = req.Size, MemoryTypeIndex = type };
+        DeviceMemory memory;
+        ThrowIfNotSuccess(Vk.AllocateMemory(Device, in ai, null, &memory), $"vkAllocateMemory({label})");
+        ThrowIfNotSuccess(Vk.BindBufferMemory(Device, buffer, memory, 0), $"vkBindBufferMemory({label})");
+        void* mapped;
+        ThrowIfNotSuccess(Vk.MapMemory(Device, memory, 0, Vk.WholeSize, 0, &mapped), $"vkMapMemory({label})");
+        new Span<byte>(mapped, sizeBytes).Clear();
+        var id = nextResourceId++;
+        gpuBufferTable[id] = new VkBufferEntry { Buffer = buffer, Memory = memory, Size = (ulong)sizeBytes, Name = label, Mapped = (nint)mapped };
+        return new GpuBufferHandle(id);
+    }
+
+    public unsafe void ReadMappedGpuBuffer(GpuBufferHandle handle, int offset, Span<byte> destination)
+    {
+        ThrowIfDisposed();
+        var entry = GetGpuBuffer(handle);
+        if (entry.Mapped == 0)
+        {
+            ReadGpuBuffer(handle, offset, destination.Length).CopyTo(destination);
+            return;
+        }
+        if (offset < 0 || (ulong)offset + (ulong)destination.Length > entry.Size)
+            throw new ArgumentOutOfRangeException(nameof(offset), $"{destination.Length} bytes from {offset} is outside GPU buffer '{entry.Name}' ({entry.Size} bytes).");
+        new ReadOnlySpan<byte>((byte*)entry.Mapped + offset, destination.Length).CopyTo(destination);
+    }
+
     public void DestroyGpuBuffer(GpuBufferHandle handle)
     {
         if (!gpuBufferTable.Remove(handle.Id, out var entry)) return;

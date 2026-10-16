@@ -737,6 +737,7 @@ internal sealed partial class SponzaLoop
         UpdateBakeScene();
         RecordRtShadows(frame.Width, frame.Height);
         CookTransportWhenReady();
+        CookGiWhenLanded();
         RecordClipmap();
         FlushTracerGroup();
         PickWatchPoints();

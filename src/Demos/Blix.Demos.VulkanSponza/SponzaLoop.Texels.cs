@@ -669,7 +669,7 @@ internal sealed partial class SponzaLoop
             ownedGpuBuffers.Remove(retiredBuffers[i].Buffer);
             retiredBuffers.RemoveAt(i);
         }
-        if (transportRelight is null || cookedPacked is null) return;
+        if ((!liveTexels && transportRelight is null) || cookedPacked is null) return;
         if (relightTask is { IsCompleted: true } done)
         {
             var (incident, guides) = done.Result;
@@ -694,6 +694,15 @@ internal sealed partial class SponzaLoop
         var irradiance = EffectiveSunIrradiance;
         var turned = MathF.Acos(Math.Clamp(Vector3.Dot(toSun, transportRelightSun.ToSun), -1f, 1f)) * 180f / MathF.PI;
         var changed = Vector3.Distance(irradiance, transportRelightSun.Irradiance) > 1e-3f * MathF.Max(1f, transportRelightSun.Irradiance.Length());
+        // --live-texels: no relight on the CPU -- the live patch light follows by itself, and the texels' cook restarts
+        // (SponzaLoop.LivePatchLight.cs). The sun's part is per unit of its irradiance: a change of strength alone
+        // recomposes, it does not re-gather.
+        if (liveTexels)
+        {
+            if (turned >= 0.25f) LiveRestart(toSun);
+            if (turned >= 0.25f || changed) transportRelightSun = (toSun, irradiance);
+            return;
+        }
         if (turned < 0.25f && !changed) return;
         relightTaskSun = (toSun, irradiance);
         relightClock = Stopwatch.StartNew();
@@ -795,11 +804,12 @@ internal sealed partial class SponzaLoop
     {
         if (!texelsUploaded || rayBlockBuffers.Length == 0) return;
         RecordTexelVisible(invProjection, invView, width, height);
+        RecordLivePatchLight();
         // A live split cook (SponzaLoop.SplitLanding.cs) takes --split-passes-per-frame passes of the frame, as the cook
         // screen does, each in its own copy of the passes; one pass a frame for everything else.
         if (sunNodeStage != SunNodeStage.Off)
         {
-            var copies = splitCooking && sunNodeStage == SunNodeStage.Tracing ? sunNodePassesPerFrame : 1;
+            var copies = splitCooking && sunNodeStage == SunNodeStage.Tracing ? SunNodePassesNow : 1;
             for (sunNodeCopy = 0; sunNodeCopy < copies; sunNodeCopy++)
             {
                 RecordSunNodes();

@@ -217,6 +217,7 @@ internal sealed partial class SponzaLoop
             transportCookTask = null;
             Console.WriteLine($"[VulkanSponza] transport: the background cook landed at post-load frame {postLoadFrames}.");
             LogMemoryInventory("the transport cook landed");
+            DropCpuScene();
         }
         if (!transportGpu || transportCooked || !fullyLoaded || !RaySurfacesReady || postLoadFrames < 2) return;
         if (transportWait || rayQueries is not { } scene || rayGpuData is not { } data)
@@ -231,6 +232,9 @@ internal sealed partial class SponzaLoop
         transportCookTask = Task.Run(() => CookTransportFrom(scene, data, surfaces));
     }
 
+    private sealed record FarLists(uint[] Start, uint[] Ids, float[] Weights);
+    // The patches' stage key (the GI bundle's stages that hang off the patches: the far field's neighbours).
+    private string? transportPatchesKey;
     private Task? transportCookTask;
     private bool transportCookAsync;
     private bool transportWait;
@@ -320,6 +324,7 @@ internal sealed partial class SponzaLoop
 
         // The cook's cache (SponzaLoop.TransportCache.cs): a run whose inputs match reads what the cook would make.
         var stageKeys = TransportCacheKeys(scene, surfaces);
+        transportPatchesKey = stageKeys.Patches;
         var cacheKey = stageKeys.Combined;
         // What depends on geometry alone -- the lightmap's buried flags, the sun records -- is filed under the texels' key
         // (the scene, its lightmap, the texel layout), not the combined one: a change to how hits find patches re-cooks the
@@ -572,7 +577,8 @@ internal sealed partial class SponzaLoop
                 }
             });
             ProgressEnd(stage + ", discovery");
-            if (diagViews is null) BuildDiagViews(scene, pos, nrm);
+            // Before the fill: these are not the final patches, so their points keep a stage of their own.
+            if (diagViews is null) BuildDiagViews(scene, pos, nrm, stageKeys.Patches + ".fill");
             var spots = found.Values.ToArray();
             var take = new bool[spots.Length];
             int hidden = 0, inside = 0;
@@ -1673,6 +1679,27 @@ internal sealed partial class SponzaLoop
                 Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                     $"[VulkanSponza] transport: {sheets:N0} patches on sheets that transmit, with their twin on the other side."));
             }
+            // --live-texels: the sky's part of the guides (texel_live_guides.comp), folded before the CPU's sky bins go --
+            // each patch's escaped share in the guide's 8 x 8 bins (each 2 x 2 of the 16 x 16 sky bins, the same
+            // octahedral map), the geometry's; and the sky's luminance a guide bin, the sky's (the mean of its four).
+            if (liveTexels)
+            {
+                var res = TransportSkyRes / TransportGuideRes;
+                var escape = new float[patches * TransportGuideBins];
+                Parallel.For(0, patches, i =>
+                {
+                    for (var b = 0; b < skyDirs.Length; b++)
+                    {
+                        var g = (b / TransportSkyRes / res) * TransportGuideRes + (b % TransportSkyRes) / res;
+                        escape[i * TransportGuideBins + g] += sky[i * skyDirs.Length + b];
+                    }
+                });
+                var skyLum = new float[TransportGuideBins];
+                for (var b = 0; b < skyDirs.Length; b++)
+                    skyLum[(b / TransportSkyRes / res) * TransportGuideRes + (b % TransportSkyRes) / res] += Lum3(skyDirs[b]) / (res * res);
+                liveSkyEscape = escape;
+                liveSkyLum = skyLum;
+            }
             transportSolve = new TransportSolveData(patches, couplings, sunletCouplings, sunletPos, sunletNrm, sunletAlbedo,
                 albedo, skyIn, () => lastIncident, iterations, transmit, twin);
         }
@@ -1683,7 +1710,17 @@ internal sealed partial class SponzaLoop
         // 36 hemispherical bins in the patch's frame), every coupling past the reach (to its patch's direction) and every
         // sky direction its rays escaped into -- (id, weight) with the sky's bin flagged in the id's top bit -- in CSR.
         // The couplings are the transport cook's: what the patches' solve already reads, binned, no new rays.
-        transportBuildFarLists = reach => BuildFarLists(reach);
+        // A stage of the GI bundle (--cook-gi), under the couplings' key and the reach.
+        transportBuildFarLists = reach =>
+        {
+            var farKey = stageKeys.Couplings;
+            var stored = LoadStage(farKey, "far-lists", r => r.ReadSingle() != reach ? null
+                : new FarLists(ReadArray<uint>(r), ReadArray<uint>(r), ReadArray<float>(r)));
+            if (stored is { } done) return (done.Start, done.Ids, done.Weights);
+            var built = BuildFarLists(reach);
+            SaveStage(farKey, "far-lists", w => { w.Write(reach); WriteArray(w, built.Start); WriteArray(w, built.Ids); WriteArray(w, built.Weights); });
+            return built;
+        };
         (uint[] Start, uint[] Ids, float[] Weights) BuildFarLists(float reach)
         {
             const int bins = 36, res = 6;
@@ -1832,7 +1869,7 @@ internal sealed partial class SponzaLoop
         // --lightmap: the lightmap atlas's texels are the finest level of the surfaces in the atlas (SponzaLoop.Lightmap.cs),
         // the hashed cells their coarser levels and every level of everything else (the foliage the cook leaves out). Null
         // when the atlas asks for more than the budget: the hashed texels then serve every surface at every level.
-        if (lightmapBuriedWhy || transportMissWhy) BuildDiagViews(scene, pos, nrm);
+        if (lightmapBuriedWhy || transportMissWhy) BuildDiagViews(scene, pos, nrm, stageKeys.Patches);
         if (missSamples is not null) MissWhy(missSamples);
         if (eitherSamples is not null) EitherWhy(eitherSamples);
         // Why a hit read a patch facing another way: the best-turned patch within OwnFallbackReach (none at all; past

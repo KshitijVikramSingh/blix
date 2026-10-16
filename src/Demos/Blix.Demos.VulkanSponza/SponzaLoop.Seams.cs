@@ -22,6 +22,30 @@ internal sealed partial class SponzaLoop
     private void BuildSeamNeighbours(Vector4[] texels, int count, int firstAtlas)
     {
         if (firstAtlas < 0 || firstAtlas >= count) return;
+        // A stage of the GI bundle (--cook-gi), under the lightmap records' key: the same records, so the same seams.
+        var seamKey = lightmapRecordsKey;
+        if (seamKey is not null && LoadStage(seamKey, "seams", r => r.ReadInt32() != firstAtlas || r.ReadInt32() != count
+                ? null : new SeamLists(ReadArray<uint>(r), ReadArray<uint>(r))) is { } stored)
+        {
+            UploadSeams(stored.Start, stored.Ids);
+            return;
+        }
+        var (start, ids) = FindSeamNeighbours(texels, count, firstAtlas);
+        if (seamKey is not null)
+            SaveStage(seamKey, "seams", w => { w.Write(firstAtlas); w.Write(count); WriteArray(w, start); WriteArray(w, ids); });
+        UploadSeams(start, ids);
+    }
+
+    private sealed record SeamLists(uint[] Start, uint[] Ids);
+
+    private void UploadSeams(uint[] start, uint[] ids)
+    {
+        texelSeamStart = Own(device.CreateGpuBuffer(start.Length * 4, MemoryMarshal.AsBytes(start.AsSpan()), "sponza.texels.seam-start"));
+        texelSeamIds = Own(device.CreateGpuBuffer(ids.Length * 4, MemoryMarshal.AsBytes(ids.AsSpan()), "sponza.texels.seam-ids"));
+    }
+
+    private (uint[] Start, uint[] Ids) FindSeamNeighbours(Vector4[] texels, int count, int firstAtlas)
+    {
         var clock = Stopwatch.StartNew();
         const float Cell = 0.04f;
         var n = count - firstAtlas;
@@ -84,10 +108,9 @@ internal sealed partial class SponzaLoop
             for (var i = 0; i < counts[k]; i++) ids[start[k] + i] = (uint)found[k * SeamNeighbourCap + i];
         });
         var with = counts.Count(x => x > 0);
-        texelSeamStart = Own(device.CreateGpuBuffer(start.Length * 4, MemoryMarshal.AsBytes(start.AsSpan()), "sponza.texels.seam-start"));
-        texelSeamIds = Own(device.CreateGpuBuffer(ids.Length * 4, MemoryMarshal.AsBytes(ids.AsSpan()), "sponza.texels.seam-ids"));
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] texels: {with:N0} of {n:N0} atlas texels touch another chart ({(long)start[n]:N0} neighbours across seams, {(start.Length + ids.Length) * 4 / 1048576.0:0} MB); found in {clock.Elapsed.TotalSeconds:0.0} s."));
+        return (start, ids);
     }
 
     // The compose filter's seam lists, placeholders without a lightmap.

@@ -79,9 +79,10 @@ internal sealed partial class SponzaLoop : IUiSource
         // Up to SunNodePassCopies of the split cook's passes a frame, each in its own copy of the passes (a frame-graph
         // Metal pass takes one piece a frame), stopping at a slice's readback (it needs the frame's GPU work done).
         var splitCooking = SplitCookRunning && rayBlockBuffers.Length > 0;
+        if (texelsUploaded && rayBlockBuffers.Length > 0) RecordLivePatchLight();
         if (splitCooking)
         {
-            for (sunNodeCopy = 0; sunNodeCopy < sunNodePassesPerFrame; sunNodeCopy++)
+            for (sunNodeCopy = 0; sunNodeCopy < SunNodePassesNow; sunNodeCopy++)
             {
                 RecordSunNodes();
                 if (sunNodeStage != SunNodeStage.Tracing || sunNodeReadback) break;

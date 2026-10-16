@@ -135,7 +135,8 @@ internal sealed partial class SponzaLoop
         var results = sunNodeResults;
         var irradiance = EffectiveSunIrradiance;
         var inverse = new Vector3(1f / MathF.Max(irradiance.X, 1e-6f), 1f / MathF.Max(irradiance.Y, 1e-6f), 1f / MathF.Max(irradiance.Z, 1e-6f));
-        for (var k = 0; k < results.Length && k < sunNodeKinds.Length; k++)
+        if (liveTexels) LandSplitSliceLive(ids, first, count, inverse);
+        else for (var k = 0; k < results.Length && k < sunNodeKinds.Length; k++)
         {
             var sunPart = sunNodeKinds[k] == 1;
             var words = results[k];
@@ -149,7 +150,7 @@ internal sealed partial class SponzaLoop
             });
             if (sunPart) splitSunLanded = true; else splitSkyLanded = true;
         }
-        if (sunNodeRefineRound == 0) LandSplitDetail(ids, first, count);
+        if (sunNodeRefineRound == 0 && !liveTexels) LandSplitDetail(ids, first, count);
         var visibleDone = !splitVisibleLanded && splitVisibleCount > 0 && sunNodeRefineRound == 0 && first + count >= splitVisibleCount;
         if (visibleDone)
         {
@@ -158,6 +159,70 @@ internal sealed partial class SponzaLoop
                 $"[VulkanSponza] split light: the {splitVisibleCount:N0} texels on screen landed ({sunNodeClock.Elapsed.TotalSeconds:0.0} s after the trace began)."));
         }
         if (visibleDone || splitLandClock.Elapsed.TotalSeconds >= SplitLandSeconds) FlushSplitLanding();
+    }
+
+    // --live-texels: the slice straight into the parts' buffers (split_scatter.comp) -- the buffers are the parts; no
+    // mirror, no whole upload. Its ids once, then each column's words (the sun's per unit of its irradiance) and, on the
+    // sweep, its cells' detail.
+    private ShaderInterface splitScatterInterface = null!;
+    private PipelineHandle splitScatterPipeline;
+    private PassHandle splitScatterPass;
+
+    private void LandSplitSliceLive(uint[] ids, int first, int count, Vector3 inverse)
+    {
+        var idsBuffer = Own(device.CreateGpuBuffer(Math.Max(16, count * 4), MemoryMarshal.AsBytes(ids.AsSpan(first, count)), "sponza.split.scatter-ids"));
+        for (var k = 0; k < sunNodeResults.Length && k < sunNodeKinds.Length; k++)
+        {
+            var sunPart = sunNodeKinds[k] == 1;
+            var words = sunNodeResults[k];
+            var values = new uint[count * 2];
+            Parallel.For(0, count, t =>
+            {
+                var id = (int)ids[first + t];
+                var w = words[2 * id];
+                values[2 * t] = sunPart ? PackRgb9e5(UnpackRgb9e5(w) * inverse) : w;
+                values[2 * t + 1] = words[2 * id + 1];
+            });
+            Scatter(EnsureLivePart(sunPart), idsBuffer, values, count, 2);
+            if (sunNodeRefineRound == 0 && k < sunNodeDetailWords.Length && sunNodeDetailWords[k].Length > 0)
+            {
+                var from = sunNodeDetailWords[k];
+                var detail = new uint[count];
+                Parallel.For(0, count, t => detail[t] = from[(int)ids[first + t]]);
+                ref var detailBuffer = ref (sunPart ? ref splitSunDetailBuffer : ref splitSkyDetailBuffer);
+                if (detailBuffer.Equals(default(GpuBufferHandle)))
+                    detailBuffer = Own(device.CreateGpuBuffer(Math.Max(texelCount, 1) * 4, new byte[Math.Max(texelCount, 1) * 4], sunPart ? "sponza.split.sun-detail" : "sponza.split.sky-detail"));
+                Scatter(detailBuffer, idsBuffer, detail, count, 1);
+            }
+        }
+        RetireGpuBuffer(idsBuffer);
+        splitComposeDirty = true;
+        splitComposeAgainFrame = framesRendered + 1;
+    }
+
+    private void Scatter(GpuBufferHandle target, GpuBufferHandle ids, uint[] values, int count, int words)
+    {
+        var valuesBuffer = Own(device.CreateGpuBuffer(Math.Max(16, values.Length * 4), MemoryMarshal.AsBytes(values.AsSpan()), "sponza.split.scatter-values"));
+        graph.Dispatch(splitScatterPass, new DispatchCommand(splitScatterPipeline, (count + 63) / 64, 1, 1,
+            new ShaderUniform[] { new("uScatter", new Vector4Uniform(new Vector4(count, words, 0f, 0f))) },
+            Array.Empty<ShaderTextureBinding>(),
+            Buffers: new[]
+            {
+                new ShaderBufferBinding("ScatterIds", ids),
+                new ShaderBufferBinding("ScatterValues", valuesBuffer),
+                new ShaderBufferBinding("ScatterTarget", target),
+            }));
+        RetireGpuBuffer(valuesBuffer);
+    }
+
+    // A part's buffer under --live-texels: made zeroed when it is not up (the provisional or the landing fills it).
+    private GpuBufferHandle EnsureLivePart(bool sunPart)
+    {
+        ref var buffer = ref (sunPart ? ref splitSunBuffer : ref splitSkyBuffer);
+        if (buffer.Equals(default(GpuBufferHandle)))
+            buffer = Own(device.CreateGpuBuffer(texelCount * 8, new byte[texelCount * 8], sunPart ? "sponza.split.sun" : "sponza.split.sky"));
+        if (sunPart) splitSunUp = true; else splitSkyUp = true;
+        return buffer;
     }
 
     // The landed parts to the GPU: written into the parts' buffers in place, or made when a part is not up yet.

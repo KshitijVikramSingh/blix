@@ -47,8 +47,11 @@ internal sealed partial class SponzaLoop
     {
         if (Interlocked.Exchange(ref bakeSceneSource, null) is not { } source) return;
         var lightPath = LightBakePathFor(cacheKey, (-Vector3.Normalize(sunDirection), EffectiveSunIrradiance));
-        var light = lightBakeOff || File.Exists(lightPath) || File.Exists(ResolvedPathFor(lightPath));
-        var buried = !lightmapEnabled || texelsStageKey is { } tk && File.Exists(BuriedCachePath(tk));
+        // Under the split light the one light's bake is never read; the lightmap records' stage (the GI bundle's)
+        // holds the buried flags with the records.
+        var light = lightBakeOff || splitLight || File.Exists(lightPath) || File.Exists(ResolvedPathFor(lightPath));
+        var buried = !lightmapEnabled || texelsStageKey is { } tk
+            && (File.Exists(BuriedCachePath(tk)) || File.Exists(TransportStagePath(tk, "lightmap-records")));
         if (light && buried)
         {
             bakeSceneSkipped = true;

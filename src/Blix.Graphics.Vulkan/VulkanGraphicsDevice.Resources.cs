@@ -27,6 +27,7 @@ public sealed partial class VulkanGraphicsDevice
         public DeviceMemory Memory;
         public ulong Size;
         public IndexType IndexType; // Only meaningful for index buffers.
+        public nint Mapped;         // CreateReadableGpuBuffer's: host-visible memory, mapped for its life (0: not mapped).
         public string Name = string.Empty;
     }
 
@@ -201,6 +202,7 @@ public sealed partial class VulkanGraphicsDevice
     internal unsafe void DestroyVkBufferEntry(VkBufferEntry e)
     {
         if (e.Buffer.Handle != 0) Vk.DestroyBuffer(Device, e.Buffer, null);
+        if (e.Mapped != 0 && e.Memory.Handle != 0) Vk.UnmapMemory(Device, e.Memory);
         if (e.Memory.Handle != 0) Vk.FreeMemory(Device, e.Memory, null);
     }
 
