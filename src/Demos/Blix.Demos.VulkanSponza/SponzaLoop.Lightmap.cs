@@ -269,6 +269,8 @@ internal sealed partial class SponzaLoop
             for (var k = 0; k < count; k++)
                 if (flags[k]) { texels![2 * k].W = MathF.Sign(texels[2 * k].W); buried++; }
         }
+        var (moved, buriedAfter) = LiftOffContacts(scene, texels!, map, w, h);
+        buried += buriedAfter;
         long gutter = 0;
         for (var pass = 0; pass < 2; pass++)
         {
@@ -299,6 +301,82 @@ internal sealed partial class SponzaLoop
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] lightmap double-sided texels: {pairedOpposed / (double)paired:P1} have vertex normals opposite their winding, {pairedGrazing / (double)paired:P1} within ~17 deg of edge-on (a pixel picks its side by the vertex normal)."));
         return (texels!, map, frames!, (int)records);
+    }
+
+    // Records where another solid touches their face: the edge inset (Inset) keeps a record off its own triangle's edges,
+    // but a wall's face runs on behind the next box that rests against it, and a texel centred on that line -- the crevices'
+    // corridor, where its side walls meet its end wall and roof -- started half its gather rays inside the box. The buried
+    // test counts back faces within lightmapBuriedReach and passed it (most of those rays run further inside first); the
+    // cook met them all, flipped them, and read the sky-lit outside: a bright texel at every joint (2026-10-16).
+    // So each single-sided record beside a buried one sends ContactRays rays from where the cook starts them (1 cm off);
+    // where ContactShare of them meet a single-sided back face at any distance, the record moves ContactStep across its
+    // face, away from them, and is tested again; still inside, it is buried.
+    private const int ContactRays = 32;
+    private const float ContactShare = 1f / 8f, ContactStep = 0.02f;
+    private (int Moved, int Buried) LiftOffContacts(RayQueryScene scene, Vector4[] texels, uint[] map, int w, int h)
+    {
+        bool Buried(uint id) => MathF.Abs(texels[2 * id].W) < 2f;
+        var candidates = new List<uint>();
+        for (var y = 0; y < h; y++)
+        for (var x = 0; x < w; x++)
+        {
+            var id = map[(long)y * w + x];
+            if (id == 0xFFFFFFFFu || texels[2 * id].W < 2f) continue;   // none, buried, or a double-sided pair
+            var beside = false;
+            foreach (var (dx, dy) in new[] { (1, 0), (-1, 0), (0, 1), (0, -1) })
+            {
+                int nx = x + dx, ny = y + dy;
+                if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+                var other = map[(long)ny * w + nx];
+                if (other != 0xFFFFFFFFu && Buried(other)) { beside = true; break; }
+            }
+            if (beside) candidates.Add(id);
+        }
+        // The share of the record's rays meeting a single-sided back face, and their mean direction.
+        (float Share, Vector3 Toward) Inside(Vector3 pos, Vector3 n)
+        {
+            var t1 = Vector3.Normalize(Vector3.Cross(MathF.Abs(n.X) < 0.9f ? Vector3.UnitX : Vector3.UnitY, n));
+            var t2 = Vector3.Cross(n, t1);
+            var origin = pos + n * 0.01f;
+            int inside = 0;
+            var toward = Vector3.Zero;
+            for (var k = 0; k < ContactRays; k++)
+            {
+                float u1 = (k + 0.5f) / ContactRays, u2 = (k * 0.6180339887f) % 1f;
+                float r = MathF.Sqrt(u1), phi = 2f * MathF.PI * u2;
+                var d = Vector3.Normalize(t1 * (r * MathF.Cos(phi)) + t2 * (r * MathF.Sin(phi)) + n * MathF.Sqrt(MathF.Max(0f, 1f - u1)));
+                if (scene.Closest(new Ray(origin, d)) is not { } hit || hit.FrontFace) continue;
+                if (hit.Instance < rayPlacementDoubleSided.Count && rayPlacementDoubleSided[hit.Instance]) continue;
+                inside++;
+                toward += d;
+            }
+            return ((float)inside / ContactRays, toward);
+        }
+        int moved = 0, buried = 0;
+        var clock = Stopwatch.StartNew();
+        Parallel.ForEach(candidates, id =>
+        {
+            var pos = new Vector3(texels[2 * id].X, texels[2 * id].Y, texels[2 * id].Z);
+            var n = Vector3.Normalize(new Vector3(texels[2 * id + 1].X, texels[2 * id + 1].Y, texels[2 * id + 1].Z));
+            var (share, toward) = Inside(pos, n);
+            if (share < ContactShare) return;
+            var across = toward - n * Vector3.Dot(toward, n);
+            if (across.LengthSquared() > 1e-8f)
+            {
+                var to = pos - Vector3.Normalize(across) * ContactStep;
+                if (Inside(to, n).Share < ContactShare)
+                {
+                    texels[2 * id] = new Vector4(to, texels[2 * id].W);
+                    Interlocked.Increment(ref moved);
+                    return;
+                }
+            }
+            texels[2 * id].W = MathF.Sign(texels[2 * id].W);
+            Interlocked.Increment(ref buried);
+        });
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[VulkanSponza] lightmap contacts: {candidates.Count:N0} records beside buried ones tested ({ContactRays} rays each, {clock.Elapsed.TotalSeconds:0.0} s); {moved:N0} moved {ContactStep * 100f:0} cm off a solid touching their face, {buried:N0} buried."));
+        return (moved, buried);
     }
 
     // The barycentrics of the point of triangle abc nearest p (in the atlas's plane): Ericson's region tests.

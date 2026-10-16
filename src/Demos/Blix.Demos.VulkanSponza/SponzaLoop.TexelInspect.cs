@@ -117,7 +117,52 @@ internal sealed partial class SponzaLoop
                 var buried = MathF.Abs(rec[0].W) < 2f;
                 Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                     $"    [{i}] cell ({ax},{ay}) w {weight:0.00} -> record {id:N0} at cell ({bits & 0xFFFF},{bits >> 16}){(buried ? " BURIED" : "")}: {(point == Vector3.Zero ? "" : $"{Vector3.Distance(pos, point) * 100f:0.0} cm from the point, ")}n.pixelN {Vector3.Dot(nrm, pixelN):0.00}, n ({nrm.X:0.00},{nrm.Y:0.00},{nrm.Z:0.00}), rays {light.W:0}, light {(light.X + light.Y + light.Z) * Lum:0.000}, filtered {(filtered.W > 0f ? ((filtered.X + filtered.Y + filtered.Z) * Lum).ToString("0.000", CultureInfo.InvariantCulture) : "-")}, resolved {resolved}"));
+                if (!buried) InspectEscapes(scene, pos, nrm);
             }
         }
+    }
+
+    // The record's gather rays as the cook starts them (texel_nodes_rays.comp: 1 cm off along its normal), cosine-weighted,
+    // on the CPU's watertight scene and on the Metal tracer: the share that escapes to the sky on each, and the rays Metal
+    // let out that the CPU stopped (a crack at a joint the frame's tracer has and the triangles do not).
+    private void InspectEscapes(RayQueryScene scene, Vector3 pos, Vector3 nrm)
+    {
+        const int N = 4096;
+        var n = Vector3.Normalize(nrm);
+        var t1 = Vector3.Normalize(Vector3.Cross(MathF.Abs(n.X) < 0.9f ? Vector3.UnitX : Vector3.UnitY, n));
+        var t2 = Vector3.Cross(n, t1);
+        var origin = pos + n * 0.01f;
+        var rays = new Vector4[2 * N];
+        var dirs = new Vector3[N];
+        for (var k = 0; k < N; k++)
+        {
+            float u1 = (k + 0.5f) / N, u2 = (k * 0.6180339887f) % 1f;
+            float r = MathF.Sqrt(u1), phi = 2f * MathF.PI * u2;
+            var d = Vector3.Normalize(t1 * (r * MathF.Cos(phi)) + t2 * (r * MathF.Sin(phi)) + n * MathF.Sqrt(MathF.Max(0f, 1f - u1)));
+            dirs[k] = d;
+            rays[2 * k] = new Vector4(origin, 0f);
+            rays[2 * k + 1] = new Vector4(d, 1e30f);
+        }
+        int cpuMiss = 0, cpuBack = 0, metalMiss = 0, crack = 0;
+        float nearestBack = float.PositiveInfinity;
+        var nearestBackDir = Vector3.Zero;
+        uint[]? hits = frameTracer is { } t ? t.TraceFromHost(rays, 0u, true, out _) : null;
+        var crackDirs = new List<Vector3>();
+        for (var k = 0; k < N; k++)
+        {
+            var hit = scene.Closest(new Ray(origin, dirs[k]));
+            if (hit is null) cpuMiss++;
+            else if (!hit.Value.FrontFace)
+            {
+                cpuBack++;
+                if (hit.Value.T < nearestBack) { nearestBack = hit.Value.T; nearestBackDir = dirs[k]; }
+            }
+            if (hits is null) continue;
+            var metalHit = (hits[k * 12 + 3] & 1u) != 0u;
+            if (!metalHit) metalMiss++;
+            if (!metalHit && hit is not null) { crack++; if (crackDirs.Count < 3) crackDirs.Add(dirs[k]); }
+        }
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"        at ({pos.X:0.0000},{pos.Y:0.0000},{pos.Z:0.0000}); nearest back face {(float.IsInfinity(nearestBack) ? "-" : string.Create(CultureInfo.InvariantCulture, $"{nearestBack * 100f:0.00} cm toward ({nearestBackDir.X:0.00},{nearestBackDir.Y:0.00},{nearestBackDir.Z:0.00})"))}; escapes from 1 cm off: CPU {100.0 * cpuMiss / N:0.00}% (back faces met {100.0 * cpuBack / N:0.00}%), Metal {(hits is null ? "-" : (100.0 * metalMiss / N).ToString("0.00", CultureInfo.InvariantCulture) + "%")}; Metal out where the CPU stopped: {crack}{string.Concat(crackDirs.Select(d => string.Create(CultureInfo.InvariantCulture, $" ({d.X:0.00},{d.Y:0.00},{d.Z:0.00})")))}"));
     }
 }

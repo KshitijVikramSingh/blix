@@ -25,7 +25,9 @@ internal sealed partial class SponzaLoop
     // 4: a hit with no patch takes its texel's known bounce, not 0 (texel_nodes_shade.glsl).
     // 5: the light strategy and multiple importance sampling (texel_nodes_rays.comp).
     // 6: the far field (SponzaLoop.FarField.cs): past its reach a texel reads its patch's record.
-    private const int SplitLightVersion = 6;
+    // 7: a hit's lookup skips buried texels (texel_nodes.glsl nodeSetAt): their patch was seen from inside the wall.
+    // 8: records where a solid touches their face move off it (SponzaLoop.Lightmap.cs LiftOffContacts).
+    private const int SplitLightVersion = 8;
     private ShaderInterface texelComposeInterface = null!;
     private PassHandle texelComposePass, texelComposeFilterPass;
     private PipelineHandle texelComposePipeline;

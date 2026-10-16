@@ -32,6 +32,11 @@ internal sealed partial class SponzaLoop
     // The CPU reference's totals by point (WriteSurfaceReference), when it ran too: the cross-check.
     private readonly Dictionary<int, double> cpuSurfaceReference = new();
     private const int GpuReferenceGrid = 24;
+    // --gpu-ref-seams N: N more points at concave creases (where two faces meet), printed as "seam" lines. The grid's
+    // points almost never land within a few pixels of one, and a leak through a seam lights exactly there: the
+    // crevices' box joints glowed with sky the gate never saw (2026-10-15). Their K: SeamKeyBase and up.
+    private int gpuReferenceSeams;
+    private const int SeamKeyBase = 1 << 20;
     private const int GpuReferencePathsPerThread = 4;
     private const int GpuReferencePathsPerDispatch = 64 * GpuReferencePathsPerThread;
 
@@ -239,6 +244,41 @@ internal sealed partial class SponzaLoop
             packed.Add(new Vector4(ray.PointAt(hit.T) + n * 0.01f, 0f));
             packed.Add(new Vector4(n, 0f));
         }
+        // The seams: a finer grid's pixels whose neighbours 3 px away all meet the same surface depth (no silhouette)
+        // but at least one meets a face turned 45 degrees or more from this one -- a concave crease. Every candidate's
+        // chance alike: a stride over them all.
+        if (gpuReferenceSeams > 0)
+        {
+            const int Fine = 8 * GpuReferenceGrid;
+            var seams = new List<(float Px, float Py, Vector3 P, Vector3 N)>();
+            for (var k = 0; k < Fine * Fine; k++)
+            {
+                var px = (k % Fine + 0.5f) / Fine * iw;
+                var py = (k / Fine + 0.5f) / Fine * ih;
+                var ray = CameraRay(px, py);
+                if (scene.Closest(ray) is not { } hit) continue;
+                var n = FaceNormal(hit);
+                if (Vector3.Dot(n, ray.Direction) > 0f) n = -n;
+                bool edge = false, crease = false;
+                foreach (var (dx, dy) in new[] { (3f, 0f), (-3f, 0f), (0f, 3f), (0f, -3f) })
+                {
+                    if (scene.Closest(CameraRay(px + dx, py + dy)) is not { } other || MathF.Abs(other.T - hit.T) > 0.05f * hit.T) { edge = true; break; }
+                    var on = FaceNormal(other);
+                    if (MathF.Abs(Vector3.Dot(on, n)) < 0.7f) crease = true;
+                }
+                if (!edge && crease) seams.Add((px, py, ray.PointAt(hit.T) + n * 0.01f, n));
+            }
+            var take = Math.Min(gpuReferenceSeams, seams.Count);
+            for (var j = 0; j < take; j++)
+            {
+                var s = seams[(int)((long)j * seams.Count / take)];
+                points.Add((SeamKeyBase + j, s.Px, s.Py));
+                packed.Add(new Vector4(s.P, 0f));
+                packed.Add(new Vector4(s.N, 0f));
+            }
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza] GPU surface reference: {take} seam points of {seams.Count} crease pixels on a {Fine}x{Fine} grid."));
+        }
         gpuReferencePoints = points;
         gpuReferencePackedPoints = packed;
         if (points.Count == 0) return;
@@ -285,7 +325,7 @@ internal sealed partial class SponzaLoop
             var o = (Math.Clamp((int)py, 0, ih - 1) * iw + Math.Clamp((int)px, 0, iw - 1)) * 8;
             var field = Lum(new Vector3((float)BitConverter.ToHalf(incident, o), (float)BitConverter.ToHalf(incident, o + 2), (float)BitConverter.ToHalf(incident, o + 4)));
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                $"    surface  at {px / iw:0.0000},{py / ih:0.0000}  gpu  total {field:0.00000} ref {reference:0.00000}"));
+                $"    {(k >= SeamKeyBase ? "seam    " : "surface ")} at {px / iw:0.0000},{py / ih:0.0000}  gpu  total {field:0.00000} ref {reference:0.00000}"));
             if (cpuSurfaceReference.TryGetValue(k, out var cpu)) pairs.Add((cpu, reference));
         }
         if (pairs.Count == 0) return;

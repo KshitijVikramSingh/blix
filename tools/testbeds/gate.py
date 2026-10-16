@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The GI correctness gate's verdict, from --probe-reference logs of the correctness scenes.
 
-usage: gate.py LOG_DIR      (reads cornell.log, thinwall-sealed.log, thinwall-open.log, crevices-corridor.log)
+usage: gate.py LOG_DIR      (reads cornell.log, thinwall-sealed.log, thinwall-open.log, crevices-corridor.log; the last
+                             with --gpu-ref-seams)
 
 Every metric carries two bars:
   target   what correct is. Reported MET or NOT MET; a metric short of it is known work, not a failure.
@@ -16,13 +17,15 @@ import re
 import sys
 
 SAMPLE = re.compile(r'surface  at \S+ .* total (-?[\d.]+) ref (-?[\d.]+)')
+# --gpu-ref-seams: points at concave creases, where a leak through the joint lights first.
+SEAM = re.compile(r'seam     at \S+ .* total (-?[\d.]+) ref (-?[\d.]+)')
 
 
-def samples(path):
+def samples(path, pattern=SAMPLE):
     out = []
     with open(path) as f:
         for line in f:
-            m = SAMPLE.search(line)
+            m = pattern.search(line)
             if m:
                 field, ref = float(m.group(1)), float(m.group(2))
                 if field >= 0:
@@ -48,6 +51,7 @@ def main():
     sealed = samples(os.path.join(logs, 'thinwall-sealed.log'))
     lit = samples(os.path.join(logs, 'thinwall-open.log'))
     corridor = samples(os.path.join(logs, 'crevices-corridor.log'))
+    seams = samples(os.path.join(logs, 'crevices-corridor.log'), SEAM)
     corridor_ref = mean(r for _, r in corridor)
 
     cornell_ref = mean(r for _, r in cornell)
@@ -80,10 +84,18 @@ def main():
          lambda v: v <= 0.015, '<= 0.015', lambda v: v <= 0.035, '<= 0.035',
          'how far each corridor point is, over its mean light: the gather\'s noise there (2026-10-13: 0.036 against a 16,384-path '
          'reference, itself 0.026 off; against 262,144 (0.007 off): the gather 0.021, the split cook 0.025)'),
+        ('crevices seam excess', sum(max(f - r, 0.0) for f, r in seams) / sum(r for _, r in seams),
+         lambda v: v <= 0.02, '<= 0.02', lambda v: v <= 0.03, '<= 0.03',
+         'light at the corridor\'s creases beyond the path trace\'s, over its light there: a texel centred where a box '
+         'rests on a face gathered half inside the box, its sky-lit outside (2026-10-16: 0.063 -> 0.015, records moved '
+         'off contacts)'),
+        ('crevices seam energy', mean(f for f, _ in seams) / mean(r for _, r in seams),
+         lambda v: abs(v - 1) <= 0.05, '|x - 1| <= 0.05', lambda v: abs(v - 1) <= 0.15, '|x - 1| <= 0.15',
+         'the creases\' light over the path trace\'s: the texels beside a buried one answer for it (2026-10-16: 0.886)'),
     ]
 
     failed = 0
-    print(f'GI correctness gate ({len(cornell)} / {len(sealed)} / {len(lit)} / {len(corridor)} samples):')
+    print(f'GI correctness gate ({len(cornell)} / {len(sealed)} / {len(lit)} / {len(corridor)} + {len(seams)} seam samples):')
     for name, value, target, target_text, ratchet, ratchet_text, what in metrics:
         held = ratchet(value)
         met = target(value)

@@ -56,7 +56,8 @@ run thinwall-sealed --scene=thinwall "$@"
 run thinwall-open --scene=thinwall --cam -3.05,3,0,90,0 "$@"
 paths=(--gpu-ref-paths 262144 --gpu-ref-lanes 4096)
 frames=4500
-run crevices-corridor --scene=crevices-dark --cam 6,1.5,1.5,90,-5 "$@"
+# And 96 points at the corridor's creases (--gpu-ref-seams): the box joints, where a leak lights first.
+run crevices-corridor --scene=crevices-dark --cam 6,1.5,1.5,90,-5 --gpu-ref-seams 96 "$@"
 rm -f "$LOGS"/*.png
 python3 "$REPO/tools/testbeds/gate.py" "$LOGS"
 status=$?

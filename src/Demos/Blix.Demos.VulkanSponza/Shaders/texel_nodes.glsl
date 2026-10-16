@@ -79,6 +79,10 @@ float nodeSetAt(int set, vec3 p, vec3 n, vec4 grid, uint slots, vec2 lookup, out
             int id = nodeFind(set, base + ivec3(i & 1, (i >> 1) & 1, (i >> 2) & 1), bins[b], grid, slots);
             if (id < 0) continue;
             vec4 tp = nodePosition(set, uint(id));
+            // A buried texel (|w| 1: inside a solid, SponzaLoop.Lightmap.cs) answers nothing: its sun is none and the
+            // patch it "sees" was found from inside the wall -- at a crease it lay nearest a hit and lent the hit the
+            // sky-lit outside: the crevices' box joints glowed (2026-10-16).
+            if (set == 0 && abs(tp.w) < 2.0) continue;
             vec3 tn = normalize(nodeNormal(set, uint(id)).xyz);
             float facing = dot(tn, n);
             if (facing <= 0.0 || abs(dot(tn, tp.xyz - p)) > lookup.x * grid.w) continue;
