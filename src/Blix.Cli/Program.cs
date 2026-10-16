@@ -385,7 +385,7 @@ public static class Program
         .GroupBy(a => (a.Project, a.Name, Assembly: Path.GetFileName(a.Assembly)))
         .Select(g => g
             .OrderByDescending(a => string.Equals(Configuration(a.Assembly),
-                Environment.GetEnvironmentVariable("BLIX_CONFIG") is { Length: > 0 } c ? c : "Debug", StringComparison.OrdinalIgnoreCase))
+                Environment.GetEnvironmentVariable("BLIX_CONFIG") is { Length: > 0 } c ? c : "Release", StringComparison.OrdinalIgnoreCase))
             .ThenByDescending(a => a.AppHost is not null && File.Exists(a.AppHost))
             .ThenBy(a => a.Assembly.Length)
             .First())
@@ -566,7 +566,7 @@ public static class Program
             ? parts[bin + 1]
             : Environment.GetEnvironmentVariable("BLIX_CONFIG") is { Length: > 0 } configured
                 ? configured
-                : "Debug";
+                : "Release";
     }
 
     /// <summary>
@@ -1026,7 +1026,7 @@ public static class Program
             ArgumentList =
             {
                 "publish", project,
-                "-c", Environment.GetEnvironmentVariable("BLIX_CONFIG") ?? "Debug",
+                "-c", Environment.GetEnvironmentVariable("BLIX_CONFIG") ?? "Release",
                 "-r", target.Rid,
                 "--self-contained", "true",
                 "-o", payload,

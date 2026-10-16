@@ -20,7 +20,10 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
-CONFIG="${BLIX_CONFIG:-Debug}"
+# Release unless asked: Debug's unoptimised JIT made the boot's CPU work several times slower (2026-10-16).
+# Exported, so the resolver picks the copy built in this configuration (bin/Release) and --build builds it.
+CONFIG="${BLIX_CONFIG:-Release}"
+export BLIX_CONFIG="$CONFIG"
 CLI="$REPO_ROOT/src/Blix.Cli/bin/$CONFIG/net8.0/blix"
 INDEXER="$REPO_ROOT/src/Blix.Tools.Apps/bin/$CONFIG/net8.0/Blix.Tools.Apps.dll"
 
