@@ -347,11 +347,14 @@ internal sealed partial class SponzaLoop
         sunNodeLive = Own(device.CreateGpuBuffer(live.Length * 4, MemoryMarshal.AsBytes(live.AsSpan()), "sponza.sun-nodes.live"));
         // A live split cook traces what the image reads first (SponzaLoop.SplitLanding.cs); otherwise the live order.
         sunNodeTraceIds = sunNodeStride == 1 ? SplitTraceOrder(live) : live.Where((_, i) => i % sunNodeStride == 0).ToArray();
+        // --live-texels: the texels on screen alone (LiveViewIds); the rest keep their coarse light until they are seen.
+        // Never the scene: with no view yet, nothing -- the next view check (LiveViewCheck) gathers what it sees.
+        if (liveTexels) sunNodeTraceIds = liveVisibleIds is { Length: > 0 } seenIds ? LiveViewIds(seenIds) : Array.Empty<uint>();
         // The far field pools a slice's texels with their neighbours: neighbours trace together (SponzaLoop.FarField.cs).
-        if (farField && splitCooking && sunNodeStride == 1)
+        else if (farField && splitCooking && sunNodeStride == 1)
             sunNodeTraceIds = FarSpatialOrder(sunNodeTraceIds, ReferenceEquals(sunNodeTraceIds, live) ? 0 : splitVisibleCount);
         sunNodeTraceBuffer = ReferenceEquals(sunNodeTraceIds, live) ? sunNodeLive
-            : Own(device.CreateGpuBuffer(sunNodeTraceIds.Length * 4, MemoryMarshal.AsBytes(sunNodeTraceIds.AsSpan()), "sponza.sun-nodes.traced"));
+            : Own(device.CreateGpuBuffer(Math.Max(16, sunNodeTraceIds.Length * 4), MemoryMarshal.AsBytes(sunNodeTraceIds.AsSpan()), "sponza.sun-nodes.traced"));
         sunNodeSunsBuffer = Own(device.CreateGpuBuffer(sunNodeDirs.Length * 16, MemoryMarshal.AsBytes(sunNodeDirs.AsSpan()), "sponza.sun-nodes.suns"));
         var (bits, points, pointBits) = sunNodeBitsTask!.Result;
         sunNodeBitsTask = null;
@@ -464,6 +467,8 @@ internal sealed partial class SponzaLoop
     // its passes, the next frame reads its sums back (the GPU idle first) and moves on.
     private void RecordSunNodeSlice()
     {
+        // Live: the sun points' bits first (shot in the frame after the merge, RecordLivePointBits).
+        if (liveTexels && !LivePointsDone) { RecordLivePointBits(); return; }
         var refining = sunNodeRefineRound > 0;
         var live = refining ? sunNodeRefineIds : sunNodeTraceIds;
         var suns = sunNodeSuns!.Length;
@@ -743,6 +748,7 @@ internal sealed partial class SponzaLoop
             : MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(raySurfaces, 0, rayData.RowPlacements.Length * 4).AsSpan()).ToArray();
         var grid = texelGrid;
         var foliageKey = lightBakeKey;
+        var hostPointBits = !liveTexels;   // live: shot in the frame once the points are all up (RecordLivePointBits)
         return Task.Run(() =>
         {
             var clock = Stopwatch.StartNew();
@@ -778,7 +784,8 @@ internal sealed partial class SponzaLoop
                     SaveStage(foliageKey, "sun-points-foliage", w => WriteArray(w, save));
                 }
                 sunNodeFoliageKept = foliage;
-                foliageBits = ShootSunBits(tracer, foliage, directions, words, reach, lift, out var fgpu);
+                double fgpu = 0;
+                foliageBits = hostPointBits ? ShootSunBits(tracer, foliage, directions, words, reach, lift, out fgpu) : new uint[foliage.Length / 2 * words];
                 Console.WriteLine(string.Create(Inv,
                     $"[VulkanSponza] sun nodes: the foliage's sun points: {foliage.Length / 2:N0} on the partly covered triangles, their bits in {fclock.Elapsed.TotalSeconds:0.0} s ({fgpu / 1000:0.0} s GPU)."));
             }
@@ -1015,7 +1022,8 @@ internal sealed partial class SponzaLoop
             var wordsK = (dirsK.Length + 31) / 32;
             var reachK = sunNodeReach;
             var liftK = sunNodeLift;
-            sunNodeDiscoverTask = Task.Run(() => (known, ShootSunBits(tracerK, known, dirsK, wordsK, reachK, liftK, out _)));
+            var hostK = !liveTexels;
+            sunNodeDiscoverTask = Task.Run(() => (known, hostK ? ShootSunBits(tracerK, known, dirsK, wordsK, reachK, liftK, out _) : new uint[known.Length / 2 * wordsK]));
             sunNodeDiscoverFirst = sunNodeDiscoverIds.Length;
             sunNodeStage = SunNodeStage.Merge;
             return;
@@ -1041,11 +1049,12 @@ internal sealed partial class SponzaLoop
         var clock = Stopwatch.StartNew();
         var saveKey = lightBakeKey;
         var header = DiscoveredHeader;
+        var hostAdded = !liveTexels;
         sunNodeDiscoverTask = Task.Run(() =>
         {
             var added = NewSunPoints(existing, found, grid);
             if (saveKey is not null) SaveStage(saveKey, "sun-points-discovered", w => { w.Write(header); WriteArray(w, added); });
-            var bits = ShootSunBits(tracer, added, directions, words, reach, lift, out _);
+            var bits = hostAdded ? ShootSunBits(tracer, added, directions, words, reach, lift, out _) : new uint[added.Length / 2 * words];
             Console.WriteLine(string.Create(Inv,
                 $"[VulkanSponza] sun nodes: discovery found {count:N0} hits among neither texel nor sun point ({(count >= DiscoverRoom ? "the list full; " : "")}every {sunNodeDiscoverStride}th texel, a pass), {added.Length / 2:N0} new sun points; bits in {clock.Elapsed.TotalSeconds:0.0} s."));
             return (added, bits);
@@ -1059,12 +1068,14 @@ internal sealed partial class SponzaLoop
         var (added, bits) = done.Result;
         sunNodeDiscoverTask = null;
         UploadSunPoints(sunNodePoints.Concat(added).ToArray(), sunNodePointBits.Concat(bits).ToArray());
+        if (liveTexels) BeginLivePointBits();
         // The trace proper counts afresh.
         RetireGpuBuffer(sunNodeStats);
         sunNodeStats = Own(device.CreateGpuBuffer(48, new byte[48], "sponza.sun-nodes.stats"));
         sunNodeClock.Restart();
         sunNodeStage = SunNodeStage.Tracing;
         if (liveTexels) liveCookWarm = true;
+        if (liveTexels) Console.WriteLine(string.Create(Inv, $"[VulkanSponza] live texels: gathering the {sunNodeTraceIds.Length:N0} texels in view."));
         // The sun moved during the setup (the solve, the bits, the lists: ~1.5 min on Sponza): no tracing a sun that
         // is gone -- the newest's cook starts now (2026-10-14: a second move waited out the first's whole 3.3-min trace).
         if (SunOnlyCook && splitSunWanted is { } wanted && sunNodeDirsAsked is [var asked] && Vector3.Distance(wanted, asked) > 1e-5f)

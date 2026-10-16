@@ -133,7 +133,9 @@ internal sealed partial class SponzaLoop
     private void FinishSplitCook()
     {
         var irradiance = EffectiveSunIrradiance;
-        for (var k = 0; k < splitCookPaths.Length; k++)
+        // --live-texels: every slice landed in the parts' buffers as it came (LandSplitSliceLive) -- and a view's gather
+        // traced only some texels, so the results arrays are not the parts: nothing to upload.
+        for (var k = 0; k < splitCookPaths.Length && !liveTexels; k++)
         {
             var words = sunNodeResults[k];
             var sunPart = sunNodeKinds[k] == 1;

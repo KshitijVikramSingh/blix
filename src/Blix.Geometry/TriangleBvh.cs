@@ -163,6 +163,9 @@ public sealed class TriangleBvh
     public BvhNode[] Nodes { get; }
     public int[] Order { get; }
 
+    /// <summary>A hierarchy as built before, from its parts (<see cref="RayQueryScene.Write"/>).</summary>
+    internal static TriangleBvh FromParts(Vector3[] positions, uint[] indices, BvhNode[] nodes, int[] order) => new(positions, indices, nodes, order);
+
     public int TriangleCount => Indices.Length / 3;
 
     /// <summary>Entries in the leaves (<see cref="Order"/>'s length): more than <see cref="TriangleCount"/> where a spatial split

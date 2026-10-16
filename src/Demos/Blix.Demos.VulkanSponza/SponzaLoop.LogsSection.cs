@@ -23,9 +23,21 @@ internal sealed partial class SponzaLoop : IDebugLogsSection
 {
     // The cook's CPU stages report through the engine's registry (DebugProgress), the Logs tab and the cook screen
     // drawing them; the "cook" group.
-    private static void ProgressBegin(string name, long total) => DebugProgress.Begin(name, total, "cook");
+    // BLIX_STAGE_TIMES=1: each stage's wall time logged at its end (the boot's timeline, 2026-10-16).
+    private static readonly bool stageTimes = Environment.GetEnvironmentVariable("BLIX_STAGE_TIMES") == "1";
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> stageStarts = new();
+    private static void ProgressBegin(string name, long total)
+    {
+        if (stageTimes) stageStarts[name] = System.Diagnostics.Stopwatch.GetTimestamp();
+        DebugProgress.Begin(name, total, "cook");
+    }
     private static void ProgressAdd(string name, long units = 1) => DebugProgress.Add(name, units);
-    private static void ProgressEnd(string name) => DebugProgress.End(name);
+    private static void ProgressEnd(string name)
+    {
+        if (stageTimes && stageStarts.TryRemove(name, out var t0))
+            Console.WriteLine($"[stage] {name}: {System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalSeconds:0.00} s");
+        DebugProgress.End(name);
+    }
 
     // Each frame: the GPU cooks' own counters into the registry (the split cook's sweep and rounds, the light bake).
     private string? splitProgressName;

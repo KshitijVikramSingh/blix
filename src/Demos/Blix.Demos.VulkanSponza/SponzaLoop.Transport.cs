@@ -249,6 +249,16 @@ internal sealed partial class SponzaLoop
 
     private GpuBufferHandle cookedGuideBuffer;
 
+    private static float[] UniformGuides(int patches)
+    {
+        var cdf = new float[patches * TransportGuideBins];
+        Parallel.For(0, patches, i =>
+        {
+            for (var b = 0; b < TransportGuideBins; b++) cdf[i * TransportGuideBins + b] = (b + 1) / (float)TransportGuideBins;
+        });
+        return cdf;
+    }
+
     private void UploadCookedGuides(float[] cdf)
     {
         if (!transportGpu) return;
@@ -306,6 +316,7 @@ internal sealed partial class SponzaLoop
     private void CookTransportFrom(RayQueryScene scene, RayQueryGpuData data, uint[] surfaces)
     {
         var clock = Stopwatch.StartNew();
+        void Mark(string what) { if (stageTimes) Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[mark] transport {what} {clock.Elapsed.TotalSeconds:0.00} s")); }
         data.ApplyCoverage(surfaces);
         Vector3 Albedo(int placement, int triangle)
         {
@@ -323,6 +334,7 @@ internal sealed partial class SponzaLoop
         }
 
         // The cook's cache (SponzaLoop.TransportCache.cs): a run whose inputs match reads what the cook would make.
+        Mark("key");
         var stageKeys = TransportCacheKeys(scene, surfaces);
         transportPatchesKey = stageKeys.Patches;
         transportCouplingsKey = stageKeys.Couplings;
@@ -333,12 +345,14 @@ internal sealed partial class SponzaLoop
         texelsStageKey = stageKeys.Texels;
         DecideBakeScene(cacheKey);
         // Each stage from its own cache; the couplings and the sun visibility only over the patches they were made for.
+        Mark("loads");
         var patchStage = LoadPatches(stageKeys.Patches);
         var couplingStage = patchStage is null ? null : LoadCouplings(stageKeys.Couplings);
         var sunVisStage = patchStage is null ? null : LoadSunVis(stageKeys.SunVis);
         var texelStage = LoadTexels(stageKeys.Texels);
 
         // ---- R1: patches ------------------------------------------------------------------------------------------
+        Mark("loaded");
         var patchArea = transportSpacing * transportSpacing;
         var pos = new List<Vector3>();
         var nrm = new List<Vector3>();
@@ -425,6 +439,7 @@ internal sealed partial class SponzaLoop
             pos = patchStage.Pos.ToList(); nrm = patchStage.Nrm.ToList(); albedo = patchStage.Albedo.ToList();
             placement = patchStage.Placement.ToList();
         }
+        Mark("patches");
         var patches = pos.Count;
         // A hash grid over the patches: a ray's hit finds the nearest patch facing the way the hit surface faces.
         // Cells twice the spacing, so the 3x3x3 search reaches past any gap between neighbouring patches.
@@ -435,6 +450,7 @@ internal sealed partial class SponzaLoop
         int[] denseStart = Array.Empty<int>(), denseItems = Array.Empty<int>();
         int denseX = 0, denseY = 0, denseZ = 0, denseMinX = 0, denseMinY = 0, denseMinZ = 0;
         (int, int, int) Key(Vector3 p) => ((int)MathF.Floor(p.X / cell), (int)MathF.Floor(p.Y / cell), (int)MathF.Floor(p.Z / cell));
+        Mark("dense");
         for (var i = 0; i < patches; i++)
         {
             var key = Key(pos[i]);
@@ -450,6 +466,7 @@ internal sealed partial class SponzaLoop
         // past 20 minutes (217 s before visibility) where none was visible.
         int NearestVisible(Vector3 p, Vector3 n, uint seed, bool anyFacing) => NearestVisibleOr(p, n, seed, anyFacing, out _);
         // As NearestVisible; nearest: the nearest candidate, seen or not (-1: none), for OwnFallback.
+        Mark("dense-done");
         var facingPenalty = transportSpacing * transportFacingWeight;
         int NearestVisibleOr(Vector3 p, Vector3 n, uint seed, bool anyFacing, out int nearest)
         {
@@ -543,6 +560,7 @@ internal sealed partial class SponzaLoop
         }
         for (var pass = 1; transportFill && patchStage is null && pass <= transportFillPasses; pass++)
             if (FillPatches(pass) == 0) break;
+        Mark("fill-done");
         var cookPatches = clock.Elapsed.TotalSeconds;
 
         // --transport-fill: patches where hits find none facing their way that they can see. A discovery pass of
@@ -629,6 +647,7 @@ internal sealed partial class SponzaLoop
         // ---- R2 couplings + R3 sky bins + R3 sun visibility -------------------------------------------------------
         var couplings = new (int To, float W)[patches][];
         var sky = new float[patches * TransportSkyRes * TransportSkyRes];
+        Mark("pre-cook");
         var visWords = (transportVisRes * transportVisRes + 63) / 64;
         var sunVis = new ulong[patches * visWords];
         long dropped = 0;
@@ -749,6 +768,7 @@ internal sealed partial class SponzaLoop
         // The couplings and the sun visibility trace the frame's scene -- the one the patches sit on and RowOf and Tri
         // read: the bake scene's hits are indices into another (they threw at RowOf, 2026-10-14).
         bool Cutout(RayHit h) => (surfaces[data.RowOf(h.Instance, h.Triangle)] >> 24) < 255u;
+        Mark("sunvis");
         if (sunVisStage is not null) sunVis = sunVisStage;
         var sunVisWithCouplings = false;   // the CPU couplings' loop made them, patch by patch
         var sunVisMetal = sunVisStage is not null || transportCpuSunVis ? null : WaitForFrameTracer();
@@ -833,6 +853,7 @@ internal sealed partial class SponzaLoop
                 SunletPos = sunletPos.ToArray(), SunletNrm = sunletNrm.ToArray(), SunletAlbedo = sunletAlbedo.ToArray(), Sky = sky,
             });
         if (transportGpu && sunVisStage is null) SaveSunVis(stageKeys.SunVis, sunVis);
+        Mark("cooked");
         var cookSeconds = clock.Elapsed.TotalSeconds;
 
         // R2 + R3 sky bins on Metal, in blocks of CouplingBlock patches: the patches' rays (as the CPU path draws them)
@@ -1419,6 +1440,7 @@ internal sealed partial class SponzaLoop
         }
         long nonzero = couplings.Sum(c => (long)c.Length);
         long sunletNonzero = sunletCouplings.Sum(c => (long)(c?.Length ?? 0));
+        Mark("diag-done");
         var sunlets = sunletPos.Count;
         var bytes = patches * (12L + 12 + 8) + nonzero * 8 + sky.LongLength * 4 + sunVis.LongLength * 8 + sunlets * 36L + sunletNonzero * 8;
 
@@ -1451,6 +1473,7 @@ internal sealed partial class SponzaLoop
         }
         var directSun = new Vector3[patches];
         var skyIn = new Vector3[patches];
+        Mark("skydirs");
         for (var i = 0; i < patches; i++)
         {
             directSun[i] = sunIrr * MathF.Max(Vector3.Dot(nrm[i], toSun), 0f) * SunVisibility(i, toSun);
@@ -1462,7 +1485,11 @@ internal sealed partial class SponzaLoop
         // sends every patch that saw it: fixed for this sun, so added outside the bounce iteration.
         var firstBounce = new Vector3[patches];
         var sunletOut = new Vector3[sunlets];
-        if (useSunlets)
+        // --live-texels: the sun's first bounce is the live patch light's, on the GPU (texel_live_direct.comp); this
+        // CPU solve is only the boot's comparison then, and the sunlets' 9.5 M CPU sun rays were ~3 s of the boot
+        // (31 thread-seconds, 2026-10-16) -- left out, the comparison is of the sky's light and its bounces.
+        Mark("direct");
+        if (useSunlets && !liveTexels)
         {
             Parallel.For(0, sunlets, s =>
             {
@@ -1477,6 +1504,7 @@ internal sealed partial class SponzaLoop
                 firstBounce[i] = h * MathF.PI;
             });
         }
+        Mark("sunlets");
         var incident = (Vector3[])skyIn.Clone();       // indirect irradiance arriving (no direct sun)
         var outgoing = new Vector3[patches];
         const int iterations = 48;
@@ -1491,6 +1519,7 @@ internal sealed partial class SponzaLoop
                 incident[i] = skyIn[i] + firstBounce[i] + h * MathF.PI;
             });
         }
+        Mark("bounced");
         var solveSeconds = clock.Elapsed.TotalSeconds - cookSeconds;
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] transport spike: {patches:N0} patches at {transportSpacing:0.###} m, {nonzero:N0} couplings ({nonzero / (double)Math.Max(1, patches):0.0} a patch), "
@@ -1842,6 +1871,7 @@ internal sealed partial class SponzaLoop
         // the texel is than the patches around it.
         var openness = new float[patches];
         var opennessFree = new int[patches];
+        Mark("closures");
         if (patchStage is not null) openness = patchStage.Openness;
         else if (transportGpu && ContactTraceAll(scene, patches * 256L, r =>
                  {
@@ -1859,9 +1889,13 @@ internal sealed partial class SponzaLoop
                     if (!scene.Any(new Ray(pos[i] + nrm[i] * 0.01f, CosineHemisphereCpu(nrm[i], r)), 0f, TexelOpenReach, (uint)r.Next())) free++;
                 openness[i] = free / (float)tests;
             });
+        Mark("openness");
         if (transportGpu && patchStage is null)
             SavePatches(stageKeys.Patches, new PatchStage { Pos = pos.ToArray(), Nrm = nrm.ToArray(), Albedo = albedo.ToArray(), Openness = openness, Placement = placement.ToArray() });
-        var guides = BuildGuides(outgoing, sunletOut);
+        // --live-texels: the guides are the live light's, on the GPU (texel_live_guides.comp); the CPU's (~6 s of the boot,
+        // 2026-10-16) would be read by nothing -- uniform ones stand in for the binding.
+        Mark("guides");
+        var guides = liveTexels ? UniformGuides(patches) : BuildGuides(outgoing, sunletOut);
         OnMain(() =>
         {
             UploadCookedPatches(pos, nrm, incident, openness, transportSpacing, placement);
@@ -1870,8 +1904,10 @@ internal sealed partial class SponzaLoop
         // --lightmap: the lightmap atlas's texels are the finest level of the surfaces in the atlas (SponzaLoop.Lightmap.cs),
         // the hashed cells their coarser levels and every level of everything else (the foliage the cook leaves out). Null
         // when the atlas asks for more than the budget: the hashed texels then serve every surface at every level.
+        Mark("uploaded");
         if (lightmapBuriedWhy || transportMissWhy) BuildDiagViews(scene, pos, nrm, stageKeys.Patches);
         if (missSamples is not null) MissWhy(missSamples);
+        Mark("diag");
         if (eitherSamples is not null) EitherWhy(eitherSamples);
         // Why a hit read a patch facing another way: the best-turned patch within OwnFallbackReach (none at all; past
         // transportFacingCos; within it, then all blocked), the nearest within transportFacingCos and how far, whether
@@ -1961,7 +1997,9 @@ internal sealed partial class SponzaLoop
             foreach (var (name, c) in blockers.OrderByDescending(x => x.Value).Take(12))
                 Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {c,7:N0}  {name}"));
         }
+        Mark("diag-why");
         var lightmapBake = lightmapEnabled && transportTexels && lightmapSources.Count > 0 ? BakeLightmapTexels(scene, stageKeys.Texels) : null;
+        Mark("lightmap");
         TexelBake? texelBake;
         if (texelStage is { } cachedTexels)
         {
@@ -2000,11 +2038,13 @@ internal sealed partial class SponzaLoop
         }
         // transportRelight (above) closes over this method's locals, and a closure keeps every local it shares a scope
         // with: drop the big ones it never reads (the stages as read, the texels and the atlas's records, both uploaded).
+        Mark("texels");
         patchStage = null;
         couplingStage = null;
         sunVisStage = null;
         texelStage = null;
         ReleaseCookMemory();
+        Mark("released");
         texelBake = null;
         lightmapBake = null;
     }

@@ -97,6 +97,51 @@ internal sealed partial class SponzaLoop
 
     private long liveSunRecordedFrame = -1;
 
+    // The sun points' bits (sunNodeFoliagePoints into sunNodeFoliageBits) for the cook's sun, the same way, after the
+    // texels': live mode shoots none through the host (ShootSunBits). -1: none asked.
+    private int livePointNext, livePointCount = -1;
+    private readonly System.Diagnostics.Stopwatch livePointClock = new();
+    private bool LivePointsDone => livePointCount < 0 || livePointNext >= livePointCount;
+
+    private void BeginLivePointBits()
+    {
+        livePointCount = sunNodePoints.Length / 2;
+        livePointNext = 0;
+        livePointClock.Restart();
+    }
+
+    // One chunk a frame, sharing the texels' (RecordLiveSunBits) frame: their bits first.
+    private void RecordLivePointBits()
+    {
+        if (LivePointsDone || !liveSunDone || liveSunColumn < 0 || liveSunRecordedFrame == framesRendered) return;
+        liveSunRecordedFrame = framesRendered;
+        var n = Math.Min(LiveSunChunk, livePointCount - livePointNext);
+        var reach = rayReach;
+        DispatchCommand Pass(int mode) => new(liveSunPipeline, (n + 63) / 64, 1, 1,
+            new ShaderUniform[]
+            {
+                new("uChunk", new Vector4Uniform(new Vector4(n, livePointNext, mode, liveSunWords))),
+                new("uToSun", new Vector4Uniform(new Vector4(liveSunToward, liveSunColumn))),
+                new("uRay", new Vector4Uniform(new Vector4(sunNodeLift, reach, 1f, 0f))),
+            },
+            Array.Empty<ShaderTextureBinding>(),
+            Buffers: new[]
+            {
+                new ShaderBufferBinding("Texels", sunNodeFoliagePoints),
+                new ShaderBufferBinding("LiveIds", splitLiveBuffer),
+                new ShaderBufferBinding("LiveSunOrigins", liveSunOrigins),
+                new ShaderBufferBinding("LiveSunOccluded", liveSunOccluded),
+                new ShaderBufferBinding("SunNodeBits", sunNodeFoliageBits),
+            });
+        graph.Dispatch(liveSunAPass, Pass(0));
+        RecordShadowBatch(liveSunBatch, liveSunOrigins, liveSunOccluded, n, liveSunToward, 7u);
+        graph.Dispatch(liveSunBPass, Pass(1));
+        livePointNext += n;
+        if (livePointNext < livePointCount) return;
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[VulkanSponza] live texels: sun bits for {livePointCount:N0} sun points shot in the frame in {livePointClock.Elapsed.TotalSeconds:0.0} s."));
+    }
+
     // Called by the live solve and by the cook's setup alike: one chunk a frame (its Metal pass takes one piece).
     private void RecordLiveSunBits()
     {
@@ -161,6 +206,7 @@ internal sealed partial class SponzaLoop
             splitCooking = false;
             sunNodeStage = SunNodeStage.Off;
         }
+        liveLightEpoch++;
         StartSplitCook(new List<(Vector3? ToSun, string Path)> { (null, ""), (toSun, "") });
         splitCookPaths = new string?[] { null, null };
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
@@ -236,7 +282,6 @@ internal sealed partial class SponzaLoop
     // points' bits (off the frame thread) and the texels' (in the frame, by the live solve), the trace order with what is
     // on screen first. The setup took ~20 s a turn (2026-10-16).
     private bool liveCookWarm, liveRetargeting;
-    private Task<uint[]>? liveRetargetBits;
 
     private void LiveRetarget(Vector3 toSun)
     {
@@ -247,6 +292,7 @@ internal sealed partial class SponzaLoop
         sunNodePass = 0;
         sunNodeReadback = false;
         liveReadbacks.Clear();   // the old sun's slices: dropped, not landed
+        liveLightEpoch++;        // every texel's detail is for the old sun now
         farRelit = false;        // the far record relit for the new sun before the sweep (FarRelightNow)
         patchDirectDone = false;
         sunNodeDirsAsked = new[] { Vector3.UnitY, toSun };
@@ -257,11 +303,7 @@ internal sealed partial class SponzaLoop
         sunNodeBitDirections = directions;
         if (sunNodeResults.Length != 2) sunNodeResults = new[] { new uint[texelCount * 2], new uint[texelCount * 2] };
         else foreach (var r in sunNodeResults) Array.Clear(r);
-        var points = sunNodePoints;
-        var tracer = frameTracer!;
-        var reach = rayReach;
-        var lift = sunNodeLift;
-        liveRetargetBits = Task.Run(() => ShootSunBits(tracer, points, directions, 1, reach, lift, out _));
+        BeginLivePointBits();
         splitCooking = true;
         BeginSplitCookLanding();
         liveRetargeting = true;
@@ -274,19 +316,13 @@ internal sealed partial class SponzaLoop
     private void FinishLiveRetarget()
     {
         var toSun = sunNodeDirsAsked![1];
-        if (!liveSunDone || liveSunToward != toSun || !LivePatchLightRested || liveRetargetBits is not { IsCompleted: true } bitsTask || SplitVisiblePending) return;
-        var bits = bitsTask.Result;
-        liveRetargetBits = null;
-        RetireGpuBuffer(sunNodeFoliageBits);
-        sunNodePointBits = bits;
-        sunNodeFoliageBits = Own(device.CreateGpuBuffer(Math.Max(16, bits.Length * 4), MemoryMarshal.AsBytes(bits.AsSpan()), "sponza.sun-nodes.sun-point-bits"));
+        RecordLivePointBits();
+        if (!liveSunDone || liveSunToward != toSun || !LivePatchLightRested || !LivePointsDone || SplitVisiblePending) return;
         var live = texelLiveIds!;
         var oldTrace = sunNodeTraceBuffer;
-        sunNodeTraceIds = SplitTraceOrder(live);
-        if (farField && sunNodeStride == 1)
-            sunNodeTraceIds = FarSpatialOrder(sunNodeTraceIds, ReferenceEquals(sunNodeTraceIds, live) ? 0 : splitVisibleCount);
+        sunNodeTraceIds = liveVisibleIds is { Length: > 0 } seenIds ? LiveViewIds(seenIds) : Array.Empty<uint>();
         sunNodeTraceBuffer = ReferenceEquals(sunNodeTraceIds, live) ? sunNodeLive
-            : Own(device.CreateGpuBuffer(sunNodeTraceIds.Length * 4, MemoryMarshal.AsBytes(sunNodeTraceIds.AsSpan()), "sponza.sun-nodes.traced"));
+            : Own(device.CreateGpuBuffer(Math.Max(16, sunNodeTraceIds.Length * 4), MemoryMarshal.AsBytes(sunNodeTraceIds.AsSpan()), "sponza.sun-nodes.traced"));
         if (!oldTrace.Equals(sunNodeLive) && !oldTrace.Equals(default(GpuBufferHandle))) RetireGpuBuffer(oldTrace);
         RetireGpuBuffer(sunNodeStats);
         sunNodeStats = Own(device.CreateGpuBuffer(48, new byte[48], "sponza.sun-nodes.stats"));
@@ -336,6 +372,64 @@ internal sealed partial class SponzaLoop
             }));
     }
 
+    // --live-texels gathers what the camera sees, not the scene: the texels on screen whose detail is not for the lights
+    // as they are; the rest keep the coarse light from the patches (LiveProvisionalNow) until they come into view. A
+    // scene-wide sweep was 16 M texels and ~6 min at every sun change (2026-10-16). liveTexelEpoch: the light epoch each
+    // texel was gathered at; liveLightEpoch moves on with every light change.
+    private uint[]? liveVisibleIds;
+    private uint[]? liveTexelEpoch;
+    private uint liveLightEpoch = 1;
+    private const int LiveViewEvery = 20, LiveViewMinTexels = 256;
+    private long liveViewAskedFrame = -1;
+
+    // The view's texels still to gather, in place order (neighbours together: the far field pools them).
+    private uint[] LiveViewIds(uint[] seen)
+    {
+        liveTexelEpoch ??= new uint[texelCount];
+        var epochs = liveTexelEpoch;
+        var stale = seen.Where(id => epochs[id] != liveLightEpoch).ToArray();
+        return farField && stale.Length > 0 ? FarSpatialOrder(stale, stale.Length) : stale;
+    }
+
+    // Each few frames, the cook idle: the view asked for again (texel_visible.comp, a frame later read); what came into
+    // view since, gathered.
+    private void LiveViewCheck()
+    {
+        if (!liveTexels || !liveCookWarm || liveRetargeting || splitCooking || sunNodeStage != SunNodeStage.Off || liveRestartPending is not null) return;
+        if (splitVisibleAsked) return;   // asked: read next frame
+        if (liveViewAskedFrame >= 0 && liveVisibleIds is { } seen)
+        {
+            liveViewAskedFrame = -1;
+            var stale = LiveViewIds(seen);
+            if (stale.Length >= LiveViewMinTexels) LiveGather(stale);
+            return;
+        }
+        if (framesRendered % LiveViewEvery != 0) return;
+        splitVisibleAsked = true;
+        splitVisibleRecorded = false;
+        liveViewAskedFrame = framesRendered;
+    }
+
+    // A gather of these texels for the lights as they are: the cook's setup and its sun as it is, no restart.
+    private void LiveGather(uint[] ids)
+    {
+        ResetSunNodeRefine();
+        sunNodeRefineRays = 0;
+        sunNodeFirst = 0;
+        sunNodePass = 0;
+        sunNodeReadback = false;
+        liveReadbacks.Clear();
+        var oldTrace = sunNodeTraceBuffer;
+        sunNodeTraceIds = ids;
+        sunNodeTraceBuffer = Own(device.CreateGpuBuffer(ids.Length * 4, MemoryMarshal.AsBytes(ids.AsSpan()), "sponza.sun-nodes.traced"));
+        if (!oldTrace.Equals(sunNodeLive) && !oldTrace.Equals(default(GpuBufferHandle))) RetireGpuBuffer(oldTrace);
+        splitCooking = true;
+        sunNodeClock.Restart();
+        sunNodeStage = SunNodeStage.Tracing;
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[VulkanSponza] live texels: {ids.Length:N0} texels came into view -- gathering them."));
+    }
+
     // Each frame, beside the texels' work.
     private long liveRecordedFrame = -1;
 
@@ -346,6 +440,7 @@ internal sealed partial class SponzaLoop
         if (liveRecordedFrame == framesRendered) return;
         liveRecordedFrame = framesRendered;
         if (liveProvisionalPending) LiveProvisionalNow();
+        LiveViewCheck();
         if (liveRestartPending is { } pending && sunNodeStage is not (SunNodeStage.Relighting or SunNodeStage.Prep or SunNodeStage.PatchPick or SunNodeStage.Discover or SunNodeStage.Merge))
             LiveRestart(pending);
         if (!EnsureLiveInputs(d)) return;

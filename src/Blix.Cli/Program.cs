@@ -376,14 +376,17 @@ public static class Program
     /// name deliberately: two DIFFERENT assemblies in one project claiming one name is a
     /// real ambiguity and must still be reported.
     /// <para>
-    /// The copy with a working apphost wins, then the shallower path, so the answer does
-    /// not depend on directory enumeration order.
+    /// The copy built in BLIX_CONFIG (Debug when unset) wins, then one with a working apphost,
+    /// then the shallower path, so the answer does not depend on directory enumeration order.
+    /// (By path alone bin/Debug always beat bin/Release, and BLIX_CONFIG=Release ran Debug.)
     /// </para>
     /// </remarks>
     private static List<App> Deduplicate(List<App> apps) => apps
         .GroupBy(a => (a.Project, a.Name, Assembly: Path.GetFileName(a.Assembly)))
         .Select(g => g
-            .OrderByDescending(a => a.AppHost is not null && File.Exists(a.AppHost))
+            .OrderByDescending(a => string.Equals(Configuration(a.Assembly),
+                Environment.GetEnvironmentVariable("BLIX_CONFIG") is { Length: > 0 } c ? c : "Debug", StringComparison.OrdinalIgnoreCase))
+            .ThenByDescending(a => a.AppHost is not null && File.Exists(a.AppHost))
             .ThenBy(a => a.Assembly.Length)
             .First())
         .ToList();

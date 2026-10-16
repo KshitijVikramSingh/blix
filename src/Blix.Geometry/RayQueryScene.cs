@@ -64,7 +64,7 @@ public sealed class RayMesh
 /// changes only its matrix (no refit, nothing rebuilt) for as long as it stays within that box.
 /// </para>
 /// </remarks>
-public sealed class RayQueryScene
+public sealed partial class RayQueryScene
 {
     /// <param name="Reach">For a dynamic placement that will <see cref="Move"/>: the world box it may occupy, which its
     /// top-level box is. Null: where it stands now.</param>

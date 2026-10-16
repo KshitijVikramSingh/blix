@@ -92,12 +92,53 @@ internal sealed partial class SponzaLoop
     {
         DebugProgress.Begin("ray scene: build and pack", 0, "load");
         var regionTriangles = rayRegionTriangles;
+        var storeDir = transportCacheDir;
         rayBuildTask = Task.Run(() =>
         {
             var clock = Stopwatch.StartNew();
-            var scene = RayQueryScene.Build(instances, regionTriangles);
+            // The hierarchies are the geometry's: kept beside the GI bundle's stages (or in the user's cache), read
+            // back for the same placements instead of built (29.5 s on Sponza, 2026-10-16).
+            var key = RayQueryScene.Key(instances, regionTriangles);
+            var keyMs = clock.Elapsed.TotalMilliseconds;
+            var path = Path.Combine(storeDir, key + ".ray-scene");
+            RayQueryScene? scene = null;
+            if (File.Exists(path))
+            {
+                try
+                {
+                    using var stream = new BufferedStream(File.OpenRead(path), 1 << 22);
+                    scene = RayQueryScene.Read(stream, instances, key);
+                    if (scene is not null)
+                        Console.WriteLine(string.Create(Inv,
+                            $"[VulkanSponza] ray scene: read from {path} ({new FileInfo(path).Length / 1048576.0:0} MB, {clock.Elapsed.TotalSeconds:0.0} s; the key {keyMs:0} ms of it)."));
+                }
+                catch (Exception e) when (e is IOException or EndOfStreamException or InvalidDataException)
+                {
+                    Console.WriteLine($"[VulkanSponza] ray scene: {path} could not be read ({e.Message}); building it.");
+                }
+            }
+            if (scene is null)
+            {
+                scene = RayQueryScene.Build(instances, regionTriangles);
+                var built = scene;
+                // Written beside the boot, once: the next boot reads it.
+                _ = Task.Run(() =>
+                {
+                    try
+                    {
+                        Directory.CreateDirectory(storeDir);
+                        var temp = path + ".partial";
+                        using (var stream = new BufferedStream(File.Create(temp), 1 << 22)) built.Write(stream, key);
+                        File.Move(temp, path, overwrite: true);
+                        Console.WriteLine(string.Create(Inv, $"[VulkanSponza] ray scene: kept at {path} ({new FileInfo(path).Length / 1048576.0:0} MB)."));
+                    }
+                    catch (IOException e) { Console.WriteLine($"[VulkanSponza] ray scene: not kept ({e.Message})."); }
+                });
+            }
             var buildMs = clock.Elapsed.TotalMilliseconds;
             var data = instances.Count > 0 ? RayQueryGpuData.Pack(scene) : null;
+            if (data is not null && Environment.GetEnvironmentVariable("BLIX_RAYSCENE_HASH") == "1")
+                Console.WriteLine("[VulkanSponza] ray scene: packed blocks " + string.Join(" ", data.Blocks().Select(b => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(b))[..12])));
             return (scene, data, buildMs, meshes.Length, instances.Count);
         });
     }
