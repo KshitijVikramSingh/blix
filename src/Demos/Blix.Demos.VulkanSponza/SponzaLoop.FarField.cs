@@ -106,9 +106,10 @@ internal sealed partial class SponzaLoop
     // UploadSunNodes: on for a guided split cook of a few columns (the guide patch is the far field's when a texel saw none).
     private void BeginFarField(int suns)
     {
-        // --live-texels: off -- its record is a pass over every texel before the sweep (minutes), per light.
+        // --live-texels: only with the complete far lists (the GI bundle's): relit for each light in milliseconds, no record
+        // pass. Without them the record is a pass over every texel before the sweep (minutes), per light -- off.
         farOn = farField && splitCooking && sunNodeGuided && !sunNodeExact && sunNodeStride == 1 && suns <= 3 && cookedPacked is not null
-            && frameTracer is not null && !liveTexels;
+            && frameTracer is not null && (!liveTexels || (farTransportMode && transportBuildFarLists is not null));
         farRecording = farOn;
         farRecordPass = 0;
         farRecordRound = 0;

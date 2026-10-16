@@ -247,6 +247,8 @@ internal sealed partial class SponzaLoop
         sunNodePass = 0;
         sunNodeReadback = false;
         liveReadbacks.Clear();   // the old sun's slices: dropped, not landed
+        farRelit = false;        // the far record relit for the new sun before the sweep (FarRelightNow)
+        patchDirectDone = false;
         sunNodeDirsAsked = new[] { Vector3.UnitY, toSun };
         sunNodeDirs = new[] { new Vector4(Vector3.UnitY, 2f), new Vector4(toSun, 1f) };
         RetireGpuBuffer(sunNodeSunsBuffer);
@@ -431,7 +433,13 @@ internal sealed partial class SponzaLoop
         transportRelightMany = null;
         transportBuildGuides = null;
         transportBuildLights = null;
-        transportBuildFarLists = null;
+        // The far lists from the GI bundle alone (no CPU scope behind them): the far field relights from them per light.
+        var couplingsKey = transportCouplingsKey;
+        transportBuildFarLists = couplingsKey is not null && File.Exists(TransportStagePath(couplingsKey, "far-lists"))
+            ? reach => LoadStage(couplingsKey, "far-lists", r => r.ReadSingle() != reach ? null
+                    : new FarLists(ReadArray<uint>(r), ReadArray<uint>(r), ReadArray<float>(r))) is { } l
+                ? (l.Start, l.Ids, l.Weights) : throw new InvalidOperationException("the GI bundle's far lists are for another reach")
+            : null;
         if (transportSolve is { } d)
             transportSolve = d with
             {

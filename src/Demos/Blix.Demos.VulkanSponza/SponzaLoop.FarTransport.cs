@@ -185,6 +185,8 @@ internal sealed partial class SponzaLoop
         farListPatches = patches;
         long sky = 0;
         foreach (var id in ids) if ((id & 0x80000000u) != 0) sky++;
+        // --live-texels: not kept on the CPU (445 MB on Sponza) -- read from the GI bundle again for the next light.
+        if (liveTexels) farListsCpu = null;
         device.WaitIdle();
         WriteGpuMemory("with the far lists up");
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
