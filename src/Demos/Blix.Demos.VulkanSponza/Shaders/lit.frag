@@ -543,6 +543,11 @@ void main() {
     if (diffTrans > 0.0) {
         sunTransmission = blix_diffuseTransmission(
             N, L, frame.uSunIrradiance * sunShadow, dtColor, diffTrans);
+        // A curtain whose sun side is behind another sunlit curtain: that one's glow on its far side passes through it
+        // as the sun would (its far-side ray crossed the other: rtSheetGlow), by the smooth normal as the diffuse
+        // lobe takes it.
+        sunTransmission += blix_diffuseTransmission(
+            Nsmooth, L, frame.uSunIrradiance * sheetGlow, dtColor, diffTrans);
     }
 
     // <b>The layering order, which these two paths used to disagree about.</b> glTF puts the
