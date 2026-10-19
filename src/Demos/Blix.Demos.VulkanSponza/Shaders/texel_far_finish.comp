@@ -26,7 +26,8 @@ layout(set = 0, binding = 0) uniform FarFinish {
     vec4 uCookedGrid;
     vec4 uCookedDims;
     vec4 uFar;
-    vec4 uDebug;    // x 1: land the far light alone; 2: the blended patches as colours (--far-debug); y the slice's serial
+    vec4 uDebug;    // x 1: land the far light alone; 2: the blended patches as colours (--far-debug); y the slice's serial; z the
+                    // sun's column + 1 when the sky's part is kept (the moment the sun's alone: texel_nodes_shade.glsl)
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
@@ -148,7 +149,7 @@ void main() {
     float nearMean = 0.0;
     for (int k = 0; k < 3; ++k) {
         vec3 near = k < cols ? nodeAccum[t * uint(columns) + uint(k)].rgb / passes : vec3(0.0);
-        nearMean += dot(near, lumW);
+        if (u.uDebug.z < 0.5 || k == int(u.uDebug.z) - 1) nearMean += dot(near, lumW);
         // Slot 0's w: the far light's error from its patches' records -- not the texel's to refine (more of its rays do
         // not move it), but what makes two texels reading different patches differ: the pooling's light test needs it.
         evidence[t * uint(EVIDENCE) + uint(k)] = vec4(near, k == 0 ? recordSpread * recordSpread : 0.0);

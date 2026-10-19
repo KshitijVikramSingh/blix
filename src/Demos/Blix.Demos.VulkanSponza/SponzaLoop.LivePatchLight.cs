@@ -25,7 +25,8 @@ internal sealed partial class SponzaLoop
     // A sun that turned while the cook was in its setup (tasks off the frame thread): restarted once the setup is done.
     private Vector3? liveRestartPending;
     private const int LiveBouncesPerFrame = 1;
-    private const int LiveBouncesToRest = 48;
+    // --live-bounces N (48): the bounces the live solve takes to rest.
+    private int LiveBouncesToRest = 48;
     private const int LiveCoarseBounces = 16;
     // The components, as the split light's columns: the sky alone, then the sun alone.
     private const int LiveComponents = 2, LiveSky = 0, LiveSun = 1;
@@ -182,6 +183,15 @@ internal sealed partial class SponzaLoop
     private void LiveRestart(Vector3 toSun)
     {
         var settingUp = sunNodeStage is SunNodeStage.Relighting or SunNodeStage.Prep or SunNodeStage.PatchPick or SunNodeStage.Discover or SunNodeStage.Merge;
+        // A re-aim not yet tracing, the sun moved again (a slider dragged): re-aimed at the newest now. Parked as pending,
+        // it waited for the setup to finish, and the setup for the old sun's bits, which no one shot any more: the sun
+        // could not be changed (2026-10-19).
+        if (settingUp && liveRetargeting)
+        {
+            liveRestartPending = null;
+            LiveRetarget(toSun);
+            return;
+        }
         if (settingUp)
         {
             liveRestartPending = toSun;
@@ -221,14 +231,21 @@ internal sealed partial class SponzaLoop
     // Rested before the split light's buffers were up (the first boot): written as soon as they are.
     private bool liveProvisionalPending;
 
+    private int provisionalCount;
+
     private void LiveProvisionalNow()
     {
         if (!liveTexels) return;
         liveProvisionalPending = !texelsUploaded || splitLiveBuffer.Equals(default(GpuBufferHandle)) || texelLiveIds is null;
         if (liveProvisionalPending) return;
         EnsureLiveTexelPatch();
-        ProvisionalPart(LiveSky, sunPart: false, LiveComponents, splitLiveBuffer, liveTexelPatch, livePatchLightBuffer);
+        // The sky's part once gathered is kept (a sun change, SponzaLoop.SliceResolve.cs): its provisional would put the
+        // patches' coarse sky over it (crevices' sky 0.8586 -> 0.865 after a sun change, 2026-10-19).
+        if (!liveSkyGathered || regatherSky) ProvisionalPart(LiveSky, sunPart: false, LiveComponents, splitLiveBuffer, liveTexelPatch, livePatchLightBuffer);
         ProvisionalPart(LiveSun, sunPart: true, LiveComponents, splitLiveBuffer, liveTexelPatch, livePatchLightBuffer);
+        provisionalCount++;
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[VulkanSponza] live texels: provisional parts written (#{provisionalCount}, the sky's {(!liveSkyGathered || regatherSky ? "too" : "kept")}) at frame {framesRendered}, stage {sunNodeStage}."));
     }
 
     // The patches' first bounce of the sun from the texels' sun bits (texel_live_direct.comp).
@@ -297,6 +314,8 @@ internal sealed partial class SponzaLoop
         patchDirectDone = false;
         sunNodeDirsAsked = new[] { Vector3.UnitY, toSun };
         sunNodeDirs = new[] { new Vector4(Vector3.UnitY, 2f), new Vector4(toSun, 1f) };
+        // The sky's part is the sky's and the geometry's, not the sun's: kept, once gathered (--regather-sky: both again).
+        skyKept = liveSkyGathered && !regatherSky;
         RetireGpuBuffer(sunNodeSunsBuffer);
         sunNodeSunsBuffer = Own(device.CreateGpuBuffer(sunNodeDirs.Length * 16, MemoryMarshal.AsBytes(sunNodeDirs.AsSpan()), "sponza.sun-nodes.suns"));
         var directions = new[] { new Vector4(Vector3.UnitY, 0f), new Vector4(toSun, 0f) };
@@ -313,11 +332,23 @@ internal sealed partial class SponzaLoop
             $"[VulkanSponza] live texels: the sun turned to ({toSun.X:0.000},{toSun.Y:0.000},{toSun.Z:0.000}) -- the cook re-aimed (its setup kept)."));
     }
 
+    private readonly System.Diagnostics.Stopwatch retargetWaitClock = System.Diagnostics.Stopwatch.StartNew();
+
     private void FinishLiveRetarget()
     {
         var toSun = sunNodeDirsAsked![1];
         RecordLivePointBits();
-        if (!liveSunDone || liveSunToward != toSun || !LivePatchLightRested || !LivePointsDone || SplitVisiblePending) return;
+        if (!liveSunDone || liveSunToward != toSun || !LivePatchLightRested || !LivePointsDone || SplitVisiblePending)
+        {
+            // What it waits on, every few seconds: a re-aim that never traces is a sun the user cannot change.
+            if (retargetWaitClock.Elapsed.TotalSeconds > 5)
+            {
+                retargetWaitClock.Restart();
+                Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                    $"[VulkanSponza] live texels: the re-aim waits -- sun bits done {liveSunDone}, toward the new sun {liveSunToward == toSun}, patch light rested {LivePatchLightRested}, points done {LivePointsDone}, view pending {SplitVisiblePending}."));
+            }
+            return;
+        }
         var live = texelLiveIds!;
         var oldTrace = sunNodeTraceBuffer;
         sunNodeTraceIds = LiveCoarseOrder();
@@ -332,6 +363,9 @@ internal sealed partial class SponzaLoop
         sunNodeClock.Restart();
         ResetSunNodeCounters();
         liveRetargeting = false;
+        // The guides and light lists are recorded in the frame the live patch light rests (RecordLiveGuides): done before the
+        // gather (outside the frame) reads them.
+        device.WaitIdle();
         sunNodeStage = SunNodeStage.Tracing;
     }
 
@@ -414,6 +448,9 @@ internal sealed partial class SponzaLoop
 
     private void RecordLivePatchLight()
     {
+        if (liveRetargeting && retargetWaitClock.Elapsed.TotalSeconds > 4.5)
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza] live patch light while re-aiming: on {livePatchLight}, solve {transportSolve is not null}, hardware {FrameRaysOnHardware}, tracer {frameTracer is not null}, recorded this frame {liveRecordedFrame == framesRendered}, inputs {(transportSolve is { } dd && EnsureLiveInputs(dd))}, texels up {texelsUploaded}, injected {liveInjected}, toward {liveToSun}."));
         if (!livePatchLight || transportSolve is not { } d || !FrameRaysOnHardware || frameTracer is null) return;
         // Recorded from the texels' frame or the cook screen's, once a frame either way.
         if (liveRecordedFrame == framesRendered) return;

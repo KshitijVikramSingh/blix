@@ -21,6 +21,12 @@ internal sealed partial class SponzaLoop
     private readonly GpuBufferHandle[] resolveIds = new GpuBufferHandle[2], resolvePlaces = new GpuBufferHandle[2];
     private int resolveCapacity, resolveNext;
     private bool gpuResolving;
+    // A sun change keeps the sky's part (gathered whole at boot): the gather writes and judges the sun's alone, and
+    // neither the instant layer nor the fine copy touches the sky's (2026-10-19). --regather-sky: both parts again.
+    private bool liveSkyGathered, skyKept, regatherSky;
+    // The fine round's refine mask (a bit a texel): its contact-flagged texels alone refine.
+    private GpuBufferHandle refineMaskBuffer;
+    private bool refineMasked;
 
     private bool GpuResolveOn => liveTexels && !cpuResolve && SunNodeRefines && sunNodeSuns is { Length: > 0 };
 
@@ -69,6 +75,7 @@ internal sealed partial class SponzaLoop
                 new("uSettle", new Vector4Uniform(new Vector4(texelMaxRays, texelNoise, TexelNoiseFloor, bar))),
                 new("uSun", new Vector4Uniform(new Vector4(inverse, sunNodeRays / 32))),
                 new("uMode", new Vector4Uniform(new Vector4(mode, suns, SunColumn(), detail ? 1f : 0f))),
+                new("uKeep", new Vector4Uniform(new Vector4(skyKept ? 1f : 0f, refineMasked && fineGathering ? 1f : 0f, 0f, 0f))),
             },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
@@ -87,6 +94,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("NextPlaces", resolvePlaces[resolveNext]),
                 new ShaderBufferBinding("Histogram", resolveHistogram),
                 new ShaderBufferBinding("NextCount", resolveCount),
+                new ShaderBufferBinding("RefineMask", refineMaskBuffer.Equals(default(GpuBufferHandle)) ? resolveCount : refineMaskBuffer),
             }.Where(b => declared.Contains(b.Name)).ToArray()) }, "slice-resolve");
     }
 

@@ -35,7 +35,8 @@ layout(local_size_x = 64) in;
 layout(set = 0, binding = 0) uniform FarPool {
     vec4 uPool;       // x the slice's first entry in NodeIds, y its texels, z the passes, w the columns
     vec4 uTexelGrid;  // xyz origin, w the finest cell
-    vec4 uSerial;     // x this slice's serial (FarSliceMap), y the cook hash's slots, z the debug mode (3: pool sizes)
+    vec4 uSerial;     // x this slice's serial (FarSliceMap), y the cook hash's slots, z the debug mode (3: pool sizes), w the
+                      // sun's column + 1 when the sky's part is kept: the light judged and the moment the sun's alone
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
@@ -74,7 +75,9 @@ const vec3 lumW = vec3(0.2126, 0.7152, 0.0722);
 
 float composed(uint s, int columns) {
     float l = 0.0;
-    for (int k = 0; k < columns; ++k) l += dot(evidence[s * uint(EVIDENCE) + uint(k)].rgb + evidence[s * uint(EVIDENCE) + 3u + uint(k)].rgb, lumW);
+    for (int k = 0; k < columns; ++k)
+        if (u.uSerial.w < 0.5 || k == int(u.uSerial.w) - 1)
+            l += dot(evidence[s * uint(EVIDENCE) + uint(k)].rgb + evidence[s * uint(EVIDENCE) + 3u + uint(k)].rgb, lumW);
     return l;
 }
 
@@ -228,7 +231,7 @@ void main() {
     float total = 0.0;
     for (int c = 0; c < columns; ++c) {
         vec3 v = near[c] + far[c];
-        total += dot(v, lumW);
+        if (u.uSerial.w < 0.5 || c == int(u.uSerial.w) - 1) total += dot(v, lumW);
         nodeAccum[t * uint(columns) + uint(c)] = vec4(v * passes, nodeAccum[t * uint(columns) + uint(c)].w);
     }
     // The settling reads the mean's variance as (w / passes - mean^2) / passes: the two budgets enter as passes^2 x them.

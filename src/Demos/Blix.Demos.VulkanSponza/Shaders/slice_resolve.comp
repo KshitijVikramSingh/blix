@@ -15,6 +15,7 @@ layout(set = 0, binding = 0) uniform SliceResolve {
     vec4 uSettle;   // x the most rays, y the noise share, z the noise floor, w the dark bar
     vec4 uSun;      // xyz 1 / the sun's irradiance, w the sweep's passes
     vec4 uMode;     // x the mode, y the columns (suns), z which column is the sun's (-1 none), w 1 the detail
+    vec4 uKeep;     // x 1: the sky's part kept (a sun change: written and judged the sun's alone); y 1: refine the masked alone
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer RoundIds { uint roundIds[]; };   // the round's texel ids
@@ -31,6 +32,8 @@ layout(std430, set = 0, binding = 11) buffer Next { uint nextIds[]; };
 layout(std430, set = 0, binding = 12) buffer NextPlaces { uint nextPlaces[]; };
 layout(std430, set = 0, binding = 13) buffer Histogram { uint histogram[]; };          // 128 quarter stops from 2^-24
 layout(std430, set = 0, binding = 14) buffer NextCount { uint nextCount[]; };
+// The texels the round may refine (a bit a texel; uKeep.y on): the fine round's contact-flagged alone.
+layout(std430, set = 0, binding = 15) readonly buffer RefineMask { uint refineMask[]; };
 
 uint packRgb9e5(vec3 c) {
     const float maxValue = 65408.0;
@@ -52,16 +55,31 @@ uint packDetail(vec2 tilt, float sky) {
 
 float lum(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 
+vec3 unpackRgb9e5(uint w) {
+    float scale = exp2(float(int(w >> 27) - 15 - 9));
+    return vec3(float(w & 511u), float((w >> 9) & 511u), float((w >> 18) & 511u)) * scale;
+}
+vec3 unpackSky(uint id) { return unpackRgb9e5(skyPart[id].x); }
+
 // CookSettled: past the most rays, or the composed light's standard error under the noise share of the larger of its
 // light and the bar.
-bool settled(uint place, uint suns, uint passes, float bar, out float mean) {
+bool settled(uint place, uint id, uint suns, uint passes, float bar, out float mean) {
     mean = 0.0;
-    for (uint k = 0u; k < suns; ++k) mean += lum(state[place * suns + k].rgb);
+    bool kept = u.uKeep.x > 0.5;
+    if (kept) mean = lum(state[place * suns + uint(u.uMode.z)].rgb);
+    else for (uint k = 0u; k < suns; ++k) mean += lum(state[place * suns + k].rgb);
     mean /= float(passes);
-    if (float(passes) * 32.0 >= u.uSettle.x) return true;
+    if (float(passes) * 32.0 >= u.uSettle.x) { if (kept) mean += lum(unpackSky(id)); return true; }
     float variance = max(state[place * suns].w / float(passes) - mean * mean, 0.0);
-    return sqrt(variance / float(passes)) <= u.uSettle.y * max(mean, max(u.uSettle.z, bar));
+    // The sky's part kept: the noise the sun's alone, against the texel's whole light (the kept sky's with it) -- the eye's.
+    float light = kept ? mean + lum(unpackSky(id)) : mean;
+    bool done = sqrt(variance / float(passes)) <= u.uSettle.y * max(light, max(u.uSettle.z, bar));
+    // The dark bar's histogram reads the texel's whole light too: the sun's alone put the median, and the bar, far down
+    // and Sponza's sun change refined 4.3 G rays where the boot refined 1.7 (2026-10-19).
+    mean = light;
+    return done;
 }
+
 
 void append(uint id, uint place) {
     uint j = atomicAdd(nextCount[0], 1u);
@@ -77,7 +95,7 @@ void main() {
     if (u.uMode.x > 0.5) {
         // Mode 1: the sweep's unsettled (this list, its places), judged against the bar.
         uint place = roundPlaces[t];
-        if (!settled(place, suns, statePasses[place], u.uSettle.w, mean)) append(roundIds[t], place);
+        if (!settled(place, roundIds[t], suns, statePasses[place], u.uSettle.w, mean)) append(roundIds[t], place);
         return;
     }
     bool refining = u.uSlice.w > 0.5;
@@ -90,6 +108,7 @@ void main() {
         state[place * suns + k] = s;
         vec3 light = s.rgb / float(passes);
         bool sunColumn = int(k) == int(u.uMode.z);
+        if (!sunColumn && u.uKeep.x > 0.5) continue;   // the sky's part kept
         uvec2 word = uvec2(packRgb9e5(sunColumn ? light * u.uSun.xyz : light), 0xFFFFu | 0x10000u);
         if (sunColumn) sunPart[id] = word; else skyPart[id] = word;
         if (!refining && u.uMode.w > 0.5) {
@@ -104,7 +123,10 @@ void main() {
     }
     statePasses[place] = passes;
     // Judged without the bar on the sweep (mode 1 judges its unsettled again once the bar is known), with it on a round.
-    bool done = settled(place, suns, passes, refining ? u.uSettle.w : 0.0, mean);
+    bool done = settled(place, id, suns, passes, refining ? u.uSettle.w : 0.0, mean);
+    // The fine round refines its contact-flagged texels alone (their seams' noise was the excess; the rest settle at the
+    // sweep): uKeep.y.
+    if (u.uKeep.y > 0.5 && (refineMask[id >> 5u] & (1u << (id & 31u))) == 0u) done = true;
     if (!refining && mean > 0.0) atomicAdd(histogram[uint(clamp((log2(mean) + 24.0) * 4.0, 0.0, 127.0))], 1u);
     if (!done) append(id, place);
 }

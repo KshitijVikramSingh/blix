@@ -11,6 +11,7 @@ layout(set = 0, binding = 0) uniform TransferFine {
     vec4 uFine;        // x the fine texels, y the dispatch's first, z the coarse level, w the coarsest
     vec4 uTexelGrid;   // the finest level's grid: xyz the origin, w the spacing
     vec4 uTexelParams; // x the hash's capacity
+    vec4 uKeep;        // x 1: the sky's part kept (a sun change: the copy writes the sun's alone)
     vec4 uFlag;        // x the dark bar (the coarse sweep's: a tenth of its median light); y 1: flag every texel (--fine-all); z the contact ratio under which a texel is flagged
                        // (--fine-contact), w 1: those first (--fine-contact-first)
 } u;
@@ -168,7 +169,7 @@ void main() {
         const float edges[6] = float[6](1.5, 2.0, 3.0, 4.0, 8.0, 16.0);
         for (int e = 0; e < 6; ++e) if (score > edges[e]) atomicAdd(fineFlags[4 + e], 1u);
     }
-    skyPart[id] = uvec2(packRgb9e5(sky * ratio), 0xFFFFu | 0x10000u);
+    if (u.uKeep.x < 0.5) skyPart[id] = uvec2(packRgb9e5(sky * ratio), 0xFFFFu | 0x10000u);
     sunPart[id] = uvec2(packRgb9e5(sun * ratio), 0xFFFFu | 0x10000u);
     // The coarse tilts turned into this texel's frame: in their own (a cell averaging a wall and the ledge under it,
     // turned 45 degrees down, its tilt toward the sunlit floor) they lit the wall's normal-mapped stones in blocks
@@ -177,6 +178,6 @@ void main() {
     // sees of the sky it sees past that. The cells' alone put bright cell outlines on the wall and the lamps where a
     // cell's centroid sank and its rays left through the wall (2026-10-19); its own alone, the gallery's openness, is far
     // above its sky and lit everything too bright.
-    skyDetail[id] = texelDetailPack(skyD.xy, min(skyD.z, texelDetailUnpack(skyDetail[id]).z));
+    if (u.uKeep.x < 0.5) skyDetail[id] = texelDetailPack(skyD.xy, min(skyD.z, texelDetailUnpack(skyDetail[id]).z));
     sunDetail[id] = texelDetailPack(sunD.xy, min(sunD.z, texelDetailUnpack(sunDetail[id]).z));
 }

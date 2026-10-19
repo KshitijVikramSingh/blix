@@ -120,7 +120,7 @@ internal sealed partial class SponzaLoop
                 new ShaderUniform[]
                 {
                     new("uPass", new Vector4Uniform(new Vector4(live.Length, first, sunNodeKinds.Length, mode))),
-                    new("uColumns", new Vector4Uniform(new Vector4(Math.Max(0, Array.IndexOf(sunNodeKinds, 2)), Math.Max(0, liveSunColumn), liveSkyEscapeBuffer.Equals(default(GpuBufferHandle)) ? 0f : 1f, 0f))),
+                    new("uColumns", new Vector4Uniform(new Vector4(Math.Max(0, Array.IndexOf(sunNodeKinds, 2)), Math.Max(0, liveSunColumn), liveSkyEscapeBuffer.Equals(default(GpuBufferHandle)) ? 0f : 1f, skyKept ? 1f : 0f))),
                     new("uInvIrr", new Vector4Uniform(new Vector4(inv, 0f))),
                     new("uFar", new Vector4Uniform(farOn ? FarUniform(0) : Vector4.Zero)),
                     new("uCookedGrid", new Vector4Uniform(cookedGrid)),
@@ -291,6 +291,9 @@ internal sealed partial class SponzaLoop
     // --fine-max-rays N: the fine refine's noisy texels refined up to N (as the coarse round's); the gathered seams at a
     // flat 256 read 0.033-0.051 of excess light against the cooked gather's 0.015 (crevices, 2026-10-19).
     private int fineGatherMaxRays = 1024;
+    // The fine round refines its contact-flagged texels alone (--fine-refine-all: every noisy one, as before): the
+    // seams' excess was theirs, and refining every noisy texel was 2 G of the fine round's 3.3 G rays on Sponza.
+    private bool fineRefineContactOnly = true;
     private bool fineGathering;
     // --fine-all (a measurement): every fine texel flagged, so the fine refine gathers the level whole (no copy).
     private bool fineAll;
@@ -319,10 +322,26 @@ internal sealed partial class SponzaLoop
         while (cut > 0 && above + histogram[cut] < take) above += histogram[cut--];
         var ids = new uint[take];
         int n = 0, atCut = take - above;
+        // The contact-flagged (ranked first: a score of 1000 and over) refine; the rest settle at the sweep.
+        var mask = fineRefineContactOnly ? new uint[(texelCount + 31) / 32] : null;
+        long masked = 0;
         for (var i = 0; i < count && n < take; i++)
         {
-            var b = Bin(BitConverter.UInt32BitsToSingle(words[2 * i + 1]));
-            if (b > cut || (b == cut && atCut-- > 0)) ids[n++] = words[2 * i];
+            var score = BitConverter.UInt32BitsToSingle(words[2 * i + 1]);
+            var b = Bin(score);
+            if (b > cut || (b == cut && atCut-- > 0))
+            {
+                var id = words[2 * i];
+                ids[n++] = id;
+                if (mask is not null && score >= 1000f) { mask[id >> 5] |= 1u << (int)(id & 31); masked++; }
+            }
+        }
+        refineMasked = mask is not null;
+        if (mask is not null)
+        {
+            if (refineMaskBuffer.Equals(default(GpuBufferHandle))) refineMaskBuffer = Own(device.CreateGpuBuffer(mask.Length * 4, name: "sponza.transfer.refine-mask"));
+            device.WriteGpuBuffer(refineMaskBuffer, 0, MemoryMarshal.AsBytes(mask.AsSpan()));
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] fine refine: {masked:N0} contact-flagged texels may refine; the rest settle at the sweep."));
         }
         if (n < take) ids = ids[..n];
         // In place order (the far field's key): picked in the order the flags were appended, a slice's texels lay all over
@@ -390,6 +409,7 @@ internal sealed partial class SponzaLoop
                     new("uTexelGrid", new Vector4Uniform(texelGrid)),
                     new("uTexelParams", new Vector4Uniform(new Vector4(texelCapacity, texelLevels, debugOn ? 1f : 0f, Luminance(EffectiveSunIrradiance)))),
                     new("uFlag", new Vector4Uniform(new Vector4(lastDarkBar, fineAll ? 1f : 0f, fineContact, fineContactFirst ? 1f : 0f))),
+                    new("uKeep", new Vector4Uniform(new Vector4(skyKept ? 1f : 0f, 0f, 0f, 0f))),
                 },
                 Array.Empty<ShaderTextureBinding>(),
                 Buffers: new[]

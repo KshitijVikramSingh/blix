@@ -16,7 +16,8 @@ layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) uniform TexelPatchLight {
     vec4 uPass;        // x the live texels, y the dispatch's first, z the patch light's columns, w the mode
-    vec4 uColumns;     // x the sky's column, y the sun's; z 1: the patches' sky escape is bound (the sky visibility from it)
+    vec4 uColumns;     // x the sky's column, y the sun's; z 1: the patches' sky escape is bound (the sky visibility from it); w 1:
+                       // the sky's part kept (a sun change: its part and detail not written)
     vec4 uInvIrr;      // rgb 1 / the sun's irradiance
     vec4 uFar;         // the far field (texel_far.glsl)
     vec4 uCookedGrid;
@@ -145,7 +146,7 @@ void main() {
     float shortRatio = vs != 0u && shortW > 0.0 && shortMean > 1e-3 ? clamp(float(vs - 1u) / 254.0 / (shortMean / shortW), 0.0, 1.5) : 1.0;
     sky *= shortRatio; sun *= shortRatio;
     float mine = ao(id);
-    skyPart[id] = uvec2(packRgb9e5(sky), 0xFFFFu | 0x10000u);
+    if (u.uColumns.w < 0.5) skyPart[id] = uvec2(packRgb9e5(sky), 0xFFFFu | 0x10000u);
     sunPart[id] = uvec2(packRgb9e5(sun * u.uInvIrr.rgb), 0xFFFFu | 0x10000u);
     float skyShare = 0.0, sunShare = 0.0;
     for (int i = 0; i < FAR_SET; ++i) if (ids[i] >= 0 && ws[i] > 0.0) { skyShare += ws[i]; sunShare += ws[i]; }
@@ -168,6 +169,6 @@ void main() {
         float ratio = mine >= 0.0 && open > 1e-3 ? clamp(mine / open, 0.0, 1.0) : 1.0;
         vis = clamp(patchSky * ratio, 0.0, 1.0);
     }
-    skyDetail[id] = detailPack(skyTilt, vis);
+    if (u.uColumns.w < 0.5) skyDetail[id] = detailPack(skyTilt, vis);
     sunDetail[id] = detailPack(sunTilt, vis);
 }

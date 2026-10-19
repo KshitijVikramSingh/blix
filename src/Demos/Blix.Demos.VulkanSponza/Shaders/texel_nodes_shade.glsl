@@ -30,7 +30,7 @@ layout(set = 0, binding = 0) uniform SunNodesShade {
     vec4 uSunIrradiance;  // rgb; w the visibility a hit among no texel takes (--sun-nodes-unknown-sun; 0 by default)
     vec4 uDetail;         // x the slice's first entry in NodeIds; y 1: write NodeDetail (the cells' sky visibility and
                           // direction, SponzaLoop.SplitDetail.cs); z 1: write NodeCensus (--split-noise-census)
-    vec4 uSky;            // x strength, y mip
+    vec4 uSky;            // x strength, y mip, z the sun's column + 1 when the sky's part is kept (a sun change: the moment the sun's alone)
     vec4 uLookup;         // x a sun bit candidate's plane distance at most (cells), y the distance weight's spread (cells); z the hit cells
                           // answer only past this distance (nearer, the search's blend: a contact's light); w 1: the hit cells answer (hit_cells.comp)
     vec4 uFoliage;        // x the foliage hash's slots (0: no foliage points); y discovering: the list's room (0: off);
@@ -657,6 +657,8 @@ void main() {
     if (lid == 0u) {
         float composed = 0.0;
         for (int k = 0; k < suns; ++k) composed += sColumnLum[k];
+        // The sky's part kept (a sun change, SponzaLoop.SliceResolve.cs): the noise is the sun's alone.
+        if (u.uSky.z > 0.5) composed = sColumnLum[int(u.uSky.z) - 1];
         nodeAccum[group * uint(suns)].w += composed * composed;
         if (u.uDetail.z > 0.5) {
             vec4 bySource = vec4(0.0), byFar = vec4(0.0), byNear = vec4(0.0);

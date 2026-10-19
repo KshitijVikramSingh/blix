@@ -413,6 +413,9 @@ internal sealed partial class SponzaLoop
         fineContact = args.Float("fine-contact") ?? (livePatchRefine ? 0.9f : 0f);
         fineContactFirst = !args.Flag("no-fine-contact-first");
         if (args.Int("fine-max-rays") is { } fm) fineGatherMaxRays = Math.Max(32, fm / 32 * 32);
+        fineRefineContactOnly = !args.Flag("fine-refine-all");
+        regatherSky = args.Flag("regather-sky");
+        if (args.Int("live-bounces") is { } lb) LiveBouncesToRest = Math.Max(1, lb);
         sunEdges = args.Flag("sun-edges");
         // --live-max-rays N (4 x --live-rays): the refine's ceiling a texel in live mode -- the budget's other half. At
         // --texel-max-rays' 2,048 a 128-ray sweep of the coarse levels refined a million texels for 15 rounds (~3 min).

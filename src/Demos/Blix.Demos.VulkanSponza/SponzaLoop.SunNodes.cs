@@ -1089,7 +1089,7 @@ internal sealed partial class SponzaLoop
                 new("uCookedDims", new Vector4Uniform(cookedDims)),
                 new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, sunNodeUnknownSun))),
                 // A ray's sky as the gather takes it: strength 1, one mip blurred.
-                new("uSky", new Vector4Uniform(new Vector4(1f, 1f, 0f, 0f))),
+                new("uSky", new Vector4Uniform(new Vector4(1f, 1f, skyKept ? SunColumn() + 1 : 0f, 0f))),
                 // w: the hit cells (SponzaLoop.HitCells.cs) answer the hit, their sun bit shot for this cook's sun.
                 new("uLookup", new Vector4Uniform(new Vector4(sunNodePlane, sunNodeSigma, cellSplit != 0 ? -cellSplit : hitCellNear, cells ? 1f : 0f))),
                 new("uFoliage", new Vector4Uniform(new Vector4(sunNodeFoliageSlots, discover, exactMode, 0f))),

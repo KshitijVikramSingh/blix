@@ -378,7 +378,7 @@ internal sealed partial class SponzaLoop
                 new("uCookedGrid", new Vector4Uniform(cookedGrid)),
                 new("uCookedDims", new Vector4Uniform(cookedDims)),
                 new("uFar", new Vector4Uniform(FarUniform(0))),
-                new("uDebug", new Vector4Uniform(new Vector4(farDebug <= 2 ? farDebug : 0, farSerial, 0f, 0f))),
+                new("uDebug", new Vector4Uniform(new Vector4(farDebug <= 2 ? farDebug : 0, farSerial, skyKept ? SunColumn() + 1 : 0f, 0f))),
             },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
@@ -405,7 +405,7 @@ internal sealed partial class SponzaLoop
             {
                 new("uPool", new Vector4Uniform(new Vector4(first, slice, passes, sunNodeSuns!.Length))),
                 new("uTexelGrid", new Vector4Uniform(texelGrid)),
-                new("uSerial", new Vector4Uniform(new Vector4(farSerial, sunNodeHashSlots, farDebug, 0f))),
+                new("uSerial", new Vector4Uniform(new Vector4(farSerial, sunNodeHashSlots, farDebug, skyKept ? SunColumn() + 1 : 0f))),
             },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
@@ -449,7 +449,7 @@ internal sealed partial class SponzaLoop
         farSerial = farSerial % 65535 + 1;
         var command = FarFinishCommand(ids, first, slice, passes);
         // The diagnostics that land the far light or the blend skip the pooling (it would overwrite them).
-        var pool = farDebug is 0 or 3 ? FarPoolCommand(ids, first, slice, passes) : (DispatchCommand?)null;
+        var pool = farDebug is 0 or 3 && Environment.GetEnvironmentVariable("BLIX_FAR_NOPOOL") != "1" ? FarPoolCommand(ids, first, slice, passes) : (DispatchCommand?)null;
         if (now)
         {
             device.DispatchNow(new[] { command }, "sun-nodes-far-finish");

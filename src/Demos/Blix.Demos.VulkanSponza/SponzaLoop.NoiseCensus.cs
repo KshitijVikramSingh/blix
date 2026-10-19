@@ -197,6 +197,10 @@ internal sealed partial class SponzaLoop
     {
         if (patchDirectDone || !(noiseCensus || farTransportMode) || patchDirectSums.Equals(default(GpuBufferHandle)) || cookedPacked is null) return;
         patchDirectDone = true;
+        // Summed afresh for this light: the pass adds into the sums, and they were zeroed only when made -- a sun change
+        // added the new sun's direct light to the old's, the far record relit from both, and the bounce after a sun change
+        // was 45% off against the cooked gather where a boot at that sun was 5% (crevices, 2026-10-19).
+        device.WriteGpuBuffer(patchDirectSums, 0, new byte[cookedPacked.Length / 3 * (sunNodeSuns!.Length + 1) * 4]);
         var live = texelLiveIds!;
         var suns = sunNodeSuns!.Length;
         var declared = patchDirectInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
