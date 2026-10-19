@@ -345,8 +345,10 @@ internal sealed partial class SponzaLoop
         sunNodeHashSlots = (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(live.Length * 2, 1024));
         var empty = new uint[sunNodeHashSlots * 2];   // id, fingerprint a slot (texel_nodes.glsl)
         Array.Fill(empty, 0xFFFFFFFFu);
-        if (!sunNodeLive.Equals(default(GpuBufferHandle))) RetireGpuBuffer(sunNodeLive);   // a cook before this one's
-        sunNodeLive = Own(device.CreateGpuBuffer(live.Length * 4, MemoryMarshal.AsBytes(live.AsSpan()), "sponza.sun-nodes.live"));
+        if (!sunNodeLive.Equals(default(GpuBufferHandle)) && !sunNodeLive.Equals(splitLiveBuffer)) RetireGpuBuffer(sunNodeLive);   // a cook before this one's
+        // The split's upload of the same ids, when there is one (61 MB on Sponza, 2026-10-20).
+        sunNodeLive = !splitLiveBuffer.Equals(default(GpuBufferHandle)) && ReferenceEquals(live, texelLiveIds) ? splitLiveBuffer
+            : Own(device.CreateGpuBuffer(live.Length * 4, MemoryMarshal.AsBytes(live.AsSpan()), "sponza.sun-nodes.live"));
         // A live split cook traces what the image reads first (SponzaLoop.SplitLanding.cs); otherwise the live order.
         sunNodeTraceIds = sunNodeStride == 1 ? SplitTraceOrder(live) : live.Where((_, i) => i % sunNodeStride == 0).ToArray();
         // --live-texels: the coarse levels, scene-wide (LiveCoarseOrder).
@@ -759,6 +761,7 @@ internal sealed partial class SponzaLoop
         if (sunNodeBits.Equals(liveSunBits)) sunNodeBits = default;
         if (sunNodeGuideBuffer.Equals(liveGuides)) sunNodeGuideBuffer = default;
         if (sunNodeLightBuffer.Equals(liveLights)) sunNodeLightBuffer = default;
+        if (sunNodeTexelPatch.Equals(liveTexelPatch)) sunNodeTexelPatch = default;
         foreach (var b in new[] { sunNodeSunsBuffer, sunNodeBits, sunNodeHash, sunNodePatchLight, sunNodeRaysBuffer, sunNodeHits, sunNodeAccum, sunNodeStats, sunNodeFoliagePoints, sunNodeFoliageHash, sunNodeFoliageBits, sunNodeDiscoverBuffer, sunNodeDiscoverList, sunNodeGuideBuffer, sunNodeRayWeights, sunNodeTexelPatch, sunNodePatchCandidates, sunNodeGuidePatch, sunNodeDetail, sunNodeLightBuffer, sunNodeCensus })
             if (!b.Equals(default(GpuBufferHandle))) RetireGpuBuffer(b);
         sunNodeDetail = default;
@@ -1261,8 +1264,10 @@ internal sealed partial class SponzaLoop
         if (sunNodePatchFirst == 0 && lightBakeKey is { } key
             && LoadStage(key, "texel-patch", r => r.ReadString() != TexelPatchHeader ? null : ReadArray<int>(r)) is { } stored)
         {
-            RetireGpuBuffer(sunNodeTexelPatch);
-            sunNodeTexelPatch = Own(device.CreateGpuBuffer(texelCount * 4, MemoryMarshal.AsBytes(stored.AsSpan()), "sponza.sun-nodes.texel-patch"));
+            if (!sunNodeTexelPatch.Equals(liveTexelPatch)) RetireGpuBuffer(sunNodeTexelPatch);
+            // The live solve's copy of the same stage, when loaded (66 MB on Sponza, 2026-10-20): read-only from here.
+            sunNodeTexelPatch = liveTexels && !liveTexelPatch.Equals(default(GpuBufferHandle)) ? liveTexelPatch
+                : Own(device.CreateGpuBuffer(texelCount * 4, MemoryMarshal.AsBytes(stored.AsSpan()), "sponza.sun-nodes.texel-patch"));
             sunNodePatchFirst = live.Length;
             sunNodeStage = sunNodeDiscoverIds.Length > 0 ? SunNodeStage.Discover : SunNodeStage.Tracing;
             return;

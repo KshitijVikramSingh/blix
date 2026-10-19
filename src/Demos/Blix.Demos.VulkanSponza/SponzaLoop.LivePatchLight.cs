@@ -304,6 +304,7 @@ internal sealed partial class SponzaLoop
     private void LiveRetarget(Vector3 toSun)
     {
         device.WaitIdle();
+        RestoreGatherScratch();
         ResetSunNodeRefine();
         sunNodeRefineRays = 0;
         sunNodeFirst = 0;
@@ -603,7 +604,7 @@ internal sealed partial class SponzaLoop
     private void ReleaseRayGeometry()
     {
         if (!liveTexels || keepCpuScene || rayGpuData is not { GeometryReleased: false } data) return;
-        if (gpuReference || probeReference || texelInspect is not null || rayLeakCensus || watch || rayCheck || rayView || surfaceCheck || spotWhy) return;
+        if (CpuSceneReaders) return;
         if (rtShadows && rtBuild is null || hitCellsOn && hitCellsBuffer.Equals(default(GpuBufferHandle)) || rayTraversalDropped && frameTracer is null) return;
         data.ReleaseGeometry();
         var before = GC.GetTotalMemory(false);
@@ -611,6 +612,60 @@ internal sealed partial class SponzaLoop
         GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] live texels: the ray data's geometry released (the managed heap {before / 1048576.0:N0} -> {GC.GetTotalMemory(false) / 1048576.0:N0} MB; --keep-cpu-scene keeps it)."));
+    }
+
+    // Whatever reads the CPU's scene or a cook's scratch after the light lands keeps them (DropCpuScene's readers).
+    private bool CpuSceneReaders => gpuReference || probeReference || texelInspect is not null || rayLeakCensus || watch || rayCheck || rayView || surfaceCheck || spotWhy;
+
+    // --live-texels, once the light has landed: the GPU buffers only a gather or the setup writes go (2026-10-20: Metal
+    // stood at 11 of 12.1 GB recommended on a 16 GB machine, swapping) -- the setup's (the discovery's list, the surface
+    // bake's rows: never again), and the gather's scratch, made again when a light change re-aims (RestoreGatherScratch)
+    // or on demand (the resolve's lists, BeginGpuResolve; the fine pass's flags, ApplyFineNow).
+    private void ReleaseGatherScratch()
+    {
+        if (!liveTexels || keepCpuScene || CpuSceneReaders || gatherScratchReleased) return;
+        long freed = 0;
+        var sizes = device.SnapshotResources().GpuBuffers.ToDictionary(x => x.Handle, x => x.SizeBytes);
+        void Retire(ref GpuBufferHandle b)
+        {
+            if (b.Equals(default(GpuBufferHandle))) return;
+            freed += sizes.GetValueOrDefault(b);
+            RetireGpuBuffer(b);
+            b = default;
+        }
+        // The setup's, never read again: placeholders where a binding still names them.
+        Retire(ref sunNodeDiscoverList);
+        sunNodeDiscoverList = Own(device.CreateGpuBuffer(48, new byte[48], "sponza.sun-nodes.discover.none"));
+        for (var i = 0; i < raySurfaceBakeBuffers.Length; i++)
+            if (raySurfaceBakeBuffers[i].Name == "BakeRows" && raySurfacesChecked)
+            {
+                var rows = raySurfaceBakeBuffers[i].Buffer;
+                Retire(ref rows);
+                raySurfaceBakeBuffers[i] = new ShaderBufferBinding("BakeRows", Own(device.CreateGpuBuffer(16, new byte[16], "sponza.ray.bake-rows.none")));
+            }
+        // The gather's.
+        Retire(ref resolveState);
+        Retire(ref resolvePasses);
+        for (var i = 0; i < 2; i++) { Retire(ref resolveIds[i]); Retire(ref resolvePlaces[i]); }
+        resolveCapacity = 0;
+        Retire(ref fineFlagsBuffer);
+        Retire(ref sunNodeRaysBuffer);
+        Retire(ref sunNodeHits);
+        gatherScratchReleased = true;
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[VulkanSponza] live texels: the setup's and the gather's GPU scratch released ({freed / 1048576.0:N0} MB)."));
+    }
+
+    private bool gatherScratchReleased;
+
+    // A light change re-aims: the gather's scratch again (the setup's sizes, SponzaLoop.SunNodes.cs).
+    private void RestoreGatherScratch()
+    {
+        if (!gatherScratchReleased) return;
+        var rays = sunNodeSlice * 32;
+        sunNodeRaysBuffer = Own(device.CreateGpuBuffer(checked((int)((long)rays * 32)), name: "sponza.sun-nodes.rays"));
+        sunNodeHits = Own(device.CreateGpuBuffer(checked((int)((long)rays * 48 + 80)), name: "sponza.sun-nodes.hits"));
+        gatherScratchReleased = false;
     }
 
     // The shared inputs (the band's solve packs them; this starts it when no band has) and the live state.

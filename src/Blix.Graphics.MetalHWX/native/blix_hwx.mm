@@ -945,6 +945,8 @@ HWX_EXPORT int hwx_build(HwxContext* ctx,
         [cb waitUntilCompleted];
         if (!Completed(ctx, cb, "compaction and top-level build")) return 1;
         stats->compactTlasGpuMs = (cb.GPUEndTime - cb.GPUStartTime) * 1e3;
+        // The index copy fed only the bottom-level builds (no refit, no rebuild): ~156 MB on Sponza, let go.
+        ctx->indices = nil;
         return 0;
     }
 }
