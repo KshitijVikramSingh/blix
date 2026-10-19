@@ -381,8 +381,8 @@ internal sealed partial class SponzaLoop
         livePatchRefine = args.Flag("live-patch-refine");
         // --cpu-resolve: the traced slices read back and resolved in C# (SponzaLoop.SliceResolve.cs), as before.
         cpuResolve = args.Flag("cpu-resolve");
-        // --fine-gather N (4 M with the refine: 87% of the copy's error against the cooked gather; 0 off), --fine-rays R (256): SponzaLoop.Transfer.cs, the fine refine.
-        fineGatherBudget = args.Int("fine-gather") ?? (livePatchRefine ? 4_000_000 : 0);
+        // --fine-gather N (5 M with the refine; 0 off), --fine-rays R (256): SponzaLoop.Transfer.cs, the fine refine.
+        fineGatherBudget = args.Int("fine-gather") ?? (livePatchRefine ? 5_000_000 : 0);
         if (args.Int("fine-rays") is { } fr) fineGatherRays = Math.Max(32, fr / 32 * 32);
         livePatchTexels = args.Flag("live-patch-texels") || livePatchRefine;
         if (livePatchTexels) { liveTransfer = true; hitCellsOn = livePatchRefine && !args.Flag("no-hit-cells"); transferAoRays = 128; transferAoReach = TexelOpenReach; }
@@ -405,7 +405,15 @@ internal sealed partial class SponzaLoop
         if (args.Float("hit-cell") is { } hc) hitCellSize = Math.Clamp(hc, 0.01f, 1f);
         if (args.Float("cell-near") is { } cn) hitCellNear = Math.Max(0f, cn);
         cellMarks = args.Flag("cell-marks");
-        if (args.Flag("no-sun-edges")) sunEdges = false;
+        fineAll = args.Flag("fine-all");
+        // --fine-contact R (0.9; 0 off): fine texels more closed than their coarse cells (their contact ratio under R)
+        // flagged, first (--no-fine-contact-first: by their score among the rest). Crevices' seams 0.835 -> 0.932 (the
+        // cooked gather's 0.931); Sponza at 5 M: every fine texel's mean error against the cooked gather 0.166 -> 0.155
+        // (2026-10-19).
+        fineContact = args.Float("fine-contact") ?? (livePatchRefine ? 0.9f : 0f);
+        fineContactFirst = !args.Flag("no-fine-contact-first");
+        if (args.Int("fine-max-rays") is { } fm) fineGatherMaxRays = Math.Max(32, fm / 32 * 32);
+        sunEdges = args.Flag("sun-edges");
         // --live-max-rays N (4 x --live-rays): the refine's ceiling a texel in live mode -- the budget's other half. At
         // --texel-max-rays' 2,048 a 128-ray sweep of the coarse levels refined a million texels for 15 rounds (~3 min).
         if (liveTexels && args.Int("texel-max-rays") is null) texelMaxRays = args.Int("live-max-rays") ?? 4 * liveRays;

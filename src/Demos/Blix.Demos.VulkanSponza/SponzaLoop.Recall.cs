@@ -215,6 +215,36 @@ internal sealed partial class SponzaLoop
 
     private uint[] recallPicked = Array.Empty<uint>();
 
+    // BLIX_DUMP_PARTS=<prefix> (a diagnosis): the parts at the light change's stages (after the coarse gather, after the
+    // copy, at the end), each texel's sky and sun words, to <prefix>.<stage>.
+    private static readonly string? dumpParts = Environment.GetEnvironmentVariable("BLIX_DUMP_PARTS");
+
+    // At the shot: what the pixels read -- the resolved light, the details -- to <prefix>.shot.
+    private void DumpShotState()
+    {
+        if (dumpParts is null) return;
+        device.WaitIdle();
+        using var w = new BinaryWriter(File.Create($"{dumpParts}.shot"));
+        w.Write(texelCount);
+        foreach (var b in new[] { texelResolvedBuffer, splitSkyDetailBuffer, splitSunDetailBuffer })
+        {
+            var bytes = b.Equals(default(GpuBufferHandle)) ? new byte[0] : device.ReadGpuBuffer(b, 0, b.Equals(texelResolvedBuffer) ? texelCount * 8 : texelCount * 4);
+            w.Write(bytes.Length); w.Write(bytes);
+        }
+        Console.WriteLine($"[VulkanSponza] shot state dumped: {dumpParts}.shot");
+    }
+
+    private void DumpParts(string stage)
+    {
+        if (dumpParts is null) return;
+        device.WaitIdle();
+        var sky = device.ReadGpuBuffer(EnsureLivePart(false), 0, texelCount * 8);
+        var sun = device.ReadGpuBuffer(EnsureLivePart(true), 0, texelCount * 8);
+        using var w = new BinaryWriter(File.Create($"{dumpParts}.{stage}"));
+        w.Write(texelCount); w.Write(sky); w.Write(sun);
+        Console.WriteLine($"[VulkanSponza] parts dumped: {dumpParts}.{stage}");
+    }
+
     // After the fine gather: the texels it took, and every fine texel, against the reference.
     private void RecallFinal()
     {

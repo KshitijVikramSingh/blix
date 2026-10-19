@@ -470,6 +470,15 @@ internal sealed partial class SponzaLoop
     {
         // Live: the sun points' bits first (shot in the frame after the merge, RecordLivePointBits).
         if (liveTexels && !LivePointsDone) { RecordLivePointBits(); return; }
+        // The texels' and the sun points' bits are shot in the frame: recorded is not done -- with frames in flight, the
+        // cells' sun pass and the gather's first passes (outside the frame, at once) read them before the last frames ran.
+        // Crevices' seams, where the sun points answer, came out 0.78-0.83 of the reference instead of 0.87 as the timing
+        // fell (2026-10-19). Once a sun, everything in flight finished first.
+        if (liveTexels && liveBitsSyncedFor != liveSunToward)
+        {
+            device.WaitIdle();
+            liveBitsSyncedFor = liveSunToward;
+        }
         HitCellsSunNow();
         var refining = sunNodeRefineRound > 0;
         var live = refining ? sunNodeRefineIds : sunNodeTraceIds;
@@ -515,6 +524,10 @@ internal sealed partial class SponzaLoop
     // next slice. False when the sweep or a round ended here (a new round starts next time, or the cook finished).
     // --live-texels: the slices' sums read where they lie once their frames are done -- no WaitIdle, no copy: each slice
     // drained the 3 frames in flight and waited on a copy before (a frame of 100-250 ms a slice, 2026-10-16).
+    // BLIX_SYNC_ALL=1 (a diagnosis): the GPU idle around every gather pass.
+    private static readonly bool syncAll = Environment.GetEnvironmentVariable("BLIX_SYNC_ALL") == "1";
+    // The sun whose in-frame bits were waited on (RecordSunNodeSlice).
+    private Vector3 liveBitsSyncedFor = new(float.NaN);
     private const int LiveAccumSlots = 4;
     // The read-backs' time by part (FinishSunNodes reports it): the mapped read, sums and refine, detail, census, landing.
     private readonly double[] readParts = new double[5];
@@ -668,10 +681,13 @@ internal sealed partial class SponzaLoop
             sunNodeRays = fineGatherSavedRays;
             texelMaxRays = fineGatherSavedMaxRays;
             RecallFinal();
+            DumpParts("final");
         }
         else if (TransferOn && transferReady && !transferCheck && transferGatherIds.Length > 0 && Environment.GetEnvironmentVariable("BLIX_NO_FINE") != "1")
         {
+            DumpParts("coarse");
             ApplyFineNow();
+            DumpParts("copy");
             if (spotWhy) SpotWhyCompare(fine: true);
             // The fine refine: the flagged texels traced as the coarse were, a round of their own, the cook screen up.
             var picked = FineGatherIds();
@@ -684,7 +700,7 @@ internal sealed partial class SponzaLoop
                 fineGatherSavedRays = sunNodeRays;
                 fineGatherSavedMaxRays = texelMaxRays;
                 sunNodeRays = fineGatherRays;
-                texelMaxRays = fineGatherRays;
+                texelMaxRays = Math.Max(fineGatherRays, fineGatherMaxRays);
                 RetireGpuBuffer(sunNodeStats);
                 sunNodeStats = Own(device.CreateGpuBuffer(48, new byte[48], "sponza.sun-nodes.stats"));
                 sunNodeFirst = 0;
@@ -1005,7 +1021,9 @@ internal sealed partial class SponzaLoop
             var slice = Math.Min(sunNodeSlice, live.Length - sunNodeFirst);
             var seedPass = refining ? sweepPasses + (sunNodeRefineRound - 1) * RefinePasses + sunNodePass : sunNodePass;
             if (GpuResolveOn && !gpuResolving && !refining && sunNodeFirst == 0 && sunNodePass == 0) BeginGpuResolve();
+            if (syncAll) device.WaitIdle();
             SunNodePassNow(refining ? sunNodeRefineBuffer : sunNodeTraceBuffer, sunNodeFirst, slice, sunNodePass, seedPass);
+            if (syncAll) device.WaitIdle();
             if (++sunNodePass == passes)
             {
                 sunNodePass = 0;

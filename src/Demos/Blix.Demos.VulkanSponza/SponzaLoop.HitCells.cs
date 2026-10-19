@@ -28,9 +28,10 @@ internal sealed partial class SponzaLoop
     private float hitCellNear = 0f;
     // The cells a sun edge crosses (their corners' sun over half apart, at each light change: 1.5% of Sponza's) take their
     // hits' sun from the search at the hit, their patch still the cell's (hit_cells.comp, texel_nodes_shade.glsl): what
-    // the creases need -- BLIX_CELL_SPLIT showed the sun at the hit gives crevices' seams 0.87 (the cell's 0.83), the
-    // patch at the hit not (0.78), 2026-10-19. --no-sun-edges: off.
-    private bool sunEdges = true;
+    // the creases need, as BLIX_CELL_SPLIT read it (seams 0.87 against the cell's 0.83) -- read at one jittered frame.
+    // Averaged over 64 (the gate since), 0.835 against 0.833: not worth the cells' sun pass's 2 s a light change and the
+    // shade's 10 -> 19.6 ms a 1 M rays (2026-10-19). --sun-edges: on.
+    private bool sunEdges;
     // --cell-marks: the cells a contact (the surface turning over 30 degrees between its centre and a corner) or a sun edge
     // crosses marked, their hits the search's (hit_cells.comp). Even so: Sponza's cells 24% marked and a workgroup's one
     // marked hit holding the rest to the search, shade 38 ms a 1 M rays, and the cell build 0.65 -> 6.4 s (2026-10-19).
@@ -109,6 +110,16 @@ internal sealed partial class SponzaLoop
         if (!liveTexels || !hitCellsOn || !hitCellsBuffer.Equals(default(GpuBufferHandle)) || rayGpuData is not { } data) return;
         var clock = Stopwatch.StartNew();
         var rows = data.Triangles.Length / 4;
+        // The geometry's: read from the GI bundle when built before for the same stages and settings (~10 s of Sponza's
+        // boot, 2026-10-19).
+        var cachePath = TransferOn && !livePatchTexels || Environment.GetEnvironmentVariable("BLIX_NO_CELLS_CACHE") == "1" ? null : HitCellsPath(rows);   // A' adds its cells' light: built
+        if (cachePath is not null && ReadHitCells(cachePath, rows))
+        {
+            hitCellsSun = (new Vector3(float.NaN), -1);
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza] hit cells: {hitCellCount:N0} cells over {rows:N0} triangle rows read from {cachePath} in {clock.Elapsed.TotalMilliseconds:0} ms."));
+            return;
+        }
         var tris = data.Triangles;
         var pos = data.Positions;
         var cellSize = hitCellSize;
@@ -155,6 +166,72 @@ internal sealed partial class SponzaLoop
         hitCellsSun = (new Vector3(float.NaN), -1);
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] hit cells: {cells:N0} cells over {rows:N0} triangle rows at {cellSize * 100:0} cm ({bytes / 1048576.0:0} MB), laid out in {layoutMs:0} ms, their patches in {clock.Elapsed.TotalMilliseconds - layoutMs:0} ms."));
+        if (cachePath is not null) WriteHitCells(cachePath, bytes, work.ToArray());
+    }
+
+    private const int HitCellsVersion = 1;
+
+    // The cells' file in the GI bundle: keyed by the transport's stages (the geometry, the patches, the texels), the rows,
+    // the cell size and the build's marks.
+    private string? HitCellsPath(int rows)
+    {
+        if (transportCombinedKey is not { } combined) return null;
+        var key = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(string.Create(CultureInfo.InvariantCulture,
+            $"{combined};rows {rows};cell {hitCellSize};contacts {cellMarks};v{HitCellsVersion}"))))[..24].ToLowerInvariant();
+        return Path.Combine(transportCacheDir, key + ".hit-cells");
+    }
+
+    private bool ReadHitCells(string path, int rows)
+    {
+        if (!File.Exists(path)) return false;
+        try
+        {
+            using var r = new BinaryReader(new BufferedStream(File.OpenRead(path), 1 << 22));
+            if (r.ReadString() != "blix-hit-cells" || r.ReadInt32() != HitCellsVersion || r.ReadInt32() != rows) return false;
+            var cells = r.ReadInt64();
+            var bytes = r.ReadInt32();
+            var workCount = r.ReadInt32();
+            var cellWords = r.ReadBytes(bytes);
+            var work = r.ReadBytes(workCount * 4);
+            if (cellWords.Length != bytes || work.Length != workCount * 4) return false;
+            hitCellsBuffer = Own(device.CreateGpuBuffer(bytes, cellWords, "sponza.hit-cells"));
+            hitCellWork = Own(device.CreateGpuBuffer(Math.Max(16, work.Length), work, "sponza.hit-cells.work"));
+            hitCellRows = rows;
+            hitCellItems = workCount / 2;
+            hitCellCount = cells;
+            return true;
+        }
+        catch (Exception e) when (e is IOException or EndOfStreamException)
+        {
+            Console.WriteLine($"[VulkanSponza] hit cells: {path} could not be read ({e.Message}); building them.");
+            return false;
+        }
+    }
+
+    // Read back once built (the patches' pass done) and written beside the boot in the background.
+    private void WriteHitCells(string path, int bytes, uint[] work)
+    {
+        device.WaitIdle();
+        var cellWords = device.ReadGpuBuffer(hitCellsBuffer, 0, bytes);
+        var rows = hitCellRows;
+        var cells = hitCellCount;
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                var temp = path + ".partial";
+                using (var w = new BinaryWriter(new BufferedStream(File.Create(temp), 1 << 22)))
+                {
+                    w.Write("blix-hit-cells"); w.Write(HitCellsVersion); w.Write(rows); w.Write(cells); w.Write(bytes); w.Write(work.Length);
+                    w.Write(cellWords);
+                    w.Write(MemoryMarshal.AsBytes(work.AsSpan()));
+                }
+                File.Move(temp, path, overwrite: true);
+                Console.WriteLine($"[VulkanSponza] hit cells: written to {path}.");
+            }
+            catch (IOException e) { Console.WriteLine($"[VulkanSponza] hit cells: {path} not written ({e.Message})."); }
+        });
     }
 
     // rows, firstRow: the work items (hit_cells.comp: a row's cells, 256 an item).

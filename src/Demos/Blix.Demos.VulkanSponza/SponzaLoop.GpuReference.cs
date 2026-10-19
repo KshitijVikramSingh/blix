@@ -116,8 +116,16 @@ internal sealed partial class SponzaLoop
             shotReadyFrame = postLoadFrames;
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] shot: ready at post-load frame {postLoadFrames} (light {(transportTexels ? "at rest" : "not cooked")}, reference {(gpuReference ? "complete" : "none")}{(lightletsAsked ? ", sun records up" : "")}); writing in {ShotReadyMargin} frames."));
+            DumpShotState();
         }
-        return postLoadFrames >= shotReadyFrame + ShotReadyMargin;
+        // On a frame fixed in advance, not a fixed count after ready: TAA's jitter is a Halton sequence over the post-load
+        // frame, and at a crease the shot's value hangs on which jitter it lands on -- the gate's crevices seams read 0.872
+        // at frame 2263 and 0.783 at 2264 for identical light, as the cook landed a frame earlier or later (2026-10-19).
+        // Rounded up to 256 frames, runs a few frames apart shoot the same one.
+        var target = (shotReadyFrame + ShotReadyMargin + 255) / 256 * 256;
+        // The 64 frames before it: each sample point's incident light summed over their jitter (WriteGpuSurfaceReference).
+        if (postLoadFrames >= target - IncidentAverageFrames && postLoadFrames < target) AccumulateIncidentPoints();
+        return postLoadFrames >= target;
     }
 
     // The frames a wave needs at most: every lane's quota of paths at their longest (bounces + 2 rays each).
@@ -298,6 +306,26 @@ internal sealed partial class SponzaLoop
         return perPoint;
     }
 
+    // The sample points' incident light over the frames before the shot: one jittered frame's value at a crease hangs on
+    // its jitter (crevices' seams 0.78-0.87 by the frame, 2026-10-19); the mean over many does not.
+    private const int IncidentAverageFrames = 64;
+    private double[]? incidentPointSums;
+    private int incidentPointFrames;
+
+    private void AccumulateIncidentPoints()
+    {
+        if (!gpuReference || gpuReferencePoints is not { Count: > 0 } points) return;
+        var incident = device.ReadTexture(graph.GetColorTexture(incidentHandle), out var iw, out var ih, out _);
+        incidentPointSums ??= new double[points.Count];
+        for (var i = 0; i < points.Count; i++)
+        {
+            var (_, px, py) = points[i];
+            var o = (Math.Clamp((int)py, 0, ih - 1) * iw + Math.Clamp((int)px, 0, iw - 1)) * 8;
+            incidentPointSums[i] += 0.2126 * (float)BitConverter.ToHalf(incident, o) + 0.7152 * (float)BitConverter.ToHalf(incident, o + 2) + 0.0722 * (float)BitConverter.ToHalf(incident, o + 4);
+        }
+        incidentPointFrames++;
+    }
+
     // At the shot: the gate's lines from the GPU reference, and the CPU's held against it where both ran.
     private void WriteGpuSurfaceReference()
     {
@@ -307,6 +335,9 @@ internal sealed partial class SponzaLoop
             : ReferenceWaveSums(gateWave!);
         var incident = device.ReadTexture(graph.GetColorTexture(incidentHandle), out var iw, out var ih, out _);
         static double Lum(Vector3 v) => 0.2126 * v.X + 0.7152 * v.Y + 0.0722 * v.Z;
+        if (incidentPointFrames > 0)
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza] surface reference: each point's light the mean of {incidentPointFrames} jittered frames."));
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] surface reference on the GPU ({(referenceMonolithic ? "monolithic" : FrameRaysOnHardware && frameTracer is not null ? "wavefront, Metal" : "wavefront, software")}; {points.Count} pixels off depth edges, {(referenceMonolithic ? gpuReferencePaths : (int)Math.Round(accum.Average(a => a.W)))} paths x {refBounces} bounces):"));
         if (!referenceMonolithic && FrameRaysOnHardware && frameTracer is not null)
@@ -323,7 +354,8 @@ internal sealed partial class SponzaLoop
             var a = accum[i];
             var reference = a.W > 0f ? Lum(new Vector3(a.X, a.Y, a.Z) / a.W) : double.NaN;
             var o = (Math.Clamp((int)py, 0, ih - 1) * iw + Math.Clamp((int)px, 0, iw - 1)) * 8;
-            var field = Lum(new Vector3((float)BitConverter.ToHalf(incident, o), (float)BitConverter.ToHalf(incident, o + 2), (float)BitConverter.ToHalf(incident, o + 4)));
+            var field = incidentPointFrames > 0 ? incidentPointSums![i] / incidentPointFrames
+                : Lum(new Vector3((float)BitConverter.ToHalf(incident, o), (float)BitConverter.ToHalf(incident, o + 2), (float)BitConverter.ToHalf(incident, o + 4)));
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"    {(k >= SeamKeyBase ? "seam    " : "surface ")} at {px / iw:0.0000},{py / ih:0.0000}  gpu  total {field:0.00000} ref {reference:0.00000}"));
             if (cpuSurfaceReference.TryGetValue(k, out var cpu)) pairs.Add((cpu, reference));

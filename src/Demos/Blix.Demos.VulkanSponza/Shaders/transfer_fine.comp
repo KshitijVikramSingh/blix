@@ -11,7 +11,8 @@ layout(set = 0, binding = 0) uniform TransferFine {
     vec4 uFine;        // x the fine texels, y the dispatch's first, z the coarse level, w the coarsest
     vec4 uTexelGrid;   // the finest level's grid: xyz the origin, w the spacing
     vec4 uTexelParams; // x the hash's capacity
-    vec4 uFlag;        // x the dark bar (the coarse sweep's: a tenth of its median light)
+    vec4 uFlag;        // x the dark bar (the coarse sweep's: a tenth of its median light); y 1: flag every texel (--fine-all); z the contact ratio under which a texel is flagged
+                       // (--fine-contact), w 1: those first (--fine-contact-first)
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer TexelHash { uvec4 texelHash[]; };
@@ -157,6 +158,12 @@ void main() {
         float disagree = max(copyLight, bar) / max(instantLight, bar);
         disagree = max(disagree, 1.0 / disagree);
         float score = max(max(keptRatio, cutRatio), disagree);
+        if (u.uFlag.y > 0.5) score = max(score, 2.5);   // --fine-all (a measurement): every fine texel gathered
+        // A crease or a contact: the texel far more closed than its coarse cells within 20 cm -- the copy leans on the
+        // contact ratio alone there, and its seams came out 0.83 of the reference where gathered they are 0.97
+        // (crevices, 2026-10-19). --fine-contact R (z): flagged under R.
+        // Ranked first (w on): the budget's cut fell at 3.1x on Sponza, under every contact's score, and none was gathered.
+        if (u.uFlag.z > 0.0 && ratio < u.uFlag.z) score = u.uFlag.w > 0.5 ? 1000.0 + (1.0 - ratio) : max(score, 2.0 + (1.0 - ratio));
         if (score > 2.0) flag(disagree >= max(keptRatio, cutRatio) ? 3u : keptRatio >= cutRatio ? 2u : 10u, score);
         const float edges[6] = float[6](1.5, 2.0, 3.0, 4.0, 8.0, 16.0);
         for (int e = 0; e < 6; ++e) if (score > edges[e]) atomicAdd(fineFlags[4 + e], 1u);

@@ -171,6 +171,16 @@ internal sealed partial class SponzaLoop
         if (texelDirOpenBuffer.Equals(default(GpuBufferHandle)))
             texelDirOpenBuffer = Own(device.CreateGpuBuffer(Math.Max(16, texelCount * 4), name: "sponza.transfer.dir-open"));
         var passes = Math.Max(1, transferAoRays / 32);
+        // The geometry's: read from the GI bundle when cooked before for the same stages, texels and settings (52 s of
+        // Sponza's boot, 2026-10-19).
+        var contactPath = Environment.GetEnvironmentVariable("BLIX_NO_CONTACT_CACHE") == "1" ? null : ContactPath(all.Length);
+        if (contactPath is not null && ReadContact(contactPath))
+        {
+            RetireGpuBuffer(counts);
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza] transfer: contact visibility of {all.Length:N0} texels read from {contactPath} in {clock.Elapsed.TotalSeconds:0.0} s."));
+            return;
+        }
         var declared = texelAoInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
         DispatchCommand Ao(int threads, int slice, int mode, int first) => new(texelAoPipeline, (threads + 63) / 64, 1, 1,
             new ShaderUniform[] { new("uAo", new Vector4Uniform(new Vector4(slice, transferAoReach, mode, first))), new("uAo2", new Vector4Uniform(new Vector4(transferAoShortReach, 0f, 0f, 0f))) },
@@ -200,6 +210,70 @@ internal sealed partial class SponzaLoop
         RetireGpuBuffer(counts);
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] transfer: contact visibility (within {transferAoReach * 100:0} cm) of {all.Length:N0} texels, {passes * 32} rays each, in {clock.Elapsed.TotalSeconds:0.0} s."));
+        if (contactPath is not null) WriteContact(contactPath);
+    }
+
+    // The contact cook's file in the GI bundle: keyed by the transport's stages (the geometry, the patches, the hashed
+    // texels), the live texels' count (the atlas's with them) and the cook's settings.
+    private const int ContactVersion = 1;
+
+    private string? ContactPath(int liveCount)
+    {
+        if (transportCombinedKey is not { } combined) return null;
+        var key = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(string.Create(CultureInfo.InvariantCulture,
+            $"{combined};texels {texelCount};live {liveCount};rays {transferAoRays};reach {transferAoReach};short {transferAoShortReach};v{ContactVersion}"))))[..24].ToLowerInvariant();
+        return Path.Combine(transportCacheDir, key + ".texel-contact");
+    }
+
+    private int ContactBytes => Math.Max(16, (texelCount + 3) / 4 * 4);
+
+    private bool ReadContact(string path)
+    {
+        if (!File.Exists(path)) return false;
+        try
+        {
+            using var r = new BinaryReader(new BufferedStream(File.OpenRead(path), 1 << 22));
+            if (r.ReadString() != "blix-texel-contact" || r.ReadInt32() != ContactVersion || r.ReadInt32() != texelCount) return false;
+            var ao = r.ReadBytes(ContactBytes);
+            var aoShort = r.ReadBytes(ContactBytes);
+            var dirOpen = r.ReadBytes(Math.Max(16, texelCount * 4));
+            if (ao.Length != ContactBytes || aoShort.Length != ContactBytes || dirOpen.Length != Math.Max(16, texelCount * 4)) return false;
+            device.WriteGpuBuffer(texelAoBuffer, 0, ao);
+            device.WriteGpuBuffer(texelAoShortBuffer, 0, aoShort);
+            device.WriteGpuBuffer(texelDirOpenBuffer, 0, dirOpen);
+            return true;
+        }
+        catch (Exception e) when (e is IOException or EndOfStreamException)
+        {
+            Console.WriteLine($"[VulkanSponza] transfer: {path} could not be read ({e.Message}); cooking the contact visibility.");
+            return false;
+        }
+    }
+
+    // Read back once cooked and written beside the boot, in the background: the next boot reads it.
+    private void WriteContact(string path)
+    {
+        device.WaitIdle();
+        var ao = device.ReadGpuBuffer(texelAoBuffer, 0, ContactBytes);
+        var aoShort = device.ReadGpuBuffer(texelAoShortBuffer, 0, ContactBytes);
+        var dirOpen = device.ReadGpuBuffer(texelDirOpenBuffer, 0, Math.Max(16, texelCount * 4));
+        var count = texelCount;
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                var temp = path + ".partial";
+                using (var w = new BinaryWriter(new BufferedStream(File.Create(temp), 1 << 22)))
+                {
+                    w.Write("blix-texel-contact"); w.Write(ContactVersion); w.Write(count);
+                    w.Write(ao); w.Write(aoShort); w.Write(dirOpen);
+                }
+                File.Move(temp, path, overwrite: true);
+                Console.WriteLine($"[VulkanSponza] transfer: contact visibility written to {path}.");
+            }
+            catch (IOException e) { Console.WriteLine($"[VulkanSponza] transfer: {path} not written ({e.Message})."); }
+        });
     }
 
     // The fine texels from their coarse ones (transfer_fine.comp), after the transfer's pass.
@@ -214,7 +288,15 @@ internal sealed partial class SponzaLoop
     // N at R rays, behind the cook screen. The cooked mode's full gather answers curtains' folds and the walls' stones
     // the copy cannot (2026-10-19); this is it where it matters. 0: off.
     private int fineGatherBudget, fineGatherRays = 256;
+    // --fine-max-rays N: the fine refine's noisy texels refined up to N (as the coarse round's); the gathered seams at a
+    // flat 256 read 0.033-0.051 of excess light against the cooked gather's 0.015 (crevices, 2026-10-19).
+    private int fineGatherMaxRays = 1024;
     private bool fineGathering;
+    // --fine-all (a measurement): every fine texel flagged, so the fine refine gathers the level whole (no copy).
+    private bool fineAll;
+    // --fine-contact R (0: off): fine texels whose contact ratio is under R flagged (transfer_fine.comp).
+    private float fineContact;
+    private bool fineContactFirst;
     // The coarse sweep's dark bar (a tenth of its median light), kept past the refine's reset: the fine flags' floor.
     private float lastDarkBar;
     private int fineGatherSavedMaxRays, fineGatherSavedRays;
@@ -307,7 +389,7 @@ internal sealed partial class SponzaLoop
                     new("uFine", new Vector4Uniform(new Vector4(count, first, transferMinLevel, texelLevels - 1))),
                     new("uTexelGrid", new Vector4Uniform(texelGrid)),
                     new("uTexelParams", new Vector4Uniform(new Vector4(texelCapacity, texelLevels, debugOn ? 1f : 0f, Luminance(EffectiveSunIrradiance)))),
-                    new("uFlag", new Vector4Uniform(new Vector4(lastDarkBar, 0f, 0f, 0f))),
+                    new("uFlag", new Vector4Uniform(new Vector4(lastDarkBar, fineAll ? 1f : 0f, fineContact, fineContactFirst ? 1f : 0f))),
                 },
                 Array.Empty<ShaderTextureBinding>(),
                 Buffers: new[]

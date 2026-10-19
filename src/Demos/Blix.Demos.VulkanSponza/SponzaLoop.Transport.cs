@@ -234,7 +234,7 @@ internal sealed partial class SponzaLoop
 
     private sealed record FarLists(uint[] Start, uint[] Ids, float[] Weights);
     // The patches' stage key (the GI bundle's stages that hang off the patches: the far field's neighbours).
-    private string? transportPatchesKey, transportCouplingsKey;
+    private string? transportPatchesKey, transportCouplingsKey, transportCombinedKey;
     private Task? transportCookTask;
     private bool transportCookAsync;
     private bool transportWait;
@@ -338,6 +338,7 @@ internal sealed partial class SponzaLoop
         var stageKeys = TransportCacheKeys(scene, surfaces);
         transportPatchesKey = stageKeys.Patches;
         transportCouplingsKey = stageKeys.Couplings;
+        transportCombinedKey = stageKeys.Combined;
         var cacheKey = stageKeys.Combined;
         // What depends on geometry alone -- the lightmap's buried flags, the sun records -- is filed under the texels' key
         // (the scene, its lightmap, the texel layout), not the combined one: a change to how hits find patches re-cooks the
