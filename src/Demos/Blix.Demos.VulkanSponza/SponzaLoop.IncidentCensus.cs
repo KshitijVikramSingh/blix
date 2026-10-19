@@ -46,7 +46,9 @@ internal sealed partial class SponzaLoop
         // The pixels that read the probes (paths 2 on): none, and the clipmap's solve can rest (RecordClipmap).
         long readers = 0;
         for (var i = 2; i < IncidentPaths.Length; i++) readers += c[i];
-        clipmapProbeReaders = readers;
+        // Under a thousandth of the surface (a few seams' pixels where no texel is found) reads the probes as they last
+        // stood: waking the solve for them cost ~6.5 ms of closest traces and half a shadow batch a frame (2026-10-20).
+        clipmapProbeReaders = readers * 1000 >= surface ? readers : 0;
         string Pct(long n) => (100.0 * n / surface).ToString("0.0", CultureInfo.InvariantCulture) + "%";
         string Fine(long n) => $"{n:N0} ({(100.0 * n / surface).ToString("0.000", CultureInfo.InvariantCulture)}%)";
         var probes = string.Join(", ", Enumerable.Range(2, IncidentPaths.Length - 2).Where(i => c[i] > 0).Select(i => $"{IncidentPaths[i]} {Pct(c[i])}"));
