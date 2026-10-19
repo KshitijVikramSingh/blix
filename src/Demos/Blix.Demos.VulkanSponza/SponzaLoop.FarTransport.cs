@@ -99,6 +99,7 @@ internal sealed partial class SponzaLoop
     // Before the sweep's first pass: every patch's direct sun, then the record relit into the radiance record.
     private void FarRelightNow()
     {
+        using var profScope = Prof("far-relight");
         if (!farTransportMode || farRelit || !farOn || farRecording) return;
         PatchDirectNow();
         var clock = Stopwatch.StartNew();

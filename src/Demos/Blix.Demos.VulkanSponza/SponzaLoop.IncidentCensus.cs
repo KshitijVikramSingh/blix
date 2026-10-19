@@ -43,6 +43,10 @@ internal sealed partial class SponzaLoop
         long surface = 0;
         for (var i = 1; i < IncidentPaths.Length; i++) surface += c[i];
         if (surface == 0) return;
+        // The pixels that read the probes (paths 2 on): none, and the clipmap's solve can rest (RecordClipmap).
+        long readers = 0;
+        for (var i = 2; i < IncidentPaths.Length; i++) readers += c[i];
+        clipmapProbeReaders = readers;
         string Pct(long n) => (100.0 * n / surface).ToString("0.0", CultureInfo.InvariantCulture) + "%";
         string Fine(long n) => $"{n:N0} ({(100.0 * n / surface).ToString("0.000", CultureInfo.InvariantCulture)}%)";
         var probes = string.Join(", ", Enumerable.Range(2, IncidentPaths.Length - 2).Where(i => c[i] > 0).Select(i => $"{IncidentPaths[i]} {Pct(c[i])}"));

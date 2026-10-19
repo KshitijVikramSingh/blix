@@ -964,6 +964,7 @@ internal sealed partial class SponzaLoop
 
     private void RunSunNodePassesNow()
     {
+        using var profScope = Prof("gather.host");
         // --live-transfer: the light change's cook is the transfer's pass, with nothing traced (SponzaLoop.Transfer.cs).
         // --live-transfer: the light change's cook is the transfer's pass, then the gather of the texels it flagged.
         if (TransferOn && transferReady && !transferCheck && sunNodeRefineRound == 0 && sunNodeFirst == 0 && sunNodePass == 0

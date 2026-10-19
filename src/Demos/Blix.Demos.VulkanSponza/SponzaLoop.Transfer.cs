@@ -70,6 +70,7 @@ internal sealed partial class SponzaLoop
 
     private void ApplyPatchTexelsNow()
     {
+        using var profScope = Prof("instant-layer");
         if (!transferReady || texelLiveIds is not { } live) return;
         var clock = Stopwatch.StartNew();
         var sky = EnsureLivePart(false);
@@ -105,6 +106,9 @@ internal sealed partial class SponzaLoop
         splitComposeAgainFrame = framesRendered + 1;
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] patch texels: {live.Length:N0} texels lit from the patches in {clock.Elapsed.TotalMilliseconds:0} ms."));
+        // Shown before the cook screen holds the image: composed, and a few scene frames drawn with it.
+        splitComposeDirty = true;
+        instantShowFrames = 3;
     }
 
     private void PatchTexelsPass(int mode, GpuBufferHandle sky = default, GpuBufferHandle sun = default, GpuBufferHandle skyDetail = default, GpuBufferHandle sunDetail = default)
@@ -360,6 +364,7 @@ internal sealed partial class SponzaLoop
 
     private void ApplyFineNow()
     {
+        using var profScope = Prof("fine-copy");
         if (transferFineCount == 0 || !transferReady) return;
         if (fineFlagsBuffer.Equals(default(GpuBufferHandle)))
             fineFlagsBuffer = Own(device.CreateGpuBuffer((16 + 2 * transferFineCount) * 4, name: "sponza.transfer.fine-flags"));

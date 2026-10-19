@@ -407,6 +407,7 @@ internal sealed partial class SponzaLoop
         if (args.Float("hit-cell") is { } hc) hitCellSize = Math.Clamp(hc, 0.01f, 1f);
         if (args.Float("cell-near") is { } cn) hitCellNear = Math.Max(0f, cn);
         cellMarks = args.Flag("cell-marks");
+        clipmapAlways = args.Flag("clipmap-always");
         fineAll = args.Flag("fine-all");
         // --fine-contact R (0.9; 0 off): fine texels more closed than their coarse cells (their contact ratio under R)
         // flagged, first (--no-fine-contact-first: by their score among the rest). Crevices' seams 0.835 -> 0.932 (the

@@ -278,10 +278,24 @@ internal sealed partial class SponzaLoop
             $"[VulkanSponza] probe clipmap: {ClipmapLevels} levels of {ClipmapDims.X}x{ClipmapDims.Y}x{ClipmapDims.Z} probes, spacing {clipmapSpacing:0.##} m doubling (level {ClipmapLevels - 1} spans {clipmap.Spacing(ClipmapLevels - 1) * ClipmapDims.X:0} m), atlases {clipmap.AtlasWidth}x{clipmap.AtlasHeight}, {clipmapBudget} probes a frame."));
     }
 
+    // The pixels the last incident census found reading the probes (-1: no census yet).
+    private long clipmapProbeReaders = -1;
+    private bool clipmapAlways;
+    private long clipmapRested;
+
     private void RecordClipmap()
     {
         if (clipmap is null || rayBlockBuffers.Length == 0 || !RaySurfacesReady) return;
         if (clipmapFrame >= clipmapFreeze) return;
+        // --live-texels: the probes solved only while something reads them. With the texels at rest every pixel took the
+        // cells alone (the census: 100%), and the probes' solve -- Metal's closest rays 4-7.5 ms a frame and its shadow
+        // batch -- lit nothing (2026-10-19). Solved again once a census sees a pixel read them, the texels leave rest, or
+        // the mover moves. --clipmap-always: every frame, as before.
+        if (liveTexels && !clipmapAlways && clipmapProbeReaders == 0 && texelResting && !MoverActive)
+        {
+            clipmapRested++;
+            return;
+        }
         // Staged (ClipmapStaged): a wave in flight holds its blocks where they were when it started -- the slots it
         // picked must still be the cells it traced when it resolves -- so the clipmap follows the camera only as a wave
         // starts (frame A), and the wave's later phases run with its own origins, frame and seed.

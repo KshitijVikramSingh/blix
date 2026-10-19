@@ -821,8 +821,8 @@ internal sealed partial class SponzaLoop
     private void RecordTexels(Matrix4x4 invProjection, Matrix4x4 invView, int width, int height)
     {
         if (!texelsUploaded || rayBlockBuffers.Length == 0) return;
-        RecordTexelVisible(invProjection, invView, width, height);
-        RecordLivePatchLight();
+        using (Prof("texels.visible")) RecordTexelVisible(invProjection, invView, width, height);
+        using (Prof("texels.live-patch-light")) RecordLivePatchLight();
         // A live split cook (SponzaLoop.SplitLanding.cs) takes --split-passes-per-frame passes of the frame, as the cook
         // screen does, each in its own copy of the passes; one pass a frame for everything else.
         if (sunNodeStage != SunNodeStage.Off)
@@ -836,7 +836,7 @@ internal sealed partial class SponzaLoop
             sunNodeCopy = 0;
         }
         RecordPatchSplitCheck();
-        RecordSplitCompose();
+        using (Prof("texels.compose")) RecordSplitCompose();
         FollowSun();
         SaveLightBakeWhenDone();
         LightletBakeWhenReady();

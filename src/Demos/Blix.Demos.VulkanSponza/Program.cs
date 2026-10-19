@@ -1010,6 +1010,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // OnLoad returned before building it.
     public void Dispose()
     {
+        ProfileSessionEnd();
         fullscreen?.Dispose();
         ReleaseDeviceResources();
         graph?.Dispose();

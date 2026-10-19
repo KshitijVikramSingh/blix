@@ -47,7 +47,8 @@ internal sealed partial class SponzaLoop : IDebugLogsSection
         {
             var refining = sunNodeRefineRound > 0;
             var name = sunNodeStage != SunNodeStage.Tracing ? $"split cook: {sunNodeStage}"
-                : refining ? $"split cook: refining round {sunNodeRefineRound}" : "split cook: sweep";
+                : (fineGathering ? "light change, 2 of 2 (fine texels): " : TransferOn ? "light change, 1 of 2 (coarse texels): " : "split cook: ")
+                  + (refining ? $"refining round {sunNodeRefineRound}" : "sweep");
             if (splitProgressName != name && splitProgressName is not null) DebugProgress.End(splitProgressName);
             splitProgressName = name;
             if (sunNodeStage == SunNodeStage.Tracing)

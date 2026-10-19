@@ -54,6 +54,7 @@ internal sealed partial class SponzaLoop
     // The cells' sun for the cook's (mode 1), before its trace: the texels' sun bits up for it (liveSunDone).
     private void HitCellsSunNow()
     {
+        using var profScope = Prof("cells-sun");
         if (!HitCellsReady || !liveSunDone || liveSunColumn < 0 || hitCellsSun == (liveSunToward, liveSunColumn)) return;
         var clock = Stopwatch.StartNew();
         // A dispatch a quarter-million work items (of up to 256 cells each): Sponza's whole build in one ran past the GPU's

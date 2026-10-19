@@ -135,6 +135,7 @@ internal sealed partial class SponzaLoop
     // again; then a round over what is left, or none.
     private bool BeginGpuRefineRound()
     {
+        using var profScope = Prof("gather.round-end");
         var left = ReadResolveCount();
         var of = sunNodeRefineRound == 0 ? sunNodeTraceIds.Length : sunNodeRefineIds.Length;
         if (sunNodeRefineRound == 0 && left > 0)

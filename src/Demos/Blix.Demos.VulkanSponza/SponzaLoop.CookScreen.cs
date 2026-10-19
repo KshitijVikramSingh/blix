@@ -32,7 +32,11 @@ internal sealed partial class SponzaLoop : IUiSource
     // user, 2026-10-16: "keep it for actual loading every time so we know when we're getting interrupted and for how
     // long"). Its view is read first, from a scene frame (SplitVisiblePending); an empty read keeps the last view.
     private bool CookScreenNow => !cookScreenOff && (transportCookTask is { IsCompleted: false } || LightletBakePending
-        || (SplitCookRunning && sceneFrameDrawn && !SplitVisiblePending));
+        || (SplitCookRunning && sceneFrameDrawn && !SplitVisiblePending && instantShowFrames == 0));
+    // Scene frames let through after the instant layer is written (ApplyPatchTexelsNow): the cook screen keeps the last
+    // image drawn, and before these it was the provisional's -- every texel its patch's light, too bright -- for the whole
+    // gather, the instant layer never shown (2026-10-19).
+    private int instantShowFrames;
 
     // The cook screen's frame (RenderFrame, while CookScreenNow): the cook's needs, a cleared screen, the cap.
     // The split cook's sweep of Sponza's 14.8M texels is ~3,800 frames: at full frames (3 fps) ~1,600 s. The cap is

@@ -356,6 +356,7 @@ internal sealed partial class SponzaLoop
 
     private void RenderFrame(Time time, RenderFrameContext frame, RenderCommandList commandList)
     {
+        ProfileFrameBegin();
         // Match-swapchain graph targets are reallocated rather than resized in place. Their public
         // handles stay stable, but their contents do not. GTAO reads ambientDenoisedHandle as the
         // preceding frame and TAA reads the other parity target, so both must refuse history once
@@ -567,7 +568,7 @@ internal sealed partial class SponzaLoop
         // A transport cook in the background: only what it waits on, and the cook screen (SponzaLoop.CookScreen.cs).
         if (CookScreenNow)
         {
-            RecordCookFrame(commandList);
+            using (Prof("cook-frame")) RecordCookFrame(commandList);
             return;
         }
 
@@ -735,10 +736,10 @@ internal sealed partial class SponzaLoop
         // the rejections and removes the whole class.
         RecordRaySurfaceBake();
         UpdateBakeScene();
-        RecordRtShadows(frame.Width, frame.Height);
+        using (Prof("rt-shadows")) RecordRtShadows(frame.Width, frame.Height);
         CookTransportWhenReady();
         CookGiWhenLanded();
-        RecordClipmap();
+        using (Prof("clipmap")) RecordClipmap();
         FlushTracerGroup();
         PickWatchPoints();
         RecordClipmapWatch();
@@ -747,7 +748,7 @@ internal sealed partial class SponzaLoop
         // Occlusion needs the pre-pass's depth; without one the early list is the whole frustum's.
         var skipPrepass = noPrepass || (abMode == "prepass" && AbOffPhase);
         var occlusionNow = occlusionCull && render.OcclusionCull && !skipPrepass;
-        CullList(SceneListCamera, cameraCull, margin: CameraCullMargin, occlusionEarly: occlusionNow);
+        using (Prof("cull")) CullList(SceneListCamera, cameraCull, margin: CameraCullMargin, occlusionEarly: occlusionNow);
         cameraTriangles = gpuCull ? -1 : fillIndirectTriangles;
         // Accumulate exactly one contiguous orbit so triangle means cover the full closed path and
         // do not depend on streaming duration or which arc happened to be sampled.
@@ -777,7 +778,7 @@ internal sealed partial class SponzaLoop
                     perFrame, Array.Empty<ShaderTextureBinding>(), material: g.IsMask ? g.Material : null);
             }
         });
-        if (occlusionNow) RecordOcclusion(cameraCull, perFrame, frame.Width, frame.Height);
+        if (occlusionNow) using (Prof("occlusion")) RecordOcclusion(cameraCull, perFrame, frame.Width, frame.Height);
         RecordRayView(frame.Width, frame.Height);
 
         // Hi-Z pyramid: level 0 reduces the resolved depth, each level after reduces its parent.
@@ -874,7 +875,7 @@ internal sealed partial class SponzaLoop
                 RecordSurfaceReclaim();
                 RecordClipmapMark(incidentInvProj, incidentInvView, frame.Width, frame.Height);
                 RecordScreenProbes(frame.Width, frame.Height);
-                RecordTexels(incidentInvProj, incidentInvView, frame.Width, frame.Height);
+                using (Prof("texels")) RecordTexels(incidentInvProj, incidentInvView, frame.Width, frame.Height);
                 RecordReference(incidentInvProj, incidentInvView, frame.Width, frame.Height);
                 RecordGpuReference();
                 if (halfLightingNow)
@@ -924,18 +925,19 @@ internal sealed partial class SponzaLoop
         }, clearColor: new GraphicsColor(0.05f, 0.07f, 0.10f, 1f));
 
         // Resolve before the graph executes, so the pass is recorded with the rest of the frame.
-        RecordTaaResolve();
+        using (Prof("taa")) RecordTaaResolve();
         // Last: this frame's surface keys become the next frame's history (after TAA and screen probes read it).
         if (SurfaceTargets)
         {
             graph.Pass(surfaceKeyHistoryPassHandle, scope => fullscreen.Draw(scope, surfaceKeyHistoryPipeline,
                 new[] { new ShaderTextureBinding("uSource", graph.GetColorTexture(surfaceKeyHandle)) }));
         }
-        UploadVisible();
-        graph.Execute(commandList);
+        using (Prof("upload")) UploadVisible();
+        using (Prof("execute")) graph.Execute(commandList);
 
         RecordPresentPass(commandList);
         sceneFrameDrawn = true;
+        if (instantShowFrames > 0) instantShowFrames--;
         taaWrite = taaWriteNext;
         // The camera this frame's velocity was measured against becomes the next frame's "previous".
         velocityPrevViewProj = viewProj;

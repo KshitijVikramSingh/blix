@@ -200,6 +200,7 @@ internal sealed partial class SponzaLoop
 
     private uint[] FarSpatialOrder(uint[] order, int front)
     {
+        using var profScope = Prof("far-order");
         var clock = System.Diagnostics.Stopwatch.StartNew();
         if (farPlaceKey is { } placeKey && farPlaceOrder is { } placeOrder && placeKey.Length == texelCount)
         {
@@ -222,10 +223,15 @@ internal sealed partial class SponzaLoop
                 return ordered;
             }
         }
-        var key = new uint[texelCount];
+        // The keys are the geometry's: from the GI bundle when made before for the same texels, else made (the texels read
+        // back, 22 s of Sponza's boot before the instant layer showed, 2026-10-19) and kept there.
+        var keyPath = PlaceKeyPath();
+        var key = keyPath is not null ? ReadPlaceKeys(keyPath) : null;
+        var keyRead = key is not null;
+        key ??= new uint[texelCount];
         var grid = texelGrid;
         const int chunk = 1 << 20;
-        for (var first = 0; first < texelCount; first += chunk)
+        for (var first = 0; first < texelCount && !keyRead; first += chunk)
         {
             var count = Math.Min(chunk, texelCount - first);
             var records = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(texelBuffer, checked(first * 32), count * 32).AsSpan()).ToArray();
@@ -241,6 +247,7 @@ internal sealed partial class SponzaLoop
                 key[first + i] = (morton << 2) ^ (ax * 2 + sign);   // 30 bits of cell, the face in the low bits' mix
             });
         }
+        if (!keyRead && keyPath is not null) WritePlaceKeys(keyPath, key);
         var ids = (uint[])order.Clone();
         var keys = new ulong[ids.Length];
         for (var i = 0; i < ids.Length; i++) keys[i] = ((ulong)key[ids[i]] << 32) | (uint)i;   // stable: ties keep the old order
@@ -253,8 +260,54 @@ internal sealed partial class SponzaLoop
         Array.Sort(allKeys, all);
         farPlaceOrder = all;
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[VulkanSponza] far field: the trace ordered by place ({front:N0} on screen, then {ids.Length - front:N0}) in {clock.Elapsed.TotalSeconds:0.0} s."));
+            $"[VulkanSponza] far field: the trace ordered by place ({front:N0} on screen, then {ids.Length - front:N0}; the keys {(keyRead ? "read from the GI bundle" : "made")}) in {clock.Elapsed.TotalSeconds:0.0} s."));
         return ids;
+    }
+
+    private const int PlaceKeyVersion = 1;
+
+    // The place keys' file beside the GI bundle's stages: the texels' stages and count, the grid, the key's version.
+    private string? PlaceKeyPath()
+    {
+        if (transportCombinedKey is not { } combined) return null;
+        var g = texelGrid;
+        var key = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(string.Create(CultureInfo.InvariantCulture,
+            $"{combined};texels {texelCount};grid {g.X},{g.Y},{g.Z},{g.W};v{PlaceKeyVersion}"))))[..24].ToLowerInvariant();
+        return Path.Combine(transportCacheDir, key + ".texel-place");
+    }
+
+    private uint[]? ReadPlaceKeys(string path)
+    {
+        if (!File.Exists(path)) return null;
+        try
+        {
+            using var r = new BinaryReader(new BufferedStream(File.OpenRead(path), 1 << 22));
+            if (r.ReadString() != "blix-texel-place" || r.ReadInt32() != PlaceKeyVersion || r.ReadInt32() != texelCount) return null;
+            var keys = new uint[texelCount];
+            var bytes = MemoryMarshal.AsBytes(keys.AsSpan());
+            return r.BaseStream.Read(bytes) == bytes.Length ? keys : null;
+        }
+        catch (Exception e) when (e is IOException or EndOfStreamException) { return null; }
+    }
+
+    private void WritePlaceKeys(string path, uint[] keys)
+    {
+        var count = texelCount;
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                var temp = path + ".partial";
+                using (var w = new BinaryWriter(new BufferedStream(File.Create(temp), 1 << 22)))
+                {
+                    w.Write("blix-texel-place"); w.Write(PlaceKeyVersion); w.Write(count);
+                    w.Write(MemoryMarshal.AsBytes(keys.AsSpan()));
+                }
+                File.Move(temp, path, overwrite: true);
+                Console.WriteLine($"[VulkanSponza] far field: the texels' place keys written to {path}.");
+            }
+            catch (IOException e) { Console.WriteLine($"[VulkanSponza] far field: {path} not written ({e.Message})."); }
+        });
     }
 
     private void ReleaseFarField()
