@@ -43,6 +43,8 @@ internal sealed partial class SponzaLoop
     private void DeclareLivePatchLight(Func<string[], ShaderInterface> reflect)
     {
         liveSunInterface = reflect(new[] { "texel_live_sun.comp" });
+        DeclareHitCells(reflect);
+        DeclareTransfer(reflect);
         liveDirectInterface = reflect(new[] { "texel_live_direct.comp" });
         liveGuidesInterface = reflect(new[] { "texel_live_guides.comp" });
         liveGuidesPass = graph.ComputePass("live-patch-guides").Shader(liveGuidesInterface).Handle;
@@ -206,7 +208,6 @@ internal sealed partial class SponzaLoop
             splitCooking = false;
             sunNodeStage = SunNodeStage.Off;
         }
-        liveLightEpoch++;
         StartSplitCook(new List<(Vector3? ToSun, string Path)> { (null, ""), (toSun, "") });
         splitCookPaths = new string?[] { null, null };
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
@@ -292,7 +293,6 @@ internal sealed partial class SponzaLoop
         sunNodePass = 0;
         sunNodeReadback = false;
         liveReadbacks.Clear();   // the old sun's slices: dropped, not landed
-        liveLightEpoch++;        // every texel's detail is for the old sun now
         farRelit = false;        // the far record relit for the new sun before the sweep (FarRelightNow)
         patchDirectDone = false;
         sunNodeDirsAsked = new[] { Vector3.UnitY, toSun };
@@ -320,7 +320,7 @@ internal sealed partial class SponzaLoop
         if (!liveSunDone || liveSunToward != toSun || !LivePatchLightRested || !LivePointsDone || SplitVisiblePending) return;
         var live = texelLiveIds!;
         var oldTrace = sunNodeTraceBuffer;
-        sunNodeTraceIds = liveVisibleIds is { Length: > 0 } seenIds ? LiveViewIds(seenIds) : Array.Empty<uint>();
+        sunNodeTraceIds = LiveCoarseOrder();
         sunNodeTraceBuffer = ReferenceEquals(sunNodeTraceIds, live) ? sunNodeLive
             : Own(device.CreateGpuBuffer(Math.Max(16, sunNodeTraceIds.Length * 4), MemoryMarshal.AsBytes(sunNodeTraceIds.AsSpan()), "sponza.sun-nodes.traced"));
         if (!oldTrace.Equals(sunNodeLive) && !oldTrace.Equals(default(GpuBufferHandle))) RetireGpuBuffer(oldTrace);
@@ -329,6 +329,7 @@ internal sealed partial class SponzaLoop
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] live texels: re-aimed in {sunNodeClock.Elapsed.TotalSeconds:0.0} s; tracing."));
         sunNodeClock.Restart();
+        ResetSunNodeCounters();
         liveRetargeting = false;
         sunNodeStage = SunNodeStage.Tracing;
     }
@@ -372,63 +373,40 @@ internal sealed partial class SponzaLoop
             }));
     }
 
-    // --live-texels gathers what the camera sees, not the scene: the texels on screen whose detail is not for the lights
-    // as they are; the rest keep the coarse light from the patches (LiveProvisionalNow) until they come into view. A
-    // scene-wide sweep was 16 M texels and ~6 min at every sun change (2026-10-16). liveTexelEpoch: the light epoch each
-    // texel was gathered at; liveLightEpoch moves on with every light change.
-    private uint[]? liveVisibleIds;
-    private uint[]? liveTexelEpoch;
-    private uint liveLightEpoch = 1;
-    private const int LiveViewEvery = 20, LiveViewMinTexels = 256;
-    private long liveViewAskedFrame = -1;
+    // --live-texels gathers the coarse levels of the whole scene at every light change, never by view: a camera move
+    // sets off no cook (the user, 2026-10-16: "doing computation that's potentially heavy or cook-ish between camera
+    // moves is a super bad idea"). The GI's budget follows the level: the hashed cells of liveMinLevel and coarser
+    // (Sponza: 0.77 M at 20 cm, 2.45 M at 10 cm), at --live-rays each, the coarsest first; pixels read no finer
+    // (TexelLevelsUniform). The finer levels -- the atlas's 12.7 M texels and the 5 cm cells -- keep the patches'
+    // light until their detail comes from the offline cook. Gathering only what was on screen made every camera
+    // move a cook of its own, and texels the jitter only sometimes landed on a trickle of them with the camera still.
+    private int liveMinLevel = 1, liveRays = 128;
+    private uint[]? liveCoarseIds, liveCoarseOrdered;
 
-    // The view's texels still to gather, in place order (neighbours together: the far field pools them).
-    private uint[] LiveViewIds(uint[] seen)
+    // The coarse texels in trace order: each level coarsest first, in place order within it (the far field pools
+    // neighbours), ordered once -- the geometry's.
+    private uint[] LiveCoarseOrder()
     {
-        liveTexelEpoch ??= new uint[texelCount];
-        var epochs = liveTexelEpoch;
-        var stale = seen.Where(id => epochs[id] != liveLightEpoch).ToArray();
-        return farField && stale.Length > 0 ? FarSpatialOrder(stale, stale.Length) : stale;
-    }
-
-    // Each few frames, the cook idle: the view asked for again (texel_visible.comp, a frame later read); what came into
-    // view since, gathered.
-    private void LiveViewCheck()
-    {
-        if (!liveTexels || !liveCookWarm || liveRetargeting || splitCooking || sunNodeStage != SunNodeStage.Off || liveRestartPending is not null) return;
-        if (splitVisibleAsked) return;   // asked: read next frame
-        if (liveViewAskedFrame >= 0 && liveVisibleIds is { } seen)
+        if (liveCoarseOrdered is not null) return liveCoarseOrdered;
+        // --live-transfer: nothing traced -- every texel is lit from its cooked entries (SponzaLoop.Transfer.cs).
+        // The hybrid: the texels the transfer flagged (SponzaLoop.Transfer.cs), in place order.
+        if (TransferOn && !transferCheck)
         {
-            liveViewAskedFrame = -1;
-            var stale = LiveViewIds(seen);
-            if (stale.Length >= LiveViewMinTexels) LiveGather(stale);
-            return;
+            if (!transferReady) return Array.Empty<uint>();   // not cooked yet: asked again at the trace (UploadSunNodes is before it)
+            var flagged = transferGatherIds;
+            return liveCoarseOrdered = farField && flagged.Length > 0 ? FarSpatialOrder(flagged, flagged.Length) : flagged;
         }
-        if (framesRendered % LiveViewEvery != 0) return;
-        splitVisibleAsked = true;
-        splitVisibleRecorded = false;
-        liveViewAskedFrame = framesRendered;
+        if (TransferOn) return liveCoarseOrdered = texelLiveIds ?? Array.Empty<uint>();   // the check: the gather over all
+        var ids = liveCoarseIds ?? Array.Empty<uint>();
+        if (!farField || ids.Length == 0) return liveCoarseOrdered = ids;
+        var texels = liveCoarseLevels!;
+        liveCoarseOrdered = ids.GroupBy(id => texels[id]).OrderByDescending(g => g.Key)
+            .SelectMany(g => { var group = g.ToArray(); return FarSpatialOrder(group, group.Length); }).ToArray();
+        return liveCoarseOrdered;
     }
 
-    // A gather of these texels for the lights as they are: the cook's setup and its sun as it is, no restart.
-    private void LiveGather(uint[] ids)
-    {
-        ResetSunNodeRefine();
-        sunNodeRefineRays = 0;
-        sunNodeFirst = 0;
-        sunNodePass = 0;
-        sunNodeReadback = false;
-        liveReadbacks.Clear();
-        var oldTrace = sunNodeTraceBuffer;
-        sunNodeTraceIds = ids;
-        sunNodeTraceBuffer = Own(device.CreateGpuBuffer(ids.Length * 4, MemoryMarshal.AsBytes(ids.AsSpan()), "sponza.sun-nodes.traced"));
-        if (!oldTrace.Equals(sunNodeLive) && !oldTrace.Equals(default(GpuBufferHandle))) RetireGpuBuffer(oldTrace);
-        splitCooking = true;
-        sunNodeClock.Restart();
-        sunNodeStage = SunNodeStage.Tracing;
-        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[VulkanSponza] live texels: {ids.Length:N0} texels came into view -- gathering them."));
-    }
+    // Each texel's level (its record's normal w), for the coarse lists' grouping.
+    private byte[]? liveCoarseLevels;
 
     // Each frame, beside the texels' work.
     private long liveRecordedFrame = -1;
@@ -440,7 +418,6 @@ internal sealed partial class SponzaLoop
         if (liveRecordedFrame == framesRendered) return;
         liveRecordedFrame = framesRendered;
         if (liveProvisionalPending) LiveProvisionalNow();
-        LiveViewCheck();
         if (liveRestartPending is { } pending && sunNodeStage is not (SunNodeStage.Relighting or SunNodeStage.Prep or SunNodeStage.PatchPick or SunNodeStage.Discover or SunNodeStage.Merge))
             LiveRestart(pending);
         if (!EnsureLiveInputs(d)) return;
@@ -559,7 +536,7 @@ internal sealed partial class SponzaLoop
         if (!liveTexels || keepCpuScene || rayQueries is null) return;
         // Whatever reads the CPU's scene keeps it: the references the gate holds the light against (2026-10-16: dropped,
         // the GPU reference stalled and the gate read garbage), the inspector, the checks, the watch, the leak census.
-        if (gpuReference || probeReference || texelInspect is not null || rayLeakCensus || watch || rayCheck || rayView || surfaceCheck) return;
+        if (gpuReference || probeReference || texelInspect is not null || rayLeakCensus || watch || rayCheck || rayView || surfaceCheck || spotWhy) return;
         rayQueries = null;
         lock (contactGate)
         {

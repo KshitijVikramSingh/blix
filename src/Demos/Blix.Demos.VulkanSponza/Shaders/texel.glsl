@@ -90,7 +90,9 @@ int texelFind(TexelGrid g, ivec3 cell, uint bin) {
 // bounce-lit cloth into blocks (the user: "looses a lot of detail and becomes really choppy").
 float texelLevelFor(float viewDepth, vec4 levels, float finestSpacing, float sunlit) {
     float want = mix(levels.w, levels.z, clamp(sunlit, 0.0, 1.0)) * viewDepth * levels.y;
-    return clamp(log2(max(want / finestSpacing, 1e-6)), 0.0, levels.x - 1.0);
+    // levels.x's fraction x 8: the finest level read (--live-texels' liveMinLevel: the finer ones are not gathered).
+    float levelCount = floor(levels.x);
+    return clamp(log2(max(want / finestSpacing, 1e-6)), floor(fract(levels.x) * 8.0 + 0.5), levelCount - 1.0);
 }
 
 // The texels a point reads: the eight cells around it (trilinear), in its face's bin, or without one in each of up

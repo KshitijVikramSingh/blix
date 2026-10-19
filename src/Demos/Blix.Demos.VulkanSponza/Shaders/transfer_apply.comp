@@ -1,0 +1,188 @@
+#version 450
+// The transfer applied (SponzaLoop.Transfer.cs): each live texel's light for the lights as they are, from its cooked
+// entries (transfer_finalize.comp) and the hit cells' light (hit_cells.comp mode 1) -- what its gather would have
+// summed, with no ray traced: per column, the sum over its entries of share x the cell side's light, and for a sky bin
+// pi x the sky's radiance there (the sky's column only). Its detail as the gather's (texel_nodes_shade.glsl): each
+// entry's light's luminance x its direction's tilt in the texel's frame, over the column's; the sky's share. Written
+// straight into the split light's parts (the sun's per unit of its irradiance) and their detail. A thread a live texel.
+
+layout(local_size_x = 64) in;
+
+#define EMPTY 0xFFFFFFFFu
+#define SKY_KEY 0x40000000u
+#define PATCH_KEY 0x80000000u
+#define FAR_KEY 0x20000000u
+#define PI 3.14159265359
+
+layout(set = 0, binding = 0) uniform TransferApply {
+    vec4 uApply;     // x the live texels, y K, z the dispatch's first
+    vec4 uInvIrr;    // rgb 1 / the sun's irradiance
+    vec4 uSky;       // x the sky's strength, y the mip it is read at
+    vec4 uColumns;   // x the patch light's columns, y the sky's, z the sun's
+    vec4 uIrr;       // rgb the sun's irradiance
+    vec4 uFar;       // the far field (texel_far.glsl)
+    vec4 uCookedGrid;
+    vec4 uCookedDims;
+} u;
+
+layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
+layout(std430, set = 0, binding = 2) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 3) readonly buffer LiveIds { uint liveIds[]; };
+layout(std430, set = 0, binding = 4) readonly buffer TransferEntries { uvec2 entries[]; };
+layout(std430, set = 0, binding = 5) readonly buffer CellLight { uint cellLight[]; };
+layout(std430, set = 0, binding = 6) buffer SplitSky { uvec2 skyPart[]; };
+layout(std430, set = 0, binding = 7) buffer SplitSun { uvec2 sunPart[]; };
+layout(std430, set = 0, binding = 8) buffer SkyDetail { uint skyDetail[]; };
+layout(std430, set = 0, binding = 9) buffer SunDetail { uint sunDetail[]; };
+// A tail entry's patch (transfer_finalize.comp): its albedo (PatchTerms: 3 a patch, albedo first), its light per column,
+// its mean direct n.l x visibility for the sun (texel_live_direct.comp's sums: n.l x 4096, texels).
+layout(std430, set = 0, binding = 10) readonly buffer PatchTerms { vec4 patchTerms[]; };
+layout(std430, set = 0, binding = 11) readonly buffer SunNodePatchLight { uvec2 patchLight[]; };
+layout(std430, set = 0, binding = 12) readonly buffer PatchDirect { uint patchDirect[]; };
+
+layout(std430, set = 0, binding = 13) readonly buffer TexelPatch { int texelPatch[]; };
+layout(std430, set = 0, binding = 20) readonly buffer TransferBins { uint bins[]; };   // [texel][19]: 36 far, 36 sky shares, far patch + 1
+layout(std430, set = 0, binding = 14) readonly buffer NodeGuidePatch { uint guidePatch[]; };
+#define COOKED_BINDING 15
+#define COOKED_GRID u.uCookedGrid
+#define COOKED_DIMS u.uCookedDims
+#include "cooked_patches.glsl"
+#define FAR_RECORD_BINDING 18
+#define FAR_RECORD_ACCESS readonly
+#define FAR_NEIGHBOURS_BINDING 19
+#include "texel_far.glsl"
+
+vec3 patchColumn(uint p, uint column) {
+    uvec2 w = patchLight[p * uint(u.uColumns.x) + column];
+    return vec3(unpackHalf2x16(w.x), unpackHalf2x16(w.y).x);
+}
+
+#define TEXEL_POSITION(i) texels[2 * (i)]
+#define TEXEL_NORMAL(i) texels[2 * (i) + 1]
+#define TEXEL_HASH(i) uvec4(0xFFFFFFFFu)
+#include "texel.glsl"
+
+uint packRgb9e5(vec3 c) {
+    const float maxValue = 65408.0;
+    c = clamp(c, vec3(0.0), vec3(maxValue));
+    float maxC = max(c.r, max(c.g, c.b));
+    int e = max(-16, int(floor(log2(max(maxC, 1e-30))))) + 1;
+    float scale = exp2(float(e - 9));
+    if (int(floor(maxC / scale + 0.5)) == 512) { e += 1; scale *= 2.0; }
+    uvec3 m = uvec3(floor(c / scale + 0.5));
+    return m.r | (m.g << 9) | (m.b << 18) | (uint(e + 15) << 27);
+}
+
+vec3 unpackRgb9e5(uint w) {
+    float scale = exp2(float(int(w >> 27) - 15 - 9));
+    return vec3(float(w & 511u), float((w >> 9) & 511u), float((w >> 18) & 511u)) * scale;
+}
+
+vec3 octDecode(vec2 e) {
+    vec3 v = vec3(e, 1.0 - abs(e.x) - abs(e.y));
+    if (v.z < 0.0) v.xy = (1.0 - abs(v.yx)) * vec2(v.x >= 0.0 ? 1.0 : -1.0, v.y >= 0.0 ? 1.0 : -1.0);
+    return normalize(v);
+}
+
+void main() {
+    uint t = gl_GlobalInvocationID.x + uint(u.uApply.z);
+    if (t >= uint(u.uApply.x)) return;
+    uint id = liveIds[t];
+    uint K = uint(u.uApply.y);
+    vec3 dn, dt1, dt2;
+    vec3 tn = texels[2u * id + 1u].xyz;
+    texelDetailFrame(dot(tn, tn) > 1e-12 ? normalize(tn) : vec3(0.0, 1.0, 0.0), dn, dt1, dt2);
+    const vec3 lumW = vec3(0.2126, 0.7152, 0.0722);
+    vec3 sky = vec3(0.0), sun = vec3(0.0);
+    vec2 skyTilt = vec2(0.0), sunTilt = vec2(0.0);
+    float escaped = 0.0;
+    // The far field's patches (texel_far.glsl's blend), for its entries: the texel's patch the cook's, else its nearest.
+    int farIds[FAR_SET];
+    float farWs[FAR_SET];
+    vec3 farN[FAR_SET], farT[FAR_SET], farB[FAR_SET];
+    for (int i = 0; i < FAR_SET; ++i) farIds[i] = -1;
+    int fp = int(bins[t * 19u + 18u] & 0xFFFFFFu) - 1;   // the cook's (transfer_finalize.comp)
+    if (u.uFar.x > 1.5 && fp >= 0) {
+        farSet(texels[2u * id].xyz, dot(tn, tn) > 1e-12 ? normalize(tn) : vec3(0.0, 1.0, 0.0), fp, u.uFar, farIds, farWs);
+        for (int i = 0; i < FAR_SET; ++i) if (farIds[i] >= 0) farFrame(farIds[i], farN[i], farT[i], farB[i]);
+    }
+    vec3 pn = vec3(0.0, 1.0, 0.0), pt = vec3(1.0, 0.0, 0.0), pbv = vec3(0.0, 0.0, 1.0);   // the first (primary) patch's frame
+    if (fp >= 0) farFrame(fp, pn, pt, pbv);
+    for (uint k = 0u; k < K; ++k) {
+        uvec2 e = entries[t * K + k];
+        if (e.x == EMPTY) break;
+        float share = unpackHalf2x16(e.y & 0xFFFFu).x;
+        vec3 d = octDecode(vec2(float((e.y >> 16) & 255u), float(e.y >> 24)) / 255.0 * 2.0 - 1.0);
+        vec2 tilt = vec2(dot(dt1, d), dot(dt2, d)) / max(dot(dn, d), 0.1);
+        vec3 a, b;
+        if ((e.x & PATCH_KEY) != 0u) {
+            uint p = e.x & 0x7FFFFFFFu;
+            vec3 albedo = patchTerms[3u * p].rgb;
+            uint texelsThere = patchDirect[2u * p + 1u];
+            float direct = texelsThere > 0u ? float(patchDirect[2u * p]) / 4096.0 / float(texelsThere) : 0.0;
+            a = albedo * patchColumn(p, uint(u.uColumns.y));
+            b = albedo * (patchColumn(p, uint(u.uColumns.z)) + u.uIrr.rgb * direct);
+        } else if ((e.x & SKY_KEY) != 0u) {
+            uint bin = e.x & 63u;
+            vec3 bd = octDecode((vec2(float(bin % 8u), float(bin / 8u)) + 0.5) / 8.0 * 2.0 - 1.0);
+            a = PI * textureLod(uSkyRadiance, bd, u.uSky.y).rgb * u.uSky.x;
+            b = vec3(0.0);
+            escaped += share;
+        } else {
+            uint cell = e.x >> 1, side = e.x & 1u;
+            a = unpackRgb9e5(cellLight[4u * cell + 2u * side]);
+            b = unpackRgb9e5(cellLight[4u * cell + 2u * side + 1u]);
+        }
+        sky += share * a;
+        sun += share * b;
+        skyTilt += dot(share * a, lumW) * tilt;
+        sunTilt += dot(share * b, lumW) * tilt;
+    }
+    // The misses: the sky by its bin about the texel's normal; the far field by its first patch's own bins (both 6 x 6
+    // octahedral over a hemisphere, transfer_accum.comp) -- pi x the blended patches' record radiance that way: the
+    // first's in that bin, the others' where its centre falls in theirs, wherever a record has any weight.
+    for (uint b = 0u; b < 36u; ++b) {
+        float fs = float((bins[t * 19u + b / 4u] >> (8u * (b % 4u))) & 255u) / 255.0;
+        float ss = float((bins[t * 19u + 9u + b / 4u] >> (8u * (b % 4u))) & 255u) / 255.0;
+        if (fp < 0 || u.uFar.x < 1.5) fs = 0.0;
+        if (fs <= 0.0 && ss <= 0.0) continue;
+        vec2 suv = (vec2(float(b % 6u), float(b / 6u)) + 0.5) / 6.0 * 2.0 - 1.0;
+        vec2 sxy = vec2(suv.x + suv.y, suv.x - suv.y) * 0.5;
+        vec3 bd = normalize(sxy.x * dt1 + sxy.y * dt2 + max(1.0 - abs(sxy.x) - abs(sxy.y), 0.0) * dn);   // the detail frame is the bins' frame
+        vec2 tilt = vec2(dot(dt1, bd), dot(dt2, bd)) / max(dot(dn, bd), 0.1);
+        if (ss > 0.0) {
+            vec3 a = ss * PI * textureLod(uSkyRadiance, bd, u.uSky.y).rgb * u.uSky.x;
+            sky += a;
+            skyTilt += dot(a, lumW) * tilt;
+            escaped += ss;
+        }
+        if (fs > 0.0) {
+            // The first patch's bin's centre (farBin's inverse).
+            vec2 uv = (vec2(float(b % 6u), float(b / 6u)) + 0.5) / 6.0 * 2.0 - 1.0;
+            vec2 pxy = vec2(uv.x + uv.y, uv.x - uv.y) * 0.5;
+            vec3 fd = normalize(pxy.x * pt + pxy.y * pbv + max(1.0 - abs(pxy.x) - abs(pxy.y), 0.0) * pn);
+            tilt = vec2(dot(dt1, fd), dot(dt2, fd)) / max(dot(dn, fd), 0.1);
+            vec3 fa = vec3(0.0), fb = vec3(0.0);
+            float fw = 0.0;
+            for (int i = 0; i < FAR_SET; ++i) {
+                if (farIds[i] < 0) continue;
+                int pb = farIds[i] == fp ? int(b) : farBin(fd, farN[i], farT[i], farB[i]);
+                if (pb < 0 || farRecord[farBase(farIds[i], pb, u.uFar)] == 0u) continue;
+                fa += farWs[i] * farLight(farIds[i], pb, int(u.uColumns.y), u.uFar);
+                fb += farWs[i] * farLight(farIds[i], pb, int(u.uColumns.z), u.uFar);
+                fw += farWs[i];
+            }
+            if (fw > 0.0) {
+                vec3 a = fs * PI * fa / fw, c = fs * PI * fb / fw;
+                sky += a; sun += c;
+                skyTilt += dot(a, lumW) * tilt;
+                sunTilt += dot(c, lumW) * tilt;
+            }
+        }
+    }
+    float skyLum = dot(sky, lumW), sunLum = dot(sun, lumW);
+    skyPart[id] = uvec2(packRgb9e5(sky), 0xFFFFu | 0x10000u);
+    sunPart[id] = uvec2(packRgb9e5(sun * u.uInvIrr.rgb), 0xFFFFu | 0x10000u);
+    skyDetail[id] = texelDetailPack(skyLum > 1e-9 ? skyTilt / skyLum : vec2(0.0), escaped);
+    sunDetail[id] = texelDetailPack(sunLum > 1e-9 ? sunTilt / sunLum : vec2(0.0), escaped);
+}

@@ -96,6 +96,14 @@
     <GlslShader Include="Shaders\texel_far_relight.comp" />
     <GlslShader Include="Shaders\texel_sun_provisional.comp" />
     <GlslShader Include="Shaders\texel_live_sun.comp" />
+    <GlslShader Include="Shaders\hit_cells.comp" />
+    <GlslShader Include="Shaders\transfer_apply.comp" />
+    <GlslShader Include="Shaders\transfer_finalize.comp" />
+    <GlslShader Include="Shaders\transfer_accum.comp" />
+    <GlslShader Include="Shaders\texel_ao.comp" />
+    <GlslShader Include="Shaders\transfer_fine.comp" />
+    <GlslShader Include="Shaders\texel_patch_light.comp" />
+    <GlslShader Include="Shaders\patch_dir.comp" />
     <GlslShader Include="Shaders\texel_live_direct.comp" />
     <GlslShader Include="Shaders\texel_live_guides.comp" />
     <GlslShader Include="Shaders\split_scatter.comp" />

@@ -1,0 +1,172 @@
+#version 450
+// The fine levels (SponzaLoop.Transfer.cs, A'): a fine texel -- the atlas's, the 5 cm cells -- has no transfer of its
+// own (16 M texels' lists would not fit); its light is its coarse texels' (the transfer's, at the level above: the
+// lookup the incident pass makes, texel.glsl's texelsAround), times its contact visibility over theirs (texel_ao.comp):
+// what it sees within two coarse spacings that they, larger, do not. Its detail the coarse texels' blend. Written into
+// the parts at each light change, after the transfer. A thread a fine texel.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform TransferFine {
+    vec4 uFine;        // x the fine texels, y the dispatch's first, z the coarse level, w the coarsest
+    vec4 uTexelGrid;   // the finest level's grid: xyz the origin, w the spacing
+    vec4 uTexelParams; // x the hash's capacity
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer TexelHash { uvec4 texelHash[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 3) readonly buffer FineIds { uint fineIds[]; };
+layout(std430, set = 0, binding = 4) buffer SplitSky { uvec2 skyPart[]; };
+layout(std430, set = 0, binding = 5) buffer SplitSun { uvec2 sunPart[]; };
+layout(std430, set = 0, binding = 6) buffer SkyDetail { uint skyDetail[]; };
+layout(std430, set = 0, binding = 7) buffer SunDetail { uint sunDetail[]; };
+layout(std430, set = 0, binding = 8) readonly buffer AoBytes { uint aoBytes[]; };
+// BLIX_SPOT_WHY (uTexelParams.z): a pass over a few texels writing, per texel, 32 words -- each candidate's id and its
+// weight as used (after the normal cut), the level read, the total.
+layout(std430, set = 0, binding = 9) buffer FineDebug { uint fineDebug[]; };
+// The fine texels the copy cannot answer, for their own gather (SponzaLoop.Transfer.cs, the fine refine): word 0 how
+// many, 1-3 by why (none turned its way; the ones turned its way disagree; the ones the normal cut disagree with them),
+// 4-15 the spread's histogram, then from 16 each its id and its spread.
+layout(std430, set = 0, binding = 10) buffer FineFlags { uint fineFlags[]; };
+
+
+#define TEXEL_HASH(i) texelHash[i]
+#define TEXEL_POSITION(i) texels[2 * (i)]
+#define TEXEL_NORMAL(i) texels[2 * (i) + 1]
+#include "texel.glsl"
+
+uint packRgb9e5(vec3 c) {
+    const float maxValue = 65408.0;
+    c = clamp(c, vec3(0.0), vec3(maxValue));
+    float maxC = max(c.r, max(c.g, c.b));
+    int e = max(-16, int(floor(log2(max(maxC, 1e-30))))) + 1;
+    float scale = exp2(float(e - 9));
+    if (int(floor(maxC / scale + 0.5)) == 512) { e += 1; scale *= 2.0; }
+    uvec3 m = uvec3(floor(c / scale + 0.5));
+    return m.r | (m.g << 9) | (m.b << 18) | (uint(e + 15) << 27);
+}
+
+vec3 unpackRgb9e5(uint w) {
+    float scale = exp2(float(int(w >> 27) - 15 - 9));
+    return vec3(float(w & 511u), float((w >> 9) & 511u), float((w >> 18) & 511u)) * scale;
+}
+
+float lightOf(uint cid) {
+    return dot(unpackRgb9e5(skyPart[cid].x) + unpackRgb9e5(sunPart[cid].x) * u.uTexelParams.w, vec3(0.2126, 0.7152, 0.0722));
+}
+
+float ao(uint id) { uint v = (aoBytes[id / 4u] >> (8u * (id % 4u))) & 255u; return v == 0u ? -1.0 : float(v - 1u) / 254.0; }
+
+void main() {
+    uint t = gl_GlobalInvocationID.x + uint(u.uFine.y);
+    if (t >= uint(u.uFine.x)) return;
+    uint id = fineIds[t];
+    vec3 p = texels[2u * id].xyz;
+    vec3 n = texels[2u * id + 1u].xyz;
+    if (dot(n, n) < 1e-12) return;
+    n = normalize(n);
+    TexelGrid g;
+    g.minCorner = u.uTexelGrid.xyz;
+    g.spacing = u.uTexelGrid.w;
+    g.capacity = uint(u.uTexelParams.x);
+    g.level = 0u;
+    int ids[TEXEL_CANDIDATES];
+    float weights[TEXEL_CANDIDATES];
+    vec3 sky = vec3(0.0), sun = vec3(0.0);
+    vec3 skyD = vec3(0.0), sunD = vec3(0.0);
+    float total = 0.0, coarseAo = 0.0, aoWeight = 0.0;
+    float keptMin = 1e30, keptMax = 0.0, cutMin = 1e30, cutMax = 0.0;
+    vec3 f1 = normalize(cross(abs(n.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0), n));
+    vec3 f2 = cross(n, f1);
+    bool debug = u.uTexelParams.z > 0.5;
+    if (debug) for (uint k = 0u; k < 32u; ++k) fineDebug[t * 32u + k] = 0xFFFFFFFFu;
+    // The coarse level, else the next coarser where it has none here.
+    for (uint level = uint(u.uFine.z); level <= uint(u.uFine.w) && total <= 0.0; ++level) {
+        texelsAround(texelLevelGrid(g, level), p, n, 0.0, ids, weights);
+        keptMin = 1e30; keptMax = 0.0; cutMin = 1e30; cutMax = 0.0;
+        if (debug) {
+            fineDebug[t * 32u + 30u] = level;
+            uint k = 0u;
+            for (int c = 0; c < TEXEL_CANDIDATES && k < 15u; ++c) {
+                if (ids[c] < 0 || weights[c] <= 0.0) continue;
+                vec3 dn = texels[2u * uint(ids[c]) + 1u].xyz;
+                fineDebug[t * 32u + 2u * k] = uint(ids[c]);
+                // Negative: cut by the normal.
+                fineDebug[t * 32u + 2u * k + 1u] = floatBitsToUint(dot(dn, dn) > 1e-12 && dot(n, normalize(dn)) > 0.95 ? weights[c] : -weights[c]);
+                ++k;
+            }
+        }
+        for (int c = 0; c < TEXEL_CANDIDATES; ++c) {
+            if (ids[c] < 0 || weights[c] <= 0.0) continue;
+            uint cid = uint(ids[c]);
+            // Turned its way only: a coarse cell can average a wall with the ledge under it (its normal 45 degrees down,
+            // and its gather the sunlit floor's bounce -- right for it, cell-sized bright blocks copied onto the wall,
+            // 2026-10-19). None turned its way: its instant light stands.
+            vec3 cn = texels[2u * cid + 1u].xyz;
+            // The lookup also reads the bins a tilt away (texel.glsl): a wall's texel with no wall cell near took the ledge
+            // cell's whole light once the weights were normalised -- a soft weight did not keep it out.
+            float w = dot(n, cn) * inversesqrt(max(dot(cn, cn), 1e-12)) > 0.95 ? weights[c] : 0.0;
+            float l = lightOf(cid);
+            if (w > 0.0) { keptMin = min(keptMin, l); keptMax = max(keptMax, l); } else { cutMin = min(cutMin, l); cutMax = max(cutMax, l); }
+            sky += w * unpackRgb9e5(skyPart[cid].x);
+            sun += w * unpackRgb9e5(sunPart[cid].x);
+            // Its tilt from its own frame (off its own normal, texel_patch_light.comp's rule) into this texel's.
+            vec3 cnn = normalize(cn);
+            vec3 c1 = normalize(cross(abs(cnn.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0), cnn));
+            vec3 c2 = cross(cnn, c1);
+            vec3 cSky = texelDetailUnpack(skyDetail[cid]);
+            vec3 cSun = texelDetailUnpack(sunDetail[cid]);
+            vec3 gSky = c1 * cSky.x + c2 * cSky.y;
+            vec3 gSun = c1 * cSun.x + c2 * cSun.y;
+            skyD += w * vec3(dot(gSky, f1), dot(gSky, f2), cSky.z);
+            sunD += w * vec3(dot(gSun, f1), dot(gSun, f2), cSun.z);
+            float a = ao(cid);
+            if (a >= 0.0) { coarseAo += w * a; aoWeight += w; }
+            total += w;
+        }
+    }
+    if (debug) fineDebug[t * 32u + 31u] = floatBitsToUint(total);
+    // Flagged: none turned its way, or the light around it changes too fast for a copy (over 2x, past a floor of a few
+    // percent of a lit wall's) among the cells turned its way or between those and the ones the normal cut.
+    if (!debug) {
+        const float floorLight = 0.002;
+        uint why = 0u;
+        if (total <= 0.0) why = 1u;
+        else if ((keptMax + floorLight) > 2.0 * (keptMin + floorLight)) why = 2u;
+        else if (cutMax > 0.0 && ((cutMax + floorLight) > 2.0 * (keptMax + floorLight) || (keptMin + floorLight) > 2.0 * (cutMin + floorLight))) why = 3u;
+        float keptRatio = (keptMax + floorLight) / (keptMin + floorLight);
+        float cutRatio = cutMax > 0.0 ? max((cutMax + floorLight) / (keptMax + floorLight), (keptMin + floorLight) / (cutMin + floorLight)) : 1.0;
+        if (why > 0u) {
+            uint slot = atomicAdd(fineFlags[0], 1u);
+            atomicAdd(fineFlags[why], 1u);
+            // Its id and how far the copy is off (none turned its way: first).
+            fineFlags[16u + 2u * slot] = id;
+            fineFlags[17u + 2u * slot] = floatBitsToUint(why == 1u ? 1e6 : max(keptRatio, cutRatio));
+        }
+        // The spread's histogram (words 4-15 before the ids move up: kept 4-9, cut 10-15): over 1.5, 2, 3, 4, 8, 16x.
+        if (total > 0.0) {
+            const float edges[6] = float[6](1.5, 2.0, 3.0, 4.0, 8.0, 16.0);
+            for (int e = 0; e < 6; ++e) {
+                if (keptRatio > edges[e]) atomicAdd(fineFlags[4 + e], 1u);
+                if (cutRatio > edges[e]) atomicAdd(fineFlags[10 + e], 1u);
+            }
+        }
+    }
+    if (total <= 0.0) return;   // none around: its provisional light stands
+    sky /= total; sun /= total; skyD /= total; sunD /= total;
+    // Contact darkens only: a coarse texel's centroid sunk in its surface (a cell holding a face and a recess) measures
+    // itself closed, and up to 2x over it lit its fine texels in cell-sized bright blocks (2026-10-19).
+    float fineAo = ao(id);
+    float ratio = fineAo >= 0.0 && aoWeight > 0.0 && coarseAo > 1e-3 ? clamp(fineAo / (coarseAo / aoWeight), 0.0, 1.0) : 1.0;
+    skyPart[id] = uvec2(packRgb9e5(sky * ratio), 0xFFFFu | 0x10000u);
+    sunPart[id] = uvec2(packRgb9e5(sun * ratio), 0xFFFFu | 0x10000u);
+    // The coarse tilts turned into this texel's frame: in their own (a cell averaging a wall and the ledge under it,
+    // turned 45 degrees down, its tilt toward the sunlit floor) they lit the wall's normal-mapped stones in blocks
+    // (2026-10-19).
+    // Its sky visibility the coarse cells', no more than its own openness within a metre (the instant layer's): what it
+    // sees of the sky it sees past that. The cells' alone put bright cell outlines on the wall and the lamps where a
+    // cell's centroid sank and its rays left through the wall (2026-10-19); its own alone, the gallery's openness, is far
+    // above its sky and lit everything too bright.
+    skyDetail[id] = texelDetailPack(skyD.xy, min(skyD.z, texelDetailUnpack(skyDetail[id]).z));
+    sunDetail[id] = texelDetailPack(sunD.xy, min(sunD.z, texelDetailUnpack(sunDetail[id]).z));
+}

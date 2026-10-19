@@ -1,0 +1,178 @@
+#version 450
+// The transfer cook (SponzaLoop.Transfer.cs): a slice's tables (transfer_accum.comp) into each texel's K + TAIL entries,
+// each two words: x the key, y its share (half, low 16 bits) and its mean direction (octahedral, 8 + 8 bits). The K
+// heaviest keys as they are (a hit cell << 1 | its back side, or SKY_KEY | the sky bin); the rest -- most of a texel's
+// weight lies in cells a few rays each (10 cm) -- folded by the patch their side sees into TAIL entries (PATCH_KEY | the
+// patch), lit at the patch level (its albedo, its light, its mean direct sun), and the sky bins among the rest into one
+// entry (the heaviest's direction). Only what is left past those is renormalized away:
+// renormalizing the whole tail (41% of the weight) over the kept heavy keys -- the sky bins first -- made the crevices'
+// corridor 1.75x too bright (2026-10-16). Then the table cleared for the next slice. A thread a texel.
+// Kept: the texel's kept share of everything its rays reached, for the cook's census (Transfer stats).
+
+layout(local_size_x = 64) in;
+
+#define TABLE 512
+#define TAIL 6
+#define EMPTY 0xFFFFFFFFu
+#define SKY_KEY 0x40000000u
+#define PATCH_KEY 0x80000000u
+#define FAR_KEY 0x20000000u
+
+layout(set = 0, binding = 0) uniform TransferFinalize {
+    vec4 uSlice;   // x the slice's texels, y its first live texel, z K, w the table's room in texels
+} u;
+
+layout(std430, set = 0, binding = 1) buffer TransferTable { uint table[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer TransferEntries { uvec2 entries[]; };   // [live texel][K]
+layout(std430, set = 0, binding = 3) buffer TransferStats { uint stats[]; };   // [0] keys over K (texels), [1] kept 1/1024 sum, [2] texels
+layout(std430, set = 0, binding = 4) readonly buffer HitCells { uint hitCells[]; };
+layout(std430, set = 0, binding = 5) writeonly buffer TransferBins { uint bins[]; };   // [texel][19]: 36 far, 36 sky shares (8 bits each), the far patch + 1
+layout(std430, set = 0, binding = 6) readonly buffer SunNodesLive { uint liveIds[]; };
+layout(std430, set = 0, binding = 7) readonly buffer TexelPatch { int texelPatch[]; };
+layout(std430, set = 0, binding = 8) readonly buffer NodeGuidePatch { uint guidePatch[]; };
+layout(std430, set = 0, binding = 9) readonly buffer CookedPatches { vec4 cookedPatch[]; };
+
+// A direction's bin in the far patch's frame (texel_far.glsl's farBin, transfer_accum.comp's primaryBin): -1 below it.
+int frameBin(int fp, vec3 d) {
+    vec3 n = normalize(cookedPatch[3 * fp + 1].xyz);
+    vec3 t = normalize(abs(n.y) < 0.999 ? cross(vec3(0.0, 1.0, 0.0), n) : cross(vec3(1.0, 0.0, 0.0), n));
+    vec3 b = cross(n, t);
+    float z = dot(d, n);
+    if (z <= 0.0) return -1;
+    float x = dot(d, t), y = dot(d, b);
+    float s = abs(x) + abs(y) + z;
+    vec2 p = vec2(x, y) / s;
+    vec2 uv = vec2(p.x + p.y, p.x - p.y) * 0.5 + 0.5;
+    ivec2 c = clamp(ivec2(uv * 6.0), ivec2(0), ivec2(5));
+    return c.y * 6 + c.x;
+}
+
+vec2 octEncode(vec3 d) {
+    d /= abs(d.x) + abs(d.y) + abs(d.z);
+    if (d.z >= 0.0) return d.xy;
+    return vec2((1.0 - abs(d.y)) * (d.x >= 0.0 ? 1.0 : -1.0), (1.0 - abs(d.x)) * (d.y >= 0.0 ? 1.0 : -1.0));
+}
+
+void main() {
+    uint t = gl_GlobalInvocationID.x;
+    uint texels = uint(u.uSlice.x);
+    if (t >= texels) return;
+    uint K = uint(u.uSlice.z);
+    uint base = t * uint(TABLE) * 5u;
+    uint room = uint(u.uSlice.w);
+    uint lostAt = room * uint(TABLE) * 5u + t;
+    uint lost = table[lostAt];
+    uint farAt = room * uint(TABLE) * 5u + room + t * 64u, skyAt = farAt + room * 64u;
+    float binTotal = 0.0;
+    for (int b = 0; b < 36; ++b) binTotal += float(table[farAt + uint(b)]) + float(table[skyAt + uint(b)]);
+    float total = float(lost);
+    int used = 0;
+    for (int s = 0; s < TABLE; ++s) if (table[base + uint(s) * 5u] != EMPTY) { total += float(table[base + uint(s) * 5u + 1u]); used++; }
+    // The K heaviest, a selection at a time (K small): each round the heaviest not yet taken.
+    uint out0 = (uint(u.uSlice.y) + t) * (K + uint(TAIL) + 2u);
+    float kept = 0.0;
+    // The K heaviest, a selection at a time (K small): each taken out of the table (its share zeroed) as it is chosen.
+    uint chosenKey[32], chosenShare[32];
+    vec3 chosenDir[32];
+    int count = 0;
+    for (uint k = 0u; k < K && k < 32u; ++k) {
+        int best = -1;
+        uint bestShare = 0u;
+        for (int s = 0; s < TABLE; ++s) {
+            if (table[base + uint(s) * 5u] == EMPTY) continue;
+            uint share = table[base + uint(s) * 5u + 1u];
+            if (share > bestShare) { bestShare = share; best = s; }
+        }
+        if (best < 0) break;
+        uint at = base + uint(best) * 5u;
+        chosenKey[count] = table[at];
+        chosenShare[count] = bestShare;
+        chosenDir[count] = vec3(ivec3(table[at + 2u], table[at + 3u], table[at + 4u]));
+        count++;
+        table[at + 1u] = 0u;
+        kept += float(bestShare);
+    }
+    // The rest, by patch (and one sky entry).
+    // The far patch the far bins are in (transfer_accum.comp's, read now as it was then): kept, so the apply reads
+    // the same one -- read again at the apply it could differ, and the far light went to nothing (2026-10-16).
+    uint id = liveIds[uint(u.uSlice.y) + t];
+    int fp = texelPatch[id];
+    if (fp < 0) fp = int(guidePatch[id]) - 2;
+    // What fits neither the K nor the tail goes into the far bins by its mean direction (the record's patch-level
+    // light that way) -- renormalized over the kept, a corridor's rare doorway paths were lit as dark as its near walls
+    // (0.56 of the reference, 2026-10-16). Only what has no bin (below the far patch's horizon, or none) is.
+    float folded = 0.0;
+    float foldBins[36];
+    for (int b = 0; b < 36; ++b) foldBins[b] = 0.0;
+    // Slots: TAIL patches, then one sky entry, one far entry (each the heaviest bin's direction for the rest of them).
+    uint tailKey[TAIL + 2];
+    float tailShare[TAIL + 2];
+    vec3 tailDir[TAIL + 2];
+    int tails = 0;
+    for (int i = 0; i < TAIL + 2; ++i) { tailKey[i] = EMPTY; tailShare[i] = 0.0; tailDir[i] = vec3(0.0); }
+    uint cellBase = 1u + 2u * hitCells[0];
+    for (int s = 0; s < TABLE; ++s) {
+        uint key = table[base + uint(s) * 5u];
+        float share = float(table[base + uint(s) * 5u + 1u]);
+        if (key == EMPTY || share <= 0.0) continue;
+        vec3 d = vec3(ivec3(table[base + uint(s) * 5u + 2u], table[base + uint(s) * 5u + 3u], table[base + uint(s) * 5u + 4u]));
+        uint tk;
+        int slot = -1;
+        {
+            tk = EMPTY;
+            if ((key & PATCH_KEY) != 0u) tk = key;   // a distant hit's, keyed by its patch already
+            else {
+                uint p = hitCells[cellBase + 2u * (key >> 1) + (key & 1u)] & 0xFFFFFFu;
+                if (p != 0u) tk = PATCH_KEY | (p - 1u);
+            }
+            if (tk != EMPTY) {
+                for (int i = 0; i < tails; ++i) if (tailKey[i] == tk) slot = i;
+                if (slot < 0 && tails < TAIL) { slot = tails++; tailKey[slot] = tk; }
+            }
+        }
+        if (slot < 0) continue;   // renormalized over the kept -- a texel where that is much is gathered (the hybrid)
+        tailShare[slot] += share;
+        tailDir[slot] += d;
+        kept += share;
+    }
+    // Shares of the texel's whole weight: the bins as they are; the near entries scaled up over the near weight lost.
+    float grand = total + binTotal;
+    float nearScale = kept > 0.0 ? max(total - folded, kept) / kept : 0.0;   // what is left (no bin) over the kept
+    uint written = 0u;
+    for (int k = 0; k < count; ++k) {
+        if (kept <= 0.0) break;
+        vec3 d = dot(chosenDir[k], chosenDir[k]) > 0.0 ? normalize(chosenDir[k]) : vec3(0.0, 0.0, 1.0);
+        uvec2 oct = uvec2(clamp((octEncode(d) * 0.5 + 0.5) * 255.0 + 0.5, vec2(0.0), vec2(255.0)));
+        entries[out0 + written++] = uvec2(chosenKey[k], (packHalf2x16(vec2(float(chosenShare[k]) * nearScale / max(grand, 1.0), 0.0)) & 0xFFFFu) | (oct.x << 16) | (oct.y << 24));
+    }
+    for (int i = 0; i < TAIL + 2; ++i) {
+        if (tailKey[i] == EMPTY || tailShare[i] <= 0.0 || kept <= 0.0) continue;
+        vec3 d = dot(tailDir[i], tailDir[i]) > 0.0 ? normalize(tailDir[i]) : vec3(0.0, 0.0, 1.0);
+        uvec2 oct = uvec2(clamp((octEncode(d) * 0.5 + 0.5) * 255.0 + 0.5, vec2(0.0), vec2(255.0)));
+        entries[out0 + written++] = uvec2(tailKey[i], (packHalf2x16(vec2(tailShare[i] * nearScale / max(grand, 1.0), 0.0)) & 0xFFFFu) | (oct.x << 16) | (oct.y << 24));
+    }
+    for (uint k = written; k < K + uint(TAIL) + 2u; ++k) entries[out0 + k] = uvec2(EMPTY, 0u);
+    uint bout = (uint(u.uSlice.y) + t) * 19u;
+    // Top 8 bits: the share of the texel's whole weight its entries dropped (near weight past them, renormalized
+    // away) -- the cook's guess of how far its light may be from its gather's; past --transfer-gather-share the
+    // texel is gathered at runtime too (SponzaLoop.Transfer.cs).
+    float dropped = grand > 0.0 ? max(total - kept - folded, 0.0) / grand : 0.0;
+    bins[bout + 18u] = (uint(fp + 1) & 0xFFFFFFu) | (uint(clamp(dropped * 255.0 + 0.5, 0.0, 255.0)) << 24);
+    for (int w = 0; w < 9; ++w) {
+        uint fw = 0u, sw = 0u;
+        for (int k = 0; k < 4; ++k) {
+            float f = grand > 0.0 ? (float(table[farAt + uint(4 * w + k)]) + foldBins[4 * w + k]) / grand : 0.0;
+            float s = grand > 0.0 ? float(table[skyAt + uint(4 * w + k)]) / grand : 0.0;
+            fw |= uint(clamp(f * 255.0 + 0.5, 0.0, 255.0)) << (8 * k);
+            sw |= uint(clamp(s * 255.0 + 0.5, 0.0, 255.0)) << (8 * k);
+        }
+        bins[bout + uint(w)] = fw;
+        bins[bout + 9u + uint(w)] = sw;
+    }
+    for (int b = 0; b < 36; ++b) { table[farAt + uint(b)] = 0u; table[skyAt + uint(b)] = 0u; }
+    if (used > int(K)) atomicAdd(stats[0], 1u);
+    atomicAdd(stats[1], uint(total > 0.0 ? kept / total * 1024.0 + 0.5 : 1024.0));   // of the near weight
+    atomicAdd(stats[2], 1u);
+    for (int s = 0; s < TABLE * 5; ++s) table[base + uint(s)] = (s % 5 == 0) ? EMPTY : 0u;
+    table[lostAt] = 0u;
+}

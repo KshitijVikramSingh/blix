@@ -1,0 +1,155 @@
+#version 450
+// --live-patch-texels (SponzaLoop.Transfer.cs, path B): every live texel's light from the patches' -- the live patch
+// light (multi-bounce, the patches' solve, real-time) blended over the texel's patch set (texel_far.glsl's farSet: its
+// patch and that patch's neighbours seen along the surface, so never across a thin wall), times its contact ratio: its
+// own openness (texel_ao.comp, the share of its cosine rays meeting nothing within a metre) over the set's (the
+// patches' cooked openness, the same reach). The patches carry the light; the texel's own geometry its detail. No ray
+// at the light change: a pass. Detail: no tilt; its openness as the sky's share. A thread a live texel.
+// Directional (2026-10-18): one ratio over the whole hemisphere lifted every corner to its patch's light -- Sponza's
+// darkest texels 2-4x the gather's, "too bright overall" (the user). So by the 8 world octants: each patch's light
+// split by where it comes from (patch_dir.comp's shares), each octant by the texel's openness there over the patch's
+// (the mean of its texels', mode 0). A texel hidden from the bright side of its patch's light is darker than it.
+//   mode 0  once, after the cook: each texel's octant openness into its patch's sums
+//   mode 1  the light
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform TexelPatchLight {
+    vec4 uPass;        // x the live texels, y the dispatch's first, z the patch light's columns, w the mode
+    vec4 uColumns;     // x the sky's column, y the sun's
+    vec4 uInvIrr;      // rgb 1 / the sun's irradiance
+    vec4 uFar;         // the far field (texel_far.glsl)
+    vec4 uCookedGrid;
+    vec4 uCookedDims;
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 2) readonly buffer LiveIds { uint liveIds[]; };
+layout(std430, set = 0, binding = 3) readonly buffer TexelPatch { int texelPatch[]; };
+layout(std430, set = 0, binding = 4) readonly buffer SunNodePatchLight { uvec2 patchLight[]; };   // [patch][column]: half rgb
+layout(std430, set = 0, binding = 5) readonly buffer AoBytes { uint aoBytes[]; };
+layout(std430, set = 0, binding = 6) buffer SplitSky { uvec2 skyPart[]; };
+layout(std430, set = 0, binding = 7) buffer SplitSun { uvec2 sunPart[]; };
+layout(std430, set = 0, binding = 8) buffer SkyDetail { uint skyDetail[]; };
+layout(std430, set = 0, binding = 9) buffer SunDetail { uint sunDetail[]; };
+layout(std430, set = 0, binding = 15) readonly buffer DirOpen { uint dirOpen[]; };            // [texel id]: 8 nibbles
+layout(std430, set = 0, binding = 16) buffer PatchOpen { uint patchOpen[]; };                 // [patch][18]: by octant sum (x14), texels; short sum (x254), texels
+layout(std430, set = 0, binding = 18) readonly buffer AoShort { uint aoShort[]; };
+layout(std430, set = 0, binding = 17) readonly buffer PatchDirShares { uint shares[]; };      // [patch][2][8]: half pairs
+
+#define COOKED_BINDING 10
+#define COOKED_GRID u.uCookedGrid
+#define COOKED_DIMS u.uCookedDims
+#include "cooked_patches.glsl"
+#define FAR_RECORD_BINDING 13
+#define FAR_RECORD_ACCESS readonly
+#define FAR_NEIGHBOURS_BINDING 14
+#include "texel_far.glsl"
+
+uint packRgb9e5(vec3 c) {
+    const float maxValue = 65408.0;
+    c = clamp(c, vec3(0.0), vec3(maxValue));
+    float maxC = max(c.r, max(c.g, c.b));
+    int e = max(-16, int(floor(log2(max(maxC, 1e-30))))) + 1;
+    float scale = exp2(float(e - 9));
+    if (int(floor(maxC / scale + 0.5)) == 512) { e += 1; scale *= 2.0; }
+    uvec3 m = uvec3(floor(c / scale + 0.5));
+    return m.r | (m.g << 9) | (m.b << 18) | (uint(e + 15) << 27);
+}
+
+// texel.glsl's texelDetailPack: the light's relative change as the normal tilts toward t1, t2 (snorm8 over +-2), the sky.
+uint detailPack(vec2 tilt, float sky) {
+    vec2 t = clamp(tilt * 0.5, vec2(-1.0), vec2(1.0));
+    uvec2 q = uvec2(ivec2(round(t * 127.0)) & 0xFF);
+    return q.x | (q.y << 8) | (uint(round(clamp(sky, 0.0, 1.0) * 255.0)) << 16) | (255u << 24);
+}
+
+vec3 column(int p, uint k) {
+    uvec2 w = patchLight[uint(p) * uint(u.uPass.z) + k];
+    return vec3(unpackHalf2x16(w.x), unpackHalf2x16(w.y).x);
+}
+
+float ao(uint id) { uint v = (aoBytes[id / 4u] >> (8u * (id % 4u))) & 255u; return v == 0u ? -1.0 : float(v - 1u) / 254.0; }
+
+void main() {
+    uint t = gl_GlobalInvocationID.x + uint(u.uPass.y);
+    if (t >= uint(u.uPass.x)) return;
+    uint id = liveIds[t];
+    vec3 p = texels[2u * id].xyz;
+    vec3 n = texels[2u * id + 1u].xyz;
+    if (dot(n, n) < 1e-12) return;
+    n = normalize(n);
+    int fp = texelPatch[id];
+    if (fp < 0) fp = cookedNearest(p, n);
+    if (fp < 0) return;   // none near: its provisional light stands
+    uint myOpen = dirOpen[id];
+    if (u.uPass.w < 0.5) {
+        for (uint o = 0u; o < 8u; ++o) {
+            uint v = (myOpen >> (4u * o)) & 15u;
+            if (v == 15u) continue;
+            atomicAdd(patchOpen[uint(fp) * 18u + o * 2u], v);
+            atomicAdd(patchOpen[uint(fp) * 18u + o * 2u + 1u], 1u);
+        }
+        uint vs = (aoShort[id / 4u] >> (8u * (id % 4u))) & 255u;
+        if (vs != 0u) { atomicAdd(patchOpen[uint(fp) * 18u + 16u], vs - 1u); atomicAdd(patchOpen[uint(fp) * 18u + 17u], 1u); }
+        return;
+    }
+    int ids[FAR_SET];
+    float ws[FAR_SET];
+    if (u.uFar.x > 0.5) farSet(p, n, fp, u.uFar, ids, ws);
+    else { for (int i = 0; i < FAR_SET; ++i) { ids[i] = -1; ws[i] = 0.0; } ids[0] = fp; ws[0] = 1.0; }   // no neighbours: its own
+    vec3 sky = vec3(0.0), sun = vec3(0.0);
+    float open = 0.0, total = 0.0;
+    vec2 skyTiltSum = vec2(0.0), sunTiltSum = vec2(0.0);
+    float tiltW = 0.0;
+    if (ids[0] < 0 || ws[0] <= 0.0) { for (int i = 0; i < FAR_SET; ++i) { ids[i] = -1; ws[i] = 0.0; } ids[0] = fp; ws[0] = 1.0; }
+    for (int i = 0; i < FAR_SET; ++i) {
+        if (ids[i] < 0 || ws[i] <= 0.0) continue;
+        uint q = uint(ids[i]);
+        // Each column's light by octant, each octant by the texel's openness there over its patch's.
+        float fSky = 0.0, fSun = 0.0;
+        // The detail's direction (the gather's tilt, texel_nodes_shade.glsl): each octant's light toward its centre, in
+        // the texel's detail frame (texel.glsl's texelDetailFrame) -- without it every bump took the same fill.
+        vec3 t1 = normalize(cross(abs(n.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0), n));
+        vec3 t2 = cross(n, t1);
+        for (uint o = 0u; o < 8u; ++o) {
+            uint v = (myOpen >> (4u * o)) & 15u;
+            uint sum = patchOpen[q * 18u + o * 2u], cnt = patchOpen[q * 18u + o * 2u + 1u];
+            float r = v == 15u || cnt == 0u || sum == 0u ? 1.0 : clamp(float(v) / (float(sum) / float(cnt)), 0.0, 2.0);
+            vec2 sk = unpackHalf2x16(shares[q * 8u + o / 2u]), sn = unpackHalf2x16(shares[q * 8u + 4u + o / 2u]);
+            float sKy = ((o & 1u) == 0u ? sk.x : sk.y) * r, sUn = ((o & 1u) == 0u ? sn.x : sn.y) * r;
+            fSky += sKy;
+            fSun += sUn;
+            vec3 dc = normalize(vec3((o & 1u) != 0u ? 1.0 : -1.0, (o & 2u) != 0u ? 1.0 : -1.0, (o & 4u) != 0u ? 1.0 : -1.0));
+            vec2 tl = vec2(dot(t1, dc), dot(t2, dc)) / max(dot(n, dc), 0.1);
+            if (dot(n, dc) > -0.2) { skyTiltSum += ws[i] * sKy * tl; sunTiltSum += ws[i] * sUn * tl; tiltW += ws[i] * (sKy + sUn) * 0.5; }
+        }
+        sky += ws[i] * column(ids[i], uint(u.uColumns.x)) * fSky;
+        sun += ws[i] * column(ids[i], uint(u.uColumns.y)) * fSun;
+        open += ws[i] * cookedPatch[3 * ids[i] + 1].w;
+        total += ws[i];
+    }
+    sky /= total; sun /= total; open /= total;
+    // The second scale: its openness within the short reach (a crease, a contact) over its patches' mean there.
+    uint vs = (aoShort[id / 4u] >> (8u * (id % 4u))) & 255u;
+    float shortMean = 0.0, shortW = 0.0;
+    for (int i = 0; i < FAR_SET; ++i) {
+        if (ids[i] < 0 || ws[i] <= 0.0) continue;
+        uint cnt = patchOpen[uint(ids[i]) * 18u + 17u];
+        if (cnt == 0u) continue;
+        shortMean += ws[i] * float(patchOpen[uint(ids[i]) * 18u + 16u]) / 254.0 / float(cnt);
+        shortW += ws[i];
+    }
+    float shortRatio = vs != 0u && shortW > 0.0 && shortMean > 1e-3 ? clamp(float(vs - 1u) / 254.0 / (shortMean / shortW), 0.0, 1.5) : 1.0;
+    sky *= shortRatio; sun *= shortRatio;
+    float mine = ao(id);
+    skyPart[id] = uvec2(packRgb9e5(sky), 0xFFFFu | 0x10000u);
+    sunPart[id] = uvec2(packRgb9e5(sun * u.uInvIrr.rgb), 0xFFFFu | 0x10000u);
+    float skyShare = 0.0, sunShare = 0.0;
+    for (int i = 0; i < FAR_SET; ++i) if (ids[i] >= 0 && ws[i] > 0.0) { skyShare += ws[i]; sunShare += ws[i]; }
+    vec2 skyTilt = skyShare > 0.0 ? skyTiltSum / max(skyShare, 1e-6) : vec2(0.0);
+    vec2 sunTilt = sunShare > 0.0 ? sunTiltSum / max(sunShare, 1e-6) : vec2(0.0);
+    float vis = mine >= 0.0 ? mine : open;
+    skyDetail[id] = detailPack(skyTilt, vis);
+    sunDetail[id] = detailPack(sunTilt, vis);
+}

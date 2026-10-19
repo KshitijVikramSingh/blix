@@ -54,6 +54,7 @@ public static class Program
         // timestamps bracket encoder submission rather than execution.
         // Opens with the overlay showing, as a research renderer is mostly read through it. ` hides it.
         var scene = SceneProfile.Named(args.String("scene"));
+        LogBuild();
         var defaults = new WindowOptions($"Blix — {scene.Title}", 1440, 810) { Diagnostics = true };
         if (args.Values("win", 2) is [var w, var h])
         {
@@ -71,6 +72,28 @@ public static class Program
         using var window = new Window(loop, WindowOptions.FromArgs(args, defaults));
         window.Run();
         return 0;
+    }
+
+    // Which build this is, first in the log: the configuration, when the binary and its shaders were built, and a hash of
+    // the shaders it will load -- so a run read against an edit can be told from a stale one (2026-10-19).
+    private static void LogBuild()
+    {
+        var assembly = typeof(Program).Assembly;
+        var config = assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyConfigurationAttribute), false)
+            .OfType<System.Reflection.AssemblyConfigurationAttribute>().FirstOrDefault()?.Configuration ?? "?";
+        var dir = Path.GetDirectoryName(assembly.Location) ?? ".";
+        var shaders = Path.Combine(dir, "Shaders");
+        var spv = Directory.Exists(shaders) ? Directory.GetFiles(shaders, "*.spv").OrderBy(f => f, StringComparer.Ordinal).ToArray() : Array.Empty<string>();
+        using var sha = System.Security.Cryptography.SHA256.Create();
+        foreach (var f in spv)
+        {
+            var bytes = File.ReadAllBytes(f);
+            sha.TransformBlock(bytes, 0, bytes.Length, null, 0);
+        }
+        sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+        var newest = spv.Length == 0 ? DateTime.MinValue : spv.Max(File.GetLastWriteTime);
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[VulkanSponza] build: {config}, {dir}; binary {File.GetLastWriteTime(assembly.Location):MM-dd HH:mm:ss}, shaders {spv.Length} newest {newest:MM-dd HH:mm:ss}, hash {Convert.ToHexString(sha.Hash!)[..12]}."));
     }
 }
 

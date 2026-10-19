@@ -1,0 +1,62 @@
+#version 450
+// Path B's directional contact (SponzaLoop.Transfer.cs): each patch's incident light split by where it comes from -- the
+// 8 world octants -- per column, as shares: its couplings' (each by the coupled patch's outgoing light, the live solve's,
+// toward it) and, for the sky's column, its sky (its escaped share by direction x the sky's luminance there), the way the
+// live guides weigh them (texel_live_guides.comp). A texel hidden from where its patch's light comes from is darker
+// than its patch (texel_patch_light.comp): a corner, an arch's underside. A thread a patch; at each light change.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform PatchDir {
+    vec4 uDir;   // x the patches, y the components (G), z the sky's component
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer CookedPatches { vec4 cookedPatch[]; };
+layout(std430, set = 0, binding = 2) readonly buffer CouplingStart { uint couplingStart[]; };
+layout(std430, set = 0, binding = 3) readonly buffer Couplings { uvec2 coupling[]; };
+layout(std430, set = 0, binding = 4) readonly buffer NodeOutgoing { vec4 nodeOut[]; };
+layout(std430, set = 0, binding = 5) readonly buffer PatchSkyEscape { float skyEscape[]; };   // [patch][64]
+layout(std430, set = 0, binding = 6) readonly buffer SkyGuideLum { float skyLum[]; };          // [64]
+layout(std430, set = 0, binding = 7) writeonly buffer PatchDirShares { uint shares[]; };       // [patch][G][8]: half pairs
+
+uint octant(vec3 d) { return (d.x > 0.0 ? 1u : 0u) | (d.y > 0.0 ? 2u : 0u) | (d.z > 0.0 ? 4u : 0u); }
+
+vec3 octDecode(vec2 e) {
+    vec3 v = vec3(e, 1.0 - abs(e.x) - abs(e.y));
+    if (v.z < 0.0) v.xy = (1.0 - abs(v.yx)) * vec2(v.x >= 0.0 ? 1.0 : -1.0, v.y >= 0.0 ? 1.0 : -1.0);
+    return normalize(v);
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= uint(u.uDir.x)) return;
+    uint G = uint(u.uDir.y);
+    const vec3 lum = vec3(0.2126, 0.7152, 0.0722);
+    float h[16];
+    for (int k = 0; k < 16; ++k) h[k] = 0.0;
+    vec3 p = cookedPatch[3u * i].xyz;
+    for (uint c = couplingStart[i]; c < couplingStart[i + 1u]; ++c) {
+        uint j = coupling[c].x;
+        vec3 d = cookedPatch[3u * j].xyz - p;
+        if (dot(d, d) < 1e-8) continue;
+        uint o = octant(d);
+        float w = uintBitsToFloat(coupling[c].y);
+        for (uint k = 0u; k < G && k < 2u; ++k) h[8u * k + o] += w * dot(nodeOut[j * G + k].rgb, lum);
+    }
+    uint skyK = uint(u.uDir.z);
+    if (skyK < 2u)
+        for (uint b = 0u; b < 64u; ++b) {
+            float e = skyEscape[i * 64u + b];
+            if (e <= 0.0) continue;
+            vec3 d = octDecode((vec2(float(b % 8u), float(b / 8u)) + 0.5) / 8.0 * 2.0 - 1.0);
+            h[8u * skyK + octant(d)] += e * skyLum[b];
+        }
+    for (uint k = 0u; k < 2u; ++k) {
+        float total = 0.0;
+        for (uint o = 0u; o < 8u; ++o) total += h[8u * k + o];
+        for (uint o = 0u; o < 8u; o += 2u) {
+            float a = total > 0.0 ? h[8u * k + o] / total : 0.125, b2 = total > 0.0 ? h[8u * k + o + 1u] / total : 0.125;
+            shares[i * 8u + k * 4u + o / 2u] = packHalf2x16(vec2(a, b2));
+        }
+    }
+}

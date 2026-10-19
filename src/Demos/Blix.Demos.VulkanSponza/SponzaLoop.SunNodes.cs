@@ -210,6 +210,8 @@ internal sealed partial class SponzaLoop
             File.ReadAllBytes(Path.Combine(shaderDir, name + ".comp.spv")), si, name)), name));
         CreateSunNodeSolvePipeline(shaderDir);
         liveSunPipeline = Make("texel_live_sun", liveSunInterface);
+        CreateHitCellsPipeline(shaderDir);
+        CreateTransferPipelines(shaderDir);
         liveDirectPipeline = Make("texel_live_direct", liveDirectInterface);
         liveGuidesPipeline = Make("texel_live_guides", liveGuidesInterface);
         CreateFarPipeline(shaderDir);
@@ -347,9 +349,8 @@ internal sealed partial class SponzaLoop
         sunNodeLive = Own(device.CreateGpuBuffer(live.Length * 4, MemoryMarshal.AsBytes(live.AsSpan()), "sponza.sun-nodes.live"));
         // A live split cook traces what the image reads first (SponzaLoop.SplitLanding.cs); otherwise the live order.
         sunNodeTraceIds = sunNodeStride == 1 ? SplitTraceOrder(live) : live.Where((_, i) => i % sunNodeStride == 0).ToArray();
-        // --live-texels: the texels on screen alone (LiveViewIds); the rest keep their coarse light until they are seen.
-        // Never the scene: with no view yet, nothing -- the next view check (LiveViewCheck) gathers what it sees.
-        if (liveTexels) sunNodeTraceIds = liveVisibleIds is { Length: > 0 } seenIds ? LiveViewIds(seenIds) : Array.Empty<uint>();
+        // --live-texels: the coarse levels, scene-wide (LiveCoarseOrder).
+        if (liveTexels) sunNodeTraceIds = LiveCoarseOrder();
         // The far field pools a slice's texels with their neighbours: neighbours trace together (SponzaLoop.FarField.cs).
         else if (farField && splitCooking && sunNodeStride == 1)
             sunNodeTraceIds = FarSpatialOrder(sunNodeTraceIds, ReferenceEquals(sunNodeTraceIds, live) ? 0 : splitVisibleCount);
@@ -380,7 +381,7 @@ internal sealed partial class SponzaLoop
         guides ??= new float[64];
         sunNodeGuideBuffer = Own(device.CreateGpuBuffer(guides.Length * 4, MemoryMarshal.AsBytes(guides.AsSpan()), "sponza.sun-nodes.guides"));
         // --live-texels: the live solve's guides (texel_live_guides.comp), rebuilt each time its light rests.
-        if (liveTexels && !liveGuides.Equals(default(GpuBufferHandle)))
+        if (liveTexels && sunNodeGuide && !liveGuides.Equals(default(GpuBufferHandle)))
         {
             RetireGpuBuffer(sunNodeGuideBuffer);
             sunNodeGuideBuffer = liveGuides;
@@ -469,6 +470,7 @@ internal sealed partial class SponzaLoop
     {
         // Live: the sun points' bits first (shot in the frame after the merge, RecordLivePointBits).
         if (liveTexels && !LivePointsDone) { RecordLivePointBits(); return; }
+        HitCellsSunNow();
         var refining = sunNodeRefineRound > 0;
         var live = refining ? sunNodeRefineIds : sunNodeTraceIds;
         var suns = sunNodeSuns!.Length;
@@ -553,8 +555,20 @@ internal sealed partial class SponzaLoop
         var passes = refining ? RefinePasses : sweepPasses;
         var clock = Stopwatch.StartNew();
         var count = Math.Min(sunNodeSlice, live.Length - sunNodeFirst);
-        device.WaitIdle();
-        var sums = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(sunNodeAccum, 0, count * suns * 16).AsSpan()).ToArray();
+        Vector4[] sums;
+        if (liveTexels && SunNodesOnHost && Array.IndexOf(sunNodeAccums, sunNodeAccum) >= 0)
+        {
+            // On the host the slice's passes are done when DispatchNow returns: its sums read where they lie (mapped),
+            // with no WaitIdle behind the frames in flight and no copy -- ~220 ms a slice before (2026-10-16).
+            var bytes = new byte[count * suns * 16];
+            device.ReadMappedGpuBuffer(sunNodeAccum, 0, bytes);
+            sums = MemoryMarshal.Cast<byte, Vector4>(bytes.AsSpan()).ToArray();
+        }
+        else
+        {
+            device.WaitIdle();
+            sums = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(sunNodeAccum, 0, count * suns * 16).AsSpan()).ToArray();
+        }
         ProcessSlice(sums, live, sunNodeFirst, count, refining, passes);
         sunNodeReadSeconds += clock.Elapsed.TotalSeconds;
         sunNodeReadback = false;
@@ -624,11 +638,46 @@ internal sealed partial class SponzaLoop
             $"[VulkanSponza] sun nodes: traced in {trace:0.0} min ({(long)sunNodeTraceIds.Length * sunNodeRays / 1e9:0.00} G rays{(sunNodeRefineRound > 0 ? $" and {sunNodeRefineRays / 1e9:0.00} G refining in {sunNodeRefineRound} rounds" : "")}, {sunNodeReadSeconds:0} s of it reading back) for {suns.Length} suns ({(sunNodeLit ? "a quarter of the rays by the band's guides, a quarter at the light lists, MIS" : sunNodeGuided ? "half the rays by the band's guides" : "cosine rays")}), after {sunNodeRelightSeconds:0.0} s of patch solves; hits {stats[0]:N0} ({100.0 * stats[4] / hits:0.00}% answered by the foliage's points, {100.0 * stats[1] / hits:0.00}% among neither: no sun; {100.0 * stats[2] / hits:0.00}% no patch), misses {stats[3]:N0}{(farOn ? $", far by the record {stats[5]:N0}" : "")}."));
         if (sunNodeNowPasses > 0)
             Console.WriteLine(string.Create(Inv,
-                $"[VulkanSponza] sun nodes, outside the frame: {sunNodeNowPasses:N0} passes; rays {sunNodeNowSeconds[0]:0} s, trace {sunNodeNowSeconds[1]:0} s, shade {sunNodeNowSeconds[2]:0} s ({sunNodeNowSeconds[2] * 1000 / sunNodeNowPasses:0.0} ms a pass of {sunNodeSlice * 32:N0} rays)."));
+                $"[VulkanSponza] sun nodes, outside the frame: {sunNodeNowPasses:N0} passes; rays {sunNodeNowSeconds[0]:0} s, trace {sunNodeNowSeconds[1]:0} s, shade {sunNodeNowSeconds[2]:0} s ({sunNodeNowSeconds[2] * 1000 / sunNodeNowPasses:0.0} ms a pass of {sunNodeSlice * 32:N0} rays; {sunNodeLaterPasses:N0} passes not a frame's first, their rays {sunNodeLaterRays * 1000 / Math.Max(1, sunNodeLaterPasses):0.0} ms each); of the trace's {sunNodeClock.Elapsed.TotalSeconds:0.0} s, passes {sunNodeNowSeconds.Sum():0.0} s, read-backs {sunNodeReadSeconds:0.0} s, the rest (frames, landing) {sunNodeClock.Elapsed.TotalSeconds - sunNodeNowSeconds.Sum() - sunNodeReadSeconds:0.0} s; shade passes by the hit cells {hitCellPassesOn:N0}, by the search {hitCellPassesOff:N0}."));
         Array.Clear(sunNodeNowSeconds);
         sunNodeNowPasses = 0;
         ResetSunNodeRefine();
         sunNodeRefineRays = 0;
+        if (spotWhy) SpotWhyCompare(fine: false);
+        // BLIX_NO_FINE=1 (an A/B): the fine texels keep the instant layer's light after the gather.
+        if (fineGathering)
+        {
+            // The fine refine's round done: its texels landed as they came; the rays as they were.
+            fineGathering = false;
+            sunNodeRays = fineGatherSavedRays;
+            texelMaxRays = fineGatherSavedMaxRays;
+        }
+        else if (TransferOn && transferReady && !transferCheck && transferGatherIds.Length > 0 && Environment.GetEnvironmentVariable("BLIX_NO_FINE") != "1")
+        {
+            ApplyFineNow();
+            if (spotWhy) SpotWhyCompare(fine: true);
+            // The fine refine: the flagged texels traced as the coarse were, a round of their own, the cook screen up.
+            if (FineGatherIds() is { Length: > 0 } fineIds)
+            {
+                RetireTraceBuffer();
+                sunNodeTraceIds = fineIds;
+                sunNodeTraceBuffer = Own(device.CreateGpuBuffer(fineIds.Length * 4, MemoryMarshal.AsBytes(fineIds.AsSpan()), "sponza.sun-nodes.fine"));
+                fineGatherSavedRays = sunNodeRays;
+                fineGatherSavedMaxRays = texelMaxRays;
+                sunNodeRays = fineGatherRays;
+                texelMaxRays = fineGatherRays;
+                RetireGpuBuffer(sunNodeStats);
+                sunNodeStats = Own(device.CreateGpuBuffer(48, new byte[48], "sponza.sun-nodes.stats"));
+                sunNodeFirst = 0;
+                sunNodePass = 0;
+                sunNodeClock.Restart();
+                ResetSunNodeCounters();
+                fineGathering = true;
+                sunNodeStage = SunNodeStage.Tracing;
+                return;
+            }
+        }
+        if (transferChecked) TransferCheckCompare();
         if (splitCooking)
         {
             FinishSplitCook();
@@ -826,22 +875,33 @@ internal sealed partial class SponzaLoop
     // --split-on-frame: the gather's passes in the frame graph, as before (the A/B).
     private bool sunNodeOnFrame;
     // How long a frame gives the passes: under the cook screen most of it; with the scene up, a share of the frame.
-    private const double SunNodeCookScreenMs = 200, SunNodeLiveMs = 50;
+    // The live budget counts the passes' own work, not the first pass's wait behind the frame's rendering on the
+    // queue: counted, the wait (~100 ms) spent a 50 ms budget, one pass a frame -- Sponza's refine took 13.5 s for
+    // ~1 s of rays (the rays kernel 1 ms, the frame's first ~100 ms, 2026-10-16). BLIX_LIVE_MS overrides it.
+    private const double SunNodeCookScreenMs = 200;
+    private static readonly double SunNodeLiveMs = double.TryParse(Environment.GetEnvironmentVariable("BLIX_LIVE_MS"), out var ms) ? ms : 80;
 
     // texel_nodes_shade_split.comp: the same shade for up to 32 suns, at ~2.5x the workgroups resident (outside the frame).
     private ShaderInterface sunNodeShadeSplitInterface = null!;
     private PipelineHandle sunNodeShadeSplitPipeline;
+
+    // The first dispatch's wait behind the frame's own work this frame (RunSunNodePassesNow leaves it out of its budget).
+    private double sunNodeQueueWaitMs;
 
     private void SunNodePassNow(GpuBufferHandle ids, int first, int slice, int pass, int seedPass)
     {
         var t0 = Stopwatch.GetTimestamp();
         device.DispatchNow(new[] { SunNodeRaysCommand(ids, first, slice, seedPass) }, "sun-nodes-rays");
         var t1 = Stopwatch.GetTimestamp();
+        var cells = HitCellsShade(0);
         frameTracer!.Trace(sunNodeRaysBuffer, sunNodeHits, slice * 32, SunNodeSeed(first, seedPass, 0), closestOnly: true);
         var t2 = Stopwatch.GetTimestamp();
-        device.DispatchNow(new[] { SunNodeShadeCommand(ids, first, slice, pass, 0, 0f, few: sunNodeSuns!.Length <= 32) }, "sun-nodes-shade");
+        device.DispatchNow(new[] { SunNodeShadeCommand(ids, first, slice, pass, 0, 0f, few: sunNodeSuns!.Length <= 32, cells: cells) }, "sun-nodes-shade");
         var t3 = Stopwatch.GetTimestamp();
         sunNodeNowSeconds[0] += Stopwatch.GetElapsedTime(t0, t1).TotalSeconds;
+        if (sunNodeNowFrame == framesRendered) { sunNodeLaterRays += Stopwatch.GetElapsedTime(t0, t1).TotalSeconds; sunNodeLaterPasses++; }
+        else sunNodeQueueWaitMs = Stopwatch.GetElapsedTime(t0, t1).TotalMilliseconds;
+        sunNodeNowFrame = framesRendered;
         sunNodeNowSeconds[1] += Stopwatch.GetElapsedTime(t1, t2).TotalSeconds;
         sunNodeNowSeconds[2] += Stopwatch.GetElapsedTime(t2, t3).TotalSeconds;
         sunNodeNowPasses++;
@@ -849,14 +909,61 @@ internal sealed partial class SponzaLoop
 
     // The immediate passes' wall time by stage (rays, trace, shade), each including its wait: reported at the finish.
     private readonly double[] sunNodeNowSeconds = new double[3];
-    private long sunNodeNowPasses;
+    // A trace's counters, from its start (MergeDiscovered, FinishLiveRetarget): they ran on across a session's cooks.
+    private void ResetSunNodeCounters()
+    {
+        Array.Clear(sunNodeNowSeconds);
+        sunNodeNowPasses = sunNodeLaterPasses = 0;
+        sunNodeLaterRays = 0;
+        sunNodeReadSeconds = 0;
+    }
+
+    private long sunNodeNowPasses, sunNodeLaterPasses, sunNodeNowFrame = -1;
+    private double sunNodeLaterRays;
 
     // RecordSunNodeSlice on hardware: passes and read-backs until the frame's budget is spent or the stage moves on.
+    private void RetireTraceBuffer()
+    {
+        if (!sunNodeTraceBuffer.Equals(sunNodeLive) && !sunNodeTraceBuffer.Equals(default(GpuBufferHandle))) RetireGpuBuffer(sunNodeTraceBuffer);
+    }
+
     private void RunSunNodePassesNow()
     {
+        // --live-transfer: the light change's cook is the transfer's pass, with nothing traced (SponzaLoop.Transfer.cs).
+        // --live-transfer: the light change's cook is the transfer's pass, then the gather of the texels it flagged.
+        if (TransferOn && transferReady && !transferCheck && sunNodeRefineRound == 0 && sunNodeFirst == 0 && sunNodePass == 0
+            && transferAppliedFor != liveSunToward)
+        {
+            // The far record relit now, from the patches' direct sums now: relit at the cook (for its cut), before the
+            // sums were up, its sun column was none -- and the apply's far light, most of a texel's, had no sun.
+            patchDirectDone = false;
+            farRelit = false;
+            FarRelightNow();
+            if (livePatchTexels) ApplyPatchTexelsNow(); else ApplyTransferNow();
+            if (spotWhy) SpotWhySnapshot();
+            transferAppliedFor = liveSunToward;
+            if (sunNodeTraceIds.Length == 0 && transferGatherIds.Length > 0)
+            {
+                // Cooked after this trace's ids were taken (at boot): the flagged now.
+                RetireTraceBuffer();
+                sunNodeTraceIds = LiveCoarseOrder();
+                sunNodeTraceBuffer = Own(device.CreateGpuBuffer(Math.Max(16, sunNodeTraceIds.Length * 4), MemoryMarshal.AsBytes(sunNodeTraceIds.AsSpan()), "sponza.sun-nodes.traced"));
+            }
+            if (sunNodeTraceIds.Length == 0) { FinishSunNodes(); return; }
+        }
+        if (TransferOn && transferCheck && transferReady && sunNodeRefineRound == 0 && sunNodeFirst == 0 && sunNodePass == 0 && transferCheckSky is null && !transferChecked)
+        {
+            patchDirectDone = false;
+            farRelit = false;
+            FarRelightNow();
+            if (livePatchTexels) ApplyPatchTexelsNow(); else ApplyTransferNow();
+            TransferCheckSnapshot();
+            transferChecked = true;
+        }
         var clock = Stopwatch.StartNew();
         var budget = CookScreenNow ? SunNodeCookScreenMs : SunNodeLiveMs;
-        while (sunNodeStage == SunNodeStage.Tracing && clock.Elapsed.TotalMilliseconds < budget)
+        sunNodeQueueWaitMs = 0;
+        while (sunNodeStage == SunNodeStage.Tracing && clock.Elapsed.TotalMilliseconds - sunNodeQueueWaitMs < budget)
         {
             if (sunNodeReadback)
             {
@@ -888,18 +995,20 @@ internal sealed partial class SponzaLoop
         }
     }
 
-    private DispatchCommand SunNodeRaysCommand(GpuBufferHandle ids, int first, int slice, int seedPass, int discover = 0)
+    // plain: cosine rays alone, no far stop (the transfer's cook: the geometry's, so nothing of the light may steer them).
+    // farCut: with plain, the far field's cut kept (the transfer's: its far rays are read from the record at the apply).
+    private DispatchCommand SunNodeRaysCommand(GpuBufferHandle ids, int first, int slice, int seedPass, int discover = 0, bool plain = false, bool farCut = false)
     {
         var raysDeclared = sunNodeRaysInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
         return new DispatchCommand(sunNodeRaysPipeline, slice, 1, 1,
             new ShaderUniform[]
             {
-                new("uSlice", new Vector4Uniform(new Vector4(first, slice, seedPass, sunNodeGuided ? 1f : 0f))),
+                new("uSlice", new Vector4Uniform(new Vector4(first, slice, seedPass, sunNodeGuided && !plain ? 1f : 0f))),
                 new("uCookedGrid", new Vector4Uniform(cookedGrid)),
                 new("uCookedDims", new Vector4Uniform(cookedDims)),
                 // x 1: the light strategy on; y the patches' disk radius (a patch stands for spacing^2 of surface).
-                new("uLights", new Vector4Uniform(new Vector4(sunNodeLit ? 1f : 0f, transportSpacing / MathF.Sqrt(MathF.PI), 0f, 0f))),
-                new("uFar", new Vector4Uniform(FarUniform(discover))),
+                new("uLights", new Vector4Uniform(new Vector4(sunNodeLit && !plain ? 1f : 0f, transportSpacing / MathF.Sqrt(MathF.PI), 0f, 0f))),
+                new("uFar", new Vector4Uniform(plain && !farCut ? Vector4.Zero : FarUniform(discover))),
             },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
@@ -917,7 +1026,8 @@ internal sealed partial class SponzaLoop
             }.Concat(CookedBuffers()).Where(b => raysDeclared.Contains(b.Name)).ToArray());
     }
 
-    private DispatchCommand SunNodeShadeCommand(GpuBufferHandle ids, int first, int slice, int pass, int discover, float exactMode, bool few = false)
+    // cells: the hit cells answer the hits (SponzaLoop.HitCells.cs), the trace having shot each hit's sun.
+    private DispatchCommand SunNodeShadeCommand(GpuBufferHandle ids, int first, int slice, int pass, int discover, float exactMode, bool few = false, bool cells = false)
     {
         // The cells' detail (SponzaLoop.SplitDetail.cs) from the sweep of a split cook; never discovering or refining.
         var detail = splitCooking && discover == 0 && sunNodeRefineRound == 0 && !sunNodeDetail.Equals(default(GpuBufferHandle));
@@ -932,7 +1042,8 @@ internal sealed partial class SponzaLoop
                 new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, sunNodeUnknownSun))),
                 // A ray's sky as the gather takes it: strength 1, one mip blurred.
                 new("uSky", new Vector4Uniform(new Vector4(1f, 1f, 0f, 0f))),
-                new("uLookup", new Vector4Uniform(new Vector4(sunNodePlane, sunNodeSigma, 0f, 0f))),
+                // w: the hit cells (SponzaLoop.HitCells.cs) answer the hit, their sun bit shot for this cook's sun.
+                new("uLookup", new Vector4Uniform(new Vector4(sunNodePlane, sunNodeSigma, 0f, cells ? 1f : 0f))),
                 new("uFoliage", new Vector4Uniform(new Vector4(sunNodeFoliageSlots, discover, exactMode, 0f))),
                 new("uDetail", new Vector4Uniform(new Vector4(first, detail ? 1f : 0f, CensusOn(discover) ? 1f : 0f, censusPlacements))),
                 new("uFar", new Vector4Uniform(exactMode > 0f ? Vector4.Zero : FarUniform(discover))),
@@ -971,6 +1082,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("NodeTransport", TransportRecordsBuffer),
                 new ShaderBufferBinding("PatchDirectSums", patchDirectSums.Equals(default(GpuBufferHandle)) ? sunNodeAccum : patchDirectSums),
                 new ShaderBufferBinding("FarTransport", farTransportRecord.Equals(default(GpuBufferHandle)) ? sunNodeAccum : farTransportRecord),
+                new ShaderBufferBinding("HitCells", hitCellsBuffer.Equals(default(GpuBufferHandle)) ? sunNodeAccum : hitCellsBuffer),
             }.Concat(CookedBuffers()).Where(b => declared.Contains(b.Name)).ToArray());
     }
 
@@ -1010,7 +1122,9 @@ internal sealed partial class SponzaLoop
     // texel nor sun point listed; after the last, the list read back and made sun points (off the frame thread).
     // The discovered sun points (hits among neither texel nor foliage point): a stage of the GI bundle, under the
     // combined key and the discovery's settings -- the geometry's; their sun bits are this cook's.
-    private string DiscoveredHeader => string.Create(Inv, $"discovered v1;stride {sunNodeDiscoverStride};room {DiscoverRoom};rays {sunNodeRays};slice {sunNodeSlice};texels {texelCount}");
+    // "rays 512" fixed: a discovery pass is one pass of 32 rays a texel whatever the sweep's count (--live-rays changed it,
+    // and a live boot re-ran a 14 s discovery the bundle had, 2026-10-16).
+    private string DiscoveredHeader => string.Create(Inv, $"discovered v1;stride {sunNodeDiscoverStride};room {DiscoverRoom};rays 512;slice {sunNodeSlice};texels {texelCount}");
 
     private void RecordSunNodeDiscover()
     {
@@ -1068,7 +1182,11 @@ internal sealed partial class SponzaLoop
         var (added, bits) = done.Result;
         sunNodeDiscoverTask = null;
         UploadSunPoints(sunNodePoints.Concat(added).ToArray(), sunNodePointBits.Concat(bits).ToArray());
+        ResetSunNodeCounters();
         if (liveTexels) BeginLivePointBits();
+        BuildHitCells();
+        BuildTransfer();
+        BuildPatchTexels();
         // The trace proper counts afresh.
         RetireGpuBuffer(sunNodeStats);
         sunNodeStats = Own(device.CreateGpuBuffer(48, new byte[48], "sponza.sun-nodes.stats"));

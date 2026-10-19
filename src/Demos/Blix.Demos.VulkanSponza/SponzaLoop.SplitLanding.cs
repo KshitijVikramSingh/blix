@@ -56,7 +56,7 @@ internal sealed partial class SponzaLoop
         splitVisibleOrder = null;
         splitVisibleCount = 0;
         splitVisibleLanded = false;
-        splitVisibleAsked = true;
+        splitVisibleAsked = !liveTexels;   // live: the coarse levels scene-wide, no view first
         splitVisibleRecorded = false;
         splitSkyLanded = splitSunLanded = false;
         splitLandClock.Restart();
@@ -71,15 +71,12 @@ internal sealed partial class SponzaLoop
         if (!splitVisibleAsked) return;
         if (splitVisibleRecorded)
         {
-            // --live-texels: read in place once the frame that wrote it is done (no wait); otherwise the next frame.
-            if (liveTexels && framesRendered < splitVisibleRecordedFrame + Math.Max(1, device.MaxFramesInFlightCount)) return;
             ReadTexelVisible();
             return;
         }
         var words = (texelCount + 31) / 32;
         if (!texelVisibleBits.Equals(default(GpuBufferHandle))) RetireGpuBuffer(texelVisibleBits);
-        texelVisibleBits = liveTexels ? Own(device.CreateReadableGpuBuffer(words * 4, "sponza.texels.visible"))
-            : Own(device.CreateGpuBuffer(words * 4, name: "sponza.texels.visible"));
+        texelVisibleBits = Own(device.CreateGpuBuffer(words * 4, name: "sponza.texels.visible"));
         splitVisibleRecordedFrame = framesRendered;
         graph.Dispatch(texelVisiblePass, new DispatchCommand(texelVisiblePipeline, (width + 7) / 8, (height + 7) / 8, 1,
             new ShaderUniform[]
@@ -111,35 +108,11 @@ internal sealed partial class SponzaLoop
     {
         var clock = Stopwatch.StartNew();
         var bitBytes = new byte[(texelCount + 31) / 32 * 4];
-        if (liveTexels) device.ReadMappedGpuBuffer(texelVisibleBits, 0, bitBytes);
-        else bitBytes = device.ReadGpuBuffer(texelVisibleBits, 0, bitBytes.Length);
+        bitBytes = device.ReadGpuBuffer(texelVisibleBits, 0, bitBytes.Length);
         var bits = MemoryMarshal.Cast<byte, uint>(bitBytes.AsSpan()).ToArray();
         RetireGpuBuffer(texelVisibleBits);
         texelVisibleBits = default;
         var live = texelLiveIds!;
-        if (liveTexels)
-        {
-            // --live-texels: the texels on screen alone, from the bits' words (the gather traces only them).
-            var seen = new List<uint>();
-            for (var w = 0; w < bits.Length; w++)
-                for (var b = bits[w]; b != 0u; b &= b - 1u)
-                {
-                    var id = (uint)(w * 32 + BitOperations.TrailingZeroCount(b));
-                    if (id < (uint)texelCount) seen.Add(id);
-                }
-            // An empty view while the last had texels: the query failed (a frame with no scene drawn) -- the last kept.
-            if (seen.Count > 0 || liveVisibleIds is not { Length: > 0 }) liveVisibleIds = seen.ToArray();
-            splitVisibleOrder = null;
-            splitVisibleCount = liveVisibleIds.Length;
-            // Nothing seen and no view before (the first frames, before the scene is drawn into the query, 2026-10-16:
-            // a boot whose view read 0 traced nothing): asked again, the cook waiting on it (SplitVisiblePending).
-            splitVisibleAsked = seen.Count == 0 && liveVisibleIds.Length == 0 && splitCooking;
-            splitVisibleRecorded = false;
-            if (splitCooking)
-                Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                    $"[VulkanSponza] live texels: {seen.Count:N0} texels on screen (recorded at frame {splitVisibleRecordedFrame}, read at {framesRendered}; {clock.Elapsed.TotalMilliseconds:0} ms){(seen.Count == 0 ? $" -- none: the last view's {liveVisibleIds.Length:N0} kept" : "")}."));
-            return;
-        }
         var order = new uint[live.Length];
         var front = 0;
         foreach (var id in live)
@@ -201,9 +174,6 @@ internal sealed partial class SponzaLoop
 
     private void LandSplitSliceLive(uint[] ids, int first, int count, Vector3 inverse)
     {
-        // Gathered for the lights as they are (LiveViewIds skips them until the lights change).
-        if (liveTexelEpoch is { } epochs && sunNodeRefineRound == 0)
-            for (var t = 0; t < count; t++) epochs[ids[first + t]] = liveLightEpoch;
         var idsBuffer = Own(device.CreateGpuBuffer(Math.Max(16, count * 4), MemoryMarshal.AsBytes(ids.AsSpan(first, count)), "sponza.split.scatter-ids"));
         for (var k = 0; k < sunNodeResults.Length && k < sunNodeKinds.Length; k++)
         {

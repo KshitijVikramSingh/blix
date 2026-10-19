@@ -50,6 +50,8 @@ internal sealed partial class SponzaLoop
         lightmapEnabled = args.Flag("lightmap");
         if (args.Int("lightmap-backface") is { } bf) lightmapBackface = Math.Clamp(bf, 1, 16);
         lightmapBuriedWhy = args.Flag("lightmap-buried-why");
+        texelCentroidWhy = args.Flag("texel-centroid-why");
+        texelLift = args.Flag("texel-lift");
         if (args.Float("lightmap-buried-lift") is { } bl) lightmapBuriedLiftAsked = Math.Clamp(bl, 0f, 1f);
         if (args.Float("lightmap-buried-reach") is { } br) lightmapBuriedReach = Math.Clamp(br, 0.01f, 1000f);
         if (args.Int("lightmap-enclosed") is { } le) lightmapEnclosedTests = Math.Clamp(le, 0, 64);

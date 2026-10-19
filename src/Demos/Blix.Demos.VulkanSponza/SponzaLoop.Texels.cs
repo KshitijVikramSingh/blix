@@ -618,6 +618,24 @@ internal sealed partial class SponzaLoop
                 : Own(device.CreateGpuBuffer(Math.Max(live.Count, 1) * 4, MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(live)), "sponza.texels.live"));
             // --lightlets: the live texels' sun records (SponzaLoop.LightletBake), read or baked.
             texelLiveIds = live.ToArray();
+            if (liveTexels)
+            {
+                // The coarse levels' hashed cells (SponzaLoop.LivePatchLight.cs, LiveCoarseOrder): a record's normal w is its level.
+                var levels = new byte[texelCount];
+                var coarse = new List<uint>();
+                foreach (var id in texelLiveIds)
+                {
+                    if (id >= all) continue;
+                    var level = (int)bake.Texels[2 * id + 1].W;
+                    levels[id] = (byte)level;
+                    if (level >= liveMinLevel) coarse.Add(id);
+                }
+                liveCoarseLevels = levels;
+                liveCoarseIds = coarse.ToArray();
+                liveCoarseOrdered = null;
+                Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                    $"[VulkanSponza] live texels: {coarse.Count:N0} hashed cells at level {liveMinLevel} and coarser gathered at each light change, {liveRays} rays each; finer levels from the patches."));
+            }
             BeginLightlets(bake.Texels, texelLiveIds, texelCount, bakePath);
         }
         // A resolved cache: at rest from the first frame. A full-state cache (LightBakeVersion 4, settled by its refining):
@@ -724,7 +742,7 @@ internal sealed partial class SponzaLoop
     // texel.glsl's texelLevelFor: levels, a pixel's width at unit depth (|M22| may carry a Y flip), the pixels a texel
     // should span.
     private Vector4 TexelLevelsUniform(int frameHeight) =>
-        new(texelLevels, 2f / (MathF.Abs(cameraProjection.M22) * Math.Max(1, frameHeight)), texelPixels, texelShadePixels);
+        new(texelLevels + (liveTexels ? Math.Min(liveMinLevel, texelLevels - 1) / 8f : 0f), 2f / (MathF.Abs(cameraProjection.M22) * Math.Max(1, frameHeight)), texelPixels, texelShadePixels);
 
     // What the level rule's sunlit test reads (texel_mark.comp, incident_clipmap.frag): the sun, the cascades.
     private IEnumerable<ShaderUniform> TexelSunUniforms() => new ShaderUniform[]

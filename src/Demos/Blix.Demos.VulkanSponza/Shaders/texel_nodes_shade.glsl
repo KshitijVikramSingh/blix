@@ -31,7 +31,7 @@ layout(set = 0, binding = 0) uniform SunNodesShade {
     vec4 uDetail;         // x the slice's first entry in NodeIds; y 1: write NodeDetail (the cells' sky visibility and
                           // direction, SponzaLoop.SplitDetail.cs); z 1: write NodeCensus (--split-noise-census)
     vec4 uSky;            // x strength, y mip
-    vec4 uLookup;         // x a sun bit candidate's plane distance at most (cells), y the distance weight's spread (cells)
+    vec4 uLookup;         // x a sun bit candidate's plane distance at most (cells), y the distance weight's spread (cells); w 1: the hit cells answer (hit_cells.comp)
     vec4 uFoliage;        // x the foliage hash's slots (0: no foliage points); y discovering: the list's room (0: off);
                           // z the exact-sun experiment (--sun-nodes-exact-sun, one sun): 1 write each hit's shadow
                           // ray toward sun 0 (ExactOrigins) and stop; 2 shade sun 0 by that ray's answer (ExactOccluded)
@@ -98,6 +98,8 @@ layout(std430, set = 0, binding = 32) readonly buffer PatchDirectSums { uint pat
 // the weight that escaped (the sky), and the whole weight (fixed point). texel_far_relight.comp makes the radiance record
 // of it for whatever lights there are.
 layout(std430, set = 0, binding = 33) buffer FarTransport { uint farTransport[]; };
+// The hit cells (hit_cells.comp, SponzaLoop.HitCells.cs; uLookup.w on): word 0 the rows, a word a row, two a cell.
+layout(std430, set = 0, binding = 34) readonly buffer HitCells { uint hitCells[]; };
 #define FAR_SLOTS 3
 #define FAR_TRANSPORT_STRIDE (2 * FAR_SLOTS + 3)
 // [9] with the comparison: x each pass's composed (patch-level near - per-texel near) direct, summed; y the per-texel
@@ -271,6 +273,27 @@ void main() {
                 return;
             }
             sNormal[lid] = hn;
+            uvec4 h1 = nodeHits[slot * 3u + 1u];
+            if (u.uLookup.w > 0.5 && h1.z != 0xFFFFFFFFu && (h1.z & 0x80000000u) == 0u) {
+                // The hit's cell: its row's square of r x r cells over the barycentrics (the row's own vertex order), the
+                // lower triangle laid out row by row -- one read for the patch on the side it was met from, and the sun of
+                // the side facing it (hit_cells.comp mode 1: the blend of the texels' bits this pass made per hit).
+                uint r = hitCells[2u + 2u * h1.z];
+                vec2 bary = vec2(float(h1.w & 0xFFFFu), float(h1.w >> 16)) / 65535.0;
+                uint ci = min(uint(bary.x * float(r)), r - 1u);
+                uint cj = min(uint(bary.y * float(r)), r - 1u - ci);
+                uint cell = hitCells[1u + 2u * h1.z] + ci * r - (ci * (ci - 1u)) / 2u + cj;
+                uint at = 1u + 2u * hitCells[0] + 2u * cell;
+                uint frontWord = hitCells[at];
+                int patchIndex = int((dot(hn, normal) > 0.0 ? frontWord : hitCells[at + 1u]) & 0xFFFFFFu) - 1;
+                sHit[lid] = vec4(unpackUnorm4x8(h2.w).rgb * nodeRayWeight[slot] / PI, float(patchIndex));
+                sWeight[lid * NODE_CANDIDATES] = float(frontWord >> 24) / 255.0;
+                for (uint w = 0u; w < words; ++w) sBits[lid * NODE_CANDIDATES * MAX_WORDS + w] = 0xFFFFFFFFu;
+                sExact[lid] = -1.0;
+                sUnknown[lid] = 0.0;
+                nodeCount(0u);
+                if (patchIndex < 0) nodeCount(2u);
+            } else {
             int ids[NODE_CANDIDATES];
             float weights[NODE_CANDIDATES];
             float total = nodeSetAt(0, hitPos, hn, u.uTexelGrid, uint(u.uShade.z), u.uLookup.xy, ids, weights);
@@ -314,6 +337,7 @@ void main() {
             }
             sUnknown[lid] = total <= 0.0 ? 1.0 : 0.0;
             if (patchIndex < 0) nodeCount(2u);
+            }
         } else {
             if (u.uFoliage.z > 0.5 && u.uFoliage.z < 1.5) { exactOrigins[slot] = vec4(0.0); return; }
             sHit[lid] = vec4(nodeRayWeight[slot] * textureLod(uSkyRadiance, dir, u.uSky.y).rgb * u.uSky.x, -2.0);

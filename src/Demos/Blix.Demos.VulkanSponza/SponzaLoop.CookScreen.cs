@@ -28,10 +28,11 @@ internal sealed partial class SponzaLoop : IUiSource
     // light landing as it went), at 50 ms of each ~150 ms frame: Sponza's sweep went from 6 min to ~23 (2026-10-14). The
     // user's call: lock the frame and the camera while it cooks. It takes the screen once a scene frame is up and the
     // visible-first order is read (one scene frame records it), so the texels on screen still go first.
-    // Not with --live-texels: a live gather is the view's texels only (seconds), and the view must stay drawn -- the
-    // cook screen's cleared frames left the visible pass an empty depth, and the gather after a sun turn saw nothing.
+    // --live-texels too: a live gather takes the screen like any cook, so its interruptions show and are timed (the
+    // user, 2026-10-16: "keep it for actual loading every time so we know when we're getting interrupted and for how
+    // long"). Its view is read first, from a scene frame (SplitVisiblePending); an empty read keeps the last view.
     private bool CookScreenNow => !cookScreenOff && (transportCookTask is { IsCompleted: false } || LightletBakePending
-        || (SplitCookRunning && sceneFrameDrawn && !SplitVisiblePending && !liveTexels));
+        || (SplitCookRunning && sceneFrameDrawn && !SplitVisiblePending));
 
     // The cook screen's frame (RenderFrame, while CookScreenNow): the cook's needs, a cleared screen, the cap.
     // The split cook's sweep of Sponza's 14.8M texels is ~3,800 frames: at full frames (3 fps) ~1,600 s. The cap is
@@ -114,10 +115,7 @@ internal sealed partial class SponzaLoop : IUiSource
         var cooking = CookScreenNow;
         // A live cook (the split light's, at boot or after a sun move): the same window over the scene, collapsible, opened
         // again each time a cook starts and otherwise left as the user leaves it.
-        // Not with --live-texels: its light is up from the patches at once, and its gathers -- the view's texels, then
-        // the few hundred each view check finds coming into view -- are detail landing behind it; the window opening
-        // at each was "an infinite cook blocking my screen" (the user, 2026-10-16).
-        var live = !loading && !streaming && !cooking && SplitCookRunning && !liveTexels;
+        var live = !loading && !streaming && !cooking && SplitCookRunning;
         var shown = loading || streaming || cooking || live;
         var opened = shown && !progressWindowShown;
         progressWindowShown = shown;

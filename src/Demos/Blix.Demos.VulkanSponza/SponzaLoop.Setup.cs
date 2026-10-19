@@ -368,6 +368,42 @@ internal sealed partial class SponzaLoop
         if (liveTexels) splitLight = true;
         liveAlways = args.Flag("live-patch-always");
         keepCpuScene = args.Flag("keep-cpu-scene");
+        // --live-min-level L (1): the finest hashed level live mode gathers and pixels read; --live-rays N (128): its
+        // rays a texel on the sweep (--sun-nodes-rays, when given, wins).
+        if (args.Int("live-min-level") is { } lml) liveMinLevel = Math.Max(0, lml);
+        if (args.Int("live-rays") is { } lr) liveRays = Math.Max(32, lr / 32 * 32);
+        if (liveTexels && args.Int("sun-nodes-rays") is null) sunNodeRays = liveRays;
+        // --no-hit-cells: the shade searches what a hit lies among, as before (SponzaLoop.HitCells.cs); --hit-cell M its size.
+        hitCellsOn = !args.Flag("no-hit-cells");
+        // --live-transfer: every texel lit from its cooked transport, nothing gathered at runtime (SponzaLoop.Transfer.cs);
+        // --transfer-rays N its cook's rays a texel, --transfer-k K its entries. Every level is lit: pixels read the finest.
+        liveTransfer = args.Flag("live-transfer");
+        livePatchRefine = args.Flag("live-patch-refine");
+        // --fine-gather N (1 M with the refine; 0 off), --fine-rays R (64): SponzaLoop.Transfer.cs, the fine refine.
+        fineGatherBudget = args.Int("fine-gather") ?? (livePatchRefine ? 1_000_000 : 0);
+        if (args.Int("fine-rays") is { } fr) fineGatherRays = Math.Max(32, fr / 32 * 32);
+        livePatchTexels = args.Flag("live-patch-texels") || livePatchRefine;
+        if (livePatchTexels) { liveTransfer = true; hitCellsOn = livePatchRefine && !args.Flag("no-hit-cells"); transferAoRays = 128; transferAoReach = TexelOpenReach; }
+        if (args.Int("transfer-rays") is { } tr) transferRays = Math.Max(32, tr / 32 * 32);
+        if (args.Int("transfer-k") is { } tk) transferK = Math.Clamp(tk, 1, 32);
+        if (args.Float("transfer-near") is { } tn) transferNear = Math.Max(0f, tn);
+        if (args.Float("transfer-gather-share") is { } tg) transferGatherShare = Math.Clamp(tg, 0f, 1f);
+        if (args.Float("transfer-gather-top") is { } gt) transferGatherTop = Math.Clamp(gt, 0f, 1f);
+        // The transfer's cells at 20 cm: at 10 cm Sponza's 48 M cells and their light were 1.2 GB (the cells serve the
+        // near field, within 25 cm, and the hybrid's gather).
+        if (liveTransfer && args.Float("hit-cell") is null) hitCellSize = 0.2f;
+        // --transfer-level L (1): the finest level the transfer carries; the finer take theirs through their contact
+        // visibility within two of its spacings (SponzaLoop.Transfer.cs, A').
+        if (args.Int("transfer-level") is { } tl2) transferMinLevel = Math.Clamp(tl2, 0, 4);
+        if (!livePatchTexels) transferAoReach = 2f * texelSpacing * (1 << transferMinLevel);
+        // The hybrid's gathered texels are the hard ones, and few: more rays each (--live-rays, --live-max-rays win).
+        if (liveTransfer && args.Int("live-rays") is null && args.Int("sun-nodes-rays") is null) { liveRays = 512; sunNodeRays = 512; }
+        if (liveTransfer && args.Int("live-max-rays") is null && args.Int("texel-max-rays") is null) texelMaxRays = 4 * sunNodeRays;
+        if (liveTransfer && args.Int("live-min-level") is null) liveMinLevel = 0;
+        if (args.Float("hit-cell") is { } hc) hitCellSize = Math.Clamp(hc, 0.01f, 1f);
+        // --live-max-rays N (4 x --live-rays): the refine's ceiling a texel in live mode -- the budget's other half. At
+        // --texel-max-rays' 2,048 a 128-ray sweep of the coarse levels refined a million texels for 15 rounds (~3 min).
+        if (liveTexels && args.Int("texel-max-rays") is null) texelMaxRays = args.Int("live-max-rays") ?? 4 * liveRays;
 
         // Seed sun yaw/pitch from the default direction so the Sun controls
         // start matching the baked look.

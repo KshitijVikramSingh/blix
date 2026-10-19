@@ -180,7 +180,10 @@ bool blix_shadow_cover(uint primitive [[primitive_id]], uint geometry [[geometry
 }
 
 // flags (in-frame batches): 1 the live count is limit[0] (a wavefront's pass wrote it), the threads past it idle.
-struct Params { uint count; uint seedBase; uint closestOnly; uint flags; };
+// flags: 1 a limit (limit[0] the rays to trace); 2 each hit's sun -- a shadow ray from the hit, lifted along its normal
+// turned toward the ray, to sun.xyz out to reach: hit flag 8 when nothing meets it (the gather's sun at a hit, read from
+// the hit itself rather than looked up among texels, Sponza's SponzaLoop.HitCells.cs).
+struct Params { uint count; uint seedBase; uint closestOnly; uint flags; float4 sun; float reach; uint pad0, pad1, pad2; };
 
 // flags: 1 the live count is limit[0], as Params'; 2 each ray's own direction (directions[i].xyz), not `direction`;
 // 4 packed: ray i is origins[2i] (origin, tMax) and origins[2i + 1] (direction), its answer written to occluded[pixelOf[i]];
@@ -287,11 +290,16 @@ kernel void blix_trace(device const float4* rays [[buffer(0)]],
     float t = d.w;
     float2 bary = float2(0.0f);
     bool front = false;
-    uint placement = 0xFFFFFFFFu, triangle = 0xFFFFFFFFu;
+    uint placement = 0xFFFFFFFFu, triangle = 0xFFFFFFFFu, hitRow = 0xFFFFFFFFu, rawBary = 0u;
     float3 n = float3(0.0f);
     uint albedo = 0u;
     if (found) {
         uint row = blix_row(primRows, entryRows, res.instance_id, res.geometry_id, res.primitive_id);
+        // The row, its top bit set when it is an instance's; the barycentrics in the row's own vertex order (before
+        // the owner's unmirroring below), 16-bit unorm each.
+        hitRow = row | (instances[res.instance_id].info.y == 0xFFFFFFFFu ? 0u : 0x80000000u);
+        float2 rb = clamp(res.triangle_barycentric_coord, 0.0f, 1.0f);
+        rawBary = uint(rb.x * 65535.0f + 0.5f) | (uint(rb.y * 65535.0f + 0.5f) << 16);
         t = res.distance;
         bary = res.triangle_barycentric_coord;
         front = res.triangle_front_facing;
@@ -313,6 +321,18 @@ kernel void blix_trace(device const float4* rays [[buffer(0)]],
         }
     }
 
+    bool sunlit = false;
+    if (found && (p.flags & 2u) != 0u) {
+        float3 hn = dot(n, d.xyz) > 0.0f ? -n : n;
+        if (dot(hn, p.sun.xyz) > 0.0f) {
+            float3 from = o.xyz + d.xyz * t + hn * p.sun.w;
+            isect.accept_any_intersection(true);
+            uint sunSeed = seed ^ 0x5BD1E995u;
+            sunlit = isect.intersect(ray(from, p.sun.xyz, 0.0f, p.reach), tlas, 0xFFu, table, sunSeed).type == intersection_type::none;
+            isect.accept_any_intersection(false);
+        }
+    }
+
     bool any = found;
     if (p.closestOnly == 0u) {
         isect.accept_any_intersection(true);
@@ -320,9 +340,12 @@ kernel void blix_trace(device const float4* rays [[buffer(0)]],
         any = isect.intersect(r, tlas, 0xFFu, table, anySeed).type != intersection_type::none;
     }
 
-    uint flags = (found ? 1u : 0u) | (front ? 2u : 0u) | (any ? 4u : 0u);
+    uint flags = (found ? 1u : 0u) | (front ? 2u : 0u) | (any ? 4u : 0u) | (sunlit ? 8u : 0u);
     hits[i * 3u] = uint4(as_type<uint>(t), as_type<uint>(bary.x), as_type<uint>(bary.y), flags);
-    hits[i * 3u + 1u] = uint4(placement, triangle, 0u, 0u);
+    // z: the packed triangle row (RayQueryGpuData's), top bit an instance's (its row serves every placement of the
+    // mesh, so a per-row answer does not hold); w: the row's own barycentrics -- a table keyed by them answers what
+    // the hit lies among without a spatial search (Sponza's SponzaLoop.HitCells.cs).
+    hits[i * 3u + 1u] = uint4(placement, triangle, hitRow, rawBary);
     hits[i * 3u + 2u] = uint4(as_type<uint>(n.x), as_type<uint>(n.y), as_type<uint>(n.z), albedo);
 }
 
@@ -928,7 +951,7 @@ HWX_EXPORT int hwx_build(HwxContext* ctx,
 
 // `repeats` dispatches, each its own command buffer, waited on; gpuMs[k] is the k-th one's GPU time.
 HWX_EXPORT int hwx_trace(HwxContext* ctx, void* rays, void* hits, uint32_t count, uint32_t seedBase, uint32_t closestOnly,
-                         uint32_t repeats, double* gpuMs) {
+                         uint32_t repeats, double* gpuMs, const float* sun, float reach) {
     @autoreleasepool {
         if (!ctx->tlas) return Fail(ctx, "trace before build");
         id<MTLBuffer> rayBuffer = (__bridge id<MTLBuffer>)rays;
@@ -944,8 +967,10 @@ HWX_EXPORT int hwx_trace(HwxContext* ctx, void* rays, void* hits, uint32_t count
             [enc setBuffer:hitBuffer offset:0 atIndex:1];
             [enc setAccelerationStructure:ctx->tlas atBufferIndex:2];
             [enc setIntersectionFunctionTable:ctx->table atBufferIndex:3];
-            uint32_t params[4] = {count, seedBase, closestOnly, 0};
-            [enc setBytes:params length:sizeof(params) atIndex:4];
+            // Params: with `sun` (direction, lift), each hit's sun too (flags 2).
+            struct { uint32_t count, seedBase, closestOnly, flags; float sun[4]; float reach; uint32_t pad[3]; } params = {
+                count, seedBase, closestOnly, sun ? 2u : 0u, {sun ? sun[0] : 0.0f, sun ? sun[1] : 0.0f, sun ? sun[2] : 0.0f, sun ? sun[3] : 0.0f}, reach, {0, 0, 0}};
+            [enc setBytes:&params length:sizeof(params) atIndex:4];
             [enc setBuffer:ctx->primRows offset:0 atIndex:5];
             [enc setBuffer:ctx->entryRows offset:0 atIndex:6];
             [enc setBuffer:ctx->instances offset:0 atIndex:7];
@@ -1100,7 +1125,7 @@ HWX_EXPORT int hwx_trace_host(HwxContext* ctx, const float* rays, uint32_t count
             [enc setBuffer:hitBuffer offset:0 atIndex:1];
             [enc setAccelerationStructure:ctx->tlas atBufferIndex:2];
             [enc setIntersectionFunctionTable:ctx->table atBufferIndex:3];
-            uint32_t params[4] = {n, seedBase + first, closestOnly, 0};
+            uint32_t params[12] = {n, seedBase + first, closestOnly, 0, 0, 0, 0, 0, 0, 0, 0, 0};
             [enc setBytes:params length:sizeof(params) atIndex:4];
             [enc setBuffer:ctx->primRows offset:0 atIndex:5];
             [enc setBuffer:ctx->entryRows offset:0 atIndex:6];
@@ -1245,7 +1270,7 @@ HWX_EXPORT int hwx_encode_trace(HwxContext* ctx, void* sharedEvent, uint64_t wai
             [enc setBuffer:hitBuffer offset:hitsOffset atIndex:1];
             [enc setAccelerationStructure:ctx->tlas atBufferIndex:2];
             [enc setIntersectionFunctionTable:ctx->table atBufferIndex:3];
-            uint32_t params[4] = {count, seedBase, 1u, limitBuffer ? 1u : 0u};
+            uint32_t params[12] = {count, seedBase, 1u, limitBuffer ? 1u : 0u, 0, 0, 0, 0, 0, 0, 0, 0};
             [enc setBytes:params length:sizeof(params) atIndex:4];
             [enc setBuffer:limitBuffer ? limitBuffer : rayBuffer offset:limitBuffer ? limitOffset : raysOffset atIndex:12];
             [enc setBuffer:ctx->primRows offset:0 atIndex:5];

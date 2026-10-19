@@ -149,13 +149,12 @@ void main() {
     vec3 position = texels[2u * id].xyz;
     vec3 n = normalize(texels[2u * id + 1u].xyz);
     if (ray == 0u) {
-        int g = -1;
-        if (u.uSlice.w > 0.5) {
-            uint known = guidePatch[id];
-            if (known == 0u) { g = cookedNearest(position, n); guidePatch[id] = uint(g + 2); }
-            else g = int(known) - 2;
-        }
-        sGuide = g;
+        // The texel's patch (its nearest): the guide's, and the far field's where the cook's pick saw none -- found
+        // unguided too (the transfer's cook, SponzaLoop.Transfer.cs, reads the far field with cosine rays).
+        uint known = guidePatch[id];
+        int g = known != 0u ? int(known) - 2 : cookedNearest(position, n);
+        if (known == 0u) guidePatch[id] = uint(g + 2);
+        sGuide = u.uSlice.w > 0.5 ? g : -1;
         // The far field: the patch the shade will read (texel_nodes_shade.glsl picks it the same way) and the reach.
         int fp = -1;
         if (u.uFar.x > 1.5) {

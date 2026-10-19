@@ -29,16 +29,28 @@ internal sealed partial class SponzaLoop
     // UploadSunNodes, a split cook: the sums' buffer and each column's words.
     private void BeginSplitDetail(int suns, int columns)
     {
-        sunNodeDetail = Own(device.CreateGpuBuffer(checked((int)((long)sunNodeSlice * suns * 16)), name: "sponza.sun-nodes.detail"));
+        // Live on the host: mapped, read where it lies once the slice's DispatchNow returns (ReadSplitDetail).
+        sunNodeDetailMapped = liveTexels && SunNodesOnHost;
+        sunNodeDetail = Own(sunNodeDetailMapped ? device.CreateReadableGpuBuffer(checked((int)((long)sunNodeSlice * suns * 16)), "sponza.sun-nodes.detail")
+            : device.CreateGpuBuffer(checked((int)((long)sunNodeSlice * suns * 16)), name: "sponza.sun-nodes.detail"));
         sunNodeDetailWords = new uint[columns][];
         for (var k = 0; k < columns; k++) sunNodeDetailWords[k] = new uint[texelCount];
     }
 
     // SunNodeReadBack, the sweep's slice: each texel's detail per column, from its light's sums and the detail's.
+    private bool sunNodeDetailMapped;
+
     private void ReadSplitDetail(Vector4[] sums, uint[] live, int first, int count, int suns, int passes)
     {
         if (sunNodeDetail.Equals(default(GpuBufferHandle)) || sunNodeDetailWords.Length == 0) return;
-        var detail = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(sunNodeDetail, 0, count * suns * 16).AsSpan()).ToArray();
+        Vector4[] detail;
+        if (sunNodeDetailMapped)
+        {
+            var bytes = new byte[count * suns * 16];
+            device.ReadMappedGpuBuffer(sunNodeDetail, 0, bytes);
+            detail = MemoryMarshal.Cast<byte, Vector4>(bytes.AsSpan()).ToArray();
+        }
+        else detail = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(sunNodeDetail, 0, count * suns * 16).AsSpan()).ToArray();
         var words = sunNodeDetailWords;
         Parallel.For(0, count, t =>
         {

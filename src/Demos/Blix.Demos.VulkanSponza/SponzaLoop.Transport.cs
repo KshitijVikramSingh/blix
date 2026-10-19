@@ -2012,6 +2012,8 @@ internal sealed partial class SponzaLoop
         else texelBake = CookTexels(scene, Tri, (i, t) => !texelFoliage && (surfaces[data.RowOf(i, t)] >> 24) < 255u,
             (i, t) => lightmapBake is not null && rayPlacementLightmapped[(int)data.RowPlacements[data.RowOf(i, t)]] ? 1 : 0);
         if (transportGpu && texelStage is null && transportTexels && texelBake is not null) SaveTexels(stageKeys.Texels, texelBake);
+        if (texelLift && texelBake is { } lifted) LiftTexels(scene, lifted);
+        if (texelCentroidWhy && texelBake is { } why) TexelCentroidWhy(scene, why);
         if (texelBake is { } hashed)
         {
             // The baked light (SponzaLoop.LightBake.cs), read here off the frame thread; without it, the bake begins

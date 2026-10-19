@@ -1,0 +1,156 @@
+#version 450
+// The transfer cook (SponzaLoop.Transfer.cs): a pass of a slice's gather rays (texel_nodes_rays.comp, cosine only -- the
+// transfer is the geometry's, so no light may steer its rays) and their Metal answers, each into its texel's table: what the ray reached -- a hit cell and the side it met (hit_cells.comp), or
+// for a miss its sky bin (8 x 8 octahedral) -- its share (the ray's weight over pi, 256ths) and its direction, summed.
+// A thread a ray. The table: TABLE slots a texel of five words (key, weight, direction x y z), key EMPTY when free;
+// a ray whose key finds no slot (the table full) adds to the texel's lost weight (the slot after its table). Misses --
+// the sky, and the far field (cut at the reach) -- are not keys: each adds to its texel's 64 world bins of each (after
+// the lost words: [room][64] far, then [room][64] sky), all kept -- 86% of a crevices texel's weight is far, and as
+// top-K keys the far bins were truncated into one entry (2026-10-16). 512: at
+// 128 the cells (10 cm, a few rays each) overflowed it and their weight -- the sun's, mostly -- was renormalized over
+// the sky bins, which take their slots first: the sky part came out 1.3x, the sun's 0.2-0.3x (2026-10-16).
+
+layout(local_size_x = 64) in;
+
+#define RAYS 32
+#define TABLE 512
+#define EMPTY 0xFFFFFFFFu
+#define SKY_KEY 0x40000000u
+#define FAR_KEY 0x20000000u
+#define PATCH_KEY 0x80000000u
+
+layout(set = 0, binding = 0) uniform TransferAccum {
+    vec4 uSlice;   // x the slice's texels, y the near distance, z the slice's first live texel, w the table's room in texels
+    vec4 uFar;     // the far field (texel_far.glsl): z the weight a known bin carries, w the columns
+} u;
+
+
+
+layout(std430, set = 0, binding = 1) readonly buffer NodeRays { vec4 nodeRays[]; };
+layout(std430, set = 0, binding = 2) readonly buffer NodeHits { uvec4 nodeHits[]; };
+layout(std430, set = 0, binding = 3) readonly buffer NodeRayWeights { float nodeRayWeight[]; };
+layout(std430, set = 0, binding = 4) readonly buffer HitCells { uint hitCells[]; };
+layout(std430, set = 0, binding = 5) buffer TransferTable { uint table[]; };   // [slice texel][TABLE slot][5], then lost
+layout(std430, set = 0, binding = 10) buffer TransferStats { uint stats[]; };
+layout(std430, set = 0, binding = 11) readonly buffer FarRecord { uint farRecord[]; };
+layout(std430, set = 0, binding = 12) readonly buffer Texels { vec4 texels[]; };
+
+// A direction's bin about a normal (6 x 6 octahedral over its hemisphere, texel_far.glsl's farBin's mapping and frame).
+int hemiBin(vec3 n, vec3 d) {
+    vec3 t = normalize(abs(n.y) < 0.999 ? cross(vec3(0.0, 1.0, 0.0), n) : cross(vec3(1.0, 0.0, 0.0), n));
+    vec3 b = cross(n, t);
+    float z = dot(d, n);
+    if (z <= 0.0) return -1;
+    float x = dot(d, t), y = dot(d, b);
+    float s = abs(x) + abs(y) + z;
+    vec2 p = vec2(x, y) / s;
+    vec2 uv = vec2(p.x + p.y, p.x - p.y) * 0.5 + 0.5;
+    ivec2 c = clamp(ivec2(uv * 6.0), ivec2(0), ivec2(5));
+    return c.y * 6 + c.x;
+}   // [3] hits, [4] misses, [5] far, [6] no row
+// A far ray's bin is its texel's far patch's (the record's own: 6 x 6 octahedral about the patch's normal, texel_far.glsl):
+// a narrow bright opening lies in one of them, and read at a world bin's centre it fell in the dark one beside.
+layout(std430, set = 0, binding = 6) readonly buffer SunNodesLive { uint liveIds[]; };
+layout(std430, set = 0, binding = 7) readonly buffer TexelPatch { int texelPatch[]; };
+layout(std430, set = 0, binding = 8) readonly buffer NodeGuidePatch { uint guidePatch[]; };
+layout(std430, set = 0, binding = 9) readonly buffer CookedPatches { vec4 cookedPatch[]; };
+
+int primaryBin(uint id, vec3 d) {
+    int fp = texelPatch[id];
+    if (fp < 0) fp = int(guidePatch[id]) - 2;
+    if (fp < 0) return -1;
+    vec3 n = normalize(cookedPatch[3 * fp + 1].xyz);
+    vec3 t = normalize(abs(n.y) < 0.999 ? cross(vec3(0.0, 1.0, 0.0), n) : cross(vec3(1.0, 0.0, 0.0), n));
+    vec3 b = cross(n, t);
+    float z = dot(d, n);
+    if (z <= 0.0) return -1;
+    float x = dot(d, t), y = dot(d, b);
+    float s = abs(x) + abs(y) + z;
+    vec2 p = vec2(x, y) / s;
+    vec2 uv = vec2(p.x + p.y, p.x - p.y) * 0.5 + 0.5;
+    ivec2 c = clamp(ivec2(uv * 6.0), ivec2(0), ivec2(5));
+    return c.y * 6 + c.x;
+}
+
+vec2 octEncode(vec3 d) {
+    d /= abs(d.x) + abs(d.y) + abs(d.z);
+    if (d.z >= 0.0) return d.xy;
+    return vec2((1.0 - abs(d.y)) * (d.x >= 0.0 ? 1.0 : -1.0), (1.0 - abs(d.x)) * (d.y >= 0.0 ? 1.0 : -1.0));
+}
+
+int primaryPatch(uint id) {
+    int fp = texelPatch[id];
+    return fp >= 0 ? fp : int(guidePatch[id]) - 2;
+}
+
+// Whether the far patch's record knows a bin (texel_far.glsl's farKnown): only then is a ray past the near distance
+// the record's -- where it does not (the rare light, a doorway down a corridor) the gather traces it, and so is it kept.
+bool recordKnows(int fp, int bin) {
+    if (u.uFar.x < 1.5 || fp < 0 || bin < 0) return false;
+    uint stride = 3u + 4u * uint(u.uFar.w + 0.5);
+    return float(farRecord[(uint(fp) * 36u + uint(bin)) * stride]) >= u.uFar.z;
+}
+
+void main() {
+    uint slot = gl_GlobalInvocationID.x;
+    uint texel = slot / uint(RAYS);
+    if (texel >= uint(u.uSlice.x)) return;
+    float w = nodeRayWeight[slot];
+    if (w <= 0.0) return;
+    vec3 dir = nodeRays[2u * slot + 1u].xyz;
+    uvec4 h0 = nodeHits[slot * 3u];
+    uint key;
+    atomicAdd(stats[(h0.w & 1u) != 0u ? 3u : 4u], 1u);
+    if ((h0.w & 1u) == 0u) {
+        if (!isinf(nodeRays[2u * slot + 1u].w)) atomicAdd(stats[5], 1u);
+        // A miss: the sky, by its direction about the texel's normal (36 bins over its hemisphere: 64 world bins
+        // spent half on what it cannot see), or -- cut at the texel's reach (texel_nodes_rays.comp: a direction its
+        // far patches' record knows) -- the far field, by its far patch's own bins, read from that record at the apply.
+        bool far = !isinf(nodeRays[2u * slot + 1u].w);
+        uint room = uint(u.uSlice.w);
+        uint pid = liveIds[uint(u.uSlice.z) + texel];
+        int hb = far ? primaryBin(pid, dir) : hemiBin(normalize(texels[2u * pid + 1u].xyz), dir);
+        if (hb < 0) return;   // cut, so its patch knew it -- or below the texel: none would be a mismatch
+        uint bin = uint(hb);
+        uint binsAt = room * uint(TABLE) * 5u + room + (far ? 0u : room * 64u) + texel * 64u + bin;
+        atomicAdd(table[binsAt], uint(w / 3.14159265 * 256.0 + 0.5));
+        return;
+    } else {
+        uvec4 h1 = nodeHits[slot * 3u + 1u];
+        if (h1.z == 0xFFFFFFFFu || (h1.z & 0x80000000u) != 0u) { atomicAdd(stats[6], 1u); return; }   // an instance's row: no cells (the search's)
+        vec3 normal = uintBitsToFloat(nodeHits[slot * 3u + 2u].xyz);
+        uint r = hitCells[2u + 2u * h1.z];
+        vec2 bary = vec2(float(h1.w & 0xFFFFu), float(h1.w >> 16)) / 65535.0;
+        uint ci = min(uint(bary.x * float(r)), r - 1u);
+        uint cj = min(uint(bary.y * float(r)), r - 1u - ci);
+        uint cell = hitCells[1u + 2u * h1.z] + ci * r - (ci * (ci - 1u)) / 2u + cj;
+        bool front = dot(normal, dir) < 0.0;   // met from the side its normal faces
+        key = (cell << 1) | (front ? 0u : 1u);
+        // Past the near distance, the patch its side sees: the rare hits a dark texel's light comes by (a doorway down a
+        // corridor) were a ray to a cell each, all dropped past the K heaviest -- the near walls -- and renormalized as
+        // dark as those: the crevices' dark texels came out at 0.55 (2026-10-16). By patch they add up.
+        if (uintBitsToFloat(h0.x) > u.uSlice.y) {
+            // Past the near distance, the patch its side sees (the far field is only what the ray kernel cut at
+            // the reach: within it the record never saw -- its couplings start past 0.75 m -- and folded there, the
+            // hits between went dark, 2026-10-17).
+            uint p = hitCells[1u + 2u * hitCells[0] + 2u * cell + (front ? 0u : 1u)] & 0xFFFFFFu;
+            if (p != 0u) key = PATCH_KEY | (p - 1u);
+        }
+    }
+    uint share = uint(w / 3.14159265 * 256.0 + 0.5);
+    ivec3 d = ivec3(dir * 256.0 * (w / 3.14159265));
+    uint base = texel * uint(TABLE) * 5u;
+    uint at = (key * 0x9E3779B1u) >> 23;   // 9 bits: TABLE 512
+    for (int probe = 0; probe < TABLE; ++probe) {
+        uint s = base + ((at + uint(probe)) & uint(TABLE - 1)) * 5u;
+        uint prior = atomicCompSwap(table[s], EMPTY, key);
+        if (prior == EMPTY || prior == key) {
+            atomicAdd(table[s + 1u], share);
+            atomicAdd(table[s + 2u], uint(d.x));
+            atomicAdd(table[s + 3u], uint(d.y));
+            atomicAdd(table[s + 4u], uint(d.z));
+            return;
+        }
+    }
+    atomicAdd(table[uint(u.uSlice.w) * uint(TABLE) * 5u + texel], share);   // lost: the table is full
+}
