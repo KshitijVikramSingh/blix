@@ -1,0 +1,110 @@
+#version 450
+// --live-texels (SponzaLoop.SliceResolve.cs): a traced slice resolved on the GPU -- what SunNodeReadBack did in C# over
+// the mapped sums (ProcessSlice: the sums, the refine's judgement, the detail, the landing), which cost 110 ms a slice of
+// 32 K texels, 57 s of a 3.6 min light change on Sponza (2026-10-19). A thread a texel of the slice.
+//   mode 0  a slice: its sums added to the texel's running state (by its place in the sweep), its light into the parts
+//           (the sun's per unit of its irradiance), on the sweep its detail, and if still noisy (SunNodesRefine.cs,
+//           CookSettled) its id and place appended for the next round; on the sweep its light into the histogram the
+//           dark bar is read from.
+//   mode 1  the sweep's unsettled judged again against the dark bar (RejudgeAfterSweep): those still noisy appended.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform SliceResolve {
+    vec4 uSlice;    // x the slice's first in the round's list, y its texels, z the passes it traced, w 1 refining
+    vec4 uSettle;   // x the most rays, y the noise share, z the noise floor, w the dark bar
+    vec4 uSun;      // xyz 1 / the sun's irradiance, w the sweep's passes
+    vec4 uMode;     // x the mode, y the columns (suns), z which column is the sun's (-1 none), w 1 the detail
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer RoundIds { uint roundIds[]; };   // the round's texel ids
+layout(std430, set = 0, binding = 2) readonly buffer RoundPlaces { uint roundPlaces[]; }; // refining: each one's place
+layout(std430, set = 0, binding = 3) readonly buffer Accum { vec4 accum[]; };         // [slice texel][column]
+layout(std430, set = 0, binding = 4) readonly buffer DetailAccum { vec4 detailAccum[]; };
+layout(std430, set = 0, binding = 5) buffer State { vec4 state[]; };                  // [place][column]: the sums; column 0's w the squares
+layout(std430, set = 0, binding = 6) buffer StatePasses { uint statePasses[]; };
+layout(std430, set = 0, binding = 7) buffer SplitSky { uvec2 skyPart[]; };
+layout(std430, set = 0, binding = 8) buffer SplitSun { uvec2 sunPart[]; };
+layout(std430, set = 0, binding = 9) buffer SkyDetail { uint skyDetail[]; };
+layout(std430, set = 0, binding = 10) buffer SunDetail { uint sunDetail[]; };
+layout(std430, set = 0, binding = 11) buffer Next { uint nextIds[]; };
+layout(std430, set = 0, binding = 12) buffer NextPlaces { uint nextPlaces[]; };
+layout(std430, set = 0, binding = 13) buffer Histogram { uint histogram[]; };          // 128 quarter stops from 2^-24
+layout(std430, set = 0, binding = 14) buffer NextCount { uint nextCount[]; };
+
+uint packRgb9e5(vec3 c) {
+    const float maxValue = 65408.0;
+    c = clamp(c, vec3(0.0), vec3(maxValue));
+    float maxC = max(c.r, max(c.g, c.b));
+    int e = max(-16, int(floor(log2(max(maxC, 1e-30))))) + 1;
+    float scale = exp2(float(e - 9));
+    if (int(floor(maxC / scale + 0.5)) == 512) { e += 1; scale *= 2.0; }
+    uvec3 m = uvec3(floor(c / scale + 0.5));
+    return m.r | (m.g << 9) | (m.b << 18) | (uint(e + 15) << 27);
+}
+
+// SponzaLoop.SplitDetail.cs's PackDetail.
+uint packDetail(vec2 tilt, float sky) {
+    vec2 t = clamp(tilt * 0.5, vec2(-1.0), vec2(1.0));
+    uvec2 q = uvec2(ivec2(round(t * 127.0)) & 0xFF);
+    return q.x | (q.y << 8) | (uint(round(clamp(sky, 0.0, 1.0) * 255.0)) << 16) | (255u << 24);
+}
+
+float lum(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+
+// CookSettled: past the most rays, or the composed light's standard error under the noise share of the larger of its
+// light and the bar.
+bool settled(uint place, uint suns, uint passes, float bar, out float mean) {
+    mean = 0.0;
+    for (uint k = 0u; k < suns; ++k) mean += lum(state[place * suns + k].rgb);
+    mean /= float(passes);
+    if (float(passes) * 32.0 >= u.uSettle.x) return true;
+    float variance = max(state[place * suns].w / float(passes) - mean * mean, 0.0);
+    return sqrt(variance / float(passes)) <= u.uSettle.y * max(mean, max(u.uSettle.z, bar));
+}
+
+void append(uint id, uint place) {
+    uint j = atomicAdd(nextCount[0], 1u);
+    nextIds[j] = id;
+    nextPlaces[j] = place;
+}
+
+void main() {
+    uint t = gl_GlobalInvocationID.x;
+    if (t >= uint(u.uSlice.y)) return;
+    uint suns = uint(u.uMode.y);
+    float mean;
+    if (u.uMode.x > 0.5) {
+        // Mode 1: the sweep's unsettled (this list, its places), judged against the bar.
+        uint place = roundPlaces[t];
+        if (!settled(place, suns, statePasses[place], u.uSettle.w, mean)) append(roundIds[t], place);
+        return;
+    }
+    bool refining = u.uSlice.w > 0.5;
+    uint at = uint(u.uSlice.x) + t;
+    uint id = roundIds[at];
+    uint place = refining ? roundPlaces[at] : at;
+    uint passes = uint(u.uSlice.z) + (refining ? statePasses[place] : 0u);
+    for (uint k = 0u; k < suns; ++k) {
+        vec4 s = accum[t * suns + k] + (refining ? state[place * suns + k] : vec4(0.0));
+        state[place * suns + k] = s;
+        vec3 light = s.rgb / float(passes);
+        bool sunColumn = int(k) == int(u.uMode.z);
+        uvec2 word = uvec2(packRgb9e5(sunColumn ? light * u.uSun.xyz : light), 0xFFFFu | 0x10000u);
+        if (sunColumn) sunPart[id] = word; else skyPart[id] = word;
+        if (!refining && u.uMode.w > 0.5) {
+            // The detail, from the sweep alone (SplitDetail.cs, ReadSplitDetail): the tilt over the column's light, the
+            // sky visibility from column 0's.
+            vec4 d = detailAccum[t * suns + k];
+            float l = lum(accum[t * suns + k].rgb);
+            vec2 tilt = l > 1e-9 ? d.xy / l : vec2(0.0);
+            uint w = packDetail(tilt, detailAccum[t * suns].z / u.uSun.w);
+            if (sunColumn) sunDetail[id] = w; else skyDetail[id] = w;
+        }
+    }
+    statePasses[place] = passes;
+    // Judged without the bar on the sweep (mode 1 judges its unsettled again once the bar is known), with it on a round.
+    bool done = settled(place, suns, passes, refining ? u.uSettle.w : 0.0, mean);
+    if (!refining && mean > 0.0) atomicAdd(histogram[uint(clamp((log2(mean) + 24.0) * 4.0, 0.0, 127.0))], 1u);
+    if (!done) append(id, place);
+}

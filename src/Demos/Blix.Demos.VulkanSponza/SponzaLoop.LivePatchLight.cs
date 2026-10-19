@@ -328,6 +328,7 @@ internal sealed partial class SponzaLoop
         sunNodeStats = Own(device.CreateGpuBuffer(48, new byte[48], "sponza.sun-nodes.stats"));
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] live texels: re-aimed in {sunNodeClock.Elapsed.TotalSeconds:0.0} s; tracing."));
+        LogGatherMemory("the gather begins");
         sunNodeClock.Restart();
         ResetSunNodeCounters();
         liveRetargeting = false;

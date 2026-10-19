@@ -516,6 +516,9 @@ internal sealed partial class SponzaLoop
     // --live-texels: the slices' sums read where they lie once their frames are done -- no WaitIdle, no copy: each slice
     // drained the 3 frames in flight and waited on a copy before (a frame of 100-250 ms a slice, 2026-10-16).
     private const int LiveAccumSlots = 4;
+    // The read-backs' time by part (FinishSunNodes reports it): the mapped read, sums and refine, detail, census, landing.
+    private readonly double[] readParts = new double[5];
+    private int readSlices;
     private GpuBufferHandle[] sunNodeAccums = Array.Empty<GpuBufferHandle>();
     private int sunNodeAccumSlot;
     private readonly Queue<(int Slot, int First, int Count, long Frame)> liveReadbacks = new();
@@ -532,6 +535,7 @@ internal sealed partial class SponzaLoop
             var clock = Stopwatch.StartNew();
             var bytes = new byte[r.Count * suns * 16];
             device.ReadMappedGpuBuffer(sunNodeAccums[r.Slot], 0, bytes);
+            readParts[0] += clock.Elapsed.TotalSeconds;
             ProcessSlice(MemoryMarshal.Cast<byte, Vector4>(bytes.AsSpan()).ToArray(), live, r.First, r.Count, refining, passes);
             sunNodeReadSeconds += clock.Elapsed.TotalSeconds;
         }
@@ -563,6 +567,7 @@ internal sealed partial class SponzaLoop
             var bytes = new byte[count * suns * 16];
             device.ReadMappedGpuBuffer(sunNodeAccum, 0, bytes);
             sums = MemoryMarshal.Cast<byte, Vector4>(bytes.AsSpan()).ToArray();
+            readParts[0] += clock.Elapsed.TotalSeconds;
         }
         else
         {
@@ -592,6 +597,7 @@ internal sealed partial class SponzaLoop
                 boot[2 * id + 1] = 0xFFFFu | 0x10000u;
             });
         }
+        var partClock = Stopwatch.StartNew();
         if (SunNodeRefines) RefineSlice(sums, first, count, suns, passes);
         else
             Parallel.For(0, count, t =>
@@ -604,9 +610,14 @@ internal sealed partial class SponzaLoop
                     results[k][2 * id + 1] = 0xFFFFu | 0x10000u;
                 }
             });
+        readParts[1] += partClock.Elapsed.TotalSeconds; partClock.Restart();
         if (!refining && splitCooking) ReadSplitDetail(sums, live, first, count, suns, passes);
+        readParts[2] += partClock.Elapsed.TotalSeconds; partClock.Restart();
         if (!refining && splitCooking) ReadNoiseCensus(sums, count, suns, passes);
+        readParts[3] += partClock.Elapsed.TotalSeconds; partClock.Restart();
         LandSplitSlice(live, first, count);
+        readParts[4] += partClock.Elapsed.TotalSeconds;
+        readSlices++;
     }
 
     // The progress line, and the sweep's or round's end once every slice is in: true while there are more to trace.
@@ -639,6 +650,11 @@ internal sealed partial class SponzaLoop
         if (sunNodeNowPasses > 0)
             Console.WriteLine(string.Create(Inv,
                 $"[VulkanSponza] sun nodes, outside the frame: {sunNodeNowPasses:N0} passes; rays {sunNodeNowSeconds[0]:0} s, trace {sunNodeNowSeconds[1]:0} s, shade {sunNodeNowSeconds[2]:0} s ({sunNodeNowSeconds[2] * 1000 / sunNodeNowPasses:0.0} ms a pass of {sunNodeSlice * 32:N0} rays; {sunNodeLaterPasses:N0} passes not a frame's first, their rays {sunNodeLaterRays * 1000 / Math.Max(1, sunNodeLaterPasses):0.0} ms each); of the trace's {sunNodeClock.Elapsed.TotalSeconds:0.0} s, passes {sunNodeNowSeconds.Sum():0.0} s, read-backs {sunNodeReadSeconds:0.0} s, the rest (frames, landing) {sunNodeClock.Elapsed.TotalSeconds - sunNodeNowSeconds.Sum() - sunNodeReadSeconds:0.0} s; shade passes by the hit cells {hitCellPassesOn:N0}, by the search {hitCellPassesOff:N0}."));
+        Console.WriteLine(string.Create(Inv,
+            $"[VulkanSponza] sun nodes, the read-backs' parts over {readSlices:N0} slices: mapped read {readParts[0]:0.0} s, sums and refine {readParts[1]:0.0} s, detail {readParts[2]:0.0} s, noise census {readParts[3]:0.0} s, landing {readParts[4]:0.0} s."));
+        Array.Clear(readParts);
+        if (liveTexels) LogGatherMemory("the gather ends");
+        readSlices = 0;
         Array.Clear(sunNodeNowSeconds);
         sunNodeNowPasses = 0;
         ResetSunNodeRefine();
@@ -984,12 +1000,22 @@ internal sealed partial class SponzaLoop
             var passes = refining ? RefinePasses : sweepPasses;
             var slice = Math.Min(sunNodeSlice, live.Length - sunNodeFirst);
             var seedPass = refining ? sweepPasses + (sunNodeRefineRound - 1) * RefinePasses + sunNodePass : sunNodePass;
+            if (GpuResolveOn && !gpuResolving && !refining && sunNodeFirst == 0 && sunNodePass == 0) BeginGpuResolve();
             SunNodePassNow(refining ? sunNodeRefineBuffer : sunNodeTraceBuffer, sunNodeFirst, slice, sunNodePass, seedPass);
             if (++sunNodePass == passes)
             {
                 sunNodePass = 0;
                 FarFinish(now: true, refining ? sunNodeRefineBuffer : sunNodeTraceBuffer, sunNodeFirst, slice, passes);
                 TransportCensusFinish(now: true, slice, passes);
+                // On the GPU (SponzaLoop.SliceResolve.cs): resolved where it lies, nothing read back.
+                if (gpuResolving)
+                {
+                    var clock2 = Stopwatch.StartNew();
+                    var more = ResolveSliceNow(slice, passes);
+                    sunNodeReadSeconds += clock2.Elapsed.TotalSeconds;
+                    if (!more) return;
+                    continue;
+                }
                 sunNodeReadback = true;
             }
         }

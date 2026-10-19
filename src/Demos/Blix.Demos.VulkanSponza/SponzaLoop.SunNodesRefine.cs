@@ -145,7 +145,7 @@ internal sealed partial class SponzaLoop
         sunNodeRefineSquares = sunNodeNextSquares.ToArray();
         sunNodeRefinePasses = sunNodeNextPasses.ToArray();
         sunNodeNextIds = new(); sunNodeNextSums = new(); sunNodeNextSquares = new(); sunNodeNextPasses = new();
-        if (!sunNodeRefineBuffer.Equals(default(GpuBufferHandle))) RetireGpuBuffer(sunNodeRefineBuffer);
+        if (!sunNodeRefineBuffer.Equals(default(GpuBufferHandle)) && !IsResolveBuffer(sunNodeRefineBuffer)) RetireGpuBuffer(sunNodeRefineBuffer);
         sunNodeRefineBuffer = Own(device.CreateGpuBuffer(left * 4, MemoryMarshal.AsBytes(sunNodeRefineIds.AsSpan()), "sponza.sun-nodes.refine"));
         sunNodeRefineRound++;
         sunNodeRefineRays += (long)left * RefinePasses * 32;
@@ -177,7 +177,7 @@ internal sealed partial class SponzaLoop
     {
         Array.Clear(sunNodeLightHistogram);
         sunNodeDarkBar = 0f;
-        if (!sunNodeRefineBuffer.Equals(default(GpuBufferHandle))) RetireGpuBuffer(sunNodeRefineBuffer);
+        if (!sunNodeRefineBuffer.Equals(default(GpuBufferHandle)) && !IsResolveBuffer(sunNodeRefineBuffer)) RetireGpuBuffer(sunNodeRefineBuffer);
         sunNodeRefineBuffer = default;
         sunNodeRefineRound = 0;
         sunNodeRefineIds = Array.Empty<uint>();

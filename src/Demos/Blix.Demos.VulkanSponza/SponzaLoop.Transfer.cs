@@ -239,9 +239,18 @@ internal sealed partial class SponzaLoop
             var b = Bin(BitConverter.UInt32BitsToSingle(words[2 * i + 1]));
             if (b > cut || (b == cut && atCut-- > 0)) ids[n++] = words[2 * i];
         }
+        if (n < take) ids = ids[..n];
+        // In place order (the far field's key): picked in the order the flags were appended, a slice's texels lay all over
+        // the scene and every hit's lookups missed the caches.
+        if (farPlaceKey is { } placeKey && placeKey.Length == texelCount)
+        {
+            var keys = new ulong[ids.Length];
+            for (var i = 0; i < ids.Length; i++) keys[i] = placeKey[ids[i]];
+            Array.Sort(keys, ids);
+        }
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] fine refine: {n:N0} of {count:N0} flagged gathered at {fineGatherRays} rays (the spread at the cut {MathF.Pow(2f, cut / 8f):0.0}x; picked in {clock.Elapsed.TotalMilliseconds:0} ms)."));
-        return n == take ? ids : ids[..n];
+        return ids;
     }
 
     private void ApplyFineNow()
@@ -538,6 +547,7 @@ internal sealed partial class SponzaLoop
         transferApplyInterface = reflect(new[] { "transfer_apply.comp" });
         texelAoInterface = reflect(new[] { "texel_ao.comp" });
         transferFineInterface = reflect(new[] { "transfer_fine.comp" });
+        sliceResolveInterface = reflect(new[] { "slice_resolve.comp" });
     }
 
     private void CreateTransferPipelines(string shaderDir)
@@ -551,6 +561,7 @@ internal sealed partial class SponzaLoop
         transferApplyPipeline = Make("transfer_apply", transferApplyInterface);
         texelAoPipeline = Make("texel_ao", texelAoInterface);
         transferFinePipeline = Make("transfer_fine", transferFineInterface);
+        sliceResolvePipeline = Make("slice_resolve", sliceResolveInterface);
     }
 
     // After the hit cells (MergeDiscovered): every live texel's entries, a slice at a time, its rays' passes through the

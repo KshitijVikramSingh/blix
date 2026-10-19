@@ -379,6 +379,8 @@ internal sealed partial class SponzaLoop
         // --transfer-rays N its cook's rays a texel, --transfer-k K its entries. Every level is lit: pixels read the finest.
         liveTransfer = args.Flag("live-transfer");
         livePatchRefine = args.Flag("live-patch-refine");
+        // --cpu-resolve: the traced slices read back and resolved in C# (SponzaLoop.SliceResolve.cs), as before.
+        cpuResolve = args.Flag("cpu-resolve");
         // --fine-gather N (1 M with the refine; 0 off), --fine-rays R (64): SponzaLoop.Transfer.cs, the fine refine.
         fineGatherBudget = args.Int("fine-gather") ?? (livePatchRefine ? 1_000_000 : 0);
         if (args.Int("fine-rays") is { } fr) fineGatherRays = Math.Max(32, fr / 32 * 32);
