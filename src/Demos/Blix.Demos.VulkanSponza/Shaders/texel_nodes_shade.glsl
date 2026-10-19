@@ -294,7 +294,7 @@ void main() {
                 uint ci = min(uint(bary.x * float(r)), r - 1u);
                 uint cj = min(uint(bary.y * float(r)), r - 1u - ci);
                 cellAt = 1u + 2u * hitCells[0] + 2u * (hitCells[1u + 2u * h1.z] + ci * r - (ci * (ci - 1u)) / 2u + cj);
-                byCell = (hitCells[cellAt + 1u] & 0xC0000000u) == 0u;
+                byCell = (hitCells[cellAt + 1u] & 0x80000000u) == 0u;
             }
             if (byCell) {
                 // The hit's cell: its row's square of r x r cells over the barycentrics (the row's own vertex order), the
@@ -308,6 +308,33 @@ void main() {
                 for (uint w = 0u; w < words; ++w) sBits[lid * NODE_CANDIDATES * MAX_WORDS + w] = 0xFFFFFFFFu;
                 sExact[lid] = -1.0;
                 sUnknown[lid] = 0.0;
+                // BLIX_CELL_SPLIT (a measurement, uLookup.z negative): -1 the sun the search's at the hit, the patch the
+                // cell's; -2 the patch the search's, the sun the cell's -- which of the two the creases need at the hit.
+                // A sun edge across the cell (hit_cells.comp, bit 30, this sun's): its sun the search's, at the hit -- what
+                // the creases need (crevices' seam energy 0.83 with the cell's, 0.87 with the hit's; the patch the cell's
+                // as well, 2026-10-19).
+                bool sunEdge = (hitCells[at + 1u] & 0x40000000u) != 0u;
+                if (u.uLookup.z < -0.5 || sunEdge) {
+                    int ids[NODE_CANDIDATES];
+                    float weights[NODE_CANDIDATES];
+                    float total = nodeSetAt(0, hitPos, hn, u.uTexelGrid, uint(u.uShade.z), u.uLookup.xy, ids, weights);
+                    if (total > 0.0 && (sunEdge || u.uLookup.z > -1.5)) {
+                        for (int c = 0; c < NODE_CANDIDATES; ++c) {
+                            sWeight[lid * NODE_CANDIDATES + c] = ids[c] >= 0 ? weights[c] / total : 0.0;
+                            for (uint w = 0u; w < words; ++w)
+                                sBits[(lid * NODE_CANDIDATES + uint(c)) * MAX_WORDS + w] = ids[c] >= 0 ? sunBits[uint(ids[c]) * words + w] : 0u;
+                        }
+                    }
+                    if (total > 0.0 && !sunEdge && u.uLookup.z < -1.5) {
+                        int likeliest = -1;
+                        float most = 0.0;
+                        for (int c = 0; c < NODE_CANDIDATES; ++c) if (ids[c] >= 0 && weights[c] > most) { most = weights[c]; likeliest = ids[c]; }
+                        int sp = max(texelPatch[likeliest], -1);
+                        if (sp < 0) sp = cookedNearestOn(hitPos, hn, nodeHits[slot * 3u + 1u].x);
+                        patchIndex = sp;
+                        sHit[lid].w = float(patchIndex);
+                    }
+                }
                 nodeCount(0u);
                 if (patchIndex < 0) nodeCount(2u);
             } else {

@@ -21,15 +21,23 @@ internal sealed partial class SponzaLoop
     private bool hitCellsOn = true;
     // A cell's side on a row's barycentric square: 10 cm (the texels' level 1).
     private float hitCellSize = 0.1f;
-    // --cell-near D (0.25 m; 0: the cells answer every hit): hits nearer than D take the search's blend, not their cell
+    // --cell-near D (0: off): hits nearer than D take the search's blend, not their cell
     // (texel_nodes_shade.glsl), in both rounds -- one patch a cell side read the creases' light across them (crevices'
     // seams 0.83 -> 0.87, thinwall's leak 0.0017 -> 0.0002); the fine round's alone was worse (0.78). Sponza's near hits
     // are many and one in a workgroup holds the rest to the search: shade 10 -> 27 ms a 1 M rays (2026-10-19).
-    private float hitCellNear = 0.25f;
+    private float hitCellNear = 0f;
+    // The cells a sun edge crosses (their corners' sun over half apart, at each light change: 1.5% of Sponza's) take their
+    // hits' sun from the search at the hit, their patch still the cell's (hit_cells.comp, texel_nodes_shade.glsl): what
+    // the creases need -- BLIX_CELL_SPLIT showed the sun at the hit gives crevices' seams 0.87 (the cell's 0.83), the
+    // patch at the hit not (0.78), 2026-10-19. --no-sun-edges: off.
+    private bool sunEdges = true;
     // --cell-marks: the cells a contact (the surface turning over 30 degrees between its centre and a corner) or a sun edge
     // crosses marked, their hits the search's (hit_cells.comp). Even so: Sponza's cells 24% marked and a workgroup's one
     // marked hit holding the rest to the search, shade 38 ms a 1 M rays, and the cell build 0.65 -> 6.4 s (2026-10-19).
     private bool cellMarks;
+    // BLIX_CELL_SPLIT=1|2 (a measurement): the cells answer every hit, but 1 takes the sun, 2 the patch from the search at
+    // the hit (texel_nodes_shade.glsl).
+    private static readonly int cellSplit = int.TryParse(Environment.GetEnvironmentVariable("BLIX_CELL_SPLIT"), out var cs) ? cs : 0;
     private ShaderInterface hitCellsInterface = null!;
     private PipelineHandle hitCellsPipeline;
     private GpuBufferHandle hitCellsBuffer;
@@ -165,7 +173,7 @@ internal sealed partial class SponzaLoop
                 new("uSunBits", new Vector4Uniform(new Vector4(liveSunWords, sunNodeUnknownSun, 0f, 0f))),
                 new("uTexelGrid", new Vector4Uniform(texelGrid)),
                 new("uShade", new Vector4Uniform(new Vector4(0f, 0f, sunNodeHashSlots, sunNodeFoliageSlots))),
-                new("uLookup", new Vector4Uniform(new Vector4(sunNodePlane, sunNodeSigma, cellMarks ? 1f : 0f, 0f))),
+                new("uLookup", new Vector4Uniform(new Vector4(sunNodePlane, sunNodeSigma, (cellMarks ? 1 : 0) | (sunEdges ? 2 : 0), 0f))),
                 new("uCookedGrid", new Vector4Uniform(cookedGrid)),
                 new("uCookedDims", new Vector4Uniform(cookedDims)),
             },

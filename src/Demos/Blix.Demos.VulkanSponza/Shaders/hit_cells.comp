@@ -29,7 +29,8 @@ layout(set = 0, binding = 0) uniform HitCellsParams {
     vec4 uRows;        // x the rows in the dispatch, y its first row
     vec4 uTexelGrid;
     vec4 uShade;       // z the cook hash's slots, w the sun points' hash's
-    vec4 uLookup;      // x, y the shade's lookup (texel_nodes.glsl); z 1: mark the cells a contact or a sun edge crosses (--cell-marks)
+    vec4 uLookup;      // x, y the shade's lookup (texel_nodes.glsl); z the marks: bit 0 contacts (mode 0, --cell-marks), bit 1 sun
+                       // edges (mode 1, on unless --no-sun-edges)
     vec4 uToSun;       // xyz toward the sun; w the sun's column (its bit)
     vec4 uSunBits;     // x the bit words a texel (and a sun point), y the visibility among no texel nor sun point
     vec4 uColumns;     // x the columns (patch light's), y the sky's column, z the sun's
@@ -158,10 +159,10 @@ void main() {
                 // A sun edge across it (its corners' visibility over half apart): its hits take the search, at the hit
                 // (word 1's bit 30, this sun's).
                 float lo = sun, hi = sun;
-                if (abs(facing) > 1e-6 && u.uLookup.z > 0.5) for (uint k = 0u; k < 3u; ++k) { float v = cellSun(corners[k], lit); lo = min(lo, v); hi = max(hi, v); }
+                if (abs(facing) > 1e-6 && (uint(u.uLookup.z) & 2u) != 0u) for (uint k = 0u; k < 3u; ++k) { float v = cellSun(corners[k], lit); lo = min(lo, v); hi = max(hi, v); }
                 uint at = cellBase + 2u * cell;
                 hitCells[at] = (hitCells[at] & 0xFFFFFFu) | (uint(clamp(sun, 0.0, 1.0) * 255.0 + 0.5) << 24);
-                hitCells[at + 1u] = (hitCells[at + 1u] & ~0x40000000u) | (hi - lo > 0.5 ? 0x40000000u : 0u);
+                hitCells[at + 1u] = (hitCells[at + 1u] & ~0x40000000u) | (hi - lo > 0.1 ? 0x40000000u : 0u);
                 if (u.uRows.w > 0.5) {
                     vec3 srgb = unpackUnorm4x8(surfaces[row]).rgb;
                     vec3 albedo = mix(srgb / 12.92, pow((srgb + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), srgb));
@@ -184,7 +185,7 @@ void main() {
             // has none (or none where it has one). A different patch alone is no contact -- patches 25 cm apart split every
             // flat wall's cells, and Sponza's marked cells held most hits to the search (shade 62 ms a 1 M rays, 2026-10-19).
             bool contact = false;
-            for (uint k = 0u; k < 3u && u.uLookup.z > 0.5; ++k) {
+            for (uint k = 0u; k < 3u && (uint(u.uLookup.z) & 1u) != 0u; ++k) {
                 for (uint side = 0u; side < 2u; ++side) {
                     int centre = side == 0u ? front : back;
                     int there = cellPatch(corners[k], side == 0u ? face : -face, placement);
