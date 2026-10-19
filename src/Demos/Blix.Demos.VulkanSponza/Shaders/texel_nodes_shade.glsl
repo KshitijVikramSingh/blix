@@ -284,16 +284,23 @@ void main() {
             // Near hits (a contact, a crease) by the search's blend of the texels about them, the rest by their cell: one patch
             // a cell side read the creases' light from across them (crevices' seams 0.83 of the reference against the
             // search's 0.86, thinwall's leak 0.0017 against 0.0001, 2026-10-19).
-            if (u.uLookup.w > 0.5 && h1.z != 0xFFFFFFFFu && (h1.z & 0x80000000u) == 0u && uintBitsToFloat(h0.x) >= u.uLookup.z) {
-                // The hit's cell: its row's square of r x r cells over the barycentrics (the row's own vertex order), the
-                // lower triangle laid out row by row -- one read for the patch on the side it was met from, and the sun of
-                // the side facing it (hit_cells.comp mode 1: the blend of the texels' bits this pass made per hit).
+            // A cell with a contact or a sun edge across it (hit_cells.comp: bits 31, 30 of its word 1) is no answer for a
+            // hit: the search's, at the hit.
+            uint cellAt = 0u;
+            bool byCell = u.uLookup.w > 0.5 && h1.z != 0xFFFFFFFFu && (h1.z & 0x80000000u) == 0u && uintBitsToFloat(h0.x) >= u.uLookup.z;
+            if (byCell) {
                 uint r = hitCells[2u + 2u * h1.z];
                 vec2 bary = vec2(float(h1.w & 0xFFFFu), float(h1.w >> 16)) / 65535.0;
                 uint ci = min(uint(bary.x * float(r)), r - 1u);
                 uint cj = min(uint(bary.y * float(r)), r - 1u - ci);
-                uint cell = hitCells[1u + 2u * h1.z] + ci * r - (ci * (ci - 1u)) / 2u + cj;
-                uint at = 1u + 2u * hitCells[0] + 2u * cell;
+                cellAt = 1u + 2u * hitCells[0] + 2u * (hitCells[1u + 2u * h1.z] + ci * r - (ci * (ci - 1u)) / 2u + cj);
+                byCell = (hitCells[cellAt + 1u] & 0xC0000000u) == 0u;
+            }
+            if (byCell) {
+                // The hit's cell: its row's square of r x r cells over the barycentrics (the row's own vertex order), the
+                // lower triangle laid out row by row -- one read for the patch on the side it was met from, and the sun of
+                // the side facing it (hit_cells.comp mode 1: the blend of the texels' bits this pass made per hit).
+                uint at = cellAt;
                 uint frontWord = hitCells[at];
                 int patchIndex = int((dot(hn, normal) > 0.0 ? frontWord : hitCells[at + 1u]) & 0xFFFFFFu) - 1;
                 sHit[lid] = vec4(unpackUnorm4x8(h2.w).rgb * nodeRayWeight[slot] / PI, float(patchIndex));

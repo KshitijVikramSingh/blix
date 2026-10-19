@@ -22,10 +22,14 @@ internal sealed partial class SponzaLoop
     // A cell's side on a row's barycentric square: 10 cm (the texels' level 1).
     private float hitCellSize = 0.1f;
     // --cell-near D (0.25 m; 0: the cells answer every hit): hits nearer than D take the search's blend, not their cell
-    // (texel_nodes_shade.glsl), in both rounds -- the coarse's seams feed the fine's (the fine round's alone: crevices'
-    // seams 0.78, worse than the cells everywhere, 0.83; both: 0.87, 2026-10-19). Sponza's near hits are many and one in a
-    // workgroup holds the rest to the search: shade 10 -> 27 ms a 1 M rays, its coarse round 1.8 -> 2.6 min.
+    // (texel_nodes_shade.glsl), in both rounds -- one patch a cell side read the creases' light across them (crevices'
+    // seams 0.83 -> 0.87, thinwall's leak 0.0017 -> 0.0002); the fine round's alone was worse (0.78). Sponza's near hits
+    // are many and one in a workgroup holds the rest to the search: shade 10 -> 27 ms a 1 M rays (2026-10-19).
     private float hitCellNear = 0.25f;
+    // --cell-marks: the cells a contact (the surface turning over 30 degrees between its centre and a corner) or a sun edge
+    // crosses marked, their hits the search's (hit_cells.comp). Even so: Sponza's cells 24% marked and a workgroup's one
+    // marked hit holding the rest to the search, shade 38 ms a 1 M rays, and the cell build 0.65 -> 6.4 s (2026-10-19).
+    private bool cellMarks;
     private ShaderInterface hitCellsInterface = null!;
     private PipelineHandle hitCellsPipeline;
     private GpuBufferHandle hitCellsBuffer;
@@ -43,13 +47,36 @@ internal sealed partial class SponzaLoop
     {
         if (!HitCellsReady || !liveSunDone || liveSunColumn < 0 || hitCellsSun == (liveSunToward, liveSunColumn)) return;
         var clock = Stopwatch.StartNew();
-        const int perDispatch = 65535 * 64;
+        // A dispatch a quarter-million work items (of up to 256 cells each): Sponza's whole build in one ran past the GPU's
+        // watchdog once a cell's corners were read too, and the device was lost (2026-10-19).
+        const int perDispatch = 4096 * 64;
         for (var first = 0; first < hitCellItems; first += perDispatch)
             device.DispatchNow(new[] { HitCellsCommand(Math.Min(perDispatch, hitCellItems - first), first, 1) }, "hit-cells-sun");
         hitCellsSun = (liveSunToward, liveSunColumn);
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[VulkanSponza] hit cells: the sun of {hitCellCount:N0} cells from the texels' bits in {clock.Elapsed.TotalSeconds:0.00} s."));
+            $"[VulkanSponza] hit cells: the sun of {hitCellCount:N0} cells from the texels' bits in {clock.Elapsed.TotalSeconds:0.00} s{CellMarks()}."));
     }
+    // BLIX_CELL_MARKS=1: the cells marked for the search (hit_cells.comp: bit 31 a contact, bit 30 a sun edge), counted.
+    private static readonly bool cellMarksLog = Environment.GetEnvironmentVariable("BLIX_CELL_MARKS") == "1";
+
+    private string CellMarks()
+    {
+        if (!cellMarksLog) return "";
+        device.WaitIdle();
+        var words = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(hitCellsBuffer, 0, (int)((1L + 2L * hitCellRows + 2L * hitCellCount) * 4)).AsSpan());
+        var at = 1 + 2 * hitCellRows;
+        long contact = 0, edge = 0, either = 0;
+        for (long c = 0; c < hitCellCount; c++)
+        {
+            var w = words[(int)(at + 2 * c + 1)];
+            if ((w & 0x80000000u) != 0) contact++;
+            if ((w & 0x40000000u) != 0) edge++;
+            if ((w & 0xC0000000u) != 0) either++;
+        }
+        return string.Create(CultureInfo.InvariantCulture,
+            $"; marked for the search: a contact {100.0 * contact / hitCellCount:0.0}%, a sun edge {100.0 * edge / hitCellCount:0.0}%, either {100.0 * either / hitCellCount:0.0}%");
+    }
+
     private bool HitCellsShade(int discover)
     {
         var on = discover == 0 && HitCellsReady && liveSunColumn >= 0 && hitCellsSun == (liveSunToward, liveSunColumn);
@@ -112,7 +139,9 @@ internal sealed partial class SponzaLoop
         hitCellWork = Own(device.CreateGpuBuffer(Math.Max(16, work.Count * 4), MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(work)), "sponza.hit-cells.work"));
         hitCellCount = cells;
         var layoutMs = clock.Elapsed.TotalMilliseconds;
-        const int perDispatch = 65535 * 64;
+        // A dispatch a quarter-million work items (of up to 256 cells each): Sponza's whole build in one ran past the GPU's
+        // watchdog once a cell's corners were read too, and the device was lost (2026-10-19).
+        const int perDispatch = 4096 * 64;
         for (var first = 0; first < hitCellItems; first += perDispatch)
             device.DispatchNow(new[] { HitCellsCommand(Math.Min(perDispatch, hitCellItems - first), first) }, "hit-cells-build");
         hitCellsSun = (new Vector3(float.NaN), -1);
@@ -136,7 +165,7 @@ internal sealed partial class SponzaLoop
                 new("uSunBits", new Vector4Uniform(new Vector4(liveSunWords, sunNodeUnknownSun, 0f, 0f))),
                 new("uTexelGrid", new Vector4Uniform(texelGrid)),
                 new("uShade", new Vector4Uniform(new Vector4(0f, 0f, sunNodeHashSlots, sunNodeFoliageSlots))),
-                new("uLookup", new Vector4Uniform(new Vector4(sunNodePlane, sunNodeSigma, 0f, 0f))),
+                new("uLookup", new Vector4Uniform(new Vector4(sunNodePlane, sunNodeSigma, cellMarks ? 1f : 0f, 0f))),
                 new("uCookedGrid", new Vector4Uniform(cookedGrid)),
                 new("uCookedDims", new Vector4Uniform(cookedDims)),
             },

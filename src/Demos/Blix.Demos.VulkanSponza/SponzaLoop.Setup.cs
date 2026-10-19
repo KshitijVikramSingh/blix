@@ -404,6 +404,7 @@ internal sealed partial class SponzaLoop
         if (liveTransfer && args.Int("live-min-level") is null) liveMinLevel = 0;
         if (args.Float("hit-cell") is { } hc) hitCellSize = Math.Clamp(hc, 0.01f, 1f);
         if (args.Float("cell-near") is { } cn) hitCellNear = Math.Max(0f, cn);
+        cellMarks = args.Flag("cell-marks");
         // --live-max-rays N (4 x --live-rays): the refine's ceiling a texel in live mode -- the budget's other half. At
         // --texel-max-rays' 2,048 a 128-ray sweep of the coarse levels refined a million texels for 15 rounds (~3 min).
         if (liveTexels && args.Int("texel-max-rays") is null) texelMaxRays = args.Int("live-max-rays") ?? 4 * liveRays;
