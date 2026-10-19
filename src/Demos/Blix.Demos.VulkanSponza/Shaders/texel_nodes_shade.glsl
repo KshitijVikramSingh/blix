@@ -157,6 +157,12 @@ shared float sFar[RAYS];
 shared float sJoint[RAYS];         // every blended patch knows the ray's direction
 shared float sRayWeight[RAYS];
 shared uint sPlacement[RAYS];   // the census: each hit's placement (0xFFFFFFFF a miss)
+// The two-column fast path (live: the sky and the sun): each ray's contribution per column, on its own thread, then summed
+// -- the column loop below ran on 2 of the workgroup's 64 threads, walking the 32 rays one after another (2026-10-19).
+shared vec3 sRaySum[RAYS * 2];
+shared vec2 sRayTilt[RAYS * 2];
+shared vec4 sRayKnown[RAYS * 2];
+shared vec3 sUnknownBounce[2];
 shared int sNearTexel[RAYS];    // the transport census: each hit's likeliest texel (-1: among none)
 shared float sTransportReach;
 shared uint sTransportObject;
@@ -416,7 +422,92 @@ void main() {
             uint at = (group * uint(FAR_SET) + uint(i)) * uint(FAR_BINS) + uint(b);
             farBins[at] = (u.uShade.w > 0.5 ? farBins[at] : vec4(0.0)) + wf;
         }
-    for (int k = int(lid); k < suns; k += SHADE_THREADS) {
+    bool fastColumns = suns <= 2 && !farRecording && u.uDetail.z < 0.5;
+    if (fastColumns) {
+        const vec3 lumW = vec3(0.2126, 0.7152, 0.0722);
+        bool detail = u.uDetail.y > 0.5;
+        vec3 dn = vec3(0.0, 1.0, 0.0), dt1 = vec3(1.0, 0.0, 0.0), dt2 = vec3(0.0, 0.0, 1.0);
+        if (detail) texelDetailFrame(normalize(texels[2u * nodeIds[uint(u.uDetail.x) + group] + 1u].xyz), dn, dt1, dt2);
+        // Each ray's known bounce (its patch's light), for the unknown hits' estimate.
+        if (lid < uint(RAYS)) {
+            int r = int(lid);
+            for (int k = 0; k < suns; ++k) {
+                float pw = sHit[r].w;
+                vec4 known = vec4(0.0);
+                if (pw >= 0.0) { uvec2 p = patchLight[uint(pw) * uint(suns) + uint(k)]; known = vec4(unpackHalf2x16(p.x), unpackHalf2x16(p.y).x, 1.0); }
+                sRayKnown[r * 2 + k] = known;
+            }
+        }
+        barrier();
+        if (lid < uint(suns)) {
+            vec4 known = vec4(0.0);
+            for (int r = 0; r < RAYS; ++r) known += sRayKnown[r * 2 + int(lid)];
+            sUnknownBounce[lid] = known.w > 0.0 ? known.rgb / known.w : vec3(0.0);
+        }
+        barrier();
+        // Each ray, each column: the column loop's body (no census, no recording).
+        if (lid < uint(RAYS)) {
+            int r = int(lid);
+            vec4 h = sHit[r];
+            vec3 w = sDir[r];
+            float tiltDen = max(dot(dn, w), 0.1);
+            for (int k = 0; k < suns; ++k) {
+                vec3 toSun = sunNodes[k].xyz;
+                uint kind = uint(sunNodes[k].w + 0.5);
+                bool hasSun = (kind & 1u) != 0u, hasSky = (kind & 2u) != 0u;
+                uint word = uint(k) / 32u, bit = 1u << (uint(k) % 32u);
+                vec3 add = vec3(0.0);
+                float tiltLight = 0.0;
+                bool tilts = detail;
+                if (h.w < -2.5) {
+                    vec3 fl = vec3(0.0);
+                    for (int i = 0; i < FAR_SET; ++i)
+                        if (sFarIds[i] >= 0) fl += sFarWeights[i] * farLight(sFarIds[i], sBin[r * FAR_SET + i], k, u.uFar);
+                    tiltLight = dot(sRayWeight[r] * fl, lumW);
+                } else if (h.w < -1.5) {
+                    if (hasSky) add = h.rgb;
+                    tiltLight = dot(add, lumW);
+                } else {
+                    vec3 light = sUnknownBounce[k];
+                    if (h.w >= 0.0) { uvec2 p = patchLight[uint(h.w) * uint(suns) + uint(k)]; light = vec3(unpackHalf2x16(p.x), unpackHalf2x16(p.y).x); }
+                    float ndotl = hasSun ? max(dot(sNormal[r], toSun), 0.0) : 0.0;
+                    if (ndotl > 0.0) {
+                        if (k == 0 && sExact[r] >= 0.0) { light += u.uSunIrradiance.rgb * ndotl * sExact[r]; tilts = false; }
+                        else {
+                            float visible = sUnknown[r] * u.uSunIrradiance.w;
+                            for (int c = 0; c < NODE_CANDIDATES; ++c)
+                                if ((sBits[(uint(r) * NODE_CANDIDATES + uint(c)) * MAX_WORDS + word] & bit) != 0u) visible += sWeight[r * NODE_CANDIDATES + c];
+                            light += u.uSunIrradiance.rgb * ndotl * visible;
+                        }
+                    }
+                    add = h.rgb * light;
+                    tiltLight = dot(add, lumW);
+                }
+                sRaySum[r * 2 + k] = add;
+                sRayTilt[r * 2 + k] = tilts ? tiltLight * vec2(dot(dt1, w), dot(dt2, w)) / tiltDen : vec2(0.0);
+            }
+        }
+        barrier();
+        if (lid < uint(suns)) {
+            int k = int(lid);
+            vec3 sum = vec3(0.0);
+            vec2 tilt = vec2(0.0);
+            for (int r = 0; r < RAYS; ++r) { sum += sRaySum[r * 2 + k]; tilt += sRayTilt[r * 2 + k]; }
+            uint at = group * uint(suns) + uint(k);
+            if (detail) {
+                float escaped = 0.0;
+                if (k == 0) for (int r = 0; r < RAYS; ++r) escaped += sMiss[r];
+                vec4 d = vec4(tilt / float(RAYS), escaped / float(RAYS), 0.0);
+                nodeDetail[at] = u.uShade.w > 0.5 ? nodeDetail[at] + d : d;
+            }
+            vec3 mean = sum / float(RAYS);
+            vec4 before = u.uShade.w > 0.5 ? nodeAccum[at] : vec4(0.0);
+            nodeAccum[at] = vec4(before.rgb + mean, before.w);
+            sColumnLum[k] = dot(mean, lumW);
+            sColumnSource[k] = vec4(0.0); sColumnFar[k] = vec4(0.0); sColumnNear[k] = vec4(0.0); sColumnCompare[k] = vec4(0.0);
+        }
+    }
+    for (int k = int(lid); k < suns && !fastColumns; k += SHADE_THREADS) {
         vec3 toSun = sunNodes[k].xyz;
         // The column's kind (SunNodes w): 1 its sun alone, 2 the sky alone, 3 both. Each part is what that part lights:
         // the sky the misses and (through the patches' sky part) the hits; the sun the hits, directly and through the

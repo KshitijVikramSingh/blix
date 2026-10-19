@@ -667,13 +667,16 @@ internal sealed partial class SponzaLoop
             fineGathering = false;
             sunNodeRays = fineGatherSavedRays;
             texelMaxRays = fineGatherSavedMaxRays;
+            RecallFinal();
         }
         else if (TransferOn && transferReady && !transferCheck && transferGatherIds.Length > 0 && Environment.GetEnvironmentVariable("BLIX_NO_FINE") != "1")
         {
             ApplyFineNow();
             if (spotWhy) SpotWhyCompare(fine: true);
             // The fine refine: the flagged texels traced as the coarse were, a round of their own, the cook screen up.
-            if (FineGatherIds() is { Length: > 0 } fineIds)
+            var picked = FineGatherIds();
+            RecallCopy(picked);
+            if (picked is { Length: > 0 } fineIds)
             {
                 RetireTraceBuffer();
                 sunNodeTraceIds = fineIds;
@@ -957,6 +960,7 @@ internal sealed partial class SponzaLoop
             FarRelightNow();
             if (livePatchTexels) ApplyPatchTexelsNow(); else ApplyTransferNow();
             if (spotWhy) SpotWhySnapshot();
+            RecallInstant();
             transferAppliedFor = liveSunToward;
             if (sunNodeTraceIds.Length == 0 && transferGatherIds.Length > 0)
             {
