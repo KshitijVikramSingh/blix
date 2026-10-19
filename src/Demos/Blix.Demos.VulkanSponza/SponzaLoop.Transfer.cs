@@ -120,7 +120,7 @@ internal sealed partial class SponzaLoop
                 new ShaderUniform[]
                 {
                     new("uPass", new Vector4Uniform(new Vector4(live.Length, first, sunNodeKinds.Length, mode))),
-                    new("uColumns", new Vector4Uniform(new Vector4(Math.Max(0, Array.IndexOf(sunNodeKinds, 2)), Math.Max(0, liveSunColumn), 0f, 0f))),
+                    new("uColumns", new Vector4Uniform(new Vector4(Math.Max(0, Array.IndexOf(sunNodeKinds, 2)), Math.Max(0, liveSunColumn), liveSkyEscapeBuffer.Equals(default(GpuBufferHandle)) ? 0f : 1f, 0f))),
                     new("uInvIrr", new Vector4Uniform(new Vector4(inv, 0f))),
                     new("uFar", new Vector4Uniform(farOn ? FarUniform(0) : Vector4.Zero)),
                     new("uCookedGrid", new Vector4Uniform(cookedGrid)),
@@ -144,6 +144,7 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("PatchOpen", patchOpenBuffer),
                     new ShaderBufferBinding("PatchDirShares", patchDirSharesBuffer),
                     new ShaderBufferBinding("AoShort", texelAoShortBuffer),
+                    new ShaderBufferBinding("PatchSkyEscape", liveSkyEscapeBuffer.Equals(default(GpuBufferHandle)) ? texelAoShortBuffer : liveSkyEscapeBuffer),
                 }.Concat(CookedBuffers()).Where(b => declared.Contains(b.Name)).ToArray()) }, "texel-patch-light");
     }
 

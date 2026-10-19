@@ -16,7 +16,7 @@ layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) uniform TexelPatchLight {
     vec4 uPass;        // x the live texels, y the dispatch's first, z the patch light's columns, w the mode
-    vec4 uColumns;     // x the sky's column, y the sun's
+    vec4 uColumns;     // x the sky's column, y the sun's; z 1: the patches' sky escape is bound (the sky visibility from it)
     vec4 uInvIrr;      // rgb 1 / the sun's irradiance
     vec4 uFar;         // the far field (texel_far.glsl)
     vec4 uCookedGrid;
@@ -36,6 +36,8 @@ layout(std430, set = 0, binding = 15) readonly buffer DirOpen { uint dirOpen[]; 
 layout(std430, set = 0, binding = 16) buffer PatchOpen { uint patchOpen[]; };                 // [patch][18]: by octant sum (x14), texels; short sum (x254), texels
 layout(std430, set = 0, binding = 18) readonly buffer AoShort { uint aoShort[]; };
 layout(std430, set = 0, binding = 17) readonly buffer PatchDirShares { uint shares[]; };      // [patch][2][8]: half pairs
+// Each patch's escaped share by guide bin (64): summed, the share of its rays that reach the sky -- its sky visibility.
+layout(std430, set = 0, binding = 19) readonly buffer PatchSkyEscape { float skyEscape[]; };
 
 #define COOKED_BINDING 10
 #define COOKED_GRID u.uCookedGrid
@@ -149,7 +151,23 @@ void main() {
     for (int i = 0; i < FAR_SET; ++i) if (ids[i] >= 0 && ws[i] > 0.0) { skyShare += ws[i]; sunShare += ws[i]; }
     vec2 skyTilt = skyShare > 0.0 ? skyTiltSum / max(skyShare, 1e-6) : vec2(0.0);
     vec2 sunTilt = sunShare > 0.0 ? sunTiltSum / max(sunShare, 1e-6) : vec2(0.0);
+    // The sky visibility: the patches' (the share of their rays reaching the sky), by the texel's openness over theirs --
+    // its openness within a metre alone stood for it, and a gallery's texels, open for a metre and seeing no sky, read
+    // half the sky (0.52 against the cooked gather's 0.18, BLIX_RECALL, 2026-10-19).
     float vis = mine >= 0.0 ? mine : open;
+    if (u.uColumns.z > 0.5) {
+        float patchSky = 0.0, w = 0.0;
+        for (int i = 0; i < FAR_SET; ++i) {
+            if (ids[i] < 0 || ws[i] <= 0.0) continue;
+            float e = 0.0;
+            for (uint b = 0u; b < 64u; ++b) e += skyEscape[uint(ids[i]) * 64u + b];
+            patchSky += ws[i] * e;
+            w += ws[i];
+        }
+        patchSky = w > 0.0 ? patchSky / w : 0.0;
+        float ratio = mine >= 0.0 && open > 1e-3 ? clamp(mine / open, 0.0, 1.0) : 1.0;
+        vis = clamp(patchSky * ratio, 0.0, 1.0);
+    }
     skyDetail[id] = detailPack(skyTilt, vis);
     sunDetail[id] = detailPack(sunTilt, vis);
 }

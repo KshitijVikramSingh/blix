@@ -51,6 +51,31 @@ internal sealed partial class SponzaLoop
             recallFloor = 0.1f * (sorted.Length > 0 ? sorted[sorted.Length / 2] : 0f);
         }
         recallInstant = RecallLive();
+        RecallSky();
+    }
+
+    // The instant layer's sky visibility (the detail's, what the lit pass reads) against the cooked gather's.
+    private void RecallSky()
+    {
+        if (recallFiles is null || texelLiveIds is not { } live) return;
+        var skyPath = recallFiles.Split(',')[0];
+        if (ReadDetailFile(DetailPathFor(skyPath), texelCount) is not { } reference) { Console.WriteLine("[VulkanSponza] recall, sky: no reference detail."); return; }
+        device.WaitIdle();
+        var mine = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(splitSkyDetailBuffer, 0, texelCount * 4).AsSpan()).ToArray();
+        var coarseSet = new HashSet<uint>(transferGatherIds);
+        foreach (var coarse in new[] { true, false })
+        {
+            double sumAbs = 0, sumMine = 0, sumRef = 0; long n = 0, off = 0;
+            foreach (var id in live)
+            {
+                if (coarseSet.Contains(id) != coarse) continue;
+                var a = ((mine[id] >> 16) & 255) / 255f; var b = ((reference[id] >> 16) & 255) / 255f;
+                sumAbs += MathF.Abs(a - b); sumMine += a; sumRef += b; n++;
+                if (MathF.Abs(a - b) > 0.2f) off++;
+            }
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza] recall, the instant layer's sky visibility, {(coarse ? "coarse" : "fine")}: {n:N0} texels, mean {sumMine / Math.Max(1, n):0.000} against the reference's {sumRef / Math.Max(1, n):0.000}, mean |difference| {sumAbs / Math.Max(1, n):0.000}, over 0.2 off {100.0 * off / Math.Max(1, n):0.0}%."));
+        }
     }
 
     private float RecallError(float live, float reference) => MathF.Abs(live - reference) / MathF.Max(reference, recallFloor);
