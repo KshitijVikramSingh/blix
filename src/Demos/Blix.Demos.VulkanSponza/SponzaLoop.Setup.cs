@@ -381,8 +381,8 @@ internal sealed partial class SponzaLoop
         livePatchRefine = args.Flag("live-patch-refine");
         // --cpu-resolve: the traced slices read back and resolved in C# (SponzaLoop.SliceResolve.cs), as before.
         cpuResolve = args.Flag("cpu-resolve");
-        // --fine-gather N (1 M with the refine; 0 off), --fine-rays R (64): SponzaLoop.Transfer.cs, the fine refine.
-        fineGatherBudget = args.Int("fine-gather") ?? (livePatchRefine ? 1_000_000 : 0);
+        // --fine-gather N (4 M with the refine: 87% of the copy's error against the cooked gather; 0 off), --fine-rays R (256): SponzaLoop.Transfer.cs, the fine refine.
+        fineGatherBudget = args.Int("fine-gather") ?? (livePatchRefine ? 4_000_000 : 0);
         if (args.Int("fine-rays") is { } fr) fineGatherRays = Math.Max(32, fr / 32 * 32);
         livePatchTexels = args.Flag("live-patch-texels") || livePatchRefine;
         if (livePatchTexels) { liveTransfer = true; hitCellsOn = livePatchRefine && !args.Flag("no-hit-cells"); transferAoRays = 128; transferAoReach = TexelOpenReach; }
@@ -403,6 +403,7 @@ internal sealed partial class SponzaLoop
         if (liveTransfer && args.Int("live-max-rays") is null && args.Int("texel-max-rays") is null) texelMaxRays = 4 * sunNodeRays;
         if (liveTransfer && args.Int("live-min-level") is null) liveMinLevel = 0;
         if (args.Float("hit-cell") is { } hc) hitCellSize = Math.Clamp(hc, 0.01f, 1f);
+        if (args.Float("cell-near") is { } cn) hitCellNear = Math.Max(0f, cn);
         // --live-max-rays N (4 x --live-rays): the refine's ceiling a texel in live mode -- the budget's other half. At
         // --texel-max-rays' 2,048 a 128-ray sweep of the coarse levels refined a million texels for 15 rounds (~3 min).
         if (liveTexels && args.Int("texel-max-rays") is null) texelMaxRays = args.Int("live-max-rays") ?? 4 * liveRays;

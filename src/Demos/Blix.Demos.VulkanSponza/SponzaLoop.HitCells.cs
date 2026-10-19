@@ -21,6 +21,11 @@ internal sealed partial class SponzaLoop
     private bool hitCellsOn = true;
     // A cell's side on a row's barycentric square: 10 cm (the texels' level 1).
     private float hitCellSize = 0.1f;
+    // --cell-near D (0.25 m; 0: the cells answer every hit): hits nearer than D take the search's blend, not their cell
+    // (texel_nodes_shade.glsl), in both rounds -- the coarse's seams feed the fine's (the fine round's alone: crevices'
+    // seams 0.78, worse than the cells everywhere, 0.83; both: 0.87, 2026-10-19). Sponza's near hits are many and one in a
+    // workgroup holds the rest to the search: shade 10 -> 27 ms a 1 M rays, its coarse round 1.8 -> 2.6 min.
+    private float hitCellNear = 0.25f;
     private ShaderInterface hitCellsInterface = null!;
     private PipelineHandle hitCellsPipeline;
     private GpuBufferHandle hitCellsBuffer;

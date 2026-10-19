@@ -212,8 +212,10 @@ internal sealed partial class SponzaLoop
     // cannot answer -- their coarse cells disagree, or none faces their way -- gathered themselves, the worst first, up to
     // N at R rays, behind the cook screen. The cooked mode's full gather answers curtains' folds and the walls' stones
     // the copy cannot (2026-10-19); this is it where it matters. 0: off.
-    private int fineGatherBudget, fineGatherRays = 64;
+    private int fineGatherBudget, fineGatherRays = 256;
     private bool fineGathering;
+    // The coarse sweep's dark bar (a tenth of its median light), kept past the refine's reset: the fine flags' floor.
+    private float lastDarkBar;
     private int fineGatherSavedMaxRays, fineGatherSavedRays;
 
     // The flagged, worst first, up to the budget.
@@ -264,7 +266,7 @@ internal sealed partial class SponzaLoop
         device.WaitIdle();
         fineFlagCounts = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(fineFlagsBuffer, 0, 64).AsSpan()).ToArray();
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[VulkanSponza] fine pass: {transferFineCount:N0} texels from the coarse in {clock.Elapsed.TotalMilliseconds:0} ms; flagged for their own gather {fineFlagCounts[0]:N0} ({100.0 * fineFlagCounts[0] / transferFineCount:0.0}%): none turned their way {fineFlagCounts[1]:N0}, the ones turned their way disagree {fineFlagCounts[2]:N0}, those and the cut ones disagree {fineFlagCounts[3]:N0}; the ones turned their way over 1.5/2/3/4/8/16x {string.Join(" / ", fineFlagCounts[4..10].Select(c => c.ToString("N0", CultureInfo.InvariantCulture)))}, against the cut ones {string.Join(" / ", fineFlagCounts[10..16].Select(c => c.ToString("N0", CultureInfo.InvariantCulture)))}."));
+            $"[VulkanSponza] fine pass: {transferFineCount:N0} texels from the coarse in {clock.Elapsed.TotalMilliseconds:0} ms; flagged for their own gather {fineFlagCounts[0]:N0} ({100.0 * fineFlagCounts[0] / transferFineCount:0.0}%), by the larger: none turned their way {fineFlagCounts[1]:N0}, the ones turned their way disagree {fineFlagCounts[2]:N0}, those and the cut ones {fineFlagCounts[10]:N0}, the copy and the instant layer {fineFlagCounts[3]:N0}; over 1.5/2/3/4/8/16x {string.Join(" / ", fineFlagCounts[4..10].Select(c => c.ToString("N0", CultureInfo.InvariantCulture)))}."));
     }
 
     // BLIX_SPOT_WHY: the fine pass again over these texels (their light unchanged: the coarse texels it reads are as
@@ -304,6 +306,7 @@ internal sealed partial class SponzaLoop
                     new("uFine", new Vector4Uniform(new Vector4(count, first, transferMinLevel, texelLevels - 1))),
                     new("uTexelGrid", new Vector4Uniform(texelGrid)),
                     new("uTexelParams", new Vector4Uniform(new Vector4(texelCapacity, texelLevels, debugOn ? 1f : 0f, Luminance(EffectiveSunIrradiance)))),
+                    new("uFlag", new Vector4Uniform(new Vector4(lastDarkBar, 0f, 0f, 0f))),
                 },
                 Array.Empty<ShaderTextureBinding>(),
                 Buffers: new[]

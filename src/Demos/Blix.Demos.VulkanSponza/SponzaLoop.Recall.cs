@@ -124,6 +124,68 @@ internal sealed partial class SponzaLoop
                 $"    miss: at {p.X:0.00},{p.Y:0.00},{p.Z:0.00} normal {nw.X:0.00},{nw.Y:0.00},{nw.Z:0.00} level {(int)nw.W}: copy {copy[id]:0.0000} instant {instant[id]:0.0000} reference {reference[id]:0.0000} ({e * 100:0}% off)"));
         }
         recallPicked = picked;
+        RecallRules(fineIds, copy, instant, words, flaggedCount);
+    }
+
+    // Selection rules scored offline at equal budgets: each ranks the fine texels; a budget takes the top. Recall: the
+    // share of the copy's bad texels (over RecallBad) taken, and of their error; precision: the share of the taken that are.
+    private void RecallRules(uint[] fineIds, float[] copy, float[] instant, uint[] flagWords, int flaggedCount)
+    {
+        var reference = recallReference!;
+        var spread = new float[texelCount];
+        for (var i = 0; i < flaggedCount; i++) spread[flagWords[2 * i]] = BitConverter.UInt32BitsToSingle(flagWords[2 * i + 1]);
+        float Disagree(uint id) => MathF.Max(copy[id], recallFloor) / MathF.Max(instant[id], recallFloor) is var r && r < 1f ? 1f / r : r;
+        // How far the copy is off, as each rule guesses it.
+        var rules = new (string Name, Func<uint, float> Score)[]
+        {
+            ("the flags by spread (now)", id => spread[id]),
+            ("copy against instant", id => Disagree(id)),
+            ("the flags by spread x light", id => spread[id] > 0f ? spread[id] * MathF.Max(copy[id], recallFloor) : 0f),
+            ("copy against instant x light", id => Disagree(id) * MathF.Max(copy[id], recallFloor)),
+            ("either: max of spread and copy against instant", id => MathF.Max(spread[id], Disagree(id))),
+            ("either, x light", id => MathF.Max(spread[id], Disagree(id)) * MathF.Max(copy[id], recallFloor)),
+            ("the error itself (the best any rule can do)", id => MathF.Abs(copy[id] - reference[id])),
+        };
+        double totalBad = 0, totalError = 0;
+        foreach (var id in fineIds) { var e = RecallError(copy[id], reference[id]); if (e > RecallBad) { totalBad++; totalError += MathF.Abs(copy[id] - reference[id]); } }
+        // Corrections of the copy itself, free at a light change: capped at k x the instant layer (the hidden faces: the copy
+        // 40x over, the instant right), against the reference -- and what each costs where the copy was right.
+        foreach (var k in new[] { 2f, 4f, 8f, 16f, 32f })
+        {
+            double sumErr = 0, sumAbs = 0, refSum = 0, liveSum = 0; long badN = 0, worsened = 0;
+            foreach (var id in fineIds)
+            {
+                var c = MathF.Min(copy[id], k * MathF.Max(instant[id], recallFloor));
+                var e = RecallError(c, reference[id]);
+                sumErr += e; sumAbs += MathF.Abs(c - reference[id]); if (e > RecallBad) badN++;
+                if (RecallError(copy[id], reference[id]) <= RecallBad && e > RecallBad) worsened++;
+                refSum += reference[id]; liveSum += c;
+            }
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza] recall, the copy capped at {k}x the instant layer: energy {liveSum / Math.Max(1e-9, refSum):0.000}, mean error {sumErr / fineIds.Length:0.000}, over 50% off {100.0 * badN / fineIds.Length:0.0}% (made bad {worsened:N0}), the error's sum {100 * sumAbs / Math.Max(1e-9, totalError):0.0}% of the uncapped bad ones'."));
+        }
+        foreach (var (name, score) in rules)
+        {
+            var scored = new float[fineIds.Length];
+            Parallel.For(0, fineIds.Length, i => scored[i] = score(fineIds[i]));
+            var order = Enumerable.Range(0, fineIds.Length).ToArray();
+            Array.Sort(scored.ToArray(), order);
+            Array.Reverse(order);
+            var line = new List<string>();
+            foreach (var budget in new[] { 1_000_000, 2_000_000, 4_000_000 })
+            {
+                double bad = 0, error = 0; long taken = 0;
+                for (var k = 0; k < Math.Min(budget, order.Length); k++)
+                {
+                    var id = fineIds[order[k]];
+                    if (scored[order[k]] <= 0f) break;
+                    taken++;
+                    if (RecallError(copy[id], reference[id]) > RecallBad) { bad++; error += MathF.Abs(copy[id] - reference[id]); }
+                }
+                line.Add(string.Create(CultureInfo.InvariantCulture, $"{budget / 1_000_000} M: recall {100 * bad / Math.Max(1, totalBad):0.0}% ({100 * error / Math.Max(1e-9, totalError):0.0}% of the error), precision {100 * bad / Math.Max(1, taken):0.0}%"));
+            }
+            Console.WriteLine($"[VulkanSponza] recall, rule {name}: " + string.Join("; ", line));
+        }
     }
 
     private uint[] recallPicked = Array.Empty<uint>();

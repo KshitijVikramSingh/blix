@@ -11,6 +11,7 @@ layout(set = 0, binding = 0) uniform TransferFine {
     vec4 uFine;        // x the fine texels, y the dispatch's first, z the coarse level, w the coarsest
     vec4 uTexelGrid;   // the finest level's grid: xyz the origin, w the spacing
     vec4 uTexelParams; // x the hash's capacity
+    vec4 uFlag;        // x the dark bar (the coarse sweep's: a tenth of its median light)
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer TexelHash { uvec4 texelHash[]; };
@@ -53,6 +54,15 @@ vec3 unpackRgb9e5(uint w) {
 
 float lightOf(uint cid) {
     return dot(unpackRgb9e5(skyPart[cid].x) + unpackRgb9e5(sunPart[cid].x) * u.uTexelParams.w, vec3(0.2126, 0.7152, 0.0722));
+}
+
+// A flagged texel: its id and score after the counts (why: 1 none turned its way, 2 the cells turned its way disagree,
+// 10 those and the cut ones, 3 the copy and the instant layer).
+void flag(uint why, float score) {
+    uint slot = atomicAdd(fineFlags[0], 1u);
+    atomicAdd(fineFlags[why], 1u);
+    fineFlags[16u + 2u * slot] = gl_GlobalInvocationID.x + uint(u.uFine.y) < uint(u.uFine.x) ? fineIds[gl_GlobalInvocationID.x + uint(u.uFine.y)] : 0u;
+    fineFlags[17u + 2u * slot] = floatBitsToUint(score);
 }
 
 float ao(uint id) { uint v = (aoBytes[id / 4u] >> (8u * (id % 4u))) & 255u; return v == 0u ? -1.0 : float(v - 1u) / 254.0; }
@@ -126,38 +136,31 @@ void main() {
         }
     }
     if (debug) fineDebug[t * 32u + 31u] = floatBitsToUint(total);
-    // Flagged: none turned its way, or the light around it changes too fast for a copy (over 2x, past a floor of a few
-    // percent of a lit wall's) among the cells turned its way or between those and the ones the normal cut.
-    if (!debug) {
-        const float floorLight = 0.002;
-        uint why = 0u;
-        if (total <= 0.0) why = 1u;
-        else if ((keptMax + floorLight) > 2.0 * (keptMin + floorLight)) why = 2u;
-        else if (cutMax > 0.0 && ((cutMax + floorLight) > 2.0 * (keptMax + floorLight) || (keptMin + floorLight) > 2.0 * (cutMin + floorLight))) why = 3u;
-        float keptRatio = (keptMax + floorLight) / (keptMin + floorLight);
-        float cutRatio = cutMax > 0.0 ? max((cutMax + floorLight) / (keptMax + floorLight), (keptMin + floorLight) / (cutMin + floorLight)) : 1.0;
-        if (why > 0u) {
-            uint slot = atomicAdd(fineFlags[0], 1u);
-            atomicAdd(fineFlags[why], 1u);
-            // Its id and how far the copy is off (none turned its way: first).
-            fineFlags[16u + 2u * slot] = id;
-            fineFlags[17u + 2u * slot] = floatBitsToUint(why == 1u ? 1e6 : max(keptRatio, cutRatio));
-        }
-        // The spread's histogram (words 4-15 before the ids move up: kept 4-9, cut 10-15): over 1.5, 2, 3, 4, 8, 16x.
-        if (total > 0.0) {
-            const float edges[6] = float[6](1.5, 2.0, 3.0, 4.0, 8.0, 16.0);
-            for (int e = 0; e < 6; ++e) {
-                if (keptRatio > edges[e]) atomicAdd(fineFlags[4 + e], 1u);
-                if (cutRatio > edges[e]) atomicAdd(fineFlags[10 + e], 1u);
-            }
-        }
-    }
-    if (total <= 0.0) return;   // none around: its provisional light stands
+    const float floorLight = 0.002;
+    float keptRatio = (keptMax + floorLight) / (keptMin + floorLight);
+    float cutRatio = cutMax > 0.0 ? max((cutMax + floorLight) / (keptMax + floorLight), (keptMin + floorLight) / (cutMin + floorLight)) : 1.0;
+    // Its light before the copy: the instant layer's (texel_patch_light.comp), for the flags below.
+    float instantLight = lightOf(id);
+    if (total <= 0.0) { if (!debug) flag(1u, 1e6); return; }   // none around: its provisional light stands, flagged first
     sky /= total; sun /= total; skyD /= total; sunD /= total;
     // Contact darkens only: a coarse texel's centroid sunk in its surface (a cell holding a face and a recess) measures
     // itself closed, and up to 2x over it lit its fine texels in cell-sized bright blocks (2026-10-19).
     float fineAo = ao(id);
     float ratio = fineAo >= 0.0 && aoWeight > 0.0 && coarseAo > 1e-3 ? clamp(fineAo / (coarseAo / aoWeight), 0.0, 1.0) : 1.0;
+    // Flagged for its own gather (SponzaLoop.Transfer.cs, the fine refine): the light around it changes too fast for a
+    // copy -- over 2x among the cells turned its way, or between those and the ones the normal cut -- or the copy and the
+    // instant layer disagree over 2x (past the dark bar): each catches what the other misses (the hidden faces: a lit
+    // cell's copy 40x over, the instant layer right; BLIX_RECALL, 2026-10-19). Ranked by the larger.
+    if (!debug) {
+        float copyLight = dot(sky * ratio + sun * ratio * u.uTexelParams.w, vec3(0.2126, 0.7152, 0.0722));
+        float bar = max(u.uFlag.x, 1e-6);
+        float disagree = max(copyLight, bar) / max(instantLight, bar);
+        disagree = max(disagree, 1.0 / disagree);
+        float score = max(max(keptRatio, cutRatio), disagree);
+        if (score > 2.0) flag(disagree >= max(keptRatio, cutRatio) ? 3u : keptRatio >= cutRatio ? 2u : 10u, score);
+        const float edges[6] = float[6](1.5, 2.0, 3.0, 4.0, 8.0, 16.0);
+        for (int e = 0; e < 6; ++e) if (score > edges[e]) atomicAdd(fineFlags[4 + e], 1u);
+    }
     skyPart[id] = uvec2(packRgb9e5(sky * ratio), 0xFFFFu | 0x10000u);
     sunPart[id] = uvec2(packRgb9e5(sun * ratio), 0xFFFFu | 0x10000u);
     // The coarse tilts turned into this texel's frame: in their own (a cell averaging a wall and the ledge under it,

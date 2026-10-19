@@ -175,6 +175,7 @@ internal sealed partial class SponzaLoop
     // The cook's refinement state let go (FinishSunNodes, a new cook).
     private void ResetSunNodeRefine()
     {
+        if (sunNodeDarkBar > 0f) lastDarkBar = sunNodeDarkBar;
         Array.Clear(sunNodeLightHistogram);
         sunNodeDarkBar = 0f;
         if (!sunNodeRefineBuffer.Equals(default(GpuBufferHandle)) && !IsResolveBuffer(sunNodeRefineBuffer)) RetireGpuBuffer(sunNodeRefineBuffer);

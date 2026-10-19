@@ -91,7 +91,11 @@ internal sealed partial class SponzaLoop : IUiSource
                 if (sunNodeStage != SunNodeStage.Tracing || sunNodeReadback) break;
             }
             sunNodeCopy = 0;
-            RecordSplitCompose();
+            // Composed once the gather is done, not every frame of it: the screen keeps the last image, so nothing shows
+            // the parts, and the compose of every texel (twice, with the filter) was the frame's work each gather pass's
+            // first waited on (~80 ms a frame, ~25 s of Sponza's light change, 2026-10-19). Left dirty, the first frame
+            // after composes.
+            if (sunNodeStage != SunNodeStage.Tracing) RecordSplitCompose();
         }
         // The last image the scene drew stays up under the cook window (the present pass reads TAA's history, or the HDR
         // target, neither touched here): the user watched streamed geometry and textures vanish for the cook, which needs

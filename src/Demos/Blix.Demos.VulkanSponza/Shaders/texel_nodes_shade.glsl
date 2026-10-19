@@ -31,7 +31,8 @@ layout(set = 0, binding = 0) uniform SunNodesShade {
     vec4 uDetail;         // x the slice's first entry in NodeIds; y 1: write NodeDetail (the cells' sky visibility and
                           // direction, SponzaLoop.SplitDetail.cs); z 1: write NodeCensus (--split-noise-census)
     vec4 uSky;            // x strength, y mip
-    vec4 uLookup;         // x a sun bit candidate's plane distance at most (cells), y the distance weight's spread (cells); w 1: the hit cells answer (hit_cells.comp)
+    vec4 uLookup;         // x a sun bit candidate's plane distance at most (cells), y the distance weight's spread (cells); z the hit cells
+                          // answer only past this distance (nearer, the search's blend: a contact's light); w 1: the hit cells answer (hit_cells.comp)
     vec4 uFoliage;        // x the foliage hash's slots (0: no foliage points); y discovering: the list's room (0: off);
                           // z the exact-sun experiment (--sun-nodes-exact-sun, one sun): 1 write each hit's shadow
                           // ray toward sun 0 (ExactOrigins) and stop; 2 shade sun 0 by that ray's answer (ExactOccluded)
@@ -280,7 +281,10 @@ void main() {
             }
             sNormal[lid] = hn;
             uvec4 h1 = nodeHits[slot * 3u + 1u];
-            if (u.uLookup.w > 0.5 && h1.z != 0xFFFFFFFFu && (h1.z & 0x80000000u) == 0u) {
+            // Near hits (a contact, a crease) by the search's blend of the texels about them, the rest by their cell: one patch
+            // a cell side read the creases' light from across them (crevices' seams 0.83 of the reference against the
+            // search's 0.86, thinwall's leak 0.0017 against 0.0001, 2026-10-19).
+            if (u.uLookup.w > 0.5 && h1.z != 0xFFFFFFFFu && (h1.z & 0x80000000u) == 0u && uintBitsToFloat(h0.x) >= u.uLookup.z) {
                 // The hit's cell: its row's square of r x r cells over the barycentrics (the row's own vertex order), the
                 // lower triangle laid out row by row -- one read for the patch on the side it was met from, and the sun of
                 // the side facing it (hit_cells.comp mode 1: the blend of the texels' bits this pass made per hit).
