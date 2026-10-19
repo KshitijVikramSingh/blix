@@ -147,6 +147,8 @@ internal sealed partial class SponzaLoop
     {
         DebugProgress.End("ray scene: build and pack");
         var (scene, data, buildMs, meshCount, placements) = rayBuildTask!.Result;
+        // The finished task held the CPU's scene past DropCpuScene (2026-10-19: 435 MB): a completed one in its place.
+        rayBuildTask = Task.FromResult<(RayQueryScene, RayQueryGpuData?, double, int, int)>(default);
         rayQueries = scene;
         rayReach = (scene.Nodes[0].Bounds.Max - scene.Nodes[0].Bounds.Min).Length();
         var nodes = rayQueries.MeshNodeCount;
@@ -249,6 +251,7 @@ internal sealed partial class SponzaLoop
     private void RestoreRayTraversal(string why)
     {
         if (!rayTraversalDropped || rayGpuData is null) return;
+        if (rayGpuData.GeometryReleased) throw new InvalidOperationException($"the software traversal is wanted ({why}) after the ray geometry was released; boot with --keep-cpu-scene.");
         var blocks = rayGpuData.Blocks();
         foreach (var b in new[] { 0, 2 })
             rayBlockBuffers[b] = new ShaderBufferBinding(RayQueryGpuData.BlockNames[b],

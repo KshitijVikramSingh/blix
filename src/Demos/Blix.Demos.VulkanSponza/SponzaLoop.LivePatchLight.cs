@@ -550,12 +550,18 @@ internal sealed partial class SponzaLoop
                     : new FarLists(ReadArray<uint>(r), ReadArray<uint>(r), ReadArray<float>(r))) is { } l
                 ? (l.Start, l.Ids, l.Weights) : throw new InvalidOperationException("the GI bundle's far lists are for another reach")
             : null;
+        // BootIncident's closure is the cook's whole scope (a lambda holds its scope's every captured local -- the
+        // couplings, the sky bins: 1.9 GB, 2026-10-19); its answer alone stays.
         if (transportSolve is { } d)
+        {
+            var boot = d.BootIncident();
             transportSolve = d with
             {
+                BootIncident = () => boot,
                 Couplings = Array.Empty<(int, float)[]>(), SunletCouplings = Array.Empty<(int, float)[]>(),
                 SunletPos = new(), SunletNrm = new(), SunletAlbedo = new(),
             };
+        }
         var before = GC.GetTotalMemory(false);
         System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
         GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
@@ -588,6 +594,23 @@ internal sealed partial class SponzaLoop
         GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] live texels: the CPU's ray scene dropped (the managed heap {before / 1048576.0:N0} -> {GC.GetTotalMemory(false) / 1048576.0:N0} MB; --keep-cpu-scene keeps it)."));
+    }
+
+    // --live-texels, once the light has landed: the ray data's geometry goes (its BVH, triangles, positions, texture
+    // coordinates and the CPU's hierarchies, 1.8 GB on Sponza, 2026-10-19) -- the GPU holds its copies, and the Metal
+    // tracer, the hit cells and the foliage's sun points are built. The rows' tables stay (the surface words, the
+    // contacts' row map). The same readers as DropCpuScene keep it; --keep-cpu-scene keeps it.
+    private void ReleaseRayGeometry()
+    {
+        if (!liveTexels || keepCpuScene || rayGpuData is not { GeometryReleased: false } data) return;
+        if (gpuReference || probeReference || texelInspect is not null || rayLeakCensus || watch || rayCheck || rayView || surfaceCheck || spotWhy) return;
+        if (rtShadows && rtBuild is null || hitCellsOn && hitCellsBuffer.Equals(default(GpuBufferHandle)) || rayTraversalDropped && frameTracer is null) return;
+        data.ReleaseGeometry();
+        var before = GC.GetTotalMemory(false);
+        System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[VulkanSponza] live texels: the ray data's geometry released (the managed heap {before / 1048576.0:N0} -> {GC.GetTotalMemory(false) / 1048576.0:N0} MB; --keep-cpu-scene keeps it)."));
     }
 
     // The shared inputs (the band's solve packs them; this starts it when no band has) and the live state.

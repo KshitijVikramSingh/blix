@@ -50,17 +50,17 @@ public sealed class RayQueryGpuData
         Owners = owners;
     }
 
-    public BvhNode[] TopNodes { get; }
+    public BvhNode[] TopNodes { get; private set; }
     /// <summary>One per entry of the top level, in its order: a region, or an instanced placement.</summary>
-    public GpuInstance[] Instances { get; }
-    public BvhNode[] Nodes { get; }
+    public GpuInstance[] Instances { get; private set; }
+    public BvhNode[] Nodes { get; private set; }
     /// <summary>Four per triangle, in leaf order: three rebased vertex indices, then its index (instance) or owner row (region).</summary>
-    public uint[] Triangles { get; }
-    public Vector4[] Positions { get; }
+    public uint[] Triangles { get; private set; }
+    public Vector4[] Positions { get; private set; }
     /// <summary>Two per region triangle: placement, then triangle index with the high bit for a swapped winding.</summary>
-    public uint[] Owners { get; }
+    public uint[] Owners { get; private set; }
     /// <summary>One per position: the texture coordinates a surface bake reads (not part of traversal).</summary>
-    public Vector2[] Uvs { get; }
+    public Vector2[] Uvs { get; private set; }
     /// <summary>One per triangle row: the placement it came from, which names its material for a bake.</summary>
     public uint[] RowPlacements { get; }
 
@@ -72,7 +72,27 @@ public sealed class RayQueryGpuData
 
     private int[][] rowsByPlacement = Array.Empty<int[]>();
 
-    private readonly (TriangleBvh Bvh, uint TriangleBase)[] distinct;
+    private (TriangleBvh Bvh, uint TriangleBase)[] distinct;
+
+    /// <summary>True once <see cref="ReleaseGeometry"/> has let the traversal's arrays go.</summary>
+    public bool GeometryReleased { get; private set; }
+
+    /// <summary>
+    /// Lets go of everything but the rows' tables (<see cref="RowPlacements"/>, <see cref="RowMap"/>): the nodes, triangles,
+    /// positions, owners and texture coordinates, and the CPU hierarchies -- for a host whose GPU copies and builds are done.
+    /// </summary>
+    public void ReleaseGeometry()
+    {
+        TopNodes = Array.Empty<BvhNode>();
+        Instances = Array.Empty<GpuInstance>();
+        Nodes = Array.Empty<BvhNode>();
+        Triangles = Array.Empty<uint>();
+        Positions = Array.Empty<Vector4>();
+        Owners = Array.Empty<uint>();
+        Uvs = Array.Empty<Vector2>();
+        distinct = Array.Empty<(TriangleBvh, uint)>();
+        GeometryReleased = true;
+    }
 
     /// <summary>Hand baked surface words (one per triangle row) back to the CPU hierarchies as coverage, so the oracle meets the same triangles.</summary>
     public void ApplyCoverage(ReadOnlySpan<uint> surfaces)
@@ -93,7 +113,7 @@ public sealed class RayQueryGpuData
     }
 
     /// <summary>The seven blocks' bytes, in <see cref="BlockNames"/> order. An empty block is one zero word, since a buffer cannot be empty.</summary>
-    public byte[][] Blocks() => new[]
+    public byte[][] Blocks() => GeometryReleased ? throw new InvalidOperationException("the ray data's geometry was released.") : new[]
     {
         MemoryMarshal.AsBytes(TopNodes.AsSpan()).ToArray(),
         MemoryMarshal.AsBytes(Instances.AsSpan()).ToArray(),

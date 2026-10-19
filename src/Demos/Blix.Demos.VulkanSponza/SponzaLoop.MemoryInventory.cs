@@ -18,7 +18,7 @@ internal sealed partial class SponzaLoop
         var gc = GC.GetGCMemoryInfo();
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] memory, {when}: GPU buffers {Mb(buffers)} MB in {snap.GpuBuffers.Count:N0}, textures {Mb(textures)} MB in {snap.Textures.Count:N0}, vertices {Mb(vertices)} MB, indices {Mb(indices)} MB; managed heap {Mb(GC.GetTotalMemory(false))} MB (committed {Mb(gc.TotalCommittedBytes)} MB)."));
-        foreach (var b in snap.GpuBuffers.OrderByDescending(b => b.SizeBytes).Take(20))
+        foreach (var b in snap.GpuBuffers.OrderByDescending(b => b.SizeBytes).Where((b, i) => i < 20 || b.SizeBytes >= 16 << 20))
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {Mb(b.SizeBytes),7} MB  buffer  {b.Name}"));
         foreach (var g in snap.Textures.GroupBy(t => t.Format).OrderByDescending(g => g.Sum(t => t.ByteSize)).Take(8))
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {Mb(g.Sum(t => t.ByteSize)),7} MB  textures {g.Key} ({g.Count():N0})"));
@@ -28,5 +28,6 @@ internal sealed partial class SponzaLoop
         var couplingPairs = transportSolve?.Couplings.Sum(c => (long)(c?.Length ?? 0)) ?? 0;
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"    cook on the CPU: couplings {couplingPairs:N0} pairs (~{Mb(couplingPairs * 8 + (transportSolve?.Couplings.Length ?? 0) * 32L)} MB as arrays a patch); ray scene {rayQueries?.MeshNodeCount ?? 0:N0} nodes (~{Mb((rayQueries?.MeshNodeCount ?? 0) * 32L)} MB) and {rayQueries?.StoredTriangleCount ?? 0:N0} triangles."));
+        LogHeapHolders();
     }
 }

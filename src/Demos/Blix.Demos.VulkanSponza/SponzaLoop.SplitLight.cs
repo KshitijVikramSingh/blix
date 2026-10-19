@@ -165,6 +165,7 @@ internal sealed partial class SponzaLoop
         Console.WriteLine("[VulkanSponza] split light: the cook landed; the texels rest on the sky's part and the sun's.");
         // The sky's part gathered whole: a sun change gathers the sun's alone from here (SponzaLoop.SliceResolve.cs).
         if (liveTexels) liveSkyGathered = true;
+        ReleaseRayGeometry();
         // A sun asked for while the cook ran: its part next.
         if (splitSunWanted is { } wanted && Vector3.Distance(wanted, splitSunSolved) > 1e-5f) SplitSunChanged(wanted);
     }

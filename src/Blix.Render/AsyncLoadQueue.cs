@@ -53,6 +53,9 @@ public sealed class AsyncLoadQueue<T>
         {
             foreach (var item in producer.Result) queue.Enqueue(item);
             enqueued = true;
+            // The finished task would hold every item (and all it references) for the queue's life: hand it a
+            // completed empty one, so each item is the caller's alone once processed.
+            producer = Task.FromResult<IReadOnlyList<T>>(Array.Empty<T>());
         }
         if (queue.Count == 0) return true;
 
