@@ -381,7 +381,7 @@ internal sealed partial class SponzaLoop
         livePatchRefine = args.Flag("live-patch-refine");
         // --cpu-resolve: the traced slices read back and resolved in C# (SponzaLoop.SliceResolve.cs), as before.
         cpuResolve = args.Flag("cpu-resolve");
-        // --fine-gather N (5 M with the refine; 0 off), --fine-rays R (256): SponzaLoop.Transfer.cs, the fine refine.
+        // --fine-gather N (5 M with the refine; 0 off), --fine-rays R (128): SponzaLoop.Transfer.cs, the fine refine.
         fineGatherBudget = args.Int("fine-gather") ?? (livePatchRefine ? 5_000_000 : 0);
         if (args.Int("fine-rays") is { } fr) fineGatherRays = Math.Max(32, fr / 32 * 32);
         livePatchTexels = args.Flag("live-patch-texels") || livePatchRefine;
@@ -399,7 +399,9 @@ internal sealed partial class SponzaLoop
         if (args.Int("transfer-level") is { } tl2) transferMinLevel = Math.Clamp(tl2, 0, 4);
         if (!livePatchTexels) transferAoReach = 2f * texelSpacing * (1 << transferMinLevel);
         // The hybrid's gathered texels are the hard ones, and few: more rays each (--live-rays, --live-max-rays win).
-        if (liveTransfer && args.Int("live-rays") is null && args.Int("sun-nodes-rays") is null) { liveRays = 512; sunNodeRays = 512; }
+        // The refine (path B and the fine round): 384 a coarse texel, the least the gate's crevices corridor holds at (256: its
+        // noise 0.039 against the ratchet's 0.035, with refining's cap at 2,048 too), 2026-10-19; else 512.
+        if (liveTransfer && args.Int("live-rays") is null && args.Int("sun-nodes-rays") is null) { liveRays = livePatchRefine ? 384 : 512; sunNodeRays = liveRays; }
         if (liveTransfer && args.Int("live-max-rays") is null && args.Int("texel-max-rays") is null) texelMaxRays = 4 * sunNodeRays;
         if (liveTransfer && args.Int("live-min-level") is null) liveMinLevel = 0;
         if (args.Float("hit-cell") is { } hc) hitCellSize = Math.Clamp(hc, 0.01f, 1f);

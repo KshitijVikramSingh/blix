@@ -287,7 +287,8 @@ internal sealed partial class SponzaLoop
     // cannot answer -- their coarse cells disagree, or none faces their way -- gathered themselves, the worst first, up to
     // N at R rays, behind the cook screen. The cooked mode's full gather answers curtains' folds and the walls' stones
     // the copy cannot (2026-10-19); this is it where it matters. 0: off.
-    private int fineGatherBudget, fineGatherRays = 256;
+    // 128 rays a fine texel: as good as 256 against the cooked gather (0.054 against 0.053) and in the gate, 2026-10-19.
+    private int fineGatherBudget, fineGatherRays = 128;
     // --fine-max-rays N: the fine refine's noisy texels refined up to N (as the coarse round's); the gathered seams at a
     // flat 256 read 0.033-0.051 of excess light against the cooked gather's 0.015 (crevices, 2026-10-19).
     private int fineGatherMaxRays = 1024;
