@@ -174,6 +174,14 @@ void main() {
 #else
                 float historyCount = historySample.a;
 #endif
+                // A target made afresh (the render scale's resize after loading) holds whatever memory it was given: a NaN
+                // there resolved to NaN and fed itself back, the frame black for good while TAA was on (2026-10-20).
+                // Anything not finite is no history.
+                if (any(isnan(historySample)) || any(isinf(historySample)) || isnan(historyCount) || isinf(historyCount)) {
+                    history = current;
+                    historyCount = 0.0;
+                }
+                historyCount = clamp(historyCount, 0.0, 2048.0);
                 // Clamped to the neighbourhood, not rejected on a threshold: a disocclusion shows up
                 // as history outside what any nearby pixel of this frame contains, and pulling it to
                 // the edge of that range keeps the stability while dropping the stale colour.
