@@ -481,7 +481,8 @@ internal sealed partial class SponzaLoop
             device.WaitIdle();
             liveBitsSyncedFor = liveSunToward;
         }
-        HitCellsSunNow();
+        // Its own frame (~0.8 s on Sponza), ahead of the far relight's and the instant layer's.
+        if (HitCellsSunNow()) return;
         var refining = sunNodeRefineRound > 0;
         var live = refining ? sunNodeRefineIds : sunNodeTraceIds;
         var suns = sunNodeSuns!.Length;
@@ -979,9 +980,26 @@ internal sealed partial class SponzaLoop
         {
             // The far record relit now, from the patches' direct sums now: relit at the cook (for its cut), before the
             // sums were up, its sun column was none -- and the apply's far light, most of a texel's, had no sun.
-            patchDirectDone = false;
-            farRelit = false;
-            FarRelightNow();
+            // A step a frame (the sums and the lists up, the relight, the instant layer): together they held one frame
+            // ~1.5 s after a sun change (2026-10-20).
+            if (transferSetupFor != liveSunToward) { transferSetupFor = liveSunToward; transferSetupStep = 0; }
+            if (transferSetupStep == 0)
+            {
+                patchDirectDone = false;
+                farRelit = false;
+                PatchDirectNow();
+                if (farTransportMode && farOn && !farRecording) EnsureFarLists(farTransportPatches);
+                transferSetupStep = 1;
+                return;
+            }
+            if (transferSetupStep == 1)
+            {
+                FarRelightNow();
+                transferSetupStep = 2;
+                return;
+            }
+            transferSetupStep = 0;
+            transferSetupFor = new Vector3(float.NaN);
             if (livePatchTexels) ApplyPatchTexelsNow(); else ApplyTransferNow();
             if (spotWhy) SpotWhySnapshot();
             RecallInstant();

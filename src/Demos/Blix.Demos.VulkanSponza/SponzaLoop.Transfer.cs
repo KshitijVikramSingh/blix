@@ -29,6 +29,9 @@ internal sealed partial class SponzaLoop
     private float transferGatherShare = 0.01f, transferGatherTop = 0.1f;
     private uint[] transferGatherIds = Array.Empty<uint>();
     private Vector3 transferAppliedFor = new(float.NaN);
+    // The light change's setup a step a frame (RunSunNodePassesNow): the step next, and the sun it's for.
+    private int transferSetupStep;
+    private Vector3 transferSetupFor = new(float.NaN);
     private const int TransferTable = 512, TransferTail = 8, TransferRoom = 8192, TransferBinWords = 19;   // the shaders' TABLE, TAIL + 2; texels a cook slice
     private int TransferEntriesPer => transferK + TransferTail;
 

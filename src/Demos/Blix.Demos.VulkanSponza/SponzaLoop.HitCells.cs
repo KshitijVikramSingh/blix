@@ -50,21 +50,35 @@ internal sealed partial class SponzaLoop
     // where the trace (SunNodePassNow) shoots each hit's sun.
     private long hitCellPassesOn, hitCellPassesOff;
     private (Vector3, int) hitCellsSun = (new Vector3(float.NaN), -1);
+    // A pass under way: the sun it's for, the next work item, its clock.
+    private (Vector3, int) hitCellsSunFor = (new Vector3(float.NaN), -1);
+    private int hitCellsSunFirst;
+    private readonly Stopwatch hitCellsSunClock = new();
 
     // The cells' sun for the cook's (mode 1), before its trace: the texels' sun bits up for it (liveSunDone).
-    private void HitCellsSunNow()
+    // True when it ran this call. Spread over frames, ~100 ms each: Sponza's whole pass is ~0.8 s (2026-10-20).
+    private bool HitCellsSunNow()
     {
         using var profScope = Prof("cells-sun");
-        if (!HitCellsReady || !liveSunDone || liveSunColumn < 0 || hitCellsSun == (liveSunToward, liveSunColumn)) return;
+        if (!HitCellsReady || !liveSunDone || liveSunColumn < 0 || hitCellsSun == (liveSunToward, liveSunColumn)) return false;
+        if (hitCellsSunFor != (liveSunToward, liveSunColumn))
+        {
+            hitCellsSunFor = (liveSunToward, liveSunColumn);
+            hitCellsSunFirst = 0;
+            hitCellsSunClock.Restart();
+        }
         var clock = Stopwatch.StartNew();
         // A dispatch a quarter-million work items (of up to 256 cells each): Sponza's whole build in one ran past the GPU's
         // watchdog once a cell's corners were read too, and the device was lost (2026-10-19).
         const int perDispatch = 4096 * 64;
-        for (var first = 0; first < hitCellItems; first += perDispatch)
-            device.DispatchNow(new[] { HitCellsCommand(Math.Min(perDispatch, hitCellItems - first), first, 1) }, "hit-cells-sun");
+        for (; hitCellsSunFirst < hitCellItems && clock.Elapsed.TotalMilliseconds < 100; hitCellsSunFirst += perDispatch)
+            device.DispatchNow(new[] { HitCellsCommand(Math.Min(perDispatch, hitCellItems - hitCellsSunFirst), hitCellsSunFirst, 1) }, "hit-cells-sun");
+        if (hitCellsSunFirst < hitCellItems) return true;
         hitCellsSun = (liveSunToward, liveSunColumn);
+        hitCellsSunFor = (new Vector3(float.NaN), -1);
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[VulkanSponza] hit cells: the sun of {hitCellCount:N0} cells from the texels' bits in {clock.Elapsed.TotalSeconds:0.00} s{CellMarks()}."));
+            $"[VulkanSponza] hit cells: the sun of {hitCellCount:N0} cells from the texels' bits in {hitCellsSunClock.Elapsed.TotalSeconds:0.00} s{CellMarks()}."));
+        return true;
     }
     // BLIX_CELL_MARKS=1: the cells marked for the search (hit_cells.comp: bit 31 a contact, bit 30 a sun edge), counted.
     private static readonly bool cellMarksLog = Environment.GetEnvironmentVariable("BLIX_CELL_MARKS") == "1";
@@ -116,7 +130,7 @@ internal sealed partial class SponzaLoop
         var cachePath = TransferOn && !livePatchTexels || Environment.GetEnvironmentVariable("BLIX_NO_CELLS_CACHE") == "1" ? null : HitCellsPath(rows);   // A' adds its cells' light: built
         if (cachePath is not null && ReadHitCells(cachePath, rows))
         {
-            hitCellsSun = (new Vector3(float.NaN), -1);
+            hitCellsSun = hitCellsSunFor = (new Vector3(float.NaN), -1);
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] hit cells: {hitCellCount:N0} cells over {rows:N0} triangle rows read from {cachePath} in {clock.Elapsed.TotalMilliseconds:0} ms."));
             return;
@@ -164,7 +178,7 @@ internal sealed partial class SponzaLoop
         const int perDispatch = 4096 * 64;
         for (var first = 0; first < hitCellItems; first += perDispatch)
             device.DispatchNow(new[] { HitCellsCommand(Math.Min(perDispatch, hitCellItems - first), first) }, "hit-cells-build");
-        hitCellsSun = (new Vector3(float.NaN), -1);
+        hitCellsSun = hitCellsSunFor = (new Vector3(float.NaN), -1);
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] hit cells: {cells:N0} cells over {rows:N0} triangle rows at {cellSize * 100:0} cm ({bytes / 1048576.0:0} MB), laid out in {layoutMs:0} ms, their patches in {clock.Elapsed.TotalMilliseconds - layoutMs:0} ms."));
         if (cachePath is not null) WriteHitCells(cachePath, bytes, work.ToArray());
