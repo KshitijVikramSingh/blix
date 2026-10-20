@@ -27,6 +27,21 @@ internal sealed partial class VulkanRenderGraphBackend : IRenderGraphBackend
 
     public ulong MatchSwapchainResourceGeneration { get; private set; }
 
+    private float renderScale = 1f;
+    public float RenderScale
+    {
+        get => renderScale;
+        set
+        {
+            var clamped = Math.Clamp(value, 0.25f, 1f);
+            if (clamped == renderScale) return;
+            renderScale = clamped;
+            if (Device is null || !BackendCompiled) return;
+            Device.Vk.DeviceWaitIdle(Device.Device);
+            OnSwapchainRecreated();
+        }
+    }
+
     internal VulkanRenderGraphBackend(VulkanGraphicsDevice device, RenderGraph graph)
     {
         Device = device;
@@ -375,9 +390,11 @@ internal sealed partial class VulkanRenderGraphBackend : IRenderGraphBackend
         return size switch
         {
             FixedGraphSize fs => ((uint)fs.Width, (uint)fs.Height),
+            // The render scale first, as RenderGraph.RenderSizeFor rounds it, then the target's own scale: at 1 the
+            // swapchain's size exactly, as before.
             MatchSwapchainGraphSize ms => (
-                (uint)MathF.Max(1, device.SwapchainExtent.Width * ms.Scale),
-                (uint)MathF.Max(1, device.SwapchainExtent.Height * ms.Scale)),
+                (uint)MathF.Max(1, (uint)MathF.Max(1, device.SwapchainExtent.Width * renderScale) * ms.Scale),
+                (uint)MathF.Max(1, (uint)MathF.Max(1, device.SwapchainExtent.Height * renderScale) * ms.Scale)),
             _ => throw new ArgumentException($"Unknown GraphSize {size.GetType().Name}"),
         };
     }

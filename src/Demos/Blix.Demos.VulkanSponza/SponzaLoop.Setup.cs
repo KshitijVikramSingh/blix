@@ -413,6 +413,7 @@ internal sealed partial class SponzaLoop
         occlusionAlways = args.Flag("occlusion-always");
         incidentReuse = !args.Flag("no-incident-reuse");
         atlasGather = !args.Flag("no-atlas-gather");
+        if (args.Float("render-scale") is { } renderScaleArg) render.RenderScale = Math.Clamp(renderScaleArg, 0.5f, 1f);
         fineAll = args.Flag("fine-all");
         // --fine-contact R (0.9; 0 off): fine texels more closed than their coarse cells (their contact ratio under R)
         // flagged, first (--no-fine-contact-first: by their score among the rest). Crevices' seams 0.835 -> 0.932 (the

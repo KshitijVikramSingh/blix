@@ -29,4 +29,10 @@ internal interface IRenderGraphBackend : IDisposable
 
     /// <summary>Advances whenever swapchain-sized targets were reallocated.</summary>
     ulong MatchSwapchainResourceGeneration { get; }
+
+    /// <summary>
+    /// The swapchain-sized targets' size as a fraction of the swapchain (1: the swapchain's). Setting it waits for the
+    /// device to idle and reallocates them, as a resize does.
+    /// </summary>
+    float RenderScale { get; set; }
 }

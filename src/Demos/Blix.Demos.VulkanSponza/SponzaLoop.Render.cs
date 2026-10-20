@@ -368,6 +368,13 @@ internal sealed partial class SponzaLoop
     private void RenderFrame(Time time, RenderFrameContext frame, RenderCommandList commandList)
     {
         ProfileFrameBegin();
+        // RenderSettings.RenderScale: the scene renders at this fraction of the window, every swapchain-sized target with
+        // it, and the present pass scales the resolved image up (the overlay and imgui stay at the window's). A change
+        // reallocates the targets, which the generation check below sees. Every pass below takes the frame's size from
+        // here, so it agrees with its targets.
+        if (MathF.Abs(graph.RenderScale - render.RenderScale) > 1e-4f) graph.RenderScale = render.RenderScale;
+        var (renderWidth, renderHeight) = RenderGraph.RenderSizeFor(frame.Width, frame.Height, graph.RenderScale);
+        frame = frame with { Width = renderWidth, Height = renderHeight };
         // Match-swapchain graph targets are reallocated rather than resized in place. Their public
         // handles stay stable, but their contents do not. GTAO reads ambientDenoisedHandle as the
         // preceding frame and TAA reads the other parity target, so both must refuse history once
@@ -378,6 +385,7 @@ internal sealed partial class SponzaLoop
             graphResourceGeneration = graph.MatchSwapchainResourceGeneration;
             ambientHistoryValid = false;
             taaHistoryValid = false;
+            incidentHistoryFrame = -10;
             Console.WriteLine("[VulkanSponza] graph resources recreated; GTAO/TAA history reset");
         }
 

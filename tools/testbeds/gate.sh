@@ -42,7 +42,7 @@ paths=(--gpu-ref-paths 16384)
 frames=3000
 run() {
     local name=$1; shift
-    "$REPO/blix" run ${build[@]+"${build[@]}"} Blix.Demos.VulkanSponza "$@" --no-fog --win=960 540 "${reference[@]}" "${paths[@]}" \
+    "$REPO/blix" run ${build[@]+"${build[@]}"} Blix.Demos.VulkanSponza "$@" --no-fog --render-scale 1 --win=960 540 "${reference[@]}" "${paths[@]}" \
         --shot-when-ready --shot-frames=$frames --shot="$LOGS/$name.png" > "$LOGS/$name.log" 2>&1 || {
         echo "gate: the $name run failed; its log is $LOGS/$name.log" >&2
         tail -5 "$LOGS/$name.log" >&2

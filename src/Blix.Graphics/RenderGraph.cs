@@ -39,6 +39,21 @@ public sealed partial class RenderGraph : IDisposable
     /// </summary>
     public ulong MatchSwapchainResourceGeneration => Backend?.MatchSwapchainResourceGeneration ?? 0;
 
+    /// <summary>
+    /// Every <see cref="MatchSwapchainGraphSize"/> target is sized at this fraction of the swapchain (times its own
+    /// scale): the scene renders at a lower resolution and whatever presents scales it up. Setting it reallocates those
+    /// targets (and advances <see cref="MatchSwapchainResourceGeneration"/>). 1 before the backend exists.
+    /// </summary>
+    public float RenderScale
+    {
+        get => Backend?.RenderScale ?? 1f;
+        set { if (Backend is { } b) b.RenderScale = value; }
+    }
+
+    /// <summary>The size a <see cref="MatchSwapchainGraphSize"/> target of scale 1 has for a swapchain this size.</summary>
+    public static (int Width, int Height) RenderSizeFor(int swapchainWidth, int swapchainHeight, float renderScale) =>
+        ((int)MathF.Max(1, swapchainWidth * renderScale), (int)MathF.Max(1, swapchainHeight * renderScale));
+
     // Per-pass scopes captured by graph.Pass(); replayed in graph.Execute()
     // and cleared at the start of every Execute so any pass not re-declared
     // this frame simply doesn't render.
