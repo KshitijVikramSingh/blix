@@ -44,6 +44,8 @@ internal sealed partial class SponzaLoop
     private int profGen2;
     // The Metal tracer's cumulative GPU time at the window's start (its work is outside the Vulkan pass timings).
     private double profMetalTraceMs, profMetalShadowMs;
+    // The frame's size, for the TAA readout's share of pixels (set where the frame is recorded).
+    private (int Width, int Height) profFrameSize;
     private long profMetalTraces, profMetalShadows;
     private long profFrames;
 
@@ -178,6 +180,15 @@ internal sealed partial class SponzaLoop
                 $"[profile]   metal a frame: closest traces {(trace.TotalGpuMs - profMetalTraceMs) / frames.Count:0.00} ms ({(trace.Dispatches - profMetalTraces) / (double)frames.Count:0.0} batches), shadow traces {(shadow.TotalGpuMs - profMetalShadowMs) / frames.Count:0.00} ms ({(shadow.Dispatches - profMetalShadows) / (double)frames.Count:0.0} batches); allocated {tracer.Memory.AllocatedMb:N0} of {tracer.Memory.RecommendedMb:N0} MB recommended"));
             profMetalTraceMs = trace.TotalGpuMs; profMetalTraces = trace.Dispatches;
             profMetalShadowMs = shadow.TotalGpuMs; profMetalShadows = shadow.Dispatches;
+        }
+        // --taa-count-rejection: the share of pixels the resolve took history for, and of those the share it cut back.
+        if (taaCountRejection && !taaStats.Equals(default(GpuBufferHandle)))
+        {
+            var c = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(taaStats, 0, 8).AsSpan()).ToArray();
+            device.WriteGpuBuffer(taaStats, 0, new byte[8]);
+            var pixels = (double)profFrameSize.Width * profFrameSize.Height * frames.Count;
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[profile]   taa: history taken at {100.0 * c[1] / Math.Max(1.0, pixels):0.0}% of pixels, cut back at {100.0 * c[0] / Math.Max(1u, c[1]):0.0}% of those"));
         }
         if (moving.Count > 0)
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,

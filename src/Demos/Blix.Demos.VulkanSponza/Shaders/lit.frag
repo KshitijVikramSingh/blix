@@ -323,6 +323,8 @@ void main() {
     // silhouette instead of a hard binary edge. Fully-outside texels discard.
     // Opaque (alphaCutoff == 0) keeps coverage 1 → alpha-to-coverage is a no-op.
     float coverage = 1.0;
+    // The layer hash reads screen derivatives (blix_layerHash): taken before any discard, in uniform flow.
+    float layerHash = alphaCutoff > 0.0 ? blix_layerHash(vWorldPos) : 0.0;
     if (alphaCutoff > 0.0) {
         coverage = clamp((albedo4.a - alphaCutoff) / max(fwidth(albedo4.a), 1e-5) + 0.5, 0.0, 1.0);
         // The depth pre-pass uses the same discard and coverage decision; only sample ownership is
@@ -332,7 +334,7 @@ void main() {
         // At one sample there is no mask over which to distribute coverage, so both depth and lit
         // passes use the same hashed binary keep test.
         if (mat.uMaterialParams2.w > 0.0 && mat.uMaterialParams2.w < 1.5) {
-            if (!blix_hashedAlphaKeeps(coverage, blix_layerHash(vWorldPos))) discard;
+            if (!blix_hashedAlphaKeeps(coverage, layerHash)) discard;
             coverage = 1.0;
         }
 
@@ -341,7 +343,7 @@ void main() {
         // Assign a decorrelated sample mask with the same expected coverage. The depth pre-pass uses
         // the identical world-position hash so unowned samples contain neither leaf depth nor colour.
         {
-            float h = blix_layerHash(vWorldPos);
+            float h = layerHash;
             gl_SampleMask[0] = blix_coverageMask(coverage, int(mat.uMaterialParams2.w), h);
             coverage = 1.0;
         }

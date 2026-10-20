@@ -70,23 +70,26 @@ void main() {
     outLightmapTexel = dot(vLightmapTexel, vLightmapTexel) > 1e-6 ? (eighths.x | (eighths.y << 16)) : 0u;
 
     float a = texture(uAlbedo, vUv).a * mat.uBaseColorFactor.w;
+    // Derivatives before any discard (blix_layerHash reads the world position's).
+    float layerHash = blix_layerHash(vWorldPos);
+    float aWidth = fwidth(a);
     if (a < mat.uMaterialParams.x) discard;
 
     // Match the lit pass's sample mask and layer hash exactly. Otherwise depth survives in samples
     // where leaf colour is discarded and prevents background layers from filling the canopy.
     // uMaterialParams2.w carries the sample-count/policy because this pass has no frame block.
-    float coverage = clamp((a - mat.uMaterialParams.x) / max(fwidth(a), 1e-5) + 0.5, 0.0, 1.0);
+    float coverage = clamp((a - mat.uMaterialParams.x) / max(aWidth, 1e-5) + 0.5, 0.0, 1.0);
     float policy = mat.uMaterialParams2.w;
     int samples = int(policy);
     if (policy > 0.0 && policy < 1.5) {
         // Single sample: the lit pass resolves coverage with a hashed discard, so this must make
         // the SAME decision or the pre-pass writes depth for a fragment the lit pass throws away
         // and the canopy fills with holes of solid depth.
-        if (!blix_hashedAlphaKeeps(coverage, blix_layerHash(vWorldPos))) discard;
+        if (!blix_hashedAlphaKeeps(coverage, layerHash)) discard;
         gl_SampleMask[0] = 1;
     } else if (samples < 2) {
         gl_SampleMask[0] = 1;   // one sample, plain binary: the discard above is the whole test
     } else {
-        gl_SampleMask[0] = blix_coverageMask(coverage, samples, blix_layerHash(vWorldPos));
+        gl_SampleMask[0] = blix_coverageMask(coverage, samples, layerHash);
     }
 }

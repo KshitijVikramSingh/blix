@@ -740,6 +740,7 @@ internal sealed partial class SponzaLoop
         // the rejections and removes the whole class.
         RecordRaySurfaceBake();
         UpdateBakeScene();
+        profFrameSize = (frame.Width, frame.Height);
         using (Prof("rt-shadows")) RecordRtShadows(frame.Width, frame.Height);
         CookTransportWhenReady();
         CookGiWhenLanded();

@@ -71,8 +71,30 @@ int blix_coverageMask(float coverage, int samples, float hash) {
 
 /// The per-layer hash. Quantised finer than a leaf card is thick, so two cards overlapping in one
 /// pixel land in different cells and therefore on different samples.
+///
+/// <b>Cells no smaller than about two pixels.</b> At a fixed 1/64 m, a distant canopy put many
+/// cells in one pixel: TAA's sub-pixel jitter landed each frame's sample in another cell, the keep
+/// decision changed every frame, and the treetop against the sky shimmered (2026-10-20) -- the
+/// per-frame hash this file warns against, by the back door. Wyman & McGuire's pixel-scale hash:
+/// cells sized to the footprint at the two power-of-two scales around it, blended by the fraction
+/// and the blend's distribution made uniform again (their eq. 5), so nothing pops between scales.
+/// Up close the 1/64 m cell is still the finest. Fragment stages only (screen derivatives).
 float blix_layerHash(vec3 worldPos) {
-    return blix_hash31(floor(worldPos * 64.0));
+    const float CellPixels = 2.0;
+    float footprint = max(length(dFdx(worldPos)), length(dFdy(worldPos))) * CellPixels;
+    float scale = 1.0 / max(footprint, 1.0 / 64.0);
+    float level = log2(scale);
+    float lo = exp2(floor(level)), hi = exp2(ceil(level));
+    float a = blix_hash31(floor(worldPos * lo));
+    float b = blix_hash31(floor(worldPos * hi) + vec3(17.0, 59.0, 113.0));
+    float t = fract(level);
+    float x = mix(a, b, t);
+    // The mix of two uniforms is not uniform: map it back through its CDF.
+    float mn = min(t, 1.0 - t);
+    float k = 1.0 - mn;
+    vec3 cases = vec3(x * x / (2.0 * mn * k), (x - 0.5 * mn) / k, 1.0 - (1.0 - x) * (1.0 - x) / (2.0 * mn * k));
+    float u = x < mn ? cases.x : (x < 1.0 - mn ? cases.y : cases.z);
+    return mn < 1e-4 ? x : clamp(u, 0.0, 1.0);
 }
 
 #endif // BLIX_COVERAGE_GLSL

@@ -123,6 +123,8 @@ internal sealed partial class SponzaLoop
         // at frame 2263 and 0.783 at 2264 for identical light, as the cook landed a frame earlier or later (2026-10-19).
         // Rounded up to 256 frames, runs a few frames apart shoot the same one.
         var target = (shotReadyFrame + ShotReadyMargin + 255) / 256 * 256;
+        // The frame the shot is taken on, for what counts back from it (--stability's K frames, SampleStability).
+        shotFrame = target;
         // The 64 frames before it: each sample point's incident light summed over their jitter (WriteGpuSurfaceReference).
         if (postLoadFrames >= target - IncidentAverageFrames && postLoadFrames < target) AccumulateIncidentPoints();
         return postLoadFrames >= target;

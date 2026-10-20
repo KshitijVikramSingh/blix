@@ -120,11 +120,22 @@ void main() {
     float refused = 1.0;
     vec3 resolved = current;
     float accumulated = 1.0;
-    if (t.uParams.y > 0.5 && t.uParams.x > 0.0 && depth < 1.0) {
+    // The sky too (depth 1): with no history it showed each frame's raw colour, and where a canopy's edge met it the
+    // jitter put a pixel on sky one frame (raw, no history) and on a leaf the next (history just reset) -- the
+    // treetops and the ivy against the sky shimmered under TAA alone (2026-10-20). It reprojects as the far plane's
+    // point (camera rotation; the velocity buffer holds nothing there) and is clamped to its neighbourhood as any.
+    if (t.uParams.y > 0.5 && t.uParams.x > 0.0) {
 #ifdef TAA_SURFACE
         ivec2 pixel = ivec2(gl_FragCoord.xy);
         ivec2 size = textureSize(uCurrent, 0);
         vec2 uvPrev = vUv - texelFetch(uVelocity, pixel, 0).xy;
+        if (depth >= 1.0) {
+            vec4 far = t.uInvViewProjJittered * vec4(vUv * 2.0 - 1.0, depth, 1.0);
+            vec4 clipPrev = t.uPrevViewProj * far;
+            vec4 clipNow = t.uViewProj * far;
+            if (abs(clipPrev.w) > 1e-6 && abs(clipNow.w) > 1e-6)
+                uvPrev = vUv + ((clipPrev.xy / clipPrev.w) - (clipNow.xy / clipNow.w)) * 0.5;
+        }
         bool reprojects = true;
 #else
         vec4 world = t.uInvViewProjJittered * vec4(vUv * 2.0 - 1.0, depth, 1.0);
@@ -168,7 +179,9 @@ void main() {
                 // the edge of that range keeps the stability while dropping the stale colour.
                 // Relax the box where nothing moves (in pixels of this frame).
                 float motionPx = length((uvPrev - vUv) * vec2(textureSize(uCurrent, 0)));
-                float widen = mix(max(t.uAccumulate.y, 1.0), 1.0, clamp(motionPx / max(t.uAccumulate.z, 1e-3), 0.0, 1.0));
+                float still = 1.0 - clamp(motionPx / max(t.uAccumulate.z, 1e-3), 0.0, 1.0);
+                float widen = mix(1.0, max(t.uAccumulate.y, 1.0), still);
+
                 vec3 centre = 0.5 * (lo + hi);
                 lo = centre - (centre - lo) * widen;
                 hi = centre + (hi - centre) * widen;
@@ -184,7 +197,16 @@ void main() {
                 float weight = clamp(t.uParams.x, 0.0, 1.0);
                 if (t.uAccumulate.x > 0.0) {
                     // A clipped pixel keeps a little history (the clip already pulled it to the neighbourhood).
-                    float count = refused > 0.5 ? min(historyCount, 3.0) : historyCount;
+                    // Graded by how far the clip moved the history: refused (above) is any clip at all, and with the
+                    // threshold at 1e-4 nearly every still pixel clipped by a hair every frame, so the count sat at
+                    // ~3 frames everywhere and sub-pixel foliage against the sky shimmered (the rejection view bright
+                    // over the whole frame, 2026-10-20). A nudge under a few percent of the pixel's light keeps the
+                    // count; a real change (disocclusion, a light change) still cuts it to three frames.
+                    float moved = length(bounded - history) / max(max(dot(history, vec3(0.3333)), dot(current, vec3(0.3333))), 1e-3);
+                    float cut = smoothstep(0.03, 0.15, moved);
+                    float count = mix(historyCount, min(historyCount, 3.0), cut);
+                    refused = cut;   // the rejection view and count: history actually cut back, not every nudge
+
                     // The long count is for pixels that hold still: by a pixel of motion it is back to 10 frames,
                     // the fixed 0.9 weight's, so a moving view behaves as it did.
                     float cap = mix(t.uAccumulate.x, min(t.uAccumulate.x, 10.0), clamp(motionPx, 0.0, 1.0));
