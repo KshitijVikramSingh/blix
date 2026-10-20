@@ -690,6 +690,7 @@ internal sealed partial class SponzaLoop
         else if (TransferOn && transferReady && !transferCheck && transferGatherIds.Length > 0 && Environment.GetEnvironmentVariable("BLIX_NO_FINE") != "1")
         {
             DumpParts("coarse");
+            FilterCoarseNow();
             ApplyFineNow();
             DumpParts("copy");
             if (spotWhy) SpotWhyCompare(fine: true);
@@ -905,7 +906,9 @@ internal sealed partial class SponzaLoop
     }
 
     private static uint SunNodeSeed(int first, int seedPass, int discover) =>
-        unchecked((uint)(first * 2654435761L) ^ (uint)seedPass * 0x9E3779B9u ^ (discover > 0 ? 0xD15C0u : 0u));
+        unchecked((uint)(first * 2654435761L) ^ (uint)(seedPass + gatherSeedOffset) * 0x9E3779B9u ^ (discover > 0 ? 0xD15C0u : 0u));
+    // BLIX_GATHER_SEED=N (a measurement): the gather's rays seeded N passes on -- two cooks' difference is their noise.
+    private static readonly int gatherSeedOffset = int.TryParse(Environment.GetEnvironmentVariable("BLIX_GATHER_SEED"), out var gs) ? gs : 0;
 
     // On hardware rays the gather's passes run outside the frame graph (IGraphicsDevice.DispatchNow): its rays, the Metal
     // trace on the same buffers, the shade -- a pass a few tens of milliseconds, as many as a frame's budget holds, with
@@ -1079,7 +1082,7 @@ internal sealed partial class SponzaLoop
         return new DispatchCommand(sunNodeRaysPipeline, slice, 1, 1,
             new ShaderUniform[]
             {
-                new("uSlice", new Vector4Uniform(new Vector4(first, slice, seedPass, sunNodeGuided && !plain ? 1f : 0f))),
+                new("uSlice", new Vector4Uniform(new Vector4(first, slice, seedPass + (plain ? 0 : gatherSeedOffset), sunNodeGuided && !plain ? 1f : 0f))),
                 new("uCookedGrid", new Vector4Uniform(cookedGrid)),
                 new("uCookedDims", new Vector4Uniform(cookedDims)),
                 // x 1: the light strategy on; y the patches' disk radius (a patch stands for spacing^2 of surface).
@@ -1125,6 +1128,7 @@ internal sealed partial class SponzaLoop
                 new("uFar", new Vector4Uniform(exactMode > 0f ? Vector4.Zero : FarUniform(discover))),
                 new("uTransport", new Vector4Uniform(TransportUniform(discover))),
                 new("uFarTransport", new Vector4Uniform(new Vector4(FarTransportUniform, 0f, 0f, 0f))),
+                new("uHitBlend", new Vector4Uniform(new Vector4(HitBlendNow ? 1f : 0f, transportSpacing, 0f, 0f))),
             },
             new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
             Buffers: new[]

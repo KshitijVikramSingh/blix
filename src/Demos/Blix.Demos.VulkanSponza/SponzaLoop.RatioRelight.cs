@@ -41,6 +41,7 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("LiveIds", splitLiveBuffer),
                     new ShaderBufferBinding("TexelSun", EnsureLivePart(true)),
                     new ShaderBufferBinding("SunRatio", sunRatioBuffer),
+                    ProvenanceBinding(),
                 }) }, "texel-ratio");
     }
 

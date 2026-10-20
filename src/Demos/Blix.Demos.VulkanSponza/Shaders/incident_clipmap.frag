@@ -184,6 +184,42 @@ layout(set = 0, binding = 19) uniform usampler2D uLightmapTexel;
 layout(set = 0, binding = 44) uniform usampler2D uLightmapIndexTex;
 #define TEXEL_INDEX_MAP(i) texelFetch(uLightmapIndexTex, ivec2(int(i) % textureSize(uLightmapIndexTex, 0).x, int(i) / textureSize(uLightmapIndexTex, 0).x), 0).r
 layout(std430, set = 0, binding = 45) readonly buffer TexelMeta { uint texelMeta[]; };
+// The texel picker and the provenance view (SponzaLoop.TexelPicker.cs). Provenance: a byte a texel id (provenance.glsl).
+// The pick, at the one pixel uTexelDebug.w names (1 + x + 4096 y; 0 none): [0] the levels read, [1..15] the pixel (world
+// position, normal, view depth, its lightmap texel, found -- 2: sky --, confidence, the answer, its sky visibility, the
+// level wanted), [16..34] how the answer was made (the finest level's light, confidence and sky visibility, the
+// coarser's, the blend's fraction and the finest's take, the two levels, the path, the probes' light), [35..36] the path
+// trace here and its standard error, from [40] a block of 34 words a level read -- its level, how many texels, then each
+// texel's id and weight.
+layout(std430, set = 0, binding = 46) readonly buffer TexelProvenance { uint provenance[]; };
+layout(std430, set = 0, binding = 47) buffer TexelPick { uint pick[]; };
+// The patch views (uReference.w 9-10): each texel's transport patch and the patches' live light ([patch][column]: half
+// rgb; uHalf.w the columns, the sky's 0 and the sun's 1).
+layout(std430, set = 0, binding = 48) readonly buffer TexelPatch { int texelPatch[]; };
+layout(std430, set = 0, binding = 49) readonly buffer SunNodePatchLight { uvec2 patchLight[]; };
+// The reference's sum of its paths' luminance squared (reference_trace.comp): its own standard error.
+layout(std430, set = 0, binding = 50) readonly buffer ReferenceMoments { float referenceMoments[]; };
+// The reference at this pixel: its mean luminance and that mean's standard error (-1, -1: none yet).
+vec2 referenceHere(vec2 uv) {
+    if (g.uReference.y < 0.5) return vec2(-1.0);
+    ivec2 rp = min(ivec2(uv * g.uReference.yz), ivec2(g.uReference.yz) - 1);
+    int at = rp.y * int(g.uReference.y) + rp.x;
+    vec4 acc = referenceAccum[at];
+    if (acc.w <= 0.0) return vec2(-1.0);
+    float mean = dot(acc.rgb / acc.w, vec3(0.2126, 0.7152, 0.0722));
+    float m2 = referenceMoments.length() > at ? referenceMoments[at] / acc.w : mean * mean;
+    return vec2(mean, sqrt(max(m2 - mean * mean, 0.0) / acc.w));
+}
+bool pickHere;
+// How texelsAt made its answer (the picker; the breakdown views, uReference.w 5-8): each level's light, confidence and
+// sky visibility (-1: that level not read), the blend.
+vec3 dbgFine = vec3(0.0), dbgCoarse = vec3(0.0);
+float dbgFineC = -1.0, dbgCoarseC = -1.0, dbgFineSky = -1.0, dbgCoarseSky = -1.0, dbgFraction = 0.0, dbgTake = 1.0;
+int dbgFinest = -1, dbgCoarsest = -1;
+float levelSkySum, levelSkyWeight;
+int viewBestId = -1;
+float viewBestWeight = 0.0;
+bool viewFirstLevel = true;
 #define TEXEL_ATLAS_GATHER
 #define TEXEL_INDEX_TEX uLightmapIndexTex
 #define TEXEL_META(id) texelMeta[(id) - uint(g.uLightmap.w)]
@@ -257,10 +293,33 @@ bool texelsAtLevel(vec3 worldPos, vec3 n, float faceBin, uint level, out vec3 ir
             if (none) texelsAround(tg, worldPos, n, 0.0, ids, weights);
         }
     }
+    if (viewFirstLevel) {
+        // The provenance view's texel: the heaviest of the finest level read.
+        viewFirstLevel = false;
+        for (int i = 0; i < TEXEL_CANDIDATES; ++i)
+            if (ids[i] >= 0 && weights[i] > viewBestWeight) { viewBestWeight = weights[i]; viewBestId = ids[i]; }
+    }
+    if (pickHere) {
+        uint block = pick[0];
+        if (block < 4u) {
+            pick[0] = block + 1u;
+            uint at = 40u + block * 34u;
+            uint n = 0u;
+            for (int i = 0; i < TEXEL_CANDIDATES && n < 16u; ++i) {
+                if (ids[i] < 0) continue;
+                pick[at + 2u + 2u * n] = uint(ids[i]);
+                pick[at + 3u + 2u * n] = floatBitsToUint(weights[i]);
+                n++;
+            }
+            pick[at] = level;
+            pick[at + 1u] = n;
+        }
+    }
     vec3 sum = vec3(0.0);
     float weight = 0.0, raysWeighted = 0.0, located = 0.0;
     float count = 0.0;
     debugStamped = 0.0; debugLit = 0.0;
+    levelSkySum = 0.0; levelSkyWeight = 0.0;
     bool resting = g.uTexelDebug.y > 0.5;
     for (int i = 0; i < TEXEL_CANDIDATES; ++i) {
         if (ids[i] < 0) continue;
@@ -275,7 +334,12 @@ bool texelsAtLevel(vec3 worldPos, vec3 n, float faceBin, uint level, out vec3 ir
             if (g.uTexelDebug.z > 0.5) {
                 uint d = texelDetail[ids[i]];
                 if ((d >> 24) == 0u) detailMissing = true;
-                else detailSum += weights[i] * vec4(texelDetailUnpack(d), 1.0);
+                else {
+                    vec3 du = texelDetailUnpack(d);
+                    detailSum += weights[i] * vec4(du, 1.0);
+                    levelSkySum += weights[i] * du.z;
+                    levelSkyWeight += weights[i];
+                }
             }
             raysWeighted += weights[i] * float(r.y & 0xFFFFu) / 65535.0;
             continue;
@@ -320,18 +384,36 @@ bool texelsAt(vec3 worldPos, vec3 n, float faceBin, float viewDepth, out vec3 ir
         finest = min(finest + 1, int(g.uTexelLevels.x) - 1);
         fraction = 0.0;
     }
+    // A lightmapped pixel reads its atlas texels at any distance (uTexelSun.w 1; --atlas-coarse: 0, the level as wanted):
+    // four reads whatever the distance, so a coarser level saves nothing, and its hashed cells (8 cm and up, across a
+    // crease) put the contacts' light out by 10-14% where the path trace and the atlas agree -- the floor at the Cornell
+    // box's base 8 m off read level 1 (2026-10-21).
+    vec2 atlasAt;
+    if (g.uTexelSun.w > 0.5 && pixelLightmapTexel != 0u && texelLightmapUnpack(pixelLightmapTexel, atlasAt)) {
+        finest = 0;
+        fraction = 0.0;
+    }
     int coarsest = min(finest + 1, int(g.uTexelLevels.x) - 1);
     irradiance = vec3(0.0);
     confidence = 0.0;
     vec3 fineValue;
     float fineC;
     bool fine = texelsAtLevel(worldPos, n, faceBin, uint(finest), fineValue, fineC);
+    dbgFinest = finest;
+    dbgFraction = fraction;
+    if (fine) { dbgFine = fineValue; dbgFineC = fineC; }
+    dbgFineSky = levelSkyWeight > 1e-6 ? levelSkySum / levelSkyWeight : -1.0;
     float stampedSum = debugStamped, litSum = debugLit;
     bool needCoarse = finest < coarsest && (!fine || fineC <= 0.999 || fraction > 0.0)
         && !(g.uClipExact.z > 0.5 && pixelLightmapTexel == 0u && fine);
     vec3 coarseValue;
     float coarseC;
     bool coarse = needCoarse && texelsAtLevel(worldPos, n, faceBin, uint(coarsest), coarseValue, coarseC);
+    if (needCoarse) {
+        dbgCoarsest = coarsest;
+        if (coarse) { dbgCoarse = coarseValue; dbgCoarseC = coarseC; }
+        dbgCoarseSky = levelSkyWeight > 1e-6 ? levelSkySum / levelSkyWeight : -1.0;
+    }
     debugStamped = stampedSum; debugLit = litSum;
     // As before: the coarse level's answer first, the finer taking over by its confidence (its share of the blend with
     // the next, at the pixel's own level).
@@ -351,9 +433,10 @@ bool texelsAt(vec3 worldPos, vec3 n, float faceBin, float viewDepth, out vec3 ir
         }
         return false;
     }
-    if (!coarse) { irradiance = fineValue; confidence = fineC; return true; }
-    if (!fine) { irradiance = coarseValue; confidence = coarseC; return true; }
+    if (!coarse) { irradiance = fineValue; confidence = fineC; dbgTake = 1.0; return true; }
+    if (!fine) { irradiance = coarseValue; confidence = coarseC; dbgTake = 0.0; return true; }
     float take = fineC * (1.0 - fraction);
+    dbgTake = take;
     irradiance = mix(coarseValue, fineValue, take);
     confidence = coarseC + (1.0 - coarseC) * fineC;
     return true;
@@ -369,6 +452,13 @@ void main() {
         ? clamp(ivec2(gl_FragCoord.xy) * 2 + ivec2(g.uHalf.yz), ivec2(0), textureSize(uSceneDepth, 0) - 1)
         : clamp(ivec2(vUv * vec2(textureSize(uSceneDepth, 0))), ivec2(0), textureSize(uSceneDepth, 0) - 1);
     float raw = texelFetch(uSceneDepth, pixel, 0).r;
+    uint pickCode = uint(g.uTexelDebug.w + 0.5);
+    pickHere = pickCode > 0u && pixel == ivec2(int((pickCode - 1u) % 4096u), int((pickCode - 1u) / 4096u));
+    if (pickHere) {
+        pick[0] = 0u;
+        pick[9] = 2u;   // 2: sky, until the pixel says otherwise
+        for (uint i = 31u; i < 37u; ++i) pick[i] = floatBitsToUint(-1.0);   // the probes' light, the reference's: not read
+    }
     if (raw >= 1.0 - 1e-6) {
         countPath(0u);
         outIncident = vec4(0.0, 0.0, 0.0, 1.0);
@@ -414,6 +504,86 @@ void main() {
     bool texelFound = g.uTexelParams.y > 0.5 && g.uClipParams.y < 0.5 && texelsAt(worldPos, N, nSample.w, viewDepth, gathered, confidence);
     vec3 t1 = normalize(cross(abs(N.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0), N));
     vec3 t2 = cross(N, t1);
+    if (pickHere) {
+        pick[1] = floatBitsToUint(worldPos.x); pick[2] = floatBitsToUint(worldPos.y); pick[3] = floatBitsToUint(worldPos.z);
+        pick[4] = floatBitsToUint(N.x); pick[5] = floatBitsToUint(N.y); pick[6] = floatBitsToUint(N.z);
+        pick[7] = floatBitsToUint(viewDepth);
+        pick[8] = pixelLightmapTexel;
+        pick[9] = texelFound ? 1u : 0u;
+        pick[10] = floatBitsToUint(texelFound ? confidence : 0.0);
+        pick[11] = floatBitsToUint(texelFound ? gathered.r : 0.0); pick[12] = floatBitsToUint(texelFound ? gathered.g : 0.0);
+        pick[13] = floatBitsToUint(texelFound ? gathered.b : 0.0);
+        pick[14] = floatBitsToUint(detailSum.w > 1e-6 ? detailSum.z / detailSum.w : -1.0);
+        pick[15] = floatBitsToUint(texelLevelFor(viewDepth, g.uTexelLevels, g.uTexelGrid.w, texelSunlit(worldPos, N)));
+        pick[16] = floatBitsToUint(dbgFine.r); pick[17] = floatBitsToUint(dbgFine.g); pick[18] = floatBitsToUint(dbgFine.b);
+        pick[19] = floatBitsToUint(dbgFineC); pick[20] = floatBitsToUint(dbgFineSky);
+        pick[21] = floatBitsToUint(dbgCoarse.r); pick[22] = floatBitsToUint(dbgCoarse.g); pick[23] = floatBitsToUint(dbgCoarse.b);
+        pick[24] = floatBitsToUint(dbgCoarseC); pick[25] = floatBitsToUint(dbgCoarseSky);
+        pick[26] = floatBitsToUint(dbgFraction); pick[27] = floatBitsToUint(dbgTake);
+        pick[28] = uint(dbgFinest + 1); pick[29] = uint(dbgCoarsest + 1);
+        // [30] the path: 1 the texels alone, 2 the texels mixed with the probes, 3 the probes alone -- as the image takes it
+        // (a texel view's own modes skip the texels-alone branch; the path is judged as if none were on).
+        bool aloneAsShown = texelFound && g.uTexelDebug.y > 0.5 && g.uTexelDebug.z > 0.5 && !detailMissing && detailSum.w > 1e-6
+            && confidence > 0.999 && g.uScreen.x < 0.5;   // the reference view replaces the answer, not its path
+        pick[30] = aloneAsShown ? 1u : texelFound ? 2u : 3u;
+        // [35] the path trace's indirect light here (--gi-reference, as it has accumulated; -1 none), [36] its standard error.
+        vec2 refHere = referenceHere(vUv);
+        pick[35] = floatBitsToUint(refHere.x);
+        pick[36] = floatBitsToUint(refHere.y);
+    }
+    // The breakdown views (SponzaLoop.TexelPicker.cs, Texel view): how this pixel's answer is made.
+    if (g.uReference.w > 10.5 && g.uReference.w < 11.5) {
+        // Ours against the path trace (--gi-reference, accumulating while still): the texels' answer against the reference's
+        // indirect light, diverging -- grey alike, blue ours darker, red ours brighter, full at 25% either way. Only what the
+        // reference can tell: the difference past twice its own standard error (ReferenceMoments) -- at ~600 paths Cornell's
+        // reference wandered +-20% a pixel and read as our blotches (2026-10-21). Magenta: no texel answer or no reference.
+        vec3 shown = vec3(1.0, 0.0, 1.0);
+        vec2 rs = referenceHere(vUv);
+        const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
+        if (texelFound && rs.x > 1e-6) {
+            float ours = dot(gathered, luma);
+            float d = ours - rs.x;
+            float significant = sign(d) * max(abs(d) - 2.0 * rs.y, 0.0);
+            float e = clamp(log2(max(rs.x + significant, 1e-9) / rs.x) / log2(1.25), -1.0, 1.0);
+            shown = e < 0.0 ? mix(vec3(0.5), vec3(0.1, 0.35, 1.0), -e) : mix(vec3(0.5), vec3(1.0, 0.2, 0.1), e);
+        }
+        outIncident = vec4(shown, 1.0);
+        outIncidentGradient = vec4(0.0);
+        return;
+    }
+    if (g.uReference.w > 8.5 && g.uReference.w < 10.5) {
+        // The patch views (SponzaLoop.TexelPicker.cs): the light a gather ray reads where it lands here (9), and the patches
+        // themselves, a colour each (10). Magenta: no texel or no patch.
+        vec3 shown = vec3(1.0, 0.0, 1.0);
+        int patchId = viewBestId >= 0 ? texelPatch[viewBestId] : -1;
+        if (patchId >= 0) {
+            if (g.uReference.w < 9.5) {
+                uint cols = max(uint(g.uHalf.w + 0.5), 1u);
+                for (uint k = 0u; k < min(cols, 2u); ++k) {
+                    uvec2 w = patchLight[uint(patchId) * cols + k];
+                    shown = (k == 0u ? vec3(0.0) : shown) + vec3(unpackHalf2x16(w.x), unpackHalf2x16(w.y).x);
+                }
+            } else {
+                uint h = blix_pcg(uint(patchId) * 2654435761u);
+                shown = vec3(float(h & 255u), float((h >> 8) & 255u), float((h >> 16) & 255u)) / 255.0 * 0.8 + 0.2;
+            }
+        }
+        outIncident = vec4(shown, 1.0);
+        outIncidentGradient = vec4(0.0);
+        return;
+    }
+    if (g.uReference.w > 4.5 && g.uReference.w < 8.5) {
+        int mode = int(g.uReference.w + 0.5);
+        vec3 shown = vec3(1.0, 0.0, 1.0);   // magenta: not read here
+        bool alone = texelFound && g.uTexelDebug.y > 0.5 && g.uTexelDebug.z > 0.5 && !detailMissing && detailSum.w > 1e-6 && confidence > 0.999;
+        if (mode == 5 && dbgFineC >= 0.0) shown = dbgFine;
+        if (mode == 6 && dbgCoarseC >= 0.0) shown = dbgCoarse;
+        if (mode == 7) shown = texelFound ? vec3(1.0 - dbgTake, 1.0 - dbgTake, 1.0 - dbgTake) * vec3(1.0, 0.35, 0.2) + vec3(0.0, 0.0, alone ? 0.0 : 1.0 - confidence) : vec3(0.0, 0.0, 1.0);
+        if (mode == 8) shown = !texelFound ? vec3(1.0, 0.1, 0.1) : alone ? vec3(0.1, 0.9, 0.2) : vec3(1.0, 0.85, 0.1);
+        outIncident = vec4(shown, 1.0);
+        outIncidentGradient = vec4(0.0);
+        return;
+    }
     if (texelFound && g.uTexelDebug.y > 0.5 && g.uTexelDebug.z > 0.5 && !detailMissing && detailSum.w > 1e-6
         && confidence > 0.999 && g.uReference.w < 0.5 && g.uScreen.x < 0.5 && g.uReference.x < 0.5) {
         countPath(1u);
@@ -456,6 +626,7 @@ void main() {
     }
     vec4 field = blix_clipmapSampleDirs(c, worldPos, N, normalize(N + tilt * t1), normalize(N + tilt * t2), found, e1, e2);
     outIncident = found ? field : vec4(texture(uIrradiance, N).rgb, 1.0);
+    if (pickHere) { pick[31] = floatBitsToUint(outIncident.r); pick[32] = floatBitsToUint(outIncident.g); pick[33] = floatBitsToUint(outIncident.b); pick[34] = floatBitsToUint(outIncident.a); }
     if (texelFound) countPath(14u);
     // The surface probes answer where they exist: the same surface keeps the same probes wherever the camera stands.
     // The gradient below stays the clipmap's (relative, applied to whatever light the pixel ends with).
@@ -475,6 +646,30 @@ void main() {
     if (!found && surfaceWeight <= 0.0) countPath(12u);
     if (surfaceWeight > 0.0) countPath(13u);
     if (texelFound) outIncident.rgb = mix(outIncident.rgb, gathered, confidence);
+    if (g.uReference.w > 2.5) {
+        // The provenance view (SponzaLoop.TexelPicker.cs): the stage that last wrote the sun part (3) or the sky part (4)
+        // of the heaviest texel the pixel reads at its finest level. Magenta: no texel.
+        vec3 shown = vec3(1.0, 0.0, 1.0);
+        if (viewBestId >= 0) {
+            uint b = (provenance[uint(viewBestId) / 4u] >> (8u * (uint(viewBestId) % 4u))) & 255u;
+            uint code = g.uReference.w > 3.5 ? b >> 4u : b & 15u;
+            const vec3 colours[10] = vec3[10](
+                vec3(0.15),                // 0 never written
+                vec3(0.1, 0.3, 1.0),       // 1 the coarse sweep
+                vec3(0.0, 0.85, 0.9),      // 2 a refining round
+                vec3(0.1, 0.9, 0.2),       // 3 the fine gather
+                vec3(1.0, 0.9, 0.1),       // 4 the visible and changed
+                vec3(1.0, 0.5, 0.05),      // 5 the fine copy
+                vec3(0.9, 0.1, 0.1),       // 6 the instant layer
+                vec3(1.0, 0.45, 0.75),     // 7 the ratio relight
+                vec3(0.6),                 // 8 provisional
+                vec3(1.0));                // 9 landed on the CPU
+            shown = colours[min(code, 9u)];
+        }
+        outIncident = vec4(shown, 1.0);
+        outIncidentGradient = vec4(0.0);
+        return;
+    }
     if (g.uReference.w > 1.5) {
         // Which record each of the pixel's four lightmap texels gives it (texelsAroundLightmap's choice), by weight.
         vec2 at;

@@ -101,6 +101,8 @@
     <GlslShader Include="Shaders\transfer_finalize.comp" />
     <GlslShader Include="Shaders\transfer_accum.comp" />
     <GlslShader Include="Shaders\texel_ao.comp" />
+    <GlslShader Include="Shaders\sky_vis_filter.comp" />
+    <GlslShader Include="Shaders\coarse_filter.comp" />
     <GlslShader Include="Shaders\transfer_fine.comp" />
     <GlslShader Include="Shaders\slice_resolve.comp" />
     <GlslShader Include="Shaders\texel_patch_light.comp" />

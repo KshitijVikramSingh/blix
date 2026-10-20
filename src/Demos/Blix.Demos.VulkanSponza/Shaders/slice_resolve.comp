@@ -15,7 +15,8 @@ layout(set = 0, binding = 0) uniform SliceResolve {
     vec4 uSettle;   // x the most rays, y the noise share, z the noise floor, w the dark bar
     vec4 uSun;      // xyz 1 / the sun's irradiance, w the sweep's passes
     vec4 uMode;     // x the mode, y the columns (suns), z which column is the sun's (-1 none), w 1 the detail
-    vec4 uKeep;     // x 1: the sky's part kept (a sun change: written and judged the sun's alone); y 1: refine the masked alone
+    vec4 uKeep;     // x 1: the sky's part kept (a sun change: written and judged the sun's alone); y 1: refine the masked alone;
+                    // z the provenance code of what this gather is (SponzaLoop.TexelPicker.cs)
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer RoundIds { uint roundIds[]; };   // the round's texel ids
@@ -26,6 +27,8 @@ layout(std430, set = 0, binding = 5) buffer State { vec4 state[]; };            
 layout(std430, set = 0, binding = 6) buffer StatePasses { uint statePasses[]; };
 layout(std430, set = 0, binding = 7) buffer SplitSky { uvec2 skyPart[]; };
 layout(std430, set = 0, binding = 8) buffer SplitSun { uvec2 sunPart[]; };
+layout(std430, set = 0, binding = 16) buffer TexelProvenance { uint provenance[]; };
+#include "provenance.glsl"
 layout(std430, set = 0, binding = 9) buffer SkyDetail { uint skyDetail[]; };
 layout(std430, set = 0, binding = 10) buffer SunDetail { uint sunDetail[]; };
 layout(std430, set = 0, binding = 11) buffer Next { uint nextIds[]; };
@@ -50,7 +53,7 @@ uint packRgb9e5(vec3 c) {
 uint packDetail(vec2 tilt, float sky) {
     vec2 t = clamp(tilt * 0.5, vec2(-1.0), vec2(1.0));
     uvec2 q = uvec2(ivec2(round(t * 127.0)) & 0xFF);
-    return q.x | (q.y << 8) | (uint(round(clamp(sky, 0.0, 1.0) * 255.0)) << 16) | (255u << 24);
+    return q.x | (q.y << 8) | (uint(round(sqrt(clamp(sky, 0.0, 1.0)) * 255.0)) << 16) | (255u << 24);
 }
 
 float lum(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
@@ -111,6 +114,7 @@ void main() {
         if (!sunColumn && u.uKeep.x > 0.5) continue;   // the sky's part kept
         uvec2 word = uvec2(packRgb9e5(sunColumn ? light * u.uSun.xyz : light), 0xFFFFu | 0x10000u);
         if (sunColumn) sunPart[id] = word; else skyPart[id] = word;
+        provenanceMark(id, uint(u.uKeep.z), sunColumn, !sunColumn);   // uKeep.z: which gather (SponzaLoop.TexelPicker.cs)
         if (!refining && u.uMode.w > 0.5) {
             // The detail, from the sweep alone (SplitDetail.cs, ReadSplitDetail): the tilt over the column's light, the
             // sky visibility from column 0's.

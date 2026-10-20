@@ -16,6 +16,8 @@ layout(set = 0, binding = 0) uniform Ratio {
 layout(std430, set = 0, binding = 1) readonly buffer LiveIds { uint liveIds[]; };
 layout(std430, set = 0, binding = 2) buffer TexelSun { uvec2 texelSun[]; };
 layout(std430, set = 0, binding = 3) buffer SunRatio { uint ratioWords[]; };   // by texel id: the instant, or the ratio
+layout(std430, set = 0, binding = 4) buffer TexelProvenance { uint provenance[]; };
+#include "provenance.glsl"
 
 uint packRgb9e5(vec3 c) {
     const float maxValue = 65408.0;
@@ -53,6 +55,7 @@ void main() {
         uint instantWord = texelSun[id].x;
         vec3 relit = unpackRgb9e5(instantWord) * unpackRgb9e5(ratioWords[id]);
         texelSun[id].x = packRgb9e5(relit);
+        provenanceMark(id, 7u, true, false);   // the ratio relight
         ratioWords[id] = instantWord;
     }
 }

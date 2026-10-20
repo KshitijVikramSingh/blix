@@ -48,12 +48,14 @@ void texelDetailFrame(vec3 n, out vec3 nn, out vec3 t1, out vec3 t2) {
 uint texelDetailPack(vec2 tilt, float skyVisibility) {
     vec2 t = clamp(tilt * 0.5, vec2(-1.0), vec2(1.0));
     uvec2 q = uvec2(ivec2(round(t * 127.0)) & 0xFF);
-    return q.x | (q.y << 8) | (uint(round(clamp(skyVisibility, 0.0, 1.0) * 255.0)) << 16) | (255u << 24);
+    return q.x | (q.y << 8) | (uint(round(sqrt(clamp(skyVisibility, 0.0, 1.0)) * 255.0)) << 16) | (255u << 24);
 }
 
 vec3 texelDetailUnpack(uint w) {
     ivec2 q = ivec2(int(w << 24) >> 24, int(w << 16) >> 24);
-    return vec3(vec2(q) / 127.0 * 2.0, float((w >> 16) & 0xFFu) / 255.0);
+    // The sky visibility by its square root: linear, a byte's step was 20% of a dark crease's 0.02 and showed as texels.
+    float sky = float((w >> 16) & 0xFFu) / 255.0;
+    return vec3(vec2(q) / 127.0 * 2.0, sky * sky);
 }
 
 uvec2 texelKey(ivec3 cell, uint bin, uint level) {

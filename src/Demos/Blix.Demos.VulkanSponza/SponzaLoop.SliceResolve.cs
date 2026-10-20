@@ -75,7 +75,7 @@ internal sealed partial class SponzaLoop
                 new("uSettle", new Vector4Uniform(new Vector4(texelMaxRays, texelNoise, TexelNoiseFloor, bar))),
                 new("uSun", new Vector4Uniform(new Vector4(inverse, sunNodeRays / 32))),
                 new("uMode", new Vector4Uniform(new Vector4(mode, suns, SunColumn(), detail ? 1f : 0f))),
-                new("uKeep", new Vector4Uniform(new Vector4(skyKept ? 1f : 0f, refineMasked && fineGathering ? 1f : 0f, 0f, 0f))),
+                new("uKeep", new Vector4Uniform(new Vector4(skyKept ? 1f : 0f, refineMasked && fineGathering ? 1f : 0f, GatherProvenanceCode, 0f))),
             },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
@@ -95,6 +95,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("Histogram", resolveHistogram),
                 new ShaderBufferBinding("NextCount", resolveCount),
                 new ShaderBufferBinding("RefineMask", refineMaskBuffer.Equals(default(GpuBufferHandle)) ? resolveCount : refineMaskBuffer),
+                ProvenanceBinding(),
             }.Where(b => declared.Contains(b.Name)).ToArray()) }, "slice-resolve");
     }
 

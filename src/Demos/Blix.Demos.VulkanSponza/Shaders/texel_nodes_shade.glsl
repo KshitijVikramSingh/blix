@@ -41,6 +41,8 @@ layout(set = 0, binding = 0) uniform SunNodesShade {
     vec4 uTransport;      // the transport census (N2, SponzaLoop.TransportCensus.cs): x 1 on; y the patch spacing; z the
                           // patches; w 1: the near-field comparison (N3: PatchDirectSums read, census slot 9)
     vec4 uFarTransport;   // the far field's light-free record (SponzaLoop.FarTransport.cs): x 1 recording it
+    vec4 uHitBlend;       // x 1: a hit's bounce blended over its patch and the patch's neighbours (hitPatchLight); y the
+                          // patches' spacing (the blend's reach)
 } u;
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
@@ -178,6 +180,31 @@ void farRecordAdd(int patchIndex, int bin, int column, vec3 c, float w, uint slo
     atomicAdd(farRecord[at + 2u], farFixed(c.b, fract(jitter + 0.6667)));
     float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
     if (w > 0.0) atomicAdd(farRecord[farSquareAt(base, column, u.uFar)], farFixed(l * l / w, fract(jitter + 0.5)));
+}
+
+// A hit's bounce, column k: its patch's light -- or blended over its patch and the patch's neighbours by the far field's
+// kernel (texel_far.glsl, farSet: continuous across the patches, zero at a spacing). Read flat from the one patch, the
+// bounce at a hit was one value over each patch, and every receiver near a patch-lit surface took the patches' outlines:
+// the Cornell box's walls blotched where the path trace is smooth (2026-10-21).
+// The hit's position from its ray (its origin, direction and distance), not kept: the 256-sun variant's threadgroup memory
+// is at Metal's 32 KB.
+vec3 hitPatchLight(int r, int k, int suns) {
+    int pw = int(sHit[r].w);
+    if (u.uHitBlend.x > 0.5) {
+        int ids[FAR_SET];
+        float ws[FAR_SET];
+        vec3 hitPos = nodeRays[2u * (gl_WorkGroupID.x * uint(RAYS) + uint(r))].xyz + sDir[r] * sDist[r];
+        farSet(hitPos, sNormal[r], pw, vec4(0.0, u.uHitBlend.y, 0.0, 0.0), ids, ws);
+        vec3 l = vec3(0.0);
+        for (int i = 0; i < FAR_SET; ++i) {
+            if (ids[i] < 0) continue;
+            uvec2 p = patchLight[uint(ids[i]) * uint(suns) + uint(k)];
+            l += ws[i] * vec3(unpackHalf2x16(p.x), unpackHalf2x16(p.y).x);
+        }
+        return l;
+    }
+    uvec2 p = patchLight[uint(pw) * uint(suns) + uint(k)];
+    return vec3(unpackHalf2x16(p.x), unpackHalf2x16(p.y).x);
 }
 
 void main() {
@@ -472,7 +499,7 @@ void main() {
             for (int k = 0; k < suns; ++k) {
                 float pw = sHit[r].w;
                 vec4 known = vec4(0.0);
-                if (pw >= 0.0) { uvec2 p = patchLight[uint(pw) * uint(suns) + uint(k)]; known = vec4(unpackHalf2x16(p.x), unpackHalf2x16(p.y).x, 1.0); }
+                if (pw >= 0.0) known = vec4(hitPatchLight(r, k, suns), 1.0);
                 sRayKnown[r * 2 + k] = known;
             }
         }
@@ -507,7 +534,7 @@ void main() {
                     tiltLight = dot(add, lumW);
                 } else {
                     vec3 light = sUnknownBounce[k];
-                    if (h.w >= 0.0) { uvec2 p = patchLight[uint(h.w) * uint(suns) + uint(k)]; light = vec3(unpackHalf2x16(p.x), unpackHalf2x16(p.y).x); }
+                    if (h.w >= 0.0) light = sRayKnown[r * 2 + k].rgb;
                     float ndotl = hasSun ? max(dot(sNormal[r], toSun), 0.0) : 0.0;
                     if (ndotl > 0.0) {
                         if (k == 0 && sExact[r] >= 0.0) { light += u.uSunIrradiance.rgb * ndotl * sExact[r]; tilts = false; }
@@ -572,8 +599,7 @@ void main() {
         for (int r = 0; r < RAYS; ++r) {
             float pw = sHit[r].w;
             if (pw < 0.0) continue;
-            uvec2 p = patchLight[uint(pw) * uint(suns) + uint(k)];
-            knownBounce += vec3(unpackHalf2x16(p.x), unpackHalf2x16(p.y).x);
+            knownBounce += hitPatchLight(r, int(k), suns);
             knownHits += 1.0;
         }
         vec3 unknownBounce = knownHits > 0.0 ? knownBounce / knownHits : vec3(0.0);
@@ -595,10 +621,7 @@ void main() {
                 continue;
             }
             vec3 light = unknownBounce;
-            if (h.w >= 0.0) {
-                uvec2 p = patchLight[uint(h.w) * uint(suns) + uint(k)];
-                light = vec3(unpackHalf2x16(p.x), unpackHalf2x16(p.y).x);
-            }
+            if (h.w >= 0.0) light = hitPatchLight(r, int(k), suns);
             if (h.w >= 0.0) source.y += dot(h.rgb * light, lumW); else source.w += dot(h.rgb * light, lumW);
             float ndotl = hasSun ? max(dot(sNormal[r], toSun), 0.0) : 0.0;
             // The near-field comparison: this near hit's direct as the patch level would give it (its patch's average

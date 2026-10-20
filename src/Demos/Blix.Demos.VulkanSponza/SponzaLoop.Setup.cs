@@ -415,6 +415,13 @@ internal sealed partial class SponzaLoop
         atlasGather = !args.Flag("no-atlas-gather");
         ratioRelight = !args.Flag("no-ratio-relight");
         visibleChanged = !args.Flag("no-visible-changed");
+        hitBlend = !args.Flag("no-hit-blend");
+        atlasCoarse = args.Flag("atlas-coarse");
+        if (args.Int("coarse-filter") is { } coarsePasses) coarseFilterPasses = Math.Max(0, coarsePasses);
+        cookedSkyVis = !args.Flag("no-cooked-sky-vis");
+        contactAllRays = !args.Flag("contact-rays-own");
+        if (args.Int("sky-vis-rays") is { } svr) skyVisRays = Math.Max(32, svr / 32 * 32);
+        if (args.Int("sky-vis-filter") is { } svf) skyVisFilterPasses = Math.Max(0, svf);
         backgroundGather = args.Flag("background-gather");
         if (args.Float("background-gather-ms") is { } bgMs) backgroundGatherMs = Math.Max(0f, bgMs);
         if (args.Float("render-scale") is { } renderScaleArg) render.RenderScale = Math.Clamp(renderScaleArg, 0.5f, 1f);

@@ -4,7 +4,8 @@
 // times its own visibility over theirs (transfer_fine.comp): the creases and contacts the coarse texels are too large
 // to see, darkened by the geometry, the light itself real-time.
 //   mode 0  a thread a ray of the slice's pass (texel_nodes_rays.comp's, cosine): its texel's rays and open rays counted,
-//           in all and by the world octant it goes toward
+//           in all and by the world octant it goes toward (uAo2.y: the contact's passes); every pass, its rays and those
+//           that met nothing at all -- the sky visibility, cooked here (SkyVis) rather than from the gather's sweep
 //   mode 1  a thread a texel of the slice: its share into its byte (AoBytes, by texel id), and by octant into its word
 //           (DirOpen: 8 nibbles, 0-14 open, 15 no ray that way -- path B's directional contact, texel_patch_light.comp),
 //           the counts cleared
@@ -15,17 +16,19 @@ layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) uniform TexelAo {
     vec4 uAo;   // x the slice's texels, y the reach, z the mode, w the slice's first
-    vec4 uAo2;  // x the short reach (the second scale: creases and contacts), 0 none
+    vec4 uAo2;  // x the short reach (the second scale: creases and contacts), 0 none; y 1: the contact counts this pass
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer NodeHits { uvec4 nodeHits[]; };
 layout(std430, set = 0, binding = 2) readonly buffer NodeRayWeights { float nodeRayWeight[]; };
-layout(std430, set = 0, binding = 3) buffer AoCounts { uint counts[]; };     // [slice texel][19]: rays, open; by octant; open short
+layout(std430, set = 0, binding = 3) buffer AoCounts { uint counts[]; };     // [slice texel][21]: rays, open; by octant; open short; sky rays, escaped
 layout(std430, set = 0, binding = 4) buffer AoBytes { uint aoBytes[]; };     // [texel id / 4]: 255 open
 layout(std430, set = 0, binding = 5) readonly buffer AoIds { uint ids[]; };
 layout(std430, set = 0, binding = 6) readonly buffer NodeRays { vec4 nodeRays[]; };
 layout(std430, set = 0, binding = 7) buffer DirOpen { uint dirOpen[]; };   // [texel id]
 layout(std430, set = 0, binding = 8) buffer AoShort { uint aoShort[]; };   // [texel id / 4]: the short reach's share, as AoBytes
+layout(std430, set = 0, binding = 9) buffer SkyVis { uint skyVis[]; };     // [texel id / 4]: the share escaped's square root, 1..255
+#define STRIDE 21u
 
 uint octant(vec3 d) { return (d.x > 0.0 ? 1u : 0u) | (d.y > 0.0 ? 2u : 0u) | (d.z > 0.0 ? 4u : 0u); }
 
@@ -35,26 +38,33 @@ void main() {
         uint texel = t / uint(RAYS);
         if (texel >= uint(u.uAo.x) || nodeRayWeight[t] <= 0.0) return;
         uvec4 h0 = nodeHits[t * 3u];
-        bool open = (h0.w & 1u) == 0u || uintBitsToFloat(h0.x) > u.uAo.y;
+        bool escaped = (h0.w & 1u) == 0u;
+        atomicAdd(counts[STRIDE * texel + 19u], 1u);
+        if (escaped) atomicAdd(counts[STRIDE * texel + 20u], 1u);
+        if (u.uAo2.y < 0.5) return;
+        bool open = escaped || uintBitsToFloat(h0.x) > u.uAo.y;
         uint o = octant(nodeRays[2u * t + 1u].xyz);
-        atomicAdd(counts[19u * texel], 1u);
-        atomicAdd(counts[19u * texel + 2u + 2u * o], 1u);
-        if (open) { atomicAdd(counts[19u * texel + 1u], 1u); atomicAdd(counts[19u * texel + 3u + 2u * o], 1u); }
-        if ((h0.w & 1u) == 0u || uintBitsToFloat(h0.x) > u.uAo2.x) atomicAdd(counts[19u * texel + 18u], 1u);
+        atomicAdd(counts[STRIDE * texel], 1u);
+        atomicAdd(counts[STRIDE * texel + 2u + 2u * o], 1u);
+        if (open) { atomicAdd(counts[STRIDE * texel + 1u], 1u); atomicAdd(counts[STRIDE * texel + 3u + 2u * o], 1u); }
+        if (escaped || uintBitsToFloat(h0.x) > u.uAo2.x) atomicAdd(counts[STRIDE * texel + 18u], 1u);
         return;
     }
     if (t >= uint(u.uAo.x)) return;
-    uint rays = counts[19u * t], open = counts[19u * t + 1u];
+    uint rays = counts[STRIDE * t], open = counts[STRIDE * t + 1u];
     uint id = ids[uint(u.uAo.w) + t];
     uint word = 0u;
     for (uint o = 0u; o < 8u; ++o) {
-        uint r = counts[19u * t + 2u + 2u * o], q = counts[19u * t + 3u + 2u * o];
+        uint r = counts[STRIDE * t + 2u + 2u * o], q = counts[STRIDE * t + 3u + 2u * o];
         word |= (r > 0u ? min(uint(float(q) / float(r) * 14.0 + 0.5), 14u) : 15u) << (4u * o);
     }
     dirOpen[id] = word;
-    uint vs = rays > 0u ? uint(float(counts[19u * t + 18u]) / float(rays) * 254.0 + 1.5) : 0u;
+    uint vs = rays > 0u ? uint(float(counts[STRIDE * t + 18u]) / float(rays) * 254.0 + 1.5) : 0u;
     atomicOr(aoShort[id / 4u], min(vs, 255u) << (8u * (id % 4u)));
-    for (uint k = 0u; k < 19u; ++k) counts[19u * t + k] = 0u;
+    uint skyRays = counts[STRIDE * t + 19u];
+    uint sv = skyRays > 0u ? uint(sqrt(float(counts[STRIDE * t + 20u]) / float(skyRays)) * 254.0 + 1.5) : 0u;   // by its square root
+    atomicOr(skyVis[id / 4u], min(sv, 255u) << (8u * (id % 4u)));
+    for (uint k = 0u; k < STRIDE; ++k) counts[STRIDE * t + k] = 0u;
     uint v = rays > 0u ? uint(float(open) / float(rays) * 254.0 + 1.5) : 0u;   // 1..255; 0: none
     atomicOr(aoBytes[id / 4u], min(v, 255u) << (8u * (id % 4u)));
 }

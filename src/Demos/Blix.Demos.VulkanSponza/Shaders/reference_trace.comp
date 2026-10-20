@@ -20,6 +20,9 @@ layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
 layout(set = 0, binding = 2) uniform sampler2D uPrepassNormal;
 layout(set = 0, binding = 3) uniform samplerCube uSkyRadiance;
 layout(std430, set = 0, binding = 4) buffer ReferenceAccum { vec4 accum[]; };
+// Each pixel's sum of its paths' luminance squared: with the sum and the count, the reference's own standard error (the
+// comparison view greys out what it cannot yet tell, SponzaLoop.TexelPicker.cs).
+layout(std430, set = 0, binding = 5) buffer ReferenceMoments { float moments[]; };
 
 #define BLIX_RAY_SET 0
 #define BLIX_RAY_BINDING 13
@@ -38,7 +41,7 @@ void main() {
     vec4 ns = texelFetch(uPrepassNormal, at, 0);
     bool restart = u.uParams.z > 0.5;
     if (raw >= 1.0 - 1e-6 || dot(ns.xyz, ns.xyz) < 1e-6) {
-        if (restart) accum[index] = vec4(0.0);
+        if (restart) { accum[index] = vec4(0.0); moments[index] = 0.0; }
         return;
     }
     vec2 uv = (vec2(at) + 0.5) / u.uTarget.xy;
@@ -53,4 +56,6 @@ void main() {
     vec3 radiance = referencePath(origin, n, int(u.uParams.y + 0.5), toSun, u.uSunIrradiance.rgb, seed);
     vec4 sample1 = vec4(PI * radiance, 1.0);
     accum[index] = restart ? sample1 : accum[index] + sample1;
+    float l = dot(sample1.rgb, vec3(0.2126, 0.7152, 0.0722));
+    moments[index] = restart ? l * l : moments[index] + l * l;
 }

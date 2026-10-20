@@ -13,6 +13,13 @@ namespace Blix.Demos.VulkanSponza;
 internal sealed partial class SponzaLoop
 {
     private bool referenceView;
+    private GpuBufferHandle referenceMoments;
+    // The incident pass's: the moments, or a placeholder (the comparison then greys nothing out).
+    private ShaderBufferBinding ReferenceMomentsBinding()
+    {
+        if (referenceMoments.Equals(default(GpuBufferHandle))) referenceMoments = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.reference.moments.none"));
+        return new ShaderBufferBinding("ReferenceMoments", referenceMoments);
+    }
     private bool referenceAvailable;
     // --texel-debug: the incident pass writes where texels answer instead of light (incident_clipmap.frag).
     // --texel-debug-records: which atlas record each of a pixel's four lightmap texels gives it, by bilinear weight --
@@ -82,6 +89,7 @@ internal sealed partial class SponzaLoop
         if (size != referenceSize)
         {
             referenceAccum = Own(device.CreateGpuBuffer(size.Item1 * size.Item2 * 16, name: "sponza.reference.accum"));
+            referenceMoments = Own(device.CreateGpuBuffer(size.Item1 * size.Item2 * 4, name: "sponza.reference.moments"));
             referenceSize = size;
             restart = true;
         }
@@ -105,7 +113,7 @@ internal sealed partial class SponzaLoop
                 new ShaderTextureBinding("uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
                 new ShaderTextureBinding("uSkyRadiance", envCubeTexture),
             },
-            Buffers: rayBlockBuffers.Append(new ShaderBufferBinding("ReferenceAccum", referenceAccum))
+            Buffers: rayBlockBuffers.Append(new ShaderBufferBinding("ReferenceAccum", referenceAccum)).Append(new ShaderBufferBinding("ReferenceMoments", referenceMoments))
                 .Where(b => declared.Contains(b.Name)).ToArray()));
         referenceFrame++;
         referenceSamples++;
@@ -117,7 +125,7 @@ internal sealed partial class SponzaLoop
         if (referenceAccum.Equals(default(GpuBufferHandle)))
             referenceAccum = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.reference.none"));
         var on = referenceView && referenceSize.X > 0 && referenceSamples > 0;
-        return (new Vector4(on ? 1f : 0f, referenceSize.X, referenceSize.Y, texelDebugRecords ? 2f : texelDebug ? 1f : 0f), new ShaderBufferBinding("ReferenceAccum", referenceAccum));
+        return (new Vector4(on ? 1f : 0f, referenceSize.X, referenceSize.Y, TexelViewReferenceW(texelDebugRecords ? 2f : texelDebug ? 1f : 0f)), new ShaderBufferBinding("ReferenceAccum", referenceAccum));
     }
 
     private void ReportReference(DebugContext debug)

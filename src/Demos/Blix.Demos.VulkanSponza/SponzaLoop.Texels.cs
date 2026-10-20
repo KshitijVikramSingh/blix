@@ -61,6 +61,8 @@ internal sealed partial class SponzaLoop
     // --texel-filter 0|1: the spatial filter over neighbouring texels, refreshed each frame a texel is seen
     // (texel_filter.comp).
     private bool texelFilter = true;
+    // --atlas-coarse: a lightmapped pixel past its texel level reads the hashed cells there, as before (incident_clipmap.frag).
+    private bool atlasCoarse;
     // The blend's occlusion estimate claims at least texelOcclusionError of the gathered mean as its error, not only of
     // itself (texel_gather.comp): relative to itself alone, a crevice's near-zero estimate claimed near-certainty and won
     // over the gather -- Sponza (every 16th texel, against the raw ray bake): dim texels -22..-29% blended, -5..-7%
@@ -747,7 +749,7 @@ internal sealed partial class SponzaLoop
     // What the level rule's sunlit test reads (texel_mark.comp, incident_clipmap.frag): the sun, the cascades.
     private IEnumerable<ShaderUniform> TexelSunUniforms() => new ShaderUniform[]
     {
-        new("uTexelSun", new Vector4Uniform(new Vector4(sunDirection, 0f))),
+        new("uTexelSun", new Vector4Uniform(new Vector4(sunDirection, atlasCoarse ? 0f : 1f))),
         new("uTexelCascadeVP", new Matrix4x4ArrayUniform(cascadeViewProj)),
     };
 
@@ -822,6 +824,7 @@ internal sealed partial class SponzaLoop
     {
         if (!texelsUploaded || rayBlockBuffers.Length == 0) return;
         using (Prof("texels.visible")) RecordTexelVisible(invProjection, invView, width, height);
+        DumpAtRest();
         using (Prof("texels.live-patch-light")) RecordLivePatchLight();
         // A live split cook (SponzaLoop.SplitLanding.cs) takes --split-passes-per-frame passes of the frame, as the cook
         // screen does, each in its own copy of the passes; one pass a frame for everything else.

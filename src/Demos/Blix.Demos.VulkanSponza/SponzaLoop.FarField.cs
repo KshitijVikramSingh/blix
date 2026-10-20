@@ -119,6 +119,9 @@ internal sealed partial class SponzaLoop
         if (!farOn)
         {
             Console.WriteLine($"[VulkanSponza] far field: off{(farField ? " (not a guided split cook of up to 3 columns)" : " (--no-far-field)")}.");
+            // The patches' neighbours all the same, for the hits' bounce blend.
+            if (hitBlend && cookedPacked is not null && frameTracer is not null && farNeighbours.Equals(default(GpuBufferHandle)))
+                FindFarNeighbours(cookedPacked.Length / 3);
             return;
         }
         var patches = cookedPacked!.Length / 3;
@@ -332,7 +335,13 @@ internal sealed partial class SponzaLoop
     // The record's buffer where a shader declares it (a placeholder when off: never indexed).
     private GpuBufferHandle FarRecordBuffer => farOn ? farRecord : sunNodeAccum;
     private GpuBufferHandle FarBinsBuffer => farOn ? farBinsBuffer : sunNodeAccum;
-    private GpuBufferHandle FarNeighboursBuffer => farOn ? farNeighbours : sunNodeAccum;
+    // Bound wherever made: the far field's, and the hits' bounce blend (HitBlendNow) without it.
+    private GpuBufferHandle FarNeighboursBuffer => !farNeighbours.Equals(default(GpuBufferHandle)) ? farNeighbours : sunNodeAccum;
+    // A gather hit's bounce blended over its patch's neighbours (texel_nodes_shade.glsl, hitPatchLight): flat from the one
+    // patch, the bounce near a patch-lit surface took the patches' outlines -- blotches on the Cornell box's walls where the
+    // path trace is smooth (2026-10-21). --no-hit-blend: one patch, as before.
+    private bool hitBlend = true;
+    private bool HitBlendNow => hitBlend && !farNeighbours.Equals(default(GpuBufferHandle));
     private GpuBufferHandle FarHarmonicBuffer => farOn ? farHarmonic : sunNodeAccum;
 
     // The record pass, a pass at a time (immediate or in the frame): a round's texels in slices, farRecordRays / 32 passes

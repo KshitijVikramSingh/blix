@@ -21,6 +21,8 @@ layout(std430, set = 0, binding = 2) readonly buffer Texels { vec4 texels[]; };
 layout(std430, set = 0, binding = 3) readonly buffer FineIds { uint fineIds[]; };
 layout(std430, set = 0, binding = 4) buffer SplitSky { uvec2 skyPart[]; };
 layout(std430, set = 0, binding = 5) buffer SplitSun { uvec2 sunPart[]; };
+layout(std430, set = 0, binding = 11) buffer TexelProvenance { uint provenance[]; };
+#include "provenance.glsl"
 layout(std430, set = 0, binding = 6) buffer SkyDetail { uint skyDetail[]; };
 layout(std430, set = 0, binding = 7) buffer SunDetail { uint sunDetail[]; };
 layout(std430, set = 0, binding = 8) readonly buffer AoBytes { uint aoBytes[]; };
@@ -170,6 +172,7 @@ void main() {
         for (int e = 0; e < 6; ++e) if (score > edges[e]) atomicAdd(fineFlags[4 + e], 1u);
     }
     if (u.uKeep.x < 0.5) skyPart[id] = uvec2(packRgb9e5(sky * ratio), 0xFFFFu | 0x10000u);
+    provenanceMark(id, 5u, true, u.uKeep.x < 0.5);   // the fine copy
     sunPart[id] = uvec2(packRgb9e5(sun * ratio), 0xFFFFu | 0x10000u);
     // The coarse tilts turned into this texel's frame: in their own (a cell averaging a wall and the ledge under it,
     // turned 45 degrees down, its tilt toward the sunlit floor) they lit the wall's normal-mapped stones in blocks

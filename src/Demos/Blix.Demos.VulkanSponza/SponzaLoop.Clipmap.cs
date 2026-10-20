@@ -133,6 +133,7 @@ internal sealed partial class SponzaLoop
         var surface = SurfaceUniforms(ClipmapLevels * clipmap.ProbesPerLevel);
         var texel = TexelIncidentInputs();
         var reference = ReferenceIncidentInputs();
+        var pick = TexelPickInputs(frameWidth, frameHeight);
         graph.Pass(half ? incidentHalfPassHandle : incidentPassHandle, scope => fullscreen.Draw(
             scope, half ? incidentHalfPipeline : incidentClipmapPipeline,
             new[]
@@ -164,13 +165,14 @@ internal sealed partial class SponzaLoop
                 new("uTexelParams", new Vector4Uniform(texel.Params)),
                 new("uReference", new Vector4Uniform(reference.Params)),
                 new("uClipExact", new Vector4Uniform(new Vector4(incidentExactVisibility ? 1f : 0f, IncidentCensusNow(half) ? 1f : 0f, UnmappedCoarse ? 1f : 0f, AtlasGatherNow ? 1f : 0f))),
-                new("uTexelDebug", new Vector4Uniform(new Vector4(texelFrame, texelResting ? 1f : 0f, texelDetailOn && TexelDetailUp ? 1f : 0f, 0f))),
+                new("uTexelDebug", new Vector4Uniform(new Vector4(texelFrame, texelResting ? 1f : 0f, texelDetailOn && TexelDetailUp ? 1f : 0f, pick.Code))),
                 new("uLightmap", new Vector4Uniform(LightmapUniform)),
                 new("uTexelLevels", new Vector4Uniform(TexelLevelsUniform(frameHeight))),
-                new("uHalf", new Vector4Uniform(new Vector4(half ? 1f : 0f, sub.X, sub.Y, 0f))),
+                new("uHalf", new Vector4Uniform(new Vector4(half ? 1f : 0f, sub.X, sub.Y, PatchViewColumns))),
                 new("uReuse", new Vector4Uniform(IncidentReuseUniform(half))),
             }.Concat(TexelSunUniforms()).ToArray(),
             buffers: new[] { new ShaderBufferBinding("ClipmapState", clipmapState), new ShaderBufferBinding("ScreenProbeTiles", screen.Tiles), new ShaderBufferBinding("ScreenProbes", screen.Probes), new ShaderBufferBinding("SurfaceIndex", surfaceIndex) }.Concat(texel.Buffers).Append(reference.Buffer).Append(new ShaderBufferBinding("IncidentCensus", IncidentCensusBuffer())).Append(AtlasGatherMeta())
+                .Append(ProvenanceBinding()).Append(pick.Buffer).Concat(PatchViewBindings()).Append(ReferenceMomentsBinding())
                 // The ray scene, for --clipmap-exact-visibility (declared always; read only then).
                 .Concat(rayBlockBuffers).ToArray()));
     }

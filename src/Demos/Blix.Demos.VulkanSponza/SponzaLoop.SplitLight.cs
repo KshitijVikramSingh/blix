@@ -167,6 +167,7 @@ internal sealed partial class SponzaLoop
             ReleaseSunNodeCook();
         }
         Console.WriteLine("[VulkanSponza] split light: the cook landed; the texels rest on the sky's part and the sun's.");
+        restDumpFrame = framesRendered + 30;   // BLIX_DUMP_PARTS: the light the image reads, once composed (Recall.cs)
         // The sky's part gathered whole: a sun change gathers the sun's alone from here (SponzaLoop.SliceResolve.cs).
         if (liveTexels) liveSkyGathered = true;
         RatioAtLanding();
@@ -224,7 +225,9 @@ internal sealed partial class SponzaLoop
         var sun = EffectiveSunIrradiance;
         // A live write (a scatter, an in-place provisional) is a pass of this frame that may run after the compose: composed
         // again the next frame too.
-        if (!splitComposeDirty && sky == splitComposedSky && sun == splitComposedSun && splitComposeAgainFrame < framesRendered) return;
+        if (!splitComposeDirty && sky == splitComposedSky && sun == splitComposedSun && splitComposeAgainFrame < framesRendered
+            && composedCookedSkyVis == CookedSkyVisNow) return;
+        composedCookedSkyVis = CookedSkyVisNow;
         splitComposeDirty = false;
         MarkIncidentDirty();   // the texels' light changes: the incident pass recomputes every pixel (SponzaLoop.IncidentReuse.cs)
         splitComposedSky = sky;
@@ -236,7 +239,7 @@ internal sealed partial class SponzaLoop
             graph.Dispatch(mode == 0 ? texelComposePass : texelComposeFilterPass, new DispatchCommand(texelComposePipeline, (live + 63) / 64, 1, 1,
                 new ShaderUniform[]
                 {
-                    new("uCompose", new Vector4Uniform(new Vector4(live, mode, 0f, 0f))),
+                    new("uCompose", new Vector4Uniform(new Vector4(live, mode, CookedSkyVisNow ? 1f : 0f, 0f))),
                     new("uSky", new Vector4Uniform(new Vector4(sky, 0f))),
                     new("uSun", new Vector4Uniform(new Vector4(sun, splitSunUp ? 1f : 0f))),
                     new("uTexelGrid", new Vector4Uniform(texelGrid)),

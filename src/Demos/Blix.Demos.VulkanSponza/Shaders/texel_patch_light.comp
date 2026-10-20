@@ -31,6 +31,8 @@ layout(std430, set = 0, binding = 4) readonly buffer SunNodePatchLight { uvec2 p
 layout(std430, set = 0, binding = 5) readonly buffer AoBytes { uint aoBytes[]; };
 layout(std430, set = 0, binding = 6) buffer SplitSky { uvec2 skyPart[]; };
 layout(std430, set = 0, binding = 7) buffer SplitSun { uvec2 sunPart[]; };
+layout(std430, set = 0, binding = 20) buffer TexelProvenance { uint provenance[]; };
+#include "provenance.glsl"
 layout(std430, set = 0, binding = 8) buffer SkyDetail { uint skyDetail[]; };
 layout(std430, set = 0, binding = 9) buffer SunDetail { uint sunDetail[]; };
 layout(std430, set = 0, binding = 15) readonly buffer DirOpen { uint dirOpen[]; };            // [texel id]: 8 nibbles
@@ -64,7 +66,7 @@ uint packRgb9e5(vec3 c) {
 uint detailPack(vec2 tilt, float sky) {
     vec2 t = clamp(tilt * 0.5, vec2(-1.0), vec2(1.0));
     uvec2 q = uvec2(ivec2(round(t * 127.0)) & 0xFF);
-    return q.x | (q.y << 8) | (uint(round(clamp(sky, 0.0, 1.0) * 255.0)) << 16) | (255u << 24);
+    return q.x | (q.y << 8) | (uint(round(sqrt(clamp(sky, 0.0, 1.0)) * 255.0)) << 16) | (255u << 24);
 }
 
 vec3 column(int p, uint k) {
@@ -148,6 +150,7 @@ void main() {
     float mine = ao(id);
     if (u.uColumns.w < 0.5) skyPart[id] = uvec2(packRgb9e5(sky), 0xFFFFu | 0x10000u);
     sunPart[id] = uvec2(packRgb9e5(sun * u.uInvIrr.rgb), 0xFFFFu | 0x10000u);
+    provenanceMark(id, 6u, true, u.uColumns.w < 0.5);   // the instant layer
     float skyShare = 0.0, sunShare = 0.0;
     for (int i = 0; i < FAR_SET; ++i) if (ids[i] >= 0 && ws[i] > 0.0) { skyShare += ws[i]; sunShare += ws[i]; }
     vec2 skyTilt = skyShare > 0.0 ? skyTiltSum / max(skyShare, 1e-6) : vec2(0.0);

@@ -38,8 +38,8 @@ public static class Program
     /// 1.5 m skylight the sun shines through -- the same experiment: one bright patch, everything else bounce.
     /// </para>
     /// <para>
-    /// Walls, floor and ceiling are 0.2 m solid slabs, so light that reaches the inside other than through the
-    /// skylight and the open front is a leak. The reflectances are the box's published ones (white 0.73,
+    /// Walls, floor and ceiling are one closed 0.2 m shell (no face inside another), so light that reaches the inside
+    /// other than through the skylight and the open front is a leak. The reflectances are the box's published ones (white 0.73,
     /// red 0.63/0.065/0.05, green 0.14/0.45/0.091), linear, matte. The front (+Z) is open; the camera looks in.
     /// </para>
     /// <para>
@@ -64,27 +64,44 @@ public static class Program
         var green = Matte("green", new Vector3(0.14f, 0.45f, 0.091f));
 
         var h = size / 2f;
-        const float t = 0.2f;                          // slab thickness
+        const float t = 0.2f;                          // the shell's thickness
         var mesh = new Mesh("cornell");
         var w = mesh.UsePrimitive(white);
-        // Floor and back wall, white; overlapping at the corners so no seam lets light through.
-        Box(w, new Vector3(-h - t, -t, -h - t), new Vector3(h + t, 0f, h));
-        Box(w, new Vector3(-h - t, -t, -h - t), new Vector3(h + t, size + t, -h));
-        // The ceiling: four slabs around the skylight.
+        // One closed shell, 0.2 m thick: the inside's faces span the room exactly, the outside's the room and the shell,
+        // and rims close the open front and the skylight's shaft. Overlapping slabs (as before, 2026-10-21) were
+        // watertight but buried faces in one another -- the floor ran under the walls, each wall down into the floor --
+        // and the lightmap put texels there, the ones at the corners half inside a wall: the walls came out dirty in the
+        // cook and the image. Every face here is seen from somewhere, and its edges meet its neighbours' exactly.
         var s = skylight / 2f;
-        Box(w, new Vector3(-h - t, size, -h - t), new Vector3(-s, size + t, h));
-        Box(w, new Vector3(s, size, -h - t), new Vector3(h + t, size + t, h));
-        Box(w, new Vector3(-s, size, -h - t), new Vector3(s, size + t, -s));
-        Box(w, new Vector3(-s, size, s), new Vector3(s, size + t, h));
-        // Left red, right green.
-        Box(mesh.UsePrimitive(red), new Vector3(-h - t, -t, -h - t), new Vector3(-h, size + t, h));
-        Box(mesh.UsePrimitive(green), new Vector3(h, -t, -h - t), new Vector3(h + t, size + t, h));
+        // The inside: floor, back, red left, green right, and the ceiling around the skylight (the front, +Z, open).
+        Quad(w, new Vector3(-h, 0f, -h), new(2f * h, 0, 0), new(0, 0, 2f * h), Vector3.UnitY);
+        Quad(w, new Vector3(-h, 0f, -h), new(2f * h, 0, 0), new(0, size, 0), Vector3.UnitZ);
+        Quad(mesh.UsePrimitive(red), new Vector3(-h, 0f, -h), new(0, 0, 2f * h), new(0, size, 0), Vector3.UnitX);
+        Quad(mesh.UsePrimitive(green), new Vector3(h, 0f, -h), new(0, 0, 2f * h), new(0, size, 0), -Vector3.UnitX);
+        Ring(w, size, -h, h, -h, h, s, -Vector3.UnitY);
+        // The skylight's shaft, through the shell's thickness, each side facing into the opening.
+        Quad(w, new Vector3(-s, size, -s), new(0, 0, 2f * s), new(0, t, 0), Vector3.UnitX);
+        Quad(w, new Vector3(s, size, -s), new(0, 0, 2f * s), new(0, t, 0), -Vector3.UnitX);
+        Quad(w, new Vector3(-s, size, -s), new(2f * s, 0, 0), new(0, t, 0), Vector3.UnitZ);
+        Quad(w, new Vector3(-s, size, s), new(2f * s, 0, 0), new(0, t, 0), -Vector3.UnitZ);
+        // The outside: under, behind, the two sides, and the roof around the skylight; flush with the opening in front.
+        Quad(w, new Vector3(-h - t, -t, -h - t), new(2f * (h + t), 0, 0), new(0, 0, 2f * h + t), -Vector3.UnitY);
+        Quad(w, new Vector3(-h - t, -t, -h - t), new(2f * (h + t), 0, 0), new(0, size + 2f * t, 0), -Vector3.UnitZ);
+        Quad(w, new Vector3(-h - t, -t, -h - t), new(0, 0, 2f * h + t), new(0, size + 2f * t, 0), -Vector3.UnitX);
+        Quad(w, new Vector3(h + t, -t, -h - t), new(0, 0, 2f * h + t), new(0, size + 2f * t, 0), Vector3.UnitX);
+        Ring(w, size + t, -h - t, h + t, -h - t, h, s, Vector3.UnitY);
+        // The front rim around the opening (z = h): below the floor, above the ceiling, beside each wall.
+        Quad(w, new Vector3(-h - t, -t, h), new(2f * (h + t), 0, 0), new(0, t, 0), Vector3.UnitZ);
+        Quad(w, new Vector3(-h - t, size, h), new(2f * (h + t), 0, 0), new(0, t, 0), Vector3.UnitZ);
+        Quad(w, new Vector3(-h - t, 0f, h), new(t, 0, 0), new(0, size, 0), Vector3.UnitZ);
+        Quad(w, new Vector3(h, 0f, h), new(t, 0, 0), new(0, size, 0), Vector3.UnitZ);
 
         // The two blocks, white: a tall one back left, a short one front right, each turned as in the original.
+        // Standing on the floor: no bottom face (it would lie on the floor, seen from nowhere).
         var tall = new Mesh("tall_block");
-        Box(tall.UsePrimitive(white), new Vector3(-0.3f * h, 0f, -0.3f * h), new Vector3(0.3f * h, 1.2f * h, 0.3f * h));
+        Box(tall.UsePrimitive(white), new Vector3(-0.3f * h, 0f, -0.3f * h), new Vector3(0.3f * h, 1.2f * h, 0.3f * h), bottom: false);
         var shortBlock = new Mesh("short_block");
-        Box(shortBlock.UsePrimitive(white), new Vector3(-0.3f * h, 0f, -0.3f * h), new Vector3(0.3f * h, 0.6f * h, 0.3f * h));
+        Box(shortBlock.UsePrimitive(white), new Vector3(-0.3f * h, 0f, -0.3f * h), new Vector3(0.3f * h, 0.6f * h, 0.3f * h), bottom: false);
 
         var scene = new SceneBuilder();
         scene.AddRigidMesh(mesh, Matrix4x4.Identity);
@@ -99,7 +116,7 @@ public static class Program
 
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!);
         scene.ToGltf2().SaveGLTF(output);
-        Console.WriteLine($"cornell: {size:0.##} m inside, {skylight:0.##} m skylight, 0.2 m slabs{(panel ? ", a hanging panel" : "")} -> {output}");
+        Console.WriteLine($"cornell: {size:0.##} m inside, {skylight:0.##} m skylight, a 0.2 m shell{(panel ? ", a hanging panel" : "")} -> {output}");
         return 0;
     }
 
@@ -235,8 +252,19 @@ public static class Program
     private static MaterialBuilder Matte(string name, Vector3 albedo) =>
         new MaterialBuilder(name).WithMetallicRoughnessShader().WithBaseColor(new Vector4(albedo, 1f)).WithMetallicRoughness(0f, 1f);
 
-    // An axis-aligned box from its two corners, all six faces outward.
-    private static void Box(PrimitiveBuilder<MaterialBuilder, VertexPositionNormal, VertexTexture1, VertexEmpty> p, Vector3 lo, Vector3 hi)
+    // A horizontal face at height y over [x0, x1] x [z0, z1] around a square hole of half-width s at the centre: four
+    // rectangles, facing n.
+    private static void Ring(PrimitiveBuilder<MaterialBuilder, VertexPositionNormal, VertexTexture1, VertexEmpty> p,
+        float y, float x0, float x1, float z0, float z1, float s, Vector3 n)
+    {
+        Quad(p, new Vector3(x0, y, z0), new(-s - x0, 0, 0), new(0, 0, z1 - z0), n);
+        Quad(p, new Vector3(s, y, z0), new(x1 - s, 0, 0), new(0, 0, z1 - z0), n);
+        Quad(p, new Vector3(-s, y, z0), new(2f * s, 0, 0), new(0, 0, -s - z0), n);
+        Quad(p, new Vector3(-s, y, s), new(2f * s, 0, 0), new(0, 0, z1 - s), n);
+    }
+
+    // An axis-aligned box from its two corners, all six faces outward (bottom: false, the -Y face left out).
+    private static void Box(PrimitiveBuilder<MaterialBuilder, VertexPositionNormal, VertexTexture1, VertexEmpty> p, Vector3 lo, Vector3 hi, bool bottom = true)
     {
         var d = hi - lo;
         Quad(p, new Vector3(lo.X, lo.Y, hi.Z), new(d.X, 0, 0), new(0, d.Y, 0), Vector3.UnitZ);
@@ -244,7 +272,7 @@ public static class Program
         Quad(p, new Vector3(hi.X, lo.Y, hi.Z), new(0, 0, -d.Z), new(0, d.Y, 0), Vector3.UnitX);
         Quad(p, new Vector3(lo.X, lo.Y, lo.Z), new(0, 0, d.Z), new(0, d.Y, 0), -Vector3.UnitX);
         Quad(p, new Vector3(lo.X, hi.Y, hi.Z), new(d.X, 0, 0), new(0, 0, -d.Z), Vector3.UnitY);
-        Quad(p, new Vector3(lo.X, lo.Y, lo.Z), new(d.X, 0, 0), new(0, 0, d.Z), -Vector3.UnitY);
+        if (bottom) Quad(p, new Vector3(lo.X, lo.Y, lo.Z), new(d.X, 0, 0), new(0, 0, d.Z), -Vector3.UnitY);
     }
 
     private readonly record struct Vertex(Vector3 P, Vector3 N, Vector2 Uv)

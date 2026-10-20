@@ -154,11 +154,91 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("PatchDirShares", patchDirSharesBuffer),
                     new ShaderBufferBinding("AoShort", texelAoShortBuffer),
                     new ShaderBufferBinding("PatchSkyEscape", liveSkyEscapeBuffer.Equals(default(GpuBufferHandle)) ? texelAoShortBuffer : liveSkyEscapeBuffer),
+                    ProvenanceBinding(),
                 }.Concat(CookedBuffers()).Where(b => declared.Contains(b.Name)).ToArray()) }, "texel-patch-light");
     }
 
     // A': the transfer's texels (the coarse levels), the fine ones, their contact visibility (a byte a texel id).
     private int transferMinLevel = 1, transferFineCount, transferAoRays = 64;
+    // The texels' sky visibility, cooked with the contact (texel_ao.comp, SkyVis): the share of cosine rays that meet
+    // nothing, a byte a texel, the geometry's alone. The gather's sweep counted it at its own rays and the fine texels
+    // took min(their cells', their own openness): blocks, speckle and a dark lean (2026-10-21). --sky-vis-rays N;
+    // --no-cooked-sky-vis: the gather's, as before.
+    private int skyVisRays = 1024;
+    // --contact-rays-own: the contact visibility at its own rays (transferAoRays) alone, as before.
+    private bool contactAllRays = true;
+    private bool cookedSkyVis = true;
+    private GpuBufferHandle texelSkyVisBuffer;
+    // Denoised at the cook (sky_vis_filter.comp): passes of the texel filter's neighbourhood, an edge past skyVisEdge
+    // standard deviations of the share's noise. --sky-vis-filter N (0: none).
+    private int skyVisFilterPasses = 4;
+    private float skyVisEdge = 2.5f;
+    private ShaderInterface skyVisFilterInterface = null!;
+    private PipelineHandle skyVisFilterPipeline;
+
+    // BLIX_SKYVIS_DUMP=path (a diagnosis): the texels (two vec4 each), the cooked share before the filter and after.
+    // BLIX_AO_SEED=N (a measurement): the contact cook's passes seeded N on -- two cooks' difference is their noise.
+    private static readonly int aoSeedOffset = int.TryParse(Environment.GetEnvironmentVariable("BLIX_AO_SEED"), out var aoSeed) ? aoSeed : 0;
+    private static readonly string? skyVisDump = Environment.GetEnvironmentVariable("BLIX_SKYVIS_DUMP");
+
+    private void DumpSkyVis(string stage)
+    {
+        if (skyVisDump is null) return;
+        device.WaitIdle();
+        if (stage == "raw") File.WriteAllBytes(skyVisDump + ".texels", device.ReadGpuBuffer(texelBuffer, 0, texelCount * 32));
+        File.WriteAllBytes($"{skyVisDump}.{stage}", device.ReadGpuBuffer(texelSkyVisBuffer, 0, ContactBytes));
+        Console.WriteLine($"[VulkanSponza] sky visibility dumped: {skyVisDump}.{stage}");
+    }
+
+    private void FilterSkyVis(int rays)
+    {
+        DumpSkyVis("raw");
+        try { FilterSkyVisPasses(rays); } finally { DumpSkyVis("filtered"); }
+    }
+
+    private void FilterSkyVisPasses(int rays)
+    {
+        if (skyVisFilterPasses <= 0) return;
+        var declared = skyVisFilterInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
+        var bytesOut = device.CreateGpuBuffer(ContactBytes, name: "sponza.transfer.sky-vis.filtered");
+        // The passes' floats, ping-ponged: the first reads the cook's bytes (its from all -1: none yet).
+        var floatBytes = Math.Max(16, texelCount * 4);
+        var none = new float[Math.Max(4, texelCount)];
+        Array.Fill(none, -1f);
+        var a = device.CreateGpuBuffer(floatBytes, MemoryMarshal.AsBytes(none.AsSpan()), "sponza.transfer.sky-vis.a");
+        var b = device.CreateGpuBuffer(floatBytes, name: "sponza.transfer.sky-vis.b");
+        GpuBufferHandle from = a, into = b;
+        for (var pass = 0; pass < skyVisFilterPasses; pass++)
+        {
+            var last = pass == skyVisFilterPasses - 1;
+            device.DispatchNow(new[] { new DispatchCommand(skyVisFilterPipeline, (texelCount + 63) / 64, 1, 1,
+                new ShaderUniform[]
+                {
+                    new("uFilter", new Vector4Uniform(new Vector4(texelCount, rays, skyVisEdge, last ? 1f : 0f))),
+                    new("uTexelGrid", new Vector4Uniform(texelGrid)),
+                    new("uTexelParams", new Vector4Uniform(new Vector4(texelCapacity, 0f, 0f, 0f))),
+                    new("uLightmap", new Vector4Uniform(LightmapUniform)),
+                },
+                new[] { AtlasGatherTexture() },
+                Buffers: new[]
+                {
+                    new ShaderBufferBinding("TexelHash", texelHashBuffer),
+                    new ShaderBufferBinding("Texels", texelBuffer),
+                    new ShaderBufferBinding("SkyIn", texelSkyVisBuffer),
+                    new ShaderBufferBinding("SkyOut", bytesOut),
+                    new ShaderBufferBinding("SkyFrom", from),
+                    new ShaderBufferBinding("SkyInto", into),
+                }.Where(bb => declared.Contains(bb.Name)).ToArray()) }, "sky-vis-filter");
+            (from, into) = (into, from);
+        }
+        device.WaitIdle();
+        device.WriteGpuBuffer(texelSkyVisBuffer, 0, device.ReadGpuBuffer(bytesOut, 0, ContactBytes));
+        foreach (var x in new[] { bytesOut, a, b }) device.DestroyGpuBuffer(x);
+    }
+
+    // The cooked sky visibility as the last compose took it: --ab skyvis composes again at each flip.
+    private bool composedCookedSkyVis;
+    private bool CookedSkyVisNow => cookedSkyVis && !texelSkyVisBuffer.Equals(default(GpuBufferHandle)) && !(abMode == "skyvis" && AbOffPhase);
     private float transferAoReach = 0.2f;
     private uint[]? transferIds;
     private GpuBufferHandle transferIdsBuffer, transferFineIdsBuffer, texelAoBuffer, texelDirOpenBuffer, patchOpenBuffer, patchDirSharesBuffer, texelAoShortBuffer;
@@ -174,12 +254,15 @@ internal sealed partial class SponzaLoop
     {
         var clock = Stopwatch.StartNew();
         texelAoBuffer = Own(device.CreateGpuBuffer(Math.Max(16, (texelCount + 3) / 4 * 4), new byte[Math.Max(16, (texelCount + 3) / 4 * 4)], "sponza.transfer.ao"));
-        var counts = Own(device.CreateGpuBuffer(sunNodeSlice * 19 * 4, new byte[sunNodeSlice * 19 * 4], "sponza.transfer.ao-counts"));
+        var counts = Own(device.CreateGpuBuffer(sunNodeSlice * 21 * 4, new byte[sunNodeSlice * 21 * 4], "sponza.transfer.ao-counts"));
+        if (texelSkyVisBuffer.Equals(default(GpuBufferHandle)))
+            texelSkyVisBuffer = Own(device.CreateGpuBuffer(ContactBytes, new byte[ContactBytes], "sponza.transfer.sky-vis"));
         if (texelAoShortBuffer.Equals(default(GpuBufferHandle)))
             texelAoShortBuffer = Own(device.CreateGpuBuffer(Math.Max(16, (texelCount + 3) / 4 * 4), new byte[Math.Max(16, (texelCount + 3) / 4 * 4)], "sponza.transfer.ao-short"));
         if (texelDirOpenBuffer.Equals(default(GpuBufferHandle)))
             texelDirOpenBuffer = Own(device.CreateGpuBuffer(Math.Max(16, texelCount * 4), name: "sponza.transfer.dir-open"));
-        var passes = Math.Max(1, transferAoRays / 32);
+        var aoPasses = Math.Max(1, transferAoRays / 32);
+        var passes = Math.Max(aoPasses, Math.Max(1, skyVisRays / 32));
         // The geometry's: read from the GI bundle when cooked before for the same stages, texels and settings (52 s of
         // Sponza's boot, 2026-10-19).
         var contactPath = Environment.GetEnvironmentVariable("BLIX_NO_CONTACT_CACHE") == "1" ? null : ContactPath(all.Length);
@@ -191,8 +274,8 @@ internal sealed partial class SponzaLoop
             return;
         }
         var declared = texelAoInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
-        DispatchCommand Ao(int threads, int slice, int mode, int first) => new(texelAoPipeline, (threads + 63) / 64, 1, 1,
-            new ShaderUniform[] { new("uAo", new Vector4Uniform(new Vector4(slice, transferAoReach, mode, first))), new("uAo2", new Vector4Uniform(new Vector4(transferAoShortReach, 0f, 0f, 0f))) },
+        DispatchCommand Ao(int threads, int slice, int mode, int first, bool contact = true) => new(texelAoPipeline, (threads + 63) / 64, 1, 1,
+            new ShaderUniform[] { new("uAo", new Vector4Uniform(new Vector4(slice, transferAoReach, mode, first))), new("uAo2", new Vector4Uniform(new Vector4(transferAoShortReach, contact ? 1f : 0f, 0f, 0f))) },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
             {
@@ -204,33 +287,37 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("NodeRays", sunNodeRaysBuffer),
                 new ShaderBufferBinding("DirOpen", texelDirOpenBuffer),
                 new ShaderBufferBinding("AoShort", texelAoShortBuffer),
+                new ShaderBufferBinding("SkyVis", texelSkyVisBuffer),
             }.Where(b => declared.Contains(b.Name)).ToArray());
         for (var first = 0; first < all.Length; first += sunNodeSlice)
         {
             var slice = Math.Min(sunNodeSlice, all.Length - first);
             for (var pass = 0; pass < passes; pass++)
             {
-                device.DispatchNow(new[] { SunNodeRaysCommand(sunNodeLive, first, slice, pass, plain: true) }, "texel-ao-rays");
-                frameTracer!.Trace(sunNodeRaysBuffer, sunNodeHits, slice * 32, SunNodeSeed(first, pass, 0) ^ 0xA0u, closestOnly: true);
-                device.DispatchNow(new[] { Ao(slice * 32, slice, 0, first) }, "texel-ao");
+                device.DispatchNow(new[] { SunNodeRaysCommand(sunNodeLive, first, slice, pass + aoSeedOffset, plain: true) }, "texel-ao-rays");
+                frameTracer!.Trace(sunNodeRaysBuffer, sunNodeHits, slice * 32, SunNodeSeed(first, pass + aoSeedOffset, 0) ^ 0xA0u, closestOnly: true);
+                // The contact counts every ray the sky's cook shoots (the rays are shot either way): at 64 a dark crease's
+                // ratio was a few rays, and its texels came out black in blotches (2026-10-21).
+                device.DispatchNow(new[] { Ao(slice * 32, slice, 0, first, contact: contactAllRays || pass < aoPasses) }, "texel-ao");
             }
             device.DispatchNow(new[] { Ao(slice, slice, 1, first) }, "texel-ao-finish");
         }
         RetireGpuBuffer(counts);
+        FilterSkyVis(passes * 32);
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[VulkanSponza] transfer: contact visibility (within {transferAoReach * 100:0} cm) of {all.Length:N0} texels, {passes * 32} rays each, in {clock.Elapsed.TotalSeconds:0.0} s."));
+            $"[VulkanSponza] transfer: contact visibility (within {transferAoReach * 100:0} cm) of {all.Length:N0} texels, {(contactAllRays ? passes : aoPasses) * 32} rays each, and their sky visibility, {passes * 32} rays each, filtered {skyVisFilterPasses} times, in {clock.Elapsed.TotalSeconds:0.0} s."));
         if (contactPath is not null) WriteContact(contactPath);
     }
 
     // The contact cook's file in the GI bundle: keyed by the transport's stages (the geometry, the patches, the hashed
     // texels), the live texels' count (the atlas's with them) and the cook's settings.
-    private const int ContactVersion = 1;
+    private const int ContactVersion = 4;   // 2: the sky visibility; 3: stored by its square root; 4: filtered in float
 
     private string? ContactPath(int liveCount)
     {
         if (transportCombinedKey is not { } combined) return null;
         var key = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(string.Create(CultureInfo.InvariantCulture,
-            $"{combined};texels {texelCount};live {liveCount};rays {transferAoRays};reach {transferAoReach};short {transferAoShortReach};v{ContactVersion}"))))[..24].ToLowerInvariant();
+            $"{combined};texels {texelCount};live {liveCount};rays {transferAoRays};reach {transferAoReach};short {transferAoShortReach};sky {skyVisRays};filter {skyVisFilterPasses} {skyVisEdge};all {contactAllRays};v{ContactVersion}"))))[..24].ToLowerInvariant();
         return Path.Combine(transportCacheDir, key + ".texel-contact");
     }
 
@@ -246,7 +333,9 @@ internal sealed partial class SponzaLoop
             var ao = r.ReadBytes(ContactBytes);
             var aoShort = r.ReadBytes(ContactBytes);
             var dirOpen = r.ReadBytes(Math.Max(16, texelCount * 4));
-            if (ao.Length != ContactBytes || aoShort.Length != ContactBytes || dirOpen.Length != Math.Max(16, texelCount * 4)) return false;
+            var skyVis = r.ReadBytes(ContactBytes);
+            if (ao.Length != ContactBytes || aoShort.Length != ContactBytes || dirOpen.Length != Math.Max(16, texelCount * 4) || skyVis.Length != ContactBytes) return false;
+            device.WriteGpuBuffer(texelSkyVisBuffer, 0, skyVis);
             device.WriteGpuBuffer(texelAoBuffer, 0, ao);
             device.WriteGpuBuffer(texelAoShortBuffer, 0, aoShort);
             device.WriteGpuBuffer(texelDirOpenBuffer, 0, dirOpen);
@@ -266,6 +355,7 @@ internal sealed partial class SponzaLoop
         var ao = device.ReadGpuBuffer(texelAoBuffer, 0, ContactBytes);
         var aoShort = device.ReadGpuBuffer(texelAoShortBuffer, 0, ContactBytes);
         var dirOpen = device.ReadGpuBuffer(texelDirOpenBuffer, 0, Math.Max(16, texelCount * 4));
+        var skyVis = device.ReadGpuBuffer(texelSkyVisBuffer, 0, ContactBytes);
         var count = texelCount;
         _ = Task.Run(() =>
         {
@@ -276,7 +366,7 @@ internal sealed partial class SponzaLoop
                 using (var w = new BinaryWriter(new BufferedStream(File.Create(temp), 1 << 22)))
                 {
                     w.Write("blix-texel-contact"); w.Write(ContactVersion); w.Write(count);
-                    w.Write(ao); w.Write(aoShort); w.Write(dirOpen);
+                    w.Write(ao); w.Write(aoShort); w.Write(dirOpen); w.Write(skyVis);
                 }
                 File.Move(temp, path, overwrite: true);
                 Console.WriteLine($"[VulkanSponza] transfer: contact visibility written to {path}.");
@@ -367,6 +457,60 @@ internal sealed partial class SponzaLoop
         return ids;
     }
 
+    // The coarse cells' parts filtered before the fine copy reads them (coarse_filter.comp): their ray noise went onto
+    // every fine texel each lights, cell-sized blobs (Cornell, 2026-10-21). --coarse-filter N passes (0: none).
+    private int coarseFilterPasses = 1;
+    private ShaderInterface coarseFilterInterface = null!;
+    private PipelineHandle coarseFilterPipeline;
+    private GpuBufferHandle coarseFilterIds, coarseFilterSky, coarseFilterSun;
+    private int coarseFilterCount;
+
+    private void FilterCoarseNow()
+    {
+        using var profScope = Prof("coarse-filter");
+        if (coarseFilterPasses <= 0 || transferGatherIds.Length == 0) return;
+        var n = transferGatherIds.Length;
+        if (coarseFilterCount != n)
+        {
+            foreach (var b in new[] { coarseFilterIds, coarseFilterSky, coarseFilterSun })
+                if (!b.Equals(default(GpuBufferHandle))) RetireGpuBuffer(b);
+            coarseFilterIds = Own(device.CreateGpuBuffer(n * 4, MemoryMarshal.AsBytes(transferGatherIds.AsSpan()), "sponza.transfer.coarse-filter.ids"));
+            coarseFilterSky = Own(device.CreateGpuBuffer(n * 4, name: "sponza.transfer.coarse-filter.sky"));
+            coarseFilterSun = Own(device.CreateGpuBuffer(n * 4, name: "sponza.transfer.coarse-filter.sun"));
+            coarseFilterCount = n;
+        }
+        var clock = Stopwatch.StartNew();
+        var declared = coarseFilterInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
+        DispatchCommand Pass(int mode) => new(coarseFilterPipeline, (n + 63) / 64, 1, 1,
+            new ShaderUniform[]
+            {
+                new("uFilter", new Vector4Uniform(new Vector4(n, mode, skyKept ? 0f : 1f, Luminance(EffectiveSunIrradiance)))),
+                new("uTexelGrid", new Vector4Uniform(texelGrid)),
+                new("uTexelParams", new Vector4Uniform(new Vector4(texelCapacity, 0f, 0f, 0f))),
+                new("uLightmap", new Vector4Uniform(LightmapUniform)),
+                new("uEdge", new Vector4Uniform(new Vector4(texelFilterSymmetric ? 1f : 0f, texelFilterArea ? 1f : 0f, 0f, 0f))),
+            },
+            new[] { AtlasGatherTexture() },
+            Buffers: new[]
+            {
+                new ShaderBufferBinding("CoarseIds", coarseFilterIds),
+                new ShaderBufferBinding("TexelHash", texelHashBuffer),
+                new ShaderBufferBinding("Texels", texelBuffer),
+                new ShaderBufferBinding("SplitSky", EnsureLivePart(false)),
+                new ShaderBufferBinding("SplitSun", EnsureLivePart(true)),
+                new ShaderBufferBinding("FilteredSky", coarseFilterSky),
+                new ShaderBufferBinding("FilteredSun", coarseFilterSun),
+            }.Where(b => declared.Contains(b.Name)).ToArray());
+        for (var pass = 0; pass < coarseFilterPasses; pass++)
+        {
+            device.DispatchNow(new[] { Pass(0) }, "coarse-filter");
+            device.DispatchNow(new[] { Pass(1) }, "coarse-filter-back");
+        }
+        device.WaitIdle();
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[VulkanSponza] coarse filter: {n:N0} coarse cells' {(skyKept ? "sun part" : "parts")} filtered {coarseFilterPasses}x before the fine copy, in {clock.Elapsed.TotalMilliseconds:0} ms."));
+    }
+
     private void ApplyFineNow()
     {
         using var profScope = Prof("fine-copy");
@@ -438,6 +582,7 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("AoBytes", livePatchTexels ? texelAoShortBuffer : texelAoBuffer),
                     new ShaderBufferBinding("FineDebug", debug),
                     new ShaderBufferBinding("FineFlags", fineFlagsBuffer.Equals(default(GpuBufferHandle)) ? debug : fineFlagsBuffer),
+                    ProvenanceBinding(),
                 }.Where(b => declared.Contains(b.Name)).ToArray()) }, "transfer-fine");
     }
 
@@ -666,6 +811,8 @@ internal sealed partial class SponzaLoop
         patchDirInterface = reflect(new[] { "patch_dir.comp" });
         transferApplyInterface = reflect(new[] { "transfer_apply.comp" });
         texelAoInterface = reflect(new[] { "texel_ao.comp" });
+        coarseFilterInterface = reflect(new[] { "coarse_filter.comp" });
+        skyVisFilterInterface = reflect(new[] { "sky_vis_filter.comp" });
         transferFineInterface = reflect(new[] { "transfer_fine.comp" });
         sliceResolveInterface = reflect(new[] { "slice_resolve.comp" });
     }
@@ -680,6 +827,8 @@ internal sealed partial class SponzaLoop
         patchDirPipeline = Make("patch_dir", patchDirInterface);
         transferApplyPipeline = Make("transfer_apply", transferApplyInterface);
         texelAoPipeline = Make("texel_ao", texelAoInterface);
+        coarseFilterPipeline = Make("coarse_filter", coarseFilterInterface);
+        skyVisFilterPipeline = Make("sky_vis_filter", skyVisFilterInterface);
         transferFinePipeline = Make("transfer_fine", transferFineInterface);
         sliceResolvePipeline = Make("slice_resolve", sliceResolveInterface);
     }

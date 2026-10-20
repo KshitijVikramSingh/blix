@@ -17,7 +17,7 @@ namespace Blix.Demos.VulkanSponza;
 // light (texel_compose.comp: the parts' directions weighted by their light, as the light is summed).
 internal sealed partial class SponzaLoop
 {
-    private const int DetailVersion = 1;
+    private const int DetailVersion = 2;   // 2: the sky visibility by its square root (texel.glsl)
     private GpuBufferHandle sunNodeDetail;
     private uint[][] sunNodeDetailWords = Array.Empty<uint[]>();
     private uint[]? splitSkyDetail, splitSunDetail;
@@ -167,6 +167,7 @@ internal sealed partial class SponzaLoop
         yield return new ShaderBufferBinding("TexelSkyDetail", splitSkyDetailBuffer);
         yield return new ShaderBufferBinding("TexelSunDetail", splitSunDetailBuffer);
         yield return new ShaderBufferBinding("TexelDetail", texelDetailBuffer);
+        yield return new ShaderBufferBinding("TexelSkyVis", CookedSkyVisNow ? texelSkyVisBuffer : splitSunDetailBuffer);
     }
 
     // The incident pass's: the composed detail once the compose made it, else a placeholder (every word 0: none).

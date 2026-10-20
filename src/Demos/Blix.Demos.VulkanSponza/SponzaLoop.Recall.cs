@@ -218,6 +218,16 @@ internal sealed partial class SponzaLoop
     // BLIX_DUMP_PARTS=<prefix> (a diagnosis): the parts at the light change's stages (after the coarse gather, after the
     // copy, at the end), each texel's sky and sun words, to <prefix>.<stage>.
     private static readonly string? dumpParts = Environment.GetEnvironmentVariable("BLIX_DUMP_PARTS");
+    // The frame after a landing at which the parts, the resolved light and the provenance are dumped as "rest".
+    private long restDumpFrame = -1;
+    private void DumpAtRest()
+    {
+        if (restDumpFrame < 0 || framesRendered < restDumpFrame) return;
+        restDumpFrame = -1;
+        DumpParts("rest");
+        // The texels' records (two vec4 each: position, normal with the atlas coordinate in w), for where each one is.
+        if (dumpParts is not null) File.WriteAllBytes($"{dumpParts}.texels", device.ReadGpuBuffer(texelBuffer, 0, texelCount * 32));
+    }
 
     // At the shot: what the pixels read -- the resolved light, the details -- to <prefix>.shot.
     private void DumpShotState()
@@ -254,6 +264,12 @@ internal sealed partial class SponzaLoop
             w.Write(liveSunWords); w.Write(liveSunColumn);
             w.Write(device.ReadGpuBuffer(liveSunBits, 0, texelCount * liveSunWords * 4));
         }
+        // The resolved light the image reads (composed, filtered), and who wrote each texel's parts
+        // (SponzaLoop.TexelPicker.cs), beside it.
+        if (!texelResolvedBuffer.Equals(default(GpuBufferHandle)))
+            File.WriteAllBytes(path + ".resolved", device.ReadGpuBuffer(texelResolvedBuffer, 0, texelCount * 8));
+        if (!texelProvenanceBuffer.Equals(default(GpuBufferHandle)) && texelProvenanceBytes >= (texelCount + 3) / 4 * 4)
+            File.WriteAllBytes(path + ".provenance", device.ReadGpuBuffer(texelProvenanceBuffer, 0, texelProvenanceBytes));
         Console.WriteLine($"[VulkanSponza] parts dumped: {path}");
     }
 

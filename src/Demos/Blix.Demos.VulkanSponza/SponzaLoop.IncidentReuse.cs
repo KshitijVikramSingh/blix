@@ -31,7 +31,7 @@ internal sealed partial class SponzaLoop
             : b.Read(reuseStandInFloat).Read(reuseStandInUint);
     }
 
-    private bool IncidentReuseOn => incidentReuse && !(abMode == "increuse" && AbOffPhase);
+    private bool IncidentReuseOn => incidentReuse && !(abMode == "increuse" && AbOffPhase) && !TexelToolsOn;
 
     // Whether this frame's incident pass may reuse last frame's: everything it reads at rest, last frame's answer kept.
     private bool IncidentReuseNow(bool half) =>

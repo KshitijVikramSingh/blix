@@ -12,7 +12,7 @@
 layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) uniform TexelCompose {
-    vec4 uCompose;   // x live texels, y the mode
+    vec4 uCompose;   // x live texels, y the mode, z 1: the sky visibility cooked (SkyVis), not the parts' detail
     vec4 uSky;       // rgb the sky's scale (1: as solved)
     vec4 uSun;       // rgb the sun's irradiance (its part is stored per unit of it); w 0: no sun part yet
     vec4 uTexelGrid;  // mode 1: xyz the cells' origin, w the spacing
@@ -39,6 +39,8 @@ layout(std430, set = 0, binding = 10) readonly buffer TexelSeamIds { uint seamId
 layout(std430, set = 0, binding = 11) readonly buffer TexelSkyDetail { uint texelSkyDetail[]; };
 layout(std430, set = 0, binding = 12) readonly buffer TexelSunDetail { uint texelSunDetail[]; };
 layout(std430, set = 0, binding = 13) writeonly buffer TexelDetail { uint texelDetail[]; };
+// The texels' cooked sky visibility (texel_ao.comp): a byte a texel id, 1..255, 0 none.
+layout(std430, set = 0, binding = 14) readonly buffer TexelSkyVis { uint texelSkyVis[]; };
 #define TEXEL_INDEX_MAP(i) texelFetch(uLightmapIndexTex, ivec2(int(i) % textureSize(uLightmapIndexTex, 0).x, int(i) / textureSize(uLightmapIndexTex, 0).x), 0).r
 #define TEXEL_HASH(i) texelHash[i]
 #define TEXEL_POSITION(i) texels[2 * (i)]
@@ -82,7 +84,12 @@ void main() {
             vec3 ds = texelDetailUnpack(skyDetail);
             vec2 tilt = ds.xy * ls;
             if (sunNeeded) tilt += texelDetailUnpack(sunDetail).xy * lu;
-            texelDetail[id] = texelDetailPack(ls + lu > 0.0 ? tilt / (ls + lu) : vec2(0.0), ds.z);
+            float sky = ds.z;
+            if (u.uCompose.z > 0.5) {
+                uint b = (texelSkyVis[id / 4u] >> (8u * (id % 4u))) & 255u;
+                if (b > 0u) { sky = float(b - 1u) / 254.0; sky *= sky; }   // stored by its square root
+            }
+            texelDetail[id] = texelDetailPack(ls + lu > 0.0 ? tilt / (ls + lu) : vec2(0.0), sky);
         }
         // Valid where the sky's part is (every live texel the cook traced); its confidence the cook's (full).
         texelComposed[id] = uvec2(packRgb9e5(light), sky.y);

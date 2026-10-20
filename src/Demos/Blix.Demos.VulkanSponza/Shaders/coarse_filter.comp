@@ -1,0 +1,91 @@
+#version 450
+// The coarse cells' light filtered before the fine copy reads it (SponzaLoop.Transfer.cs, ApplyFineNow): each coarse
+// cell's parts over its 27 neighbours at its level, weighed as the compose's filter weighs the composed light
+// (texel_filter_neighbour.glsl: distance, normal, and an edge where a neighbour's light is ~half again brighter or
+// darker -- a shadow's, a corner's -- not noise). The fine texels take their cells' light as smooth fields; unfiltered,
+// each cell's own ray noise (~1.3% of its light at 384 rays) went onto every fine texel it lights, cell-sized blobs the
+// eye reads as patches (Cornell, 2026-10-21). The compose filters the composed light at rest too, but the copy reads the
+// parts.
+//   mode 0  each coarse cell's filtered parts into FilteredSky / FilteredSun
+//   mode 1  those back into the parts (the confidence words kept)
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform CoarseFilter {
+    vec4 uFilter;       // x the coarse cells, y the mode, z 1: the sky's part too (0: kept, a sun change), w the sun's luminance
+    vec4 uTexelGrid;    // xyz the cells' origin, w the spacing
+    vec4 uTexelParams;  // x hash capacity
+    vec4 uLightmap;     // as texel_filter.comp's
+    vec4 uEdge;         // as texel_filter.comp's
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer CoarseIds { uint coarseIds[]; };
+layout(std430, set = 0, binding = 2) readonly buffer TexelHash { uvec4 texelHash[]; };
+layout(std430, set = 0, binding = 3) readonly buffer Texels { vec4 texels[]; };
+layout(set = 0, binding = 4) uniform usampler2D uLightmapIndexTex;
+layout(std430, set = 0, binding = 5) buffer SplitSky { uvec2 skyPart[]; };
+layout(std430, set = 0, binding = 6) buffer SplitSun { uvec2 sunPart[]; };
+layout(std430, set = 0, binding = 7) buffer FilteredSky { uint filteredSky[]; };   // [coarse cell]
+layout(std430, set = 0, binding = 8) buffer FilteredSun { uint filteredSun[]; };
+#define TEXEL_INDEX_MAP(i) texelFetch(uLightmapIndexTex, ivec2(int(i) % textureSize(uLightmapIndexTex, 0).x, int(i) / textureSize(uLightmapIndexTex, 0).x), 0).r
+#define TEXEL_HASH(i) texelHash[i]
+#define TEXEL_POSITION(i) texels[2 * (i)]
+#define TEXEL_NORMAL(i) texels[2 * (i) + 1]
+#include "texel.glsl"
+#include "texel_filter_neighbour.glsl"
+
+uint packRgb9e5(vec3 c) {
+    const float maxValue = 65408.0;
+    c = clamp(c, vec3(0.0), vec3(maxValue));
+    float maxC = max(c.r, max(c.g, c.b));
+    int e = max(-16, int(floor(log2(max(maxC, 1e-30))))) + 1;
+    float scale = exp2(float(e - 9));
+    if (int(floor(maxC / scale + 0.5)) == 512) { e += 1; scale *= 2.0; }
+    uvec3 m = uvec3(floor(c / scale + 0.5));
+    return m.r | (m.g << 9) | (m.b << 18) | (uint(e + 15) << 27);
+}
+
+vec3 unpackRgb9e5(uint p) {
+    float scale = exp2(float(int(p >> 27) - 15 - 9));
+    return vec3(p & 511u, (p >> 9) & 511u, (p >> 18) & 511u) * scale;
+}
+
+const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
+float composedLum(uint id) { return dot(unpackRgb9e5(skyPart[id].x), luma) + dot(unpackRgb9e5(sunPart[id].x), luma) * u.uFilter.w; }
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= uint(u.uFilter.x)) return;
+    uint id = coarseIds[i];
+    bool sky = u.uFilter.z > 0.5;
+    if (int(u.uFilter.y) == 1) {
+        if (sky) skyPart[id].x = filteredSky[i];
+        sunPart[id].x = filteredSun[i];
+        return;
+    }
+    filteredSky[i] = skyPart[id].x;
+    filteredSun[i] = sunPart[id].x;
+    if ((skyPart[id].y & 0x10000u) == 0u) return;   // not gathered: as it is
+    vec3 position = TEXEL_POSITION(id).xyz;
+    vec3 n = TEXEL_NORMAL(id).xyz;
+    float centre = composedLum(id);
+    TexelGrid finestGrid;
+    finestGrid.minCorner = u.uTexelGrid.xyz;
+    finestGrid.spacing = u.uTexelGrid.w;
+    finestGrid.capacity = uint(u.uTexelParams.x);
+    finestGrid.level = 0u;
+    vec3 accSky = vec3(0.0), accSun = vec3(0.0);
+    float total = 0.0;
+    for (uint k = 0u; k < 27u; ++k) {
+        TexelGrid tg;
+        int other = texelFilterNeighbour(int(id), k, position, n, finestGrid, u.uLightmap, tg);
+        if (other < 0 || (skyPart[other].y & 0x10000u) == 0u) continue;
+        float w = texelFilterWeight(other, position, n, tg, centre, composedLum(uint(other)), u.uEdge);
+        accSky += w * unpackRgb9e5(skyPart[other].x);
+        accSun += w * unpackRgb9e5(sunPart[other].x);
+        total += w;
+    }
+    if (total <= 1e-6) return;
+    if (sky) filteredSky[i] = packRgb9e5(accSky / total);
+    filteredSun[i] = packRgb9e5(accSun / total);
+}

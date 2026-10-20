@@ -106,6 +106,16 @@ internal sealed partial class SponzaLoop
             incidentField = debug.Controls.Toggle("Incident field (off: open sky cube)", incidentField);
             // The cells' detail (SponzaLoop.SplitDetail.cs): off, the probes answer everywhere, as before the detail.
             texelDetailOn = debug.Controls.Toggle("Cells answer alone (sky visibility, direction)", texelDetailOn);
+            // What the cook made, live (SponzaLoop.TexelPicker.cs): the picker's panel, and each pixel's texel by the stage
+            // that wrote it (shown through Show: Bounce radiance (raw)).
+            texelPicker = debug.Controls.Toggle("Texel picker (hover; P freezes)", texelPicker);
+            var texelViewAsked = debug.Controls.Enum("Texel view", texelView, TexelViewNames);
+            if (texelViewAsked != texelView)
+            {
+                texelView = texelViewAsked;
+                if (texelViewAsked != 0) vizChannel = 10f;
+                MarkIncidentDirty();
+            }
         }
 
         // The clipmap's levels, live (stage 4g-v): answer from one level alone or the blend, and the knobs the level

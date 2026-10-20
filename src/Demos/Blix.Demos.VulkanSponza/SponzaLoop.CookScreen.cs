@@ -118,6 +118,7 @@ internal sealed partial class SponzaLoop : IUiSource
     public void DrawUi()
     {
         ReportCookProgress();
+        DrawTexelPicker();
         var loading = !sceneLoaded;
         var streaming = sceneLoaded && !fullyLoaded;
         var cooking = CookScreenNow;

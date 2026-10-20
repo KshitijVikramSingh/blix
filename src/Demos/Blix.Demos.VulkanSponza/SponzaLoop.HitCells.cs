@@ -25,7 +25,10 @@ internal sealed partial class SponzaLoop
     // (texel_nodes_shade.glsl), in both rounds -- one patch a cell side read the creases' light across them (crevices'
     // seams 0.83 -> 0.87, thinwall's leak 0.0017 -> 0.0002); the fine round's alone was worse (0.78). Sponza's near hits
     // are many and one in a workgroup holds the rest to the search: shade 10 -> 27 ms a 1 M rays (2026-10-19).
-    private float hitCellNear = 0f;
+    // Hits nearer than this (m) take the search's sun (the texels' bits about the hit), not their cell's: a cell across a
+    // crease gave the hits beside it the wrong sun, Cornell's creases 35% dark where the path trace is (2026-10-21; 0.1 m:
+    // crease error 6.0% -> 2.1%, the shade 2.8 -> 3.1 ms a pass; with no cells at all 5.3). --cell-near D.
+    private float hitCellNear = 0.1f;
     // The cells a sun edge crosses (their corners' sun over half apart, at each light change: 1.5% of Sponza's) take their
     // hits' sun from the search at the hit, their patch still the cell's (hit_cells.comp, texel_nodes_shade.glsl): what
     // the creases need, as BLIX_CELL_SPLIT read it (seams 0.87 against the cell's 0.83) -- read at one jittered frame.
