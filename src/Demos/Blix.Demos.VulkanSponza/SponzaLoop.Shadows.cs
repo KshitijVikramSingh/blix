@@ -22,6 +22,13 @@ internal sealed partial class SponzaLoop
     // in Vulkan depth-[0,1] conventions (CreateOrthoVulkan + System.Numerics
     // right-handed CreateLookAt, same matrix-multiply order as the camera's
     // viewProj = view * proj).
+    // Whether nothing reads the cascades this frame, so they are neither refit nor redrawn: --live-texels with the
+    // traced shadows live (the lit pass's sun and the incident pass's texel level read the traced mask), the probes'
+    // solve at rest last frame (clipmap_inject shades its hits by them), no fog (froxel), no screen probes, no split
+    // cook gathering. They were redrawn whenever the camera moved: ~3-4 ms a moving frame of Sponza (2026-10-20).
+    private bool CascadesIdle => liveTexels && rtShadows && !rtShadowBound.Equals(default(GpuBufferHandle)) && rtShadowSize.Width > 0
+        && clipmapRestedLastFrame && !fog.Enabled && !screenProbesEnabled && !splitCooking;
+
     private void UpdateCascades()
     {
         var fwd = cameraForward;
@@ -87,7 +94,7 @@ internal sealed partial class SponzaLoop
             var moved = Vector3.Distance(snapped, cascadeFitCentre[c]);
             var slack = radius * CascadePad[c];
             var due = (framesRendered - cascadeFittedFrame[c]) >= CascadeInterval[c];
-            if (cascadeFittedFrame[c] == 0 || (due || moved > slack) && !freezeCascades)
+            if (cascadeFittedFrame[c] == 0 || (due || moved > slack) && !freezeCascades && !CascadesIdle)
             {
                 cascadeFitCentre[c] = snapped;
                 cascadeFittedFrame[c] = framesRendered;

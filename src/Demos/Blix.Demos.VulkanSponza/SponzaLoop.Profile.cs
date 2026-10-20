@@ -31,6 +31,9 @@ internal sealed partial class SponzaLoop
         public bool Moving { get; }
         public string State { get; }
         public Dictionary<string, double> Sections { get; }
+        // --ab: the phase the frame ran in (1 OFF, 0 ON), -1 outside an A/B or in a phase's first frames (still the last
+        // phase's work in flight).
+        public int AbPhase { get; init; }
     }
 
     private readonly Stopwatch profFrameClock = new(), profWindowClock = new();
@@ -38,6 +41,7 @@ internal sealed partial class SponzaLoop
     private readonly List<ProfFrame> profWindow = new(), profSession = new();
     private Dictionary<string, GpuPassTotal>? profGpuAtWindow;
     private Vector3 profLastCameraPosition;
+    private int profAbPhase = -1;
     private float profLastYaw, profLastPitch;
     private int profSpikesThisWindow;
     private TimeSpan profGcPause;
@@ -99,7 +103,9 @@ internal sealed partial class SponzaLoop
         var gcPause = GC.GetTotalPauseDuration();
         var gen2 = GC.CollectionCount(2);
         var frame = new ProfFrame(interval, last?.WaitMs ?? 0, last?.EncodeMs ?? 0, last?.SubmitPresentMs ?? 0, moving, state, profSections,
-            (gcPause - profGcPause).TotalMilliseconds, gen2 - profGen2);
+            (gcPause - profGcPause).TotalMilliseconds, gen2 - profGen2) { AbPhase = profAbPhase };
+        // This frame's phase, for the interval the next call closes; a phase's first 8 frames left out.
+        profAbPhase = abMode.Length == 0 || framesRendered % AbPeriodFrames < 8 ? -1 : AbOffPhase ? 1 : 0;
         profGcPause = gcPause;
         profGen2 = gen2;
         profSections = new Dictionary<string, double>(StringComparer.Ordinal);
@@ -180,6 +186,14 @@ internal sealed partial class SponzaLoop
                 $"[profile]   metal a frame: closest traces {(trace.TotalGpuMs - profMetalTraceMs) / frames.Count:0.00} ms ({(trace.Dispatches - profMetalTraces) / (double)frames.Count:0.0} batches), shadow traces {(shadow.TotalGpuMs - profMetalShadowMs) / frames.Count:0.00} ms ({(shadow.Dispatches - profMetalShadows) / (double)frames.Count:0.0} batches); allocated {tracer.Memory.AllocatedMb:N0} of {tracer.Memory.RecommendedMb:N0} MB recommended"));
             profMetalTraceMs = trace.TotalGpuMs; profMetalTraces = trace.Dispatches;
             profMetalShadowMs = shadow.TotalGpuMs; profMetalShadows = shadow.Dispatches;
+        }
+        // --ab: the window's frames by phase, the same process and thermal state.
+        if (abMode.Length > 0)
+        {
+            var on = frames.Where(f => f.AbPhase == 0).ToList();
+            var off = frames.Where(f => f.AbPhase == 1).ToList();
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[profile]   ab {abMode}: {FrameStats(on, "ON")}; {FrameStats(off, "OFF")}"));
         }
         // --taa-count-rejection: the share of pixels the resolve took history for, and of those the share it cut back.
         if (taaCountRejection && !taaStats.Equals(default(GpuBufferHandle)))

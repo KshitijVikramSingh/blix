@@ -1222,6 +1222,7 @@ internal sealed partial class SponzaLoop
             "normal" => "normal mapping",
             "cull"    => "camera frustum culling",
             "castercull" => "shadow caster culling against the camera",
+            "leaflookup" => "pixels the atlas leaves out reading one coarser texel level alone (OFF: both levels)",
             "lightlets" => "the traced shadows answered by the baked sun records where they can (OFF: every pixel traced)",
             "queue"   => "the Metal tracers on the Vulkan device's command queue (OFF: their own)",
             "lod"     => lodArmOff > 0f

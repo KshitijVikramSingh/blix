@@ -180,12 +180,23 @@ ivec2 pixelAt;   // the pixel whose lightmap texel pixelLightmapTexel is (uLight
 #define TEXEL_NORMAL(i) texels[2 * (i) + 1]
 #include "texel.glsl"
 
-// The pixel's own direct sun, 0-1, for its texel level (texelLevelFor): facing away, or shadowed in the cascades, is
-// shade; past the cascades, sun (far, where coarse texels are all a pixel can hold anyway).
+// The traced sun shadows' mask (SponzaLoop.RtShadows.cs): x y its size, z 0 when not live; a word a pixel, bit 0 blocked.
+layout(std430, set = 0, binding = 37) readonly buffer RtShadowMask { uvec4 rtShadowHeader; uint rtShadowWords[]; };
+
+// The pixel's own direct sun, 0-1, for its texel level (texelLevelFor): facing away, or shadowed, is shade. Shadowed by
+// the traced mask where it is live (this pixel's word; half-res, the half-res pixel under it) -- the cascades then need
+// no redraw for this alone (2026-10-20: ~3-4 ms a moving frame); else by the cascades, and past them, sun (far, where
+// coarse texels are all a pixel can hold anyway).
 float texelSunlit(vec3 world, vec3 n) {
     vec3 toSun = -normalize(g.uTexelSun.xyz);
     float ndotl = dot(n, toSun);
     if (ndotl <= 0.0) return 0.0;
+    if (rtShadowHeader.z != 0u && rtShadowHeader.x > 0u) {
+        ivec2 full = textureSize(uSceneDepth, 0);
+        uvec2 px = uvec2(rtShadowHeader.x * 2u <= uint(full.x) ? pixelAt / 2 : pixelAt);
+        if (px.x < rtShadowHeader.x && px.y < rtShadowHeader.y)
+            return (rtShadowWords[px.y * rtShadowHeader.x + px.x] & 1u) != 0u ? 0.0 : 1.0;
+    }
     int cascade = -1;
     float lit = blix_sun_shadow_cascaded_hard(uTexelCascadeMaps[0], uTexelCascadeMaps[1], uTexelCascadeMaps[2],
         g.uTexelCascadeVP[0], g.uTexelCascadeVP[1], g.uTexelCascadeVP[2], world + n * 0.01, ndotl, cascade);
@@ -294,6 +305,13 @@ bool texelsAt(vec3 worldPos, vec3 n, float faceBin, float viewDepth, out vec3 ir
     float levelWanted = texelLevelFor(viewDepth, g.uTexelLevels, g.uTexelGrid.w, texelSunlit(worldPos, n));
     int finest = int(floor(levelWanted));
     float fraction = clamp((levelWanted - float(finest) - (1.0 - TEXEL_LEVEL_BAND)) / TEXEL_LEVEL_BAND, 0.0, 1.0);
+    // uClipExact.z: a pixel the atlas leaves out (foliage, small props: the hashed cells, up to 8 corners x bins a
+    // level) reads one level, the next coarser, alone -- its indirect light a touch broader, at ~a quarter of the pass
+    // (the leaves were ~4.7 of the incident pass's ~17 ms at the tree, 2026-10-20). The sun and shadows are not this.
+    if (g.uClipExact.z > 0.5 && pixelLightmapTexel == 0u) {
+        finest = min(finest + 1, int(g.uTexelLevels.x) - 1);
+        fraction = 0.0;
+    }
     int coarsest = min(finest + 1, int(g.uTexelLevels.x) - 1);
     irradiance = vec3(0.0);
     confidence = 0.0;
@@ -301,7 +319,8 @@ bool texelsAt(vec3 worldPos, vec3 n, float faceBin, float viewDepth, out vec3 ir
     float fineC;
     bool fine = texelsAtLevel(worldPos, n, faceBin, uint(finest), fineValue, fineC);
     float stampedSum = debugStamped, litSum = debugLit;
-    bool needCoarse = finest < coarsest && (!fine || fineC <= 0.999 || fraction > 0.0);
+    bool needCoarse = finest < coarsest && (!fine || fineC <= 0.999 || fraction > 0.0)
+        && !(g.uClipExact.z > 0.5 && pixelLightmapTexel == 0u && fine);
     vec3 coarseValue;
     float coarseC;
     bool coarse = needCoarse && texelsAtLevel(worldPos, n, faceBin, uint(coarsest), coarseValue, coarseC);

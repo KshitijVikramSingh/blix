@@ -409,6 +409,7 @@ internal sealed partial class SponzaLoop
         cellMarks = args.Flag("cell-marks");
         clipmapAlways = args.Flag("clipmap-always");
         freezeCascades = args.Flag("freeze-cascades");
+        unmappedCoarse = !args.Flag("no-unmapped-coarse");
         fineAll = args.Flag("fine-all");
         // --fine-contact R (0.9; 0 off): fine texels more closed than their coarse cells (their contact ratio under R)
         // flagged, first (--no-fine-contact-first: by their score among the rest). Crevices' seams 0.835 -> 0.932 (the
