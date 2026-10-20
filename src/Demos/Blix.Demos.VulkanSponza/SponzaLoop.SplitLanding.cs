@@ -92,6 +92,7 @@ internal sealed partial class SponzaLoop
             {
                 new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
                 new ShaderTextureBinding("uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
+                AtlasGatherTexture(),
                 LightmapTexelTexture(),
             },
             Buffers: new[]
@@ -99,7 +100,6 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("TexelHash", texelHashBuffer),
                 new ShaderBufferBinding("Texels", texelBuffer),
                 new ShaderBufferBinding("TexelVisibleBits", texelVisibleBits),
-                new ShaderBufferBinding("LightmapIndexMap", LightmapIndexMap()),
             }));
         splitVisibleRecorded = true;
     }

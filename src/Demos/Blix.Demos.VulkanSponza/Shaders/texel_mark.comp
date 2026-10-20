@@ -48,8 +48,9 @@ layout(std430, set = 0, binding = 11) buffer TexelFilterList { uint texelFilterL
 
 // --lightmap: the pre-pass's packed atlas texel, and the atlas's map from texel to record (texel.glsl).
 layout(set = 0, binding = 13) uniform usampler2D uLightmapTexel;
-layout(std430, set = 0, binding = 14) readonly buffer LightmapIndexMap { uint lightmapIndexMap[]; };
-#define TEXEL_INDEX_MAP(i) lightmapIndexMap[i]
+// The atlas's map from texel to record, as an R32UI texture (SponzaLoop.LightmapGather.cs).
+layout(set = 0, binding = 14) uniform usampler2D uLightmapIndexTex;
+#define TEXEL_INDEX_MAP(i) texelFetch(uLightmapIndexTex, ivec2(int(i) % textureSize(uLightmapIndexTex, 0).x, int(i) / textureSize(uLightmapIndexTex, 0).x), 0).r
 #define TEXEL_HASH(i) texelHash[i]
 #define TEXEL_POSITION(i) texels[2 * (i)]
 #define TEXEL_NORMAL(i) texels[2 * (i) + 1]

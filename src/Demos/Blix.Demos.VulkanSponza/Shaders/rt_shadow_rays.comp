@@ -49,7 +49,8 @@ layout(std430, set = 0, binding = 5) writeonly buffer RtShadowDirections { vec4 
 // ray (0 lit, 1 shadowed); >= 2 where it traces. lighting_upsample.frag reads it beside the traced mask.
 layout(std430, set = 0, binding = 6) writeonly buffer RtShadowBaked { uint baked[]; };
 layout(set = 0, binding = 7) uniform usampler2D uLightmapTexel;
-layout(std430, set = 0, binding = 8) readonly buffer LightmapIndexMap { uint lightmapIndexMap[]; };
+// The atlas's map from texel to record, as an R32UI texture (SponzaLoop.LightmapGather.cs).
+layout(set = 0, binding = 8) uniform usampler2D uLightmapIndexTex;
 layout(std430, set = 0, binding = 9) readonly buffer Texels { vec4 texels[]; };
 layout(std430, set = 0, binding = 10) readonly buffer LightletIndex { uint lightletIndex[]; };
 layout(std430, set = 0, binding = 11) readonly buffer LightletPool { uint lightletPool[]; };
@@ -61,7 +62,7 @@ layout(std430, set = 0, binding = 12) writeonly buffer RtShadowPacked { vec4 pac
 layout(std430, set = 0, binding = 13) writeonly buffer RtShadowPixelOf { uint pixelOf[]; };
 layout(std430, set = 0, binding = 14) buffer RtShadowCounters { uint counters[]; };
 layout(std430, set = 0, binding = 15) writeonly buffer RtShadowMaskWords { uvec4 maskHeader; uint maskWords[]; };
-#define TEXEL_INDEX_MAP(i) lightmapIndexMap[i]
+#define TEXEL_INDEX_MAP(i) texelFetch(uLightmapIndexTex, ivec2(int(i) % textureSize(uLightmapIndexTex, 0).x, int(i) / textureSize(uLightmapIndexTex, 0).x), 0).r
 #define TEXEL_HASH(i) uvec4(0u)
 #define TEXEL_POSITION(i) texels[2 * (i)]
 #define TEXEL_NORMAL(i) texels[2 * (i) + 1]
@@ -86,7 +87,7 @@ uint bakedSun(ivec2 q, vec3 n) {
     for (int k = 0; k < 4; ++k) {
         ivec2 at = base + ivec2(k & 1, k >> 1);
         if (any(lessThan(at, ivec2(0))) || any(greaterThanEqual(at, size))) return 4u;
-        uint front = lightmapIndexMap[at.y * size.x + at.x];
+        uint front = TEXEL_INDEX_MAP(at.y * size.x + at.x);
         if (front == 0xFFFFFFFFu) return 4u;
         bool pair = TEXEL_POSITION(front).w < 0.0;
         // The side the pixel shows (texelsAroundLightmap's rule), and the one that answers the sun.

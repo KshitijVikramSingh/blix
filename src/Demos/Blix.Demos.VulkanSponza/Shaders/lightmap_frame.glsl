@@ -6,12 +6,17 @@
 // the drawn LOD moves the silhouette, not the light. Pixels without one (foliage: left out of the atlas) keep their own.
 //
 // Set 1 on the lit interface, bound by name with ClipmapState (SponzaLoop.Render.cs, LitClipmapBuffer):
-//   LightmapCells   the atlas's map from texel (y * width + x) to its record id, 0xFFFFFFFF where none covers it
+//   uLightmapCells  the atlas's map from texel to its record id (R32UI texture), 0xFFFFFFFF where none covers it
 //   LightmapFrames  [0] the atlas size (zero: no atlas); [1 + id] record id's packed frame (zero: none)
 #ifndef SPONZA_LIGHTMAP_FRAME_GLSL
 #define SPONZA_LIGHTMAP_FRAME_GLSL
 
-layout(std430, set = 1, binding = 14) readonly buffer LightmapCells { uint lightmapCellOf[]; };
+// The atlas's map from texel to record as an R32UI texture (SponzaLoop.LightmapGather.cs; a buffer of 256 MB until
+// 2026-10-20, the same map the incident pass gathers from).
+layout(set = 1, binding = 14) uniform utexture2D uLightmapCells;
+//@sampler NearestClamp
+layout(set = 1, binding = 16) uniform sampler uLightmapCellSampler;
+#define LIGHTMAP_CELL_OF(at) texelFetch(usampler2D(uLightmapCells, uLightmapCellSampler), (at), 0).r
 layout(std430, set = 1, binding = 15) readonly buffer LightmapFrames { uvec2 lightmapFrames[]; };
 
 vec3 lightmapOctDecode(uint packed) {
@@ -63,7 +68,7 @@ bool lightmapShadingFrame(vec2 texel, vec3 vertexN, out vec3 normal, out vec4 ta
         for (int i = 0; i < 5; ++i) {
             ivec2 at = i == 4 ? ivec2(floor(texel)) : base + ivec2(i & 1, i >> 1);
             if (any(lessThan(at, ivec2(0))) || any(greaterThanEqual(at, ivec2(size)))) continue;
-            uint oid = lightmapCellOf[at.y * int(size.x) + at.x];
+            uint oid = LIGHTMAP_CELL_OF(at);
             if (oid == 0xFFFFFFFFu) continue;
             uvec2 op = lightmapFrames[1u + oid];
             if (op.x == 0u && op.y == 0u) continue;
@@ -81,7 +86,7 @@ bool lightmapShadingFrame(vec2 texel, vec3 vertexN, out vec3 normal, out vec4 ta
         ivec2 o = ivec2(i & 1, i >> 1);
         ivec2 at = base + o;
         if (any(lessThan(at, ivec2(0))) || any(greaterThanEqual(at, ivec2(size)))) continue;
-        uint id = lightmapCellOf[at.y * int(size.x) + at.x];
+        uint id = LIGHTMAP_CELL_OF(at);
         if (id == 0xFFFFFFFFu) continue;
         uvec2 packed = lightmapFrames[1u + id];
         if (packed.x == 0u && packed.y == 0u) continue;

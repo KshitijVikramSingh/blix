@@ -898,6 +898,7 @@ internal sealed partial class SponzaLoop
             {
                 new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
                 new ShaderTextureBinding("uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
+                AtlasGatherTexture(),
             }.Concat(TexelCascadeTextures()).Append(LightmapTexelTexture()).ToArray(),
             Buffers: new[]
             {
@@ -910,7 +911,6 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("TexelEpoch", texelEpochBuffer),
                 new ShaderBufferBinding("TexelMoment", texelMomentBuffer),
                 new ShaderBufferBinding("TexelFilterList", texelFilterListBuffer),
-                new ShaderBufferBinding("LightmapIndexMap", LightmapIndexMap()),
             }));
         // Probe mode every frame (576 threads): the census reads the latest.
         {
@@ -930,6 +930,7 @@ internal sealed partial class SponzaLoop
                 {
                     new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
                     new ShaderTextureBinding("uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
+                    AtlasGatherTexture(),
                 }.Concat(TexelCascadeTextures()).Append(LightmapTexelTexture()).ToArray(),
                 Buffers: new[]
                 {
@@ -942,7 +943,6 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("TexelEpoch", texelEpochBuffer),
                     new ShaderBufferBinding("TexelMoment", texelMomentBuffer),
                 new ShaderBufferBinding("TexelFilterList", texelFilterListBuffer),
-                    new ShaderBufferBinding("LightmapIndexMap", LightmapIndexMap()),
                 }));
         }
         var gatherBuffers = rayBlockBuffers
@@ -1025,7 +1025,7 @@ internal sealed partial class SponzaLoop
                     new("uLightmap", new Vector4Uniform(LightmapUniform)),
                     new("uEdge", new Vector4Uniform(new Vector4(texelFilterSymmetric ? 1f : 0f, texelFilterArea ? 1f : 0f, 0f, 0f))),
                 },
-                Array.Empty<ShaderTextureBinding>(),
+                new[] { AtlasGatherTexture() },
                 Buffers: new[]
                 {
                     new ShaderBufferBinding("TexelHash", texelHashBuffer),
@@ -1033,7 +1033,6 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("TexelBlend", texelBlendBuffer),
                     new ShaderBufferBinding("TexelFiltered", texelFilteredBuffer),
                     new ShaderBufferBinding("TexelFilterList", texelFilterListBuffer),
-                    new ShaderBufferBinding("LightmapIndexMap", LightmapIndexMap()),
                 }));
     }
 

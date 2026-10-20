@@ -96,7 +96,7 @@ internal sealed partial class SponzaLoop
                 int ox = i & 1, oy = i >> 1, ax = bx + ox, ay = by + oy;
                 var weight = (ox == 1 ? t.X : 1f - t.X) * (oy == 1 ? t.Y : 1f - t.Y);
                 if (ax < 0 || ay < 0 || ax >= lightmapAtlasWidth || ay >= lightmapAtlasHeight) { Console.WriteLine($"    [{i}] off the atlas"); continue; }
-                var id = BitConverter.ToUInt32(device.ReadGpuBuffer(lightmapIndexMapBuffer, (ay * lightmapAtlasWidth + ax) * 4, 4), 0);
+                var id = lightmapIndexMapCpu is { } cpuMap ? cpuMap[ay * lightmapAtlasWidth + ax] : 0xFFFFFFFFu;
                 if (id == 0xFFFFFFFFu) { Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    [{i}] cell ({ax},{ay}) w {weight:0.00}: EMPTY")); continue; }
                 var rec = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(texelBuffer, (int)id * 32, 32).AsSpan()).ToArray();
                 // The side the pixel shows, as texel.glsl picks it.

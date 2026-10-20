@@ -14,6 +14,8 @@ internal sealed partial class SponzaLoop
     private TextureHandle lightmapIndexTexture, lightmapIndexTextureNone;
     private GpuBufferHandle texelMetaBuffer, texelMetaNone;
     private bool atlasGather = true;
+    // The index map on the CPU, kept only for --texel-inspect (the GPU's is a texture).
+    private uint[]? lightmapIndexMapCpu;
     private bool AtlasGatherNow => atlasGather && lightmapTexels && !lightmapIndexTexture.Equals(default(TextureHandle))
         && !(abMode == "atlasgather" && AbOffPhase);
 
@@ -34,6 +36,7 @@ internal sealed partial class SponzaLoop
             if (MathF.Abs(pos.W) >= 2f) word |= 1u << 31;
             meta[r] = word;
         }
+        if (texelInspect is not null) lightmapIndexMapCpu = map;
         texelMetaBuffer = Own(device.CreateGpuBuffer(meta.Length * 4, MemoryMarshal.AsBytes(meta.AsSpan()), "sponza.lightmap.texel-meta"));
         lightmapIndexTexture = Own(device.CreateTexture2D(new TextureDescription(lightmapAtlasWidth, lightmapAtlasHeight, TextureFormat.R32Uint,
             SamplerDescription.NearestClamp), MemoryMarshal.AsBytes(map.AsSpan()), "sponza.lightmap.index-texture"));
@@ -63,5 +66,14 @@ internal sealed partial class SponzaLoop
         if (!texelMetaBuffer.Equals(default(GpuBufferHandle))) return new ShaderBufferBinding("TexelMeta", texelMetaBuffer);
         if (texelMetaNone.Equals(default(GpuBufferHandle))) texelMetaNone = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.lightmap.texel-meta.none"));
         return new ShaderBufferBinding("TexelMeta", texelMetaNone);
+    }
+
+    private IReadOnlyList<ShaderTextureBinding> WithLightmapCells(IReadOnlyList<ShaderTextureBinding> textures)
+    {
+        var cells = AtlasGatherTexture();
+        var all = new ShaderTextureBinding[textures.Count + 1];
+        for (var i = 0; i < textures.Count; i++) all[i] = textures[i];
+        all[^1] = new ShaderTextureBinding("uLightmapCells", cells.Texture);
+        return all;
     }
 }

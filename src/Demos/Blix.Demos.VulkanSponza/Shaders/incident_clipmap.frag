@@ -179,10 +179,10 @@ vec3 unpackRgb9e5(uint v) {
 float debugStamped, debugLit;
 // --lightmap: the pre-pass's packed atlas texel and the atlas's map from texel to record (texel.glsl).
 layout(set = 0, binding = 19) uniform usampler2D uLightmapTexel;
-layout(std430, set = 0, binding = 20) readonly buffer LightmapIndexMap { uint lightmapIndexMap[]; };
-#define TEXEL_INDEX_MAP(i) lightmapIndexMap[i]
-// The index map as a texture and the records' meta words (texelsAroundLightmapGather, uClipExact.w).
+// The atlas's map from texel to record, as an R32UI texture, and the records' meta words (texelsAroundLightmapGather,
+// uClipExact.w; SponzaLoop.LightmapGather.cs).
 layout(set = 0, binding = 44) uniform usampler2D uLightmapIndexTex;
+#define TEXEL_INDEX_MAP(i) texelFetch(uLightmapIndexTex, ivec2(int(i) % textureSize(uLightmapIndexTex, 0).x, int(i) / textureSize(uLightmapIndexTex, 0).x), 0).r
 layout(std430, set = 0, binding = 45) readonly buffer TexelMeta { uint texelMeta[]; };
 #define TEXEL_ATLAS_GATHER
 #define TEXEL_INDEX_TEX uLightmapIndexTex

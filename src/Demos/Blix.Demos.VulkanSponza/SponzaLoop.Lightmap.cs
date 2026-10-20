@@ -25,7 +25,6 @@ internal sealed partial class SponzaLoop
     private static int lightmapAtlasWidth, lightmapAtlasHeight;
     // What the bake rasterizes, captured as the shared buffers are built: each drawable with a lightmap.
     private readonly List<(string Name, byte[] VertexBytes, int Stride, int NormalOffset, int TangentOffset, uint[] Indices, Matrix4x4 World, Vector2[] Texels, bool DoubleSided)> lightmapSources = new();
-    private GpuBufferHandle lightmapIndexMapBuffer;
     // Set 1's LightmapFrames (lightmap_frame.glsl): [0] the atlas size, then per record id + 1 its packed LOD 0
     // shading frame; and the index map again, under the lit interface's name for it.
     private GpuBufferHandle lightmapFramesBuffer;
@@ -645,7 +644,6 @@ internal sealed partial class SponzaLoop
             if (map[i] != 0xFFFFFFFFu) map[i] += (uint)first;
         UploadTexels(hashed with { Texels = texels, Count = first + atlas.Count }, light, bakePath, first, resolved);
         if (splitLight || cookGi) BuildSeamNeighbours(texels, first + atlas.Count, first);
-        lightmapIndexMapBuffer = Own(device.CreateGpuBuffer(map.Length * 4, MemoryMarshal.AsBytes(map.AsSpan()), "sponza.lightmap.index-map"));
         UploadAtlasGather(map, texels, first, atlas.Count);
         // The frames by absolute record id, after a one-entry header with the atlas size (zero: none).
         var frames = new uint[2 * (1 + first + atlas.Count)];
@@ -677,13 +675,7 @@ internal sealed partial class SponzaLoop
     {
         if (lightmapFramesBuffer.Equals(default(GpuBufferHandle)))
             lightmapFramesBuffer = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.lightmap.frames.none"));
-        return new[] { new ShaderBufferBinding("LightmapCells", LightmapIndexMap()), new ShaderBufferBinding("LightmapFrames", lightmapFramesBuffer) };
+        return new[] { new ShaderBufferBinding("LightmapFrames", lightmapFramesBuffer) };
     }
 
-    private GpuBufferHandle LightmapIndexMap()
-    {
-        if (lightmapIndexMapBuffer.Equals(default(GpuBufferHandle)))
-            lightmapIndexMapBuffer = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.lightmap.index-map.none"));
-        return lightmapIndexMapBuffer;
-    }
 }

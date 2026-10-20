@@ -170,7 +170,7 @@ internal sealed partial class SponzaLoop
                 new("uHalf", new Vector4Uniform(new Vector4(half ? 1f : 0f, sub.X, sub.Y, 0f))),
                 new("uReuse", new Vector4Uniform(IncidentReuseUniform(half))),
             }.Concat(TexelSunUniforms()).ToArray(),
-            buffers: new[] { new ShaderBufferBinding("ClipmapState", clipmapState), new ShaderBufferBinding("ScreenProbeTiles", screen.Tiles), new ShaderBufferBinding("ScreenProbes", screen.Probes), new ShaderBufferBinding("SurfaceIndex", surfaceIndex) }.Concat(texel.Buffers).Append(reference.Buffer).Append(new ShaderBufferBinding("LightmapIndexMap", LightmapIndexMap())).Append(new ShaderBufferBinding("IncidentCensus", IncidentCensusBuffer())).Append(AtlasGatherMeta())
+            buffers: new[] { new ShaderBufferBinding("ClipmapState", clipmapState), new ShaderBufferBinding("ScreenProbeTiles", screen.Tiles), new ShaderBufferBinding("ScreenProbes", screen.Probes), new ShaderBufferBinding("SurfaceIndex", surfaceIndex) }.Concat(texel.Buffers).Append(reference.Buffer).Append(new ShaderBufferBinding("IncidentCensus", IncidentCensusBuffer())).Append(AtlasGatherMeta())
                 // The ray scene, for --clipmap-exact-visibility (declared always; read only then).
                 .Concat(rayBlockBuffers).ToArray()));
     }

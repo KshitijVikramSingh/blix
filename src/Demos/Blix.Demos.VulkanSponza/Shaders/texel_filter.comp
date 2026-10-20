@@ -24,8 +24,9 @@ layout(std430, set = 0, binding = 4) buffer TexelFiltered { vec4 texelFiltered[]
 // [parity] the counts (this frame's mark adds to set frame & 1; this pass zeroes the other), the list after them.
 layout(std430, set = 0, binding = 5) buffer TexelFilterList { uint texelFilterList[]; };
 
-layout(std430, set = 0, binding = 6) readonly buffer LightmapIndexMap { uint lightmapIndexMap[]; };
-#define TEXEL_INDEX_MAP(i) lightmapIndexMap[i]
+// The atlas's map from texel to record, as an R32UI texture (SponzaLoop.LightmapGather.cs).
+layout(set = 0, binding = 6) uniform usampler2D uLightmapIndexTex;
+#define TEXEL_INDEX_MAP(i) texelFetch(uLightmapIndexTex, ivec2(int(i) % textureSize(uLightmapIndexTex, 0).x, int(i) / textureSize(uLightmapIndexTex, 0).x), 0).r
 #define TEXEL_HASH(i) texelHash[i]
 #define TEXEL_POSITION(i) texels[2 * (i)]
 #define TEXEL_NORMAL(i) texels[2 * (i) + 1]
