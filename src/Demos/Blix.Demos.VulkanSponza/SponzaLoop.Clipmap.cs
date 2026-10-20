@@ -169,7 +169,7 @@ internal sealed partial class SponzaLoop
                 new("uTexelLevels", new Vector4Uniform(TexelLevelsUniform(frameHeight))),
                 new("uHalf", new Vector4Uniform(new Vector4(half ? 1f : 0f, sub.X, sub.Y, 0f))),
             }.Concat(TexelSunUniforms()).ToArray(),
-            buffers: new[] { new ShaderBufferBinding("ClipmapState", clipmapState), new ShaderBufferBinding("ScreenProbeTiles", screen.Tiles), new ShaderBufferBinding("ScreenProbes", screen.Probes), new ShaderBufferBinding("SurfaceIndex", surfaceIndex) }.Concat(texel.Buffers).Append(reference.Buffer).Append(new ShaderBufferBinding("LightmapIndexMap", LightmapIndexMap())).Append(new ShaderBufferBinding("IncidentCensus", IncidentCensusBuffer())).Append(new ShaderBufferBinding("RtShadowMask", RtShadowMask))
+            buffers: new[] { new ShaderBufferBinding("ClipmapState", clipmapState), new ShaderBufferBinding("ScreenProbeTiles", screen.Tiles), new ShaderBufferBinding("ScreenProbes", screen.Probes), new ShaderBufferBinding("SurfaceIndex", surfaceIndex) }.Concat(texel.Buffers).Append(reference.Buffer).Append(new ShaderBufferBinding("LightmapIndexMap", LightmapIndexMap())).Append(new ShaderBufferBinding("IncidentCensus", IncidentCensusBuffer()))
                 // The ray scene, for --clipmap-exact-visibility (declared always; read only then).
                 .Concat(rayBlockBuffers).ToArray()));
     }
@@ -283,11 +283,10 @@ internal sealed partial class SponzaLoop
     private bool clipmapAlways;
     // --freeze-cascades (measurement): the sun cascades fitted once, never refit or redrawn.
     private bool freezeCascades;
-    // The probes' solve rested this frame (RecordClipmap): read by the next frame's cascade fit (CascadesIdle).
-    private bool clipmapRestedLastFrame;
-    // Pixels the atlas leaves out read one coarser texel level alone (incident_clipmap.frag, uClipExact.z);
-    // --no-unmapped-coarse: both levels as before; --ab leaflookup alternates the two.
-    private bool unmappedCoarse = true;
+    // --unmapped-coarse: pixels the atlas leaves out read one coarser texel level alone (incident_clipmap.frag,
+    // uClipExact.z). Off by default: ~2 ms at the tree, but the user saw pops and tears on the leaves while moving
+    // (2026-10-20). --ab leaflookup alternates the two.
+    private bool unmappedCoarse;
     private bool UnmappedCoarse => abMode == "leaflookup" ? !AbOffPhase : unmappedCoarse;
     private long clipmapRested;
 
@@ -299,11 +298,9 @@ internal sealed partial class SponzaLoop
         // cells alone (the census: 100%), and the probes' solve -- Metal's closest rays 4-7.5 ms a frame and its shadow
         // batch -- lit nothing (2026-10-19). Solved again once a census sees a pixel read them, the texels leave rest, or
         // the mover moves. --clipmap-always: every frame, as before.
-        clipmapRestedLastFrame = false;
         if (liveTexels && !clipmapAlways && clipmapProbeReaders == 0 && texelResting && !MoverActive)
         {
             clipmapRested++;
-            clipmapRestedLastFrame = true;
             return;
         }
         // Staged (ClipmapStaged): a wave in flight holds its blocks where they were when it started -- the slots it

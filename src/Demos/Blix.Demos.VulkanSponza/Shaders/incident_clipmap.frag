@@ -180,23 +180,14 @@ ivec2 pixelAt;   // the pixel whose lightmap texel pixelLightmapTexel is (uLight
 #define TEXEL_NORMAL(i) texels[2 * (i) + 1]
 #include "texel.glsl"
 
-// The traced sun shadows' mask (SponzaLoop.RtShadows.cs): x y its size, z 0 when not live; a word a pixel, bit 0 blocked.
-layout(std430, set = 0, binding = 37) readonly buffer RtShadowMask { uvec4 rtShadowHeader; uint rtShadowWords[]; };
-
-// The pixel's own direct sun, 0-1, for its texel level (texelLevelFor): facing away, or shadowed, is shade. Shadowed by
-// the traced mask where it is live (this pixel's word; half-res, the half-res pixel under it) -- the cascades then need
-// no redraw for this alone (2026-10-20: ~3-4 ms a moving frame); else by the cascades, and past them, sun (far, where
-// coarse texels are all a pixel can hold anyway).
+// The pixel's own direct sun, 0-1, for its texel level (texelLevelFor): facing away, or shadowed in the cascades, is
+// shade; past the cascades, sun (far, where coarse texels are all a pixel can hold anyway). Not the traced mask: its
+// per-pixel answer flips at edges and disocclusions, and each flip switched the texel level -- tears along the walls as
+// the cloth swung past, white flashes at edges (2026-10-20, even from last frame's complete mask).
 float texelSunlit(vec3 world, vec3 n) {
     vec3 toSun = -normalize(g.uTexelSun.xyz);
     float ndotl = dot(n, toSun);
     if (ndotl <= 0.0) return 0.0;
-    if (rtShadowHeader.z != 0u && rtShadowHeader.x > 0u) {
-        ivec2 full = textureSize(uSceneDepth, 0);
-        uvec2 px = uvec2(rtShadowHeader.x * 2u <= uint(full.x) ? pixelAt / 2 : pixelAt);
-        if (px.x < rtShadowHeader.x && px.y < rtShadowHeader.y)
-            return (rtShadowWords[px.y * rtShadowHeader.x + px.x] & 1u) != 0u ? 0.0 : 1.0;
-    }
     int cascade = -1;
     float lit = blix_sun_shadow_cascaded_hard(uTexelCascadeMaps[0], uTexelCascadeMaps[1], uTexelCascadeMaps[2],
         g.uTexelCascadeVP[0], g.uTexelCascadeVP[1], g.uTexelCascadeVP[2], world + n * 0.01, ndotl, cascade);
