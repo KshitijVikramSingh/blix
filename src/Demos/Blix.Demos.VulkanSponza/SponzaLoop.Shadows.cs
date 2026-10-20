@@ -87,7 +87,7 @@ internal sealed partial class SponzaLoop
             var moved = Vector3.Distance(snapped, cascadeFitCentre[c]);
             var slack = radius * CascadePad[c];
             var due = (framesRendered - cascadeFittedFrame[c]) >= CascadeInterval[c];
-            if (cascadeFittedFrame[c] == 0 || due || moved > slack)
+            if (cascadeFittedFrame[c] == 0 || (due || moved > slack) && !freezeCascades)
             {
                 cascadeFitCentre[c] = snapped;
                 cascadeFittedFrame[c] = framesRendered;

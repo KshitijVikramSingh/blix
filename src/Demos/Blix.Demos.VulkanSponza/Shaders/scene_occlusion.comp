@@ -111,9 +111,11 @@ void occlude(uint i) {
     state[late] = lod | (drawLate ? 0u : Culled);
     bool drawn = drawnEarly || drawLate;
     state[uint(u.uOcclusion.w) + i] = lod | (drawn ? 0u : Culled);
-    uint record = p.drawable * uint(u.uArgs.z) + lod;
-    if (drawLate) atomicAdd(args[(uint(u.uArgs.x) + record) * 5u + 1u], 1u);
-    if (drawn) atomicAdd(args[(uint(u.uArgs.x) + uint(u.uArgs.y) + record) * 5u + 1u], 1u);
+    uint record = recordOf(p.drawable, lod);
+    uint d = uint(u.uRange.z) + p.drawable;
+    uint oLate = (uint(u.uArgs.x) + record) * 5u, oDrawn = (uint(u.uArgs.x) + uint(u.uArgs.y) + record) * 5u;
+    if (drawLate) { writeRange(oLate, d, lod); atomicAdd(args[oLate + 1u], 1u); }
+    if (drawn) { writeRange(oDrawn, d, lod); atomicAdd(args[oDrawn + 1u], 1u); }
 }
 
 void main() {

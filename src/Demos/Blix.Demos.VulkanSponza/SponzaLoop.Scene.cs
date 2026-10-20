@@ -463,20 +463,24 @@ internal sealed partial class SponzaLoop
         // each frame (camera opaque + one per shadow cascade + blend). indirectScratch is sized for the
         // largest list (opaque) and reused for the smaller fills.
         lodSlots = Math.Max(1, opaqueDrawables.Concat(blendDrawables).Select(d => d.LodIndexCounts.Length).DefaultIfEmpty(1).Max());
+        // One record a drawable when none is placed twice: its one placement's level is the record's (the cull writes
+        // the range). MoltenVK encodes every record of a multi-draw on the CPU, culled or not -- four a drawable was
+        // ~26 ms a frame of Sponza's main thread inside vkQueueSubmit (2026-10-20).
+        recordSlots = opaqueDrawables.Concat(blendDrawables).All(d => d.PlacementCount <= 1) ? 1 : lodSlots;
         staging.Clear();
         Console.WriteLine(
             $"[VulkanSponza] bundled geometry: 1 VB ({bundle.VertexCount} verts) holding {opaqueDrawables.Count} + {blendDrawables.Count} "
             + $"unique primitives, placed {opaquePlacements.Count} + {blendPlacements.Count} times; {opaqueGroups.Count} opaque indirect groups "
-            + $"x {lodSlots} LOD slots; {sceneTransforms.Count} transforms ({sceneTransforms.Count * 64 / 1024.0:0.0} KB).");
+            + $"x {lodSlots} LOD slots ({recordSlots} indirect records a drawable); {sceneTransforms.Count} transforms ({sceneTransforms.Count * 64 / 1024.0:0.0} KB).");
         // The GPU cull's buffers wait for the LOD margins (RegisterSelectables); see BuildCullBuffers.
         if (gpuCull) return;
 
-        opaqueIndirect = Own(device.CreateIndirectBuffer(opaqueDrawables.Count * lodSlots, "sponza.opaque.indirect"));
+        opaqueIndirect = Own(device.CreateIndirectBuffer(opaqueDrawables.Count * recordSlots, "sponza.opaque.indirect"));
         for (var c = 0; c < CascadeCount; c++)
-            cascadeIndirect[c] = Own(device.CreateIndirectBuffer(opaqueDrawables.Count * lodSlots, $"sponza.cascade{c}.indirect"));
+            cascadeIndirect[c] = Own(device.CreateIndirectBuffer(opaqueDrawables.Count * recordSlots, $"sponza.cascade{c}.indirect"));
         if (blendDrawables.Count > 0)
-            blendIndirect = Own(device.CreateIndirectBuffer(blendDrawables.Count * lodSlots, "sponza.blend.indirect"));
-        indirectScratch = new byte[Math.Max(opaqueDrawables.Count, blendDrawables.Count) * lodSlots * IndirectDraw.RecordStride];
+            blendIndirect = Own(device.CreateIndirectBuffer(blendDrawables.Count * recordSlots, "sponza.blend.indirect"));
+        indirectScratch = new byte[Math.Max(opaqueDrawables.Count, blendDrawables.Count) * recordSlots * IndirectDraw.RecordStride];
 
         // Set 3, sized to this scene: the transform table, and room for every pass to see every placement
         // (camera and each cascade over the opaque placements, the camera again over the blend ones).
@@ -540,7 +544,7 @@ internal sealed partial class SponzaLoop
         }
 
         var visibleCapacity = Math.Max(1, SceneListVisibleBase(SceneListBlend) + blendPlacements.Count);
-        var records = Math.Max(1, SceneListRecordBase(SceneListBlend) + blendDrawables.Count * lodSlots);
+        var records = Math.Max(1, SceneListRecordBase(SceneListBlend) + blendDrawables.Count * recordSlots);
         cullPlacements = Own(device.CreateGpuBuffer(placements.Length * CullPlacement.Size,
             MemoryMarshal.AsBytes(placements.AsSpan()), "sponza.cull.placements"));
         cullDrawables = Own(device.CreateGpuBuffer(drawables.Length * 16, MemoryMarshal.AsBytes(drawables.AsSpan()), "sponza.cull.drawables"));

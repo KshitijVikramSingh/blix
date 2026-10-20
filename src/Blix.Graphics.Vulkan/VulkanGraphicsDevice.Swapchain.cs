@@ -258,7 +258,9 @@ public sealed partial class VulkanGraphicsDevice
             Vk.GetPhysicalDeviceQueueFamilyProperties(PhysicalDevice, &qfCount, p);
         }
         var validBits = families[GraphicsQueueFamily].TimestampValidBits;
-        timestampsSupported = timestampPeriodNs > 0 && validBits > 0;
+        // BLIX_GPU_TIMING=off: no per-pass timestamps (MoltenVK samples each into its own blit encoder and resolves them
+        // at the buffer's end).
+        timestampsSupported = timestampPeriodNs > 0 && validBits > 0 && Environment.GetEnvironmentVariable("BLIX_GPU_TIMING") != "off";
         if (!timestampsSupported) return;
 
         var ci = new QueryPoolCreateInfo

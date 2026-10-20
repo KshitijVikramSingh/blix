@@ -841,6 +841,8 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // How many indirect commands each drawable owns per pass: one per LOD level the deepest chain has, so
     // a drawable's placements at different levels draw from one indirect run.
     private int lodSlots = 1;
+    // Indirect records a drawable: lodSlots, or 1 when no drawable is placed twice (SponzaLoop.Scene.cs).
+    private int recordSlots = 1;
     // GPU culling (the default; --cpu-cull is the A/B): scene_cull.comp builds every pass's indirect records
     // and visible list on the GPU, and the draws read them from sceneArgs. The placements, drawables and
     // levels it reads are uploaded once; per-placement LOD state lives in cullState across frames. set 3

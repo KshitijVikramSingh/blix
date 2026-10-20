@@ -281,6 +281,8 @@ internal sealed partial class SponzaLoop
     // The pixels the last incident census found reading the probes (-1: no census yet).
     private long clipmapProbeReaders = -1;
     private bool clipmapAlways;
+    // --freeze-cascades (measurement): the sun cascades fitted once, never refit or redrawn.
+    private bool freezeCascades;
     private long clipmapRested;
 
     private void RecordClipmap()

@@ -13,12 +13,14 @@ layout(set = 0, binding = 0) uniform Cull {
     vec4 uCamera;      // xyz camera position, w = pixels-per-world at unit distance
     vec4 uLod;         // x error pixels, y world error budget (> 0 selects by world error), z hysteresis, w cull margin
     vec4 uRange;       // x first placement (global), y placement count, z first drawable (global), w visible base
-    vec4 uArgs;        // x first record, y record count, z LOD slots, w mode
+    vec4 uArgs;        // x first record, y record count, z (unused: uSlots), w mode
     vec4 uFlags;       // x cull by uCull, y cull by uReceivers, z edited placement + 1 (0 = none), w its new margin
     mat4 uView;        // the camera's view (occlusion: a bound's nearest view depth)
     vec4 uOcclusion;   // x 1 = the camera's early list draws only what was visible last frame, 2 = nothing
                        // (--occlusion-cut: every frame a camera cut); y near plane;
                        // z first visible slot of the camera's late list
+    vec4 uSlots;       // x LOD levels a drawable in lods[]; y indirect records a drawable: one per level, or
+                       // 1 when no drawable has two placements (the one placement's level written into it)
 } u;
 
 struct Placement {
@@ -57,6 +59,17 @@ layout(std430, set = 0, binding = 7) buffer SceneVisible { uint visible[]; };
 const uint Culled = 0x80000000u;
 // On the camera's early slots only: the placement passed the occlusion test last frame (scene_occlusion.comp).
 const uint WasVisible = 0x40000000u;
+
+// The record a drawable's placement at this level counts into, and the level table's row.
+uint recordOf(uint drawable, uint lod) { return uint(u.uSlots.y) > 1u ? drawable * uint(u.uSlots.y) + lod : drawable; }
+uint lodRow(uint drawableGlobal, uint lod) { return drawableGlobal * uint(u.uSlots.x) + lod; }
+// One record a drawable: the counting placement writes its level's range (the only placement, so no race).
+void writeRange(uint o, uint drawableGlobal, uint lod) {
+    if (uint(u.uSlots.y) > 1u) return;
+    DrawableLod l = lods[lodRow(drawableGlobal, lod)];
+    args[o + 0u] = l.indexCount;
+    args[o + 2u] = l.firstIndex;
+}
 
 // Frustum.FromViewProjection: Gribb-Hartmann planes from the clip matrix's rows, normalised so a
 // margin is in world units.
@@ -113,12 +126,12 @@ uint pickLod(uint lodBase, uint lodCount, float budget, float pixelsPerWorld, ui
 }
 
 void reset(uint r) {
-    uint slots = uint(u.uArgs.z);
+    uint slots = uint(u.uSlots.y);
     uint d = uint(u.uRange.z) + r / slots;
     uint l = r % slots;
     DrawableInfo info = drawables[d];
     bool has = l < info.lodCount;
-    DrawableLod lod = lods[d * slots + l];
+    DrawableLod lod = lods[lodRow(d, l)];
     uint o = (uint(u.uArgs.x) + r) * 5u;
     args[o + 0u] = has ? lod.indexCount : 0u;
     args[o + 1u] = 0u;
@@ -149,18 +162,17 @@ void classify(uint i) {
     bool vis = u.uFlags.x <= 0.0 || intersects(u.uCull, tmin, tmax, margin);
     if (vis && u.uFlags.y > 0.0) vis = intersects(u.uReceivers, tmin, tmax, margin);
 
-    uint slots = uint(u.uArgs.z);
     uint d = uint(u.uRange.z) + p.drawable;
     uint lodCount = drawables[d].lodCount;
     uint at = uint(u.uRange.w) + i;
     uint current = state[at] & 0xFFu;
     uint lod;
     if (u.uLod.y > 0.0) {
-        lod = pickLod(d * slots, lodCount, u.uLod.y * p.margin, 1.0, current);
+        lod = pickLod(lodRow(d, 0u), lodCount, u.uLod.y * p.margin, 1.0, current);
     } else {
         vec3 nearest = clamp(u.uCamera.xyz, bmin, bmax);
         float dist = max(length(u.uCamera.xyz - nearest), 0.01);
-        lod = pickLod(d * slots, lodCount, u.uLod.x * p.margin, u.uCamera.w / dist, current);
+        lod = pickLod(lodRow(d, 0u), lodCount, u.uLod.x * p.margin, u.uCamera.w / dist, current);
     }
     uint history = state[at] & WasVisible;
     // Two-phase occlusion: the early list draws what the late test found visible last frame, and the late
@@ -169,7 +181,9 @@ void classify(uint i) {
     if (u.uOcclusion.x > 1.5) vis = false;
     state[at] = lod | (vis ? 0u : Culled) | history;
     if (!vis) return;
-    atomicAdd(args[(uint(u.uArgs.x) + p.drawable * slots + lod) * 5u + 1u], 1u);
+    uint o = (uint(u.uArgs.x) + recordOf(p.drawable, lod)) * 5u;
+    writeRange(o, d, lod);
+    atomicAdd(args[o + 1u], 1u);
 }
 
 void scatter(uint i) {
@@ -178,14 +192,14 @@ void scatter(uint i) {
     if ((s & Culled) != 0u) return;
     uint lod = s & 0xFFu;
     Placement p = placements[uint(u.uRange.x) + i];
-    uint slots = uint(u.uArgs.z);
-    uint first = uint(u.uArgs.x) + p.drawable * slots;
+    uint first = uint(u.uArgs.x) + recordOf(p.drawable, 0u);
     uint start = uint(u.uRange.w) + drawables[uint(u.uRange.z) + p.drawable].placementStart;
-    for (uint l = 0u; l < lod; ++l) start += args[(first + l) * 5u + 1u];
+    if (uint(u.uSlots.y) > 1u) for (uint l = 0u; l < lod; ++l) start += args[(first + l) * 5u + 1u];
+    uint record = uint(u.uArgs.x) + recordOf(p.drawable, lod);
     // Every placement at this level writes the same value.
-    args[(first + lod) * 5u + 4u] = start;
+    args[record * 5u + 4u] = start;
     // The level rides in the top 8 bits (instances.glsl, instanceLod): the atlas's LOD 0 frames apply only to coarse levels.
-    visible[start + atomicAdd(cursor[first + lod], 1u)] = p.transform | (min(lod, 255u) << 24u);
+    visible[start + atomicAdd(cursor[record], 1u)] = p.transform | (min(lod, 255u) << 24u);
 }
 
 #endif

@@ -94,10 +94,13 @@ internal sealed partial class SponzaLoop
                 visibleScratch[fill[levelScratch[k]]++] = (uint)placements[d.PlacementStart + k].Transform | ((uint)Math.Min(levelScratch[k], 255) << 24);   // the level in the top 8 bits (instances.glsl)
             }
 
-            for (var l = 0; l < lodSlots; l++)
+            // One record a drawable (recordSlots 1: no drawable placed twice): its one placement's level.
+            var single = recordSlots == 1 ? Math.Max(0, levelScratch[..d.PlacementCount].ToArray().Max()) : -1;
+            for (var r = 0; r < recordSlots; r++)
             {
+                var l = single >= 0 ? single : r;
                 var has = l < d.LodIndexCounts.Length;
-                var o = (di * lodSlots + l) * 5;
+                var o = (di * recordSlots + r) * 5;
                 cmds[o + 0] = has ? (uint)d.LodIndexCounts[l] : 0u;  // indexCount
                 cmds[o + 1] = has ? (uint)counts[l] : 0u;             // instanceCount (0 = nothing at this level)
                 cmds[o + 2] = has ? (uint)d.LodFirstIndex[l] : 0u;    // firstIndex
@@ -109,7 +112,7 @@ internal sealed partial class SponzaLoop
         }
         // Write exactly this list's prefix; the buffer is sized to its count,
         // and indirectScratch is sized for the largest (opaque) list.
-        device.WriteIndirectCommands(buffer, indirectScratch.AsSpan(0, drawables.Count * lodSlots * IndirectDraw.RecordStride));
+        device.WriteIndirectCommands(buffer, indirectScratch.AsSpan(0, drawables.Count * recordSlots * IndirectDraw.RecordStride));
         visibleWritten = Math.Max(visibleWritten, cursor);
         return visible;
     }
@@ -126,9 +129,9 @@ internal sealed partial class SponzaLoop
         visibleWritten = 0;
     }
 
-    // A group's commands: its drawables' lodSlots each.
-    private int GroupByteOffset(OpaqueGroup g) => g.Start * lodSlots * IndirectDraw.RecordStride;
-    private int GroupDrawCount(OpaqueGroup g) => g.Count * lodSlots;
+    // A group's commands: its drawables' recordSlots each.
+    private int GroupByteOffset(OpaqueGroup g) => g.Start * recordSlots * IndirectDraw.RecordStride;
+    private int GroupDrawCount(OpaqueGroup g) => g.Count * recordSlots;
 
     // --ab lod reaches every camera and cascade selection through this. A zero budget is full detail.
     private float LodErrorPixelsNow => abMode == "lod" ? LodArmPixels : lodPixelsOverride >= 0f ? lodPixelsOverride : render.LodErrorPixels;
@@ -144,7 +147,7 @@ internal sealed partial class SponzaLoop
     // Early and late together: what the lit pass draws when occlusion is on.
     private const int SceneListCameraFinal = 2 + CascadeCount;
     private const int SceneListBlend = 3 + CascadeCount;
-    private int SceneListRecordBase(int list) => opaqueDrawables.Count * lodSlots * list;
+    private int SceneListRecordBase(int list) => opaqueDrawables.Count * recordSlots * list;
     private int SceneListVisibleBase(int list) => opaquePlacements.Count * list;
 
     // The CPU path's buffers and state per list; it has no late list.
@@ -182,7 +185,7 @@ internal sealed partial class SponzaLoop
         }
 
         var firstPlacement = blend ? opaquePlacements.Count : 0;
-        var records = drawables.Count * lodSlots;
+        var records = drawables.Count * recordSlots;
         // The edit belongs to this list's bucket only when its row is in this list's range.
         var edit = pendingMarginEdit.Placement - 1;
         var editsHere = edit >= firstPlacement && edit < firstPlacement + placements.Count;
@@ -224,6 +227,7 @@ internal sealed partial class SponzaLoop
                 new("uLod", new Vector4Uniform(new Vector4(LodErrorPixelsNow, worldErrorBudget, LodHysteresis, margin))),
                 new("uRange", new Vector4Uniform(new Vector4(firstPlacement, placementCount, firstDrawable, visibleBase))),
                 new("uArgs", new Vector4Uniform(new Vector4(recordBase, records, lodSlots, mode))),
+                new("uSlots", new Vector4Uniform(new Vector4(lodSlots, recordSlots, 0f, 0f))),
                 new("uFlags", new Vector4Uniform(new Vector4(
                     cullViewProj is null ? 0f : 1f, receiversViewProj is null ? 0f : 1f, edit.Placement, edit.Margin))),
                 new("uView", new Matrix4x4Uniform(cameraView)),
@@ -240,7 +244,7 @@ internal sealed partial class SponzaLoop
     {
         RecordPyramid(occZPassHandles, occZPipelines, occZHandles, frameWidth, frameHeight, skip: false);
 
-        var records = opaqueDrawables.Count * lodSlots;
+        var records = opaqueDrawables.Count * recordSlots;
         var pyramid = new ShaderTextureBinding[HiZLevels];
         for (var level = 0; level < HiZLevels; level++)
         {
@@ -316,7 +320,7 @@ internal sealed partial class SponzaLoop
         if (gpuCull)
         {
             scope.DrawIndexedIndirect(sharedVb, ib, pipeline, sceneArgs,
-                (SceneListRecordBase(list) + g.Start * lodSlots) * IndirectDraw.RecordStride, GroupDrawCount(g),
+                (SceneListRecordBase(list) + g.Start * recordSlots) * IndirectDraw.RecordStride, GroupDrawCount(g),
                 uniforms, textures, material, pushConstants, litLayout ? LitSceneBuffers : sceneBuffers);
             return;
         }
