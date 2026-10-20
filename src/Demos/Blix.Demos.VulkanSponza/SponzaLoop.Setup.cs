@@ -410,6 +410,7 @@ internal sealed partial class SponzaLoop
         clipmapAlways = args.Flag("clipmap-always");
         freezeCascades = args.Flag("freeze-cascades");
         unmappedCoarse = args.Flag("unmapped-coarse");
+        occlusionAlways = args.Flag("occlusion-always");
         fineAll = args.Flag("fine-all");
         // --fine-contact R (0.9; 0 off): fine texels more closed than their coarse cells (their contact ratio under R)
         // flagged, first (--no-fine-contact-first: by their score among the rest). Crevices' seams 0.835 -> 0.932 (the
@@ -471,11 +472,11 @@ internal sealed partial class SponzaLoop
             taaHandles[i] = graph.ColorTarget($"taa{i}", TextureFormat.Rgba16F, fullSize);
         if (SurfaceTargets)
         {
-            for (var i = 0; i < 2; i++) taaCountHandles[i] = graph.ColorTarget($"taa-count{i}", TextureFormat.R32Uint, fullSize);
             surfaceKeyHistoryHandle = graph.ColorTarget("surface-key-history", TextureFormat.R32Uint, fullSize);
         }
         // MSAA colour + depth the lit pass renders into; resolves to hdr.
-        hdrMsaaHandle = graph.ColorTarget("hdr-msaa", TextureFormat.R11G11B10F, fullSize, samples: MsaaSamples);
+        // Only with MSAA (the single-sample lit pass renders straight into hdr): 18 MB unused otherwise.
+        if (MsaaSamples > 1) hdrMsaaHandle = graph.ColorTarget("hdr-msaa", TextureFormat.R11G11B10F, fullSize, samples: MsaaSamples);
         depthHandle = graph.DepthTarget("scene-depth", fullSize, samples: MsaaSamples);
 
         // One depth target per cascade, sized per ShadowMapSizes (no 2D-array
@@ -681,7 +682,7 @@ internal sealed partial class SponzaLoop
         for (var level = 0; level < HiZLevels; level++)
         {
             occZHandles[level] = graph.ColorTarget(
-                $"occ-z{level}", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(0.5f / (1 << level)));
+                $"occ-z{level}", TextureFormat.Rg16F, new MatchSwapchainGraphSize(0.5f / (1 << level)));   // min, max (hiz_build.frag)
         }
         for (var level = 0; level < HiZLevels; level++)
         {
@@ -767,7 +768,7 @@ internal sealed partial class SponzaLoop
         for (var level = 0; level < HiZLevels; level++)
         {
             hiZHandles[level] = graph.ColorTarget(
-                $"hi-z{level}", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(0.5f / (1 << level)));
+                $"hi-z{level}", TextureFormat.Rg16F, new MatchSwapchainGraphSize(0.5f / (1 << level)));   // min, max (hiz_build.frag)
         }
         for (var level = 0; level < HiZLevels; level++)
         {
@@ -921,8 +922,6 @@ internal sealed partial class SponzaLoop
             if (SurfaceTargets)
             {
                 taaBuilder = taaBuilder
-                    .Target(taaCountHandles[i], LoadOp.Clear, StoreOp.Store)
-                    .ReadHistory(taaCountHandles[i ^ 1])
                     .Read(velocityHandle)
                     .Read(surfaceKeyHandle)
                     .ReadHistory(surfaceKeyHistoryHandle);
@@ -1085,7 +1084,7 @@ internal sealed partial class SponzaLoop
         {
             taaPipelines[i] = Pipeline(taaProgram, VertexPosition3NormalTexture.Layout,
                 DepthState.Disabled, RasterizerState.NoCulling,
-                SurfaceTargets ? new[] { BlendState.Disabled, BlendState.Disabled } : new[] { BlendState.Disabled },
+                new[] { BlendState.Disabled },   // one target: the count rides in its alpha
                 taaPassHandles[i], $"taa{i}");
         }
         if (SurfaceTargets)

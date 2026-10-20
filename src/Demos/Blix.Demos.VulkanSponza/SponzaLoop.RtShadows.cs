@@ -231,7 +231,7 @@ internal sealed partial class SponzaLoop
                 new("uSize", new Vector4Uniform(new Vector4(width, height, 0f, 0f))),
                 new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, 0f))),
                 new("uSun", new Vector4Uniform(new Vector4(towardSun, reach))),
-                new("uSky", new Vector4Uniform(new Vector4(sky is null ? 0f : 1f, rtShadowFrame % (1u << 24), 0f, 0f))),
+                new("uSky", new Vector4Uniform(new Vector4(sky is null ? 0f : 1f, rtShadowFrame % (1u << 24), halfLightingNow || lightletCensus || lightletRecord || shotPath is not null ? 1f : 0f, 0f))),
                 new("uHalf", new Vector4Uniform(new Vector4(halfShadowsNow ? 1f : 0f, sub.X, sub.Y, 0f))),
                 // The frame's number for the disc's sequence, kept small: a float's fraction holds at 2^16.
                 new("uDisc", new Vector4Uniform(new Vector4(discTangent, rtShadowFrame % 65536u, 0f, 0f))),

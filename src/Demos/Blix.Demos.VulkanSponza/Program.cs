@@ -258,7 +258,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private GraphResourceHandle surfaceKeyHistoryHandle;
     private PassHandle surfaceKeyHistoryPassHandle;
     private PipelineHandle surfaceKeyHistoryPipeline;
-    private readonly GraphResourceHandle[] taaCountHandles = new GraphResourceHandle[2];
     // Stage 4f: --taa-dynamic-count N, the count a pixel whose shading depends on the mover accumulates up to.
     private float taaDynamicCount = 4f;
     // Last frame's un-jittered view-projection, for the velocity (the camera's half of it).

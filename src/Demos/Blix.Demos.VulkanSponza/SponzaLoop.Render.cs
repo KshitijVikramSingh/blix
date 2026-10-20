@@ -240,6 +240,11 @@ internal sealed partial class SponzaLoop
     // The late half of two-phase occlusion: reduce the early pre-pass's depth into its own pyramid, test
     // every opaque placement against it (scene_occlusion.comp), and draw what is visible but was not drawn
     // into the same depth and normals. The lit pass then draws the final list, early and late together.
+    private Matrix4x4 occlusionLastView, occlusionLastProjection;
+    private int occlusionLastPlacements, occlusionStillFrames;
+    // --occlusion-always: the occlusion test and late pre-pass every frame, still or not.
+    private bool occlusionAlways;
+
     private void RecordOcclusion(Matrix4x4? cameraCull, IReadOnlyList<ShaderUniform> perFrame, int frameWidth, int frameHeight)
     {
         RecordPyramid(occZPassHandles, occZPipelines, occZHandles, frameWidth, frameHeight, skip: false);
@@ -753,7 +758,20 @@ internal sealed partial class SponzaLoop
         // Occlusion needs the pre-pass's depth; without one the early list is the whole frustum's.
         var skipPrepass = noPrepass || (abMode == "prepass" && AbOffPhase);
         var occlusionNow = occlusionCull && render.OcclusionCull && !skipPrepass;
-        using (Prof("cull")) CullList(SceneListCamera, cameraCull, margin: CameraCullMargin, occlusionEarly: occlusionNow);
+        // Nothing moved for two frames (the camera, the mover, the placements): last frame's occlusion test marked every
+        // visible placement, so this frame's early list is the whole visible set and the late list would be empty. The
+        // occlusion pyramid, its cull and the late pre-pass -- which loads and stores all five pre-pass targets, ~224 MB
+        // a frame drawing nothing (2026-10-20) -- are skipped, and the lit pass draws the early list.
+        var occlusionSame = cameraView == occlusionLastView && cameraProjection == occlusionLastProjection && !moverMoved
+            && opaquePlacements.Count == occlusionLastPlacements;
+        // Counted in frames the test actually RAN under this camera: frames before the scene (loading, the cook screen)
+        // never set the placements' visible flags, and skipping on them drew an empty list -- a black frame until the
+        // camera moved (2026-10-20).
+        if (!occlusionSame) occlusionStillFrames = 0;
+        occlusionLastView = cameraView; occlusionLastProjection = cameraProjection; occlusionLastPlacements = opaquePlacements.Count;
+        var occlusionSkipped = occlusionNow && occlusionStillFrames >= 2 && !occlusionAlways && !(abMode == "occlskip" && AbOffPhase);
+        occlusionNow &= !occlusionSkipped;
+        using (Prof("cull")) CullList(SceneListCamera, cameraCull, margin: CameraCullMargin, occlusionEarly: occlusionNow || occlusionSkipped);
         cameraTriangles = gpuCull ? -1 : fillIndirectTriangles;
         // Accumulate exactly one contiguous orbit so triangle means cover the full closed path and
         // do not depend on streaming duration or which arc happened to be sampled.
@@ -783,7 +801,11 @@ internal sealed partial class SponzaLoop
                     perFrame, Array.Empty<ShaderTextureBinding>(), material: g.IsMask ? g.Material : null);
             }
         });
-        if (occlusionNow) using (Prof("occlusion")) RecordOcclusion(cameraCull, perFrame, frame.Width, frame.Height);
+        if (occlusionNow)
+        {
+            using (Prof("occlusion")) RecordOcclusion(cameraCull, perFrame, frame.Width, frame.Height);
+            occlusionStillFrames++;
+        }
         RecordRayView(frame.Width, frame.Height);
 
         // Hi-Z pyramid: level 0 reduces the resolved depth, each level after reduces its parent.
@@ -1120,9 +1142,10 @@ internal sealed partial class SponzaLoop
     {
         var pixels = device.ReadTexture(
             graph.GetColorTexture(hiZHandles[HiZCensusLevel]), out var w, out var h, out var format);
-        if (format != TextureFormat.Rgba16F) return null;
+        if (format != TextureFormat.Rg16F && format != TextureFormat.Rgba16F) return null;
+        var stride = format == TextureFormat.Rg16F ? 4 : 8;
         var farthest = new float[w * h];
-        for (var i = 0; i < w * h; i++) farthest[i] = (float)BitConverter.ToHalf(pixels, i * 8 + 2);
+        for (var i = 0; i < w * h; i++) farthest[i] = (float)BitConverter.ToHalf(pixels, i * stride + 2);
         return new HiZSnapshot(farthest, w, h, cameraView, viewProj, CameraNearPlane);
     }
 
@@ -1140,14 +1163,15 @@ internal sealed partial class SponzaLoop
         {
             var pixels = device.ReadTexture(
                 graph.GetColorTexture(hiZHandles[level]), out var w, out var h, out var format);
-            if (format != TextureFormat.Rgba16F) { Console.WriteLine("  unexpected format"); return; }
+            if (format != TextureFormat.Rg16F && format != TextureFormat.Rgba16F) { Console.WriteLine("  unexpected format"); return; }
+            var stride = format == TextureFormat.Rg16F ? 4 : 8;
 
             var lo = new float[w * h];
             var hi = new float[w * h];
             for (var i = 0; i < w * h; i++)
             {
-                lo[i] = (float)BitConverter.ToHalf(pixels, i * 8);
-                hi[i] = (float)BitConverter.ToHalf(pixels, i * 8 + 2);
+                lo[i] = (float)BitConverter.ToHalf(pixels, i * stride);
+                hi[i] = (float)BitConverter.ToHalf(pixels, i * stride + 2);
             }
 
             var finite = lo.Where(v => v > 0 && !float.IsInfinity(v)).ToArray();
@@ -1222,6 +1246,7 @@ internal sealed partial class SponzaLoop
             "normal" => "normal mapping",
             "cull"    => "camera frustum culling",
             "castercull" => "shadow caster culling against the camera",
+            "occlskip" => "the occlusion test and late pre-pass skipped while nothing moves (OFF: every frame)",
             "leaflookup" => "pixels the atlas leaves out reading one coarser texel level alone (OFF: both levels)",
             "lightlets" => "the traced shadows answered by the baked sun records where they can (OFF: every pixel traced)",
             "queue"   => "the Metal tracers on the Vulkan device's command queue (OFF: their own)",
@@ -1735,7 +1760,6 @@ internal sealed partial class SponzaLoop
             bindings.Add(new ShaderTextureBinding("uVelocity", graph.GetColorTexture(velocityHandle)));
             bindings.Add(new ShaderTextureBinding("uSurfaceKey", graph.GetColorTexture(surfaceKeyHandle)));
             bindings.Add(new ShaderTextureBinding("uSurfaceKeyPrev", graph.GetColorTexture(surfaceKeyHistoryHandle)));
-            bindings.Add(new ShaderTextureBinding("uCountPrev", graph.GetColorTexture(taaCountHandles[taaWrite ^ 1])));
         }
         graph.Pass(taaPassHandles[taaWrite], scope => fullscreen.Draw(
             scope, taaPipelines[taaWrite], bindings, pushConstants: null, uniforms: uniforms,

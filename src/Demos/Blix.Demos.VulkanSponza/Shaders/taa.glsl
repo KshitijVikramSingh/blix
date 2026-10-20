@@ -72,8 +72,6 @@ layout(set = 0, binding = 3) uniform sampler2D uDepth;
 layout(set = 0, binding = 5) uniform sampler2D uVelocity;
 layout(set = 0, binding = 6) uniform usampler2D uSurfaceKey;
 layout(set = 0, binding = 7) uniform usampler2D uSurfaceKeyPrev;
-layout(set = 0, binding = 8) uniform usampler2D uCountPrev;
-layout(location = 1) out uint outCount;
 #endif
 
 // Luminance-weighted blending in a tonemapped space, so one very bright sample cannot dominate the
@@ -170,7 +168,9 @@ void main() {
                 vec4 historySample = texture(uHistory, uvPrev);
                 vec3 history = historySample.rgb;
 #ifdef TAA_SURFACE
-                float historyCount = float(texelFetch(uCountPrev, past, 0).r);
+                // The count rides in the history's alpha (fp16 holds whole counts to 2048): read at the reprojected pixel,
+                // unfiltered. It had its own R32UI pair (36 MB, ~37 MB a frame of traffic) until 2026-10-20.
+                float historyCount = texelFetch(uHistory, past, 0).a;
 #else
                 float historyCount = historySample.a;
 #endif
@@ -246,6 +246,5 @@ void main() {
     // anything the camera has just turned onto. A still camera should show almost nothing.
     outColor = t.uParams.z > 0.5 ? vec4(vec3(refused), 1.0) : vec4(resolved, accumulated);
 #ifdef TAA_SURFACE
-    outCount = uint(accumulated);
 #endif
 }

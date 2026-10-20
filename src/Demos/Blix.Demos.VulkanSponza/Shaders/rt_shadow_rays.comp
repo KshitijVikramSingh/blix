@@ -22,7 +22,8 @@ layout(set = 0, binding = 0) uniform RtShadowRays {
     vec4 uSize;          // xy: pixels
     vec4 uCamera;        // xyz: position
     vec4 uSun;           // xyz: toward the sun, unit; w: how far a ray goes
-    vec4 uSky;           // x: 1 to write sky rays; y: the frame's number (exact: below 2^24)
+    vec4 uSky;           // x: 1 to write sky rays; y: the frame's number (exact: below 2^24); z: 1 to write baked[] (its
+                         // readers: the half-res upsample, the lightlet census and the shot's audits -- 19 MB a frame else)
     vec4 uHalf;          // x 1: one ray per half-res pixel (uSize the half grid), from the full-res pixel 2p + yz of its
                          // 2x2 (RenderSettings.HalfResLighting: the incident pass's pixel, lighting_upsample.frag)
     vec4 uDisc;          // the sun's disc (ShadowsSettings.SunDiscDegrees): x the tangent of its angular radius (0: a point,
@@ -129,14 +130,14 @@ void main() {
     bool sky = u.uSky.x > 0.5;
     if (raw >= 1.0 - 1e-6 || dot(nSample.xyz, nSample.xyz) < 1e-6) {
         if (perPixel) origins[index] = vec4(0.0);
-        baked[index] = 3u;
+        if (u.uSky.z > 0.5) baked[index] = 3u;
         if (packing) maskWords[index] = 0u;
         if (sky) skyRays[index * 2u] = vec4(0.0);
         return;
     }
     // Interleaved: not this frame's pixel of its 2x2 -- no ray, no word (the fill writes it). Packed only, never per pixel.
     if (u.uCompact.w > 0.5 && (p.x & 1u) + 2u * (p.y & 1u) != uint(u.uCompact.w) - 1u) {
-        baked[index] = 2u;
+        if (u.uSky.z > 0.5) baked[index] = 2u;
         return;
     }
     vec2 ndc = (vec2(q) + 0.5) / vec2(fullSize) * 2.0 - 1.0;
@@ -148,7 +149,7 @@ void main() {
     float lift = 0.01 + 0.001 * length(position - u.uCamera.xyz);
     vec3 origin = position + n * (dot(n, u.uSun.xyz) > 0.0 ? lift : -lift);
     uint answer = bakedSun(q, n);
-    baked[index] = answer;
+    if (u.uSky.z > 0.5) baked[index] = answer;
     // Answered: no ray, and the answer rides the reach (blix_shadow: 0 answered lit, < 0 answered shadowed), so the mask
     // every reader takes -- lit.frag at full res, lighting_upsample at half -- holds it with the traced pixels'.
     if (perPixel) origins[index] = vec4(origin, answer >= 2u ? u.uSun.w : answer == 1u ? -1.0 : 0.0);

@@ -84,14 +84,15 @@ internal sealed partial class SponzaLoop
         }
         if (SurfaceTargets && render.Taa > 0f)
         {
-            var counts = device.ReadTexture(graph.GetColorTexture(taaCountHandles[taaWrite]), out var cw, out var ch, out _);
+            // The count is the resolved image's alpha (Rgba16F): 8 bytes a pixel, the half at 6.
+            var counts = device.ReadTexture(graph.GetColorTexture(taaHandles[taaWrite]), out var cw, out var ch, out _);
             stabilityTaaCount ??= new long[gw * gh];
             for (var y = 0; y < gh; y++)
             for (var x = 0; x < gw; x++)
             {
                 var cx = Math.Min(cw - 1, x * StabilityStride * cw / sw);
                 var cy = Math.Min(ch - 1, y * StabilityStride * ch / sh);
-                stabilityTaaCount[y * gw + x] += BitConverter.ToUInt32(counts, (cy * cw + cx) * 4);
+                stabilityTaaCount[y * gw + x] += (long)(float)BitConverter.ToHalf(counts, (cy * cw + cx) * 8 + 6);
             }
         }
         stabilityIncident.Add(inc);
