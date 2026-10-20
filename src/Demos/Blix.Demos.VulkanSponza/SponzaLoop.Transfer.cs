@@ -101,6 +101,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("PatchDirShares", patchDirSharesBuffer),
             }.Where(b => declaredDir.Contains(b.Name)).ToArray()) }, "patch-dir");
         PatchTexelsPass(1, sky, sun, skyDetail, sunDetail);
+        RatioAtInstant();
         splitDetailLanded = true;
         splitComposeDirty = true;
         splitComposeAgainFrame = framesRendered + 1;
@@ -109,6 +110,7 @@ internal sealed partial class SponzaLoop
         // Shown before the cook screen holds the image: composed, and a few scene frames drawn with it.
         splitComposeDirty = true;
         instantShowFrames = 3;
+        DumpParts("instant", sunBits: true);   // BLIX_DUMP_PARTS: the instant layer, before any gather (ratio-relight study)
     }
 
     private void PatchTexelsPass(int mode, GpuBufferHandle sky = default, GpuBufferHandle sun = default, GpuBufferHandle skyDetail = default, GpuBufferHandle sunDetail = default)

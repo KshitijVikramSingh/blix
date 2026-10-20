@@ -234,15 +234,27 @@ internal sealed partial class SponzaLoop
         Console.WriteLine($"[VulkanSponza] shot state dumped: {dumpParts}.shot");
     }
 
-    private void DumpParts(string stage)
+    // Each stage's dumps numbered in order (<prefix>.<stage>.<n>): a run with a sun change keeps both suns'. With
+    // sunBits, the texels' sun visibility bits after the parts (words a texel, the sun's column, then the words).
+    private readonly Dictionary<string, int> dumpPartsCount = new();
+
+    private void DumpParts(string stage, bool sunBits = false)
     {
         if (dumpParts is null) return;
         device.WaitIdle();
         var sky = device.ReadGpuBuffer(EnsureLivePart(false), 0, texelCount * 8);
         var sun = device.ReadGpuBuffer(EnsureLivePart(true), 0, texelCount * 8);
-        using var w = new BinaryWriter(File.Create($"{dumpParts}.{stage}"));
+        var n = dumpPartsCount.GetValueOrDefault(stage);
+        dumpPartsCount[stage] = n + 1;
+        var path = $"{dumpParts}.{stage}.{n}";
+        using var w = new BinaryWriter(File.Create(path));
         w.Write(texelCount); w.Write(sky); w.Write(sun);
-        Console.WriteLine($"[VulkanSponza] parts dumped: {dumpParts}.{stage}");
+        if (sunBits && !liveSunBits.Equals(default(GpuBufferHandle)))
+        {
+            w.Write(liveSunWords); w.Write(liveSunColumn);
+            w.Write(device.ReadGpuBuffer(liveSunBits, 0, texelCount * liveSunWords * 4));
+        }
+        Console.WriteLine($"[VulkanSponza] parts dumped: {path}");
     }
 
     // After the fine gather: the texels it took, and every fine texel, against the reference.

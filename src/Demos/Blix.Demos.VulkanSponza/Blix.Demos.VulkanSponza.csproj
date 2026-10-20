@@ -120,6 +120,7 @@
     <GlslShader Include="Shaders\taa_surface.frag" />
     <GlslShader Include="Shaders\copy_key.frag" />
     <GlslShader Include="Shaders\copy_incident.frag" />
+    <GlslShader Include="Shaders\texel_ratio.comp" />
     <GlslShader Include="Shaders\screen_probe_filter.comp" />
     <GlslShader Include="Shaders\incident_clipmap.frag" />
     <GlslShader Include="Shaders\present.vert" />

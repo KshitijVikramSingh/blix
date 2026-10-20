@@ -1,0 +1,58 @@
+#version 450
+// The ratio relight (SponzaLoop.RatioRelight.cs): a light change's first image from the last landing's gather. Per live
+// texel, its gathered sun part over what the instant layer (the patches' light, texel_patch_light.comp) gave it for the
+// same sun is mostly geometry -- contact shadowing, near-field occlusion the patches cannot hold -- not the sun. So on
+// a sun change the new instant layer times that ratio is close to the new gather (crevices, 2026-10-20: 5 degrees
+// 11% -> 2.3% mean error, 20 degrees 12.8% -> 5.9%) while the gather still runs.
+//   mode 0: keep the instant layer (the sun part now) as the texel's instant
+//   mode 1: at a landing: the ratio, the gathered sun part over the kept instant
+//   mode 2: at a re-aim, after the new instant layer: the sun part becomes instant x ratio; the instant is kept
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform Ratio {
+    vec4 uRatio;   // x live texels, y mode, z the largest ratio kept, w the first live texel of this dispatch
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer LiveIds { uint liveIds[]; };
+layout(std430, set = 0, binding = 2) buffer TexelSun { uvec2 texelSun[]; };
+layout(std430, set = 0, binding = 3) buffer SunRatio { uint ratioWords[]; };   // by texel id: the instant, or the ratio
+
+uint packRgb9e5(vec3 c) {
+    const float maxValue = 65408.0;
+    c = clamp(c, vec3(0.0), vec3(maxValue));
+    float maxC = max(c.r, max(c.g, c.b));
+    int e = max(-16, int(floor(log2(max(maxC, 1e-30))))) + 1;
+    float scale = exp2(float(e - 9));
+    if (int(floor(maxC / scale + 0.5)) == 512) { e += 1; scale *= 2.0; }
+    uvec3 m = uvec3(floor(c / scale + 0.5));
+    return m.r | (m.g << 9) | (m.b << 18) | (uint(e + 15) << 27);
+}
+
+vec3 unpackRgb9e5(uint p) {
+    float scale = exp2(float(int(p >> 27) - 15 - 9));
+    return vec3(p & 511u, (p >> 9) & 511u, (p >> 18) & 511u) * scale;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x + uint(u.uRatio.w);
+    if (i >= uint(u.uRatio.x)) return;
+    uint id = liveIds[i];
+    int mode = int(u.uRatio.y);
+    if (mode == 0) {
+        ratioWords[id] = texelSun[id].x;
+    } else if (mode == 1) {
+        vec3 instant = unpackRgb9e5(ratioWords[id]);
+        vec3 gathered = unpackRgb9e5(texelSun[id].x);
+        const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
+        // A texel the instant layer left dark has no ratio to keep: it takes the next instant as it is (ratio 1).
+        vec3 ratio = dot(instant, luma) > 1e-6
+            ? clamp(gathered / max(instant, vec3(1e-6)), vec3(0.0), vec3(u.uRatio.z))
+            : vec3(1.0);
+        ratioWords[id] = packRgb9e5(ratio);
+    } else {
+        uint instantWord = texelSun[id].x;
+        vec3 relit = unpackRgb9e5(instantWord) * unpackRgb9e5(ratioWords[id]);
+        texelSun[id].x = packRgb9e5(relit);
+        ratioWords[id] = instantWord;
+    }
+}

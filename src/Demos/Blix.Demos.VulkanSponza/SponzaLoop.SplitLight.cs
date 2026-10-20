@@ -51,8 +51,11 @@ internal sealed partial class SponzaLoop
         if (args.Float("split-refine-min-share") is { } share) splitRefineMinShare = Math.Clamp(share, 0f, 1f);
     }
 
+    private Func<string[], ShaderInterface>? splitReflect;
+
     private void DeclareSplitLightPass(Func<string[], ShaderInterface> reflect)
     {
+        splitReflect = reflect;
         texelComposeInterface = reflect(new[] { "texel_compose.comp" });
         texelComposePass = graph.ComputePass("texel-compose").Shader(texelComposeInterface).Handle;
         // The filter over the composed light (mode 1), a pass of its own: it reads the neighbours mode 0 wrote.
@@ -65,6 +68,7 @@ internal sealed partial class SponzaLoop
         texelComposePipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "texel_compose.comp.spv")), texelComposeInterface, "texel_compose")), "texel_compose"));
         CreateTexelVisiblePipeline(shaderDir);
+        CreateTexelRatioPipeline(splitReflect!, shaderDir);
     }
 
     // A part's cache: the transport's key, which part (and for the sun its direction), and how it was solved.
@@ -165,6 +169,7 @@ internal sealed partial class SponzaLoop
         Console.WriteLine("[VulkanSponza] split light: the cook landed; the texels rest on the sky's part and the sun's.");
         // The sky's part gathered whole: a sun change gathers the sun's alone from here (SponzaLoop.SliceResolve.cs).
         if (liveTexels) liveSkyGathered = true;
+        RatioAtLanding();
         ReleaseRayGeometry();
         ReleaseGatherScratch();
         // A sun asked for while the cook ran: its part next.
