@@ -676,6 +676,7 @@ internal sealed partial class SponzaLoop
         ResetSunNodeRefine();
         sunNodeRefineRays = 0;
         if (spotWhy) SpotWhyCompare(fine: false);
+        if (EndVisibleChanged()) return;
         // BLIX_NO_FINE=1 (an A/B): the fine texels keep the instant layer's light after the gather.
         if (fineGathering)
         {
@@ -1012,6 +1013,7 @@ internal sealed partial class SponzaLoop
                 sunNodeTraceBuffer = Own(device.CreateGpuBuffer(Math.Max(16, sunNodeTraceIds.Length * 4), MemoryMarshal.AsBytes(sunNodeTraceIds.AsSpan()), "sponza.sun-nodes.traced"));
             }
             if (sunNodeTraceIds.Length == 0) { FinishSunNodes(); return; }
+            BeginVisibleChanged();
         }
         if (TransferOn && transferCheck && transferReady && sunNodeRefineRound == 0 && sunNodeFirst == 0 && sunNodePass == 0 && transferCheckSky is null && !transferChecked)
         {
@@ -1023,7 +1025,7 @@ internal sealed partial class SponzaLoop
             transferChecked = true;
         }
         var clock = Stopwatch.StartNew();
-        var budget = CookScreenNow ? SunNodeCookScreenMs : SunNodeLiveMs;
+        var budget = CookScreenNow ? SunNodeCookScreenMs : GatherInBackground ? backgroundGatherMs : SunNodeLiveMs;
         sunNodeQueueWaitMs = 0;
         while (sunNodeStage == SunNodeStage.Tracing && clock.Elapsed.TotalMilliseconds - sunNodeQueueWaitMs < budget)
         {

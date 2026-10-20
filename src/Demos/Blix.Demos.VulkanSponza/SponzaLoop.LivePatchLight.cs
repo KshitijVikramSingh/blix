@@ -83,6 +83,7 @@ internal sealed partial class SponzaLoop
 
     private void BeginLiveSunBits(Vector3 toward, int column, int words)
     {
+        if (toward != liveSunToward) KeepSunBitsBefore();
         liveSunColumn = column;
         liveSunWords = words;
         liveSunToward = toward;
@@ -328,7 +329,10 @@ internal sealed partial class SponzaLoop
         else foreach (var r in sunNodeResults) Array.Clear(r);
         BeginLivePointBits();
         splitCooking = true;
+        gatherBehind = false;
         BeginSplitCookLanding();
+        // The view as the sun turned: what the first gather takes (SponzaLoop.VisibleChanged.cs).
+        if (VisibleChangedOn && liveSkyGathered) splitVisibleAsked = true;
         liveRetargeting = true;
         sunNodeClock.Restart();
         sunNodeStage = SunNodeStage.Relighting;

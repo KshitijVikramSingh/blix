@@ -375,8 +375,11 @@ internal sealed partial class SponzaLoop
             fineFlagsBuffer = Own(device.CreateGpuBuffer((16 + 2 * transferFineCount) * 4, name: "sponza.transfer.fine-flags"));
         device.WriteGpuBuffer(fineFlagsBuffer, 0, new byte[64]);
         var clock = Stopwatch.StartNew();
-        FineDispatch(transferFineIdsBuffer, transferFineCount, default);
+        // Not over the texels the light change's first gather took (SponzaLoop.VisibleChanged.cs).
+        var (copyIds, copyCount, copyOwn) = FineCopyIds();
+        FineDispatch(copyIds, copyCount, default);
         device.WaitIdle();
+        if (copyOwn) device.DestroyGpuBuffer(copyIds);
         fineFlagCounts = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(fineFlagsBuffer, 0, 64).AsSpan()).ToArray();
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] fine pass: {transferFineCount:N0} texels from the coarse in {clock.Elapsed.TotalMilliseconds:0} ms; flagged for their own gather {fineFlagCounts[0]:N0} ({100.0 * fineFlagCounts[0] / transferFineCount:0.0}%), by the larger: none turned their way {fineFlagCounts[1]:N0}, the ones turned their way disagree {fineFlagCounts[2]:N0}, those and the cut ones {fineFlagCounts[10]:N0}, the copy and the instant layer {fineFlagCounts[3]:N0}; over 1.5/2/3/4/8/16x {string.Join(" / ", fineFlagCounts[4..10].Select(c => c.ToString("N0", CultureInfo.InvariantCulture)))}."));

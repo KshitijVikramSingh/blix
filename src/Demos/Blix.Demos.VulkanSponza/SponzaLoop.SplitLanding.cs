@@ -107,11 +107,15 @@ internal sealed partial class SponzaLoop
     private void ReadTexelVisible()
     {
         var clock = Stopwatch.StartNew();
+        // The frame that marked them may still be in flight: read before it ran, the view came back partial -- 41 K of
+        // the texels on screen one run, 395 K the next, the same view (2026-10-21).
+        device.WaitIdle();
         var bitBytes = new byte[(texelCount + 31) / 32 * 4];
         bitBytes = device.ReadGpuBuffer(texelVisibleBits, 0, bitBytes.Length);
         var bits = MemoryMarshal.Cast<byte, uint>(bitBytes.AsSpan()).ToArray();
         RetireGpuBuffer(texelVisibleBits);
         texelVisibleBits = default;
+        if (liveTexels) visibleAtTurn = bits;
         var live = texelLiveIds!;
         var order = new uint[live.Length];
         var front = 0;
