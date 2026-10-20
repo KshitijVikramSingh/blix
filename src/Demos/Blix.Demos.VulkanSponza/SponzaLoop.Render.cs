@@ -1250,6 +1250,7 @@ internal sealed partial class SponzaLoop
             "normal" => "normal mapping",
             "cull"    => "camera frustum culling",
             "castercull" => "shadow caster culling against the camera",
+            "atlasgather" => "the incident pass's atlas lookup by gather and meta words (OFF: the index-map buffer walk)",
             "increuse" => "the incident pass reusing last frame's answer at rest (OFF: every pixel every frame)",
             "occlskip" => "the occlusion test and late pre-pass skipped while nothing moves (OFF: every frame)",
             "leaflookup" => "pixels the atlas leaves out reading one coarser texel level alone (OFF: both levels)",

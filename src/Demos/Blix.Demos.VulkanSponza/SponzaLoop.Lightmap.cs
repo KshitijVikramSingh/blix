@@ -646,6 +646,7 @@ internal sealed partial class SponzaLoop
         UploadTexels(hashed with { Texels = texels, Count = first + atlas.Count }, light, bakePath, first, resolved);
         if (splitLight || cookGi) BuildSeamNeighbours(texels, first + atlas.Count, first);
         lightmapIndexMapBuffer = Own(device.CreateGpuBuffer(map.Length * 4, MemoryMarshal.AsBytes(map.AsSpan()), "sponza.lightmap.index-map"));
+        UploadAtlasGather(map, texels, first, atlas.Count);
         // The frames by absolute record id, after a one-entry header with the atlas size (zero: none).
         var frames = new uint[2 * (1 + first + atlas.Count)];
         frames[0] = (uint)lightmapAtlasWidth;

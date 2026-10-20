@@ -258,6 +258,61 @@ void texelsAroundLightmap(vec2 texel, vec3 n, ivec2 atlasSize, out int ids[4], o
     }
 }
 
+#ifdef TEXEL_ATLAS_GATHER
+// The same four with one gather of the index map as a texture (TEXEL_INDEX_TEX, a usampler2D) and a 4-byte meta word a
+// record (TEXEL_META(id), SponzaLoop.LightmapGather.cs) for everything the choice reads: bits 0-23 the face normal
+// (octahedral, 12 + 12 bits), 29 the normal is not zero, 30 a double-sided pair's front (the back is id + 1), 31 not
+// buried. ~35 dependent loads a pixel -> one gather and ~8 (2026-10-20). False where the full lookup must answer: the
+// groove ring (the best of the four turned past 25 degrees) and the atlas's edge.
+vec3 texelMetaNormal(uint m) {
+    vec2 e = vec2(float(m & 0xFFFu), float((m >> 12) & 0xFFFu)) / 4095.0 * 2.0 - 1.0;
+    vec3 v = vec3(e, 1.0 - abs(e.x) - abs(e.y));
+    if (v.z < 0.0) v.xy = (1.0 - abs(v.yx)) * vec2(v.x >= 0.0 ? 1.0 : -1.0, v.y >= 0.0 ? 1.0 : -1.0);
+    return normalize(v);
+}
+
+bool texelsAroundLightmapGather(vec2 texel, vec3 n, ivec2 atlasSize, out int ids[4], out float weights[4]) {
+    vec2 f = texel - 0.5;
+    ivec2 base = ivec2(floor(f));
+    vec2 t = f - vec2(base);
+    for (int i = 0; i < 4; ++i) { ids[i] = -1; weights[i] = 0.0; }
+    if (any(lessThan(base, ivec2(0))) || any(greaterThanEqual(base + 1, atlasSize))) return false;
+    // Gather order: w (x0, y0), z (x1, y0), x (x0, y1), y (x1, y1) -- as i = o.x + 2 o.y below.
+    uvec4 quad = textureGather(TEXEL_INDEX_TEX, (vec2(base) + 1.0) / vec2(atlasSize));
+    uint raw[4] = uint[4](quad.w, quad.z, quad.x, quad.y);
+    uint id[4];
+    uint meta[4];
+    vec3 normals[4];
+    float bestDot = -2.0;
+    vec3 ownNormal = vec3(0.0);
+    for (int i = 0; i < 4; ++i) {
+        id[i] = raw[i];
+        meta[i] = 0u;
+        normals[i] = vec3(0.0);
+        if (raw[i] == 0xFFFFFFFFu) continue;
+        uint m = TEXEL_META(raw[i]);
+        // A double-sided pair: the side the pixel's normal agrees with.
+        if ((m & 0x40000000u) != 0u && dot(texelMetaNormal(m), n) < 0.0) { id[i] = raw[i] + 1u; m = TEXEL_META(id[i]); }
+        meta[i] = m;
+        if ((m & 0x80000000u) == 0u) continue;   // buried
+        if ((m & 0x20000000u) == 0u) continue;   // no normal: not a reference
+        normals[i] = texelMetaNormal(m);
+        float d = dot(normals[i], n);
+        if (d > bestDot) { bestDot = d; ownNormal = normals[i]; }
+    }
+    if (bestDot > -2.0 && bestDot < 0.9) return false;
+    for (int i = 0; i < 4; ++i) {
+        uint m = meta[i];
+        if (raw[i] == 0xFFFFFFFFu || (m & 0x80000000u) == 0u) continue;
+        if (bestDot > -2.0 && (m & 0x20000000u) != 0u && dot(normals[i], ownNormal) < 0.9) continue;
+        ivec2 o = ivec2(i & 1, i >> 1);
+        ids[i] = int(id[i]);
+        weights[i] = max((o.x == 1 ? t.x : 1.0 - t.x) * (o.y == 1 ? t.y : 1.0 - t.y), 1.0 / 64.0);
+    }
+    return true;
+}
+#endif // TEXEL_ATLAS_GATHER
+
 #endif // TEXEL_INDEX_MAP
 
 #endif

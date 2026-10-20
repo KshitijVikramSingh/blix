@@ -181,6 +181,12 @@ float debugStamped, debugLit;
 layout(set = 0, binding = 19) uniform usampler2D uLightmapTexel;
 layout(std430, set = 0, binding = 20) readonly buffer LightmapIndexMap { uint lightmapIndexMap[]; };
 #define TEXEL_INDEX_MAP(i) lightmapIndexMap[i]
+// The index map as a texture and the records' meta words (texelsAroundLightmapGather, uClipExact.w).
+layout(set = 0, binding = 44) uniform usampler2D uLightmapIndexTex;
+layout(std430, set = 0, binding = 45) readonly buffer TexelMeta { uint texelMeta[]; };
+#define TEXEL_ATLAS_GATHER
+#define TEXEL_INDEX_TEX uLightmapIndexTex
+#define TEXEL_META(id) texelMeta[(id) - uint(g.uLightmap.w)]
 // This pixel's packed atlas texel (main sets it): not 0, the atlas's texels are its level 0 and the hashed cells its
 // coarser levels; 0 (no lightmap, or a surface the atlas leaves out), the hashed cells at every level.
 uint pixelLightmapTexel;
@@ -222,7 +228,8 @@ bool texelsAtLevel(vec3 worldPos, vec3 n, float faceBin, uint level, out vec3 ir
         for (int i = 0; i < TEXEL_CANDIDATES; ++i) { ids[i] = -1; weights[i] = 0.0; }
         int lm[4];
         float lw[4];
-        texelsAroundLightmap(atlasTexel, n, ivec2(g.uLightmap.yz), lm, lw);
+        if (!(g.uClipExact.w > 0.5 && texelsAroundLightmapGather(atlasTexel, n, ivec2(g.uLightmap.yz), lm, lw)))
+            texelsAroundLightmap(atlasTexel, n, ivec2(g.uLightmap.yz), lm, lw);
         // None of the four answers: a layer under another, nearly coplanar (Sponza's door ornaments are stacked so), wins
         // the depth test along thin lines, and its texels are rightly buried -- the pixel read nothing and took the
         // probes' light, bright dashes along the ornaments (2026-10-15). The neighbours' lightmap texels instead, out to
