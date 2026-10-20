@@ -197,11 +197,29 @@ internal sealed partial class SponzaLoop
     private static void SavePatches(string key, PatchStage p) => SaveStage(key, "patches", w =>
         { WriteArray(w, p.Pos); WriteArray(w, p.Nrm); WriteArray(w, p.Albedo); WriteArray(w, p.Openness); WriteArray(w, p.Placement); });
 
-    private static CouplingStage? LoadCouplings(string key) => LoadStage(key, "couplings", r => new CouplingStage
+    // skipSunlets (--live-texels, which never reads them: the live patch light has its own sun): the sunlets and their
+    // couplings are seeked past, ~1.07 GB of Sponza's 1.65 GB file (2026-10-20), and every patch gets an empty list.
+    private static CouplingStage? LoadCouplings(string key, bool skipSunlets = false) => LoadStage(key, "couplings", r =>
     {
-        Couplings = ReadJagged(r), SunletCouplings = ReadJagged(r),
-        SunletPos = ReadArray<Vector3>(r), SunletNrm = ReadArray<Vector3>(r), SunletAlbedo = ReadArray<Vector3>(r), Sky = ReadArray<float>(r),
+        var couplings = ReadJagged(r);
+        if (!skipSunlets)
+            return new CouplingStage
+            {
+                Couplings = couplings, SunletCouplings = ReadJagged(r),
+                SunletPos = ReadArray<Vector3>(r), SunletNrm = ReadArray<Vector3>(r), SunletAlbedo = ReadArray<Vector3>(r), Sky = ReadArray<float>(r),
+            };
+        SkipArray<int>(r); SkipArray<int>(r); SkipArray<float>(r);   // the sunlet couplings: counts, ids, weights
+        SkipArray<Vector3>(r); SkipArray<Vector3>(r); SkipArray<Vector3>(r);
+        var none = new (int, float)[couplings.Length][];
+        Array.Fill(none, Array.Empty<(int, float)>());
+        return new CouplingStage { Couplings = couplings, SunletCouplings = none, Sky = ReadArray<float>(r) };
     });
+
+    private static void SkipArray<T>(BinaryReader r) where T : unmanaged
+    {
+        var n = r.ReadInt32();
+        r.BaseStream.Seek((long)n * System.Runtime.CompilerServices.Unsafe.SizeOf<T>(), SeekOrigin.Current);
+    }
 
     private static void SaveCouplings(string key, CouplingStage c) => SaveStage(key, "couplings", w =>
     {

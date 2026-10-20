@@ -228,6 +228,8 @@ internal sealed partial class SponzaLoop
     // and the sun's (SponzaLoop.SunProvisional.cs) -- with no wait on the cook's setup or its sweep. Its texels' patches
     // are the GI bundle's (the cook's pick, "texel-patch"); without them, each texel's nearest patch.
     private GpuBufferHandle liveTexelPatch;
+    // liveTexelPatch came from the GI bundle's texel-patch stage (not a fill of -1): the sun nodes alias it unread.
+    private bool liveTexelPatchStored;
     // Rested before the split light's buffers were up (the first boot): written as soon as they are.
     private bool liveProvisionalPending;
 
@@ -291,6 +293,7 @@ internal sealed partial class SponzaLoop
     {
         if (!liveTexelPatch.Equals(default(GpuBufferHandle))) return;
         var picked = lightBakeKey is { } key ? LoadStage(key, "texel-patch", r => r.ReadString() != TexelPatchHeader ? null : ReadArray<int>(r)) : null;
+        liveTexelPatchStored = picked is not null;
         if (picked is null) { picked = new int[texelCount]; Array.Fill(picked, -1); }
         liveTexelPatch = Own(device.CreateGpuBuffer(texelCount * 4, MemoryMarshal.AsBytes(picked.AsSpan()), "sponza.live.texel-patch"));
     }
@@ -564,8 +567,7 @@ internal sealed partial class SponzaLoop
             };
         }
         var before = GC.GetTotalMemory(false);
-        System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
-        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
+        ReleaseHeap();
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] live texels: the transport cook's CPU side released (the managed heap {before / 1048576.0:N0} -> {GC.GetTotalMemory(false) / 1048576.0:N0} MB)."));
         LogMemoryInventory("the transport cook's CPU side released");
@@ -591,8 +593,7 @@ internal sealed partial class SponzaLoop
             cookContactScene = null;
         }
         var before = GC.GetTotalMemory(false);
-        System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
-        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
+        ReleaseHeap();
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] live texels: the CPU's ray scene dropped (the managed heap {before / 1048576.0:N0} -> {GC.GetTotalMemory(false) / 1048576.0:N0} MB; --keep-cpu-scene keeps it)."));
     }
@@ -608,8 +609,7 @@ internal sealed partial class SponzaLoop
         if (rtShadows && rtBuild is null || hitCellsOn && hitCellsBuffer.Equals(default(GpuBufferHandle)) || rayTraversalDropped && frameTracer is null) return;
         data.ReleaseGeometry();
         var before = GC.GetTotalMemory(false);
-        System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
-        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
+        ReleaseHeap(compact: true);
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] live texels: the ray data's geometry released (the managed heap {before / 1048576.0:N0} -> {GC.GetTotalMemory(false) / 1048576.0:N0} MB; --keep-cpu-scene keeps it)."));
     }

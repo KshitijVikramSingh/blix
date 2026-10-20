@@ -223,4 +223,21 @@ internal sealed partial class SponzaLoop
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[profile] session slowest: {f.Interval:0.0} ms{(f.Moving ? " moving" : "")}, {f.State}; wait {f.Wait:0.0} encode {f.Encode:0.0} present {f.Present:0.0}; gc pause {f.GcPause:0.0}{(f.Gen2 > 0 ? " (full)" : "")}; {Sections(f.Sections, 5)}"));
     }
+
+    // A full collection after the cook lets a large structure go. Not compacting (BLIX_GC_COMPACT=1: compacting, as
+    // before): the big arrays sit in the large-object heap, whose emptied segments go back to the OS without moving
+    // anything, and a compacting collection of a multi-GB heap paused the frame thread 2-5 s (2026-10-20).
+    private static readonly bool gcCompact = Environment.GetEnvironmentVariable("BLIX_GC_COMPACT") == "1";
+
+    // compact: the last and largest release (the ray geometry's, under the cook screen) compacts, so the heap's committed
+    // memory goes back to the OS (~2 GB more stayed committed without it).
+    private static void ReleaseHeap(bool compact = false)
+    {
+        var pause = GC.GetTotalPauseDuration();
+        compact |= gcCompact;
+        if (compact) System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: compact);
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[VulkanSponza] heap released: paused {(GC.GetTotalPauseDuration() - pause).TotalMilliseconds:0} ms; committed {GC.GetGCMemoryInfo().TotalCommittedBytes / 1048576.0:N0} MB{(compact ? " (compacting)" : "")}."));
+    }
 }

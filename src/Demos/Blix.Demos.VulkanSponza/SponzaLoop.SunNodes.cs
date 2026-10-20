@@ -968,6 +968,10 @@ internal sealed partial class SponzaLoop
     private void RunSunNodePassesNow()
     {
         using var profScope = Prof("gather.host");
+        // The ray data's geometry goes as the gather starts, under the cook screen, rather than as the light lands:
+        // everything that reads it (the tracer, the hit cells, the foliage points) is built by now, and its compacting
+        // collection paused a lit frame ~4 s when it ran at the landing (2026-10-20). A no-op once released.
+        ReleaseRayGeometry();
         // --live-transfer: the light change's cook is the transfer's pass, with nothing traced (SponzaLoop.Transfer.cs).
         // --live-transfer: the light change's cook is the transfer's pass, then the gather of the texels it flagged.
         if (TransferOn && transferReady && !transferCheck && sunNodeRefineRound == 0 && sunNodeFirst == 0 && sunNodePass == 0
@@ -1261,6 +1265,15 @@ internal sealed partial class SponzaLoop
     private void RecordSunNodePatchPick()
     {
         var live = texelLiveIds!;
+        // The live solve's copy, read from the same stage: aliased without reading the 66 MB again.
+        if (sunNodePatchFirst == 0 && liveTexels && liveTexelPatchStored && !liveTexelPatch.Equals(default(GpuBufferHandle)))
+        {
+            if (!sunNodeTexelPatch.Equals(liveTexelPatch)) RetireGpuBuffer(sunNodeTexelPatch);
+            sunNodeTexelPatch = liveTexelPatch;
+            sunNodePatchFirst = live.Length;
+            sunNodeStage = sunNodeDiscoverIds.Length > 0 ? SunNodeStage.Discover : SunNodeStage.Tracing;
+            return;
+        }
         if (sunNodePatchFirst == 0 && lightBakeKey is { } key
             && LoadStage(key, "texel-patch", r => r.ReadString() != TexelPatchHeader ? null : ReadArray<int>(r)) is { } stored)
         {

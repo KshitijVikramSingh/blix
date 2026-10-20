@@ -348,7 +348,7 @@ internal sealed partial class SponzaLoop
         // Each stage from its own cache; the couplings and the sun visibility only over the patches they were made for.
         Mark("loads");
         var patchStage = LoadPatches(stageKeys.Patches);
-        var couplingStage = patchStage is null ? null : LoadCouplings(stageKeys.Couplings);
+        var couplingStage = patchStage is null ? null : LoadCouplings(stageKeys.Couplings, skipSunlets: liveTexels);
         var sunVisStage = patchStage is null ? null : LoadSunVis(stageKeys.SunVis);
         var texelStage = LoadTexels(stageKeys.Texels);
 

@@ -319,8 +319,7 @@ internal sealed partial class SponzaLoop
             cookContactTracer = null;
             cookContactScene = null;
         }
-        System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
-        GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+        ReleaseHeap();
         Console.WriteLine(string.Create(System.Globalization.CultureInfo.InvariantCulture,
             $"[VulkanSponza] cook: its tests' data let go; the managed heap {before / 1048576.0:N0} -> {GC.GetTotalMemory(false) / 1048576.0:N0} MB."));
     }
