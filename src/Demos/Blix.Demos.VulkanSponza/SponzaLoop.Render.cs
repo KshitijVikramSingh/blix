@@ -911,7 +911,11 @@ internal sealed partial class SponzaLoop
                     RecordIncidentClipmap(incidentInvProj, incidentInvView, halfWidth, halfHeight, frame.Width, frame.Height, half: true);
                     RecordLightingUpsample(incidentInvProj, incidentInvView, frame.Height);
                 }
-                else RecordIncidentClipmap(incidentInvProj, incidentInvView, frame.Width, frame.Height, frame.Width, frame.Height);
+                else if (IncidentPassNeeded())
+                {
+                    RecordIncidentClipmap(incidentInvProj, incidentInvView, frame.Width, frame.Height, frame.Width, frame.Height);
+                    RecordIncidentHistory();
+                }
             }
             // Before the clipmap's first solve there is nothing to read, and the lit pass does not (uIncident.z is 0
             // until then). Recorded empty anyway: the graph runs a pass with nothing drawn, so its Clear load op
@@ -1246,6 +1250,7 @@ internal sealed partial class SponzaLoop
             "normal" => "normal mapping",
             "cull"    => "camera frustum culling",
             "castercull" => "shadow caster culling against the camera",
+            "increuse" => "the incident pass reusing last frame's answer at rest (OFF: every pixel every frame)",
             "occlskip" => "the occlusion test and late pre-pass skipped while nothing moves (OFF: every frame)",
             "leaflookup" => "pixels the atlas leaves out reading one coarser texel level alone (OFF: both levels)",
             "lightlets" => "the traced shadows answered by the baked sun records where they can (OFF: every pixel traced)",

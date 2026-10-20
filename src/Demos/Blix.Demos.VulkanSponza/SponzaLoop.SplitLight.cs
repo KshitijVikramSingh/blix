@@ -221,6 +221,7 @@ internal sealed partial class SponzaLoop
         // again the next frame too.
         if (!splitComposeDirty && sky == splitComposedSky && sun == splitComposedSun && splitComposeAgainFrame < framesRendered) return;
         splitComposeDirty = false;
+        MarkIncidentDirty();   // the texels' light changes: the incident pass recomputes every pixel (SponzaLoop.IncidentReuse.cs)
         splitComposedSky = sky;
         splitComposedSun = sun;
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,

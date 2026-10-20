@@ -411,6 +411,7 @@ internal sealed partial class SponzaLoop
         freezeCascades = args.Flag("freeze-cascades");
         unmappedCoarse = args.Flag("unmapped-coarse");
         occlusionAlways = args.Flag("occlusion-always");
+        incidentReuse = !args.Flag("no-incident-reuse");
         fineAll = args.Flag("fine-all");
         // --fine-contact R (0.9; 0 off): fine texels more closed than their coarse cells (their contact ratio under R)
         // flagged, first (--no-fine-contact-first: by their score among the rest). Crevices' seams 0.835 -> 0.932 (the
@@ -634,6 +635,15 @@ internal sealed partial class SponzaLoop
         incidentHandle = graph.ColorTarget("incident-light", TextureFormat.Rgba16F, fullSize);
         incidentGradientHandle = graph.ColorTarget("incident-gradient", TextureFormat.Rgba16F, fullSize);
         // RenderSettings.HalfResLighting: the incident pass into these, lighting-upsample back into the two above.
+        // Last frame's incident light and gradient, for reuse (incident_clipmap.frag, uReuse); copied after the lit pass.
+        incidentPrevHandle = graph.ColorTarget("incident-light-prev", TextureFormat.Rgba16F, fullSize);
+        incidentGradientPrevHandle = graph.ColorTarget("incident-gradient-prev", TextureFormat.Rgba16F, fullSize);
+        // Without the pre-pass's motion and keys (MSAA): 1x1 stand-ins the shader declares, and no reuse.
+        if (!SurfaceTargets)
+        {
+            reuseStandInFloat = graph.ColorTarget("reuse-stand-in-float", TextureFormat.Rg16F, new FixedGraphSize(1, 1));
+            reuseStandInUint = graph.ColorTarget("reuse-stand-in-uint", TextureFormat.R32Uint, new FixedGraphSize(1, 1));
+        }
         incidentHalfHandle = graph.ColorTarget("incident-light-half", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(0.5f));
         incidentGradientHalfHandle = graph.ColorTarget("incident-gradient-half", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(0.5f));
 
@@ -848,6 +858,7 @@ internal sealed partial class SponzaLoop
             // The cascades: the texel level rule asks whether a pixel has direct sun (texelSunlit).
             for (var c = 0; c < CascadeCount; c++) incidentBuilder = incidentBuilder.Read(cascadeHandles[c]);
             incidentBuilder = incidentBuilder.Read(lightmapEnabled ? lightmapTexelHandle : surfaceKeyHandle);
+            incidentBuilder = IncidentReuseReads(incidentBuilder);
             incidentPassHandle = incidentBuilder.Shader(incidentClipmapInterface).Handle;
             // The same pass at half resolution (RenderSettings.HalfResLighting); a frame records one of the two.
             var halfBuilder = graph.GraphicsPass("incident-light-half")
@@ -857,6 +868,7 @@ internal sealed partial class SponzaLoop
                 .Read(SampleablePrepassNormal);
             for (var c = 0; c < CascadeCount; c++) halfBuilder = halfBuilder.Read(cascadeHandles[c]);
             halfBuilder = halfBuilder.Read(lightmapEnabled ? lightmapTexelHandle : surfaceKeyHandle);
+            halfBuilder = IncidentReuseReads(halfBuilder);
             incidentHalfPassHandle = halfBuilder.Shader(incidentClipmapInterface).Handle;
         }
 
@@ -908,6 +920,14 @@ internal sealed partial class SponzaLoop
         litPass = litPass.Read(incidentHandle);
         litPass = litPass.Read(incidentGradientHandle);
         litPassHandle = litPass.Handle;
+        // After the lit pass, the last reader of this frame's incident light: it becomes the next frame's (reuse).
+        incidentHistoryPassHandle = graph.GraphicsPass("incident-history")
+            .Target(incidentPrevHandle, LoadOp.DontCare, StoreOp.Store)
+            .Target(incidentGradientPrevHandle, LoadOp.DontCare, StoreOp.Store)
+            .Read(incidentHandle)
+            .Read(incidentGradientHandle)
+            .Shader(Reflect("present.vert", "copy_incident.frag"))
+            .Handle;
 
         // One pass per parity. Only one is recorded each frame; the other's target is that frame's
         // history, and ReadHistory is what lets a pass declare a read of it before it is rewritten.
@@ -1087,6 +1107,10 @@ internal sealed partial class SponzaLoop
                 new[] { BlendState.Disabled },   // one target: the count rides in its alpha
                 taaPassHandles[i], $"taa{i}");
         }
+        incidentHistoryPipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(presentVertSpv,
+                File.ReadAllBytes(Path.Combine(shaderDir, "copy_incident.frag.spv")), Reflect("present.vert", "copy_incident.frag"), "copy_incident")),
+            VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
+            new[] { BlendState.Disabled, BlendState.Disabled }, incidentHistoryPassHandle, "copy_incident");
         if (SurfaceTargets)
         {
             var copyKeyInterface = Reflect("present.vert", "copy_key.frag");

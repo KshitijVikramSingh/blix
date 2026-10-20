@@ -142,7 +142,7 @@ internal sealed partial class SponzaLoop
                 new ShaderTextureBinding("uClipmapIrradiance", clipmapIrradiance),
                 new ShaderTextureBinding("uClipmapDepth", clipmapDepth),
                 new ShaderTextureBinding("uIrradiance", irradianceCubeTexture),
-            }.Concat(TexelCascadeTextures()).Append(LightmapTexelTexture()).ToArray(),
+            }.Concat(TexelCascadeTextures()).Append(LightmapTexelTexture()).Concat(IncidentReuseTextures()).ToArray(),
             pushConstants: null,
             uniforms: new ShaderUniform[]
             {
@@ -168,6 +168,7 @@ internal sealed partial class SponzaLoop
                 new("uLightmap", new Vector4Uniform(LightmapUniform)),
                 new("uTexelLevels", new Vector4Uniform(TexelLevelsUniform(frameHeight))),
                 new("uHalf", new Vector4Uniform(new Vector4(half ? 1f : 0f, sub.X, sub.Y, 0f))),
+                new("uReuse", new Vector4Uniform(IncidentReuseUniform(half))),
             }.Concat(TexelSunUniforms()).ToArray(),
             buffers: new[] { new ShaderBufferBinding("ClipmapState", clipmapState), new ShaderBufferBinding("ScreenProbeTiles", screen.Tiles), new ShaderBufferBinding("ScreenProbes", screen.Probes), new ShaderBufferBinding("SurfaceIndex", surfaceIndex) }.Concat(texel.Buffers).Append(reference.Buffer).Append(new ShaderBufferBinding("LightmapIndexMap", LightmapIndexMap())).Append(new ShaderBufferBinding("IncidentCensus", IncidentCensusBuffer()))
                 // The ray scene, for --clipmap-exact-visibility (declared always; read only then).
@@ -303,6 +304,7 @@ internal sealed partial class SponzaLoop
             clipmapRested++;
             return;
         }
+        MarkIncidentDirty();   // the probes solve: what the incident pass reads where texels do not answer changes
         // Staged (ClipmapStaged): a wave in flight holds its blocks where they were when it started -- the slots it
         // picked must still be the cells it traced when it resolves -- so the clipmap follows the camera only as a wave
         // starts (frame A), and the wave's later phases run with its own origins, frame and seed.

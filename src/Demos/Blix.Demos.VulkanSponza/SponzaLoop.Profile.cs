@@ -187,6 +187,7 @@ internal sealed partial class SponzaLoop
             profMetalTraceMs = trace.TotalGpuMs; profMetalTraces = trace.Dispatches;
             profMetalShadowMs = shadow.TotalGpuMs; profMetalShadows = shadow.Dispatches;
         }
+        Console.WriteLine($"[profile]   {IncidentReuseCounts()}");
         // --ab: the window's frames by phase, the same process and thermal state.
         if (abMode.Length > 0)
         {

@@ -53,7 +53,17 @@ layout(set = 0, binding = 0) uniform IncidentClipmap {
                          // frame's pixels by the path they take (IncidentCensus, SponzaLoop.IncidentCensus.cs); zw unused
     vec4 uHalf;          // x 1: this target is half the frame (RenderSettings.HalfResLighting), each pixel standing for
                          // the full-res pixel 2p + yz of its 2x2 (a different one each frame; lighting_upsample.frag)
+    vec4 uReuse;         // x 1: reuse last frame's answer (SponzaLoop.Clipmap.cs, IncidentReuseNow); y the pixel of each
+                         // 2x2 recomputed this frame (x + 2y), every other one reprojected where its surface matches
 } g;
+
+// Last frame's answer, for reuse: the pixel's motion, its surface key now and a frame ago, the incident light and
+// gradient as the lit pass read them (copy_incident.frag).
+layout(set = 0, binding = 39) uniform sampler2D uReuseVelocity;
+layout(set = 0, binding = 40) uniform usampler2D uReuseKey;
+layout(set = 0, binding = 41) uniform usampler2D uReuseKeyPrev;
+layout(set = 0, binding = 42) uniform sampler2D uIncidentPrev;
+layout(set = 0, binding = 43) uniform sampler2D uIncidentGradientPrev;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
 layout(set = 0, binding = 2) uniform sampler2D uPrepassNormal;
@@ -359,6 +369,23 @@ void main() {
         return;
     }
     vec2 pixelUv = (vec2(pixel) + 0.5) / vec2(textureSize(uSceneDepth, 0));
+    // Reuse (at rest: the texels, the probes and the light still): three of each 2x2 take last frame's answer where the
+    // same surface showed there, reprojected by the pixel's motion; the fourth recomputes, a different one each frame,
+    // so a pixel's answer is never more than four frames old. The texel lookups are the frame's largest pass (~10-20 ms
+    // at 2880x1620, 2026-10-20); the light they read is low-frequency by construction (a texel spans 6-24 px).
+    if (g.uReuse.x > 0.5 && uint(pixel.x & 1) + 2u * uint(pixel.y & 1) != uint(g.uReuse.y)) {
+        ivec2 size = textureSize(uSceneDepth, 0);
+        vec2 prevUv = pixelUv - texelFetch(uReuseVelocity, pixel, 0).xy;
+        ivec2 pp = ivec2(floor(prevUv * vec2(size)));
+        if (all(greaterThanEqual(pp, ivec2(0))) && all(lessThan(pp, size))) {
+            uint key = texelFetch(uReuseKey, pixel, 0).r;
+            if (key != 0u && key == texelFetch(uReuseKeyPrev, pp, 0).r) {
+                outIncident = texelFetch(uIncidentPrev, pp, 0);
+                outIncidentGradient = texelFetch(uIncidentGradientPrev, pp, 0);
+                return;
+            }
+        }
+    }
     vec4 view = g.uInvProjection * vec4(pixelUv * 2.0 - 1.0, raw, 1.0);
     vec3 worldPos = (g.uInvView * vec4(view.xyz / view.w, 1.0)).xyz;
     float viewDepth = abs(view.z / view.w);
