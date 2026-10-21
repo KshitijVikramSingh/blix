@@ -76,7 +76,12 @@ internal sealed partial class SponzaLoop
         if (args.Int("ref-bounces") is { } rb) refBounces = Math.Clamp(rb, 1, 64);
         if (args.Int("ref-paths") is { } rp) refPaths = Math.Clamp(rp, 16, 1 << 20);
         if (args.Int("ref-seed") is { } rs) refSeed = rs;
-        refSunDisc = args.Flag("ref-sun-disc");
+        refSunDisc = args.String("ref-sun") switch
+        {
+            null or "disc" => true,
+            "point" => false,
+            _ => throw new AppArgsException("--ref-sun takes disc or point."),
+        };
         if (args.String("shadow-maps") is { } shadowMaps)
         {
             var sm = shadowMaps.Split(',');
@@ -422,6 +427,7 @@ internal sealed partial class SponzaLoop
         if (args.Float("lightmap-edge-inset") is { } edgeInset) LightmapEdgeInset = Math.Clamp(edgeInset, 0f, 0.1f);
         atlasCoarse = args.Flag("atlas-coarse");
         if (args.Int("coarse-filter") is { } coarsePasses) coarseFilterPasses = Math.Max(0, coarsePasses);
+        coarseFilterLinear = args.Flag("coarse-filter-linear");
         cookedSkyVis = !args.Flag("no-cooked-sky-vis");
         contactAllRays = !args.Flag("contact-rays-own");
         if (args.Int("sky-vis-rays") is { } svr) skyVisRays = Math.Max(32, svr / 32 * 32);
@@ -440,7 +446,6 @@ internal sealed partial class SponzaLoop
         fineRefineContactOnly = !args.Flag("fine-refine-all");
         regatherSky = args.Flag("regather-sky");
         if (args.Int("live-bounces") is { } lb) LiveBouncesToRest = Math.Max(1, lb);
-        sunEdges = args.Flag("sun-edges");
         // --live-max-rays N (4 x --live-rays): the refine's ceiling a texel in live mode -- the budget's other half. At
         // --texel-max-rays' 2,048 a 128-ray sweep of the coarse levels refined a million texels for 15 rounds (~3 min).
         if (liveTexels && args.Int("texel-max-rays") is null) texelMaxRays = args.Int("live-max-rays") ?? 4 * liveRays;

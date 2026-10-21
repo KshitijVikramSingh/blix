@@ -462,6 +462,8 @@ internal sealed partial class SponzaLoop
     // The coarse cells' parts filtered before the fine copy reads them (coarse_filter.comp): their ray noise went onto
     // every fine texel each lights, cell-sized blobs (Cornell, 2026-10-21). --coarse-filter N passes (0: none).
     private int coarseFilterPasses = 1;
+    // --coarse-filter-linear: the filter a local linear fit, not a weighted mean (coarse_filter.comp): no bias beside a crease.
+    private bool coarseFilterLinear;
     private ShaderInterface coarseFilterInterface = null!;
     private PipelineHandle coarseFilterPipeline;
     private GpuBufferHandle coarseFilterIds, coarseFilterSky, coarseFilterSun;
@@ -490,7 +492,7 @@ internal sealed partial class SponzaLoop
                 new("uTexelGrid", new Vector4Uniform(texelGrid)),
                 new("uTexelParams", new Vector4Uniform(new Vector4(texelCapacity, 0f, 0f, 0f))),
                 new("uLightmap", new Vector4Uniform(LightmapUniform)),
-                new("uEdge", new Vector4Uniform(new Vector4(texelFilterSymmetric ? 1f : 0f, texelFilterArea ? 1f : 0f, 0f, 0f))),
+                new("uEdge", new Vector4Uniform(new Vector4(texelFilterSymmetric ? 1f : 0f, texelFilterArea ? 1f : 0f, coarseFilterLinear ? 1f : 0f, 0f))),
             },
             new[] { AtlasGatherTexture() },
             Buffers: new[]

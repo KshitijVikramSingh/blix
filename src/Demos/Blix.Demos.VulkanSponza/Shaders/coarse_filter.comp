@@ -6,6 +6,10 @@
 // each cell's own ray noise (~1.3% of its light at 384 rays) went onto every fine texel it lights, cell-sized blobs the
 // eye reads as patches (Cornell, 2026-10-21). The compose filters the composed light at rest too, but the copy reads the
 // parts.
+// uEdge.z 1 (--coarse-filter-linear): a local linear fit in the surface's plane instead of the weighted mean -- the light as
+// c + g.(offset), c kept. Where the neighbourhood is one-sided (a cell beside a crease, the surface ending) the mean's
+// centre sits ~0.4 of a cell off the cell's, and the light's slope there times that offset came out as a bias; the fit has
+// none to first order, and over a full neighbourhood it is the mean exactly (the offsets' moments vanish).
 //   mode 0  each coarse cell's filtered parts into FilteredSky / FilteredSun
 //   mode 1  those back into the parts (the confidence words kept)
 
@@ -76,16 +80,42 @@ void main() {
     finestGrid.level = 0u;
     vec3 accSky = vec3(0.0), accSun = vec3(0.0);
     float total = 0.0;
+    // The linear fit's moments: the offsets (in the cell's tangent plane, in cells) and the light against them.
+    vec3 ta = normalize(abs(n.y) < 0.99 ? cross(n, vec3(0.0, 1.0, 0.0)) : cross(n, vec3(1.0, 0.0, 0.0)));
+    vec3 tb = cross(n, ta);
+    float sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0, syy = 0.0;
+    vec3 skyX = vec3(0.0), skyY = vec3(0.0), sunX = vec3(0.0), sunY = vec3(0.0);
+    vec3 skyLo = vec3(1e30), skyHi = vec3(0.0), sunLo = vec3(1e30), sunHi = vec3(0.0);
     for (uint k = 0u; k < 27u; ++k) {
         TexelGrid tg;
         int other = texelFilterNeighbour(int(id), k, position, n, finestGrid, u.uLightmap, tg);
         if (other < 0 || (skyPart[other].y & 0x10000u) == 0u) continue;
         float w = texelFilterWeight(other, position, n, tg, centre, composedLum(uint(other)), u.uEdge);
-        accSky += w * unpackRgb9e5(skyPart[other].x);
-        accSun += w * unpackRgb9e5(sunPart[other].x);
+        vec3 ks = unpackRgb9e5(skyPart[other].x), kn = unpackRgb9e5(sunPart[other].x);
+        accSky += w * ks;
+        accSun += w * kn;
         total += w;
+        vec3 dp = (TEXEL_POSITION(other).xyz - position) / tg.spacing;
+        float x = dot(dp, ta), y = dot(dp, tb);
+        sx += w * x; sy += w * y; sxx += w * x * x; sxy += w * x * y; syy += w * y * y;
+        skyX += w * x * ks; skyY += w * y * ks; sunX += w * x * kn; sunY += w * y * kn;
+        if (w > 1e-4) { skyLo = min(skyLo, ks); skyHi = max(skyHi, ks); sunLo = min(sunLo, kn); sunHi = max(sunHi, kn); }
     }
     if (total <= 1e-6) return;
-    if (sky) filteredSky[i] = packRgb9e5(accSky / total);
-    filteredSun[i] = packRgb9e5(accSun / total);
+    vec3 outSky = accSky / total, outSun = accSun / total;
+    if (u.uEdge.z > 0.5) {
+        // Weighted least squares for (c, gx, gy), the slope's terms damped (a tenth of the weight: a line of neighbours, or
+        // two, leaves the slope across it unknown, and the fit then leans to the mean); c is the first row of the inverse.
+        float lam = 0.1 * total;
+        float a00 = total, a01 = sx, a02 = sy, a11 = sxx + lam, a12 = sxy, a22 = syy + lam;
+        float c00 = a11 * a22 - a12 * a12, c01 = a02 * a12 - a01 * a22, c02 = a01 * a12 - a02 * a11;
+        float det = a00 * c00 + a01 * c01 + a02 * c02;
+        if (abs(det) > 1e-8 * total * total * total) {
+            // Never past what the neighbours hold: noise in a one-sided fit would otherwise extrapolate.
+            outSky = clamp((c00 * accSky + c01 * skyX + c02 * skyY) / det, skyLo, skyHi);
+            outSun = clamp((c00 * accSun + c01 * sunX + c02 * sunY) / det, sunLo, sunHi);
+        }
+    }
+    if (sky) filteredSky[i] = packRgb9e5(outSky);
+    filteredSun[i] = packRgb9e5(outSun);
 }

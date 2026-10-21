@@ -78,13 +78,16 @@ internal sealed partial class SponzaLoop
     // --sun-nodes-exact-sun (one sun): the hits' sun by a shadow ray each, as the bake's gather has it -- the check on
     // the sun bits' interpolation.
     private bool sunNodeExact;
-    // --hit-sun-ray: every gather hit's sun by its own shadow ray, traced by the Metal trace in the same thread as the hit
-    // (MetalRayTracer.Trace's sun, hit flag 8), in place of the cells' and the search's blend of the texels' sun bits --
-    // which made O(1) errors within a grid spacing of where a shadow edge meets a crease (tools/gi-model/sun_vis.py,
-    // 2026-10-21). The cells and the search still answer the patch. --hit-sun-disc: each ray toward its own point of the
-    // sun's disc (ShadowsSettings.SunDiscDegrees), as the frame's direct sun has it; without, the point sun the GPU
-    // reference traces.
-    private bool hitSunRay, hitSunDisc;
+    // --hit-sun disc|point|cells (disc): every gather hit's sun by its own shadow ray, traced by the Metal trace in the
+    // same thread as the hit (MetalRayTracer.Trace's sun, hit flag 8), toward its own point of the sun's disc
+    // (ShadowsSettings.SunDiscDegrees, as the frame's direct sun and the GPU reference have it) or the disc's centre --
+    // in place of the cells' and the search's blend of the texels' sun bits, which made O(1) errors within a grid spacing
+    // of where a shadow edge meets a crease (tools/gi-model/sun_vis.py): Cornell's creases |error| 2.38% -> 2.08%, rms
+    // 6.5 -> 5.1%, no noise added, 3.0 -> 3.1 ms a pass (2026-10-21). The cells and the search still answer the patch.
+    // Not yet where sheets transmit (the bits' shadow rays pass the sheet they leave and go through cloth, blix_shadow;
+    // the hit's does neither): those scenes keep the cells' sun until the materials' own pass.
+    private bool hitSunRay = true, hitSunDisc = true;
+    private bool hitSunSaid;
     // The band's guides steer half of each texel's rays (texel_nodes_rays.comp); --sun-nodes-no-guide: cosine rays only.
     private bool sunNodeGuide = true;
     private bool sunNodeGuided;
@@ -141,8 +144,13 @@ internal sealed partial class SponzaLoop
         sunNodeOnFrame = args.Flag("split-on-frame");
         if (args.Int("sun-nodes-discover-stride") is { } ds) sunNodeDiscoverStride = Math.Max(0, ds);
         if (args.Float("sun-nodes-lift") is { } lift) sunNodeLift = Math.Max(0f, lift);
-        hitSunRay = args.Flag("hit-sun-ray") || args.Flag("hit-sun-disc");
-        hitSunDisc = args.Flag("hit-sun-disc");
+        switch (args.String("hit-sun"))
+        {
+            case null or "disc": break;
+            case "point": hitSunDisc = false; break;
+            case "cells": hitSunRay = hitSunDisc = false; break;
+            default: throw new AppArgsException("--hit-sun takes disc, point or cells.");
+        }
         if (args.Float("sun-nodes-unknown-sun") is { } us) sunNodeUnknownSun = Math.Clamp(us, 0f, 1f);
         sunNodeCpuSolve = args.Flag("sun-nodes-cpu-solve");
         sunNodeGuide = !args.Flag("sun-nodes-no-guide");
@@ -916,7 +924,7 @@ internal sealed partial class SponzaLoop
 
     // The column whose sun the gather's hits trace (--hit-sun-ray): the one sun of a live cook's columns; -1 off, or with
     // several suns (a cooked set of hours), where one shadow ray a hit answers only one of them.
-    private int HitSunColumn => hitSunRay && sunNodeKinds.Count(k => (k & 1) != 0) == 1 && sunNodeBitDirections.Length == sunNodeKinds.Length
+    private int HitSunColumn => hitSunRay && rtSheetRows == 0 && sunNodeKinds.Count(k => (k & 1) != 0) == 1 && sunNodeBitDirections.Length == sunNodeKinds.Length
         ? Array.FindIndex(sunNodeKinds, k => (k & 1) != 0) : -1;
 
     private static uint SunNodeSeed(int first, int seedPass, int discover) =>
@@ -952,6 +960,13 @@ internal sealed partial class SponzaLoop
         var t1 = Stopwatch.GetTimestamp();
         var cells = HitCellsShade(0);
         var hitSun = HitSunColumn;
+        if (!hitSunSaid)
+        {
+            hitSunSaid = true;
+            Console.WriteLine(hitSun >= 0
+                ? $"[VulkanSponza] gather: each hit's sun by its own shadow ray, toward {(hitSunDisc ? "a point of the sun's disc" : "the sun's centre")} (--hit-sun)."
+                : $"[VulkanSponza] gather: each hit's sun from its cell's blend of the texels' sun bits ({(!hitSunRay ? "--hit-sun cells" : rtSheetRows > 0 ? $"{rtSheetRows:N0} rows of sheets that transmit: the hit's ray does not go through them yet" : "several suns")}).");
+        }
         if (hitSun >= 0)
             frameTracer!.Trace(sunNodeRaysBuffer, sunNodeHits, slice * 32, SunNodeSeed(first, seedPass, 0), closestOnly: true,
                 sun: sunNodeBitDirections[hitSun] with { W = sunNodeLift }, reach: rayReach, discTan: hitSunDisc ? SunDiscTangent : 0f);
@@ -1142,7 +1157,7 @@ internal sealed partial class SponzaLoop
                 // A ray's sky as the gather takes it: strength 1, one mip blurred.
                 new("uSky", new Vector4Uniform(new Vector4(1f, 1f, skyKept ? SunColumn() + 1 : 0f, 0f))),
                 // w: the hit cells (SponzaLoop.HitCells.cs) answer the hit, their sun bit shot for this cook's sun.
-                new("uLookup", new Vector4Uniform(new Vector4(sunNodePlane, sunNodeSigma, cellSplit != 0 ? -cellSplit : hitCellNear, cells ? 1f : 0f))),
+                new("uLookup", new Vector4Uniform(new Vector4(sunNodePlane, sunNodeSigma, hitCellNear, cells ? 1f : 0f))),
                 new("uFoliage", new Vector4Uniform(new Vector4(sunNodeFoliageSlots, discover, exactMode, exactColumn + 1))),
                 new("uDetail", new Vector4Uniform(new Vector4(first, detail ? 1f : 0f, CensusOn(discover) ? 1f : 0f, censusPlacements))),
                 new("uFar", new Vector4Uniform(exactMode is > 0f and < 2.5f ? Vector4.Zero : FarUniform(discover))),
