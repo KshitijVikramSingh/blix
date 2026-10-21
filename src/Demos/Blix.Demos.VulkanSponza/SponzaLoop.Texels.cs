@@ -72,8 +72,11 @@ internal sealed partial class SponzaLoop
     // --texel-dump PATH (SponzaLoop.Texels.cs, UploadTexels).
     private string? texelDumpPath;
     // The filter's edge measured against the brighter texel, not the centre (texel_filter.comp): equal to the centre's on
-    // every testbed (2026-10-13); off, a switch while Sponza's hashed texels are looked into.
-    private bool texelFilterSymmetric;
+    // every testbed (2026-10-13), when few texels were gathered at few rays. Against the centre, a skewed gather's noisy-
+    // low texels drop their brighter neighbours as edges and stay low, the noisy-high ones are pulled down: the light
+    // filtered 6-9% dark where it comes by rare paths at 128 rays (tools/gi-model/skewed_filter.py), as the crevices'
+    // gathered crease texels are; against the brighter, none. --texel-filter-symmetric 0: against the centre.
+    private bool texelFilterSymmetric = true;
     // The filter weighs each neighbour by the surface it holds in its cell, as the pixels' lookup does (texel_filter.comp).
     private bool texelFilterArea;
     private const float TexelNoiseFloor = 1e-4f;
