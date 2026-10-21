@@ -640,7 +640,10 @@ void main() {
 
     // With the field the sky's diffuse light arrives through it, as the sky the surface actually sees;
     // adding the cube's irradiance times visibility here would count it twice.
-    vec3 diffuseIBL = incidentOn ? vec3(0.0) : irradiance * albedo * skyVisibility;
+    // Lambert: radiance out is albedo/PI times the irradiance in, as the direct sun has it. Every cache and the
+    // irradiance cube hold irradiance E (PbrIblBaker integrates cos-weighted to E), so the /PI belongs here; shading
+    // them as albedo * E made all indirect light PI times too bright against the sun (fixed 2026-10-21).
+    vec3 diffuseIBL = incidentOn ? vec3(0.0) : irradiance * albedo / PI * skyVisibility;
 
     // Specular: prefiltered env at LOD = roughness × (mipCount - 1), times
     // the BRDF LUT integration (split-sum approximation of the specular term).
@@ -685,7 +688,7 @@ void main() {
             incident *= clamp(1.0 + dot(gradient, nLow - vizGeometricN) / lum, 1.0 - range, 1.0 + range);
         }
         vizBounceRaw = incident;
-        bounce = incident * albedo * (1.0 - metallic) * ao * (frame.uIncident.y > 0.5 ? 1.0 : visibility);
+        bounce = incident * albedo / PI * (1.0 - metallic) * ao * (frame.uIncident.y > 0.5 ? 1.0 : visibility);
     }
 
     // Sheen's own prefiltered environment, at the sheen roughness rather than the base one, times
@@ -707,8 +710,9 @@ void main() {
         // where the two sides of a sheet share it); without the field the sky is open.
         float backVis = incidentUsed ? incidentField.a : 1.0;
         vec3 backIrradiance = texture(samplerCube(uIrradiance, uLinearClamp), -cubeN).rgb * backVis;
+        // The helper returns irradiance times the transmitted fraction; Lambert about -N divides by PI.
         transmittedIBL = blix_diffuseTransmissionAmbient(
-            backIrradiance, dtColor, diffTrans) * ao * visibility;
+            backIrradiance, dtColor, diffTrans) / PI * ao * visibility;
     }
 
     // Same shape as `direct` above, deliberately: (base + transmitted) * sheenScale + sheen.
