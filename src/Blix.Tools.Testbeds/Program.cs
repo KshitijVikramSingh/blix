@@ -64,37 +64,9 @@ public static class Program
         var green = Matte("green", new Vector3(0.14f, 0.45f, 0.091f));
 
         var h = size / 2f;
-        const float t = 0.2f;                          // the shell's thickness
-        var mesh = new Mesh("cornell");
-        var w = mesh.UsePrimitive(white);
-        // One closed shell, 0.2 m thick: the inside's faces span the room exactly, the outside's the room and the shell,
-        // and rims close the open front and the skylight's shaft. Overlapping slabs (as before, 2026-10-21) were
-        // watertight but buried faces in one another -- the floor ran under the walls, each wall down into the floor --
-        // and the lightmap put texels there, the ones at the corners half inside a wall: the walls came out dirty in the
-        // cook and the image. Every face here is seen from somewhere, and its edges meet its neighbours' exactly.
         var s = skylight / 2f;
-        // The inside: floor, back, red left, green right, and the ceiling around the skylight (the front, +Z, open).
-        Quad(w, new Vector3(-h, 0f, -h), new(2f * h, 0, 0), new(0, 0, 2f * h), Vector3.UnitY);
-        Quad(w, new Vector3(-h, 0f, -h), new(2f * h, 0, 0), new(0, size, 0), Vector3.UnitZ);
-        Quad(mesh.UsePrimitive(red), new Vector3(-h, 0f, -h), new(0, 0, 2f * h), new(0, size, 0), Vector3.UnitX);
-        Quad(mesh.UsePrimitive(green), new Vector3(h, 0f, -h), new(0, 0, 2f * h), new(0, size, 0), -Vector3.UnitX);
-        Ring(w, size, -h, h, -h, h, s, -Vector3.UnitY);
-        // The skylight's shaft, through the shell's thickness, each side facing into the opening.
-        Quad(w, new Vector3(-s, size, -s), new(0, 0, 2f * s), new(0, t, 0), Vector3.UnitX);
-        Quad(w, new Vector3(s, size, -s), new(0, 0, 2f * s), new(0, t, 0), -Vector3.UnitX);
-        Quad(w, new Vector3(-s, size, -s), new(2f * s, 0, 0), new(0, t, 0), Vector3.UnitZ);
-        Quad(w, new Vector3(-s, size, s), new(2f * s, 0, 0), new(0, t, 0), -Vector3.UnitZ);
-        // The outside: under, behind, the two sides, and the roof around the skylight; flush with the opening in front.
-        Quad(w, new Vector3(-h - t, -t, -h - t), new(2f * (h + t), 0, 0), new(0, 0, 2f * h + t), -Vector3.UnitY);
-        Quad(w, new Vector3(-h - t, -t, -h - t), new(2f * (h + t), 0, 0), new(0, size + 2f * t, 0), -Vector3.UnitZ);
-        Quad(w, new Vector3(-h - t, -t, -h - t), new(0, 0, 2f * h + t), new(0, size + 2f * t, 0), -Vector3.UnitX);
-        Quad(w, new Vector3(h + t, -t, -h - t), new(0, 0, 2f * h + t), new(0, size + 2f * t, 0), Vector3.UnitX);
-        Ring(w, size + t, -h - t, h + t, -h - t, h, s, Vector3.UnitY);
-        // The front rim around the opening (z = h): below the floor, above the ceiling, beside each wall.
-        Quad(w, new Vector3(-h - t, -t, h), new(2f * (h + t), 0, 0), new(0, t, 0), Vector3.UnitZ);
-        Quad(w, new Vector3(-h - t, size, h), new(2f * (h + t), 0, 0), new(0, t, 0), Vector3.UnitZ);
-        Quad(w, new Vector3(-h - t, 0f, h), new(t, 0, 0), new(0, size, 0), Vector3.UnitZ);
-        Quad(w, new Vector3(h, 0f, h), new(t, 0, 0), new(0, size, 0), Vector3.UnitZ);
+        var mesh = new Mesh("cornell");
+        CornellShell(mesh, white, red, green, size, skylight);
 
         // The two blocks, white: a tall one back left, a short one front right, each turned as in the original.
         // Standing on the floor: no bottom face (it would lie on the floor, seen from nowhere).
@@ -117,6 +89,85 @@ public static class Program
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!);
         scene.ToGltf2().SaveGLTF(output);
         Console.WriteLine($"cornell: {size:0.##} m inside, {skylight:0.##} m skylight, a 0.2 m shell{(panel ? ", a hanging panel" : "")} -> {output}");
+        return 0;
+    }
+
+    /// <summary>
+    /// The Cornell box's room with cloth in the sun's shaft instead of its blocks: the scene for light through thin sheets.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Material response and transport through cloth judged on their own, as the Cornell box judges bounce: the room is
+    /// Cornell's (<see cref="CornellShell"/>: 6 m, a 1.5 m skylight, red and green walls) and nothing else in it is new. Two
+    /// sheets, double-sided and matte, scattering part of the light through themselves (KHR_materials_diffuse_transmission):
+    /// </para>
+    /// <list type="bullet">
+    /// <item>a flat white veil across the -X half of the shaft, 1 m under the skylight: the floor below it gets the sun
+    /// through cloth beside the sun itself, one edge between them;</item>
+    /// <item>a pleated red curtain hanging in the shaft, its folds 30 cm apart and 6 cm deep, the sun grazing them (17
+    /// degrees off vertical): fold shading, light through the folds, and the room behind it lit through red cloth.</item>
+    /// </list>
+    /// <para>
+    /// <c>--veil T</c>, <c>--curtain T</c>: the sheets' diffuse transmission (0.5, 0.4); 0 makes either opaque, the
+    /// same scene for the A/B. The curtain transmits its own hue; the veil white.
+    /// </para>
+    /// </remarks>
+    [BlixApp("drapes", Summary = "write the Cornell room with a veil and a pleated curtain in the sun's shaft, as glTF: a scene for light through cloth")]
+    public static int Drapes(AppArgs args)
+    {
+        var output = args.String("out") ?? "drapes.gltf";
+        var veilT = Math.Clamp(args.Float("veil") ?? 0.5f, 0f, 1f);
+        var curtainT = Math.Clamp(args.Float("curtain") ?? 0.4f, 0f, 1f);
+        const float size = 6f, skylight = 1.5f;
+        var white = Matte("white", new Vector3(0.73f, 0.73f, 0.73f));
+        var red = Matte("red", new Vector3(0.63f, 0.065f, 0.05f));
+        var green = Matte("green", new Vector3(0.14f, 0.45f, 0.091f));
+        var room = new Mesh("drapes_room");
+        CornellShell(room, white, red, green, size, skylight);
+
+        // The sun travels (-0.112, -0.957, -0.268) by default (SponzaLoop), so the shaft drifts -X and -Z as it falls:
+        // at height y its square is the skylight's offset by (6 - y) / 0.957 x (-0.112, -0.268).
+        static Vector2 Shaft(float y) => (6f - y) / 0.957f * new Vector2(-0.112f, -0.268f);
+        var s = skylight / 2f;
+        var veilAt = 5f;
+        var vo = Shaft(veilAt);
+        var veil = new Mesh("veil");
+        Quad(veil.UsePrimitive(Cloth("veil", new Vector3(0.8f, 0.8f, 0.8f), veilT, Vector3.One)),
+            new Vector3(-s - 0.1f + vo.X, veilAt, -s - 0.1f + vo.Y), new(s + 0.1f, 0, 0), new(0, 0, skylight + 0.2f), -Vector3.UnitY);
+
+        // The curtain: a sheet along X at the shaft's middle depth halfway down, its folds a sine in Z, smooth normals.
+        var curtainRed = new Vector3(0.6f, 0.12f, 0.1f);
+        var curtain = new Mesh("curtain");
+        var cp = curtain.UsePrimitive(Cloth("curtain", curtainRed, curtainT, curtainRed / MathF.Max(curtainRed.X, MathF.Max(curtainRed.Y, curtainRed.Z))));
+        const float period = 0.3f, depth = 0.06f, step = 0.02f, top = 4.6f, bottom = 1.2f;
+        var co = Shaft(3f);
+        float x0 = -2f, x1 = 1f, zc = co.Y;
+        var n = (int)MathF.Round((x1 - x0) / step);
+        for (var i = 0; i < n; i++)
+        {
+            Vertex At(float x, float y)
+            {
+                var k = 2f * MathF.PI / period;
+                var z = zc + 0.5f * depth * MathF.Sin(k * (x - x0));
+                var slope = 0.5f * depth * k * MathF.Cos(k * (x - x0));
+                return new Vertex(new Vector3(x, y, z), Vector3.Normalize(new Vector3(-slope, 0f, 1f)), new Vector2(x - x0, y));
+            }
+            float xa = x0 + i * step, xb = xa + step;
+            var a = At(xa, bottom);
+            var b = At(xb, bottom);
+            var c = At(xb, top);
+            var d = At(xa, top);
+            cp.AddTriangle(a, b, c);
+            cp.AddTriangle(a, c, d);
+        }
+
+        var scene = new SceneBuilder();
+        scene.AddRigidMesh(room, Matrix4x4.Identity);
+        scene.AddRigidMesh(veil, Matrix4x4.Identity);
+        scene.AddRigidMesh(curtain, Matrix4x4.Identity);
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!);
+        scene.ToGltf2().SaveGLTF(output);
+        Console.WriteLine($"drapes: the Cornell room, a veil (transmission {veilT:0.##}) and a pleated curtain ({curtainT:0.##}) in the shaft -> {output}");
         return 0;
     }
 
@@ -243,6 +294,43 @@ public static class Program
         return 0;
     }
 
+    // The Cornell box's room, size m inside: one closed 0.2 m shell, a skylight of side `skylight` in its ceiling, its front
+    // (+Z) open; white floor, back and ceiling, red left (-X) and green right (+X). Cornell and its variants share it.
+    private static void CornellShell(Mesh mesh, MaterialBuilder white, MaterialBuilder red, MaterialBuilder green, float size, float skylight)
+    {
+        var h = size / 2f;
+        const float t = 0.2f;                          // the shell's thickness
+        var w = mesh.UsePrimitive(white);
+        // One closed shell, 0.2 m thick: the inside's faces span the room exactly, the outside's the room and the shell,
+        // and rims close the open front and the skylight's shaft. Overlapping slabs (as before, 2026-10-21) were
+        // watertight but buried faces in one another -- the floor ran under the walls, each wall down into the floor --
+        // and the lightmap put texels there, the ones at the corners half inside a wall: the walls came out dirty in the
+        // cook and the image. Every face here is seen from somewhere, and its edges meet its neighbours' exactly.
+        var s = skylight / 2f;
+        // The inside: floor, back, red left, green right, and the ceiling around the skylight (the front, +Z, open).
+        Quad(w, new Vector3(-h, 0f, -h), new(2f * h, 0, 0), new(0, 0, 2f * h), Vector3.UnitY);
+        Quad(w, new Vector3(-h, 0f, -h), new(2f * h, 0, 0), new(0, size, 0), Vector3.UnitZ);
+        Quad(mesh.UsePrimitive(red), new Vector3(-h, 0f, -h), new(0, 0, 2f * h), new(0, size, 0), Vector3.UnitX);
+        Quad(mesh.UsePrimitive(green), new Vector3(h, 0f, -h), new(0, 0, 2f * h), new(0, size, 0), -Vector3.UnitX);
+        Ring(w, size, -h, h, -h, h, s, -Vector3.UnitY);
+        // The skylight's shaft, through the shell's thickness, each side facing into the opening.
+        Quad(w, new Vector3(-s, size, -s), new(0, 0, 2f * s), new(0, t, 0), Vector3.UnitX);
+        Quad(w, new Vector3(s, size, -s), new(0, 0, 2f * s), new(0, t, 0), -Vector3.UnitX);
+        Quad(w, new Vector3(-s, size, -s), new(2f * s, 0, 0), new(0, t, 0), Vector3.UnitZ);
+        Quad(w, new Vector3(-s, size, s), new(2f * s, 0, 0), new(0, t, 0), -Vector3.UnitZ);
+        // The outside: under, behind, the two sides, and the roof around the skylight; flush with the opening in front.
+        Quad(w, new Vector3(-h - t, -t, -h - t), new(2f * (h + t), 0, 0), new(0, 0, 2f * h + t), -Vector3.UnitY);
+        Quad(w, new Vector3(-h - t, -t, -h - t), new(2f * (h + t), 0, 0), new(0, size + 2f * t, 0), -Vector3.UnitZ);
+        Quad(w, new Vector3(-h - t, -t, -h - t), new(0, 0, 2f * h + t), new(0, size + 2f * t, 0), -Vector3.UnitX);
+        Quad(w, new Vector3(h + t, -t, -h - t), new(0, 0, 2f * h + t), new(0, size + 2f * t, 0), Vector3.UnitX);
+        Ring(w, size + t, -h - t, h + t, -h - t, h, s, Vector3.UnitY);
+        // The front rim around the opening (z = h): below the floor, above the ceiling, beside each wall.
+        Quad(w, new Vector3(-h - t, -t, h), new(2f * (h + t), 0, 0), new(0, t, 0), Vector3.UnitZ);
+        Quad(w, new Vector3(-h - t, size, h), new(2f * (h + t), 0, 0), new(0, t, 0), Vector3.UnitZ);
+        Quad(w, new Vector3(-h - t, 0f, h), new(t, 0, 0), new(0, size, 0), Vector3.UnitZ);
+        Quad(w, new Vector3(h, 0f, h), new(t, 0, 0), new(0, size, 0), Vector3.UnitZ);
+    }
+
     // The glTF vertex the cook reads in full: position, normal, one UV set (the cook generates the tangent).
     private sealed class Mesh : MeshBuilder<VertexPositionNormal, VertexTexture1, VertexEmpty>
     {
@@ -251,6 +339,13 @@ public static class Program
 
     private static MaterialBuilder Matte(string name, Vector3 albedo) =>
         new MaterialBuilder(name).WithMetallicRoughnessShader().WithBaseColor(new Vector4(albedo, 1f)).WithMetallicRoughness(0f, 1f);
+
+    // A matte sheet seen from both sides that scatters `transmission` of the light reaching it through itself, tinted by
+    // `transmitted` (KHR_materials_diffuse_transmission; its colour defaults to white, so it is always written).
+    private static MaterialBuilder Cloth(string name, Vector3 albedo, float transmission, Vector3 transmitted) =>
+        Matte(name, albedo).WithDoubleSide(true)
+            .WithDiffuseTransmissionFactor(null, transmission)
+            .WithDiffuseTransmissionColor(null, transmitted);
 
     // A horizontal face at height y over [x0, x1] x [z0, z1] around a square hole of half-width s at the centre: four
     // rectangles, facing n.

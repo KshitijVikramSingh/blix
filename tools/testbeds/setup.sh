@@ -15,7 +15,7 @@ COOKED="$BLIX_TESTBED_ASSETS"
 SRC="${BLIX_TESTBED_SRC:-${COOKED%/}-src}"
 dotnet build "$REPO/src/Blix.Tools.Cook" -v quiet --nologo >/dev/null
 # cornell-panel: the Cornell box with a panel hung from the skylight's edge (`--mover panel` swings it across the light).
-for scene in cornell cornell-panel thinwall crevices crevices-dark; do
+for scene in cornell cornell-panel thinwall crevices crevices-dark drapes; do
     app="${scene%-panel}"
     app="${app%-dark}"
     extra=()

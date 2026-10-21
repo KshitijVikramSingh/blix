@@ -159,6 +159,18 @@ internal sealed record SceneProfile(
         Packs = new ScenePack[] { new("cornell-panel", Required: true) },
     };
 
+    /// <summary>The Cornell room with a veil and a pleated curtain in the sun's shaft (<c>blix drapes</c>): light through cloth.</summary>
+    /// <remarks>
+    /// Cornell's room and sun, its blocks swapped for two double-sided sheets that scatter light through themselves: the
+    /// scene material response and transport through thin sheets are refined on, apart from Sponza's cost.
+    /// </remarks>
+    public static readonly SceneProfile Drapes = Cornell with
+    {
+        Name = "drapes",
+        Title = "Vulkan drapes",
+        Packs = new ScenePack[] { new("drapes", Required: true) },
+    };
+
     /// <summary>Two rooms sharing a 0.1 m wall, one open to the sky, one sealed (<c>blix thinwall</c>): a leak scene.</summary>
     /// <remarks>
     /// The truth inside the sealed room (x &gt; 0) is exactly no light, so every bit of indirect light the GI puts
@@ -221,7 +233,7 @@ internal sealed record SceneProfile(
         Packs = new ScenePack[] { new("crevices-hashed", Required: true) },
     };
 
-    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, CornellPanel, ThinWall, Crevices, CrevicesDark, CrevicesHashed };
+    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, CornellPanel, Drapes, ThinWall, Crevices, CrevicesDark, CrevicesHashed };
 
     /// <summary>The profile <c>--scene</c> names, Sponza when it names none.</summary>
     public static SceneProfile Named(string? name)
