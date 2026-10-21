@@ -84,14 +84,23 @@ def main():
          lambda v: v <= 0.015, '<= 0.015', lambda v: v <= 0.035, '<= 0.035',
          'how far each corridor point is, over its mean light: the gather\'s noise there (2026-10-13: 0.036 against a 16,384-path '
          'reference, itself 0.026 off; against 262,144 (0.007 off): the gather 0.021, the split cook 0.025)'),
-        ('crevices seam excess', sum(max(f - r, 0.0) for f, r in seams) / sum(r for _, r in seams),
-         lambda v: v <= 0.02, '<= 0.02', lambda v: v <= 0.03, '<= 0.03',
-         'light at the corridor\'s creases beyond the path trace\'s, over its light there: a texel centred where a box '
-         'rests on a face gathered half inside the box, its sky-lit outside (2026-10-16: 0.063 -> 0.015, records moved '
-         'off contacts)'),
+        # The seams were judged by their excess alone (Sum max(F - R, 0) over Sum R, ratchet 0.03): built when a leak put
+        # 6% of light into the creases (2026-10-16), by 2026-10-22 it read the noise's bright half and any bright bias --
+        # the gather losing a dark bias (seam |error| 0.0735 -> 0.0560, bias -2.2% -> +0.5% over four changes) read worse.
+        # Now the error both ways, the bias (energy), and a leak as a leak looks: light far above its point.
+        ('crevices seam |error|', sum(abs(f - r) for f, r in seams) / sum(r for _, r in seams),
+         lambda v: v <= 0.04, '<= 0.04', lambda v: v <= 0.07, '<= 0.07',
+         'how far the corridor\'s crease points are, both ways, over their light (2026-10-22: 0.056; the excess and deficit '
+         'were 0.026 / 0.048 on 2026-10-21)'),
+        ('crevices seam leak', sum(f - 1.25 * r for f, r in seams if f > 1.25 * r) / sum(r for _, r in seams),
+         lambda v: v <= 0.001, '<= 0.001', lambda v: v <= 0.005, '<= 0.005',
+         'crease light more than 25% above its point\'s path trace, over the creases\' light: a texel centred where a box '
+         'rests on a face gathered half inside the box, its sky-lit outside (2026-10-16: excess 0.063 -> 0.015, records '
+         'moved off contacts; 2026-10-22: 0.0023, one crease bottom at +31-41%)'),
         ('crevices seam energy', mean(f for f, _ in seams) / mean(r for _, r in seams),
-         lambda v: abs(v - 1) <= 0.05, '|x - 1| <= 0.05', lambda v: abs(v - 1) <= 0.15, '|x - 1| <= 0.15',
-         'the creases\' light over the path trace\'s: the texels beside a buried one answer for it (2026-10-16: 0.886)'),
+         lambda v: abs(v - 1) <= 0.02, '|x - 1| <= 0.02', lambda v: abs(v - 1) <= 0.05, '|x - 1| <= 0.05',
+         'the creases\' light over the path trace\'s: the texels beside a buried one answer for it (2026-10-16: 0.886; '
+         '2026-10-22: 1.005)'),
     ]
 
     failed = 0

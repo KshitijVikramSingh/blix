@@ -490,7 +490,7 @@ internal sealed partial class SponzaLoop
             sunNodeLit = true;
             lightLists = new float[transportSolve!.Patches * LightListSize * 2];   // the log's count
         }
-        Console.WriteLine(string.Create(Inv, $"[VulkanSponza] sun nodes: the light strategy {(sunNodeLit ? $"on ({lightLists.Length / 2 / LightListSize:N0} patches' lists)" : sunNodeLights ? "off: no light lists (no guides)" : "off (--sun-nodes-no-lights)")}."));
+        Console.WriteLine(string.Create(Inv, $"[VulkanSponza] sun nodes: the light strategy {(sunNodeLit ? $"on ({lightLists.Length / 2 / LightListSize:N0} patches' lists)" : sunNodeLights ? "off: no light lists (no guides)" : liveTexels ? "off (live's default; --light-lists for them)" : "off (--sun-nodes-no-lights)")}."));
         if (sunNodeExact)
         {
             sunNodeExactOrigins = Own(device.CreateGpuBuffer(rays * 16, name: "sponza.sun-nodes.exact-origins"));

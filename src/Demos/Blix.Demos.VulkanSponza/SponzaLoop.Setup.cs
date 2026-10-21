@@ -462,6 +462,13 @@ internal sealed partial class SponzaLoop
         // --live-max-rays N (4 x --live-rays): the refine's ceiling a texel in live mode -- the budget's other half. At
         // --texel-max-rays' 2,048 a 128-ray sweep of the coarse levels refined a million texels for 15 rounds (~3 min).
         if (liveTexels && args.Int("texel-max-rays") is null) texelMaxRays = args.Int("live-max-rays") ?? 4 * liveRays;
+        // Live: no light lists, a 3.5% noise share (2026-10-22). The lists' 16 patches could not cover the sun a contact sees
+        // (466 patches, 90% from 158): a quarter of its rays at slivers, under 1% of its light; their rays the cosine's and
+        // the guide's. The 5% share let the smoother passes settle before a rare doorway's light was counted (the corridor
+        // 1% dark); at 3.5% none is, for 4-15% more rays. Two seeds: crevices-dark surfaces |error| 1.87/1.93% ->
+        // 1.61/1.63%, Cornell seed noise 0.72% -> 0.53%. --light-lists, --texel-noise 0.05: as before.
+        if (liveTexels && !args.Flag("light-lists")) sunNodeLights = false;
+        if (liveTexels && args.Float("texel-noise") is null) texelNoise = 0.035f;
 
         // Seed sun yaw/pitch from the default direction so the Sun controls
         // start matching the baked look.
