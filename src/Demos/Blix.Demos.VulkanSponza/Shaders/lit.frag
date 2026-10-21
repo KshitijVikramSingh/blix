@@ -479,7 +479,9 @@ void main() {
     if (frame.uShadowStrength > 0.0 && shadowNeed > 0.0 && rtShadowHeader.z != 0u) {
         sunShadow = rtSunVisibility(gl_FragCoord.xy);
         sunShadow = mix(1.0, sunShadow, frame.uShadowStrength);
-        sheetGlow = rtSheetGlow(gl_FragCoord.xy) * frame.uShadowStrength;
+        // --sheet-light: the sheets' glow is in the incident field (the gather's hits on a sheet's far side, the patch
+        // solve's twins: tools/gi-model/thin_sheet.py) -- the frame's own here as well counted it twice.
+        sheetGlow = frame.uIncidentGradient.z > 0.5 ? vec3(0.0) : rtSheetGlow(gl_FragCoord.xy) * frame.uShadowStrength;
     } else if (frame.uShadowStrength > 0.0 && shadowNeed > 0.0) {
         sunShadow = blix_sun_shadow_cascaded(
             uCascadeShadowMaps[0], uCascadeShadowMaps[1], uCascadeShadowMaps[2], uLinearClamp,

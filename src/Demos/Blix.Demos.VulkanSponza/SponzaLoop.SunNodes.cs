@@ -93,7 +93,7 @@ internal sealed partial class SponzaLoop
     // corridor, where the noise is near-field and neighbours do not share it (tools/gi-model/ray_mix.py), no gain.
     // On by default (2026-10-21). --no-interleave: off.
     private bool interleave = true;
-    // --sheet-light: sheets that transmit as the spec has them in the GI (tools/gi-model/thin_sheet.py) -- a gather hit on
+    // Sheets that transmit as the spec has them in the GI (default; --no-sheet-light) (tools/gi-model/thin_sheet.py) -- a gather hit on
     // one reflects 1 - T of the sun on its side and passes T c of the sun on its far side (its own shadow ray from there:
     // the hit sun ray, on now where sheets are); the patch solve's sheets pass T c / albedo of their twin's light and keep
     // 1 - T of their own. Without, the sun through sheets is the frame's alone (its one-disc glow), as before.
@@ -209,7 +209,9 @@ internal sealed partial class SponzaLoop
         if (args.Int("sun-nodes-discover-stride") is { } ds) sunNodeDiscoverStride = Math.Max(0, ds);
         if (args.Float("sun-nodes-lift") is { } lift) sunNodeLift = Math.Max(0f, lift);
         nearTexelLight = !args.Flag("no-near-texel-light");
-        sheetLight = args.Flag("sheet-light");
+        // On by default (2026-10-22: drapes against its physical reference, two seeds, surfaces |error| 3.36% -> 1.32%,
+        // rms 8.9% -> 2.0%; the frame's own glow off with it). --no-sheet-light: the frame's glow alone, as before.
+        sheetLight = !args.Flag("no-sheet-light");
         interleave = !args.Flag("no-interleave") || args.Flag("interleave");
         nearRounds = Math.Max(0, args.Int("near-rounds") ?? (nearTexelLight ? 2 : 0));
         switch (args.String("hit-sun"))

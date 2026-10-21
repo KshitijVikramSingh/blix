@@ -82,7 +82,8 @@ layout(set = 0, binding = 0) uniform Frame {
     // How the lit pass carries the incident field's light to its normal-mapped normal (incident_clipmap.frag's
     // gradient): x the mip bias the normal map is read at for it (indirect diffuse answers to folds and relief, not
     // to a weave finer than a pixel, which under TAA's jitter shimmered), y how far the correction may scale the
-    // light either way (factor in [1 - y, 1 + y]).
+    // light either way (factor in [1 - y, 1 + y]); z 1: the sheets' glow is the incident field's (--sheet-light), the
+    // frame's own (rtSheetGlow) off.
     vec4  uIncidentGradient;
     // Stage 4e's velocity: this frame's UN-jittered view-projection and last frame's. The pre-pass projects a
     // vertex through both (current and previous world) and writes the difference, so motion never carries the
