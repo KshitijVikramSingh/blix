@@ -142,9 +142,15 @@ public sealed partial class VulkanGraphicsDevice
         ThrowIfDisposed();
         if (dispatches.Count == 0) return;
         ThrowIfNotSuccess(Vk.DeviceWaitIdle(Device), "vkDeviceWaitIdle(dispatch-now)");
+        // The uniform blocks these dispatches write are read by this submission alone, done when it returns: given back to
+        // the arena after, as they were before. A cook's thousands of DispatchNow calls between two frames each took a
+        // slice the next frame's rewind would have freed, and Sponza's sky visibility (16 K of them) ran the slot out
+        // (2026-10-21).
+        var arenaMark = uniformArenaBump.Length > 0 ? uniformArenaBump[arenaSlot].Used : 0;
         var cmd = BeginSingleTimeCommands();
         foreach (var d in dispatches) RecordComputeDispatch(cmd, d, name, currentFrame);
         EndSingleTimeCommands(cmd);
+        ReleaseUniformBlocksPast(arenaMark);
     }
 
     public unsafe void WriteGpuBuffer(GpuBufferHandle handle, int offset, ReadOnlySpan<byte> data)

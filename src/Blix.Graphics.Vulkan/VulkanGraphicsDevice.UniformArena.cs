@@ -91,6 +91,19 @@ public sealed partial class VulkanGraphicsDevice
     // Rewound in lockstep with the vertex arena — same ring index, same slot-depth reasoning
     // (ArenaSlots = MaxFramesInFlight + 1, so the slot being rewound was last read a full
     // frames-in-flight ago and is GPU-complete).
+    // DispatchNow, its submission done: the current slot back to where it stood before it, and the blocks it uploaded
+    // forgotten (a later draw with the same bytes must not reuse a slice the next allocation overwrites).
+    private void ReleaseUniformBlocksPast(int mark)
+    {
+        if (uniformArenaBump.Length == 0 || uniformArenaBump[arenaSlot].Used <= mark) return;
+        uniformArenaBump[arenaSlot].Used = mark;
+        var slotBuffer = uniformArenaBuffers[arenaSlot].Buffer.Handle;
+        List<(string, int, int)>? stale = null;
+        foreach (var (key, live) in uniformUploaded)
+            if (live.Buffer.Handle == slotBuffer && live.Offset >= (uint)mark) (stale ??= new()).Add(key);
+        if (stale is not null) foreach (var key in stale) uniformUploaded.Remove(key);
+    }
+
     private void ResetUniformArenaSlot()
     {
         if (uniformArenaBump.Length == 0) return;
