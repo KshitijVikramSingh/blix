@@ -274,6 +274,7 @@ kernel void blix_trace(device const float4* rays [[buffer(0)]],
                        device const uint2* owners [[buffer(10)]],
                        device const uint* surfaces [[buffer(11)]],
                        device const uint* limit [[buffer(12)]],
+                       device const uint* rowTransmit [[buffer(13)]],
                        uint i [[thread_position_in_grid]])
 {
     if (i >= p.count) return;
@@ -291,11 +292,12 @@ kernel void blix_trace(device const float4* rays [[buffer(0)]],
     float t = d.w;
     float2 bary = float2(0.0f);
     bool front = false;
-    uint placement = 0xFFFFFFFFu, triangle = 0xFFFFFFFFu, hitRow = 0xFFFFFFFFu, rawBary = 0u;
+    uint placement = 0xFFFFFFFFu, triangle = 0xFFFFFFFFu, hitRow = 0xFFFFFFFFu, rawBary = 0u, sheetRow = 0xFFFFFFFFu;
     float3 n = float3(0.0f);
     uint albedo = 0u;
     if (found) {
         uint row = blix_row(primRows, entryRows, res.instance_id, res.geometry_id, res.primitive_id);
+        sheetRow = row;
         // The row, its top bit set when it is an instance's; the barycentrics in the row's own vertex order (before
         // the owner's unmirroring below), 16-bit unorm each.
         hitRow = row | (instances[res.instance_id].info.y == 0xFFFFFFFFu ? 0u : 0x80000000u);
@@ -325,6 +327,9 @@ kernel void blix_trace(device const float4* rays [[buffer(0)]],
     bool sunlit = false;
     if (found && (p.flags & 2u) != 0u) {
         float3 hn = dot(n, d.xyz) > 0.0f ? -n : n;
+        // A sheet that transmits (flags 4: rowTransmit bound) lit on its far side: the shadow ray from that side, the
+        // sun there being the glow on this one (the consumer reads which side from n.l's sign).
+        if (dot(hn, p.sun.xyz) <= 0.0f && (p.flags & 4u) != 0u && rowTransmit[sheetRow] != 0u) hn = -hn;
         if (dot(hn, p.sun.xyz) > 0.0f) {
             float3 from = o.xyz + d.xyz * t + hn * p.sun.w;
             float3 toward = p.sun.xyz;
@@ -986,7 +991,7 @@ HWX_EXPORT int hwx_trace(HwxContext* ctx, void* rays, void* hits, uint32_t count
             [enc setIntersectionFunctionTable:ctx->table atBufferIndex:3];
             // Params: with `sun` (direction, lift), each hit's sun too (flags 2), toward a point of the disc when discTan > 0.
             struct { uint32_t count, seedBase, closestOnly, flags; float sun[4]; float reach; float discTan; uint32_t pad[2]; } params = {
-                count, seedBase, closestOnly, sun ? 2u : 0u, {sun ? sun[0] : 0.0f, sun ? sun[1] : 0.0f, sun ? sun[2] : 0.0f, sun ? sun[3] : 0.0f}, reach, discTan, {0, 0}};
+                count, seedBase, closestOnly, (sun ? 2u : 0u) | (sun && ctx->rowTransmit ? 4u : 0u), {sun ? sun[0] : 0.0f, sun ? sun[1] : 0.0f, sun ? sun[2] : 0.0f, sun ? sun[3] : 0.0f}, reach, discTan, {0, 0}};
             [enc setBytes:&params length:sizeof(params) atIndex:4];
             [enc setBuffer:ctx->primRows offset:0 atIndex:5];
             [enc setBuffer:ctx->entryRows offset:0 atIndex:6];
@@ -996,6 +1001,7 @@ HWX_EXPORT int hwx_trace(HwxContext* ctx, void* rays, void* hits, uint32_t count
             [enc setBuffer:ctx->owners offset:0 atIndex:10];
             [enc setBuffer:ctx->surfaces offset:0 atIndex:11];
             [enc setBuffer:rayBuffer offset:0 atIndex:12];   // the limit's slot, unread (flags 0)
+            [enc setBuffer:(ctx->rowTransmit ? ctx->rowTransmit : ctx->surfaces) offset:0 atIndex:13];
             // Reached only through the top level and the function table, so not resident unless named here.
             [enc useResources:ctx->blas.data() count:ctx->blas.size() usage:MTLResourceUsageRead];
             id<MTLResource> alphaBuffers[] = {ctx->alphaOff, ctx->rowMaterial, ctx->materials, ctx->uvs};
@@ -1152,6 +1158,7 @@ HWX_EXPORT int hwx_trace_host(HwxContext* ctx, const float* rays, uint32_t count
             [enc setBuffer:ctx->owners offset:0 atIndex:10];
             [enc setBuffer:ctx->surfaces offset:0 atIndex:11];
             [enc setBuffer:rayBuffer offset:0 atIndex:12];
+            [enc setBuffer:(ctx->rowTransmit ? ctx->rowTransmit : ctx->surfaces) offset:0 atIndex:13];
             [enc useResources:ctx->blas.data() count:ctx->blas.size() usage:MTLResourceUsageRead];
             id<MTLResource> alphaBuffers[] = {ctx->alphaOff, ctx->rowMaterial, ctx->materials, ctx->uvs};
             [enc useResources:alphaBuffers count:4 usage:MTLResourceUsageRead];
@@ -1290,6 +1297,7 @@ HWX_EXPORT int hwx_encode_trace(HwxContext* ctx, void* sharedEvent, uint64_t wai
             uint32_t params[12] = {count, seedBase, 1u, limitBuffer ? 1u : 0u, 0, 0, 0, 0, 0, 0, 0, 0};
             [enc setBytes:params length:sizeof(params) atIndex:4];
             [enc setBuffer:limitBuffer ? limitBuffer : rayBuffer offset:limitBuffer ? limitOffset : raysOffset atIndex:12];
+            [enc setBuffer:(ctx->rowTransmit ? ctx->rowTransmit : ctx->surfaces) offset:0 atIndex:13];
             [enc setBuffer:ctx->primRows offset:0 atIndex:5];
             [enc setBuffer:ctx->entryRows offset:0 atIndex:6];
             [enc setBuffer:ctx->instances offset:0 atIndex:7];

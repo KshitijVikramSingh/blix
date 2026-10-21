@@ -79,13 +79,13 @@ internal sealed partial class SponzaLoop
     // with no sheet in the scene (or --ref-opaque-sheets). The spec's terms, not RtRowTransmit's frame-side cap and hue.
     private GpuBufferHandle? referenceSheets;
     private bool referenceSheetsMade;
-    private GpuBufferHandle? ReferenceSheetsBuffer
+    private GpuBufferHandle? SheetRowsBuffer
     {
         get
         {
             if (referenceSheetsMade) return referenceSheets;
             referenceSheetsMade = true;
-            if (!refSheets || rayGpuData is not { } data) return null;
+            if (!(refSheets || sheetLight) || rayGpuData is not { } data) return null;
             var rows = new uint[Math.Max(1, data.RowPlacements.Length)];
             var any = 0;
             uint Byte(float x) => (uint)Math.Clamp(MathF.Round(x * 255f), 0f, 255f);
@@ -100,7 +100,7 @@ internal sealed partial class SponzaLoop
                 any++;
             }
             if (any == 0) return null;
-            Console.WriteLine(string.Create(Inv, $"[VulkanSponza] reference: {any:N0} triangle rows are thin sheets (diffuse transmission), scattered as the spec has them."));
+            Console.WriteLine(string.Create(Inv, $"[VulkanSponza] sheets: {any:N0} triangle rows are thin sheets (diffuse transmission), scattered as the spec has them{(refSheets ? " in the reference" : "")}{(sheetLight ? " and the GI" : "")}."));
             referenceSheets = Own(device.CreateGpuBuffer(rows.Length * 4, MemoryMarshal.AsBytes(rows.AsSpan()), "sponza.reference.sheets"));
             return referenceSheets;
         }
@@ -109,7 +109,7 @@ internal sealed partial class SponzaLoop
     private ReferenceWave CreateReferenceWave(List<Vector4> packed, int lanesPerPoint, int quota, string name)
     {
         var w = new ReferenceWave { PointCount = packed.Count / 2, LanesPerPoint = lanesPerPoint, Quota = quota };
-        _ = ReferenceSheetsBuffer;   // made with the wave, not at its first dispatch
+        _ = SheetRowsBuffer;   // made with the wave, not at its first dispatch
         var lanes = w.Count;
         // Every lane starts with no path: its hit count -1.
         var start = new float[lanes * 16];
@@ -237,7 +237,7 @@ internal sealed partial class SponzaLoop
                 new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, refSky))),
                 new("uParams", new Vector4Uniform(new Vector4(mode, refBounces, w.Quota, w.LanesPerPoint))),
                 new("uCount", new Vector4Uniform(new Vector4(count, w.Dispatch + (uint)refSeed * 7919u, refSunDisc ? SunDiscTangent : 0f,
-                    (ReferenceSheetsBuffer is not null ? 1f : 0f) + (refSunClosest ? 2f : 0f)))),
+                    (refSheets && SheetRowsBuffer is not null ? 1f : 0f) + (refSunClosest ? 2f : 0f)))),
             },
             new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
             Buffers: rayBlockBuffers
@@ -249,7 +249,7 @@ internal sealed partial class SponzaLoop
                 .Append(new ShaderBufferBinding("BatchOrigins", w.Origins))
                 .Append(new ShaderBufferBinding("BatchOccluded", w.Occluded))
                 .Append(new ShaderBufferBinding("BatchDirections", w.Directions))
-                .Append(new ShaderBufferBinding("ReferenceSheets", ReferenceSheetsBuffer ?? w.Occluded))
+                .Append(new ShaderBufferBinding("ReferenceSheets", SheetRowsBuffer ?? w.Occluded))
                 .Append(new ShaderBufferBinding("BatchSunRays", w.SunRays))
                 .Append(new ShaderBufferBinding("BatchSunHits", w.SunHits))
                 .Where(b => declared.Contains(b.Name)).ToArray());

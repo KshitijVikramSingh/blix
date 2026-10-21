@@ -88,6 +88,12 @@ internal sealed partial class SponzaLoop
     // the hit's does neither): those scenes keep the cells' sun until the materials' own pass.
     private bool hitSunRay = true, hitSunDisc = true;
     private bool hitSunSaid;
+    // --sheet-light: sheets that transmit as the spec has them in the GI (tools/gi-model/thin_sheet.py) -- a gather hit on
+    // one reflects 1 - T of the sun on its side and passes T c of the sun on its far side (its own shadow ray from there:
+    // the hit sun ray, on now where sheets are); the patch solve's sheets pass T c / albedo of their twin's light and keep
+    // 1 - T of their own. Without, the sun through sheets is the frame's alone (its one-disc glow), as before.
+    private bool sheetLight;
+    private bool SheetsInGi => sheetLight && rtSheetRows > 0 && SheetRowsBuffer is not null;
     // --near-rounds N (2; 0 without the near texels' light): the fine round's texels gathered N times more, each on the light the last left (with
     // --near-texel-light, its near hits read the texels the last round gathered).
     private int nearRounds, nearRoundsLeft;
@@ -175,6 +181,7 @@ internal sealed partial class SponzaLoop
         if (args.Int("sun-nodes-discover-stride") is { } ds) sunNodeDiscoverStride = Math.Max(0, ds);
         if (args.Float("sun-nodes-lift") is { } lift) sunNodeLift = Math.Max(0f, lift);
         nearTexelLight = !args.Flag("no-near-texel-light");
+        sheetLight = args.Flag("sheet-light");
         nearRounds = Math.Max(0, args.Int("near-rounds") ?? (nearTexelLight ? 2 : 0));
         switch (args.String("hit-sun"))
         {
@@ -955,7 +962,7 @@ internal sealed partial class SponzaLoop
 
     // The column whose sun the gather's hits trace (--hit-sun-ray): the one sun of a live cook's columns; -1 off, or with
     // several suns (a cooked set of hours), where one shadow ray a hit answers only one of them.
-    private int HitSunColumn => hitSunRay && rtSheetRows == 0 && sunNodeKinds.Count(k => (k & 1) != 0) == 1 && sunNodeBitDirections.Length == sunNodeKinds.Length
+    private int HitSunColumn => hitSunRay && (rtSheetRows == 0 || sheetLight) && sunNodeKinds.Count(k => (k & 1) != 0) == 1 && sunNodeBitDirections.Length == sunNodeKinds.Length
         ? Array.FindIndex(sunNodeKinds, k => (k & 1) != 0) : -1;
 
     private static uint SunNodeSeed(int first, int seedPass, int discover) =>
@@ -1189,7 +1196,7 @@ internal sealed partial class SponzaLoop
                 new("uSky", new Vector4Uniform(new Vector4(1f, 1f, skyKept ? SunColumn() + 1 : 0f, 0f))),
                 // w: the hit cells (SponzaLoop.HitCells.cs) answer the hit, their sun bit shot for this cook's sun.
                 new("uLookup", new Vector4Uniform(new Vector4(sunNodePlane, sunNodeSigma, hitCellNear, cells ? 1f : 0f))),
-                new("uFoliage", new Vector4Uniform(new Vector4(sunNodeFoliageSlots, discover, exactMode, exactColumn + 1))),
+                new("uFoliage", new Vector4Uniform(new Vector4(sunNodeFoliageSlots, discover, exactMode, (exactColumn + 1) * (SheetsInGi ? -1f : 1f)))),
                 new("uDetail", new Vector4Uniform(new Vector4(first, detail ? 1f : 0f, CensusOn(discover) ? 1f : 0f, censusPlacements))),
                 new("uFar", new Vector4Uniform(exactMode is > 0f and < 2.5f ? Vector4.Zero : FarUniform(discover))),
                 new("uTransport", new Vector4Uniform(TransportUniform(discover))),
@@ -1232,6 +1239,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("SplitSky", NearTexelLightNow ? splitSkyBuffer : sunNodeAccum),
                 new ShaderBufferBinding("SplitSun", NearTexelLightNow ? splitSunBuffer : sunNodeAccum),
                 NearTexelLightNow ? ProvenanceBinding() : new ShaderBufferBinding("TexelProvenance", sunNodeAccum),
+                new ShaderBufferBinding("SheetRows", SheetsInGi ? SheetRowsBuffer!.Value : sunNodeAccum),
             }.Concat(CookedBuffers()).Where(b => declared.Contains(b.Name)).ToArray());
     }
 

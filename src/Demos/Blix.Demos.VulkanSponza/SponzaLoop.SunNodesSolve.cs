@@ -118,6 +118,7 @@ internal sealed partial class SponzaLoop
         var d = transportSolve!;
         if (solvePack is not null || solveBuffers.Length > 0) return;
         solveSunlets = withSunlets ? d.SunletPos.Count : 0;
+        var specSheets = sheetLight;
         solvePack = Task.Run(() =>
         {
             (uint[], uint[]) Csr((int To, float W)[][] rows)
@@ -174,6 +175,17 @@ internal sealed partial class SponzaLoop
                     // patch (the factor over that channel), so no channel is lifted alone. The albedo as it is (0.35 x
                     // 0.05-0.2) passed 2-7% of the sun: opaque again by eye (2026-10-15).
                     var a = d.Albedo[p];
+                    if (specSheets)
+                    {
+                        // --sheet-light: the spec's sheet -- T c of the light on the twin's side through (per unit of the
+                        // albedo the readers multiply in), 1 - T of its own kept (terms' w: T, incomingThrough). T is the
+                        // factor's brightest channel, the colour factor's at 1 (the testbeds author it so).
+                        static float Over(float x, float y) => x / MathF.Max(y, 0.02f);
+                        transmit[p] = new Vector4(Over(tr[p].X, a.X), Over(tr[p].Y, a.Y), Over(tr[p].Z, a.Z), BitConverter.Int32BitsToSingle(tw[p]));
+                        terms[3 * p].W = MathF.Max(tr[p].X, MathF.Max(tr[p].Y, tr[p].Z));
+                        sheets++;
+                        continue;
+                    }
                     var top = MathF.Max(MathF.Max(a.X, MathF.Max(a.Y, a.Z)), 0.05f);
                     // Capped at what its lit face reflects, as lit.frag caps it.
                     var factor = MathF.Max(tr[p].X, MathF.Max(tr[p].Y, tr[p].Z));

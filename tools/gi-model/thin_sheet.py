@@ -101,3 +101,41 @@ if __name__ == "__main__":
             f = frame_glow(p, up, o, u, v, ns)
             ratio = f"{f / e:.2f}" if e > 1e-4 else "-"
             print(f"   ({p[0]:+.2f}, {p[2]:+.2f})            {e:8.4f}{f:8.4f}{ratio:>13}")
+
+
+def patch_glow(p, n_p, q, dA, n_s, lit_q, origin, u, v, size=0.25):
+    """The glow as 25 cm patches would carry it (the patch solve's twins): each patch's lit share averaged over it,
+    glowing uniformly."""
+    a = (q - origin) @ u / np.dot(u, u)
+    b = (q - origin) @ v / np.dot(v, v)
+    nu = max(1, int(round(np.linalg.norm(u) / size)))
+    nv = max(1, int(round(np.linalg.norm(v) / size)))
+    key = np.minimum((a * nu).astype(int), nu - 1) * nv + np.minimum((b * nv).astype(int), nv - 1)
+    mean = np.zeros(nu * nv)
+    np.add.at(mean, key, lit_q)
+    count = np.bincount(key, minlength=nu * nv)
+    flat = (mean / np.maximum(count, 1))[key]
+    return exact_glow(p, n_p, q, dA, n_s, flat)
+
+
+def with_bounces(e1, rho_f=0.73, rho_sheet=0.8, T=0.5, view=0.4):
+    """The floor under the veil and the veil's underside lighting each other (view: the share of the floor point's view
+    the veil fills, ~0.4 at its middle): the series' first terms, as a scale on the single scattering."""
+    loop = rho_f * rho_sheet * (1 - T) * view * view
+    return e1 / (1 - loop)
+
+
+if __name__ == "__main__" and "--gi" in __import__("sys").argv:
+    up = np.array([0.0, 1.0, 0.0])
+    o, u, v, n = veil
+    q, dA, ns = sheet_samples(o, u, v, n)
+    lq = lit(q).astype(float)
+    print("\n== the veil's glow on the floor, E / (T c E_s): exact single scattering, the GI's options against it")
+    print(f"   {'point':<16}{'exact':>8}{'hit sun':>9}{'patches':>9}{'frame':>8}   (hit sun: a gather hit on the dark side, its far-side sun by ray)")
+    for x in np.linspace(-1.8, 0.0, 10):
+        p = np.array([x, 0.0, o[2] + 0.85])
+        e = exact_glow(p, up, q, dA, ns, lq)
+        pg = patch_glow(p, up, q, dA, ns, lq, o, u, v)
+        f = frame_glow(p, up, o, u, v, ns)
+        print(f"   ({x:+.2f}, {p[2]:+.2f})   {e:8.4f}{e:9.4f}{pg:9.4f}{f:8.4f}    patches {100 * (pg / e - 1):+5.1f}%")
+    print(f"\n   the floor-veil bounces add {100 * (with_bounces(1.0) - 1):.1f}% under its middle (rho_f 0.73, the veil 0.8 at T 0.5)")

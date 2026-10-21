@@ -64,7 +64,8 @@ vec3 incomingThrough(uint p, uint k, uint G) {
     vec4 t = patchTransmit[p];
     // The live solve's one component holds the sky too, and has no cache key to keep apart: its sheets pass both.
     if (t.r + t.g + t.b <= 0.0 || (skyWeight[uint(u.uCount.y) + k] > 0.0 && u.uLive.x < 0.5)) return own;
-    return own + t.rgb * nodeIn[uint(floatBitsToInt(t.w)) * G + k].rgb;
+    // --sheet-light (patchTerms' w: T): the base lobe keeps 1 - T of its own side's light (0 before: the frame's sheets).
+    return own * (1.0 - patchTerms[3u * p].w) + t.rgb * nodeIn[uint(floatBitsToInt(t.w)) * G + k].rgb;
 }
 
 void main() {

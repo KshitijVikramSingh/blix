@@ -67,6 +67,11 @@ layout(std430, set = 0, binding = 36) readonly buffer SplitSun { uvec2 sunPart[]
 // Which stage last wrote each texel's parts (provenance.glsl): only a gather's (codes 1-4) is a texel's own light -- the
 // instant layer and the fine copy carry the coarse estimate a near hit's light is to replace.
 layout(std430, set = 0, binding = 37) readonly buffer TexelProvenance { uint provenance[]; };
+// Per triangle row, the sheet it is (KHR_materials_diffuse_transmission as the spec has it, --sheet-light; 0 none): rgb8
+// T c, the top byte T (SponzaLoop.GpuReference.cs, SheetRowsBuffer). A hit on one reflects 1 - T of the sun on its side
+// with its albedo, and passes T c of the sun on its far side: the hit's sun ray from that side (hit flag 8, the trace's
+// sheets, blix_hwx.mm). uFoliage.w's sign: negative with sheets (the exact column then -w - 1).
+layout(std430, set = 0, binding = 38) readonly buffer SheetRows { uint sheetRows[]; };
 layout(std430, set = 0, binding = 14) readonly buffer FoliagePoints { vec4 foliagePoints[]; };
 layout(std430, set = 0, binding = 15) readonly buffer FoliageHash { uint foliageHash[]; };
 layout(std430, set = 0, binding = 16) readonly buffer FoliageBits { uint foliageBits[]; };
@@ -177,6 +182,9 @@ shared vec2 sRayTilt[RAYS * 2];
 shared vec4 sRayKnown[RAYS * 2];
 shared vec3 sUnknownBounce[2];
 shared int sNearTexel[RAYS];    // the transport census: each hit's likeliest texel (-1: among none)
+#if MAX_WORDS == 1
+shared vec4 sSheet[RAYS];       // the hit's sheet: rgb T c, a T (0: not a sheet); the 256-sun variant meets sheets as opaque
+#endif
 shared float sTransportReach;
 shared uint sTransportObject;
 
@@ -250,7 +258,8 @@ void main() {
     // Never while discovering nor for the exact-sun experiment: those passes trace every ray to its end.
     bool farOn = u.uFar.x > 0.5 && u.uFoliage.y < 0.5 && (u.uFoliage.z < 0.5 || u.uFoliage.z > 2.5);
     // The column whose sun the hits' exact visibility is (uFoliage.z 2, 3).
-    int exactColumn = u.uFoliage.w > 0.5 ? int(u.uFoliage.w + 0.5) - 1 : 0;
+    int exactColumn = abs(u.uFoliage.w) > 0.5 ? int(abs(u.uFoliage.w) + 0.5) - 1 : 0;
+    bool sheetsOn = u.uFoliage.w < -0.5;
     bool farRecording = farOn && u.uFar.x < 1.5;
     if (lid == 0u) {
         int fp = -1;
@@ -302,6 +311,14 @@ void main() {
         sRayWeight[lid] = nodeRayWeight[slot];
         sPlacement[lid] = (h0.w & 1u) != 0u ? nodeHits[slot * 3u + 1u].x : 0xFFFFFFFFu;
         sNearTexel[lid] = -1;
+#if MAX_WORDS == 1
+        sSheet[lid] = vec4(0.0);
+        if (sheetsOn && (h0.w & 1u) != 0u) {
+            uint hr = nodeHits[slot * 3u + 1u].z;
+            uint sw = hr != 0xFFFFFFFFu ? sheetRows[hr & 0x7FFFFFFFu] : 0u;
+            if (sw != 0u) sSheet[lid] = vec4(unpackUnorm4x8(sw).rgb, float(sw >> 24) / 255.0);
+        }
+#endif
         // A ray past the reach (a miss, or one texel_nodes_rays.comp cut at the reach) where every blended patch's
         // record knows its direction: the patches' light, not its own. Recording, every ray past the reach in any bin
         // above its own patch's horizon.
@@ -550,8 +567,17 @@ void main() {
                     vec3 light = sUnknownBounce[k];
                     if (h.w >= 0.0) light = sRayKnown[r * 2 + k].rgb;
                     float ndotl = hasSun ? max(dot(sNormal[r], toSun), 0.0) : 0.0;
+                    vec3 glow = vec3(0.0);
+#if MAX_WORDS == 1
+                    // A sheet: the base lobe keeps 1 - T of the sun on its side; T c of the sun on its far side is its glow.
+                    float baseLobe = 1.0 - sSheet[r].a;
+                    if (hasSun && k == exactColumn && sSheet[r].a > 0.0 && sExact[r] >= 0.0)
+                        glow = sSheet[r].rgb * u.uSunIrradiance.rgb * max(-dot(sNormal[r], toSun), 0.0) * sExact[r] * sRayWeight[r] / PI;
+#else
+                    float baseLobe = 1.0;
+#endif
                     if (ndotl > 0.0) {
-                        if (k == exactColumn && sExact[r] >= 0.0) { light += u.uSunIrradiance.rgb * ndotl * sExact[r]; tilts = false; }
+                        if (k == exactColumn && sExact[r] >= 0.0) { light += u.uSunIrradiance.rgb * ndotl * sExact[r] * baseLobe; tilts = false; }
                         else {
                             float visible = sUnknown[r] * u.uSunIrradiance.w;
                             for (int c = 0; c < NODE_CANDIDATES; ++c)
@@ -559,7 +585,7 @@ void main() {
                             light += u.uSunIrradiance.rgb * ndotl * visible;
                         }
                     }
-                    add = h.rgb * light;
+                    add = h.rgb * light + glow;
                     tiltLight = dot(add, lumW);
                 }
                 sRaySum[r * 2 + k] = add;
@@ -648,6 +674,14 @@ void main() {
                 float texelsThere = float(patchDirect[patches * columnsAll + hp]);
                 patchLevel = texelsThere > 0.0 ? float(patchDirect[hp * columnsAll + uint(k)]) / 65536.0 / texelsThere : 0.0;
             }
+#if MAX_WORDS == 1
+            if (hasSun && k == exactColumn && sSheet[r].a > 0.0 && sExact[r] >= 0.0) {
+                // A sheet (as above): 1 - T of the sun on its side, T c of the sun on its far side.
+                sum += h.rgb * (light + u.uSunIrradiance.rgb * ndotl * sExact[r] * (1.0 - sSheet[r].a))
+                     + sSheet[r].rgb * u.uSunIrradiance.rgb * max(-dot(sNormal[r], toSun), 0.0) * sExact[r] * sRayWeight[r] / PI;
+                continue;
+            }
+#endif
             if (ndotl > 0.0) {
                 float visible = sUnknown[r] * u.uSunIrradiance.w;
                 if (k == exactColumn && sExact[r] >= 0.0) { light += u.uSunIrradiance.rgb * ndotl * sExact[r]; sum += h.rgb * light; continue; }
