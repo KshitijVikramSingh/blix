@@ -88,6 +88,31 @@ internal sealed partial class SponzaLoop
     // the hit's does neither): those scenes keep the cells' sun until the materials' own pass.
     private bool hitSunRay = true, hitSunDisc = true;
     private bool hitSunSaid;
+    // --near-rounds N (0): the fine round's texels gathered N times more, each on the light the last left (with
+    // --near-texel-light, its near hits read the texels the last round gathered).
+    private int nearRounds, nearRoundsLeft;
+    private uint[] fineRoundIds = Array.Empty<uint>();
+
+    // The fine refine's round over these texels: traced as the coarse were, a round of their own, the cook screen up.
+    private void StartFineRound(uint[] fineIds)
+    {
+        RetireTraceBuffer();
+        sunNodeTraceIds = fineIds;
+        sunNodeTraceBuffer = Own(device.CreateGpuBuffer(fineIds.Length * 4, MemoryMarshal.AsBytes(fineIds.AsSpan()), "sponza.sun-nodes.fine"));
+        fineGatherSavedRays = sunNodeRays;
+        fineGatherSavedMaxRays = texelMaxRays;
+        sunNodeRays = fineGatherRays;
+        texelMaxRays = Math.Max(fineGatherRays, fineGatherMaxRays);
+        RetireGpuBuffer(sunNodeStats);
+        sunNodeStats = Own(device.CreateGpuBuffer(64, new byte[64], "sponza.sun-nodes.stats"));
+        sunNodeFirst = 0;
+        sunNodePass = 0;
+        sunNodeClock.Restart();
+        ResetSunNodeCounters();
+        ResetSunNodeRefine();
+        fineGathering = true;
+        sunNodeStage = SunNodeStage.Tracing;
+    }
     // --near-texel-light: a near hit's bounce (the search's, within --cell-near) the light of the texel it lies among as
     // the last resolve left it, not its patch's (texel_nodes_shade.glsl, nearTexelLight; tools/gi-model/crease_bounce.py).
     private bool nearTexelLight;
@@ -149,6 +174,7 @@ internal sealed partial class SponzaLoop
         if (args.Int("sun-nodes-discover-stride") is { } ds) sunNodeDiscoverStride = Math.Max(0, ds);
         if (args.Float("sun-nodes-lift") is { } lift) sunNodeLift = Math.Max(0f, lift);
         nearTexelLight = args.Flag("near-texel-light");
+        nearRounds = Math.Max(0, args.Int("near-rounds") ?? 0);
         switch (args.String("hit-sun"))
         {
             case null or "disc": break;
@@ -700,6 +726,17 @@ internal sealed partial class SponzaLoop
         if (spotWhy) SpotWhyCompare(fine: false);
         if (EndVisibleChanged()) return;
         // BLIX_NO_FINE=1 (an A/B): the fine texels keep the instant layer's light after the gather.
+        if (fineGathering && nearRoundsLeft > 0 && fineRoundIds.Length > 0)
+        {
+            // --near-rounds: the same texels gathered again, their near hits now lit by the texels the last round gathered
+            // (--near-texel-light): the lagged step tools/gi-model/crease_bounce.py needs (one within 2.3%, two 0.6%).
+            nearRoundsLeft--;
+            Console.WriteLine(string.Create(Inv, $"[VulkanSponza] near round: the {fineRoundIds.Length:N0} fine texels gathered again on the last round's light ({nearRoundsLeft} more)."));
+            sunNodeRays = fineGatherSavedRays;
+            texelMaxRays = fineGatherSavedMaxRays;
+            StartFineRound(fineRoundIds);
+            return;
+        }
         if (fineGathering)
         {
             // The fine refine's round done: its texels landed as they came; the rays as they were.
@@ -721,21 +758,9 @@ internal sealed partial class SponzaLoop
             RecallCopy(picked);
             if (picked is { Length: > 0 } fineIds)
             {
-                RetireTraceBuffer();
-                sunNodeTraceIds = fineIds;
-                sunNodeTraceBuffer = Own(device.CreateGpuBuffer(fineIds.Length * 4, MemoryMarshal.AsBytes(fineIds.AsSpan()), "sponza.sun-nodes.fine"));
-                fineGatherSavedRays = sunNodeRays;
-                fineGatherSavedMaxRays = texelMaxRays;
-                sunNodeRays = fineGatherRays;
-                texelMaxRays = Math.Max(fineGatherRays, fineGatherMaxRays);
-                RetireGpuBuffer(sunNodeStats);
-                sunNodeStats = Own(device.CreateGpuBuffer(64, new byte[64], "sponza.sun-nodes.stats"));
-                sunNodeFirst = 0;
-                sunNodePass = 0;
-                sunNodeClock.Restart();
-                ResetSunNodeCounters();
-                fineGathering = true;
-                sunNodeStage = SunNodeStage.Tracing;
+                fineRoundIds = fineIds;
+                nearRoundsLeft = nearRounds;
+                StartFineRound(fineIds);
                 return;
             }
         }
