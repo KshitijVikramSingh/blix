@@ -281,6 +281,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("Couplings", solveBuffers[6]),
                 new ShaderBufferBinding("PatchTerms", solveBuffers[7]),
                 new ShaderBufferBinding("NodeFirst", liveFirst),
+                new ShaderBufferBinding("PatchTransmit", solveTransmit.Equals(default(GpuBufferHandle)) ? liveFirst : solveTransmit),
             }.Concat(CookedBuffers()).ToArray());
         graph.Dispatch(liveDirectPass, Pass(0, d.Patches, 0));
         var live = texelLiveIds!.Length;

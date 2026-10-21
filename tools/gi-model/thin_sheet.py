@@ -139,3 +139,37 @@ if __name__ == "__main__" and "--gi" in __import__("sys").argv:
         f = frame_glow(p, up, o, u, v, ns)
         print(f"   ({x:+.2f}, {p[2]:+.2f})   {e:8.4f}{e:9.4f}{pg:9.4f}{f:8.4f}    patches {100 * (pg / e - 1):+5.1f}%")
     print(f"\n   the floor-veil bounces add {100 * (with_bounces(1.0) - 1):.1f}% under its middle (rho_f 0.73, the veil 0.8 at T 0.5)")
+
+
+if __name__ == "__main__" and "--bounce" in __import__("sys").argv:
+    # Option 2's bounce: the floor lit by the veil's glow, as 25 cm patches carry it, seen by a wall 1 m from the veil's
+    # footprint (x = -2.5 m, facing +x) and by the veil's own underside.
+    up = np.array([0.0, 1.0, 0.0])
+    o, u, v, n = veil
+    q, dA, ns = sheet_samples(o, u, v, n, step=0.04)
+    lq = lit(q).astype(float)
+    xs = np.arange(-2.6, 0.6, 0.04) + 0.02
+    zs = np.arange(-2.8, 0.0, 0.04) + 0.02
+    X, Z = np.meshgrid(xs, zs, indexing="ij")
+    floor = np.stack([X.ravel(), np.zeros(X.size), Z.ravel()], 1)
+    E = np.array([exact_glow(p, up, q, dA, ns, lq) for p in floor])      # the glow on the floor, / (T c E_s)
+    # The same over 25 cm patches.
+    key = (np.floor((X.ravel() + 2.6) / 0.25) * 100 + np.floor((Z.ravel() + 2.8) / 0.25)).astype(int)
+    sums = {}
+    for k, e in zip(key, E): sums.setdefault(k, []).append(e)
+    Ep = np.array([np.mean(sums[k]) for k in key])
+    rho_f = 0.73
+    def seen(p, n_p, field):
+        d = floor - p[None, :]
+        r2 = (d * d).sum(1)
+        r = np.sqrt(r2)
+        cos_p = np.maximum((d @ n_p) / r, 0.0)
+        cos_f = np.maximum(-(d @ up) / r, 0.0)
+        return (rho_f * field / np.pi * cos_p * cos_f / r2).sum() * 0.04 * 0.04
+    print("\n== option 2: the glow-lit floor's light at receivers, exact against 25 cm patches, / (T c E_s)")
+    for name, p, n_p in (("wall x -2.6, 0.5 m up", np.array([-2.6, 0.5, -1.4]), np.array([1.0, 0, 0])),
+                         ("veil's underside middle", np.array([-1.0, 0.99, -1.4]), np.array([0, -1.0, 0])),
+                         ("floor's far wall z -2.9, 1 m up", np.array([-1.0, 1.0, -2.9]), np.array([0, 0, 1.0]))):
+        a, b = seen(p, n_p, E), seen(p, n_p, Ep)
+        print(f"   {name:<34} exact {a:.4f}   patches {b:.4f}   ({100 * (b / a - 1):+.1f}%)")
+    print(f"   the floor's glow in all: {E.sum() * 0.04 * 0.04:.3f} m^2 x T c E_s (what option 2 lets the room reflect onward)")

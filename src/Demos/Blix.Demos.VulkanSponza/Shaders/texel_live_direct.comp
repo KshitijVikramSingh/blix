@@ -7,7 +7,10 @@
 //   mode 1  a thread a live texel: its patch (the cook's pick, else the nearest facing patch) gains the texel's direct
 //           sun (n.l where its sun bit is set) and one texel -- fixed point, by atomics
 //   mode 2  a thread a patch: its first bounce of the sun, Sum_j w_ij albedo_j E D_j over its couplings, D_j patch j's
-//           mean direct n.l over its texels -- texel_nodes_solve.comp mode 1's form with patches for sunlets
+//           mean direct n.l over its texels -- texel_nodes_solve.comp mode 1's form with patches for sunlets. A patch j
+//           on a sheet that transmits (--sheet-light: patchTerms' w its T) sends 1 - T of its own side's sun and T c of
+//           its twin's, the far side's glow (tools/gi-model/thin_sheet.py --bounce: 25 cm patches within 1% of it at
+//           what the glow-lit floor lights)
 
 layout(local_size_x = 64) in;
 
@@ -28,6 +31,8 @@ layout(std430, set = 0, binding = 6) readonly buffer CouplingStart { uint coupli
 layout(std430, set = 0, binding = 7) readonly buffer Couplings { uvec2 coupling[]; };   // (to, weight bits)
 layout(std430, set = 0, binding = 8) readonly buffer PatchTerms { vec4 patchTerms[]; };  // 3 a patch: albedo, sky, boot
 layout(std430, set = 0, binding = 9) buffer NodeFirst { vec4 nodeFirst[]; };
+// Per patch: rgb what of the light on its twin's side its sheet passes, per unit of its albedo; w its twin (int bits).
+layout(std430, set = 0, binding = 14) readonly buffer PatchTransmit { vec4 patchTransmit[]; };
 
 #define COOKED_BINDING 10
 #define COOKED_GRID u.uCookedGrid
@@ -68,7 +73,16 @@ void main() {
         uint texelsThere = patchDirect[2u * j + 1u];
         if (texelsThere == 0u) continue;
         float d = float(patchDirect[2u * j]) / Fixed / float(texelsThere);
-        s += uintBitsToFloat(coupling[c].y) * patchTerms[3u * j].rgb * d;
+        vec3 sent = vec3(d);
+        float share = patchTerms[3u * j].w;
+        vec4 tr = patchTransmit[j];
+        if (share > 0.0 && tr.r + tr.g + tr.b > 0.0) {
+            uint twin = uint(floatBitsToInt(tr.w));
+            uint twinTexels = patchDirect[2u * twin + 1u];
+            float dt = twinTexels > 0u ? float(patchDirect[2u * twin]) / Fixed / float(twinTexels) : 0.0;
+            sent = d * (1.0 - share) + tr.rgb * dt;
+        }
+        s += uintBitsToFloat(coupling[c].y) * patchTerms[3u * j].rgb * sent;
     }
     nodeFirst[t * uint(u.uDirect.w) + uint(u.uToSun.w)] = vec4(s * u.uIrr.rgb, 0.0);
 }
