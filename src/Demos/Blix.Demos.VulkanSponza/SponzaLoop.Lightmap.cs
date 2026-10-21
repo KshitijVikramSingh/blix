@@ -94,7 +94,7 @@ internal sealed partial class SponzaLoop
     // stage of the GI bundle (--cook-gi): what they depend on beyond the texels key (which names the scene, its
     // .blixlightmap files and the texel settings).
     private sealed record LightmapRecords(Vector4[] Texels, uint[] IndexMap, uint[] Frames, int Count);
-    private const int LightmapRecordsVersion = 1;
+    private const int LightmapRecordsVersion = 2;
     private string? lightmapRecordsKey;
     private string LightmapRecordsRule => string.Create(CultureInfo.InvariantCulture,
         $"records v{LightmapRecordsVersion};atlas {lightmapAtlasWidth}x{lightmapAtlasHeight};{LightmapBuriedRule};contacts {ContactRays} {ContactShare} {ContactStep};budget {LightmapRecordBudgetBytes}");
@@ -337,6 +337,12 @@ internal sealed partial class SponzaLoop
     // So each single-sided record beside a buried one sends ContactRays rays from where the cook starts them (1 cm off);
     // where ContactShare of them meet a single-sided back face at any distance, the record moves ContactStep across its
     // face, away from them, and is tested again; still inside, it is buried.
+    // Past the faces through the origin: a record centred ON the contact line (crevices-dark's corridor, a texel at its
+    // side wall's plane, z = 2.000) started its test rays in that wall's face, met it at t ~ 0 as a front face and
+    // counted none inside -- while the cook's same rays slipped into the wall half the time, met the buried face behind
+    // it among no texel, and took the pass's mean bounce: 7% of its rays, 43% of its light, the seam point +31-41%
+    // (2026-10-22, --ray-capture-texel). Past the coplanar face, those rays meet the wall's inside: the record moves.
+    private const float ContactTMin = 1e-4f;
     private const int ContactRays = 32;
     private const float ContactShare = 1f / 8f, ContactStep = 0.02f;
     private (int Moved, int Buried) LiftOffContacts(RayQueryScene scene, Vector4[] texels, uint[] map, int w, int h)
@@ -371,7 +377,7 @@ internal sealed partial class SponzaLoop
                 float u1 = (k + 0.5f) / ContactRays, u2 = (k * 0.6180339887f) % 1f;
                 float r = MathF.Sqrt(u1), phi = 2f * MathF.PI * u2;
                 var d = Vector3.Normalize(t1 * (r * MathF.Cos(phi)) + t2 * (r * MathF.Sin(phi)) + n * MathF.Sqrt(MathF.Max(0f, 1f - u1)));
-                if (scene.Closest(new Ray(origin, d)) is not { } hit || hit.FrontFace) continue;
+                if (scene.Closest(new Ray(origin, d), ContactTMin) is not { } hit || hit.FrontFace) continue;
                 if (hit.Instance < rayPlacementDoubleSided.Count && rayPlacementDoubleSided[hit.Instance]) continue;
                 inside++;
                 toward += d;

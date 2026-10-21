@@ -14,6 +14,8 @@ namespace Blix.Demos.VulkanSponza;
 internal sealed partial class SponzaLoop
 {
     private int rayCaptureBits = -1;
+    // --ray-capture-texel ID: every gather ray of the one texel instead (a crease point's, say).
+    private int rayCaptureTexel = -1;
     private int rayCaptureRoom = 1 << 22;
     private GpuBufferHandle rayCaptureBuffer;
 
@@ -21,6 +23,8 @@ internal sealed partial class SponzaLoop
     {
         rayCaptureBits = args.Int("ray-capture") ?? -1;
         rayCaptureRoom = args.Int("ray-capture-room") ?? rayCaptureRoom;
+        rayCaptureTexel = args.Int("ray-capture-texel") ?? -1;
+        if (rayCaptureTexel >= 0 && rayCaptureBits < 0) rayCaptureBits = 0;
         if (rayCaptureBits >= 0)
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] ray capture: every gather ray of 1 in {1L << rayCaptureBits:N0} texels, up to {rayCaptureRoom:N0} records."));
@@ -32,7 +36,8 @@ internal sealed partial class SponzaLoop
     // round << 4, the near round << 8.
     private float RayCaptureTag => GatherProvenanceCode + 16f * sunNodeRefineRound + 256f * (fineGathering ? nearRounds - nearRoundsLeft : 0);
 
-    private Vector4 RayCaptureUniform => RayCaptureOn ? new Vector4(1f, rayCaptureBits, RayCaptureTag, rayCaptureRoom) : Vector4.Zero;
+    private Vector4 RayCaptureUniform => RayCaptureOn
+        ? new Vector4(1f, rayCaptureTexel >= 0 ? -(rayCaptureTexel + 1f) : rayCaptureBits, RayCaptureTag, rayCaptureRoom) : Vector4.Zero;
 
     private ShaderBufferBinding RayCaptureBinding(GpuBufferHandle stand)
     {

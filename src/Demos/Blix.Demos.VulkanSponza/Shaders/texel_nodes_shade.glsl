@@ -47,7 +47,7 @@ layout(set = 0, binding = 0) uniform SunNodesShade {
                           // patches' spacing (the blend's reach); z 1: a near hit's bounce the texels' about it
                           // (--near-texel-light), w the sun's column (its part per unit of uSunIrradiance)
     vec4 uCapture;        // the ray capture (--ray-capture, SponzaLoop.RayCapture.cs): x 1 on; y the texels sampled, 1 in
-                          // 2^y by a hash of the id; z the round's tag; w the records' room
+                          // 2^y by a hash of the id (negative: the one texel -y - 1); z the round's tag; w the records' room
     vec4 uNear;           // --near-cut (SponzaLoop.SunNodes.cs): x 1 the fine round, each texel's far part kept (FarPart); 2
                           // a near round, its rays cut at y and the far part added back; y the reach (the near texels'
                           // light's, --cell-near)
@@ -628,8 +628,10 @@ void main() {
             sRayFar[r] = sDist[r] >= u.uNear.y || h.w < -1.5 ? 1.0 : 0.0;
             if (u.uCapture.x > 0.5) {
                 uint id = nodeIds[uint(u.uDetail.x) + group];
-                uint bits = uint(u.uCapture.y);
-                if (bits == 0u || ((id * 2654435761u) >> (32u - bits)) == 0u) {
+                // y < 0: the one texel -y - 1 (--ray-capture-texel), every ray of it.
+                uint bits = uint(max(u.uCapture.y, 0.0));
+                bool picked = u.uCapture.y < 0.0 ? id == uint(-u.uCapture.y - 1.0) : (bits == 0u || ((id * 2654435761u) >> (32u - bits)) == 0u);
+                if (picked) {
                     uint at = atomicAdd(captureCount, 1u);
                     if (at < uint(u.uCapture.w)) {
                         float whole = 0.0;
