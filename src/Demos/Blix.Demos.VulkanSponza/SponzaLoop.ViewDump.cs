@@ -32,7 +32,8 @@ internal sealed partial class SponzaLoop
             if (!viewDumpPending && !landed) return;
             viewDumpPending = false;
             if (landed) viewDumpDone = true;
-            if (referenceView) { viewDumpWaiting = 3; viewDumpReady = true; return; }
+            // The reference view's display and any texel view held off a few frames: the field read is then the GI's.
+            if (referenceView || texelView != 0) { viewDumpWaiting = 3; viewDumpReady = true; return; }
         }
         viewDumpReady = false;
         try { viewDumpLast = DumpView(); Console.WriteLine($"[VulkanSponza] view dumped: {viewDumpLast}"); }
@@ -88,6 +89,8 @@ internal sealed partial class SponzaLoop
             lightmapAtlas = new[] { lightmapAtlasWidth, lightmapAtlasHeight },
             reference = new { width = referenceSize.X, height = referenceSize.Y, samples = referenceSamples, on = referenceView },
             pick = new[] { texelPickFraction.X, texelPickFraction.Y },
+            texelView = TexelViewNames[Math.Clamp(texelView, 0, TexelViewNames.Length - 1)],
+            fieldIsGi = true,
             files,
         };
         File.WriteAllText(Path.Combine(dir, "meta.json"), JsonSerializer.Serialize(meta, new JsonSerializerOptions { WriteIndented = true }));

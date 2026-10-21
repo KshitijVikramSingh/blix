@@ -132,7 +132,8 @@ internal sealed partial class SponzaLoop
     private bool TexelToolsOn => texelView != 0 || texelPicker;
 
     // uReference.w for the view: 3-4 provenance, 5-8 the breakdown (incident_clipmap.frag).
-    private float TexelViewReferenceW(float otherwise) => texelView == 0 ? otherwise : texelView + 2f;
+    // Not while a view dump waits (SponzaLoop.ViewDump.cs): a view's colours are written where the field is.
+    private float TexelViewReferenceW(float otherwise) => texelView == 0 || viewDumpWaiting > 0 ? otherwise : texelView + 2f;
 
     // RecordIncidentClipmap: this frame's pick (the pixel's code for uTexelDebug.w, and the buffer); the slot whose frame
     // is past the frames in flight read first.

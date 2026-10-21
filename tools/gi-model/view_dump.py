@@ -75,12 +75,16 @@ def main():
         yy, xx = np.mgrid[0:H, 0:W]
         ref = mean[np.minimum(yy * rh // H, rh - 1), np.minimum(xx * rw // W, rw - 1)]
         err = se[np.minimum(yy * rh // H, rh - 1), np.minimum(xx * rw // W, rw - 1)]
+    # A dump from before the field was always the GI's (meta's fieldIsGi): the pixel's nearest texel's resolved light.
+    if not meta.get("fieldIsGi"):
+        print("   (the field may hold a texel view's colours in this dump: the GI is read as the nearest texel's resolved light)")
+        field = np.where(ids >= 0, resolved[np.maximum(ids, 0)], np.nan)
     R = (slice(y0, y1), slice(x0, x1))
     fid, fld, rf, se = ids[R], field[R], ref[R], err[R]
     have = fid >= 0
     print(f"{d.name}: frame {meta['frame']}, rect ({x0},{y0})-({x1},{y1}) of {W}x{H}; {have.sum()} of {fid.size} pixels on lightmap texels; trace samples {meta['reference']['samples']}")
     if np.isfinite(rf).any():
-        ok = np.isfinite(rf) & (rf > 1e-6)
+        ok = np.isfinite(rf) & (rf > 1e-6) & np.isfinite(fld)
         rel = (fld[ok] - rf[ok]) / rf[ok]
         tell = np.abs(fld[ok] - rf[ok]) > 2 * se[ok]
         print(f"   GI {fld[ok].mean():.4f} against the trace {rf[ok].mean():.4f} ({100 * (fld[ok].mean() / rf[ok].mean() - 1):+.1f}%); per pixel |diff| {100 * np.abs(rel).mean():.1f}%,"
