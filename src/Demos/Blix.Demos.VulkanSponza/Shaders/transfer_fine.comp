@@ -167,7 +167,15 @@ void main() {
         // (crevices, 2026-10-19). --fine-contact R (z): flagged under R.
         // Ranked first (w on): the budget's cut fell at 3.1x on Sponza, under every contact's score, and none was gathered.
         if (u.uFlag.z > 0.0 && ratio < u.uFlag.z) score = u.uFlag.w > 0.5 ? 1000.0 + (1.0 - ratio) : max(score, 2.0 + (1.0 - ratio));
-        if (score > 2.0) flag(disagree >= max(keptRatio, cutRatio) ? 3u : keptRatio >= cutRatio ? 2u : 10u, score);
+        // A two-sided sheet's texel (uKeep.y: --no-fine-cloth off): every one gathered. A coarse cell spans a cloth's folds and
+        // both its sides, so the copy is wrong there in a way no flag above sees, and the ones the flags did pick sat
+        // among copied ones a step apart -- the folded curtains stair-stepped along the atlas's texels, the steps exactly
+        // the flags' patchwork (Sponza, 2026-10-21). Ranked after the contacts (1000 and over), before the rest.
+        bool pairFront = texels[2u * id].w < 0.0;
+        bool pairBack = id > 0u && texels[2u * (id - 1u)].w < 0.0 && texels[2u * id + 1u].w == texels[2u * (id - 1u) + 1u].w;
+        bool cloth = u.uKeep.y > 0.5 && (pairFront || pairBack);
+        if (cloth && score < 500.0) flag(11u, 500.0 + score / 1000.0);   // its copy below still written: what a cut leaves it
+        else if (score > 2.0) flag(disagree >= max(keptRatio, cutRatio) ? 3u : keptRatio >= cutRatio ? 2u : 10u, score);
         const float edges[6] = float[6](1.5, 2.0, 3.0, 4.0, 8.0, 16.0);
         for (int e = 0; e < 6; ++e) if (score > edges[e]) atomicAdd(fineFlags[4 + e], 1u);
     }

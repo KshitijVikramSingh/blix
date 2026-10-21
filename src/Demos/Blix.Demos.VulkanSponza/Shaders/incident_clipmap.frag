@@ -220,6 +220,8 @@ float levelSkySum, levelSkyWeight;
 int viewBestId = -1;
 float viewBestWeight = 0.0;
 bool viewFirstLevel = true;
+// The facing view (uReference.w 12): the finest level's texels, weighted, by how their record's normal meets the pixel's.
+float viewFacing = 0.0, viewFacingWeight = 0.0, viewAway = 0.0;
 #define TEXEL_ATLAS_GATHER
 #define TEXEL_INDEX_TEX uLightmapIndexTex
 #define TEXEL_META(id) texelMeta[(id) - uint(g.uLightmap.w)]
@@ -294,10 +296,17 @@ bool texelsAtLevel(vec3 worldPos, vec3 n, float faceBin, uint level, out vec3 ir
         }
     }
     if (viewFirstLevel) {
-        // The provenance view's texel: the heaviest of the finest level read.
+        // The provenance view's texel: the heaviest of the finest level read; the facing view's sums.
         viewFirstLevel = false;
-        for (int i = 0; i < TEXEL_CANDIDATES; ++i)
-            if (ids[i] >= 0 && weights[i] > viewBestWeight) { viewBestWeight = weights[i]; viewBestId = ids[i]; }
+        for (int i = 0; i < TEXEL_CANDIDATES; ++i) {
+            if (ids[i] < 0) continue;
+            if (weights[i] > viewBestWeight) { viewBestWeight = weights[i]; viewBestId = ids[i]; }
+            vec3 tn = TEXEL_NORMAL(uint(ids[i])).xyz;
+            float f = dot(tn, tn) > 1e-12 ? dot(normalize(tn), n) : 0.0;
+            viewFacing += weights[i] * f;
+            viewFacingWeight += weights[i];
+            if (f < 0.0) viewAway += weights[i];
+        }
     }
     if (pickHere) {
         uint block = pick[0];
@@ -532,6 +541,21 @@ void main() {
         pick[36] = floatBitsToUint(refHere.y);
     }
     // The breakdown views (SponzaLoop.TexelPicker.cs, Texel view): how this pixel's answer is made.
+    if (g.uReference.w > 11.5 && g.uReference.w < 12.5) {
+        // The facing view (SponzaLoop.TexelPicker.cs): how the texels the pixel reads at its finest level face it, by their
+        // record's normal against the pixel's -- green alike, yellow grazing, red the share read from records facing away
+        // (a two-sided texel's other side). Magenta: no texel.
+        vec3 shown = vec3(1.0, 0.0, 1.0);
+        if (viewFacingWeight > 1e-6) {
+            float f = viewFacing / viewFacingWeight;
+            float away = viewAway / viewFacingWeight;
+            shown = away > 0.01 ? mix(vec3(1.0, 0.6, 0.0), vec3(1.0, 0.0, 0.0), away)
+                  : mix(vec3(1.0, 0.9, 0.1), vec3(0.1, 0.8, 0.2), smoothstep(0.5, 0.95, f));
+        }
+        outIncident = vec4(shown, 1.0);
+        outIncidentGradient = vec4(0.0);
+        return;
+    }
     if (g.uReference.w > 10.5 && g.uReference.w < 11.5) {
         // Ours against the path trace (--gi-reference, accumulating while still): the texels' answer against the reference's
         // indirect light, diverging -- grey alike, blue ours darker, red ours brighter, full at 25% either way. Only what the

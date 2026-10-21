@@ -416,6 +416,7 @@ internal sealed partial class SponzaLoop
         ratioRelight = !args.Flag("no-ratio-relight");
         visibleChanged = !args.Flag("no-visible-changed");
         hitBlend = !args.Flag("no-hit-blend");
+        fineCloth = !args.Flag("no-fine-cloth");
         ReadTexelPickArgs(args);
         if (args.Float("lightmap-edge-inset") is { } edgeInset) LightmapEdgeInset = Math.Clamp(edgeInset, 0f, 0.1f);
         atlasCoarse = args.Flag("atlas-coarse");

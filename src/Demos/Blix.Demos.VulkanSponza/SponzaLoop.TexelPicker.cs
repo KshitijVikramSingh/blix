@@ -30,6 +30,7 @@ internal sealed partial class SponzaLoop
         "Breakdown: the coarser level's share (orange; blue: the probes')", "Breakdown: path (green texels alone, yellow with the probes, red probes)",
         "Patches: the light a gather ray reads landing here", "Patches: layout (a colour each)",
         "Against the path trace (--gi-reference; grey alike, blue darker, red brighter, full at 25%)",
+        "Texels' facing (green facing the pixel, yellow grazing, orange-red read from records facing away)",
     };
 
     // The incident pass's patch bindings (the patch views; placeholders without the live patch light).
