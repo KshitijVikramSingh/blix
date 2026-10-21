@@ -1139,9 +1139,10 @@ internal sealed class RenderSettings
     // On: --half-res-lighting.
     [Tune]             public bool HalfResLighting = false;
     // The scene's resolution as a fraction of the window's, per axis (RenderGraph.RenderScale): every scene pass renders
-    // at it, TAA resolves at it, and the present pass scales the result up to the window. --render-scale S. 0.75 by
-    // default (the user's baseline, 2026-10-20: the tree view still 21.5 -> 28.5 fps); the gate runs at 1.
-    [Tune(0.5f, 1f)]   public float RenderScale = 0.75f;
+    // at it, TAA resolves at it, and the present pass scales the result up to the window. --render-scale S. 1 by default
+    // (the user's, 2026-10-22: the image judged at full resolution, as the gate runs; 0.75 was the 2026-10-20 baseline,
+    // the tree view 21.5 -> 28.5 fps).
+    [Tune(0.5f, 1f)]   public float RenderScale = 1f;
     // The traced sun shadows at half resolution too (only with HalfResLighting: the upsample brings the mask back). Off
     // by default: half-res shadows left blocky patches the upsample could not hide, worst on cloth.
     [Tune]             public bool HalfResShadows = false;
