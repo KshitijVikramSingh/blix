@@ -427,7 +427,7 @@ internal sealed partial class SponzaLoop
         if (args.Float("lightmap-edge-inset") is { } edgeInset) LightmapEdgeInset = Math.Clamp(edgeInset, 0f, 0.1f);
         atlasCoarse = args.Flag("atlas-coarse");
         if (args.Int("coarse-filter") is { } coarsePasses) coarseFilterPasses = Math.Max(0, coarsePasses);
-        coarseFilterLinear = args.Flag("coarse-filter-linear");
+        coarseFilterLinear = !args.Flag("coarse-filter-mean");
         cookedSkyVis = !args.Flag("no-cooked-sky-vis");
         contactAllRays = !args.Flag("contact-rays-own");
         if (args.Int("sky-vis-rays") is { } svr) skyVisRays = Math.Max(32, svr / 32 * 32);

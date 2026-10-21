@@ -462,8 +462,10 @@ internal sealed partial class SponzaLoop
     // The coarse cells' parts filtered before the fine copy reads them (coarse_filter.comp): their ray noise went onto
     // every fine texel each lights, cell-sized blobs (Cornell, 2026-10-21). --coarse-filter N passes (0: none).
     private int coarseFilterPasses = 1;
-    // --coarse-filter-linear: the filter a local linear fit, not a weighted mean (coarse_filter.comp): no bias beside a crease.
-    private bool coarseFilterLinear;
+    // The filter a local linear fit, not a weighted mean (coarse_filter.comp): no first-order bias where the neighbourhood
+    // is one-sided, beside a crease. Cornell, two seeds each: crease rms 4.69% -> 4.44% (unfiltered 4.18%), flat |error|
+    // 1.31% -> 1.29% (unfiltered 1.60%); the crevices level (2026-10-21). --coarse-filter-mean: the mean, as before.
+    private bool coarseFilterLinear = true;
     private ShaderInterface coarseFilterInterface = null!;
     private PipelineHandle coarseFilterPipeline;
     private GpuBufferHandle coarseFilterIds, coarseFilterSky, coarseFilterSun;

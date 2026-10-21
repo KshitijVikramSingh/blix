@@ -6,7 +6,7 @@
 // each cell's own ray noise (~1.3% of its light at 384 rays) went onto every fine texel it lights, cell-sized blobs the
 // eye reads as patches (Cornell, 2026-10-21). The compose filters the composed light at rest too, but the copy reads the
 // parts.
-// uEdge.z 1 (--coarse-filter-linear): a local linear fit in the surface's plane instead of the weighted mean -- the light as
+// uEdge.z 1 (the default; --coarse-filter-mean 0): a local linear fit in the surface's plane instead of the weighted mean -- the light as
 // c + g.(offset), c kept. Where the neighbourhood is one-sided (a cell beside a crease, the surface ending) the mean's
 // centre sits ~0.4 of a cell off the cell's, and the light's slope there times that offset came out as a bias; the fit has
 // none to first order, and over a full neighbourhood it is the mean exactly (the offsets' moments vanish).
