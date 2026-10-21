@@ -103,6 +103,26 @@ internal sealed partial class SponzaLoop
     // --near-texel-light, its near hits read the texels the last round gathered).
     private int nearRounds, nearRoundsLeft;
     private uint[] fineRoundIds = Array.Empty<uint>();
+    // --near-cut (default; --no-near-cut the old full regather): a near round traces fineGatherRays short rays (to hitCellNear, the reach of the near texels' light) with
+    // no refine, the fine round's far part added back (texel_nodes_shade.glsl FarPart): the ray capture had the near
+    // rounds at two thirds of the fine round's rays, every one re-tracing what could not change (2026-10-22).
+    private bool nearCut;
+    private GpuBufferHandle finePlaceBuffer, farPartBuffer;
+    private int NearRoundIndex => nearRounds - nearRoundsLeft;
+    // 0 off; 1 the fine round (its far part kept); 2 a near round (cut, the far part added back).
+    private int NearCutMode => nearCut && fineGathering && nearRounds > 0 && !farPartBuffer.Equals(default(GpuBufferHandle)) ? (NearRoundIndex == 0 ? 1 : 2) : 0;
+
+    // The fine round's places (a texel's place + 1) and its far parts cleared, once at its start.
+    private void BeginNearCut(uint[] fineIds)
+    {
+        if (!nearCut || nearRounds == 0) return;
+        if (!finePlaceBuffer.Equals(default(GpuBufferHandle))) RetireGpuBuffer(finePlaceBuffer);
+        if (!farPartBuffer.Equals(default(GpuBufferHandle))) RetireGpuBuffer(farPartBuffer);
+        var place = new uint[texelCount];
+        for (var i = 0; i < fineIds.Length; i++) place[fineIds[i]] = (uint)i + 1;
+        finePlaceBuffer = Own(device.CreateGpuBuffer(Math.Max(16, texelCount * 4), MemoryMarshal.AsBytes(place.AsSpan()), "sponza.sun-nodes.fine-place"));
+        farPartBuffer = Own(device.CreateGpuBuffer(Math.Max(16, fineIds.Length * 2 * 16), new byte[Math.Max(16, fineIds.Length * 2 * 16)], "sponza.sun-nodes.far-part"));
+    }
 
     // The fine refine's round over these texels: traced as the coarse were, a round of their own, the cook screen up.
     private void StartFineRound(uint[] fineIds)
@@ -202,6 +222,9 @@ internal sealed partial class SponzaLoop
         sunNodeLights = !args.Flag("sun-nodes-no-lights");
         noiseCensus = args.Flag("split-noise-census");
         ReadRayCaptureArgs(args);
+        // On by default (2026-10-22: the gate held; Cornell and crevices seams' |error| and noise down, two seeds each).
+        guideSun = !args.Flag("no-guide-sun");
+        nearCut = !args.Flag("no-near-cut");
         ReadFarArgs(args);
         ReadTransportCensusArgs(args);
         ReadFarTransportArgs(args);
@@ -750,6 +773,7 @@ internal sealed partial class SponzaLoop
             sunNodeRays = fineGatherSavedRays;
             texelMaxRays = fineGatherSavedMaxRays;
             StartFineRound(fineRoundIds);
+            if (NearCutMode == 2) texelMaxRays = sunNodeRays;
             return;
         }
         if (fineGathering)
@@ -775,6 +799,7 @@ internal sealed partial class SponzaLoop
             {
                 fineRoundIds = fineIds;
                 nearRoundsLeft = nearRounds;
+                BeginNearCut(fineIds);
                 StartFineRound(fineIds);
                 return;
             }
@@ -1166,7 +1191,7 @@ internal sealed partial class SponzaLoop
                 new("uCookedDims", new Vector4Uniform(cookedDims)),
                 // x 1: the light strategy on; y the patches' disk radius (a patch stands for spacing^2 of surface).
                 new("uLights", new Vector4Uniform(new Vector4(sunNodeLit && !plain ? 1f : 0f, transportSpacing / MathF.Sqrt(MathF.PI), 0f, 0f))),
-                new("uTile", new Vector4Uniform(new Vector4(interleave ? 1f : 0f, texelGrid.W, lightmapTexels ? lightmapFirstRecord : float.MaxValue, 0f))),
+                new("uTile", new Vector4Uniform(new Vector4(interleave ? 1f : 0f, texelGrid.W, lightmapTexels ? lightmapFirstRecord : float.MaxValue, !plain && NearCutMode == 2 ? hitCellNear : 0f))),
                 new("uFar", new Vector4Uniform(plain && !farCut ? Vector4.Zero : FarUniform(discover))),
             },
             Array.Empty<ShaderTextureBinding>(),
@@ -1211,6 +1236,7 @@ internal sealed partial class SponzaLoop
                 new("uFarTransport", new Vector4Uniform(new Vector4(FarTransportUniform, 0f, 0f, 0f))),
                 new("uHitBlend", new Vector4Uniform(new Vector4(HitBlendNow ? 1f : 0f, transportSpacing, NearTexelLightNow ? 1f : 0f, SunColumn()))),
                 new("uCapture", new Vector4Uniform(discover == 0 && exactMode is < 0.5f or > 2.5f ? RayCaptureUniform : Vector4.Zero)),
+                new("uNear", new Vector4Uniform(discover == 0 && few ? new Vector4(NearCutMode, hitCellNear, 0f, 0f) : new Vector4(0f, 1e30f, 0f, 0f))),
             },
             new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
             Buffers: new[]
@@ -1250,6 +1276,8 @@ internal sealed partial class SponzaLoop
                 NearTexelLightNow ? ProvenanceBinding() : new ShaderBufferBinding("TexelProvenance", sunNodeAccum),
                 new ShaderBufferBinding("SheetRows", SheetsInGi ? SheetRowsBuffer!.Value : sunNodeAccum),
                 RayCaptureBinding(sunNodeAccum),
+                new ShaderBufferBinding("FinePlace", finePlaceBuffer.Equals(default(GpuBufferHandle)) ? sunNodeAccum : finePlaceBuffer),
+                new ShaderBufferBinding("FarPart", farPartBuffer.Equals(default(GpuBufferHandle)) ? sunNodeAccum : farPartBuffer),
             }.Concat(CookedBuffers()).Where(b => declared.Contains(b.Name)).ToArray());
     }
 

@@ -387,6 +387,11 @@ internal sealed partial class SponzaLoop
     // sky's luminance a guide bin.
     private float[]? liveSkyEscape, liveSkyLum;
 
+    // The guides and light lists count each patch's own direct sun (texel_live_guides.comp); --no-guide-sun: its bounce
+    // alone, as before.
+    private bool guideSun;
+    private bool GuideSunNow => guideSun && !liveDirect.Equals(default(GpuBufferHandle));
+
     private void RecordLiveGuides(TransportSolveData d)
     {
         if (liveGuides.Equals(default(GpuBufferHandle)))
@@ -402,7 +407,11 @@ internal sealed partial class SponzaLoop
         if (liveSkyLumBuffer.Equals(default(GpuBufferHandle)))
             liveSkyLumBuffer = Own(device.CreateGpuBuffer(64 * 4, MemoryMarshal.AsBytes(lum.AsSpan()), "sponza.live.sky-lum"));
         graph.Dispatch(liveGuidesPass, new DispatchCommand(liveGuidesPipeline, (d.Patches + 63) / 64, 1, 1,
-            new ShaderUniform[] { new("uGuides", new Vector4Uniform(new Vector4(d.Patches, LiveComponents, 0f, 0f))) },
+            new ShaderUniform[]
+            {
+                new("uGuides", new Vector4Uniform(new Vector4(d.Patches, LiveComponents, GuideSunNow ? 1f : 0f, 0f))),
+                new("uIrr", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 0f))),
+            },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
             {
@@ -414,6 +423,8 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("PatchLights", liveLights),
                 new ShaderBufferBinding("PatchSkyEscape", liveSkyEscapeBuffer),
                 new ShaderBufferBinding("SkyGuideLum", liveSkyLumBuffer),
+                new ShaderBufferBinding("PatchDirect", GuideSunNow ? liveDirect : liveSkyLumBuffer),
+                new ShaderBufferBinding("PatchTerms", solveBuffers[7]),
             }));
     }
 

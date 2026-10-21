@@ -80,6 +80,11 @@ internal sealed partial class SponzaLoop
         // --ray-capture's rays (SponzaLoop.RayCapture.cs): the count's 16 bytes, then 32 a ray.
         var (captured, capturedBytes) = RayCaptureForDump();
         Buffer("rays_captured.u32x8", captured, capturedBytes);
+        // The light strategy's inputs (texel_nodes_rays.comp): each texel's guide patch (+ 2; 1 none), the patches'
+        // light lists (LIGHT_K (index bits, cumulative share) a patch) and the patches (pos, normal, indirect).
+        Buffer("guide_patch.u32", sunNodeGuidePatch, (long)texelCount * 4);
+        if (cookedPacked is { } packed) Buffer("light_lists.f32x2", liveLights, (long)(packed.Length / 3) * LightListSize * 8);
+        Buffer("patches.f32x12", cookedPatchBuffer, cookedPacked is { } cp ? (long)cp.Length * 16 : 0);
         if (referenceView || referenceSamples > 0)
         {
             Buffer("reference.f32x4", referenceAccum, (long)referenceSize.X * referenceSize.Y * 16);

@@ -45,6 +45,12 @@ def main():
     rnd = sys.argv[sys.argv.index("--round") + 1] if "--round" in sys.argv else "all"
     if rnd in args: args.remove(rnd)
     meta, count, rec, contact, resolved = load(args[0])
+    d0 = Path(args[0])
+    lists = guide = None
+    if (d0 / "light_lists.f32x2").exists() and (d0 / "guide_patch.u32").exists():
+        ll = np.frombuffer((d0 / "light_lists.f32x2").read_bytes(), np.float32).reshape(-1, 16, 2)
+        lists = ll[..., 0].copy().view(np.int32)
+        guide = np.frombuffer((d0 / "guide_patch.u32").read_bytes(), np.uint32)
     print(f"{Path(args[0]).name}: {count:,} rays met, {len(rec):,} kept; seed {meta.get('seed')}")
     tid = rec[:, 0].astype(np.int64)
     tag = rec[:, 1] & 0xFFFF
@@ -129,6 +135,40 @@ def main():
                     nm = names[int(k)]
                 v = np.sum((x[s2] - xm[s2]) ** 2)
                 print(f"         {nm:28s} rays {100 * s2.sum() / sel.sum():5.1f}%  light {100 * x[s2].sum() / x[sel].sum():5.1f}%  variance {100 * v / tot:5.1f}%  light a ray {x[s2].mean():6.2f}x")
+        # By strategy (the ray's place in its pass, texel_nodes_rays.comp: 0-15 cosine, 16-23 the guide, 24-31 the light
+        # lists, where the texel has them): rays, light, variance, and how often a ray brought sun from its hit.
+        place = (how >> 8) & 31
+        strat = np.where(place < 16, 0, np.where(place < 24, 1, 2))
+        print("      by strategy (the ray's place in its pass):")
+        for k, nm in enumerate(("cosine 0-15", "guide 16-23", "light lists 24-31")):
+            s2 = sel & (strat == k)
+            if not s2.any(): continue
+            v = np.sum((x[s2] - xm[s2]) ** 2)
+            sunny = np.mean(sun[s2] > 1e-9 * np.maximum(mean[inv[s2]], 1e-12))
+            print(f"         {nm:28s} rays {100 * s2.sum() / sel.sum():5.1f}%  light {100 * x[s2].sum() / x[sel].sum():5.1f}%  variance {100 * v / tot:5.1f}%"
+                  f"  light a ray {x[s2].mean():5.2f}x  sun at the hit {100 * sunny:4.1f}% of its rays, their sun a ray {np.mean((sun * norm)[s2][sun[s2] > 0]) if (sun[s2] > 0).any() else 0:6.2f}x")
+        if lists is not None:
+            # The light lists: the texel's guide patch's (guide_patch.u32: + 2), its LIGHT_K entries' patches. Which of the
+            # sun the rays brought came from a hit on a listed patch -- the light strategy's aim, against where it was.
+            gp = guide[tid[sel]].astype(np.int64) - 2
+            hp = (how[sel] >> 13).astype(np.int64) - 1
+            ok = (gp >= 0) & (gp < len(lists)) & (hp >= 0)
+            listed = np.zeros(sel.sum(), bool)
+            idx = np.where(ok)[0]
+            listed[idx] = (lists[gp[idx]] == hp[idx, None]).any(1)
+            sn = (sun * norm)[sel]
+            st_ = strat[sel]
+            print(f"      the sun by its hit's patch: from listed patches {100 * sn[listed].sum() / max(sn.sum(), 1e-12):.0f}% of the sun the rays brought"
+                  f" (the guide patch known for {100 * np.mean(gp >= 0):.0f}% of rays); lists' entries used {np.mean((lists[gp[gp >= 0]] >= 0).sum(1)) if (gp >= 0).any() else 0:.1f} of 16")
+            for k, nm in enumerate(("cosine", "guide", "light lists")):
+                m = (st_ == k) & (sn > 0)
+                if m.any(): print(f"         {nm:12s} rays with sun: on a listed patch {100 * np.mean(listed[m]):.0f}%")
+            # The patches that brought the sun to this band, by how much: how many it takes for 90%.
+            sp = np.bincount(np.maximum(hp, 0), sn * (hp >= 0))
+            order = np.sort(sp)[::-1]
+            if order.sum() > 0:
+                c90 = int(np.searchsorted(np.cumsum(order) / order.sum(), 0.9)) + 1
+                print(f"      the sun came from {np.count_nonzero(sp):,} patches; 90% of it from {c90}")
         # Between the distance bins: per texel, the variance its bins' means explain (stratifying on the bin removes it).
         key = inv[sel] * len(DIST_NAMES) + dbin[sel]
         ks, kinv, kn = np.unique(key, return_inverse=True, return_counts=True)

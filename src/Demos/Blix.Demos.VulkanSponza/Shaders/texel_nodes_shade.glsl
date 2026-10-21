@@ -48,6 +48,9 @@ layout(set = 0, binding = 0) uniform SunNodesShade {
                           // (--near-texel-light), w the sun's column (its part per unit of uSunIrradiance)
     vec4 uCapture;        // the ray capture (--ray-capture, SponzaLoop.RayCapture.cs): x 1 on; y the texels sampled, 1 in
                           // 2^y by a hash of the id; z the round's tag; w the records' room
+    vec4 uNear;           // --near-cut (SponzaLoop.SunNodes.cs): x 1 the fine round, each texel's far part kept (FarPart); 2
+                          // a near round, its rays cut at y and the far part added back; y the reach (the near texels'
+                          // light's, --cell-near)
 } u;
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
@@ -77,9 +80,19 @@ layout(std430, set = 0, binding = 38) readonly buffer SheetRows { uint sheetRows
 // The ray capture (uCapture.x on; the split variant's two-column fast path alone): each ray of the sampled texels, two
 // uvec4s -- x the texel, y the round's tag | the pass << 16, z its hit distance (a miss 1e30), w how it was answered (0
 // the sky, 1 the far record, 2 a hit cell, 3 the search's texels, 4 among none; + 8 its bounce a near texel's own light,
-// + 16 no patch); then its whole luminance (weight in), the bounce's share of it, half2 (its cosine to the texel's
-// normal, its weight), the hit's likeliest texel (else 0xFFFFFFFF). tools/gi-model/ray_capture.py reads them.
+// + 16 no patch; bits 8-12 its place in its pass, which says its strategy: texel_nodes_rays.comp; bits 13-31 its hit's
+// patch + 1, 0 none -- a miss or a far ray wraps, read only for hits); then its whole
+// luminance (weight in), the bounce's share of it, half2 (its cosine to the texel's normal, its weight), the hit's
+// likeliest texel (else 0xFFFFFFFF). tools/gi-model/ray_capture.py reads them.
 layout(std430, set = 0, binding = 39) buffer RayCapture { uint captureCount; uint capturePad[3]; uvec4 captured[]; };
+// --near-cut: a near round re-gathers the fine texels for their near hits' new light (the texels the last round
+// gathered, nearTexelLight) -- nothing past the reach changes between rounds (hit cells, patches, the sky: the ray
+// capture found no hit past it lit by a texel, 2026-10-22). So the fine round keeps, per texel, the part of its
+// estimate its rays past the reach and its misses brought (FarPart [place][column]: rgb the passes' means summed, w the
+// passes); a near round traces short rays (texel_nodes_rays.comp) for the near part alone and adds it back. FinePlace:
+// a texel's place in the fine round + 1 (0 none). The split variant's fast path alone.
+layout(std430, set = 0, binding = 40) readonly buffer FinePlace { uint finePlace[]; };
+layout(std430, set = 0, binding = 41) buffer FarPart { vec4 farPart[]; };
 layout(std430, set = 0, binding = 14) readonly buffer FoliagePoints { vec4 foliagePoints[]; };
 layout(std430, set = 0, binding = 15) readonly buffer FoliageHash { uint foliageHash[]; };
 layout(std430, set = 0, binding = 16) readonly buffer FoliageBits { uint foliageBits[]; };
@@ -194,6 +207,7 @@ shared int sNearTexel[RAYS];    // the transport census: each hit's likeliest te
 shared vec4 sSheet[RAYS];       // the hit's sheet: rgb T c, a T (0: not a sheet); the 256-sun variant meets sheets as opaque
 shared uint sHow[RAYS];         // the ray capture: how the hit was answered (RayCapture's w, before its flags); the
                                 // 256-sun variant (at Metal's 32 KB) captures nothing
+shared float sRayFar[RAYS];     // --near-cut: the ray met nothing within the reach (FarPart)
 #define HOW(r, v) sHow[r] = v
 #else
 #define HOW(r, v)
@@ -611,6 +625,7 @@ void main() {
                 sRayTilt[r * 2 + k] = tilts ? tiltLight * vec2(dot(dt1, w), dot(dt2, w)) / tiltDen : vec2(0.0);
             }
 #if MAX_WORDS == 1
+            sRayFar[r] = sDist[r] >= u.uNear.y || h.w < -1.5 ? 1.0 : 0.0;
             if (u.uCapture.x > 0.5) {
                 uint id = nodeIds[uint(u.uDetail.x) + group];
                 uint bits = uint(u.uCapture.y);
@@ -625,7 +640,7 @@ void main() {
                         if (how >= 2u && h.w < 0.0) how += 16u;
                         vec3 tn = texels[2u * id + 1u].xyz;
                         float cosine = dot(tn, tn) > 0.0 ? dot(normalize(tn), w) : 0.0;
-                        captured[2u * at] = uvec4(id, uint(u.uCapture.z) | (uint(u.uShade.w) << 16), floatBitsToUint(sDist[r]), how);
+                        captured[2u * at] = uvec4(id, uint(u.uCapture.z) | (uint(u.uShade.w) << 16), floatBitsToUint(sDist[r]), how | (uint(r) << 8) | (uint(int(h.w) + 1) << 13));
                         captured[2u * at + 1u] = uvec4(floatBitsToUint(whole), floatBitsToUint(captureBounce),
                             packHalf2x16(vec2(cosine, sRayWeight[r])), uint(sNearTexel[r]));
                     }
@@ -639,6 +654,22 @@ void main() {
             vec3 sum = vec3(0.0);
             vec2 tilt = vec2(0.0);
             for (int r = 0; r < RAYS; ++r) { sum += sRaySum[r * 2 + k]; tilt += sRayTilt[r * 2 + k]; }
+#if MAX_WORDS == 1
+            if (u.uNear.x > 0.5) {
+                uint place = finePlace[nodeIds[uint(u.uDetail.x) + group]];
+                vec3 farSum = vec3(0.0);
+                for (int r = 0; r < RAYS; ++r) farSum += sRayFar[r] * sRaySum[r * 2 + k];
+                if (place > 0u) {
+                    uint fp = (place - 1u) * 2u + uint(k);
+                    if (u.uNear.x < 1.5) farPart[fp] += vec4(farSum / float(RAYS), 1.0);
+                    else {
+                        // The cut rays met "nothing" (the sky's light): theirs and the misses' out, the fine round's far part in.
+                        vec4 f = farPart[fp];
+                        sum += (f.w > 0.0 ? f.rgb / f.w : vec3(0.0)) * float(RAYS) - farSum;
+                    }
+                }
+            }
+#endif
             uint at = group * uint(suns) + uint(k);
             if (detail) {
                 float escaped = 0.0;

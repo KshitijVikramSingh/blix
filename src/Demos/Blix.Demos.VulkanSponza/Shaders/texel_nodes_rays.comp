@@ -22,7 +22,8 @@ layout(set = 0, binding = 0) uniform SunNodesRays {
     vec4 uCookedDims;
     vec4 uLights;  // x 1: the light strategy; y the patches' disk radius
     vec4 uFar;     // the far field (texel_far.glsl); x 2: a ray in a bin the record knows stops at the texel's reach
-    vec4 uTile;    // --interleave: x 1 on, y the finest cells' spacing, z the first lightmap record (its texels by atlas)
+    vec4 uTile;    // --interleave: x 1 on, y the finest cells' spacing, z the first lightmap record (its texels by atlas);
+                   // w a near round's reach (--near-cut, texel_nodes_shade.glsl FarPart; 0 none)
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
@@ -267,5 +268,6 @@ void main() {
         }
         if (known) tMax = sFarReach;
     }
+    if (u.uTile.w > 0.0) tMax = min(tMax, u.uTile.w);
     nodeRays[slot * 2u + 1u] = vec4(dir, tMax);
 }

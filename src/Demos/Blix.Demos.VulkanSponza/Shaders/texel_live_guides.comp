@@ -11,10 +11,12 @@
 layout(local_size_x = 64) in;
 
 #define GUIDE_RES 8
+#define PI 3.14159265359
 #define GUIDE_BINS 64
 
 layout(set = 0, binding = 0) uniform LiveGuides {
-    vec4 uGuides;   // x the patches, y the components (G)
+    vec4 uGuides;   // x the patches, y the components (G), z 1: a patch's own direct sun counted (--guide-sun)
+    vec4 uIrr;      // rgb the sun's irradiance
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer CookedPatches { vec4 cookedPatch[]; };   // 3 a patch: pos, normal, indirect
@@ -29,6 +31,14 @@ layout(std430, set = 0, binding = 5) writeonly buffer PatchGuides { float guide[
 layout(std430, set = 0, binding = 6) writeonly buffer PatchLights { vec2 lightList[]; };
 layout(std430, set = 0, binding = 7) readonly buffer PatchSkyEscape { float skyEscape[]; };   // [patch][bin]
 layout(std430, set = 0, binding = 8) readonly buffer SkyGuideLum { float skyLum[]; };          // [bin]
+// --guide-sun: a patch's outgoing light is its bounce (nodeOut: albedo / pi x what it receives) AND its own direct sun
+// (texel_live_direct.comp's sums: the mean n.l over its texels, their sun bits) -- the sunlet's part, which nodeOut has
+// not. Without it the guides and the lists never aimed at the sunlit floor: the ray capture found the fine round's
+// contact texels' light-list rays, a quarter of their rays, bringing 0.9% of their light, and the sun at the hits 70%
+// of their variance (Cornell, 2026-10-22); tools/gi-model/contact_far.py: lists that count the sun, 384 rays as noisy as
+// 640 plain, today's as 300.
+layout(std430, set = 0, binding = 9) readonly buffer PatchDirect { uint patchDirect[]; };   // 2 a patch: n.l x 4096, texels
+layout(std430, set = 0, binding = 10) readonly buffer PatchTerms { vec4 patchTerms[]; };   // 3 a patch: albedo, sky, boot
 
 vec2 octEncode(vec3 d) {
     d /= abs(d.x) + abs(d.y) + abs(d.z);
@@ -58,6 +68,8 @@ void main() {
         if (dot(d, d) < 1e-8) continue;
         vec3 out_ = vec3(0.0);
         for (uint k = 0u; k < G; ++k) out_ += nodeOut[j * G + k].rgb;
+        if (u.uGuides.z > 0.5 && patchDirect[2u * j + 1u] > 0u)
+            out_ += patchTerms[3u * j].rgb * u.uIrr.rgb * (float(patchDirect[2u * j]) / 4096.0 / float(patchDirect[2u * j + 1u])) / PI;
         float s = uintBitsToFloat(coupling[c].y) * dot(out_, lum);
         h[octBin(normalize(d))] += s;
         if (j == i || s <= 0.0) continue;
