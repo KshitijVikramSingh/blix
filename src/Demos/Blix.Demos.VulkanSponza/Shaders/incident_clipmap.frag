@@ -259,47 +259,45 @@ float texelSunlit(vec3 world, vec3 n) {
 // texel or two across -- drapes' curtain, 2 cm strips each its own chart -- the light was one texel's from edge to edge
 // and stepped at every chart's edge where the path trace runs smooth (the user's vertical stripes, 2026-10-22). The
 // cook lists each atlas texel's touching texels of OTHER charts (SponzaLoop.Seams.cs: within 4.5 cm, on its plane, facing
-// within cos 0.95). Each of the heaviest texel's takes a share of the pixel's light by how far the pixel lies from that
-// texel toward it: 0 at its own texel, 1/2 at the midpoint, where the neighbour's pixels give the same -- the light
-// continuous across the seam (the model: steps 9-22% rms -> under 0.1%, error 3-5x down). The own four keep the rest.
+// within cos 0.95). Each of the pixel's own texels gives its neighbour straight across a share by how far the pixel
+// lies toward it, 1/2 at the midpoint, where the neighbour's pixels give the same -- the light continuous across the
+// seam (the model: steps 9-22% rms -> under 0.1%, error 3-5x down).
 layout(std430, set = 0, binding = 20) readonly buffer TexelSeamStart { uint seamStart[]; };   // [atlas record - first]
 layout(std430, set = 0, binding = 21) readonly buffer TexelSeamIds { uint seamIds[]; };
 void seamBlend(vec3 worldPos, vec3 n, inout int ids[TEXEL_CANDIDATES], inout float weights[TEXEL_CANDIDATES]) {
-    int own = -1;
-    float most = 0.0, ownSum = 0.0;
-    for (int i = 0; i < 4; ++i) {
-        if (ids[i] < 0) continue;
-        ownSum += weights[i];
-        if (weights[i] > most) { most = weights[i]; own = ids[i]; }
-    }
+    // Per own texel (the bilinear four, which already interpolate along the chart): its one seam neighbour straight
+    // across from the pixel -- of those the pixel lies toward, the least to the side of the line between them -- takes
+    // its share of that texel's weight by how far across the pixel lies, 1/2 at the midpoint. Along the seam the
+    // bilinear weights carry on; across it the two sides meet at the same mix. (Taking the heaviest texel's neighbours
+    // all at once, by projection alone, pulled the next strip's rows above and below into a strip's middle: its stripes
+    // halved, not gone -- the user's view, 2026-10-22.)
     uint first = uint(g.uLightmap.w);
-    if (own < 0 || uint(own) < first || ownSum <= 0.0) return;
-    // Every atlas record has its list (a pair's back too: its neighbours face as it does).
-    uint at = uint(own) - first;
-    vec3 po = TEXEL_POSITION(uint(own)).xyz;
-    float shares[6];
-    int others[6];
-    int found = 0;
-    float total = 0.0;
-    for (uint k = seamStart[at]; k < seamStart[at + 1u] && found < 6 && 4 + found < TEXEL_CANDIDATES; ++k) {
-        uint j = seamIds[k];
-        if (abs(TEXEL_POSITION(j).w) < 2.0) continue;
-        vec3 d = TEXEL_POSITION(j).xyz - po;
-        float dd = dot(d, d);
-        if (dd < 1e-8) continue;
-        float t = clamp(dot(worldPos - po, d) / dd, 0.0, 0.5);
-        if (t <= 0.0) continue;
-        others[found] = int(j);
-        shares[found] = t;
-        total += t;
-        found++;
+    int added = 0;
+    for (int i = 0; i < 4; ++i) {
+        if (ids[i] < 0 || uint(ids[i]) < first || weights[i] <= 0.0) continue;
+        vec3 po = TEXEL_POSITION(uint(ids[i])).xyz;
+        vec3 rel = worldPos - po;
+        uint at = uint(ids[i]) - first;
+        int best = -1;
+        float bestSide = 1e30, bestT = 0.0;
+        for (uint k = seamStart[at]; k < seamStart[at + 1u]; ++k) {
+            uint j = seamIds[k];
+            if (abs(TEXEL_POSITION(j).w) < 2.0) continue;
+            vec3 d = TEXEL_POSITION(j).xyz - po;
+            float dd = dot(d, d);
+            if (dd < 1e-8) continue;
+            float along = dot(rel, d) / dd;
+            if (along <= 0.0) continue;
+            float side = length(rel - d * along);
+            if (side < bestSide) { bestSide = side; best = int(j); bestT = along; }
+        }
+        if (best < 0 || 4 + added >= TEXEL_CANDIDATES) continue;
+        float share = min(bestT, 0.5);
+        ids[4 + added] = best;
+        weights[4 + added] = weights[i] * share;
+        weights[i] *= 1.0 - share;
+        added++;
     }
-    if (found == 0) return;
-    // At a chart's corner two or three neighbours each claim a share: half the light at most leaves the own chart.
-    float scale = total > 0.5 ? 0.5 / total : 1.0;
-    float keep = (1.0 - total * scale) / ownSum;
-    for (int i = 0; i < 4; ++i) weights[i] *= keep;
-    for (int f = 0; f < found; ++f) { ids[4 + f] = others[f]; weights[4 + f] = shares[f] * scale; }
 }
 
 bool texelsAtLevel(vec3 worldPos, vec3 n, float faceBin, uint level, out vec3 irradiance, out float confidence) {

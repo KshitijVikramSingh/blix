@@ -396,6 +396,7 @@ internal sealed partial class SponzaLoop
     // The fine round refines its contact-flagged texels alone (--fine-refine-all: every noisy one, as before): the
     // seams' excess was theirs, and refining every noisy texel was 2 G of the fine round's 3.3 G rays on Sponza.
     private bool fineRefineContactOnly = true;
+    private bool fineRefineCloth = true;
     private bool fineGathering;
     // --fine-all (a measurement): every fine texel flagged, so the fine refine gathers the level whole (no copy).
     private bool fineAll;
@@ -424,7 +425,10 @@ internal sealed partial class SponzaLoop
         while (cut > 0 && above + histogram[cut] < take) above += histogram[cut--];
         var ids = new uint[take];
         int n = 0, atCut = take - above;
-        // The contact-flagged (ranked first: a score of 1000 and over) refine; the rest settle at the sweep.
+        // The contact-flagged (ranked first: a score of 1000 and over) refine, and two-sided sheets' (500 and over:
+        // transfer_fine.comp) -- the cloth stopped at its first 128 rays, each texel 2.6% off its neighbours, p95 5%
+        // (drapes' curtain, the user's view: "noisy and dirty", 2026-10-22). --no-fine-refine-cloth: the contacts alone.
+        // The rest settle at the sweep.
         var mask = fineRefineContactOnly ? new uint[(texelCount + 31) / 32] : null;
         long masked = 0;
         for (var i = 0; i < count && n < take; i++)
@@ -435,7 +439,7 @@ internal sealed partial class SponzaLoop
             {
                 var id = words[2 * i];
                 ids[n++] = id;
-                if (mask is not null && score >= 1000f) { mask[id >> 5] |= 1u << (int)(id & 31); masked++; }
+                if (mask is not null && score >= (fineRefineCloth ? 500f : 1000f)) { mask[id >> 5] |= 1u << (int)(id & 31); masked++; }
             }
         }
         refineMasked = mask is not null;
@@ -443,7 +447,7 @@ internal sealed partial class SponzaLoop
         {
             if (refineMaskBuffer.Equals(default(GpuBufferHandle))) refineMaskBuffer = Own(device.CreateGpuBuffer(mask.Length * 4, name: "sponza.transfer.refine-mask"));
             device.WriteGpuBuffer(refineMaskBuffer, 0, MemoryMarshal.AsBytes(mask.AsSpan()));
-            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] fine refine: {masked:N0} contact-flagged texels may refine; the rest settle at the sweep."));
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] fine refine: {masked:N0} contact-flagged {(fineRefineCloth ? "and sheet " : "")}texels may refine; the rest settle at the sweep."));
         }
         if (n < take) ids = ids[..n];
         // In place order (the far field's key): picked in the order the flags were appended, a slice's texels lay all over
