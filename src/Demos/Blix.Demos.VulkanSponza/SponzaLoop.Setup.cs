@@ -76,6 +76,9 @@ internal sealed partial class SponzaLoop
         if (args.Int("ref-bounces") is { } rb) refBounces = Math.Clamp(rb, 1, 64);
         if (args.Int("ref-paths") is { } rp) refPaths = Math.Clamp(rp, 16, 1 << 20);
         if (args.Int("ref-seed") is { } rs) refSeed = rs;
+        refSheets = !args.Flag("ref-opaque-sheets");
+        refSunClosest = !args.Flag("ref-shadow-batch");
+        if (args.Float("ref-sky") is { } rsk) refSky = Math.Max(0f, rsk);
         refSunDisc = args.String("ref-sun") switch
         {
             null or "disc" => true,
@@ -867,6 +870,7 @@ internal sealed partial class SponzaLoop
         referenceClosestBatch = DeclareClosestBatch("reference-closest");
         referenceWaveShadePass = graph.ComputePass("reference-wave-shade").Shader(referenceWaveInterface).Handle;
         referenceShadowBatch = DeclareShadowBatch("reference-shadow");
+        referenceSunBatch = DeclareClosestBatch("reference-sun");
         referenceWaveResolvePass = graph.ComputePass("reference-wave-resolve").Shader(referenceWaveInterface).Handle;
         referencePassHandle = graph.ComputePass("reference-trace").Shader(referenceInterface)
             .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;

@@ -597,6 +597,12 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private int refBounces = 3;
     private int refPaths = 1024;
     private int refSeed;
+    // The GPU reference's thin sheets (KHR_materials_diffuse_transmission as the spec has it, reference_wave.comp): a path
+    // reflects off a sheet with 1 - T of its albedo or passes to the far side tinted T c, and the sun on either side lights
+    // both. --ref-opaque-sheets: met as opaque surfaces, as before (2026-10-21). --ref-sky S: the sky's radiance scaled
+    // (0: the sun alone, for closed forms).
+    private bool refSheets = true;
+    private float refSky = 1f;
     // The GPU reference's sun rays (the wavefront's, on Metal) each toward its own point of the sun's disc, as the frame's
     // direct sun and the gather's hits (--hit-sun) have it: one sun for the picture, the GI and its truth (2026-10-21; the
     // gate's history before was against a point sun). --ref-sun point: the disc's centre.
@@ -773,7 +779,10 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
         Vector2[]? LightmapTexels = null,
         // KHR_materials_diffuse_transmission: its factor times its colour factor (zero: none) -- what a sheet of it lets
         // through to its far side, which the bounce light will read as the sheet's glow (rayPlacementTransmission).
-        Vector3 Transmission = default);
+        Vector3 Transmission = default,
+        // And the factor alone (the share of the light the transmission lobe takes; the base lobe keeps 1 - it): what the
+        // GPU reference's thin sheets reflect and pass (reference_wave.comp).
+        float TransmissionFactor = 0f);
 
     /// <summary>One placement of a unique primitive: which drawable, its row in the transform table, and its world AABB.</summary>
     /// <remarks>

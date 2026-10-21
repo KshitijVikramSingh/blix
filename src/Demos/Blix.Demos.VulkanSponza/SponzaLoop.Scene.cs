@@ -327,7 +327,8 @@ internal sealed partial class SponzaLoop
                 string.IsNullOrEmpty(mesh.Name) ? "primitive" : mesh.Name, placed.Worlds, placed.Instances, prim.Source,
                 pm?.BaseColorFactor ?? Vector4.One, placed.LightmapTexels,
                 ClothTransmission(pm) is { } cloth ? cloth.Factor * cloth.Colour
-                    : pm?.Ext is { } ext ? ext.DiffuseTransmissionFactor * ext.DiffuseTransmissionColorFactor : Vector3.Zero));
+                    : pm?.Ext is { } ext ? ext.DiffuseTransmissionFactor * ext.DiffuseTransmissionColorFactor : Vector3.Zero,
+                ClothTransmission(pm) is { } clothF ? clothF.Factor : pm?.Ext is { } extF ? extF.DiffuseTransmissionFactor : 0f));
         }
     }
 
@@ -413,6 +414,7 @@ internal sealed partial class SponzaLoop
                 rayPlacementLightmapped.Add(s.LightmapTexels is not null);
                 rayPlacementDoubleSided.Add(s.Pipeline == opaqueDoubleSidedPipeline || s.Pipeline == blendDoubleSidedPipeline);
                 rayPlacementTransmission.Add(s.Transmission);
+                rayPlacementTransmissionFactor.Add(s.TransmissionFactor);
                 rayPlacementNames.Add(s.Name);
                 if (!UniformScale(world)) nonUniform++;
             }

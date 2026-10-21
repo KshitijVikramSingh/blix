@@ -30,6 +30,7 @@ internal sealed partial class SponzaLoop
     // through such a sheet (SponzaLoop.RtShadows.cs RtRowTransmit), and what lands behind it is the sunlit sheet's
     // diffuse glow, not a tinted beam (tried as a beam: a sharp coloured copy of the cloth, 2026-10-15).
     private readonly List<Vector3> rayPlacementTransmission = new();
+    private readonly List<float> rayPlacementTransmissionFactor = new();
     // Per placement: its primitive's name (--texel-inspect).
     private readonly List<string> rayPlacementNames = new();
     private RayQueryGpuData? rayGpuData;

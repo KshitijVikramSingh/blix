@@ -171,6 +171,18 @@ internal sealed record SceneProfile(
         Packs = new ScenePack[] { new("drapes", Required: true) },
     };
 
+    /// <summary>A 60 m thin sheet 0.5 m over a floor (<c>blix sheetslab</c>): the closed form for the reference's sheets.</summary>
+    /// <remarks>With <c>--ref-sky 0</c>, the floor under the sheet's middle is at T c E_s cos_s / (1 - rho_f rho_s (1 - T));
+    /// the camera stands between the two, looking along them.</remarks>
+    public static readonly SceneProfile SheetSlab = Cornell with
+    {
+        Name = "sheetslab",
+        Title = "Vulkan sheet slab",
+        Packs = new ScenePack[] { new("sheetslab", Required: true) },
+        StartPosition = new Vector3(0f, 0.3f, 4f),
+        StartPitch = -8f,
+    };
+
     /// <summary>Two rooms sharing a 0.1 m wall, one open to the sky, one sealed (<c>blix thinwall</c>): a leak scene.</summary>
     /// <remarks>
     /// The truth inside the sealed room (x &gt; 0) is exactly no light, so every bit of indirect light the GI puts
@@ -233,7 +245,7 @@ internal sealed record SceneProfile(
         Packs = new ScenePack[] { new("crevices-hashed", Required: true) },
     };
 
-    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, CornellPanel, Drapes, ThinWall, Crevices, CrevicesDark, CrevicesHashed };
+    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, CornellPanel, Drapes, SheetSlab, ThinWall, Crevices, CrevicesDark, CrevicesHashed };
 
     /// <summary>The profile <c>--scene</c> names, Sponza when it names none.</summary>
     public static SceneProfile Named(string? name)

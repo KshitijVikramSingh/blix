@@ -55,7 +55,10 @@ internal sealed partial class SponzaLoop
     private ShaderInterface referenceWaveInterface = null!;
     private PipelineHandle referenceWavePipeline;
     private PassHandle referenceWaveStepPass, referenceWaveShadePass, referenceWaveResolvePass;
-    private RayBatchPasses referenceClosestBatch, referenceShadowBatch;
+    private RayBatchPasses referenceClosestBatch, referenceShadowBatch, referenceSunBatch;
+    // The reference's sun rays traced as closest rays, anything met shade (reference_wave.comp, BatchSunRays): the paths'
+    // own trace, independent of the frame's shadow kernel and its sheets. --ref-shadow-batch: the shadow batch, as before.
+    private bool refSunClosest = true;
     private int ReferenceLaneQuota => (GpuReferenceTarget + ReferenceLanesPerPoint - 1) / ReferenceLanesPerPoint;
     // The gate's points as PickGpuReferencePoints packed them (position, normal), and their wave.
     private List<Vector4>? gpuReferencePackedPoints;
@@ -66,15 +69,47 @@ internal sealed partial class SponzaLoop
     /// points have one (gateWave).</summary>
     private sealed class ReferenceWave
     {
-        public GpuBufferHandle Points, Lanes, Sums, Rays, Hits, Origins, Occluded, Directions;
+        public GpuBufferHandle Points, Lanes, Sums, Rays, Hits, Origins, Occluded, Directions, SunRays, SunHits;
         public int PointCount, LanesPerPoint, Quota;
         public uint Dispatch;
         public int Count => PointCount * LanesPerPoint;
     }
 
+    // Per triangle row, its sheet for the reference (reference_wave.comp, ReferenceSheets): rgb8 T c, the top byte T; null
+    // with no sheet in the scene (or --ref-opaque-sheets). The spec's terms, not RtRowTransmit's frame-side cap and hue.
+    private GpuBufferHandle? referenceSheets;
+    private bool referenceSheetsMade;
+    private GpuBufferHandle? ReferenceSheetsBuffer
+    {
+        get
+        {
+            if (referenceSheetsMade) return referenceSheets;
+            referenceSheetsMade = true;
+            if (!refSheets || rayGpuData is not { } data) return null;
+            var rows = new uint[Math.Max(1, data.RowPlacements.Length)];
+            var any = 0;
+            uint Byte(float x) => (uint)Math.Clamp(MathF.Round(x * 255f), 0f, 255f);
+            for (var row = 0; row < data.RowPlacements.Length; row++)
+            {
+                var p = (int)data.RowPlacements[row];
+                if (p >= rayPlacementTransmissionFactor.Count) continue;
+                var factor = rayPlacementTransmissionFactor[p];
+                var tc = rayPlacementTransmission[p];
+                if (factor <= 0f) continue;
+                rows[row] = Byte(tc.X) | Byte(tc.Y) << 8 | Byte(tc.Z) << 16 | Math.Max(1u, Byte(factor)) << 24;
+                any++;
+            }
+            if (any == 0) return null;
+            Console.WriteLine(string.Create(Inv, $"[VulkanSponza] reference: {any:N0} triangle rows are thin sheets (diffuse transmission), scattered as the spec has them."));
+            referenceSheets = Own(device.CreateGpuBuffer(rows.Length * 4, MemoryMarshal.AsBytes(rows.AsSpan()), "sponza.reference.sheets"));
+            return referenceSheets;
+        }
+    }
+
     private ReferenceWave CreateReferenceWave(List<Vector4> packed, int lanesPerPoint, int quota, string name)
     {
         var w = new ReferenceWave { PointCount = packed.Count / 2, LanesPerPoint = lanesPerPoint, Quota = quota };
+        _ = ReferenceSheetsBuffer;   // made with the wave, not at its first dispatch
         var lanes = w.Count;
         // Every lane starts with no path: its hit count -1.
         var start = new float[lanes * 16];
@@ -87,6 +122,8 @@ internal sealed partial class SponzaLoop
         w.Origins = Own(device.CreateGpuBuffer(lanes * 16, new byte[lanes * 16], $"sponza.{name}.shadow-origins"));
         w.Occluded = Own(device.CreateGpuBuffer(lanes * 4, new byte[lanes * 4], $"sponza.{name}.occluded"));
         w.Directions = Own(device.CreateGpuBuffer(lanes * 16, new byte[lanes * 16], $"sponza.{name}.shadow-directions"));
+        w.SunRays = Own(device.CreateGpuBuffer(lanes * 32, new byte[lanes * 32], $"sponza.{name}.sun-rays"));
+        w.SunHits = Own(device.CreateGpuBuffer(lanes * 48, new byte[lanes * 48], $"sponza.{name}.sun-hits"));
         return w;
     }
 
@@ -174,6 +211,10 @@ internal sealed partial class SponzaLoop
         {
             if (!shotWhenReady && postLoadFrames < shotFrame - ReferenceLaneQuota * (refBounces + 2) - 4) return;
             if (shotWhenReady && postLoadFrames < 4) return;
+            // Not before the Metal tracer is up (on hardware rays): the first frames' batches ran on the software traversal,
+            // whose hits name no triangle row, so every lane's first path met the sheets as opaque -- 1 / quota of the light
+            // through them lost (the slab's floor 15/16 of its closed form, 2026-10-21).
+            if (FrameRaysOnHardware && frameTracer is null) return;
             PickGpuReferencePoints(scene);
             if (gpuReferencePackedPoints is not { Count: > 0 } packed) return;
             gateWave = CreateReferenceWave(packed, ReferenceLanesPerPoint, ReferenceLaneQuota, "reference");
@@ -193,9 +234,10 @@ internal sealed partial class SponzaLoop
             new ShaderUniform[]
             {
                 new("uSunDirection", new Vector4Uniform(new Vector4(sunDirection, 0f))),
-                new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 1f))),
+                new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, refSky))),
                 new("uParams", new Vector4Uniform(new Vector4(mode, refBounces, w.Quota, w.LanesPerPoint))),
-                new("uCount", new Vector4Uniform(new Vector4(count, w.Dispatch + (uint)refSeed * 7919u, refSunDisc ? SunDiscTangent : 0f, 0f))),
+                new("uCount", new Vector4Uniform(new Vector4(count, w.Dispatch + (uint)refSeed * 7919u, refSunDisc ? SunDiscTangent : 0f,
+                    (ReferenceSheetsBuffer is not null ? 1f : 0f) + (refSunClosest ? 2f : 0f)))),
             },
             new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
             Buffers: rayBlockBuffers
@@ -207,11 +249,15 @@ internal sealed partial class SponzaLoop
                 .Append(new ShaderBufferBinding("BatchOrigins", w.Origins))
                 .Append(new ShaderBufferBinding("BatchOccluded", w.Occluded))
                 .Append(new ShaderBufferBinding("BatchDirections", w.Directions))
+                .Append(new ShaderBufferBinding("ReferenceSheets", ReferenceSheetsBuffer ?? w.Occluded))
+                .Append(new ShaderBufferBinding("BatchSunRays", w.SunRays))
+                .Append(new ShaderBufferBinding("BatchSunHits", w.SunHits))
                 .Where(b => declared.Contains(b.Name)).ToArray());
         graph.Dispatch(referenceWaveStepPass, Wave(0));
         RecordClosestBatch(referenceClosestBatch, w.Rays, w.Hits, count, frameSeed, on);
         graph.Dispatch(referenceWaveShadePass, Wave(1));
-        RecordShadowBatch(referenceShadowBatch, w.Origins, w.Occluded, count, -Vector3.Normalize(sunDirection), frameSeed ^ 0x5bd1e995u, on,
+        if (refSunClosest) RecordClosestBatch(referenceSunBatch, w.SunRays, w.SunHits, count, frameSeed ^ 0x5bd1e995u, on);
+        else RecordShadowBatch(referenceShadowBatch, w.Origins, w.Occluded, count, -Vector3.Normalize(sunDirection), frameSeed ^ 0x5bd1e995u, on,
             directions: refSunDisc ? w.Directions : null);
         graph.Dispatch(referenceWaveResolvePass, Wave(2));
         w.Dispatch++;

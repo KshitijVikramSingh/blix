@@ -11,6 +11,11 @@
 //   SHADOW   the batch
 //   resolve  (uParams.x 2) the sun light lands where the shadow ray met nothing
 //
+// A thin sheet (ReferenceSheets, uCount.w): of the light reaching either side, 1 - T meets the base lobe (albedo) and T
+// the transmission lobe (T c, Lambertian about the far side) -- so the sun on the side away from the ray is the sheet's
+// glow on this one, and a path goes through with probability T. Shadow rays meet a sheet as any surface: a diffuse sheet
+// scatters the beam, it does not pass it (tools/gi-model/thin_sheet.py).
+//
 // Bounces count as reference_path.glsl counts them (the CPU reference's way): the sun at hits 1..N+1, the sky escaping
 // after up to N+1 hits. A finished path adds pi x its radiance to its lane's sum; the host adds a point's lanes at the
 // shot. Lane l serves point l / uParams.w.
@@ -20,9 +25,10 @@ layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) uniform ReferenceWave {
     vec4 uSunDirection;    // xyz the direction the sun travels
-    vec4 uSunIrradiance;   // rgb
+    vec4 uSunIrradiance;   // rgb; w the sky's radiance scale (--ref-sky)
     vec4 uParams;          // x the mode (0 step, 1 shade, 2 resolve), y bounces, z paths a lane in all, w lanes a point
-    vec4 uCount;           // x lanes, y the frame (seed), z the tangent of the sun's angular radius (--ref-sun-disc; 0 a point sun)
+    vec4 uCount;           // x lanes, y the frame (seed), z the tangent of the sun's angular radius (--ref-sun-disc; 0 a point sun),
+                           // w bit 0: thin sheets (ReferenceSheets), bit 1: the sun's rays as closest rays (BatchSunRays)
 } u;
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
@@ -38,6 +44,14 @@ layout(std430, set = 0, binding = 7) buffer BatchOrigins { vec4 batchOrigins[]; 
 layout(std430, set = 0, binding = 8) readonly buffer BatchOccluded { uint batchOccluded[]; };
 // With a disc (uCount.z): each lane's shadow ray toward its own point of the sun's disc, the shadow batch's directions.
 layout(std430, set = 0, binding = 9) writeonly buffer BatchDirections { vec4 batchDirections[]; };
+// Per triangle row, the sheet it is (KHR_materials_diffuse_transmission; 0: none): rgb8 T c, the light its transmission
+// lobe passes to the far side; the top byte T, the share that lobe takes (the base lobe's albedo keeps 1 - T).
+layout(std430, set = 0, binding = 10) readonly buffer ReferenceSheets { uint sheets[]; };
+// The sun's rays as CLOSEST rays (uCount.w's bit 1): each lane's, and its answer -- anything met in the way is shade. The
+// same trace the paths take, so the reference's sheets stop the beam whatever the frame's shadow kernel makes of sheets
+// that transmit (its glow mode lets rays through them).
+layout(std430, set = 0, binding = 11) writeonly buffer BatchSunRays { vec4 batchSunRays[]; };
+layout(std430, set = 0, binding = 12) readonly buffer BatchSunHits { uvec4 batchSunHits[]; };
 
 // Nothing here traces (the batches do); ray_query.glsl comes in for blix_pcg and reference_path.glsl's sampling, which
 // the paths must share with the monolithic reference to be the same paths.
@@ -91,9 +105,11 @@ void main() {
         vec3 dir = batchRays[2u * l + 1u].xyz;
         sums[2u * l] = vec4(0.0);
         batchOrigins[l] = vec4(0.0);
+        batchSunRays[2u * l] = vec4(0.0);
+        batchSunRays[2u * l + 1u] = vec4(0.0, 1.0, 0.0, 0.0);
         bool ended = false;
         if ((h0.w & 1u) == 0u) {
-            r.rgb += c.rgb * textureLod(uSkyRadiance, dir, 1.0).rgb;
+            r.rgb += c.rgb * textureLod(uSkyRadiance, dir, 1.0).rgb * u.uSunIrradiance.w;
             ended = true;
         } else if (int(a.w + 0.5) == bounces + 1) {
             ended = true;   // a hit past the last one lit: only its escape would have counted
@@ -101,6 +117,13 @@ void main() {
             vec3 normal = vec3(uintBitsToFloat(h2.x), uintBitsToFloat(h2.y), uintBitsToFloat(h2.z));
             vec3 albedo = unpackUnorm4x8(h2.w).rgb;
             vec3 hn = dot(normal, dir) > 0.0 ? -normal : normal;
+            uint sheet = 0u;
+            if (mod(u.uCount.w, 2.0) > 0.5) {
+                uint row = batchHits[3u * l + 1u].z;
+                if (row != 0xFFFFFFFFu) sheet = sheets[row & 0x7FFFFFFFu];
+            }
+            vec3 passed = unpackUnorm4x8(sheet).rgb;            // T c
+            float share = float(sheet >> 24) / 255.0;          // T
             vec3 hp = a.xyz + dir * uintBitsToFloat(h0.x);
             vec3 toSun = -normalize(u.uSunDirection.xyz);
             if (u.uCount.z > 0.0) {
@@ -117,11 +140,28 @@ void main() {
             float ndl = dot(hn, toSun);
             if (ndl > 0.0) {
                 batchOrigins[l] = vec4(hp + hn * 0.01, uintBitsToFloat(0x7F800000u));
-                sums[2u * l] = vec4(c.rgb * albedo * u.uSunIrradiance.rgb * ndl / PI, 0.0);
+                batchSunRays[2u * l] = vec4(hp + hn * 0.01, 0.0);
+                batchSunRays[2u * l + 1u] = vec4(toSun, uintBitsToFloat(0x7F800000u));
+                sums[2u * l] = vec4(c.rgb * albedo * (1.0 - share) * u.uSunIrradiance.rgb * ndl / PI, 0.0);
+            } else if (sheet != 0u && ndl < 0.0) {
+                // The sun on the sheet's far side: its glow on this one, the shadow ray from there.
+                batchOrigins[l] = vec4(hp - hn * 0.01, uintBitsToFloat(0x7F800000u));
+                batchSunRays[2u * l] = vec4(hp - hn * 0.01, 0.0);
+                batchSunRays[2u * l + 1u] = vec4(toSun, uintBitsToFloat(0x7F800000u));
+                sums[2u * l] = vec4(c.rgb * passed * u.uSunIrradiance.rgb * (-ndl) / PI, 0.0);
             }
-            c.rgb *= albedo;
-            a = vec4(hp + hn * 0.01, a.w + 1.0);
-            b.xyz = hn;
+            // On: reflected (the base lobe, 1 - T of the light, albedo) or through (T, tinted c), chosen by T.
+            uint seedNow = floatBitsToUint(c.w) ^ 0xB5297A4Du ^ (l * 0x68E31DA4u);
+            bool through = sheet != 0u && referenceRand(seedNow) < share;
+            if (through) {
+                c.rgb *= passed / max(share, 1e-4);
+                a = vec4(hp - hn * 0.01, a.w + 1.0);
+                b.xyz = -hn;
+            } else {
+                c.rgb *= albedo;
+                a = vec4(hp + hn * 0.01, a.w + 1.0);
+                b.xyz = hn;
+            }
         }
         if (ended) {
             vec4 s = sums[2u * l + 1u];
@@ -138,5 +178,6 @@ void main() {
 
     // mode 2: the sun light lands where nothing was in the way.
     vec4 pending = sums[2u * l];
-    if (dot(pending.rgb, vec3(1.0)) > 0.0 && batchOccluded[l] == 0u) lanes[4u * l + 3u] = vec4(r.rgb + pending.rgb, 0.0);
+    bool shade = u.uCount.w > 1.5 ? (batchSunHits[3u * l].w & 1u) != 0u : batchOccluded[l] != 0u;
+    if (dot(pending.rgb, vec3(1.0)) > 0.0 && !shade) lanes[4u * l + 3u] = vec4(r.rgb + pending.rgb, 0.0);
 }

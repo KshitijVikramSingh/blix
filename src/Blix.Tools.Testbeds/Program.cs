@@ -102,10 +102,11 @@ public static class Program
     /// sheets, double-sided and matte, scattering part of the light through themselves (KHR_materials_diffuse_transmission):
     /// </para>
     /// <list type="bullet">
-    /// <item>a flat white veil across the -X half of the shaft, 1 m under the skylight: the floor below it gets the sun
-    /// through cloth beside the sun itself, one edge between them;</item>
-    /// <item>a pleated red curtain hanging in the shaft, its folds 30 cm apart and 6 cm deep, the sun grazing them (17
-    /// degrees off vertical): fold shading, light through the folds, and the room behind it lit through red cloth.</item>
+    /// <item>a flat white veil, an awning 1 m over the floor across the -X half of the shaft: the floor under it lit
+    /// through cloth (its glow fills ~40% of a point's view there), beside the sun itself, one edge between them;</item>
+    /// <item>a pleated red curtain hanging in the +X half of the shaft (clear of the veil's light), its folds 30 cm apart
+    /// and 6 cm deep, the sun grazing them (17 degrees off vertical): fold shading, light through the folds, and the room
+    /// behind it lit through red cloth.</item>
     /// </list>
     /// <para>
     /// <c>--veil T</c>, <c>--curtain T</c>: the sheets' diffuse transmission (0.5, 0.4); 0 makes either opaque, the
@@ -129,7 +130,7 @@ public static class Program
         // at height y its square is the skylight's offset by (6 - y) / 0.957 x (-0.112, -0.268).
         static Vector2 Shaft(float y) => (6f - y) / 0.957f * new Vector2(-0.112f, -0.268f);
         var s = skylight / 2f;
-        var veilAt = 5f;
+        var veilAt = 1f;
         var vo = Shaft(veilAt);
         var veil = new Mesh("veil");
         Quad(veil.UsePrimitive(Cloth("veil", new Vector3(0.8f, 0.8f, 0.8f), veilT, Vector3.One)),
@@ -141,7 +142,8 @@ public static class Program
         var cp = curtain.UsePrimitive(Cloth("curtain", curtainRed, curtainT, curtainRed / MathF.Max(curtainRed.X, MathF.Max(curtainRed.Y, curtainRed.Z))));
         const float period = 0.3f, depth = 0.06f, step = 0.02f, top = 4.6f, bottom = 1.2f;
         var co = Shaft(3f);
-        float x0 = -2f, x1 = 1f, zc = co.Y;
+        // From -0.3: the sun reaching the veil passes x < -0.35 at the curtain's height (3 m).
+        float x0 = -0.3f, x1 = 1.5f, zc = co.Y;
         var n = (int)MathF.Round((x1 - x0) / step);
         for (var i = 0; i < n; i++)
         {
@@ -168,6 +170,37 @@ public static class Program
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!);
         scene.ToGltf2().SaveGLTF(output);
         Console.WriteLine($"drapes: the Cornell room, a veil (transmission {veilT:0.##}) and a pleated curtain ({curtainT:0.##}) in the shaft -> {output}");
+        return 0;
+    }
+
+    /// <summary>
+    /// A thin sheet over a floor, both 60 m across: the closed form a reference's thin sheets are checked against.
+    /// </summary>
+    /// <remarks>
+    /// Sun alone (the renderer's <c>--ref-sky 0</c>), far from the edges the floor under the sheet sees nothing but its
+    /// underside, and the sheet's top nothing but the sun: with the sheet reflecting rho_s (1 - T) and passing T c of the
+    /// light on either side, the floor's irradiance is T c E_s cos_s / (1 - rho_f rho_s (1 - T)) and the underside's
+    /// rho_f times that (tools/gi-model/thin_sheet.py). The defaults: floor 0.5, sheet 0.8 at T 0.5, white, 0.5 m up --
+    /// at the default sun (cos_s 0.957) the floor 0.598 E_s, the underside 0.299 E_s. <c>--transmission T</c>.
+    /// </remarks>
+    [BlixApp("sheetslab", Summary = "write a 60 m thin sheet over a floor, as glTF: the closed form for thin-sheet transport")]
+    public static int SheetSlab(AppArgs args)
+    {
+        var output = args.String("out") ?? "sheetslab.gltf";
+        var t = Math.Clamp(args.Float("transmission") ?? 0.5f, 0f, 1f);
+        const float half = 30f, height = 0.5f;
+        var floor = new Mesh("floor");
+        Quad(floor.UsePrimitive(Matte("floor", new Vector3(0.5f))), new Vector3(-half - 0.5f, 0f, -half - 0.5f),
+            new(2f * half + 1f, 0, 0), new(0, 0, 2f * half + 1f), Vector3.UnitY);
+        var sheet = new Mesh("sheet");
+        Quad(sheet.UsePrimitive(Cloth("sheet", new Vector3(0.8f), t, Vector3.One)), new Vector3(-half, height, -half),
+            new(2f * half, 0, 0), new(0, 0, 2f * half), Vector3.UnitY);
+        var scene = new SceneBuilder();
+        scene.AddRigidMesh(floor, Matrix4x4.Identity);
+        scene.AddRigidMesh(sheet, Matrix4x4.Identity);
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!);
+        scene.ToGltf2().SaveGLTF(output);
+        Console.WriteLine($"sheetslab: a {2 * half:0} m sheet (0.8, transmission {t:0.##}) {height} m over a 0.5 floor -> {output}");
         return 0;
     }
 
