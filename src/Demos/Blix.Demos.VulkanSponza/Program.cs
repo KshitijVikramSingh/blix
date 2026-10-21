@@ -602,6 +602,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // both. --ref-opaque-sheets: met as opaque surfaces, as before (2026-10-21). --ref-sky S: the sky's radiance scaled
     // (0: the sun alone, for closed forms).
     private bool refSheets = true;
+    private bool refFaceNormal;
     private float refSky = 1f;
     // The GPU reference's sun rays (the wavefront's, on Metal) each toward its own point of the sun's disc, as the frame's
     // direct sun and the gather's hits (--hit-sun) have it: one sun for the picture, the GI and its truth (2026-10-21; the

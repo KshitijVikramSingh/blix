@@ -77,6 +77,7 @@ internal sealed partial class SponzaLoop
         if (args.Int("ref-paths") is { } rp) refPaths = Math.Clamp(rp, 16, 1 << 20);
         if (args.Int("ref-seed") is { } rs) refSeed = rs;
         refSheets = !args.Flag("ref-opaque-sheets");
+        refFaceNormal = args.Flag("ref-face-normal");
         refSunClosest = !args.Flag("ref-shadow-batch");
         if (args.Float("ref-sky") is { } rsk) refSky = Math.Max(0f, rsk);
         refSunDisc = args.String("ref-sun") switch

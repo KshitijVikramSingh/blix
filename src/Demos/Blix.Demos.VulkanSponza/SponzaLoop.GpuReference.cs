@@ -287,6 +287,14 @@ internal sealed partial class SponzaLoop
         }
         var points = new List<(int K, float Px, float Py)>();
         var packed = new List<Vector4>();
+        // The shading normal at each point (the pre-pass's: the one the incident pass reads the light at and the frame
+        // shades with), not its triangle's face: on a faceted fold -- drapes' 2 cm strips with smooth normals -- they part by
+        // up to half a facet's turn, and under light from one side the face's irradiance was up to 20% from the smooth one's
+        // (tools/gi-model/facet_normal.py; the curtain's +7-10% against the path trace, 2026-10-21). --ref-face-normal: the
+        // face's, as before. The point still lifted along its face.
+        byte[]? shading = null;
+        int sw = 0, sh = 0;
+        if (!refFaceNormal) shading = device.ReadTexture(graph.GetColorTexture(SampleablePrepassNormal), out sw, out sh, out _);
         for (var k = 0; k < GpuReferenceGrid * GpuReferenceGrid; k++)
         {
             // At the centre of the pixel the field is read from (WriteGpuSurfaceReference: (int)px, (int)py), so the reference's
@@ -301,9 +309,16 @@ internal sealed partial class SponzaLoop
             if (edge) continue;
             var n = FaceNormal(hit);
             if (Vector3.Dot(n, ray.Direction) > 0f) n = -n;
+            var at = n;
+            if (shading is not null && sw > 0 && sh > 0)
+            {
+                var o = (Math.Clamp((int)(py * sh / ih), 0, sh - 1) * sw + Math.Clamp((int)(px * sw / iw), 0, sw - 1)) * 8;
+                var s = new Vector3((float)BitConverter.ToHalf(shading, o), (float)BitConverter.ToHalf(shading, o + 2), (float)BitConverter.ToHalf(shading, o + 4));
+                if (s.LengthSquared() > 1e-6f && Vector3.Dot(Vector3.Normalize(s), n) > 0.8f) at = Vector3.Normalize(s);
+            }
             points.Add((k, px, py));
             packed.Add(new Vector4(ray.PointAt(hit.T) + n * 0.01f, 0f));
-            packed.Add(new Vector4(n, 0f));
+            packed.Add(new Vector4(at, 0f));
         }
         // The seams: a finer grid's pixels whose neighbours 3 px away all meet the same surface depth (no silhouette)
         // but at least one meets a face turned 45 degrees or more from this one -- a concave crease. Every candidate's
