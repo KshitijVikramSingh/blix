@@ -92,6 +92,45 @@ public static class Program
         return 0;
     }
 
+    /// <summary>A Khronos sample asset (glTF-Sample-Assets) placed in a testbed: the light through cloth and leaves judged on
+    /// models others render too, against their reference images and the path trace.</summary>
+    /// <remarks>
+    /// <c>--model PATH</c> the sample's .glb, <c>--scale S</c>, <c>--at x,y,z</c> where its origin lands, <c>--room
+    /// cornell|ground</c>: inside the Cornell room's shell (6 m, a 1.5 m skylight: one sunlit shaft, the rest bounce), or on
+    /// an open 40 m ground under the sky (a sample lit from behind by a low sun). The sample's own lights and cameras are
+    /// dropped; its materials, KHR_materials_diffuse_transmission among them, are kept as they are.
+    /// </remarks>
+    [BlixApp("khronos", Summary = "place a Khronos glTF sample asset in the Cornell room or on open ground, as glTF: a scene for light through cloth and leaves")]
+    public static int Khronos(AppArgs args)
+    {
+        var output = args.String("out") ?? "khronos.gltf";
+        var model = args.String("model") ?? throw new AppArgsException("--model PATH: the sample's .glb.");
+        var scale = args.Float("scale") ?? 1f;
+        var at = args.String("at") is { } a ? ParseVector(a) : Vector3.Zero;
+        var room = args.String("room") ?? "cornell";
+        var source = SharpGLTF.Schema2.ModelRoot.Load(model);
+        var sample = SceneBuilder.CreateFrom(source.DefaultScene);
+        var scene = new SceneBuilder();
+        scene.AddScene(sample, Matrix4x4.CreateScale(scale) * Matrix4x4.CreateTranslation(at));
+        var white = Matte("white", new Vector3(0.73f, 0.73f, 0.73f));
+        var shell = new Mesh(room == "ground" ? "ground" : "khronos_room");
+        if (room == "ground") Box(shell.UsePrimitive(white), new Vector3(-20f, -0.2f, -20f), new Vector3(20f, 0f, 20f));
+        else if (room == "cornell") CornellShell(shell, white, Matte("red", new Vector3(0.63f, 0.065f, 0.05f)), Matte("green", new Vector3(0.14f, 0.45f, 0.091f)), 6f, 1.5f);
+        else throw new AppArgsException("--room must be cornell or ground.");
+        scene.AddRigidMesh(shell, Matrix4x4.Identity);
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!);
+        scene.ToGltf2().SaveGLTF(output);
+        Console.WriteLine($"khronos: {Path.GetFileName(model)} x{scale:0.###} at ({at.X:0.##}, {at.Y:0.##}, {at.Z:0.##}) in the {room} -> {output}");
+        return 0;
+    }
+
+    private static Vector3 ParseVector(string text)
+    {
+        var p = text.Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+        if (p.Length != 3) throw new AppArgsException($"'{text}' is not x,y,z.");
+        return new Vector3(p[0], p[1], p[2]);
+    }
+
     /// <summary>
     /// The Cornell box's room with cloth in the sun's shaft instead of its blocks: the scene for light through thin sheets.
     /// </summary>

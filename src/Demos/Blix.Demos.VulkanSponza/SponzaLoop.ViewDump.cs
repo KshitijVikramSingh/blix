@@ -61,6 +61,11 @@ internal sealed partial class SponzaLoop
             files[name] = new { bytes = data.Length };
         }
         Texture("incident.rgba16f", graph.GetColorTexture(incidentHandle));
+        // The lit image (HDR, before TAA and tone mapping) and the sun's RT shadow mask (its header, then a word a pixel:
+        // bit 0 blocked; the planes after, SponzaLoop.RtShadows.cs): the frame's direct term beside the GI's, as data.
+        Texture("hdr.r11g11b10f", graph.GetColorTexture(hdrHandle));
+        if (rtShadowMasks.Length > 0 && rtShadowSize.Width > 0)
+            Buffer("rtmask.u32", rtShadowMasks[device.CurrentFrameSlot], 16 + (long)rtShadowSize.Width * rtShadowSize.Height * 4);
         Texture("normal.rgba16f", graph.GetColorTexture(SampleablePrepassNormal));
         if (lightmapEnabled) Texture("lightmap_texel.r32u", graph.GetColorTexture(lightmapTexelHandle));
         if (!lightmapIndexTexture.Equals(default(TextureHandle))) Texture("lightmap_index.r32u", lightmapIndexTexture);
@@ -104,6 +109,7 @@ internal sealed partial class SponzaLoop
             lightmapAtlas = new[] { lightmapAtlasWidth, lightmapAtlasHeight },
             reference = new { width = referenceSize.X, height = referenceSize.Y, samples = referenceSamples, on = referenceView },
             pick = new[] { texelPickFraction.X, texelPickFraction.Y },
+            rtMask = new[] { rtShadowSize.Width, rtShadowSize.Height },
             seed = Environment.GetEnvironmentVariable("BLIX_GATHER_SEED") ?? "0",
             texelView = TexelViewNames[Math.Clamp(texelView, 0, TexelViewNames.Length - 1)],
             fieldIsGi = true,

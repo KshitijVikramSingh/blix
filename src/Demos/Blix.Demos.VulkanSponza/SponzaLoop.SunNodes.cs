@@ -110,6 +110,9 @@ internal sealed partial class SponzaLoop
     // A near hit among no texel takes the pass's near hits' light (texel_nodes_shade.glsl; --no-near-unknown-local: its
     // nearest patch facing its way, as before).
     private bool nearUnknownLocal;
+    // --gather-smooth-normal: a lightmap record's rays about its smooth (shading) normal, not its face's (texel_nodes_rays.comp).
+    private bool gatherSmooth;
+    private bool GatherSmoothNow => gatherSmooth && !lightmapFramesBuffer.Equals(default(GpuBufferHandle));
     private GpuBufferHandle finePlaceBuffer, farPartBuffer;
     private int NearRoundIndex => nearRounds - nearRoundsLeft;
     // 0 off; 1 the fine round (its far part kept); 2 a near round (cut, the far part added back).
@@ -233,6 +236,7 @@ internal sealed partial class SponzaLoop
         // On by default (2026-10-22: two seeds, crevices seams' bias -1.2% -> -0.4%, every seed noise down; the gate held).
         settlePool = !args.Flag("no-settle-pool");
         nearUnknownLocal = !args.Flag("no-near-unknown-local");
+        gatherSmooth = args.Flag("gather-smooth-normal");
         ReadFarArgs(args);
         ReadTransportCensusArgs(args);
         ReadFarTransportArgs(args);
@@ -1198,7 +1202,7 @@ internal sealed partial class SponzaLoop
                 new("uCookedGrid", new Vector4Uniform(cookedGrid)),
                 new("uCookedDims", new Vector4Uniform(cookedDims)),
                 // x 1: the light strategy on; y the patches' disk radius (a patch stands for spacing^2 of surface).
-                new("uLights", new Vector4Uniform(new Vector4(sunNodeLit && !plain ? 1f : 0f, transportSpacing / MathF.Sqrt(MathF.PI), 0f, 0f))),
+                new("uLights", new Vector4Uniform(new Vector4(sunNodeLit && !plain ? 1f : 0f, transportSpacing / MathF.Sqrt(MathF.PI), GatherSmoothNow ? 1f : 0f, 0f))),
                 new("uTile", new Vector4Uniform(new Vector4(interleave ? 1f : 0f, texelGrid.W, lightmapTexels ? lightmapFirstRecord : float.MaxValue, !plain && NearCutMode == 2 ? hitCellNear : 0f))),
                 new("uFar", new Vector4Uniform(plain && !farCut ? Vector4.Zero : FarUniform(discover))),
             },
@@ -1215,6 +1219,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("TexelPatch", sunNodeTexelPatch),
                 new ShaderBufferBinding("FarRecord", FarRecordBuffer),
                 new ShaderBufferBinding("PatchNeighbours", FarNeighboursBuffer),
+                new ShaderBufferBinding("LightmapFrames", GatherSmoothNow ? lightmapFramesBuffer : sunNodeAccum),
             }.Concat(CookedBuffers()).Where(b => raysDeclared.Contains(b.Name)).ToArray());
     }
 

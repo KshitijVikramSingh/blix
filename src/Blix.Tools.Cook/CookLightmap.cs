@@ -45,6 +45,9 @@ public static partial class Program
         var padding = args.Int("padding", 2);
         // --max-cost C: xatlas's chart cost limit (default 2): higher, larger charts -- fewer seams to lock, more stretch.
         var maxCost = args.Float("max-cost", 0f);
+        // --normal-deviation W: xatlas's weight on a chart's normals turning from its mean (default 2; lower, curved
+        // surfaces chart whole).
+        var normalDeviation = args.Float("normal-deviation", 0f);
         var only = args.String("only");
         // --lod-test: per primitive, today's LOD chain against one simplified with every chart border locked (the split
         // mesh, simplified with LockBorder: a simplified triangle then never crosses a chart). Positions only and no
@@ -118,7 +121,7 @@ public static partial class Program
                 if (cmHere <= 0f) { g.LeftOut++; g.LeftOutTriangles += indices.Length / 3; continue; }
                 var tpm = 100f / cmHere;
                 LightmapUnwrap.Result r;
-                try { r = LightmapUnwrap.Unwrap(positions, indices, tpm, padding, maxCost: maxCost); }
+                try { r = LightmapUnwrap.Unwrap(positions, indices, tpm, padding, maxCost: maxCost, normalDeviation: normalDeviation); }
                 catch (InvalidOperationException ex) { Console.WriteLine($"  {rel} #{primIndex}: {ex.Message}"); g.Failed++; continue; }
                 var tris = indices.Length / 3;
                 g.Primitives++; g.Instances += instances; g.Triangles += tris; g.InVertices += vertexCount; g.OutVertices += r.Uv.Length;

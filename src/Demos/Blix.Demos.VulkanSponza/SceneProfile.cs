@@ -183,6 +183,40 @@ internal sealed record SceneProfile(
         StartPitch = -8f,
     };
 
+    /// <summary>Khronos' DiffuseTransmissionPlant x1.5 in the Cornell room's sunlit shaft (<c>blix khronos</c>): leaves that
+    /// transmit red, on a model with reference renders elsewhere (Babylon.js; edited for path tracers' ground truth).</summary>
+    public static readonly SceneProfile KhronosPlant = Cornell with
+    {
+        Name = "khronos-plant",
+        Title = "Vulkan Khronos plant",
+        Packs = new ScenePack[] { new("khronos-plant", Required: true) },
+        StartPosition = new Vector3(-0.7f, 0.9f, 0.9f),
+        StartPitch = -8f,
+    };
+
+    /// <summary>Khronos' DiffuseTransmissionTeacup x8 in the Cornell room's sunlit shaft: thin ceramic that lets light
+    /// through (the glTF Sample Viewer's reference renders).</summary>
+    public static readonly SceneProfile KhronosTeacup = Cornell with
+    {
+        Name = "khronos-teacup",
+        Title = "Vulkan Khronos teacup",
+        Packs = new ScenePack[] { new("khronos-teacup", Required: true) },
+        StartPosition = new Vector3(-0.7f, 0.9f, 0.2f),
+        StartPitch = -20f,
+    };
+
+    /// <summary>Khronos' DiffuseTransmissionTest x0.5 standing on open ground, a low sun behind it toward the camera (as
+    /// its one directional light): each input of KHR_materials_diffuse_transmission on its own panel.</summary>
+    public static readonly SceneProfile KhronosTest = Cornell with
+    {
+        Name = "khronos-test",
+        Title = "Vulkan Khronos diffuse transmission test",
+        Packs = new ScenePack[] { new("khronos-test", Required: true) },
+        StartPosition = new Vector3(0.6f, 1.3f, 5f),
+        StartPitch = -2f,
+        DefaultSunDegrees = new Vector2(180f, -20f),
+    };
+
     /// <summary>Two rooms sharing a 0.1 m wall, one open to the sky, one sealed (<c>blix thinwall</c>): a leak scene.</summary>
     /// <remarks>
     /// The truth inside the sealed room (x &gt; 0) is exactly no light, so every bit of indirect light the GI puts
@@ -245,7 +279,7 @@ internal sealed record SceneProfile(
         Packs = new ScenePack[] { new("crevices-hashed", Required: true) },
     };
 
-    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, CornellPanel, Drapes, SheetSlab, ThinWall, Crevices, CrevicesDark, CrevicesHashed };
+    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, CornellPanel, Drapes, SheetSlab, ThinWall, Crevices, CrevicesDark, CrevicesHashed, KhronosPlant, KhronosTeacup, KhronosTest };
 
     /// <summary>The profile <c>--scene</c> names, Sponza when it names none.</summary>
     public static SceneProfile Named(string? name)

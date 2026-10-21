@@ -23,7 +23,11 @@ public static unsafe class LightmapUnwrap
 
     /// <summary>Unwraps one mesh. <paramref name="padding"/> texels between charts (bilinear lookups need at least one).</summary>
     /// <param name="maxCost">xatlas's chart cost limit (0: its default, 2): higher grows larger charts -- fewer seams, more stretch.</param>
-    public static Result Unwrap(Vector3[] positions, uint[] indices, float texelsPerUnit, int padding = 2, int maxResolution = 8192, float maxCost = 0f)
+    /// <param name="normalDeviation">xatlas's weight on a chart's normals turning from its mean (0: its default, 2): lower lets a
+    /// curved surface -- a folded curtain, its strips each a few degrees from the next -- grow into one chart, so the light
+    /// interpolates across it instead of stepping at every strip.</param>
+    public static Result Unwrap(Vector3[] positions, uint[] indices, float texelsPerUnit, int padding = 2, int maxResolution = 8192, float maxCost = 0f,
+        float normalDeviation = 0f)
     {
         if (!XatlasNative.Available)
             throw new InvalidOperationException($"The xatlas native ({XatlasNative.FileName}) is missing: the BuildXatlas target in Blix.Recipes.csproj did not produce it.");
@@ -48,6 +52,7 @@ public static unsafe class LightmapUnwrap
                 XatlasNative.ChartOptions chart;
                 XatlasNative.xatlasChartOptionsInit(&chart);
                 if (maxCost > 0f) chart.MaxCost = maxCost;
+                if (normalDeviation > 0f) chart.NormalDeviationWeight = normalDeviation;
                 XatlasNative.PackOptions pack;
                 XatlasNative.xatlasPackOptionsInit(&pack);
                 pack.TexelsPerUnit = texelsPerUnit;
