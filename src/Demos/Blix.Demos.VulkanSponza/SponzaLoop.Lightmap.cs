@@ -58,7 +58,7 @@ internal sealed partial class SponzaLoop
     private int lightmapEnclosedTests = 16;
     private int LightmapEnclosedTests => lightmapEnclosedTests;
     // What the buried flags depend on, for the caches that hold them or what was gathered with them.
-    private string LightmapBuriedRule => string.Create(CultureInfo.InvariantCulture, $"{LightmapBuriedThreshold}/{LightmapBuriedTests} within {lightmapBuriedReach} m from {LightmapBuriedLift} m off, single-sided; {(LightmapEnclosedTests > 0 ? $"enclosed {LightmapEnclosedTests * 3 / 4}/{LightmapEnclosedTests}; " : "")}contacts as back faces (the table, then 4 jittered retries where a triangle has partners); edges inset {LightmapEdgeInset} m");
+    private string LightmapBuriedRule => string.Create(CultureInfo.InvariantCulture, $"{LightmapBuriedThreshold}/{LightmapBuriedTests} within {lightmapBuriedReach} m from {LightmapBuriedLift} m off, single-sided; {(LightmapEnclosedTests > 0 ? $"enclosed {LightmapEnclosedTests * 3 / 4}/{LightmapEnclosedTests}; " : "")}contacts as back faces (the table, then 4 jittered retries where a triangle has partners); chart-boundary edges inset {LightmapEdgeInset} m, pushed straight in");
     private int lightmapFirstRecord;
 
     // What one texel record costs on the GPU: its two vec4s (position, normal) and the light state UploadTexels makes
@@ -130,6 +130,8 @@ internal sealed partial class SponzaLoop
                 BitConverter.ToSingle(source.VertexBytes, (int)v * stride + 4),
                 BitConverter.ToSingle(source.VertexBytes, (int)v * stride + 8)), source.World);
             var idx = source.Indices;
+            // Which of each triangle's edges bound its chart (no other triangle shares them in the atlas): the inset's.
+            var boundary = pass >= 2 ? ChartBoundaryEdges(source.Indices, source.Texels) : null;
             for (var t = 0; t + 2 < idx.Length; t += 3)
             {
                 Vector2 a = source.Texels[idx[t]], b = source.Texels[idx[t + 1]], c = source.Texels[idx[t + 2]];
@@ -174,7 +176,7 @@ internal sealed partial class SponzaLoop
                     // Fill: the record this texel's owner claimed, written once (w is +-4 once written, 0 before).
                     var id = map[cell];
                     if (texels![2 * id].W != 0f) continue;
-                    var pos = Inset(pa, pb, pc, wa, wb, wc);
+                    var pos = Inset(pa, pb, pc, wa, wb, wc, boundary![t / 3]);
                     var atlas = BitConverter.Int32BitsToSingle(x | (y << 16));
                     // Position w: the area weight texel.glsl's hashed path reads (4: whole), negative for a pair.
                     texels[2 * id] = new Vector4(pos, source.DoubleSided ? -4f : 4f);
@@ -419,17 +421,64 @@ internal sealed partial class SponzaLoop
     // Two seeds each: crevices' crease rms 13.5% -> 8.3%, |error| 8.7% -> 6.5%; Cornell's crease rms 2.90% -> 2.32%
     // (2026-10-21). --lightmap-edge-inset M.
     private static float LightmapEdgeInset = 0.01f;
-    private static Vector3 Inset(Vector3 pa, Vector3 pb, Vector3 pc, float wa, float wb, float wc)
+    // Only the edges that bound the chart (bits 0-2: the edges opposite a, b, c), where the surface ends or turns -- every
+    // crease is one; and pushed straight in from each, by what it lacks of the inset. Each weight floored at the inset
+    // over the triangle's height (as before) took every edge, the ones between neighbouring strips of one surface too,
+    // and rescaled the rest: on a sliver -- a folded curtain's 2 cm strips, metres long -- both long edges' floors took
+    // a third each and the texels near the far tip were dragged a third of the way along, up to 43 cm and in the cook
+    // 2 m from the pixels reading them (drapes' curtain +9-14% against the path trace, 2026-10-21;
+    // tools/gi-model/lightmap_inset.py: pushed in from boundary edges, at most the inset).
+    private static Vector3 Inset(Vector3 pa, Vector3 pb, Vector3 pc, float wa, float wb, float wc, byte boundary)
     {
-        var twiceArea = Vector3.Cross(pb - pa, pc - pa).Length();
-        float Floor(Vector3 e) => MathF.Min(LightmapEdgeInset * e.Length() / MathF.Max(twiceArea, 1e-12f), 1f / 3f);
-        float fa = Floor(pc - pb), fb = Floor(pa - pc), fc = Floor(pb - pa);
-        float ra = MathF.Max(wa - fa, 0f), rb = MathF.Max(wb - fb, 0f), rc = MathF.Max(wc - fc, 0f);
-        var rest = 1f - fa - fb - fc;
-        var sum = ra + rb + rc;
-        if (sum > 1e-12f) { ra *= rest / sum; rb *= rest / sum; rc *= rest / sum; }
-        else ra = rb = rc = rest / 3f;
-        return pa * (fa + ra) + pb * (fb + rb) + pc * (fc + rc);
+        var q = pa * wa + pb * wb + pc * wc;
+        if (boundary == 0) return q;
+        var n = Vector3.Cross(pb - pa, pc - pa);
+        if (n.LengthSquared() < 1e-24f) return q;
+        n = Vector3.Normalize(n);
+        Span<Vector3> corner = stackalloc Vector3[] { pa, pb, pc };
+        for (var round = 0; round < 2; round++)
+            for (var i = 0; i < 3; i++)
+            {
+                if ((boundary & (1 << i)) == 0) continue;
+                Vector3 e0 = corner[(i + 1) % 3], e1 = corner[(i + 2) % 3], opposite = corner[i];
+                var along = e1 - e0;
+                if (along.LengthSquared() < 1e-20f) continue;
+                var inward = Vector3.Normalize(Vector3.Cross(n, along));
+                var room = Vector3.Dot(opposite - e0, inward);
+                if (room < 0f) { inward = -inward; room = -room; }
+                var d = Vector3.Dot(q - e0, inward);
+                // Never past half the triangle's height across this edge: a sliver too narrow for two insets keeps its
+                // points on its middle.
+                var target = MathF.Min(LightmapEdgeInset, room * 0.5f);
+                if (d < target) q += (target - d) * inward;
+            }
+        return q;
+    }
+
+    // Per triangle of a source, which of its edges no other triangle shares in the atlas (bit i: the edge opposite its
+    // i-th corner): its chart's boundary.
+    private static byte[] ChartBoundaryEdges(uint[] idx, Vector2[] texels)
+    {
+        var count = new Dictionary<(long, long), int>();
+        static long Key(Vector2 v) => ((long)MathF.Round(v.X * 1024f) << 32) ^ (uint)(int)MathF.Round(v.Y * 1024f);
+        (long, long) Edge(uint u, uint v)
+        {
+            long ku = Key(texels[u]), kv = Key(texels[v]);
+            return ku < kv ? (ku, kv) : (kv, ku);
+        }
+        for (var t = 0; t + 2 < idx.Length; t += 3)
+            foreach (var e in new[] { Edge(idx[t + 1], idx[t + 2]), Edge(idx[t + 2], idx[t]), Edge(idx[t], idx[t + 1]) })
+                count[e] = count.GetValueOrDefault(e) + 1;
+        var flags = new byte[idx.Length / 3];
+        for (var t = 0; t + 2 < idx.Length; t += 3)
+        {
+            byte f = 0;
+            if (count[Edge(idx[t + 1], idx[t + 2])] == 1) f |= 1;
+            if (count[Edge(idx[t + 2], idx[t])] == 1) f |= 2;
+            if (count[Edge(idx[t], idx[t + 1])] == 1) f |= 4;
+            flags[t / 3] = f;
+        }
+        return flags;
     }
 
     private static (float A, float B, float C) NearestBarycentric(Vector2 p, Vector2 a, Vector2 b, Vector2 c)
