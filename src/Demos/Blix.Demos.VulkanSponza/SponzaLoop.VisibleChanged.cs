@@ -136,7 +136,7 @@ internal sealed partial class SponzaLoop
         sunNodeRays = fineGatherRays;
         texelMaxRays = Math.Max(fineGatherRays, fineGatherMaxRays);
         RetireGpuBuffer(sunNodeStats);
-        sunNodeStats = Own(device.CreateGpuBuffer(48, new byte[48], "sponza.sun-nodes.stats"));
+        sunNodeStats = Own(device.CreateGpuBuffer(64, new byte[64], "sponza.sun-nodes.stats"));
         sunNodeFirst = 0;
         sunNodePass = 0;
         ResetSunNodeCounters();
@@ -157,7 +157,7 @@ internal sealed partial class SponzaLoop
         sunNodeRays = visibleChangedSavedRays;
         texelMaxRays = visibleChangedSavedMaxRays;
         RetireGpuBuffer(sunNodeStats);
-        sunNodeStats = Own(device.CreateGpuBuffer(48, new byte[48], "sponza.sun-nodes.stats"));
+        sunNodeStats = Own(device.CreateGpuBuffer(64, new byte[64], "sponza.sun-nodes.stats"));
         sunNodeFirst = 0;
         sunNodePass = 0;
         sunNodeReadback = false;

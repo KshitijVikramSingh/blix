@@ -88,6 +88,10 @@ internal sealed partial class SponzaLoop
     // the hit's does neither): those scenes keep the cells' sun until the materials' own pass.
     private bool hitSunRay = true, hitSunDisc = true;
     private bool hitSunSaid;
+    // --near-texel-light: a near hit's bounce (the search's, within --cell-near) the light of the texel it lies among as
+    // the last resolve left it, not its patch's (texel_nodes_shade.glsl, nearTexelLight; tools/gi-model/crease_bounce.py).
+    private bool nearTexelLight;
+    private bool NearTexelLightNow => nearTexelLight && !splitSkyBuffer.Equals(default(GpuBufferHandle)) && !splitSunBuffer.Equals(default(GpuBufferHandle));
     // The band's guides steer half of each texel's rays (texel_nodes_rays.comp); --sun-nodes-no-guide: cosine rays only.
     private bool sunNodeGuide = true;
     private bool sunNodeGuided;
@@ -144,6 +148,7 @@ internal sealed partial class SponzaLoop
         sunNodeOnFrame = args.Flag("split-on-frame");
         if (args.Int("sun-nodes-discover-stride") is { } ds) sunNodeDiscoverStride = Math.Max(0, ds);
         if (args.Float("sun-nodes-lift") is { } lift) sunNodeLift = Math.Max(0f, lift);
+        nearTexelLight = args.Flag("near-texel-light");
         switch (args.String("hit-sun"))
         {
             case null or "disc": break;
@@ -436,7 +441,7 @@ internal sealed partial class SponzaLoop
             sunNodeAccum = sunNodeAccums[0];
             liveReadbacks.Clear();
         }
-        sunNodeStats = Own(device.CreateGpuBuffer(48, new byte[48], "sponza.sun-nodes.stats"));
+        sunNodeStats = Own(device.CreateGpuBuffer(64, new byte[64], "sponza.sun-nodes.stats"));
         var keep = Math.Min(sunNodeKeep, suns);
         if (splitCooking) BeginSplitDetail(suns, keep);
         BeginFarField(suns);
@@ -674,12 +679,12 @@ internal sealed partial class SponzaLoop
         sunNodeStage = SunNodeStage.Done;
         var suns = sunNodeSuns!;
         var trace = sunNodeClock.Elapsed.TotalMinutes;
-        var words = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(sunNodeStats, 0, 48).AsSpan()).ToArray();
+        var words = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(sunNodeStats, 0, 64).AsSpan()).ToArray();
         ReportFarPool("over the refining rounds");
-        var stats = Enumerable.Range(0, 6).Select(k => (ulong)words[2 * k] | ((ulong)words[2 * k + 1] << 32)).ToArray();
+        var stats = Enumerable.Range(0, 7).Select(k => (ulong)words[2 * k] | ((ulong)words[2 * k + 1] << 32)).ToArray();
         var hits = Math.Max(stats[0], 1ul);
         Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] sun nodes: traced in {trace:0.0} min ({(long)sunNodeTraceIds.Length * sunNodeRays / 1e9:0.00} G rays{(sunNodeRefineRound > 0 ? $" and {sunNodeRefineRays / 1e9:0.00} G refining in {sunNodeRefineRound} rounds" : "")}, {sunNodeReadSeconds:0} s of it reading back) for {suns.Length} suns ({(sunNodeLit ? "a quarter of the rays by the band's guides, a quarter at the light lists, MIS" : sunNodeGuided ? "half the rays by the band's guides" : "cosine rays")}), after {sunNodeRelightSeconds:0.0} s of patch solves; hits {stats[0]:N0} ({100.0 * stats[4] / hits:0.00}% answered by the foliage's points, {100.0 * stats[1] / hits:0.00}% among neither: no sun; {100.0 * stats[2] / hits:0.00}% no patch), misses {stats[3]:N0}{(farOn ? $", far by the record {stats[5]:N0}" : "")}."));
+            $"[VulkanSponza] sun nodes: traced in {trace:0.0} min ({(long)sunNodeTraceIds.Length * sunNodeRays / 1e9:0.00} G rays{(sunNodeRefineRound > 0 ? $" and {sunNodeRefineRays / 1e9:0.00} G refining in {sunNodeRefineRound} rounds" : "")}, {sunNodeReadSeconds:0} s of it reading back) for {suns.Length} suns ({(sunNodeLit ? "a quarter of the rays by the band's guides, a quarter at the light lists, MIS" : sunNodeGuided ? "half the rays by the band's guides" : "cosine rays")}), after {sunNodeRelightSeconds:0.0} s of patch solves; hits {stats[0]:N0} ({100.0 * stats[4] / hits:0.00}% answered by the foliage's points, {100.0 * stats[1] / hits:0.00}% among neither: no sun; {100.0 * stats[2] / hits:0.00}% no patch), misses {stats[3]:N0}{(farOn ? $", far by the record {stats[5]:N0}" : "")}{(nearTexelLight ? $", near hits lit by their texels {stats[6]:N0} ({100.0 * stats[6] / hits:0.0}%)" : "")}."));
         if (sunNodeNowPasses > 0)
             Console.WriteLine(string.Create(Inv,
                 $"[VulkanSponza] sun nodes, outside the frame: {sunNodeNowPasses:N0} passes; rays {sunNodeNowSeconds[0]:0} s, trace {sunNodeNowSeconds[1]:0} s, shade {sunNodeNowSeconds[2]:0} s ({sunNodeNowSeconds[2] * 1000 / sunNodeNowPasses:0.0} ms a pass of {sunNodeSlice * 32:N0} rays; {sunNodeLaterPasses:N0} passes not a frame's first, their rays {sunNodeLaterRays * 1000 / Math.Max(1, sunNodeLaterPasses):0.0} ms each); of the trace's {sunNodeClock.Elapsed.TotalSeconds:0.0} s, passes {sunNodeNowSeconds.Sum():0.0} s, read-backs {sunNodeReadSeconds:0.0} s, the rest (frames, landing) {sunNodeClock.Elapsed.TotalSeconds - sunNodeNowSeconds.Sum() - sunNodeReadSeconds:0.0} s; shade passes by the hit cells {hitCellPassesOn:N0}, by the search {hitCellPassesOff:N0}."));
@@ -724,7 +729,7 @@ internal sealed partial class SponzaLoop
                 sunNodeRays = fineGatherRays;
                 texelMaxRays = Math.Max(fineGatherRays, fineGatherMaxRays);
                 RetireGpuBuffer(sunNodeStats);
-                sunNodeStats = Own(device.CreateGpuBuffer(48, new byte[48], "sponza.sun-nodes.stats"));
+                sunNodeStats = Own(device.CreateGpuBuffer(64, new byte[64], "sponza.sun-nodes.stats"));
                 sunNodeFirst = 0;
                 sunNodePass = 0;
                 sunNodeClock.Restart();
@@ -1163,7 +1168,7 @@ internal sealed partial class SponzaLoop
                 new("uFar", new Vector4Uniform(exactMode is > 0f and < 2.5f ? Vector4.Zero : FarUniform(discover))),
                 new("uTransport", new Vector4Uniform(TransportUniform(discover))),
                 new("uFarTransport", new Vector4Uniform(new Vector4(FarTransportUniform, 0f, 0f, 0f))),
-                new("uHitBlend", new Vector4Uniform(new Vector4(HitBlendNow ? 1f : 0f, transportSpacing, 0f, 0f))),
+                new("uHitBlend", new Vector4Uniform(new Vector4(HitBlendNow ? 1f : 0f, transportSpacing, NearTexelLightNow ? 1f : 0f, SunColumn()))),
             },
             new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
             Buffers: new[]
@@ -1198,6 +1203,9 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("PatchDirectSums", patchDirectSums.Equals(default(GpuBufferHandle)) ? sunNodeAccum : patchDirectSums),
                 new ShaderBufferBinding("FarTransport", farTransportRecord.Equals(default(GpuBufferHandle)) ? sunNodeAccum : farTransportRecord),
                 new ShaderBufferBinding("HitCells", hitCellsBuffer.Equals(default(GpuBufferHandle)) ? sunNodeAccum : hitCellsBuffer),
+                new ShaderBufferBinding("SplitSky", NearTexelLightNow ? splitSkyBuffer : sunNodeAccum),
+                new ShaderBufferBinding("SplitSun", NearTexelLightNow ? splitSunBuffer : sunNodeAccum),
+                NearTexelLightNow ? ProvenanceBinding() : new ShaderBufferBinding("TexelProvenance", sunNodeAccum),
             }.Concat(CookedBuffers()).Where(b => declared.Contains(b.Name)).ToArray());
     }
 
@@ -1304,7 +1312,7 @@ internal sealed partial class SponzaLoop
         BuildPatchTexels();
         // The trace proper counts afresh.
         RetireGpuBuffer(sunNodeStats);
-        sunNodeStats = Own(device.CreateGpuBuffer(48, new byte[48], "sponza.sun-nodes.stats"));
+        sunNodeStats = Own(device.CreateGpuBuffer(64, new byte[64], "sponza.sun-nodes.stats"));
         sunNodeClock.Restart();
         sunNodeStage = SunNodeStage.Tracing;
         if (liveTexels) liveCookWarm = true;

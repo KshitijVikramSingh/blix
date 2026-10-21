@@ -44,7 +44,8 @@ layout(set = 0, binding = 0) uniform SunNodesShade {
                           // patches; w 1: the near-field comparison (N3: PatchDirectSums read, census slot 9)
     vec4 uFarTransport;   // the far field's light-free record (SponzaLoop.FarTransport.cs): x 1 recording it
     vec4 uHitBlend;       // x 1: a hit's bounce blended over its patch and the patch's neighbours (hitPatchLight); y the
-                          // patches' spacing (the blend's reach)
+                          // patches' spacing (the blend's reach); z 1: a near hit's bounce the texels' about it
+                          // (--near-texel-light), w the sun's column (its part per unit of uSunIrradiance)
 } u;
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
@@ -59,6 +60,13 @@ layout(std430, set = 0, binding = 9) buffer NodeAccum { vec4 nodeAccum[]; };    
 // Counts in pairs of words (low, high: a cook's 8 G rays overflow 32 bits): [0] hits, [1] hits among no texel nor
 // foliage point (no sun there), [2] hits with no patch, [3] misses, [4] hits answered by the foliage's points.
 layout(std430, set = 0, binding = 10) buffer NodeStats { uint nodeStats[]; };
+// The texels' light as the last resolve left it (slice_resolve.comp: rgb9e5, word 1 bit 16 once gathered; the sun's
+// part per unit of the sun's irradiance): a near hit's bounce (uHitBlend.z).
+layout(std430, set = 0, binding = 35) readonly buffer SplitSky { uvec2 skyPart[]; };
+layout(std430, set = 0, binding = 36) readonly buffer SplitSun { uvec2 sunPart[]; };
+// Which stage last wrote each texel's parts (provenance.glsl): only a gather's (codes 1-4) is a texel's own light -- the
+// instant layer and the fine copy carry the coarse estimate a near hit's light is to replace.
+layout(std430, set = 0, binding = 37) readonly buffer TexelProvenance { uint provenance[]; };
 layout(std430, set = 0, binding = 14) readonly buffer FoliagePoints { vec4 foliagePoints[]; };
 layout(std430, set = 0, binding = 15) readonly buffer FoliageHash { uint foliageHash[]; };
 layout(std430, set = 0, binding = 16) readonly buffer FoliageBits { uint foliageBits[]; };
@@ -190,7 +198,31 @@ void farRecordAdd(int patchIndex, int bin, int column, vec3 c, float w, uint slo
 // the Cornell box's walls blotched where the path trace is smooth (2026-10-21).
 // The hit's position from its ray (its origin, direction and distance), not kept: the 256-sun variant's threadgroup memory
 // is at Metal's 32 KB.
+vec3 unpackPart(uint p) {
+    float scale = exp2(float(int(p >> 27) - 15 - 9));
+    return vec3(p & 511u, (p >> 9) & 511u, (p >> 18) & 511u) * scale;
+}
+
+// A near hit's bounce from the texels about it (uHitBlend.z): the patch's light is the irradiance at a patch's centre,
+// 12 cm and more from a crease, where most of a receiver beside the crease's light lands (tools/gi-model/
+// crease_bounce.py: 25 cm patches +2-6% at a texel 2 cm off a crease, the texels' own light within 25 cm +-0.3%, one
+// lagged step of it within 2.3%). The texels' light is the last resolve's, so the gather iterates on it; a texel not
+// gathered yet (word 1 bit 16) leaves the patch's. sNearTexel: the hit's likeliest texel, on the hit's side.
+bool nearTexelLight(int r, int k, out vec3 l) {
+    if (u.uHitBlend.z < 0.5 || sNearTexel[r] < 0) return false;
+    uint id = uint(sNearTexel[r]);
+    bool sunColumn = k == int(u.uHitBlend.w);
+    uvec2 w = sunColumn ? sunPart[id] : skyPart[id];
+    if ((w.y & 0x10000u) == 0u) return false;
+    uint code = (provenance[id / 4u] >> (8u * (id % 4u) + (sunColumn ? 0u : 4u))) & 0xFu;
+    if (code < 1u || code > 4u) return false;
+    l = unpackPart(w.x) * (sunColumn ? u.uSunIrradiance.rgb : vec3(1.0));
+    return true;
+}
+
 vec3 hitPatchLight(int r, int k, int suns) {
+    vec3 near;
+    if (nearTexelLight(r, k, near)) return near;
     int pw = int(sHit[r].w);
     if (u.uHitBlend.x > 0.5) {
         int ids[FAR_SET];
@@ -359,6 +391,10 @@ void main() {
                 for (int c = 0; c < NODE_CANDIDATES; ++c) if (ids[c] >= 0 && weights[c] > most) { most = weights[c]; likeliest = ids[c]; }
                 patchIndex = max(texelPatch[likeliest], -1);
                 sNearTexel[lid] = likeliest;
+                if (u.uHitBlend.z > 0.5 && likeliest >= 0) {
+                    uint code = (provenance[uint(likeliest) / 4u] >> (8u * (uint(likeliest) % 4u) + 4u)) & 0xFu;
+                    if (code >= 1u && code <= 4u) nodeCount(6u);
+                }
                 // The texel saw none of its candidate patches (texel_nodes_patch.comp: 22.5% of Sponza's texels, so a
                 // quarter of all hits brought no bounce at all -- dark and blotchy where geometry is busy, 2026-10-14):
                 // the nearest patch on the hit's own placement facing within 60 degrees (the user's rule: not the nearest

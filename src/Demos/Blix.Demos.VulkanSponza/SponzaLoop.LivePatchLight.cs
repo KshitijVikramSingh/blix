@@ -364,7 +364,7 @@ internal sealed partial class SponzaLoop
             : Own(device.CreateGpuBuffer(Math.Max(16, sunNodeTraceIds.Length * 4), MemoryMarshal.AsBytes(sunNodeTraceIds.AsSpan()), "sponza.sun-nodes.traced"));
         if (!oldTrace.Equals(sunNodeLive) && !oldTrace.Equals(default(GpuBufferHandle))) RetireGpuBuffer(oldTrace);
         RetireGpuBuffer(sunNodeStats);
-        sunNodeStats = Own(device.CreateGpuBuffer(48, new byte[48], "sponza.sun-nodes.stats"));
+        sunNodeStats = Own(device.CreateGpuBuffer(64, new byte[64], "sponza.sun-nodes.stats"));
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] live texels: re-aimed in {sunNodeClock.Elapsed.TotalSeconds:0.0} s; tracing."));
         LogGatherMemory("the gather begins");
