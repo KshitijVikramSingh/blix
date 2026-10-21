@@ -88,7 +88,7 @@ internal sealed partial class SponzaLoop
     // the hit's does neither): those scenes keep the cells' sun until the materials' own pass.
     private bool hitSunRay = true, hitSunDisc = true;
     private bool hitSunSaid;
-    // --near-rounds N (0): the fine round's texels gathered N times more, each on the light the last left (with
+    // --near-rounds N (2; 0 without the near texels' light): the fine round's texels gathered N times more, each on the light the last left (with
     // --near-texel-light, its near hits read the texels the last round gathered).
     private int nearRounds, nearRoundsLeft;
     private uint[] fineRoundIds = Array.Empty<uint>();
@@ -113,9 +113,10 @@ internal sealed partial class SponzaLoop
         fineGathering = true;
         sunNodeStage = SunNodeStage.Tracing;
     }
-    // --near-texel-light: a near hit's bounce (the search's, within --cell-near) the light of the texel it lies among as
-    // the last resolve left it, not its patch's (texel_nodes_shade.glsl, nearTexelLight; tools/gi-model/crease_bounce.py).
-    private bool nearTexelLight;
+    // A near hit's bounce (the search's, within --cell-near) the light the texel it lies among last gathered, not its
+    // patch's (texel_nodes_shade.glsl, nearTexelLight; tools/gi-model/crease_bounce.py), with --near-rounds' regathers:
+    // Cornell's creases |error| 1.92% -> 1.38%, the box's base +33% -> +13% (2026-10-21). --no-near-texel-light: off.
+    private bool nearTexelLight = true;
     private bool NearTexelLightNow => nearTexelLight && !splitSkyBuffer.Equals(default(GpuBufferHandle)) && !splitSunBuffer.Equals(default(GpuBufferHandle));
     // The band's guides steer half of each texel's rays (texel_nodes_rays.comp); --sun-nodes-no-guide: cosine rays only.
     private bool sunNodeGuide = true;
@@ -173,8 +174,8 @@ internal sealed partial class SponzaLoop
         sunNodeOnFrame = args.Flag("split-on-frame");
         if (args.Int("sun-nodes-discover-stride") is { } ds) sunNodeDiscoverStride = Math.Max(0, ds);
         if (args.Float("sun-nodes-lift") is { } lift) sunNodeLift = Math.Max(0f, lift);
-        nearTexelLight = args.Flag("near-texel-light");
-        nearRounds = Math.Max(0, args.Int("near-rounds") ?? 0);
+        nearTexelLight = !args.Flag("no-near-texel-light");
+        nearRounds = Math.Max(0, args.Int("near-rounds") ?? (nearTexelLight ? 2 : 0));
         switch (args.String("hit-sun"))
         {
             case null or "disc": break;

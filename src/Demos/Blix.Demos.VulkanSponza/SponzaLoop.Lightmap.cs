@@ -412,8 +412,13 @@ internal sealed partial class SponzaLoop
     // Half a texel (the atlas's 4 cm): an edge texel stands for the light as far in as its neighbours are apart. At 1 cm a
     // crease's edge texels gathered with half their hemisphere the other wall, ~3x darker than a pixel 2-3 cm out reads,
     // and the creases came out in jagged dark bands (crevices' seam energy 0.955 -> 0.978, its excess 0.0165 -> 0.0126,
-    // the leak unchanged, 2026-10-21). --lightmap-edge-inset M.
-    private static float LightmapEdgeInset = 0.02f;
+    // the leak unchanged, 2026-10-21). That darkness was the light the edge texels were given -- a contact ratio treating
+    // the other wall as black, a patch's light for the hits beside them -- and with crease texels gathered and their
+    // near hits lit by the texels' own light it is gone; 1 cm then halves what a pixel nearer the crease than the first
+    // texel reads of the light's slope (tools/gi-model/crease_inset.py: +4-7% at 5 mm from 2 cm, +2-3% from 1 cm).
+    // Two seeds each: crevices' crease rms 13.5% -> 8.3%, |error| 8.7% -> 6.5%; Cornell's crease rms 2.90% -> 2.32%
+    // (2026-10-21). --lightmap-edge-inset M.
+    private static float LightmapEdgeInset = 0.01f;
     private static Vector3 Inset(Vector3 pa, Vector3 pb, Vector3 pc, float wa, float wb, float wc)
     {
         var twiceArea = Vector3.Cross(pb - pa, pc - pa).Length();

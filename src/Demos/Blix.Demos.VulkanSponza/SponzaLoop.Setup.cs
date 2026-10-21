@@ -436,11 +436,13 @@ internal sealed partial class SponzaLoop
         if (args.Float("background-gather-ms") is { } bgMs) backgroundGatherMs = Math.Max(0f, bgMs);
         if (args.Float("render-scale") is { } renderScaleArg) render.RenderScale = Math.Clamp(renderScaleArg, 0.5f, 1f);
         fineAll = args.Flag("fine-all");
-        // --fine-contact R (0.9; 0 off): fine texels more closed than their coarse cells (their contact ratio under R)
+        // --fine-contact R (0.999; 0 off): fine texels more closed than their coarse cells (their contact ratio under R)
         // flagged, first (--no-fine-contact-first: by their score among the rest). Crevices' seams 0.835 -> 0.932 (the
         // cooked gather's 0.931); Sponza at 5 M: every fine texel's mean error against the cooked gather 0.166 -> 0.155
-        // (2026-10-19).
-        fineContact = args.Float("fine-contact") ?? (livePatchRefine ? 0.9f : 0f);
+        // (2026-10-19). At 0.999 every texel the copy would darken: the ratio treats the face across a crease as black
+        // (tools/gi-model/crease_contact.py: -6% in room light alone at 2 cm, -12% to +16% under light from one side);
+        // Cornell's back corner -4.1% -> -1.0%, the crevices' crease bias -6.1% -> -3.8% (2026-10-21).
+        fineContact = args.Float("fine-contact") ?? (livePatchRefine ? 0.999f : 0f);
         fineContactFirst = !args.Flag("no-fine-contact-first");
         if (args.Int("fine-max-rays") is { } fm) fineGatherMaxRays = Math.Max(32, fm / 32 * 32);
         fineRefineContactOnly = !args.Flag("fine-refine-all");

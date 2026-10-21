@@ -26,8 +26,11 @@ internal sealed partial class SponzaLoop
     // leak 0.0017 -> 0.0002); the fine round's alone was worse (0.78). Their sun was the search's too: a cell across a
     // crease gave the hits beside it the wrong sun (Cornell's crease error 6.0% -> 2.1% at 0.1 m, 2026-10-21) -- now the
     // hit's own shadow ray's (--hit-sun), so the rule is for the patch. Sponza's near hits are many and one in a workgroup
-    // holds the rest to the search: shade 10 -> 27 ms a 1 M rays (2026-10-19).
-    private float hitCellNear = 0.1f;
+    // holds the rest to the search: shade 10 -> 27 ms a 1 M rays (2026-10-19). 25 cm with the near hits lit by their
+    // texels (--near-texel-light): the reach tools/gi-model/crease_bounce.py needs (10 cm leaves ~1% at a texel beside a
+    // crease); Cornell's crease rms 3.10% -> 2.90%, the box's base +13% -> +8% (2026-10-21). Its cost on Sponza is the
+    // next Sponza pass's to measure.
+    private float hitCellNear = 0.25f;
     // --cell-marks: the cells a contact (the surface turning over 30 degrees between its centre and a corner) crosses
     // marked, their hits the search's (hit_cells.comp). Even so: Sponza's cells 24% marked and a workgroup's one marked
     // hit holding the rest to the search, shade 38 ms a 1 M rays, and the cell build 0.65 -> 6.4 s (2026-10-19).
