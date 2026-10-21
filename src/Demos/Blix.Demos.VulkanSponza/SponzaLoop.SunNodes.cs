@@ -107,6 +107,9 @@ internal sealed partial class SponzaLoop
     // no refine, the fine round's far part added back (texel_nodes_shade.glsl FarPart): the ray capture had the near
     // rounds at two thirds of the fine round's rays, every one re-tracing what could not change (2026-10-22).
     private bool nearCut;
+    // A near hit among no texel takes the pass's near hits' light (texel_nodes_shade.glsl; --no-near-unknown-local: its
+    // nearest patch facing its way, as before).
+    private bool nearUnknownLocal;
     private GpuBufferHandle finePlaceBuffer, farPartBuffer;
     private int NearRoundIndex => nearRounds - nearRoundsLeft;
     // 0 off; 1 the fine round (its far part kept); 2 a near round (cut, the far part added back).
@@ -227,6 +230,7 @@ internal sealed partial class SponzaLoop
         nearCut = !args.Flag("no-near-cut");
         // On by default (2026-10-22: two seeds, crevices seams' bias -1.2% -> -0.4%, every seed noise down; the gate held).
         settlePool = !args.Flag("no-settle-pool");
+        nearUnknownLocal = !args.Flag("no-near-unknown-local");
         ReadFarArgs(args);
         ReadTransportCensusArgs(args);
         ReadFarTransportArgs(args);
@@ -1238,7 +1242,7 @@ internal sealed partial class SponzaLoop
                 new("uFarTransport", new Vector4Uniform(new Vector4(FarTransportUniform, 0f, 0f, 0f))),
                 new("uHitBlend", new Vector4Uniform(new Vector4(HitBlendNow ? 1f : 0f, transportSpacing, NearTexelLightNow ? 1f : 0f, SunColumn()))),
                 new("uCapture", new Vector4Uniform(discover == 0 && exactMode is < 0.5f or > 2.5f ? RayCaptureUniform : Vector4.Zero)),
-                new("uNear", new Vector4Uniform(discover == 0 && few ? new Vector4(NearCutMode, hitCellNear, 0f, 0f) : new Vector4(0f, 1e30f, 0f, 0f))),
+                new("uNear", new Vector4Uniform(discover == 0 && few ? new Vector4(NearCutMode, hitCellNear, nearUnknownLocal ? 1f : 0f, 0f) : new Vector4(0f, 1e30f, 0f, 0f))),
             },
             new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
             Buffers: new[]

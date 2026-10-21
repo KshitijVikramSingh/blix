@@ -50,7 +50,8 @@ layout(set = 0, binding = 0) uniform SunNodesShade {
                           // 2^y by a hash of the id (negative: the one texel -y - 1); z the round's tag; w the records' room
     vec4 uNear;           // --near-cut (SponzaLoop.SunNodes.cs): x 1 the fine round, each texel's far part kept (FarPart); 2
                           // a near round, its rays cut at y and the far part added back; y the reach (the near texels'
-                          // light's, --cell-near)
+                          // light's, --cell-near); z 1: a near hit among no texel the pass's near hits' light
+                          // (--near-unknown-local, sNearKnown)
 } u;
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
@@ -208,6 +209,12 @@ shared vec4 sSheet[RAYS];       // the hit's sheet: rgb T c, a T (0: not a sheet
 shared uint sHow[RAYS];         // the ray capture: how the hit was answered (RayCapture's w, before its flags); the
                                 // 256-sun variant (at Metal's 32 KB) captures nothing
 shared float sRayFar[RAYS];     // --near-cut: the ray met nothing within the reach (FarPart)
+// The near unknown (default; --no-near-unknown-local): a near hit among no texel (none within the search's reach: a crease's foot, its records moved
+// off the contact or buried) took its nearest patch facing its way -- by distance alone, through the wall at the wall's
+// foot: crevices-dark's corridor corner read the sunlit floor outside, 1.4% of a texel's rays and 14% of its light,
+// the seam point +12-16% (2026-10-22, --ray-capture-texel). Such a hit lies a few cm from the texel's near hits that
+// found texels; it takes their mean light this pass, per column (w: how many).
+shared vec4 sNearKnown[2];
 #define HOW(r, v) sHow[r] = v
 #else
 #define HOW(r, v)
@@ -570,6 +577,13 @@ void main() {
             vec4 known = vec4(0.0);
             for (int r = 0; r < RAYS; ++r) known += sRayKnown[r * 2 + int(lid)];
             sUnknownBounce[lid] = known.w > 0.0 ? known.rgb / known.w : vec3(0.0);
+#if MAX_WORDS == 1
+            vec4 near = vec4(0.0);
+            if (u.uNear.z > 0.5)
+                for (int r = 0; r < RAYS; ++r)
+                    if (sHow[r] == 3u && sUnknown[r] < 0.5 && sDist[r] < u.uLookup.z && sHit[r].w >= 0.0) near += sRayKnown[r * 2 + int(lid)];
+            sNearKnown[lid] = near.w > 0.0 ? vec4(near.rgb / near.w, near.w) : vec4(0.0);
+#endif
         }
         barrier();
         // Each ray, each column: the column loop's body (no census, no recording).
@@ -598,6 +612,9 @@ void main() {
                 } else {
                     vec3 light = sUnknownBounce[k];
                     if (h.w >= 0.0) light = sRayKnown[r * 2 + k].rgb;
+#if MAX_WORDS == 1
+                    if (sUnknown[r] > 0.5 && sDist[r] < u.uLookup.z && sNearKnown[k].w > 0.0) light = sNearKnown[k].rgb;
+#endif
                     captureBounce += dot(h.rgb * light, lumW);
                     float ndotl = hasSun ? max(dot(sNormal[r], toSun), 0.0) : 0.0;
                     vec3 glow = vec3(0.0);
