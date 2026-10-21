@@ -27,6 +27,11 @@ internal sealed partial class SponzaLoop
     // The fine round's refine mask (a bit a texel): its contact-flagged texels alone refine.
     private GpuBufferHandle refineMaskBuffer;
     private bool refineMasked;
+    // The pooled stop (default; --no-settle-pool: each texel's own noise alone, as before) (slice_resolve.comp; tools/gi-model/settle_rule.py) -- each sweep pools its texels'
+    // relative noise by patch, and the whole sweep is judged again against it and the bar.
+    private bool settlePool;
+    private GpuBufferHandle resolvePool;
+    private bool SettlePoolNow => settlePool && !liveTexelPatch.Equals(default(GpuBufferHandle)) && cookedPacked is not null;
 
     private bool GpuResolveOn => liveTexels && !cpuResolve && SunNodeRefines && sunNodeSuns is { Length: > 0 };
 
@@ -52,6 +57,12 @@ internal sealed partial class SponzaLoop
         if (resolveHistogram.Equals(default(GpuBufferHandle))) resolveHistogram = Own(device.CreateGpuBuffer(512, name: "sponza.resolve.histogram"));
         device.WriteGpuBuffer(resolveCount, 0, new byte[16]);
         device.WriteGpuBuffer(resolveHistogram, 0, new byte[512]);
+        if (SettlePoolNow)
+        {
+            var bytes = Math.Max(16, cookedPacked!.Length / 3 * 16);
+            if (resolvePool.Equals(default(GpuBufferHandle))) resolvePool = Own(device.CreateGpuBuffer(bytes, name: "sponza.resolve.pool"));
+            device.WriteGpuBuffer(resolvePool, 0, new byte[bytes]);
+        }
         resolveNext = 0;
         gpuResolving = true;
     }
@@ -75,7 +86,7 @@ internal sealed partial class SponzaLoop
                 new("uSettle", new Vector4Uniform(new Vector4(texelMaxRays, texelNoise, TexelNoiseFloor, bar))),
                 new("uSun", new Vector4Uniform(new Vector4(inverse, sunNodeRays / 32))),
                 new("uMode", new Vector4Uniform(new Vector4(mode, suns, SunColumn(), detail ? 1f : 0f))),
-                new("uKeep", new Vector4Uniform(new Vector4(skyKept ? 1f : 0f, refineMasked && fineGathering ? 1f : 0f, GatherProvenanceCode, 0f))),
+                new("uKeep", new Vector4Uniform(new Vector4(skyKept ? 1f : 0f, refineMasked && fineGathering ? 1f : 0f, GatherProvenanceCode, SettlePoolNow ? 1f : 0f))),
             },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
@@ -97,6 +108,8 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RefineMask", refineMaskBuffer.Equals(default(GpuBufferHandle)) ? resolveCount : refineMaskBuffer),
                 ProvenanceBinding(),
                 TexelRaysBinding(),
+                new ShaderBufferBinding("TexelPatch", SettlePoolNow ? liveTexelPatch : resolveCount),
+                new ShaderBufferBinding("Pool", SettlePoolNow ? resolvePool : resolveCount),
             }.Where(b => declared.Contains(b.Name)).ToArray()) }, "slice-resolve");
     }
 
@@ -140,7 +153,9 @@ internal sealed partial class SponzaLoop
         using var profScope = Prof("gather.round-end");
         var left = ReadResolveCount();
         var of = sunNodeRefineRound == 0 ? sunNodeTraceIds.Length : sunNodeRefineIds.Length;
-        if (sunNodeRefineRound == 0 && left > 0)
+        // The pooled stop: the whole sweep judged again (the pool complete now), whatever its slices appended.
+        var pooled = SettlePoolNow;
+        if (sunNodeRefineRound == 0 && (left > 0 || pooled))
         {
             var histogram = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(resolveHistogram, 0, 512).AsSpan()).ToArray();
             long total = 0, seen = 0;
@@ -156,10 +171,12 @@ internal sealed partial class SponzaLoop
             var judged = resolveNext;
             resolveNext = 1 - resolveNext;
             device.WriteGpuBuffer(resolveCount, 0, new byte[16]);
-            ResolveDispatch(1, 0, left, 0, false, resolveIds[judged], resolvePlaces[judged], sunNodeDarkBar);
+            if (pooled) ResolveDispatch(1, 0, of, 0, false, sunNodeTraceBuffer, sunNodeTraceBuffer, sunNodeDarkBar);
+            else ResolveDispatch(1, 0, left, 0, false, resolveIds[judged], resolvePlaces[judged], sunNodeDarkBar);
             var after = ReadResolveCount();
-            Console.WriteLine(string.Create(Inv,
-                $"[VulkanSponza] sun nodes: the dark bar {sunNodeDarkBar:G3} ({texelDarkFloor:G2} of the median texel light); judged again, {left - after:N0} more texels settled."));
+            Console.WriteLine(pooled
+                ? string.Create(Inv, $"[VulkanSponza] sun nodes: the dark bar {sunNodeDarkBar:G3} ({texelDarkFloor:G2} of the median texel light); the whole sweep judged again with its patches' pooled noise: {after:N0} refine (its slices alone: {left:N0}).")
+                : string.Create(Inv, $"[VulkanSponza] sun nodes: the dark bar {sunNodeDarkBar:G3} ({texelDarkFloor:G2} of the median texel light); judged again, {left - after:N0} more texels settled."));
             left = after;
         }
         Console.WriteLine(string.Create(Inv,

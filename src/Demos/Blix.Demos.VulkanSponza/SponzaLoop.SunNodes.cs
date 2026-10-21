@@ -225,6 +225,8 @@ internal sealed partial class SponzaLoop
         // On by default (2026-10-22: the gate held; Cornell and crevices seams' |error| and noise down, two seeds each).
         guideSun = !args.Flag("no-guide-sun");
         nearCut = !args.Flag("no-near-cut");
+        // On by default (2026-10-22: two seeds, crevices seams' bias -1.2% -> -0.4%, every seed noise down; the gate held).
+        settlePool = !args.Flag("no-settle-pool");
         ReadFarArgs(args);
         ReadTransportCensusArgs(args);
         ReadFarTransportArgs(args);
