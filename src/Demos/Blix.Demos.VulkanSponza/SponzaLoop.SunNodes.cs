@@ -88,6 +88,11 @@ internal sealed partial class SponzaLoop
     // the hit's does neither): those scenes keep the cells' sun until the materials' own pass.
     private bool hitSunRay = true, hitSunDisc = true;
     private bool hitSunSaid;
+    // The gather's rays interleaved over each 3x3 tile of cells (texel_nodes_rays.comp, interleaveTile): from the open
+    // courtyard of crevices (the user's view, two seeds) surfaces' noise 1.17x less at the same rays; down the dark
+    // corridor, where the noise is near-field and neighbours do not share it (tools/gi-model/ray_mix.py), no gain.
+    // On by default (2026-10-21). --no-interleave: off.
+    private bool interleave = true;
     // --sheet-light: sheets that transmit as the spec has them in the GI (tools/gi-model/thin_sheet.py) -- a gather hit on
     // one reflects 1 - T of the sun on its side and passes T c of the sun on its far side (its own shadow ray from there:
     // the hit sun ray, on now where sheets are); the patch solve's sheets pass T c / albedo of their twin's light and keep
@@ -182,6 +187,7 @@ internal sealed partial class SponzaLoop
         if (args.Float("sun-nodes-lift") is { } lift) sunNodeLift = Math.Max(0f, lift);
         nearTexelLight = !args.Flag("no-near-texel-light");
         sheetLight = args.Flag("sheet-light");
+        interleave = !args.Flag("no-interleave") || args.Flag("interleave");
         nearRounds = Math.Max(0, args.Int("near-rounds") ?? (nearTexelLight ? 2 : 0));
         switch (args.String("hit-sun"))
         {
@@ -1159,6 +1165,7 @@ internal sealed partial class SponzaLoop
                 new("uCookedDims", new Vector4Uniform(cookedDims)),
                 // x 1: the light strategy on; y the patches' disk radius (a patch stands for spacing^2 of surface).
                 new("uLights", new Vector4Uniform(new Vector4(sunNodeLit && !plain ? 1f : 0f, transportSpacing / MathF.Sqrt(MathF.PI), 0f, 0f))),
+                new("uTile", new Vector4Uniform(new Vector4(interleave ? 1f : 0f, texelGrid.W, lightmapTexels ? lightmapFirstRecord : float.MaxValue, 0f))),
                 new("uFar", new Vector4Uniform(plain && !farCut ? Vector4.Zero : FarUniform(discover))),
             },
             Array.Empty<ShaderTextureBinding>(),

@@ -1085,15 +1085,19 @@ internal sealed class ShadowsSettings
     [Tune(10f, 120f)] public float SunDistance = 40f;
     // --rt-shadows: the sun's angular diameter the traced shadows see, in degrees (the real sun's is 0.53). Each frame
     // the rays aim at another point of the disc and TAA averages them: a penumbra that widens with the distance from
-    // the occluder, hard at contact. 0: a point sun, every shadow hard (as before).
-    [Tune(0f, 5f)]    public float SunDiscDegrees = 0.53f;
+    // the occluder, hard at contact. 0: a point sun, every shadow hard -- the default since 2026-10-21, for a while:
+    // with the penumbra filter, shadow interleave and TAA off, a point sun gives a reproducibly correct image, and the
+    // GI's hits and the GPU reference follow it (--hit-sun disc, --ref-sun disc read this). --sun-disc D: the disc.
+    [Tune(0f, 5f)]    public float SunDiscDegrees = 0f;
     // The disc's penumbra filtered in space (rt_shadow_filter.comp): every ray toward the sun's centre (coherent, no
     // direction per pixel), the hard shadow widened by blocker distance x the disc. Stable without TAA. Off: each ray
     // toward its own point of the disc, a different one each frame, and TAA averages them (noisy, incoherent rays).
-    [Tune]            public bool PenumbraFilter = true;
+    // Off by default (2026-10-21; a point sun needs none). --penumbra-filter: on.
+    [Tune]            public bool PenumbraFilter = false;
     // --rt-shadows: a quarter of the pixels traced a frame, one of each 2x2 in turn (rt_shadow_fill.comp fills the
-    // rest from last frame's mask, reprojected, or this frame's neighbours). Off: every pixel every frame.
-    [Tune]            public bool Interleave = true;
+    // rest from last frame's mask, reprojected, or this frame's neighbours). Off: every pixel every frame -- the default
+    // (2026-10-21: no frame's shadow from another's). --rt-shadow-interleave: on.
+    [Tune]            public bool Interleave = false;
 }
 
 // Ambient-visibility tunables (overlay "Ambient" group).
@@ -1102,7 +1106,9 @@ internal sealed class ShadowsSettings
 // extra strength, power, or bias controls layered over its visibility integral.
 internal sealed class AmbientSettings
 {
-    [Tune]            public bool Enabled = true;
+    // Off by default (2026-10-21): the texels hold the occlusion the bounce needs (lit.frag skips GTAO on it once they
+    // are up), and screen-space visibility is the one term of the image that is neither the GI nor its truth. --ao: on.
+    [Tune]            public bool Enabled = false;
     [Tune(0.1f, 4f)]  public float RadiusMetres = 0.8f;
 
     // How much visibility comes from previous frames. The shipping shader uses two slices with four
@@ -1151,7 +1157,8 @@ internal sealed class RenderSettings
     [Tune(0f, 4f)]     public float SkyStrength = 1f;
     // History weight for the full-screen resolve; zero is the current-frame reference. History is
     // rejected off-screen and neighbourhood-clamped so the present frame remains authoritative.
-    [Tune(0f, 0.97f)]  public float Taa = 0.9f;
+    // 0 by default (2026-10-21): each frame its own, reproducibly; --taa W for the history.
+    [Tune(0f, 0.97f)]  public float Taa = 0f;
     // Bright where history was refused or clamped back. A still camera should show nearly nothing.
     [Tune]             public bool ShowTaaRejection = false;
 }

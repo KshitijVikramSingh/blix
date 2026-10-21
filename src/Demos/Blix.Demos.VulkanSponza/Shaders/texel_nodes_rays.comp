@@ -22,6 +22,7 @@ layout(set = 0, binding = 0) uniform SunNodesRays {
     vec4 uCookedDims;
     vec4 uLights;  // x 1: the light strategy; y the patches' disk radius
     vec4 uFar;     // the far field (texel_far.glsl); x 2: a ray in a bin the record knows stops at the texel's reach
+    vec4 uTile;    // --interleave: x 1 on, y the finest cells' spacing, z the first lightmap record (its texels by atlas)
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
@@ -135,6 +136,35 @@ shared float sFarReach;
 shared int sFarIds[FAR_SET];
 shared vec3 sFarN[FAR_SET], sFarT[FAR_SET], sFarB[FAR_SET];
 
+float radicalInverse(uint i, uint base) {
+    float f = 1.0, r = 0.0;
+    while (i > 0u) { f /= float(base); r += f * float(i % base); i /= base; }
+    return r;
+}
+vec2 interleaveShift = vec2(0.0);   // the guide's and the light strategy's two random numbers shifted by it (--interleave)
+
+// Interleaved sampling (--interleave; tools/gi-model/cell_noise.py --interleave, ray_mix.py): the nine cells of a 3x3 tile
+// on their surface share their rays' random numbers, each shifted by its place's radical inverses, so the coarse filter's
+// 3x3 average is nine shifted copies of the tile's samples filling in between one another. Returns the tile's id (the
+// numbers' seed) and the cell's place in it (0-8): hashed cells by their grid cell at their level (two mod-3 indices that
+// tell the nine apart on every axis plane); lightmap records by their atlas texel. An experiment: near-field noise, which
+// neighbours do not share, it cannot cancel (ray_mix.py).
+uint interleaveTile(uint id, vec3 position, out uint place) {
+    if (float(id) >= u.uTile.z) {
+        uint packed = floatBitsToUint(texels[2u * id + 1u].w);
+        uvec2 at = uvec2(packed & 0xFFFFu, packed >> 16);
+        place = (at.x % 3u) + 3u * (at.y % 3u);
+        return blix_pcg((at.x / 3u) * 73856093u ^ (at.y / 3u) * 19349663u ^ 0x5EED1u);
+    }
+    float level = texels[2u * id + 1u].w;
+    float spacing = u.uTile.y * exp2(floor(level + 0.5));
+    ivec3 c = ivec3(floor(position / spacing));
+    ivec3 m = ((c % 3) + 3) % 3;
+    place = uint((m.x + m.y + m.z) % 3) * 3u + uint((m.x + 2 * m.y) % 3);
+    ivec3 t = (c - m) / 3;
+    return blix_pcg(uint(t.x) * 73856093u ^ uint(t.y) * 19349663u ^ uint(t.z) * 83492791u ^ uint(floor(level + 0.5)) * 2654435761u);
+}
+
 void main() {
     uint group = gl_WorkGroupID.x;
     uint ray = gl_LocalInvocationID.x;
@@ -183,6 +213,15 @@ void main() {
     uint setSeed = blix_pcg(id * 9781u + pass * 0x632BE5ABu);
     float rotation = float(blix_pcg(setSeed) & 0xFFFFu) / 65536.0;
     float jitter = float(blix_pcg(seed) & 0xFFFFu) / 65536.0;
+    if (u.uTile.x > 0.5) {
+        uint place;
+        uint tile = interleaveTile(id, position, place);
+        uint tileSet = blix_pcg(tile * 9781u + pass * 0x632BE5ABu);
+        seed = blix_pcg(tile * 9781u + pass * 0x632BE5ABu + ray * 2654435761u);
+        interleaveShift = vec2(radicalInverse(place, 5u), radicalInverse(place, 7u));
+        rotation = fract(float(blix_pcg(tileSet) & 0xFFFFu) / 65536.0 + radicalInverse(place, 3u));
+        jitter = fract(float(blix_pcg(seed) & 0xFFFFu) / 65536.0 + radicalInverse(place, 2u));
+    }
     const uint halfRays = uint(RAYS) / 2u;
     // The rays by strategy: cosine [0, cosineEnd), guide [cosineEnd, guideEnd), light [guideEnd, RAYS).
     bool lit = guide >= 0 && u.uLights.x > 0.5 && lightList[guide * LIGHT_K + LIGHT_K - 1].y > 0.5;
@@ -198,10 +237,10 @@ void main() {
     vec3 dir;
     if (aimed) {
         uint s1 = blix_pcg(seed ^ 0x85EBCA77u), s2 = blix_pcg(s1);
-        dir = lightSample(guide, origin, (float(stratum) + jitter) / lightCount, float(s1 & 0xFFFFu) / 65536.0, float(s2 & 0xFFFFu) / 65536.0);
+        dir = lightSample(guide, origin, (float(stratum) + jitter) / lightCount, fract(float(s1 & 0xFFFFu) / 65536.0 + interleaveShift.x), fract(float(s2 & 0xFFFFu) / 65536.0 + interleaveShift.y));
     } else if (guided) {
         uint s1 = blix_pcg(seed ^ 0x9E3779B9u), s2 = blix_pcg(s1);
-        dir = guideSample(guide, (float(stratum) + jitter) / guideCount, float(s1 & 0xFFFFu) / 65536.0, float(s2 & 0xFFFFu) / 65536.0);
+        dir = guideSample(guide, (float(stratum) + jitter) / guideCount, fract(float(s1 & 0xFFFFu) / 65536.0 + interleaveShift.x), fract(float(s2 & 0xFFFFu) / 65536.0 + interleaveShift.y));
     } else {
         float r = sqrt((float(stratum) + jitter) / cosineCount);
         float phi = 2.0 * PI * fract(float(stratum) * 0.618034 + rotation);

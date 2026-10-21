@@ -58,6 +58,10 @@ internal sealed partial class SponzaLoop
         // --no-ao: keep both ambient passes in the graph but give the search a zero radius, so a
         // paired run attributes the HORIZON SEARCH specifically rather than the whole feature.
         if (args.Flag("no-ao")) ambient.Enabled = false;
+        if (args.Flag("ao")) ambient.Enabled = true;
+        if (args.Float("sun-disc") is { } sunDisc) shadows.SunDiscDegrees = Math.Clamp(sunDisc, 0f, 5f);
+        if (args.Flag("penumbra-filter")) shadows.PenumbraFilter = true;
+        if (args.Flag("rt-shadow-interleave")) shadows.Interleave = true;
         if (args.Flag("no-shadow")) shadows.Enabled = false;
         if (args.Float("cloth-transmission") is { } cloth) clothTransmission = Math.Clamp(cloth, 0f, 1f);
         // --rt-shadow-full: every pixel traced every frame (ShadowsSettings.Interleave off).
@@ -411,7 +415,10 @@ internal sealed partial class SponzaLoop
         // The hybrid's gathered texels are the hard ones, and few: more rays each (--live-rays, --live-max-rays win).
         // The refine (path B and the fine round): 384 a coarse texel, the least the gate's crevices corridor holds at (256: its
         // noise 0.039 against the ratchet's 0.035, with refining's cap at 2,048 too), 2026-10-19; else 512.
-        if (liveTransfer && args.Int("live-rays") is null && args.Int("sun-nodes-rays") is null) { liveRays = livePatchRefine ? 384 : 512; sunNodeRays = liveRays; }
+        // 512 with the refine (2026-10-21; 384 before): the coarse cells' ray noise is what the fine copies carry as clouds
+        // on every wall (tools/gi-model/cell_noise.py); 512 takes ~15% off them (two seeds: surfaces' noise 1.17-1.19x
+        // less), the light landing a few frames later on the testbeds. --live-rays N.
+        if (liveTransfer && args.Int("live-rays") is null && args.Int("sun-nodes-rays") is null) { liveRays = 512; sunNodeRays = liveRays; }
         if (liveTransfer && args.Int("live-max-rays") is null && args.Int("texel-max-rays") is null) texelMaxRays = 4 * sunNodeRays;
         if (liveTransfer && args.Int("live-min-level") is null) liveMinLevel = 0;
         if (args.Float("hit-cell") is { } hc) hitCellSize = Math.Clamp(hc, 0.01f, 1f);
