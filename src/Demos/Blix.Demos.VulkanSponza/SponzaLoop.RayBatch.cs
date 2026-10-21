@@ -93,14 +93,14 @@ internal sealed partial class SponzaLoop
     }
 
     private void RecordShadowBatch(RayBatchPasses passes, GpuBufferHandle origins, GpuBufferHandle occluded, int count, Vector3 towardLight, uint seedBase,
-        MetalRayTracer? on = null, GpuBufferHandle? limit = null, bool deferred = false)
+        MetalRayTracer? on = null, GpuBufferHandle? limit = null, bool deferred = false, GpuBufferHandle? directions = null)
     {
         if (count <= 0) return;
         if (FrameRaysOnHardware && (on ?? (EnsureFrameTracer() ? frameTracer : null)) is { } tracer)
         {
             if (deferred && TracerGroupsOn && ReferenceEquals(tracer, frameTracer))
-                DeferTracerBatch((sync, t) => t.EncodeShadow(sync, origins, occluded, 0, count, towardLight, seedBase, limit: limit));
-            else graph.External(passes.Hardware, sync => tracer.EncodeShadow(sync, origins, occluded, 0, count, towardLight, seedBase, limit: limit));
+                DeferTracerBatch((sync, t) => t.EncodeShadow(sync, origins, occluded, 0, count, towardLight, seedBase, limit: limit, directions: directions));
+            else graph.External(passes.Hardware, sync => tracer.EncodeShadow(sync, origins, occluded, 0, count, towardLight, seedBase, limit: limit, directions: directions));
             return;
         }
         var declared = batchShadowInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();

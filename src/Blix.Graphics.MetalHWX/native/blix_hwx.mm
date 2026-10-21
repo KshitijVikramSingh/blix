@@ -182,8 +182,9 @@ bool blix_shadow_cover(uint primitive [[primitive_id]], uint geometry [[geometry
 // flags (in-frame batches): 1 the live count is limit[0] (a wavefront's pass wrote it), the threads past it idle.
 // flags: 1 a limit (limit[0] the rays to trace); 2 each hit's sun -- a shadow ray from the hit, lifted along its normal
 // turned toward the ray, to sun.xyz out to reach: hit flag 8 when nothing meets it (the gather's sun at a hit, read from
-// the hit itself rather than looked up among texels, Sponza's SponzaLoop.HitCells.cs).
-struct Params { uint count; uint seedBase; uint closestOnly; uint flags; float4 sun; float reach; uint pad0, pad1, pad2; };
+// the hit itself rather than looked up among texels, Sponza's SponzaLoop.HitCells.cs). discTan > 0: each shadow ray toward
+// its own point of the sun's disc (discTan the tangent of its angular radius), so the hits' sun has the disc's penumbra.
+struct Params { uint count; uint seedBase; uint closestOnly; uint flags; float4 sun; float reach; float discTan; uint pad1, pad2; };
 
 // flags: 1 the live count is limit[0], as Params'; 2 each ray's own direction (directions[i].xyz), not `direction`;
 // 4 packed: ray i is origins[2i] (origin, tMax) and origins[2i + 1] (direction), its answer written to occluded[pixelOf[i]];
@@ -326,9 +327,23 @@ kernel void blix_trace(device const float4* rays [[buffer(0)]],
         float3 hn = dot(n, d.xyz) > 0.0f ? -n : n;
         if (dot(hn, p.sun.xyz) > 0.0f) {
             float3 from = o.xyz + d.xyz * t + hn * p.sun.w;
+            float3 toward = p.sun.xyz;
+            if (p.discTan > 0.0f) {
+                // A uniform point of the disc: radius sqrt(u1), angle 2 pi u2, in a frame about the sun's direction.
+                float3 a = abs(toward.y) < 0.99f ? float3(0.0f, 1.0f, 0.0f) : float3(1.0f, 0.0f, 0.0f);
+                float3 tx = normalize(cross(a, toward));
+                float3 ty = cross(toward, tx);
+                uint h1 = blix_pcg(seed * 0x2545F491u + 0x9E3779B9u);
+                uint h2 = blix_pcg(h1 ^ 0x68E31DA4u);
+                float rr = sqrt(float(h1 >> 8) / 16777216.0f) * p.discTan;
+                float ph = float(h2 >> 8) / 16777216.0f * 6.28318530718f;
+                toward = normalize(toward + rr * (cos(ph) * tx + sin(ph) * ty));
+                // The lift kept off the surface for a disc point grazing it.
+                if (dot(hn, toward) <= 0.0f) toward = p.sun.xyz;
+            }
             isect.accept_any_intersection(true);
             uint sunSeed = seed ^ 0x5BD1E995u;
-            sunlit = isect.intersect(ray(from, p.sun.xyz, 0.0f, p.reach), tlas, 0xFFu, table, sunSeed).type == intersection_type::none;
+            sunlit = isect.intersect(ray(from, toward, 0.0f, p.reach), tlas, 0xFFu, table, sunSeed).type == intersection_type::none;
             isect.accept_any_intersection(false);
         }
     }
@@ -953,7 +968,7 @@ HWX_EXPORT int hwx_build(HwxContext* ctx,
 
 // `repeats` dispatches, each its own command buffer, waited on; gpuMs[k] is the k-th one's GPU time.
 HWX_EXPORT int hwx_trace(HwxContext* ctx, void* rays, void* hits, uint32_t count, uint32_t seedBase, uint32_t closestOnly,
-                         uint32_t repeats, double* gpuMs, const float* sun, float reach) {
+                         uint32_t repeats, double* gpuMs, const float* sun, float reach, float discTan) {
     @autoreleasepool {
         if (!ctx->tlas) return Fail(ctx, "trace before build");
         id<MTLBuffer> rayBuffer = (__bridge id<MTLBuffer>)rays;
@@ -969,9 +984,9 @@ HWX_EXPORT int hwx_trace(HwxContext* ctx, void* rays, void* hits, uint32_t count
             [enc setBuffer:hitBuffer offset:0 atIndex:1];
             [enc setAccelerationStructure:ctx->tlas atBufferIndex:2];
             [enc setIntersectionFunctionTable:ctx->table atBufferIndex:3];
-            // Params: with `sun` (direction, lift), each hit's sun too (flags 2).
-            struct { uint32_t count, seedBase, closestOnly, flags; float sun[4]; float reach; uint32_t pad[3]; } params = {
-                count, seedBase, closestOnly, sun ? 2u : 0u, {sun ? sun[0] : 0.0f, sun ? sun[1] : 0.0f, sun ? sun[2] : 0.0f, sun ? sun[3] : 0.0f}, reach, {0, 0, 0}};
+            // Params: with `sun` (direction, lift), each hit's sun too (flags 2), toward a point of the disc when discTan > 0.
+            struct { uint32_t count, seedBase, closestOnly, flags; float sun[4]; float reach; float discTan; uint32_t pad[2]; } params = {
+                count, seedBase, closestOnly, sun ? 2u : 0u, {sun ? sun[0] : 0.0f, sun ? sun[1] : 0.0f, sun ? sun[2] : 0.0f, sun ? sun[3] : 0.0f}, reach, discTan, {0, 0}};
             [enc setBytes:&params length:sizeof(params) atIndex:4];
             [enc setBuffer:ctx->primRows offset:0 atIndex:5];
             [enc setBuffer:ctx->entryRows offset:0 atIndex:6];

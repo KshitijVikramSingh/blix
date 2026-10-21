@@ -66,7 +66,7 @@ internal sealed partial class SponzaLoop
     /// points have one (gateWave).</summary>
     private sealed class ReferenceWave
     {
-        public GpuBufferHandle Points, Lanes, Sums, Rays, Hits, Origins, Occluded;
+        public GpuBufferHandle Points, Lanes, Sums, Rays, Hits, Origins, Occluded, Directions;
         public int PointCount, LanesPerPoint, Quota;
         public uint Dispatch;
         public int Count => PointCount * LanesPerPoint;
@@ -86,6 +86,7 @@ internal sealed partial class SponzaLoop
         w.Hits = Own(device.CreateGpuBuffer(lanes * 48, new byte[lanes * 48], $"sponza.{name}.hits"));
         w.Origins = Own(device.CreateGpuBuffer(lanes * 16, new byte[lanes * 16], $"sponza.{name}.shadow-origins"));
         w.Occluded = Own(device.CreateGpuBuffer(lanes * 4, new byte[lanes * 4], $"sponza.{name}.occluded"));
+        w.Directions = Own(device.CreateGpuBuffer(lanes * 16, new byte[lanes * 16], $"sponza.{name}.shadow-directions"));
         return w;
     }
 
@@ -194,7 +195,7 @@ internal sealed partial class SponzaLoop
                 new("uSunDirection", new Vector4Uniform(new Vector4(sunDirection, 0f))),
                 new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 1f))),
                 new("uParams", new Vector4Uniform(new Vector4(mode, refBounces, w.Quota, w.LanesPerPoint))),
-                new("uCount", new Vector4Uniform(new Vector4(count, w.Dispatch + (uint)refSeed * 7919u, 0f, 0f))),
+                new("uCount", new Vector4Uniform(new Vector4(count, w.Dispatch + (uint)refSeed * 7919u, refSunDisc ? SunDiscTangent : 0f, 0f))),
             },
             new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
             Buffers: rayBlockBuffers
@@ -205,11 +206,13 @@ internal sealed partial class SponzaLoop
                 .Append(new ShaderBufferBinding("BatchHits", w.Hits))
                 .Append(new ShaderBufferBinding("BatchOrigins", w.Origins))
                 .Append(new ShaderBufferBinding("BatchOccluded", w.Occluded))
+                .Append(new ShaderBufferBinding("BatchDirections", w.Directions))
                 .Where(b => declared.Contains(b.Name)).ToArray());
         graph.Dispatch(referenceWaveStepPass, Wave(0));
         RecordClosestBatch(referenceClosestBatch, w.Rays, w.Hits, count, frameSeed, on);
         graph.Dispatch(referenceWaveShadePass, Wave(1));
-        RecordShadowBatch(referenceShadowBatch, w.Origins, w.Occluded, count, -Vector3.Normalize(sunDirection), frameSeed ^ 0x5bd1e995u, on);
+        RecordShadowBatch(referenceShadowBatch, w.Origins, w.Occluded, count, -Vector3.Normalize(sunDirection), frameSeed ^ 0x5bd1e995u, on,
+            directions: refSunDisc ? w.Directions : null);
         graph.Dispatch(referenceWaveResolvePass, Wave(2));
         w.Dispatch++;
     }

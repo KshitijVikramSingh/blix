@@ -76,6 +76,7 @@ internal sealed partial class SponzaLoop
         if (args.Int("ref-bounces") is { } rb) refBounces = Math.Clamp(rb, 1, 64);
         if (args.Int("ref-paths") is { } rp) refPaths = Math.Clamp(rp, 16, 1 << 20);
         if (args.Int("ref-seed") is { } rs) refSeed = rs;
+        refSunDisc = args.Flag("ref-sun-disc");
         if (args.String("shadow-maps") is { } shadowMaps)
         {
             var sm = shadowMaps.Split(',');

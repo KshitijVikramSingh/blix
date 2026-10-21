@@ -177,8 +177,10 @@ public sealed class MetalRayTracer : IDisposable
     /// <param name="closestOnly">Skip the any-hit trace (its flag then repeats the closest hit's), as --ray-bench does.</param>
     /// <param name="sun">With it (toward the sun, xyz; w the lift along the hit's normal), each hit's sun too: a shadow ray
     /// from the hit to <paramref name="reach"/>, its hit flags gaining 8 when nothing meets it.</param>
+    /// <param name="discTan">With <paramref name="sun"/>: the tangent of the sun's angular radius, each shadow ray toward its
+    /// own point of the disc (0: the disc's centre, a point sun).</param>
     public unsafe double[] Trace(GpuBufferHandle rays, GpuBufferHandle hits, int count, uint seedBase, bool closestOnly, int repeats = 1,
-        Vector4? sun = null, float reach = 0f)
+        Vector4? sun = null, float reach = 0f, float discTan = 0f)
     {
         ObjectDisposedException.ThrowIf(ctx == 0, this);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(count);
@@ -188,7 +190,7 @@ public sealed class MetalRayTracer : IDisposable
         {
             var s = sun ?? Vector4.Zero;
             if (HwxNative.hwx_trace(ctx, device.ExportMetalBuffer(rays), device.ExportMetalBuffer(hits), (uint)count, seedBase,
-                    closestOnly ? 1u : 0u, (uint)repeats, mp, sun.HasValue ? (float*)&s : null, reach) != 0)
+                    closestOnly ? 1u : 0u, (uint)repeats, mp, sun.HasValue ? (float*)&s : null, reach, discTan) != 0)
                 throw new InvalidOperationException($"Metal trace: {Error}");
         }
         return ms;

@@ -78,6 +78,13 @@ internal sealed partial class SponzaLoop
     // --sun-nodes-exact-sun (one sun): the hits' sun by a shadow ray each, as the bake's gather has it -- the check on
     // the sun bits' interpolation.
     private bool sunNodeExact;
+    // --hit-sun-ray: every gather hit's sun by its own shadow ray, traced by the Metal trace in the same thread as the hit
+    // (MetalRayTracer.Trace's sun, hit flag 8), in place of the cells' and the search's blend of the texels' sun bits --
+    // which made O(1) errors within a grid spacing of where a shadow edge meets a crease (tools/gi-model/sun_vis.py,
+    // 2026-10-21). The cells and the search still answer the patch. --hit-sun-disc: each ray toward its own point of the
+    // sun's disc (ShadowsSettings.SunDiscDegrees), as the frame's direct sun has it; without, the point sun the GPU
+    // reference traces.
+    private bool hitSunRay, hitSunDisc;
     // The band's guides steer half of each texel's rays (texel_nodes_rays.comp); --sun-nodes-no-guide: cosine rays only.
     private bool sunNodeGuide = true;
     private bool sunNodeGuided;
@@ -134,6 +141,8 @@ internal sealed partial class SponzaLoop
         sunNodeOnFrame = args.Flag("split-on-frame");
         if (args.Int("sun-nodes-discover-stride") is { } ds) sunNodeDiscoverStride = Math.Max(0, ds);
         if (args.Float("sun-nodes-lift") is { } lift) sunNodeLift = Math.Max(0f, lift);
+        hitSunRay = args.Flag("hit-sun-ray") || args.Flag("hit-sun-disc");
+        hitSunDisc = args.Flag("hit-sun-disc");
         if (args.Float("sun-nodes-unknown-sun") is { } us) sunNodeUnknownSun = Math.Clamp(us, 0f, 1f);
         sunNodeCpuSolve = args.Flag("sun-nodes-cpu-solve");
         sunNodeGuide = !args.Flag("sun-nodes-no-guide");
@@ -905,6 +914,11 @@ internal sealed partial class SponzaLoop
         graph.Dispatch(sunNodeShadePasses[copy], SunNodeShadeCommand(ids, first, slice, pass, discover, exact ? 2f : 0f));
     }
 
+    // The column whose sun the gather's hits trace (--hit-sun-ray): the one sun of a live cook's columns; -1 off, or with
+    // several suns (a cooked set of hours), where one shadow ray a hit answers only one of them.
+    private int HitSunColumn => hitSunRay && sunNodeKinds.Count(k => (k & 1) != 0) == 1 && sunNodeBitDirections.Length == sunNodeKinds.Length
+        ? Array.FindIndex(sunNodeKinds, k => (k & 1) != 0) : -1;
+
     private static uint SunNodeSeed(int first, int seedPass, int discover) =>
         unchecked((uint)(first * 2654435761L) ^ (uint)(seedPass + gatherSeedOffset) * 0x9E3779B9u ^ (discover > 0 ? 0xD15C0u : 0u));
     // BLIX_GATHER_SEED=N (a measurement): the gather's rays seeded N passes on -- two cooks' difference is their noise.
@@ -937,9 +951,14 @@ internal sealed partial class SponzaLoop
         device.DispatchNow(new[] { SunNodeRaysCommand(ids, first, slice, seedPass) }, "sun-nodes-rays");
         var t1 = Stopwatch.GetTimestamp();
         var cells = HitCellsShade(0);
-        frameTracer!.Trace(sunNodeRaysBuffer, sunNodeHits, slice * 32, SunNodeSeed(first, seedPass, 0), closestOnly: true);
+        var hitSun = HitSunColumn;
+        if (hitSun >= 0)
+            frameTracer!.Trace(sunNodeRaysBuffer, sunNodeHits, slice * 32, SunNodeSeed(first, seedPass, 0), closestOnly: true,
+                sun: sunNodeBitDirections[hitSun] with { W = sunNodeLift }, reach: rayReach, discTan: hitSunDisc ? SunDiscTangent : 0f);
+        else frameTracer!.Trace(sunNodeRaysBuffer, sunNodeHits, slice * 32, SunNodeSeed(first, seedPass, 0), closestOnly: true);
         var t2 = Stopwatch.GetTimestamp();
-        device.DispatchNow(new[] { SunNodeShadeCommand(ids, first, slice, pass, 0, 0f, few: sunNodeSuns!.Length <= 32, cells: cells) }, "sun-nodes-shade");
+        device.DispatchNow(new[] { SunNodeShadeCommand(ids, first, slice, pass, 0, hitSun >= 0 ? 3f : 0f, few: sunNodeSuns!.Length <= 32,
+            cells: cells, exactColumn: Math.Max(hitSun, 0)) }, "sun-nodes-shade");
         var t3 = Stopwatch.GetTimestamp();
         sunNodeNowSeconds[0] += Stopwatch.GetElapsedTime(t0, t1).TotalSeconds;
         if (sunNodeNowFrame == framesRendered) { sunNodeLaterRays += Stopwatch.GetElapsedTime(t0, t1).TotalSeconds; sunNodeLaterPasses++; }
@@ -1106,7 +1125,8 @@ internal sealed partial class SponzaLoop
     }
 
     // cells: the hit cells answer the hits (SponzaLoop.HitCells.cs), the trace having shot each hit's sun.
-    private DispatchCommand SunNodeShadeCommand(GpuBufferHandle ids, int first, int slice, int pass, int discover, float exactMode, bool few = false, bool cells = false)
+    private DispatchCommand SunNodeShadeCommand(GpuBufferHandle ids, int first, int slice, int pass, int discover, float exactMode, bool few = false, bool cells = false,
+        int exactColumn = 0)
     {
         // The cells' detail (SponzaLoop.SplitDetail.cs) from the sweep of a split cook; never discovering or refining.
         var detail = splitCooking && discover == 0 && sunNodeRefineRound == 0 && !sunNodeDetail.Equals(default(GpuBufferHandle));
@@ -1123,9 +1143,9 @@ internal sealed partial class SponzaLoop
                 new("uSky", new Vector4Uniform(new Vector4(1f, 1f, skyKept ? SunColumn() + 1 : 0f, 0f))),
                 // w: the hit cells (SponzaLoop.HitCells.cs) answer the hit, their sun bit shot for this cook's sun.
                 new("uLookup", new Vector4Uniform(new Vector4(sunNodePlane, sunNodeSigma, cellSplit != 0 ? -cellSplit : hitCellNear, cells ? 1f : 0f))),
-                new("uFoliage", new Vector4Uniform(new Vector4(sunNodeFoliageSlots, discover, exactMode, 0f))),
+                new("uFoliage", new Vector4Uniform(new Vector4(sunNodeFoliageSlots, discover, exactMode, exactColumn + 1))),
                 new("uDetail", new Vector4Uniform(new Vector4(first, detail ? 1f : 0f, CensusOn(discover) ? 1f : 0f, censusPlacements))),
-                new("uFar", new Vector4Uniform(exactMode > 0f ? Vector4.Zero : FarUniform(discover))),
+                new("uFar", new Vector4Uniform(exactMode is > 0f and < 2.5f ? Vector4.Zero : FarUniform(discover))),
                 new("uTransport", new Vector4Uniform(TransportUniform(discover))),
                 new("uFarTransport", new Vector4Uniform(new Vector4(FarTransportUniform, 0f, 0f, 0f))),
                 new("uHitBlend", new Vector4Uniform(new Vector4(HitBlendNow ? 1f : 0f, transportSpacing, 0f, 0f))),

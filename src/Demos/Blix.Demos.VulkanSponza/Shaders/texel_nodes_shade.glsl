@@ -35,7 +35,9 @@ layout(set = 0, binding = 0) uniform SunNodesShade {
                           // answer only past this distance (nearer, the search's blend: a contact's light); w 1: the hit cells answer (hit_cells.comp)
     vec4 uFoliage;        // x the foliage hash's slots (0: no foliage points); y discovering: the list's room (0: off);
                           // z the exact-sun experiment (--sun-nodes-exact-sun, one sun): 1 write each hit's shadow
-                          // ray toward sun 0 (ExactOrigins) and stop; 2 shade sun 0 by that ray's answer (ExactOccluded)
+                          // ray toward sun 0 (ExactOrigins) and stop; 2 shade sun 0 by that ray's answer (ExactOccluded);
+                          // 3 every hit's sun by the Metal trace's own shadow ray from it (hit flag 8, --hit-sun-ray), the
+                          // cells and the search answering the patch alone; w the column that sun is + 1 (0: column 0)
     vec4 uFar;            // the far field (texel_far.glsl): x 0 off, 1 the record pass, 2 the sweep reads the record; y the
                           // patch spacing; z a known bin's weight (fixed point); w the columns
     vec4 uTransport;      // the transport census (N2, SponzaLoop.TransportCensus.cs): x 1 on; y the patch spacing; z the
@@ -214,7 +216,9 @@ void main() {
     int suns = int(u.uShade.y);
     uint words = uint(suns + 31) / 32u;
     // Never while discovering nor for the exact-sun experiment: those passes trace every ray to its end.
-    bool farOn = u.uFar.x > 0.5 && u.uFoliage.y < 0.5 && u.uFoliage.z < 0.5;
+    bool farOn = u.uFar.x > 0.5 && u.uFoliage.y < 0.5 && (u.uFoliage.z < 0.5 || u.uFoliage.z > 2.5);
+    // The column whose sun the hits' exact visibility is (uFoliage.z 2, 3).
+    int exactColumn = u.uFoliage.w > 0.5 ? int(u.uFoliage.w + 0.5) - 1 : 0;
     bool farRecording = farOn && u.uFar.x < 1.5;
     if (lid == 0u) {
         int fp = -1;
@@ -333,15 +337,15 @@ void main() {
                 sHit[lid] = vec4(unpackUnorm4x8(h2.w).rgb * nodeRayWeight[slot] / PI, float(patchIndex));
                 sWeight[lid * NODE_CANDIDATES] = float(frontWord >> 24) / 255.0;
                 for (uint w = 0u; w < words; ++w) sBits[lid * NODE_CANDIDATES * MAX_WORDS + w] = 0xFFFFFFFFu;
-                sExact[lid] = -1.0;
+                sExact[lid] = u.uFoliage.z > 2.5 ? ((h0.w & 8u) != 0u ? 1.0 : 0.0) : -1.0;
                 sUnknown[lid] = 0.0;
                 // BLIX_CELL_SPLIT (a measurement, uLookup.z negative): -1 the sun the search's at the hit, the patch the
                 // cell's; -2 the patch the search's, the sun the cell's -- which of the two the creases need at the hit.
                 // A sun edge across the cell (hit_cells.comp, bit 30, this sun's): its sun the search's, at the hit -- what
                 // the creases need (crevices' seam energy 0.83 with the cell's, 0.87 with the hit's; the patch the cell's
                 // as well, 2026-10-19).
-                bool sunEdge = (hitCells[at + 1u] & 0x40000000u) != 0u;
-                if (u.uLookup.z < -0.5 || sunEdge) {
+                bool sunEdge = (hitCells[at + 1u] & 0x40000000u) != 0u && u.uFoliage.z < 2.5;
+                if ((u.uLookup.z < -0.5 || sunEdge) && u.uFoliage.z < 2.5) {
                     int ids[NODE_CANDIDATES];
                     float weights[NODE_CANDIDATES];
                     float total = nodeSetAt(0, hitPos, hn, u.uTexelGrid, uint(u.uShade.z), u.uLookup.xy, ids, weights);
@@ -396,7 +400,8 @@ void main() {
                     sBits[(lid * NODE_CANDIDATES + uint(c)) * MAX_WORDS + w] = foliage
                         ? foliageBits[uint(ids[c]) * words + w] : sunBits[uint(ids[c]) * words + w];
             }
-            sExact[lid] = u.uFoliage.z > 1.5 ? ((exactOccluded[slot] & 1u) != 0u ? 0.0 : 1.0) : -1.0;
+            sExact[lid] = u.uFoliage.z > 2.5 ? ((h0.w & 8u) != 0u ? 1.0 : 0.0)
+                        : u.uFoliage.z > 1.5 ? ((exactOccluded[slot] & 1u) != 0u ? 0.0 : 1.0) : -1.0;
             nodeCount(0u);
             if (total <= 0.0) nodeCount(1u);
             if (total <= 0.0 && u.uFoliage.y > 0.5) {
@@ -537,7 +542,7 @@ void main() {
                     if (h.w >= 0.0) light = sRayKnown[r * 2 + k].rgb;
                     float ndotl = hasSun ? max(dot(sNormal[r], toSun), 0.0) : 0.0;
                     if (ndotl > 0.0) {
-                        if (k == 0 && sExact[r] >= 0.0) { light += u.uSunIrradiance.rgb * ndotl * sExact[r]; tilts = false; }
+                        if (k == exactColumn && sExact[r] >= 0.0) { light += u.uSunIrradiance.rgb * ndotl * sExact[r]; tilts = false; }
                         else {
                             float visible = sUnknown[r] * u.uSunIrradiance.w;
                             for (int c = 0; c < NODE_CANDIDATES; ++c)
@@ -636,7 +641,7 @@ void main() {
             }
             if (ndotl > 0.0) {
                 float visible = sUnknown[r] * u.uSunIrradiance.w;
-                if (k == 0 && sExact[r] >= 0.0) { light += u.uSunIrradiance.rgb * ndotl * sExact[r]; sum += h.rgb * light; continue; }
+                if (k == exactColumn && sExact[r] >= 0.0) { light += u.uSunIrradiance.rgb * ndotl * sExact[r]; sum += h.rgb * light; continue; }
                 for (int c = 0; c < NODE_CANDIDATES; ++c)
                     if ((sBits[(uint(r) * NODE_CANDIDATES + uint(c)) * MAX_WORDS + word] & bit) != 0u) visible += sWeight[r * NODE_CANDIDATES + c];
                 light += u.uSunIrradiance.rgb * ndotl * visible;

@@ -597,6 +597,9 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private int refBounces = 3;
     private int refPaths = 1024;
     private int refSeed;
+    // --ref-sun-disc: the GPU reference's sun rays (the wavefront's, on Metal) each toward its own point of the sun's disc,
+    // as the frame's direct sun has it and --hit-sun-disc gives the gather's hits; without, a point sun.
+    private bool refSunDisc;
     private Matrix4x4 prevAmbientViewProj = Matrix4x4.Identity;
     private bool ambientHistoryValid;
     // Two shadow caster pipelines: opaque casters use a push-only program (no

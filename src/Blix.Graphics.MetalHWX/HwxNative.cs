@@ -123,5 +123,5 @@ internal static unsafe class HwxNative
         uint nodeCount, float* tanRadii, uint radii, uint azimuths, uint seed, float lift, float reach, uint* bits, double* gpuMs);
 
     [DllImport(Library)]
-    public static extern int hwx_trace(nint ctx, nint rays, nint hits, uint count, uint seedBase, uint closestOnly, uint repeats, double* gpuMs, float* sun, float reach);
+    public static extern int hwx_trace(nint ctx, nint rays, nint hits, uint count, uint seedBase, uint closestOnly, uint repeats, double* gpuMs, float* sun, float reach, float discTan);
 }

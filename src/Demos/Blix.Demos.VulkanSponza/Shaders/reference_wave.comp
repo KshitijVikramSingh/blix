@@ -22,7 +22,7 @@ layout(set = 0, binding = 0) uniform ReferenceWave {
     vec4 uSunDirection;    // xyz the direction the sun travels
     vec4 uSunIrradiance;   // rgb
     vec4 uParams;          // x the mode (0 step, 1 shade, 2 resolve), y bounces, z paths a lane in all, w lanes a point
-    vec4 uCount;           // x lanes, y the frame (seed)
+    vec4 uCount;           // x lanes, y the frame (seed), z the tangent of the sun's angular radius (--ref-sun-disc; 0 a point sun)
 } u;
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
@@ -36,6 +36,8 @@ layout(std430, set = 0, binding = 5) buffer BatchRays { vec4 batchRays[]; };
 layout(std430, set = 0, binding = 6) readonly buffer BatchHits { uvec4 batchHits[]; };
 layout(std430, set = 0, binding = 7) buffer BatchOrigins { vec4 batchOrigins[]; };
 layout(std430, set = 0, binding = 8) readonly buffer BatchOccluded { uint batchOccluded[]; };
+// With a disc (uCount.z): each lane's shadow ray toward its own point of the sun's disc, the shadow batch's directions.
+layout(std430, set = 0, binding = 9) writeonly buffer BatchDirections { vec4 batchDirections[]; };
 
 // Nothing here traces (the batches do); ray_query.glsl comes in for blix_pcg and reference_path.glsl's sampling, which
 // the paths must share with the monolithic reference to be the same paths.
@@ -101,6 +103,17 @@ void main() {
             vec3 hn = dot(normal, dir) > 0.0 ? -normal : normal;
             vec3 hp = a.xyz + dir * uintBitsToFloat(h0.x);
             vec3 toSun = -normalize(u.uSunDirection.xyz);
+            if (u.uCount.z > 0.0) {
+                // A uniform point of the disc (radius sqrt(u1), angle 2 pi u2), in a frame about the sun's direction.
+                vec3 ax = abs(toSun.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+                vec3 tx = normalize(cross(ax, toSun));
+                vec3 ty = cross(toSun, tx);
+                uint hs = blix_pcg(floatBitsToUint(c.w) ^ (l * 0x2545F491u) ^ uint(u.uCount.y) * 0x9E3779B9u);
+                float rr = sqrt(float(hs >> 8) / 16777216.0) * u.uCount.z;
+                float ph = float(blix_pcg(hs) >> 8) / 16777216.0 * 6.28318530718;
+                toSun = normalize(toSun + rr * (cos(ph) * tx + sin(ph) * ty));
+                batchDirections[l] = vec4(toSun, 0.0);
+            }
             float ndl = dot(hn, toSun);
             if (ndl > 0.0) {
                 batchOrigins[l] = vec4(hp + hn * 0.01, uintBitsToFloat(0x7F800000u));
