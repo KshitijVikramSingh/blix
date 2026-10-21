@@ -317,7 +317,7 @@ internal sealed partial class SponzaLoop
     {
         if (transportCombinedKey is not { } combined) return null;
         var key = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(string.Create(CultureInfo.InvariantCulture,
-            $"{combined};texels {texelCount};live {liveCount};rays {transferAoRays};reach {transferAoReach};short {transferAoShortReach};sky {skyVisRays};filter {skyVisFilterPasses} {skyVisEdge};all {contactAllRays};v{ContactVersion}"))))[..24].ToLowerInvariant();
+            $"{combined};texels {texelCount};records {(lightmapTexels ? LightmapRecordsRule : "none")};live {liveCount};rays {transferAoRays};reach {transferAoReach};short {transferAoShortReach};sky {skyVisRays};filter {skyVisFilterPasses} {skyVisEdge};all {contactAllRays};v{ContactVersion}"))))[..24].ToLowerInvariant();
         return Path.Combine(transportCacheDir, key + ".texel-contact");
     }
 

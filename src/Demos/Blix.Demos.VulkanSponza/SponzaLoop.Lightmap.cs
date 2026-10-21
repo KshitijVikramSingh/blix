@@ -409,7 +409,11 @@ internal sealed partial class SponzaLoop
     // at a corner its rays started in that wall's plane and went through it -- the thin wall's sealed room read the sky
     // outside at every corner (2026-10-13). Each weight floored at the inset over the triangle's height across from its
     // vertex, the rest spread as it was.
-    private const float LightmapEdgeInset = 0.01f;
+    // Half a texel (the atlas's 4 cm): an edge texel stands for the light as far in as its neighbours are apart. At 1 cm a
+    // crease's edge texels gathered with half their hemisphere the other wall, ~3x darker than a pixel 2-3 cm out reads,
+    // and the creases came out in jagged dark bands (crevices' seam energy 0.955 -> 0.978, its excess 0.0165 -> 0.0126,
+    // the leak unchanged, 2026-10-21). --lightmap-edge-inset M.
+    private static float LightmapEdgeInset = 0.02f;
     private static Vector3 Inset(Vector3 pa, Vector3 pb, Vector3 pc, float wa, float wb, float wc)
     {
         var twiceArea = Vector3.Cross(pb - pa, pc - pa).Length();

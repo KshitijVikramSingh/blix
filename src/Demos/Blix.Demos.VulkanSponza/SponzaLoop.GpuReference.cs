@@ -240,8 +240,10 @@ internal sealed partial class SponzaLoop
         var packed = new List<Vector4>();
         for (var k = 0; k < GpuReferenceGrid * GpuReferenceGrid; k++)
         {
-            var px = (k % GpuReferenceGrid + 0.5f) / GpuReferenceGrid * iw;
-            var py = (k / GpuReferenceGrid + 0.5f) / GpuReferenceGrid * ih;
+            // At the centre of the pixel the field is read from (WriteGpuSurfaceReference: (int)px, (int)py), so the reference's
+            // ray and the pixel see the same face.
+            var px = MathF.Floor((k % GpuReferenceGrid + 0.5f) / GpuReferenceGrid * iw) + 0.5f;
+            var py = MathF.Floor((k / GpuReferenceGrid + 0.5f) / GpuReferenceGrid * ih) + 0.5f;
             var ray = CameraRay(px, py);
             if (scene.Closest(ray) is not { } hit) continue;
             var edge = false;
@@ -263,8 +265,10 @@ internal sealed partial class SponzaLoop
             var seams = new List<(float Px, float Py, Vector3 P, Vector3 N)>();
             for (var k = 0; k < Fine * Fine; k++)
             {
-                var px = (k % Fine + 0.5f) / Fine * iw;
-                var py = (k / Fine + 0.5f) / Fine * ih;
+                // A pixel's centre, as the grid's: at a crease, a point a fraction of a pixel off its pixel's centre had its
+                // pixel on the other face -- the crevices' seams read 0.013 against 0.063 (2026-10-21).
+                var px = MathF.Floor((k % Fine + 0.5f) / Fine * iw) + 0.5f;
+                var py = MathF.Floor((k / Fine + 0.5f) / Fine * ih) + 0.5f;
                 var ray = CameraRay(px, py);
                 if (scene.Closest(ray) is not { } hit) continue;
                 var n = FaceNormal(hit);
@@ -276,6 +280,14 @@ internal sealed partial class SponzaLoop
                     var on = FaceNormal(other);
                     if (MathF.Abs(Vector3.Dot(on, n)) < 0.7f) crease = true;
                 }
+                // Its own pixel whole: the same face and depth a pixel each way, so the reference's ray and the raster (and its
+                // jitter) meet the same surface. A point a pixel from a step between two parallel faces passed the normal
+                // test frame by frame and read the nearer face's light against the farther's reference, 4x over (crevices,
+                // 2026-10-21).
+                if (!edge && crease)
+                    foreach (var (dx, dy) in new[] { (1f, 0f), (-1f, 0f), (0f, 1f), (0f, -1f) })
+                        if (scene.Closest(CameraRay(px + dx, py + dy)) is not { } near || MathF.Abs(near.T - hit.T) > 0.01f * hit.T
+                            || Vector3.Dot(FaceNormal(near) * (Vector3.Dot(FaceNormal(near), ray.Direction) > 0f ? -1f : 1f), n) < 0.95f) { edge = true; break; }
                 if (!edge && crease) seams.Add((px, py, ray.PointAt(hit.T) + n * 0.01f, n));
             }
             var take = Math.Min(gpuReferenceSeams, seams.Count);
@@ -313,17 +325,34 @@ internal sealed partial class SponzaLoop
     private const int IncidentAverageFrames = 64;
     private double[]? incidentPointSums;
     private int incidentPointFrames;
+    // Each point's frames that counted: a frame whose pixel showed another face than the reference's point is left out.
+    // A crease's pixel sits on the crease line, and under the jitter half its frames saw the other face -- the crevices'
+    // seams read 0.013 against the reference's 0.063 where the pixel's own face read 0.065 (2026-10-21).
+    private int[]? incidentPointCounts;
+    private int incidentPointsOffFace;
 
     private void AccumulateIncidentPoints()
     {
         if (!gpuReference || gpuReferencePoints is not { Count: > 0 } points) return;
         var incident = device.ReadTexture(graph.GetColorTexture(incidentHandle), out var iw, out var ih, out _);
+        var normals = device.ReadTexture(graph.GetColorTexture(SampleablePrepassNormal), out var nw, out var nh, out _);
         incidentPointSums ??= new double[points.Count];
+        incidentPointCounts ??= new int[points.Count];
+        var packed = gpuReferencePackedPoints;
         for (var i = 0; i < points.Count; i++)
         {
             var (_, px, py) = points[i];
+            // This frame's face at the pixel against the point's (the reference's): another face, not counted.
+            if (packed is not null && nw > 0 && nh > 0)
+            {
+                var no = (Math.Clamp((int)(py * nh / ih), 0, nh - 1) * nw + Math.Clamp((int)(px * nw / iw), 0, nw - 1)) * 8;
+                var seen = new Vector3((float)BitConverter.ToHalf(normals, no), (float)BitConverter.ToHalf(normals, no + 2), (float)BitConverter.ToHalf(normals, no + 4));
+                var want = new Vector3(packed[2 * i + 1].X, packed[2 * i + 1].Y, packed[2 * i + 1].Z);
+                if (seen.LengthSquared() > 1e-6f && Vector3.Dot(Vector3.Normalize(seen), want) < 0.9f) { incidentPointsOffFace++; continue; }
+            }
             var o = (Math.Clamp((int)py, 0, ih - 1) * iw + Math.Clamp((int)px, 0, iw - 1)) * 8;
             incidentPointSums[i] += 0.2126 * (float)BitConverter.ToHalf(incident, o) + 0.7152 * (float)BitConverter.ToHalf(incident, o + 2) + 0.0722 * (float)BitConverter.ToHalf(incident, o + 4);
+            incidentPointCounts[i]++;
         }
         incidentPointFrames++;
     }
@@ -339,7 +368,7 @@ internal sealed partial class SponzaLoop
         static double Lum(Vector3 v) => 0.2126 * v.X + 0.7152 * v.Y + 0.0722 * v.Z;
         if (incidentPointFrames > 0)
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                $"[VulkanSponza] surface reference: each point's light the mean of {incidentPointFrames} jittered frames."));
+                $"[VulkanSponza] surface reference: each point's light the mean of {incidentPointFrames} jittered frames ({incidentPointsOffFace:N0} point-frames left out: their pixel showed another face)."));
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] surface reference on the GPU ({(referenceMonolithic ? "monolithic" : FrameRaysOnHardware && frameTracer is not null ? "wavefront, Metal" : "wavefront, software")}; {points.Count} pixels off depth edges, {(referenceMonolithic ? gpuReferencePaths : (int)Math.Round(accum.Average(a => a.W)))} paths x {refBounces} bounces):"));
         if (!referenceMonolithic && FrameRaysOnHardware && frameTracer is not null)
@@ -356,7 +385,10 @@ internal sealed partial class SponzaLoop
             var a = accum[i];
             var reference = a.W > 0f ? Lum(new Vector3(a.X, a.Y, a.Z) / a.W) : double.NaN;
             var o = (Math.Clamp((int)py, 0, ih - 1) * iw + Math.Clamp((int)px, 0, iw - 1)) * 8;
-            var field = incidentPointFrames > 0 ? incidentPointSums![i] / incidentPointFrames
+            // No frame showed the reference's face at the pixel (the reference's ray and the raster split a crease there): no
+            // sample (gate.py skips a negative one) -- not the other face's light against this one's reference.
+            var field = incidentPointFrames > 0 && incidentPointCounts![i] == 0 ? -1.0
+                : incidentPointFrames > 0 ? incidentPointSums![i] / incidentPointCounts[i]
                 : Lum(new Vector3((float)BitConverter.ToHalf(incident, o), (float)BitConverter.ToHalf(incident, o + 2), (float)BitConverter.ToHalf(incident, o + 4)));
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"    {(k >= SeamKeyBase ? "seam    " : "surface ")} at {px / iw:0.0000},{py / ih:0.0000}  gpu  total {field:0.00000} ref {reference:0.00000}"));

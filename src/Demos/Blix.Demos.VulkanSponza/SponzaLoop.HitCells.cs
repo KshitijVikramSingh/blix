@@ -195,7 +195,7 @@ internal sealed partial class SponzaLoop
     {
         if (transportCombinedKey is not { } combined) return null;
         var key = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(string.Create(CultureInfo.InvariantCulture,
-            $"{combined};rows {rows};cell {hitCellSize};contacts {cellMarks};v{HitCellsVersion}"))))[..24].ToLowerInvariant();
+            $"{combined};rows {rows};records {(lightmapTexels ? LightmapRecordsRule : "none")};cell {hitCellSize};contacts {cellMarks};v{HitCellsVersion}"))))[..24].ToLowerInvariant();
         return Path.Combine(transportCacheDir, key + ".hit-cells");
     }
 

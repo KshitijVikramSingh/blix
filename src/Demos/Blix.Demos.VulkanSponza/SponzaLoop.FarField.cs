@@ -275,7 +275,7 @@ internal sealed partial class SponzaLoop
         if (transportCombinedKey is not { } combined) return null;
         var g = texelGrid;
         var key = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(string.Create(CultureInfo.InvariantCulture,
-            $"{combined};texels {texelCount};grid {g.X},{g.Y},{g.Z},{g.W};v{PlaceKeyVersion}"))))[..24].ToLowerInvariant();
+            $"{combined};texels {texelCount};records {(lightmapTexels ? LightmapRecordsRule : "none")};grid {g.X},{g.Y},{g.Z},{g.W};v{PlaceKeyVersion}"))))[..24].ToLowerInvariant();
         return Path.Combine(transportCacheDir, key + ".texel-place");
     }
 

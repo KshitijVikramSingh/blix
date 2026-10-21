@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Numerics;
 using System.Runtime.InteropServices;
+using Blix.Core;
 using Blix.Graphics;
 using ImGuiNET;
 
@@ -46,6 +47,40 @@ internal sealed partial class SponzaLoop
     private int texelProvenanceBytes;
     private int texelView;
     private bool texelPicker, texelPickFrozen;
+    // --texel-pick x,y (frame fractions): the picker on, frozen there, and its panel printed to the log once the light is at
+    // rest (and again every few seconds) -- the picker without a screen to read it from.
+    private bool texelPickLog;
+    private long landedFrame = -1;
+    private readonly System.Diagnostics.Stopwatch texelPickLogClock = new();
+
+    private void ReadTexelPickArgs(AppArgs args)
+    {
+        if (args.String("texel-pick") is not { } at) return;
+        var parts = at.Split(',');
+        if (parts.Length != 2 || !float.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var x)
+            || !float.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var y))
+            throw new AppArgsException("--texel-pick takes x,y, the frame's fractions (0-1).");
+        texelPicker = texelPickFrozen = texelPickLog = true;
+        texelPickFraction = new Vector2(x, y);
+    }
+
+    // RenderFrame's end, with --texel-pick: the panel's lines to the log.
+    private void LogTexelPick()
+    {
+        // The cook landed a second ago: the pick reads back frames late, its rows a quarter second.
+        if (!texelPickLog || !texelResting || landedFrame < 0 || framesRendered < landedFrame + 60) return;
+        if (texelPickLogClock.IsRunning && texelPickLogClock.Elapsed.TotalSeconds < 5) return;
+        UpdateTexelPick();
+        if (texelPickPixel is not { } px) return;
+        texelPickLogClock.Restart();
+        var inv = CultureInfo.InvariantCulture;
+        var lum = 0.2126f * px.Answer.X + 0.7152f * px.Answer.Y + 0.0722f * px.Answer.Z;
+        Console.WriteLine(string.Create(inv,
+            $"[pick] ({texelPickFraction.X:0.0000},{texelPickFraction.Y:0.0000}) at ({px.World.X:0.000},{px.World.Y:0.000},{px.World.Z:0.000}) n ({px.Normal.X:0.00},{px.Normal.Y:0.00},{px.Normal.Z:0.00}): light {lum:0.0000}, sky {px.Sky:0.00}, level wanted {px.LevelWanted:0.00}, path {px.Path}{(px.Reference > 0 ? $", path trace {px.Reference:0.0000} +-{px.ReferenceError:0.0000} ({100 * (lum / px.Reference - 1):+0.0}%)" : "")}"));
+        foreach (var r in texelPickRows)
+            Console.WriteLine(string.Create(inv,
+                $"[pick]   {r.Share * 100,3:0}% L{r.Level} {r.Kind} #{r.Id}: off {r.AlongCm:+0.0;-0.0} cm (across {r.AcrossCm:0.0}), facing {r.Facing:0.00}, sky {r.Sky:0.00}, contact {r.Contact:0.00}/{r.ContactShort:0.00}, light {r.Light:0.0000}{(r.Lit ? "" : " NONE")}, patch #{r.Patch} ({r.PatchLight:0.0000}), by {ProvenanceShort(r.ProvSun)}/{ProvenanceShort(r.ProvSky)}{(r.Problems.Count > 0 ? " -- " + string.Join("; ", r.Problems.Select(q => q.Text)) : "")}"));
+    }
     private Vector2 texelPickFraction = new(0.5f);
     private readonly GpuBufferHandle[] texelPickBuffers = new GpuBufferHandle[4];
     private readonly long[] texelPickFrames = { -1, -1, -1, -1 };
