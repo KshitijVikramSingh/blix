@@ -201,6 +201,7 @@ internal sealed partial class SponzaLoop
         sunNodeGuide = !args.Flag("sun-nodes-no-guide");
         sunNodeLights = !args.Flag("sun-nodes-no-lights");
         noiseCensus = args.Flag("split-noise-census");
+        ReadRayCaptureArgs(args);
         ReadFarArgs(args);
         ReadTransportCensusArgs(args);
         ReadFarTransportArgs(args);
@@ -1209,6 +1210,7 @@ internal sealed partial class SponzaLoop
                 new("uTransport", new Vector4Uniform(TransportUniform(discover))),
                 new("uFarTransport", new Vector4Uniform(new Vector4(FarTransportUniform, 0f, 0f, 0f))),
                 new("uHitBlend", new Vector4Uniform(new Vector4(HitBlendNow ? 1f : 0f, transportSpacing, NearTexelLightNow ? 1f : 0f, SunColumn()))),
+                new("uCapture", new Vector4Uniform(discover == 0 && exactMode is < 0.5f or > 2.5f ? RayCaptureUniform : Vector4.Zero)),
             },
             new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
             Buffers: new[]
@@ -1247,6 +1249,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("SplitSun", NearTexelLightNow ? splitSunBuffer : sunNodeAccum),
                 NearTexelLightNow ? ProvenanceBinding() : new ShaderBufferBinding("TexelProvenance", sunNodeAccum),
                 new ShaderBufferBinding("SheetRows", SheetsInGi ? SheetRowsBuffer!.Value : sunNodeAccum),
+                RayCaptureBinding(sunNodeAccum),
             }.Concat(CookedBuffers()).Where(b => declared.Contains(b.Name)).ToArray());
     }
 

@@ -8,8 +8,9 @@ namespace Blix.Demos.VulkanSponza;
 // The view dump (the texel picker's "Dump view", --view-dump): everything a frame's GI is made of at the scale it is seen,
 // written raw for tools/gi-model/view_dump.py -- per pixel the incident field, the pre-pass normal, the atlas texel it
 // reads and the per-pixel path trace (--gi-reference, G) with its moments; per texel its record, its parts, its resolved
-// light, who wrote it, its rays and its patch; meta.json the camera, the sun and the sizes. Patterns a pixel's picker
-// cannot show at once -- texels that settled at different counts side by side -- are read off the whole view.
+// light, who wrote it, its rays, its patch and its cooked visibilities; meta.json the camera, the sun, the seed and the
+// sizes. Patterns a pixel's picker cannot show at once -- texels that settled at different counts side by side -- are
+// read off the whole view.
 internal sealed partial class SponzaLoop
 {
     private bool viewDumpPending, viewDumpAtLanding, viewDumpDone;
@@ -70,6 +71,15 @@ internal sealed partial class SponzaLoop
         Buffer("provenance.u8", texelProvenanceBuffer, Math.Min(texelProvenanceBytes, (texelCount + 3) / 4 * 4));
         Buffer("rays.u16", texelRaysBuffer, Math.Min(texelRaysBytes, (texelCount + 1) / 2 * 4));
         Buffer("patch.i32", liveTexelPatch, (long)texelCount * 4);
+        // The cooked visibilities (a byte a texel, 0 none, else 1 + 254 v): contact (the fine flag's ratio), its short
+        // reach, the sky's (by its square root).
+        var visBytes = (texelCount + 3) / 4 * 4;
+        Buffer("contact.u8", texelAoBuffer, visBytes);
+        Buffer("contact_short.u8", texelAoShortBuffer, visBytes);
+        Buffer("skyvis.u8", texelSkyVisBuffer, visBytes);
+        // --ray-capture's rays (SponzaLoop.RayCapture.cs): the count's 16 bytes, then 32 a ray.
+        var (captured, capturedBytes) = RayCaptureForDump();
+        Buffer("rays_captured.u32x8", captured, capturedBytes);
         if (referenceView || referenceSamples > 0)
         {
             Buffer("reference.f32x4", referenceAccum, (long)referenceSize.X * referenceSize.Y * 16);
@@ -89,6 +99,7 @@ internal sealed partial class SponzaLoop
             lightmapAtlas = new[] { lightmapAtlasWidth, lightmapAtlasHeight },
             reference = new { width = referenceSize.X, height = referenceSize.Y, samples = referenceSamples, on = referenceView },
             pick = new[] { texelPickFraction.X, texelPickFraction.Y },
+            seed = Environment.GetEnvironmentVariable("BLIX_GATHER_SEED") ?? "0",
             texelView = TexelViewNames[Math.Clamp(texelView, 0, TexelViewNames.Length - 1)],
             fieldIsGi = true,
             files,

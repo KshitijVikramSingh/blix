@@ -46,6 +46,8 @@ layout(set = 0, binding = 0) uniform SunNodesShade {
     vec4 uHitBlend;       // x 1: a hit's bounce blended over its patch and the patch's neighbours (hitPatchLight); y the
                           // patches' spacing (the blend's reach); z 1: a near hit's bounce the texels' about it
                           // (--near-texel-light), w the sun's column (its part per unit of uSunIrradiance)
+    vec4 uCapture;        // the ray capture (--ray-capture, SponzaLoop.RayCapture.cs): x 1 on; y the texels sampled, 1 in
+                          // 2^y by a hash of the id; z the round's tag; w the records' room
 } u;
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
@@ -72,6 +74,12 @@ layout(std430, set = 0, binding = 37) readonly buffer TexelProvenance { uint pro
 // with its albedo, and passes T c of the sun on its far side: the hit's sun ray from that side (hit flag 8, the trace's
 // sheets, blix_hwx.mm). uFoliage.w's sign: negative with sheets (the exact column then -w - 1).
 layout(std430, set = 0, binding = 38) readonly buffer SheetRows { uint sheetRows[]; };
+// The ray capture (uCapture.x on; the split variant's two-column fast path alone): each ray of the sampled texels, two
+// uvec4s -- x the texel, y the round's tag | the pass << 16, z its hit distance (a miss 1e30), w how it was answered (0
+// the sky, 1 the far record, 2 a hit cell, 3 the search's texels, 4 among none; + 8 its bounce a near texel's own light,
+// + 16 no patch); then its whole luminance (weight in), the bounce's share of it, half2 (its cosine to the texel's
+// normal, its weight), the hit's likeliest texel (else 0xFFFFFFFF). tools/gi-model/ray_capture.py reads them.
+layout(std430, set = 0, binding = 39) buffer RayCapture { uint captureCount; uint capturePad[3]; uvec4 captured[]; };
 layout(std430, set = 0, binding = 14) readonly buffer FoliagePoints { vec4 foliagePoints[]; };
 layout(std430, set = 0, binding = 15) readonly buffer FoliageHash { uint foliageHash[]; };
 layout(std430, set = 0, binding = 16) readonly buffer FoliageBits { uint foliageBits[]; };
@@ -184,6 +192,11 @@ shared vec3 sUnknownBounce[2];
 shared int sNearTexel[RAYS];    // the transport census: each hit's likeliest texel (-1: among none)
 #if MAX_WORDS == 1
 shared vec4 sSheet[RAYS];       // the hit's sheet: rgb T c, a T (0: not a sheet); the 256-sun variant meets sheets as opaque
+shared uint sHow[RAYS];         // the ray capture: how the hit was answered (RayCapture's w, before its flags); the
+                                // 256-sun variant (at Metal's 32 KB) captures nothing
+#define HOW(r, v) sHow[r] = v
+#else
+#define HOW(r, v)
 #endif
 shared float sTransportReach;
 shared uint sTransportObject;
@@ -311,6 +324,7 @@ void main() {
         sRayWeight[lid] = nodeRayWeight[slot];
         sPlacement[lid] = (h0.w & 1u) != 0u ? nodeHits[slot * 3u + 1u].x : 0xFFFFFFFFu;
         sNearTexel[lid] = -1;
+        HOW(lid, (h0.w & 1u) != 0u ? 3u : 0u);
 #if MAX_WORDS == 1
         sSheet[lid] = vec4(0.0);
         if (sheetsOn && (h0.w & 1u) != 0u) {
@@ -350,6 +364,7 @@ void main() {
             sNormal[lid] = vec3(0.0);
             sUnknown[lid] = 0.0;
             sExact[lid] = -1.0;
+            HOW(lid, 1u);
             nodeCount(5u);
         } else if ((h0.w & 1u) != 0u) {
             vec3 normal = uintBitsToFloat(h2.xyz);
@@ -388,6 +403,7 @@ void main() {
                 for (uint w = 0u; w < words; ++w) sBits[lid * NODE_CANDIDATES * MAX_WORDS + w] = 0xFFFFFFFFu;
                 sExact[lid] = u.uFoliage.z > 2.5 ? ((h0.w & 8u) != 0u ? 1.0 : 0.0) : -1.0;
                 sUnknown[lid] = 0.0;
+                HOW(lid, 2u);
                 nodeCount(0u);
                 if (patchIndex < 0) nodeCount(2u);
             } else {
@@ -438,6 +454,7 @@ void main() {
                 }
             }
             sUnknown[lid] = total <= 0.0 ? 1.0 : 0.0;
+            if (total <= 0.0) HOW(lid, 4u);
             if (patchIndex < 0) nodeCount(2u);
             }
         } else {
@@ -547,6 +564,7 @@ void main() {
             vec4 h = sHit[r];
             vec3 w = sDir[r];
             float tiltDen = max(dot(dn, w), 0.1);
+            float captureBounce = 0.0;
             for (int k = 0; k < suns; ++k) {
                 vec3 toSun = sunNodes[k].xyz;
                 uint kind = uint(sunNodes[k].w + 0.5);
@@ -566,6 +584,7 @@ void main() {
                 } else {
                     vec3 light = sUnknownBounce[k];
                     if (h.w >= 0.0) light = sRayKnown[r * 2 + k].rgb;
+                    captureBounce += dot(h.rgb * light, lumW);
                     float ndotl = hasSun ? max(dot(sNormal[r], toSun), 0.0) : 0.0;
                     vec3 glow = vec3(0.0);
 #if MAX_WORDS == 1
@@ -591,6 +610,28 @@ void main() {
                 sRaySum[r * 2 + k] = add;
                 sRayTilt[r * 2 + k] = tilts ? tiltLight * vec2(dot(dt1, w), dot(dt2, w)) / tiltDen : vec2(0.0);
             }
+#if MAX_WORDS == 1
+            if (u.uCapture.x > 0.5) {
+                uint id = nodeIds[uint(u.uDetail.x) + group];
+                uint bits = uint(u.uCapture.y);
+                if (bits == 0u || ((id * 2654435761u) >> (32u - bits)) == 0u) {
+                    uint at = atomicAdd(captureCount, 1u);
+                    if (at < uint(u.uCapture.w)) {
+                        float whole = 0.0;
+                        for (int k = 0; k < suns; ++k) whole += dot(sRaySum[r * 2 + k], lumW);
+                        uint how = sHow[r];
+                        vec3 near;
+                        if (how >= 2u && h.w >= 0.0 && nearTexelLight(r, int(u.uHitBlend.w), near)) how += 8u;
+                        if (how >= 2u && h.w < 0.0) how += 16u;
+                        vec3 tn = texels[2u * id + 1u].xyz;
+                        float cosine = dot(tn, tn) > 0.0 ? dot(normalize(tn), w) : 0.0;
+                        captured[2u * at] = uvec4(id, uint(u.uCapture.z) | (uint(u.uShade.w) << 16), floatBitsToUint(sDist[r]), how);
+                        captured[2u * at + 1u] = uvec4(floatBitsToUint(whole), floatBitsToUint(captureBounce),
+                            packHalf2x16(vec2(cosine, sRayWeight[r])), uint(sNearTexel[r]));
+                    }
+                }
+            }
+#endif
         }
         barrier();
         if (lid < uint(suns)) {
