@@ -31,3 +31,18 @@ for sc in SCENES:
             ratio = min(1.0, contact(t, REACH) / contact(centre, REACH))
             row.append(f"texel {100*t:.0f} cm: copy x{ratio:.3f} -> {100*(ratio*ec/np.interp(t, xa, ea)-1):+5.1f}%")
         print(f"   {100*cell:.0f} cm cell (centre {100*centre:.0f} cm): " + "   ".join(row))
+
+
+if __name__ == "__main__" and "--albedo" in __import__("sys").argv:
+    print("\n== the copy with the hidden directions seeing the near face's reflection: (r + (1-r) rho) / (rc + (1-rc) rho)")
+    for sc in SCENES:
+        xa, ea, _, _ = truth(sc)
+        rho = sc.rho[1]
+        centre = 0.10
+        ec = np.interp(centre, xa, ea)
+        row = []
+        for t in (0.02, 0.06):
+            r, rc = contact(t, REACH), contact(centre, REACH)
+            ratio = (r + (1 - r) * rho) / (rc + (1 - rc) * rho)
+            row.append(f"texel {100*t:.0f} cm: x{ratio:.3f} -> {100*(ratio*ec/np.interp(t, xa, ea)-1):+5.1f}%")
+        print(f"   {sc.name:<36} " + "   ".join(row))
