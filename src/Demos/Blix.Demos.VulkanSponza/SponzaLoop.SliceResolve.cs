@@ -96,6 +96,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("NextCount", resolveCount),
                 new ShaderBufferBinding("RefineMask", refineMaskBuffer.Equals(default(GpuBufferHandle)) ? resolveCount : refineMaskBuffer),
                 ProvenanceBinding(),
+                TexelRaysBinding(),
             }.Where(b => declared.Contains(b.Name)).ToArray()) }, "slice-resolve");
     }
 

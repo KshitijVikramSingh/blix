@@ -124,7 +124,8 @@ internal sealed partial class SponzaLoop
     {
         if (referenceAccum.Equals(default(GpuBufferHandle)))
             referenceAccum = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.reference.none"));
-        var on = referenceView && referenceSize.X > 0 && referenceSamples > 0;
+        // Held off while a view dump waits (SponzaLoop.ViewDump.cs): the field it reads is the GI's, not the trace shown in its place.
+        var on = referenceView && referenceSize.X > 0 && referenceSamples > 0 && viewDumpWaiting == 0;
         return (new Vector4(on ? 1f : 0f, referenceSize.X, referenceSize.Y, TexelViewReferenceW(texelDebugRecords ? 2f : texelDebug ? 1f : 0f)), new ShaderBufferBinding("ReferenceAccum", referenceAccum));
     }
 

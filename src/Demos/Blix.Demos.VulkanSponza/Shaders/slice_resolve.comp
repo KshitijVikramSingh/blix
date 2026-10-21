@@ -28,6 +28,9 @@ layout(std430, set = 0, binding = 6) buffer StatePasses { uint statePasses[]; };
 layout(std430, set = 0, binding = 7) buffer SplitSky { uvec2 skyPart[]; };
 layout(std430, set = 0, binding = 8) buffer SplitSun { uvec2 sunPart[]; };
 layout(std430, set = 0, binding = 16) buffer TexelProvenance { uint provenance[]; };
+// Each texel's passes (32 rays each) at its last gather, 16 bits a texel (SponzaLoop.TexelPicker.cs: the rays view, the
+// view dump): where neighbours stopped at different counts.
+layout(std430, set = 0, binding = 17) buffer TexelRays { uint texelRays[]; };
 #include "provenance.glsl"
 layout(std430, set = 0, binding = 9) buffer SkyDetail { uint skyDetail[]; };
 layout(std430, set = 0, binding = 10) buffer SunDetail { uint sunDetail[]; };
@@ -115,6 +118,11 @@ void main() {
         uvec2 word = uvec2(packRgb9e5(sunColumn ? light * u.uSun.xyz : light), 0xFFFFu | 0x10000u);
         if (sunColumn) sunPart[id] = word; else skyPart[id] = word;
         provenanceMark(id, uint(u.uKeep.z), sunColumn, !sunColumn);   // uKeep.z: which gather (SponzaLoop.TexelPicker.cs)
+        if (k == 0u) {
+            uint shift = 16u * (id & 1u);
+            atomicAnd(texelRays[id >> 1u], ~(0xFFFFu << shift));
+            atomicOr(texelRays[id >> 1u], min(passes, 0xFFFFu) << shift);
+        }
         if (!refining && u.uMode.w > 0.5) {
             // The detail, from the sweep alone (SplitDetail.cs, ReadSplitDetail): the tilt over the column's light, the
             // sky visibility from column 0's.

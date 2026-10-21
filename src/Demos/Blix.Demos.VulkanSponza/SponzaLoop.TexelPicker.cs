@@ -31,6 +31,7 @@ internal sealed partial class SponzaLoop
         "Patches: the light a gather ray reads landing here", "Patches: layout (a colour each)",
         "Against the path trace (--gi-reference; grey alike, blue darker, red brighter, full at 25%)",
         "Texels' facing (green facing the pixel, yellow grazing, orange-red read from records facing away)",
+        "Rays gathered (blue 128, green 256, yellow 512, red 1,024+; grey copied)",
     };
 
     // The incident pass's patch bindings (the patch views; placeholders without the live patch light).
@@ -56,6 +57,10 @@ internal sealed partial class SponzaLoop
 
     private void ReadTexelPickArgs(AppArgs args)
     {
+        // --view-dump: the view dump once the light has landed (SponzaLoop.ViewDump.cs).
+        viewDumpAtLanding = args.Flag("view-dump");
+        // --view-dump-at N: at post-load frame N instead (the path trace's samples by then), if the light has landed.
+        if (args.Int("view-dump-at") is { } vda) { viewDumpAtLanding = true; viewDumpAtFrame = vda; }
         if (args.String("texel-pick") is not { } at) return;
         var parts = at.Split(',');
         if (parts.Length != 2 || !float.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var x)
@@ -103,6 +108,21 @@ internal sealed partial class SponzaLoop
             texelProvenanceBytes = bytes;
         }
         return new ShaderBufferBinding("TexelProvenance", texelProvenanceBuffer);
+    }
+
+    // Each texel's passes at its last gather, 16 bits a texel (slice_resolve.comp): the rays view, the view dump.
+    private GpuBufferHandle texelRaysBuffer;
+    private int texelRaysBytes;
+    private ShaderBufferBinding TexelRaysBinding()
+    {
+        var bytes = Math.Max(16, (texelCount + 1) / 2 * 4);
+        if (texelRaysBuffer.Equals(default(GpuBufferHandle)) || texelRaysBytes < bytes)
+        {
+            if (!texelRaysBuffer.Equals(default(GpuBufferHandle))) RetireGpuBuffer(texelRaysBuffer);
+            texelRaysBuffer = Own(device.CreateGpuBuffer(bytes, new byte[bytes], "sponza.texels.rays"));
+            texelRaysBytes = bytes;
+        }
+        return new ShaderBufferBinding("TexelRays", texelRaysBuffer);
     }
 
     // slice_resolve.comp's code (uKeep.z): which gather this is.
@@ -170,6 +190,10 @@ internal sealed partial class SponzaLoop
         if (ImGui.Begin("Texel picker"))
         {
             ImGui.Checkbox("Frozen (P)", ref texelPickFrozen);
+            ImGui.SameLine();
+            // The whole view's pixels and texels to a folder (SponzaLoop.ViewDump.cs; tools/gi-model/view_dump.py reads it).
+            if (ImGui.Button("Dump view")) viewDumpPending = true;
+            if (viewDumpLast is { } last) { ImGui.SameLine(); ImGui.TextUnformatted(last); }
             DrawTexelPickBody();
         }
         ImGui.End();

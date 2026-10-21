@@ -199,6 +199,8 @@ layout(std430, set = 0, binding = 48) readonly buffer TexelPatch { int texelPatc
 layout(std430, set = 0, binding = 49) readonly buffer SunNodePatchLight { uvec2 patchLight[]; };
 // The reference's sum of its paths' luminance squared (reference_trace.comp): its own standard error.
 layout(std430, set = 0, binding = 50) readonly buffer ReferenceMoments { float referenceMoments[]; };
+// Each texel's passes (32 rays each) at its last gather, 16 bits a texel (slice_resolve.comp): the rays view (13).
+layout(std430, set = 0, binding = 51) readonly buffer TexelRays { uint texelRays[]; };
 // The reference at this pixel: its mean luminance and that mean's standard error (-1, -1: none yet).
 vec2 referenceHere(vec2 uv) {
     if (g.uReference.y < 0.5) return vec2(-1.0);
@@ -541,6 +543,25 @@ void main() {
         pick[36] = floatBitsToUint(refHere.y);
     }
     // The breakdown views (SponzaLoop.TexelPicker.cs, Texel view): how this pixel's answer is made.
+    if (g.uReference.w > 12.5 && g.uReference.w < 13.5) {
+        // The rays view (SponzaLoop.TexelPicker.cs): the rays the heaviest finest-level texel last gathered, blue at 128,
+        // green 256, yellow 512, red 1,024 and over; grey a copy (its light the coarse cells'), magenta no texel.
+        vec3 shown = vec3(1.0, 0.0, 1.0);
+        if (viewBestId >= 0) {
+            uint id = uint(viewBestId);
+            uint b = (provenance[id / 4u] >> (8u * (id % 4u))) & 15u;
+            uint passes = (texelRays[id >> 1u] >> (16u * (id & 1u))) & 0xFFFFu;
+            if (b >= 1u && b <= 4u && passes > 0u) {
+                float s = clamp(log2(float(passes) * 32.0 / 128.0) / 3.0, 0.0, 1.0);
+                shown = s < 1.0 / 3.0 ? mix(vec3(0.1, 0.3, 1.0), vec3(0.1, 0.9, 0.2), s * 3.0)
+                      : s < 2.0 / 3.0 ? mix(vec3(0.1, 0.9, 0.2), vec3(1.0, 0.9, 0.1), s * 3.0 - 1.0)
+                      : mix(vec3(1.0, 0.9, 0.1), vec3(1.0, 0.1, 0.1), s * 3.0 - 2.0);
+            } else shown = b == 5u ? vec3(0.35) : vec3(0.6, 0.0, 0.6);
+        }
+        outIncident = vec4(shown, 1.0);
+        outIncidentGradient = vec4(0.0);
+        return;
+    }
     if (g.uReference.w > 11.5 && g.uReference.w < 12.5) {
         // The facing view (SponzaLoop.TexelPicker.cs): how the texels the pixel reads at its finest level face it, by their
         // record's normal against the pixel's -- green alike, yellow grazing, red the share read from records facing away
