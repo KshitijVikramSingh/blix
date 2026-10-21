@@ -21,7 +21,7 @@ layout(set = 0, binding = 0) uniform SunNodesRays {
     vec4 uCookedGrid;
     vec4 uCookedDims;
     vec4 uLights;  // x 1: the light strategy; y the patches' disk radius; z 1: a lightmap record gathers about its smooth
-                   // normal (--gather-smooth-normal, LightmapFrames)
+                   // normal (the smooth gather, LightmapFrames)
     vec4 uFar;     // the far field (texel_far.glsl); x 2: a ray in a bin the record knows stops at the texel's reach
     vec4 uTile;    // --interleave: x 1 on, y the finest cells' spacing, z the first lightmap record (its texels by atlas);
                    // w a near round's reach (--near-cut, texel_nodes_shade.glsl FarPart; 0 none)
@@ -40,7 +40,7 @@ layout(std430, set = 0, binding = 10) readonly buffer NodeLights { vec2 lightLis
 #define LIGHT_K 16
 // Each live texel's nearest patch it can see (texel_nodes_patch.comp; -1 none): the far field's patch, else the guide's.
 layout(std430, set = 0, binding = 11) readonly buffer TexelPatch { int texelPatch[]; };
-// --gather-smooth-normal: a lightmap record's LOD 0 shading frame (SponzaLoop.Lightmap.cs PackFrame; [0] the atlas size,
+// The smooth gather (default; --no-gather-smooth-normal): a lightmap record's LOD 0 shading frame (SponzaLoop.Lightmap.cs PackFrame; [0] the atlas size,
 // [1 + id] its packed normal and tangent, zero none). A record carries its triangle's face normal; the pixel reads its
 // light at the smooth one, and on a faceted fold (drapes' curtain, 2 cm strips) the face's irradiance parts from the
 // smooth's by up to half a facet's turn (tools/gi-model/facet_normal.py: 1-2% median, 8-20% at most, with light from

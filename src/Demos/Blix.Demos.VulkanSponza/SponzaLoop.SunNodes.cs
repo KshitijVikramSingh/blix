@@ -110,7 +110,8 @@ internal sealed partial class SponzaLoop
     // A near hit among no texel takes the pass's near hits' light (texel_nodes_shade.glsl; --no-near-unknown-local: its
     // nearest patch facing its way, as before).
     private bool nearUnknownLocal;
-    // --gather-smooth-normal: a lightmap record's rays about its smooth (shading) normal, not its face's (texel_nodes_rays.comp).
+    // A lightmap record's rays about its smooth (shading) normal, not its face's (texel_nodes_rays.comp; default,
+    // --no-gather-smooth-normal: its face's).
     private bool gatherSmooth;
     private bool GatherSmoothNow => gatherSmooth && !lightmapFramesBuffer.Equals(default(GpuBufferHandle));
     private GpuBufferHandle finePlaceBuffer, farPartBuffer;
@@ -236,7 +237,10 @@ internal sealed partial class SponzaLoop
         // On by default (2026-10-22: two seeds, crevices seams' bias -1.2% -> -0.4%, every seed noise down; the gate held).
         settlePool = !args.Flag("no-settle-pool");
         nearUnknownLocal = !args.Flag("no-near-unknown-local");
-        gatherSmooth = args.Flag("gather-smooth-normal");
+        // On by default (2026-10-22: drapes' curtain, close up, the GI's step at a strip's edge against the path trace
+        // 1.10% -> 0.38% rms, under the 0.6% within a texel; the gate and two seeds a scene level).
+        gatherSmooth = !args.Flag("no-gather-smooth-normal");
+        seamBlend = !args.Flag("no-seam-blend");
         ReadFarArgs(args);
         ReadTransportCensusArgs(args);
         ReadFarTransportArgs(args);

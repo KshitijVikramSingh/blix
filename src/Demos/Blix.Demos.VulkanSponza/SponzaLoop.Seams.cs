@@ -17,6 +17,16 @@ namespace Blix.Demos.VulkanSponza;
 internal sealed partial class SponzaLoop
 {
     private const int SeamNeighbourCap = 6;
+    // A pixel's light blended across its chart's seams by these lists (incident_clipmap.frag, seamBlend; default,
+    // --no-seam-blend: its own chart's texels alone).
+    private bool seamBlend;
+    private bool SeamBlendNow => seamBlend && !texelSeamStart.Equals(default(GpuBufferHandle));
+    private IEnumerable<ShaderBufferBinding> SeamBlendBindings()
+    {
+        var stand = SeamBlendNow ? texelSeamStart : clipmapState;
+        yield return new ShaderBufferBinding("TexelSeamStart", stand);
+        yield return new ShaderBufferBinding("TexelSeamIds", SeamBlendNow ? texelSeamIds : clipmapState);
+    }
     private GpuBufferHandle texelSeamStart, texelSeamIds;
 
     private void BuildSeamNeighbours(Vector4[] texels, int count, int firstAtlas)

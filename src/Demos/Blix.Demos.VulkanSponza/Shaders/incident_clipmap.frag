@@ -50,11 +50,13 @@ layout(set = 0, binding = 0) uniform IncidentClipmap {
                          // b 1 where the lookup found none); w 2: the records view (--texel-debug-records)
     vec4 uClipExact;     // x 1: whether a point sees each probe, TRACED (--clipmap-exact-visibility): the ceiling a
                          // cooked per-texel mask could reach, in place of the Chebyshev estimate; y 1: count this
-                         // frame's pixels by the path they take (IncidentCensus, SponzaLoop.IncidentCensus.cs); zw unused
+                         // frame's pixels by the path they take (IncidentCensus, SponzaLoop.IncidentCensus.cs); z 1: the
+                         // atlas's unmapped pixels by the coarse cells; w 1: the atlas's four by one gather
     vec4 uHalf;          // x 1: this target is half the frame (RenderSettings.HalfResLighting), each pixel standing for
                          // the full-res pixel 2p + yz of its 2x2 (a different one each frame; lighting_upsample.frag)
     vec4 uReuse;         // x 1: reuse last frame's answer (SponzaLoop.Clipmap.cs, IncidentReuseNow); y the pixel of each
                          // 2x2 recomputed this frame (x + 2y), every other one reprojected where its surface matches
+    vec4 uSeam;          // x 1: blend across lightmap chart seams (seamBlend; --no-seam-blend off)
 } g;
 
 // Last frame's answer, for reuse: the pixel's motion, its surface key now and a frame ago, the incident light and
@@ -253,6 +255,53 @@ float texelSunlit(vec3 world, vec3 n) {
 // One level's texels: their irradiance, weighted by distance and area and by how many rays each has; confidence the
 // mean of those rays against the trust threshold. False where none of the eight has rays (foliage has no texels; a texel not
 // yet gathered has none), and the field above stands.
+// The seam blend (default; --no-seam-blend; tools/gi-model/seam_blend.py): a pixel's four atlas texels are all its own chart's, so where a chart is a
+// texel or two across -- drapes' curtain, 2 cm strips each its own chart -- the light was one texel's from edge to edge
+// and stepped at every chart's edge where the path trace runs smooth (the user's vertical stripes, 2026-10-22). The
+// cook lists each atlas texel's touching texels of OTHER charts (SponzaLoop.Seams.cs: within 4.5 cm, on its plane, facing
+// within cos 0.95). Each of the heaviest texel's takes a share of the pixel's light by how far the pixel lies from that
+// texel toward it: 0 at its own texel, 1/2 at the midpoint, where the neighbour's pixels give the same -- the light
+// continuous across the seam (the model: steps 9-22% rms -> under 0.1%, error 3-5x down). The own four keep the rest.
+layout(std430, set = 0, binding = 20) readonly buffer TexelSeamStart { uint seamStart[]; };   // [atlas record - first]
+layout(std430, set = 0, binding = 21) readonly buffer TexelSeamIds { uint seamIds[]; };
+void seamBlend(vec3 worldPos, vec3 n, inout int ids[TEXEL_CANDIDATES], inout float weights[TEXEL_CANDIDATES]) {
+    int own = -1;
+    float most = 0.0, ownSum = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        if (ids[i] < 0) continue;
+        ownSum += weights[i];
+        if (weights[i] > most) { most = weights[i]; own = ids[i]; }
+    }
+    uint first = uint(g.uLightmap.w);
+    if (own < 0 || uint(own) < first || ownSum <= 0.0) return;
+    // Every atlas record has its list (a pair's back too: its neighbours face as it does).
+    uint at = uint(own) - first;
+    vec3 po = TEXEL_POSITION(uint(own)).xyz;
+    float shares[6];
+    int others[6];
+    int found = 0;
+    float total = 0.0;
+    for (uint k = seamStart[at]; k < seamStart[at + 1u] && found < 6 && 4 + found < TEXEL_CANDIDATES; ++k) {
+        uint j = seamIds[k];
+        if (abs(TEXEL_POSITION(j).w) < 2.0) continue;
+        vec3 d = TEXEL_POSITION(j).xyz - po;
+        float dd = dot(d, d);
+        if (dd < 1e-8) continue;
+        float t = clamp(dot(worldPos - po, d) / dd, 0.0, 0.5);
+        if (t <= 0.0) continue;
+        others[found] = int(j);
+        shares[found] = t;
+        total += t;
+        found++;
+    }
+    if (found == 0) return;
+    // At a chart's corner two or three neighbours each claim a share: half the light at most leaves the own chart.
+    float scale = total > 0.5 ? 0.5 / total : 1.0;
+    float keep = (1.0 - total * scale) / ownSum;
+    for (int i = 0; i < 4; ++i) weights[i] *= keep;
+    for (int f = 0; f < found; ++f) { ids[4 + f] = others[f]; weights[4 + f] = shares[f] * scale; }
+}
+
 bool texelsAtLevel(vec3 worldPos, vec3 n, float faceBin, uint level, out vec3 irradiance, out float confidence) {
     TexelGrid finest;
     finest.minCorner = g.uTexelGrid.xyz;
@@ -286,6 +335,7 @@ bool texelsAtLevel(vec3 worldPos, vec3 n, float faceBin, uint level, out vec3 ir
             }
         }
         for (int i = 0; i < 4; ++i) { ids[i] = lm[i]; weights[i] = lw[i]; }
+        if (g.uSeam.x > 0.5) seamBlend(worldPos, n, ids, weights);
     } else {
         texelsAround(tg, worldPos, n, faceBin, ids, weights);
         // The face's own bins found nothing: a thin stem turning through bins its cell holds no record in (few records a
