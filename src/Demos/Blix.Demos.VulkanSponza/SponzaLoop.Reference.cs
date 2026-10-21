@@ -74,6 +74,13 @@ internal sealed partial class SponzaLoop
     {
         if (input[Key.G].Pressed)
         {
+            // The view traces in GLSL: past boot the live cook has released the ray geometry (unless --keep-cpu-scene or
+            // --gi-reference); then G says so and stays off -- it threw, and took the session with it (2026-10-22).
+            if (!referenceView && rayTraversalDropped && rayGpuData is { GeometryReleased: true })
+            {
+                Console.WriteLine("[VulkanSponza] reference view: not available -- the ray geometry was released after boot; boot with --gi-reference (or --keep-cpu-scene) to use G.");
+                return;
+            }
             referenceView = !referenceView;
             if (referenceView) RestoreRayTraversal("the reference view traces in GLSL");
             referenceSamples = 0;
