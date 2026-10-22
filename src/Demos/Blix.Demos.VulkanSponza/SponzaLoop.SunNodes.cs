@@ -1296,8 +1296,12 @@ internal sealed partial class SponzaLoop
 
     // cells: the hit cells answer the hits (SponzaLoop.HitCells.cs), the trace having shot each hit's sun.
     // --lean-shade (a prototype, the runtime gather's model): texel_nodes_lean.comp in place of the shade on every pass the
-    // hit cells answer -- each hit its cell's light, nothing else; the fine round's near rounds as the shade has them. Not
-    // yet: a hit on a sheet that lets light through takes its cell, not its far side's texels (the shade's search).
+    // hit cells answer -- each hit its cell's light; a near one (nearer than the cells' near distance, without a cell, a
+    // contact's, a sheet's) the shade's search; the fine round's near rounds as the shade has them. The crevices corridor
+    // and the materials testbeds as the shade (cells' sun) to the third decimal; Sponza's sweep shade 8 s against 64.
+    // Searching only contacts and sheets (not the near distance) put the seams back to 0.064; the fine rounds' passes cost
+    // the same with no search at all (~55 ms, the rays kernel slowed alike): the frame's own work beside them, not the
+    // shade (2026-10-23).
     private bool leanShade;
     private ShaderInterface leanShadeInterface = null!;
     private PipelineHandle leanShadePipeline;
