@@ -723,6 +723,10 @@ internal sealed partial class SponzaLoop
         litClipmapBuffer = null;
         lightmapFirstRecord = first;
         lightmapTexels = true;
+        // The records on surfaces that let light through (|w| 5), a bit each: the near rounds leave them out (SunNodes).
+        transmitRecords = new uint[(first + atlas.Count + 31) / 32];
+        for (var id = first; id < first + atlas.Count; id++)
+            if (MathF.Abs(texels[2 * id].W) > 4.5f) transmitRecords[id >> 5] |= 1u << (id & 31);
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] texels: {first:N0} hashed (the surfaces the atlas leaves out) and {atlas.Count:N0} lightmap records, one set."));
     }

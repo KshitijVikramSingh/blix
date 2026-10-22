@@ -12,7 +12,7 @@
 layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) uniform NodesPatch {
-    vec4 uPatch;      // x the slice's first live texel, y its texels, z the mode
+    vec4 uPatch;      // x the slice's first live texel, y its texels, z the mode, w 1: the behind rule and the scaled lift
     vec4 uCookedGrid;
     vec4 uCookedDims;
 } u;
@@ -51,7 +51,8 @@ void main() {
                 int cell = (cc.z * dims.y + cc.y) * dims.x + cc.x;
                 for (uint k = cookedCellStart[cell]; k < cookedCellStart[cell + 1]; ++k) {
                     int j = int(cookedId[k]);
-                    if (dot(cookedPatch[3 * j + 1].xyz, n) < 0.5) continue;
+                    // Not one the texel lies behind (cookedBehind: a patch across a thin wall or shell), as the couplings' rule.
+                    if (dot(cookedPatch[3 * j + 1].xyz, n) < 0.5 || (u.uPatch.w > 0.5 && cookedBehind(j, p))) continue;
                     vec3 d = cookedPatch[3 * j].xyz - p;
                     float d2 = dot(d, d);
                     if (d2 >= bestD[PATCH_CANDIDATES - 1]) continue;
@@ -62,12 +63,15 @@ void main() {
                 }
             }
         }
-        vec3 origin = p + n * 0.01;
         for (int k = 0; k < PATCH_CANDIDATES; ++k) {
             uint slot = t * uint(PATCH_CANDIDATES) + uint(k);
             candidates[slot] = best[k];
             if (best[k] < 0) { nodeRays[slot * 2u] = vec4(0.0); nodeRays[slot * 2u + 1u] = vec4(0.0); continue; }
-            vec3 target = cookedPatch[3 * best[k]].xyz + cookedPatch[3 * best[k] + 1].xyz * 0.01;
+            // Lifted 1 cm, a quarter of the line at most (SponzaLoop.Transport.cs, VisLift): lifted 1 cm at both ends a line
+            // across a 2 cm gap ran past what bounds it.
+            float lift = u.uPatch.w > 0.5 ? min(0.01, 0.25 * length(cookedPatch[3 * best[k]].xyz - p)) : 0.01;
+            vec3 origin = p + n * lift;
+            vec3 target = cookedPatch[3 * best[k]].xyz + cookedPatch[3 * best[k] + 1].xyz * lift;
             vec3 d = target - origin;
             float len = length(d);
             nodeRays[slot * 2u] = vec4(origin, 0.0);

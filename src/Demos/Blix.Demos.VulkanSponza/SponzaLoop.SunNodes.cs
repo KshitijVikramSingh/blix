@@ -103,6 +103,10 @@ internal sealed partial class SponzaLoop
     // --near-texel-light, its near hits read the texels the last round gathered).
     private int nearRounds, nearRoundsLeft;
     private uint[] fineRoundIds = Array.Empty<uint>();
+    // Per record, a bit: on a surface that lets light through (SponzaLoop.Lightmap.cs, UploadLightmapTexels).
+    private uint[]? transmitRecords;
+    // --patch-pick-old: the texel's patch pick without the behind rule and the scaled lift (texel_nodes_patch.comp), as before.
+    private bool patchPickOld;
     // --near-cut (default; --no-near-cut the old full regather): a near round traces fineGatherRays short rays (to hitCellNear, the reach of the near texels' light) with
     // no refine, the fine round's far part added back (texel_nodes_shade.glsl FarPart): the ray capture had the near
     // rounds at two thirds of the fine round's rays, every one re-tracing what could not change (2026-10-22).
@@ -795,13 +799,23 @@ internal sealed partial class SponzaLoop
         {
             // --near-rounds: the same texels gathered again, their near hits now lit by the texels the last round gathered
             // (--near-texel-light): the lagged step tools/gi-model/crease_bounce.py needs (one within 2.3%, two 0.6%).
+            // The first near round every fine texel; the later ones the sheets that let light through alone. A closed thin shell's
+            // walls pass light to each other across their gap, and each round takes one more step of it (the teacup's far
+            // sides 0.069 excess after one round, 0.046 after two); elsewhere the second round changed no pixel (Sponza,
+            // 2026-10-22) and cost 0.6 min.
+            var later = nearRounds - nearRoundsLeft > 0;
             nearRoundsLeft--;
-            Console.WriteLine(string.Create(Inv, $"[VulkanSponza] near round: the {fineRoundIds.Length:N0} fine texels gathered again on the last round's light ({nearRoundsLeft} more)."));
+            var nearIds = later && transmitRecords is { } tr ? Array.FindAll(fineRoundIds, id => (tr[id >> 5] & (1u << (int)(id & 31))) != 0) : fineRoundIds;
+            Console.WriteLine(string.Create(Inv, $"[VulkanSponza] near round: {nearIds.Length:N0} of the {fineRoundIds.Length:N0} fine texels gathered again on the last round's light{(later ? " (the sheets that let light through)" : "")} ({nearRoundsLeft} more)."));
             sunNodeRays = fineGatherSavedRays;
             texelMaxRays = fineGatherSavedMaxRays;
-            StartFineRound(fineRoundIds);
-            if (NearCutMode == 2) texelMaxRays = sunNodeRays;
-            return;
+            if (nearIds.Length > 0)
+            {
+                StartFineRound(nearIds);
+                if (NearCutMode == 2) texelMaxRays = sunNodeRays;
+                return;
+            }
+            nearRoundsLeft = 0;   // no sheet to take another step: the round ends below
         }
         if (fineGathering)
         {
@@ -1433,7 +1447,8 @@ internal sealed partial class SponzaLoop
     // rays for): the candidates and their rays, the CLOSEST batch, the first unblocked kept.
     // Each texel's nearest visible patch: a stage of the GI bundle (under the transport's combined key -- the patches and
     // the texels both), picked on the GPU when it is not there.
-    private string TexelPatchHeader => string.Create(Inv, $"texel patch v1;candidates {PatchCandidates};texels {texelCount}");
+    // v2/v3: candidates the texel lies behind left out, the rays' lift a quarter of the line at most (v3: re-picked once, as a first boot now adopts it into the live solve; 2026-10-22).
+    private string TexelPatchHeader => string.Create(Inv, $"texel patch {(patchPickOld ? "v1" : "v3")};candidates {PatchCandidates};texels {texelCount}");
 
     private void RecordSunNodePatchPick()
     {
@@ -1464,6 +1479,18 @@ internal sealed partial class SponzaLoop
             device.WaitIdle();
             var picked = MemoryMarshal.Cast<byte, int>(device.ReadGpuBuffer(sunNodeTexelPatch, 0, texelCount * 4).AsSpan()).ToArray();
             if (lightBakeKey is { } saveKey) SaveStage(saveKey, "texel-patch", w => { w.Write(TexelPatchHeader); WriteArray(w, picked); });
+            // A first boot (no stored pick): the live solve and the settle pool read liveTexelPatch, which was -1 throughout --
+            // every texel's direct sun into its nearest patch, no pool -- so a first boot's light was not a later boot's (the
+            // crevices' corridor |error| 0.0177 picked, 0.0160 loaded, 2026-10-22). The pick into it, and the live solve and
+            // the cook again from it once this setup is done: every boot then lights from the same pick.
+            if (liveTexels && !liveTexelPatchStored && !liveTexelPatch.Equals(default(GpuBufferHandle)))
+            {
+                device.WriteGpuBuffer(liveTexelPatch, 0, MemoryMarshal.AsBytes(picked.AsSpan()));
+                liveTexelPatchStored = true;
+                liveInjected = false;
+                liveRestartPending = -Vector3.Normalize(sunDirection);
+                Console.WriteLine("[VulkanSponza] sun nodes: the pick was not stored -- the live solve and the cook restart from it (a first boot).");
+            }
             int blocked = 0, none = 0;
             foreach (var id in live) { if (picked[id] == -1) blocked++; else if (picked[id] == -2) none++; }
             Console.WriteLine(string.Create(Inv,
@@ -1475,7 +1502,7 @@ internal sealed partial class SponzaLoop
         DispatchCommand Pick(int mode) => new(sunNodePatchPipeline, (count + 63) / 64, 1, 1,
             new ShaderUniform[]
             {
-                new("uPatch", new Vector4Uniform(new Vector4(sunNodePatchFirst, count, mode, 0f))),
+                new("uPatch", new Vector4Uniform(new Vector4(sunNodePatchFirst, count, mode, patchPickOld ? 0f : 1f))),
                 new("uCookedGrid", new Vector4Uniform(cookedGrid)),
                 new("uCookedDims", new Vector4Uniform(cookedDims)),
             },

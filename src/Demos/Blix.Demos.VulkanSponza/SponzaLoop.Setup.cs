@@ -449,6 +449,7 @@ internal sealed partial class SponzaLoop
         backgroundGather = args.Flag("background-gather");
         if (args.Float("background-gather-ms") is { } bgMs) backgroundGatherMs = Math.Max(0f, bgMs);
         gatherStepsAFrame = Math.Max(0, args.Int("gather-steps-a-frame") ?? 0);
+        patchPickOld = args.Flag("patch-pick-old");
         if (args.Float("render-scale") is { } renderScaleArg) render.RenderScale = Math.Clamp(renderScaleArg, 0.5f, 1f);
         fineAll = args.Flag("fine-all");
         // --fine-contact R (0.999; 0 off): fine texels more closed than their coarse cells (their contact ratio under R)

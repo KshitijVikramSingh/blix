@@ -431,22 +431,34 @@ internal sealed partial class SponzaLoop
         // The rest settle at the sweep.
         var mask = fineRefineContactOnly ? new uint[(texelCount + 31) / 32] : null;
         long masked = 0;
-        // The cut's bin: its smallest ids, not its first appended -- the flags land as the threads meet, and which of the
-        // bin's texels made the round moved run to run (2026-10-22).
-        var atCutIds = new List<uint>();
+        // The cut's bin by its exact scores, the highest first (ties by id): a class's scores share one bin -- every contact
+        // 1000 + (1 - its contact ratio), every sheet 500 + its copy's disagreement / 1000 (transfer_fine.comp) -- and
+        // Sponza's contacts and sheets alone fill the budget, so the cut fell inside them. Taken first-appended it moved run
+        // to run; by smallest id it followed the atlas's chart order (2.8 M of 7.8 M flagged left out by where xatlas put
+        // them, 2026-10-22). Now the most closed contacts and the sheets the copy gets most wrong.
+        var atCutEntries = new List<(float Score, uint Id)>();
         for (var i = 0; i < count; i++)
-            if (Bin(BitConverter.UInt32BitsToSingle(words[2 * i + 1])) == cut) atCutIds.Add(words[2 * i]);
-        atCutIds.Sort();
-        var cutLast = atCut > 0 && atCutIds.Count > 0 ? atCutIds[Math.Min(atCut, atCutIds.Count) - 1] : 0u;
+        {
+            var sc = BitConverter.UInt32BitsToSingle(words[2 * i + 1]);
+            if (Bin(sc) == cut) atCutEntries.Add((sc, words[2 * i]));
+        }
+        atCutEntries.Sort((x, y) => x.Score != y.Score ? y.Score.CompareTo(x.Score) : x.Id.CompareTo(y.Id));
+        var atCutTaken = new HashSet<uint>();
+        for (var k = 0; k < Math.Min(Math.Max(atCut, 0), atCutEntries.Count); k++) atCutTaken.Add(atCutEntries[k].Id);
         for (var i = 0; i < count && n < take; i++)
         {
             var score = BitConverter.UInt32BitsToSingle(words[2 * i + 1]);
             var b = Bin(score);
             var id = words[2 * i];
-            if (b > cut || (b == cut && atCut > 0 && id <= cutLast))
+            if (b > cut || (b == cut && atCutTaken.Contains(id)))
             {
                 ids[n++] = id;
-                if (mask is not null && score >= (fineRefineCloth ? 500f : 1000f)) { mask[id >> 5] |= 1u << (int)(id & 31); masked++; }
+                // Not a sheet that lets light through while near rounds follow: they regather it whole (its rays are not cut,
+                // it keeps no far part: texel_nodes_rays.comp) and replace what a refine settled -- Sponza's curtains refined
+                // and lost it (cloth refine off changed no pixel, 2026-10-22). Kept out of them, a closed shell's walls read
+                // their gap 13% bright (the teacup's records): the near rounds settle the light its walls pass each other.
+                var regathered = nearRounds > 0 && transmitRecords is { } tr && (tr[id >> 5] & (1u << (int)(id & 31))) != 0;
+                if (mask is not null && score >= (fineRefineCloth ? 500f : 1000f) && !regathered) { mask[id >> 5] |= 1u << (int)(id & 31); masked++; }
             }
         }
         refineMasked = mask is not null;

@@ -83,6 +83,8 @@ internal sealed partial class SponzaLoop
     // themselves (0.90), a loop of gain ~0.9 -- their light 19x the sun's, and the closed gaps under the cup 7-20x their
     // path trace (2026-10-22, --ref-view-records). Metal's couplings (CouplingsOnMetal); the CPU's keep nearest anywhere.
     private bool transportOwnFirst = true;
+    // This run's couplings were made on the CPU though Metal's were asked for: not cached (their key is Metal's).
+    private bool couplingsFellBack;
     private const int CouplingBlock = 2048, CouplingWorkers = 2;
 
     // A Metal couplings worker's block arrays, made once and reused block after block.
@@ -804,6 +806,13 @@ internal sealed partial class SponzaLoop
         if (couplingsMetal is not null) CouplingsOnMetal(couplingsMetal);
         else
         {
+        // Metal was asked for and is not there (the frame tracer late or failed): the CPU's couplings, which keep the old
+        // rules (nearest anywhere, no own-first or twin rule), cooked for this run but not cached under Metal's key.
+        if (!transportCpuCouplings)
+        {
+            couplingsFellBack = true;
+            Console.WriteLine("[VulkanSponza] transport: WARNING the frame tracer is not there -- couplings on the CPU (the old candidate rules) for this run, not cached.");
+        }
         ProgressBegin("transport: couplings", patches);
         Parallel.For(0, patches, i =>
         {
@@ -867,7 +876,7 @@ internal sealed partial class SponzaLoop
             else Parallel.For(0, patches, i => SunVisCpu(i, sunVis));
         }
         // Each stage cached as soon as it is made, under its own key: a run that closes early (--texel-dump) keeps them.
-        if (transportGpu && couplingStage is null)
+        if (transportGpu && couplingStage is null && !couplingsFellBack)
             SaveCouplings(stageKeys.Couplings, new CouplingStage
             {
                 Couplings = couplings, SunletCouplings = sunletCouplings,

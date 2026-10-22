@@ -115,7 +115,7 @@ internal sealed partial class SponzaLoop
             $"patches;spacing {transportSpacing};reach {TexelOpenReach};{(transportFill ? $"fill {transportFillRays} x{transportFillPasses} {finding}" : "no fill")}{StageVersion(PatchesStageVersion)}"));
         var sunVis = Hash(patches + string.Create(CultureInfo.InvariantCulture, $";sun vis {transportVisRes}{StageVersion(SunVisStageVersion)}"));
         var couplings = Hash(patches + string.Create(CultureInfo.InvariantCulture,
-            $";couplings;rays {transportRays};sunlet {transportSunlet};{finding}{(transportOwnFallback ? " own fallback" : "")}{(transportOwnFirst ? " own first" : "")}{(transportSeed != 0 ? $" seed {transportSeed}" : "")}{StageVersion(CouplingsStageVersion)}"));
+            $";couplings;rays {transportRays};sunlet {transportSunlet};{finding}{(transportOwnFallback ? " own fallback" : "")}{(transportOwnFirst ? " own first" : "")}{(transportCpuCouplings ? " cpu" : "")}{(transportSeed != 0 ? $" seed {transportSeed}" : "")}{StageVersion(CouplingsStageVersion)}"));
         var texels = Hash(scenePart + string.Create(CultureInfo.InvariantCulture,
             $"texels {transportTexels};texel {texelSpacing};levels {texelLevels};reach {TexelOpenReach};lightmap {lightmapEnabled} (the atlas is level 0);{(texelFoliage ? "foliage;" : "")}{StageVersion(TexelsStageVersion)}"));
         return new TransportStageKeys(patches, sunVis, couplings, texels, Hash($"{patches};{sunVis};{couplings};{texels}"));
