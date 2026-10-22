@@ -229,12 +229,14 @@ internal sealed partial class SponzaLoop
     private uint[] SortResolveList(int k, int count)
     {
         if (count < 2) return MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(resolveIds[k], 0, Math.Max(4, count * 4)).AsSpan())[..count].ToArray();
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         device.WaitIdle();
         var ids = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(resolveIds[k], 0, count * 4).AsSpan()).ToArray();
         var places = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(resolvePlaces[k], 0, count * 4).AsSpan()).ToArray();
         Array.Sort(ids, places);
         device.WriteGpuBuffer(resolveIds[k], 0, MemoryMarshal.AsBytes(ids.AsSpan()));
         device.WriteGpuBuffer(resolvePlaces[k], 0, MemoryMarshal.AsBytes(places.AsSpan()));
+        Console.WriteLine(string.Create(Inv, $"[VulkanSponza] sun nodes: the round's {count:N0} texels put in id order in {clock.Elapsed.TotalMilliseconds:0} ms (read back, sorted, written)."));
         return ids;
     }
 
