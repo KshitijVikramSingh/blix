@@ -22,13 +22,13 @@ namespace Blix.Demos.VulkanSponza;
 // entry (PackLists; tools/gi-model/list_packing.py): 171 entries a texel on the crevices corridor, 0.7 KB.
 internal sealed partial class SponzaLoop
 {
-    private bool listCook, listsOn, listDebug;
+    private bool listCook, listCookAppend, listsOn, listDebug;
     private GpuBufferHandle listDebugBuffer;
     private int listIterations = 3;
     // A cell side's patch blend, averaged over this many points a side of it (hit_cells.comp; 4: 0.0168 on the corridor,
     // the gather's).
     private const int ListCellPoints = 4;
-    private const string ListsHeader = "texel lists v6";
+    private const string ListsHeader = "texel lists v7";
 
     private sealed class ListAcc
     {
@@ -50,7 +50,11 @@ internal sealed partial class SponzaLoop
 
     private void ReadListArgs(AppArgs args)
     {
-        listCook = args.Flag("list-cook");
+        // --list-cook-append: the cook's rays added to the stored lists (another sun's guides: a ray carries its own pdf's
+        // weight, so rays guided by several suns sum to one estimate -- a crease's lists cooked under one sun read +1% and
+        // half again as noisy under another, the guides aimed elsewhere, 2026-10-23).
+        listCookAppend = args.Flag("list-cook-append");
+        listCook = args.Flag("list-cook") || listCookAppend;
         listsOn = args.Flag("lists");
         listDebug = args.Flag("list-debug");
         if (args.Int("list-iterations") is { } it) listIterations = Math.Max(1, it);
@@ -118,6 +122,7 @@ internal sealed partial class SponzaLoop
     {
         if (listAcc is not { Count: > 0 } acc || lightBakeKey is not { } key) return;
         var clock = Stopwatch.StartNew();
+        var appended = listCookAppend ? AppendStoredLists(key, acc) : 0;
         var order = acc.Keys.Where(id => !acc[id].Fine).OrderBy(id => id).Concat(acc.Keys.Where(id => acc[id].Fine).OrderBy(id => id)).ToArray();
         var coarse = acc.Values.Count(a => !a.Fine);
         var norm = new float[order.Length * 2];
@@ -128,6 +133,8 @@ internal sealed partial class SponzaLoop
             norm[2 * i + 1] = a.Kept > 1e-12 ? (float)(a.Whole / a.Kept) : 1f;
         }
         var (start, words, range, counts, escapes) = PackLists(order.Select(id => acc[id].Entries).ToArray());
+        var sums = new float[order.Length * 3];   // its rays, its whole and kept light at the cook (an append sums them)
+        for (var i = 0; i < order.Length; i++) { var a = acc[order[i]]; sums[3 * i] = a.Rays; sums[3 * i + 1] = (float)a.Whole; sums[3 * i + 2] = (float)a.Kept; }
         var kw = new float[order.Length * 4];
         for (var i = 0; i < order.Length; i++)
             for (var k = 0; k < 4; k++) kw[4 * i + k] = (float)(acc[order[i]].KindWhole[k] / Math.Max(1, acc[order[i]].Rays));
@@ -135,13 +142,65 @@ internal sealed partial class SponzaLoop
         SaveStage(key, "texel-lists", w =>
         {
             w.Write(ListsHeader); w.Write(texelCount); w.Write(coarse); w.Write(range.X); w.Write(range.Y);
-            WriteArray(w, order); WriteArray(w, start); WriteArray(w, words); WriteArray(w, norm);
+            WriteArray(w, order); WriteArray(w, start); WriteArray(w, words); WriteArray(w, norm); WriteArray(w, sums);
         });
         var n = Math.Max(1, order.Length);
         var entries = counts[0] + counts[1] + counts[2];
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[VulkanSponza] lists: {order.Length:N0} texels ({coarse:N0} coarse) cooked into {entries:N0} entries ({entries / (double)n:0.0} a texel: sky bins {counts[0] / (double)n:0.0}, texels {counts[1] / (double)n:0.0}, cells {counts[2] / (double)n:0.0}); packed {words.Length * 4L / 1048576.0:0.0} MB ({words.Length * 4.0 / n:0} B a texel; {escapes:N0} ids whole, {100.0 * escapes / Math.Max(1, entries):0.0}%); luminance over 2^{range.X:0.0}..2^{range.Y:0.0}; remainder scale median {norm.Where((_, i) => i % 2 == 1).OrderBy(x => x).ElementAt(n / 2):0.000}; built in {clock.Elapsed.TotalSeconds:0.0} s."));
+            $"[VulkanSponza] lists: {order.Length:N0} texels ({coarse:N0} coarse) cooked into {entries:N0} entries ({entries / (double)n:0.0} a texel: sky bins {counts[0] / (double)n:0.0}, texels {counts[1] / (double)n:0.0}, cells {counts[2] / (double)n:0.0}); packed {words.Length * 4L / 1048576.0:0.0} MB ({words.Length * 4.0 / n:0} B a texel; {escapes:N0} ids whole, {100.0 * escapes / Math.Max(1, entries):0.0}%); luminance over 2^{range.X:0.0}..2^{range.Y:0.0}; remainder scale median {norm.Where((_, i) => i % 2 == 1).OrderBy(x => x).ElementAt(n / 2):0.000}; built in {clock.Elapsed.TotalSeconds:0.0} s{(appended > 0 ? $"; {appended:N0} stored lists added to (--list-cook-append)" : "")}."));
         listAcc = null;
+    }
+
+    // --list-cook-append: the stored lists unpacked into this cook's (rays, light and entries summed). How many there were.
+    private int AppendStoredLists(string key, Dictionary<uint, ListAcc> acc)
+    {
+        var stored = LoadStage(key, "texel-lists", r =>
+        {
+            if (r.ReadString() != ListsHeader || r.ReadInt32() != texelCount) return null;
+            var coarse = r.ReadInt32();
+            var range = new Vector2(r.ReadSingle(), r.ReadSingle());
+            var order = ReadArray<uint>(r); var start = ReadArray<uint>(r); var words = ReadArray<uint>(r);
+            ReadArray<float>(r);
+            var sums = ReadArray<float>(r);
+            return new StoredLists(coarse, range, order, start, words, sums);
+        });
+        if (stored is not { } s) { Console.WriteLine("[VulkanSponza] lists: --list-cook-append, but no stored lists of this format: these alone."); return 0; }
+        for (var i = 0; i < s.Order.Length; i++)
+        {
+            if (!acc.TryGetValue(s.Order[i], out var a)) acc[s.Order[i]] = a = new ListAcc { Fine = i >= s.Coarse };
+            a.Rays += (int)s.Sums[3 * i]; a.Whole += s.Sums[3 * i + 1]; a.Kept += s.Sums[3 * i + 2];
+            var at = (int)s.Start[i];
+            var h0 = s.Words[at]; var h1 = s.Words[at + 1];
+            at += 2;
+            var n = new[] { (int)(h0 & 0xFFFF), (int)(h0 >> 16), (int)h1 };
+            for (var k = 0; k < 3; k++)
+            {
+                uint last = 0;
+                for (var e = 0; e < n[k]; e++)
+                {
+                    var w = s.Words[at++];
+                    var step = w >> 22;
+                    var t = k == 0 ? step : step == 1023u ? s.Words[at++] : last + step;
+                    last = t;
+                    var key2 = ((ulong)k << 32) | t;
+                    var v = UnpackRgb22(w, s.Range.X, s.Range.Y);
+                    a.Entries[key2] = a.Entries.TryGetValue(key2, out var old) ? old + v : v;
+                }
+            }
+        }
+        return s.Order.Length;
+    }
+
+    private sealed record StoredLists(int Coarse, Vector2 Range, uint[] Order, uint[] Start, uint[] Words, float[] Sums);
+
+    private static Vector3 UnpackRgb22(uint w, float lo, float hi)
+    {
+        var q = (w >> 10) & 4095u;
+        if (q == 0u) return Vector3.Zero;
+        var l = MathF.Pow(2f, lo + (q - 1f) * (hi - lo) / 4094f);
+        var c = new Vector3(((w >> 5) & 31u) / 31f, (w & 31u) / 31f, 0f);
+        c.Z = MathF.Max(1f - c.X - c.Y, 0f);
+        return c * (l / MathF.Max(0.2126f * c.X + 0.7152f * c.Y + 0.0722f * c.Z, 1e-6f));
     }
 
     // The lists packed (texel_lists.comp reads them): per list two header words (the sky bins | the texels << 16; the
@@ -298,6 +357,7 @@ internal sealed partial class SponzaLoop
         Sum(0, listCoarse, "coarse");
         FilterCoarseNow();
         ApplyFineNow();
+        if (listDebug) ListFineCoverage();
         Sum(listCoarse, listCount - listCoarse, "fine");
         if (listDebug) ListDebugReport();
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
@@ -305,6 +365,19 @@ internal sealed partial class SponzaLoop
         sunNodeStage = SunNodeStage.Done;
         ResetSunNodeRefine();
         if (splitCooking) FinishSplitCook();
+    }
+
+    // --list-debug: the fine texels the gather would take at this light (FineGatherIds, from the fine copy's flags) against
+    // those with a list (the cook's light's pick). At (120, -40) against the cook's sun: 2,109 of 27,471 without one;
+    // cooked with them too, the corridor's seams 0.0458 against 0.0470 -- not what holds them back (2026-10-23).
+    private void ListFineCoverage()
+    {
+        var picked = FineGatherIds();
+        var ids = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(listTexelsBuffer, listCoarse * 4, (listCount - listCoarse) * 4).AsSpan()).ToArray();
+        var listed = new HashSet<uint>(ids);
+        var have = picked.Count(listed.Contains);
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[VulkanSponza] lists, --list-debug: the gather would take {picked.Length:N0} fine texels at this light; {have:N0} have a list, {picked.Length - have:N0} not; {listed.Count - have:N0} of the {listed.Count:N0} fine lists not among them."));
     }
 
     // --list-debug: the lists' light by kind against the gather's at the cook (the same sun: what each kind's stand-in costs).
