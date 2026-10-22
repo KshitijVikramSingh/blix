@@ -238,6 +238,7 @@ internal sealed partial class SponzaLoop
         sunNodeLights = !args.Flag("sun-nodes-no-lights");
         noiseCensus = args.Flag("split-noise-census");
         ReadRayCaptureArgs(args);
+        ReadListArgs(args);
         // On by default (2026-10-22: the gate held; Cornell and crevices seams' |error| and noise down, two seeds each).
         guideSun = !args.Flag("no-guide-sun");
         nearCut = !args.Flag("no-near-cut");
@@ -293,6 +294,7 @@ internal sealed partial class SponzaLoop
         DeclarePatchDirect(reflect);
         DeclareFarRelight(reflect);
         DeclareSunProvisional(reflect);
+        DeclareLists(reflect);
         transportCensusPass = graph.ComputePass("sun-nodes-transport-census").Shader(transportCensusInterface).Handle;
         sunNodePrepInterface = reflect(new[] { "texel_nodes_prep.comp" });
         sunNodePrepPass = graph.ComputePass("sun-nodes-prep").Shader(sunNodePrepInterface).Handle;
@@ -323,6 +325,7 @@ internal sealed partial class SponzaLoop
         liveSunPipeline = Make("texel_live_sun", liveSunInterface);
         CreateHitCellsPipeline(shaderDir);
         CreateTransferPipelines(shaderDir);
+        CreateListsPipeline(shaderDir);
         liveDirectPipeline = Make("texel_live_direct", liveDirectInterface);
         liveGuidesPipeline = Make("texel_live_guides", liveGuidesInterface);
         CreateFarPipeline(shaderDir);
@@ -848,6 +851,7 @@ internal sealed partial class SponzaLoop
         if (transferChecked) TransferCheckCompare();
         if (splitCooking)
         {
+            if (listCook) SaveLists();
             FinishSplitCook();
             return;
         }
@@ -1096,6 +1100,7 @@ internal sealed partial class SponzaLoop
         sunNodeNowSeconds[1] += Stopwatch.GetElapsedTime(t1, t2).TotalSeconds;
         sunNodeNowSeconds[2] += Stopwatch.GetElapsedTime(t2, t3).TotalSeconds;
         sunNodeNowPasses++;
+        ListCookRead();
     }
 
     // The immediate passes' wall time by stage (rays, trace, shade), each including its wait: reported at the finish.
@@ -1195,6 +1200,12 @@ internal sealed partial class SponzaLoop
             if (sunNodeRefineRound == 0) PatchDirectNow();
             if (sunNodeRefineRound == 0) FarRelightNow();
             if (sunNodeRefineRound == 0) SunProvisionalNow();
+            // --lists: the stored lists in place of the gather (SponzaLoop.Lists.cs).
+            if (!fineGathering && sunNodeRefineRound == 0 && sunNodeFirst == 0 && sunNodePass == 0 && ListsReady())
+            {
+                RunListsNow();
+                return;
+            }
             var refining = sunNodeRefineRound > 0;
             var live = refining ? sunNodeRefineIds : sunNodeTraceIds;
             var sweepPasses = sunNodeRays / 32;

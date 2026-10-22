@@ -1,0 +1,122 @@
+#version 450
+// Light-free lists (SponzaLoop.Lists.cs, --lists): a texel's light at a light change as a sum over what its rays reached
+// when the lists were cooked (--list-cook), with no ray traced -- tools/gi-model/light_lists.py and light_lists_change.py
+// the model. A thread a texel of the dispatch; per entry, by its kind:
+//   0 a sky bin    the cook's rays that missed into it (8 x 8 octahedral, the world's): weight x pi x the sky along their
+//                  mean direction (rgb: the directions x weights summed)
+//   1 a texel      a near hit's: rgb (albedo x weight / pi, summed) x (its light, the last iteration's parts, + on the sun's
+//                  column the sun x its n.l x its sun bit -- the hit's sun light-free, texel by texel)
+//   2 a cell side  a far hit's sun: rgb (albedo x weight / pi, summed: the rays' own albedos) x hit_cells.comp's CellLight
+//                  (under --lists the sun alone: the side's bits' blend x n.l x the sun)
+//   4 a patch      a far hit's bounce: rgb (albedo x weight / pi x the patch's share of the gather's blend at the hit,
+//                  summed) x the patch's light (the live patch solve's, both columns)
+// The sums over the texel's cook rays (each its own share: 1 / rays) times its scale (the remainder: what its rays met
+// that no list keeps -- among no texel, the foliage's -- in the light it carried at the cook). Read from Prev*, written
+// to Split* (a texel's light from the last iteration's, never this one's: the same answer whatever order threads run).
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform Lists {
+    vec4 uLists;    // x the texels in the dispatch, y the first, z the sky's lod, w the sky's scale
+    vec4 uToSun;    // xyz toward the sun; w the sun's bit in a texel's sun bits
+    vec4 uIrr;      // rgb the sun's irradiance; w the sun bits' words a texel
+    vec4 uColumns;  // x the patch light's columns, y the sky's column, z the sun's
+} u;
+
+
+layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
+layout(std430, set = 0, binding = 2) readonly buffer ListTexels { uint listTexels[]; };    // the texel each list is
+layout(std430, set = 0, binding = 3) readonly buffer ListStart { uint listStart[]; };      // CSR: its first entry
+layout(std430, set = 0, binding = 4) readonly buffer ListEntries { uvec4 entries[]; };    // kind, target, half rg, half b w
+layout(std430, set = 0, binding = 5) readonly buffer ListNorm { vec2 listNorm[]; };       // 1 / its rays, its scale
+layout(std430, set = 0, binding = 6) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 7) readonly buffer SunNodeBits { uint sunBits[]; };
+layout(std430, set = 0, binding = 8) readonly buffer CellLight { uint cellLight[]; };
+layout(std430, set = 0, binding = 9) readonly buffer PrevSky { uvec2 prevSky[]; };
+layout(std430, set = 0, binding = 10) readonly buffer PrevSun { uvec2 prevSun[]; };
+layout(std430, set = 0, binding = 11) buffer SplitSky { uvec2 skyPart[]; };
+layout(std430, set = 0, binding = 12) buffer SplitSun { uvec2 sunPart[]; };
+// --list-debug: per list, the light (luminance, both columns, sun absolute) by kind: x the sky, y texels, z cells, w the
+// remainder's share added (scale - 1 of the kept).
+layout(std430, set = 0, binding = 13) buffer ListDebug { vec4 listDebug[]; };
+layout(std430, set = 0, binding = 15) readonly buffer SunNodePatchLight { uvec2 patchLight[]; };   // [patch][column]: half rgb
+layout(std430, set = 0, binding = 14) buffer TexelProvenance { uint provenance[]; };
+#include "provenance.glsl"
+
+vec3 patchColumn(uint p, uint column) {
+    uvec2 w = patchLight[p * uint(u.uColumns.x) + column];
+    return vec3(unpackHalf2x16(w.x), unpackHalf2x16(w.y).x);
+}
+
+uint packRgb9e5(vec3 c) {
+    const float maxValue = 65408.0;
+    c = clamp(c, vec3(0.0), vec3(maxValue));
+    float maxC = max(c.r, max(c.g, c.b));
+    int e = max(-16, int(floor(log2(max(maxC, 1e-30))))) + 1;
+    float scale = exp2(float(e - 9));
+    if (int(floor(maxC / scale + 0.5)) == 512) { e += 1; scale *= 2.0; }
+    uvec3 m = uvec3(floor(c / scale + 0.5));
+    return m.r | (m.g << 9) | (m.b << 18) | (uint(e + 15) << 27);
+}
+
+vec3 unpackRgb9e5(uint p) {
+    float scale = exp2(float(int(p >> 27) - 15 - 9));
+    return vec3(p & 511u, (p >> 9) & 511u, (p >> 18) & 511u) * scale;
+}
+
+// The centre of an 8 x 8 octahedral bin (texel_nodes_shade.glsl's record: x and z on the plane, y up).
+vec3 binDirection(uint b) {
+    vec2 o = (vec2(float(b % 8u), float(b / 8u)) + 0.5) / 8.0 * 2.0 - 1.0;
+    vec3 d = vec3(o.x, 1.0 - abs(o.x) - abs(o.y), o.y);
+    if (d.y < 0.0) d.xz = (1.0 - abs(d.zx)) * vec2(d.x >= 0.0 ? 1.0 : -1.0, d.z >= 0.0 ? 1.0 : -1.0);
+    return normalize(d);
+}
+
+const float PI = 3.14159265359;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= uint(u.uLists.x)) return;
+    uint li = uint(u.uLists.y) + i;
+    uint id = listTexels[li];
+    uint words = uint(u.uIrr.w);
+    uint bit = uint(u.uToSun.w);
+    vec3 sky = vec3(0.0), sun = vec3(0.0);
+    const vec3 lumW = vec3(0.2126, 0.7152, 0.0722);
+    vec4 dbg = vec4(0.0);
+    for (uint k = listStart[li]; k < listStart[li + 1u]; ++k) {
+        vec3 sky0 = sky, sun0 = sun;
+        uvec4 e = entries[k];
+        uint kind = e.x & 7u;
+        vec2 rg = unpackHalf2x16(e.z), bw = unpackHalf2x16(e.w);
+        vec3 rgb = vec3(rg, bw.x);
+        if (kind == 0u && (e.x & 256u) != 0u) {
+            sky += rgb;   // BLIX_LIST_SKY_EXACT: the cook's sky light itself
+        } else if (kind == 0u) {
+            // The sky along its rays' mean direction in the bin (rgb: their directions x weights, summed), else the bin's centre.
+            vec3 d = dot(rgb, rgb) > 1e-12 ? normalize(rgb) : binDirection(e.y);
+            sky += PI * bw.y * textureLod(uSkyRadiance, d, u.uLists.z).rgb * abs(u.uLists.w);
+        } else if (kind == 1u) {
+            uint t = e.y;
+            vec3 n = texels[2u * t + 1u].xyz;
+            float nl = dot(n, n) > 1e-12 ? max(dot(normalize(n), u.uToSun.xyz), 0.0) : 0.0;
+            float lit = (sunBits[t * words + bit / 32u] >> (bit % 32u)) & 1u;
+            sky += rgb * unpackRgb9e5(prevSky[t].x);
+            sun += rgb * (unpackRgb9e5(prevSun[t].x) * u.uIrr.rgb + u.uIrr.rgb * nl * lit);
+        } else if (kind == 2u) {
+            uint c = e.y >> 1u, side = e.y & 1u;
+            sun += rgb * unpackRgb9e5(cellLight[4u * c + 2u * side + 1u]);
+        } else if (kind == 4u) {
+            sky += rgb * patchColumn(e.y, uint(u.uColumns.y));
+            sun += rgb * patchColumn(e.y, uint(u.uColumns.z));
+        }
+        dbg[kind == 4u ? 2u : kind] += dot(sky - sky0 + sun - sun0, lumW);
+    }
+    vec2 norm = listNorm[li];
+    if (u.uLists.w < 0.0) listDebug[li] = vec4(dbg.xyz * norm.x, dot(sky + sun, lumW) * norm.x * (norm.y - 1.0));
+    skyPart[id] = uvec2(packRgb9e5(sky * norm.x * norm.y), 0xFFFFu | 0x10000u);
+    sunPart[id] = uvec2(packRgb9e5(sun * norm.x * norm.y / max(u.uIrr.rgb, vec3(1e-6))), 0xFFFFu | 0x10000u);
+    // A gather's answer: a later gather's near hits read it (texel_nodes_shade.glsl, texelPartLight) -- left as the instant
+    // layer's (6), the live gathers after landing took the patches' instead (corridor |error| 0.0216 against 0.0168).
+    provenanceMark(id, 10u, true, true);
+}

@@ -165,7 +165,7 @@ internal sealed partial class SponzaLoop
         var bytes = (int)((1L + 2L * rows + 2L * cells) * 4);
         hitCellsBuffer = Own(device.CreateGpuBuffer(bytes, MemoryMarshal.AsBytes(words.AsSpan()), "sponza.hit-cells"));
         // --live-transfer: each cell's outgoing light, either side, per column (hit_cells.comp mode 1).
-        if (TransferOn && !livePatchTexels) cellLightBuffer = Own(device.CreateGpuBuffer(checked((int)(cells * 16)), name: "sponza.hit-cells.light"));
+        if (TransferOn && (!livePatchTexels || listsOn)) cellLightBuffer = Own(device.CreateGpuBuffer(checked((int)(cells * 16)), name: "sponza.hit-cells.light"));
         hitCellRows = rows;
         hitCellItems = work.Count / 2;
         hitCellWork = Own(device.CreateGpuBuffer(Math.Max(16, work.Count * 4), MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(work)), "sponza.hit-cells.work"));
@@ -209,6 +209,8 @@ internal sealed partial class SponzaLoop
             if (cellWords.Length != bytes || work.Length != workCount * 4) return false;
             hitCellsBuffer = Own(device.CreateGpuBuffer(bytes, cellWords, "sponza.hit-cells"));
             hitCellWork = Own(device.CreateGpuBuffer(Math.Max(16, work.Length), work, "sponza.hit-cells.work"));
+            // As a fresh build makes it (BuildHitCells): each cell's outgoing light, either side, per column.
+            if (TransferOn && (!livePatchTexels || listsOn)) cellLightBuffer = Own(device.CreateGpuBuffer(checked((int)(cells * 16)), name: "sponza.hit-cells.light"));
             hitCellRows = rows;
             hitCellItems = workCount / 2;
             hitCellCount = cells;
@@ -256,8 +258,8 @@ internal sealed partial class SponzaLoop
         return new DispatchCommand(hitCellsPipeline, (rows + 63) / 64, 1, 1,
             new ShaderUniform[]
             {
-                new("uRows", new Vector4Uniform(new Vector4(rows, firstRow, mode, cellLightBuffer.Equals(default(GpuBufferHandle)) ? 0f : 1f))),
-                new("uColumns", new Vector4Uniform(new Vector4(sunNodeKinds.Length, Math.Max(0, Array.IndexOf(sunNodeKinds, 2)), Math.Max(0, liveSunColumn), 0f))),
+                new("uRows", new Vector4Uniform(new Vector4(rows, firstRow, mode, cellLightBuffer.Equals(default(GpuBufferHandle)) ? 0f : listsOn ? 2f : 1f))),
+                new("uColumns", new Vector4Uniform(new Vector4(sunNodeKinds.Length, Math.Max(0, Array.IndexOf(sunNodeKinds, 2)), Math.Max(0, liveSunColumn), listsOn && HitBlendNow && Environment.GetEnvironmentVariable("BLIX_LIST_CELL_BLEND") != "0" ? transportSpacing : 0f))),
                 new("uIrr", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 0f))),
                 new("uToSun", new Vector4Uniform(new Vector4(liveSunToward, liveSunColumn))),
                 new("uSunBits", new Vector4Uniform(new Vector4(liveSunWords, sunNodeUnknownSun, 0f, 0f))),
@@ -285,6 +287,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("SunNodePatchLight", sunNodePatchLight),
                 new ShaderBufferBinding("RaySurfaces", Block("BlixRaySurfaces")),
                 new ShaderBufferBinding("CellLight", cellLightBuffer.Equals(default(GpuBufferHandle)) ? hitCellsBuffer : cellLightBuffer),
+                new ShaderBufferBinding("PatchNeighbours", listsOn && HitBlendNow ? FarNeighboursBuffer : hitCellsBuffer),
             }.Concat(CookedBuffers()).Where(b => declared.Contains(b.Name)).ToArray());
     }
 }

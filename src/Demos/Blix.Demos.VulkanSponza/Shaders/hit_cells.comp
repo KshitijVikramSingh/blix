@@ -32,7 +32,8 @@ layout(set = 0, binding = 0) uniform HitCellsParams {
     vec4 uLookup;      // x, y the shade's lookup (texel_nodes.glsl); z the marks: bit 0 contacts (mode 0, --cell-marks)
     vec4 uToSun;       // xyz toward the sun; w the sun's column (its bit)
     vec4 uSunBits;     // x the bit words a texel (and a sun point), y the visibility among no texel nor sun point
-    vec4 uColumns;     // x the columns (patch light's), y the sky's column, z the sun's
+    vec4 uColumns;     // x the columns (patch light's), y the sky's column, z the sun's; w the patch blend's reach (0: its
+                       // patch alone)
     vec4 uIrr;         // rgb the sun's irradiance
     vec4 uCookedGrid;
     vec4 uCookedDims;
@@ -72,12 +73,44 @@ vec3 patchColumn(int p, uint column) {
     return vec3(unpackHalf2x16(w.x), unpackHalf2x16(w.y).x);
 }
 
+// --lists (SponzaLoop.Lists.cs): a cell's light is a far hit's, so its patch's blended with the patch's neighbours as a
+// gather's hit blends them (texel_far.glsl farSet, hitPatchLight): the cell's patch alone left the dark corridor's
+// bounced sun 1% low and 5% apart texel to texel (p90, 2026-10-22).
+layout(std430, set = 0, binding = 19) readonly buffer PatchNeighbours { int farNeighbours[]; };
+
 #define COOKED_BINDING 10
 #define COOKED_GRID u.uCookedGrid
 #define COOKED_DIMS u.uCookedDims
 #include "cooked_patches.glsl"
 #define NODE_LOOKUP
 #include "texel_nodes.glsl"
+
+void cellBlendConsider(int c, vec3 x, vec3 nx, inout int ids[4], inout float ws[4]) {
+    float d = length(x - cookedPatch[3 * c].xyz) / u.uColumns.w;
+    float k = max(1.0 - d * d, 0.0);
+    float w = k * k * smoothstep(0.5, 0.9, dot(nx, normalize(cookedPatch[3 * c + 1].xyz)));
+    if (w <= ws[3]) return;
+    int at = 3;
+    while (at > 0 && ws[at - 1] < w) { ws[at] = ws[at - 1]; ids[at] = ids[at - 1]; --at; }
+    ws[at] = w;
+    ids[at] = c;
+}
+
+vec3 blendedPatchColumn(int p, vec3 x, vec3 nx, uint column) {
+    if (p < 0 || u.uColumns.w <= 0.0) return patchColumn(p, column);
+    int ids[4] = int[4](-1, -1, -1, -1);
+    float ws[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    cellBlendConsider(p, x, nx, ids, ws);
+    for (int i = 0; i < 8; ++i) {
+        int c = farNeighbours[p * 8 + i];
+        if (c >= 0) cellBlendConsider(c, x, nx, ids, ws);
+    }
+    float total = ws[0] + ws[1] + ws[2] + ws[3];
+    if (total <= 0.0) return patchColumn(p, column);
+    vec3 l = vec3(0.0);
+    for (int i = 0; i < 4; ++i) if (ids[i] >= 0) l += ws[i] / total * patchColumn(ids[i], column);
+    return l;
+}
 
 // The shade's answer for a point on a side: the patch its likeliest texel sees, else the nearest on its placement
 // facing; among no texel, the nearest anywhere.
@@ -160,13 +193,20 @@ void main() {
                 if (u.uRows.w > 0.5) {
                     vec3 srgb = unpackUnorm4x8(surfaces[row]).rgb;
                     vec3 albedo = mix(srgb / 12.92, pow((srgb + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), srgb));
+                    // w 2 (--lists): the light alone -- a list's entry carries its rays' own albedos, as the gather takes each
+                    // hit's (the row's mean colour put the cells' bounce 1% under the gather's, 2026-10-22).
+                    if (u.uRows.w > 1.5) albedo = vec3(1.0);
+                    // and the sun alone: a list takes the bounce from the patches the gather blends at each hit (kind 4).
+                    bool sunAlone = u.uRows.w > 1.5;
                     uint skyColumn = uint(u.uColumns.y), sunColumn = uint(u.uColumns.z);
+                    vec3 cellPos = p;
                     for (uint side = 0u; side < 2u; ++side) {
                         int p = int(hitCells[at + side] & 0xFFFFFFu) - 1;
                         float nl = max(dot(side == 0u ? face : -face, u.uToSun.xyz), 0.0);
                         vec3 direct = u.uIrr.rgb * nl * sun;
-                        cellLight[4u * cell + 2u * side] = packRgb9e5(albedo * patchColumn(p, skyColumn));
-                        cellLight[4u * cell + 2u * side + 1u] = packRgb9e5(albedo * (patchColumn(p, sunColumn) + direct));
+                        vec3 sn = side == 0u ? face : -face;
+                        cellLight[4u * cell + 2u * side] = sunAlone ? 0u : packRgb9e5(albedo * blendedPatchColumn(p, cellPos, sn, skyColumn));
+                        cellLight[4u * cell + 2u * side + 1u] = packRgb9e5(albedo * ((sunAlone ? vec3(0.0) : blendedPatchColumn(p, cellPos, sn, sunColumn)) + direct));
                     }
                 }
                 continue;

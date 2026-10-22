@@ -21,7 +21,7 @@ internal sealed partial class SponzaLoop
     private static readonly string[] ProvenanceNames =
     {
         "never written", "coarse sweep", "refining round", "fine gather", "visible and changed",
-        "fine copy", "instant layer", "ratio relight", "provisional", "landed on the CPU",
+        "fine copy", "instant layer", "ratio relight", "provisional", "landed on the CPU", "light-free lists",
     };
     private static readonly string[] TexelViewNames =
     {
