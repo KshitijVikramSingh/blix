@@ -259,10 +259,10 @@ internal sealed partial class SponzaLoop
             new ShaderUniform[]
             {
                 new("uRows", new Vector4Uniform(new Vector4(rows, firstRow, mode, cellLightBuffer.Equals(default(GpuBufferHandle)) ? 0f : listsOn ? 2f : 1f))),
-                new("uColumns", new Vector4Uniform(new Vector4(sunNodeKinds.Length, Math.Max(0, Array.IndexOf(sunNodeKinds, 2)), Math.Max(0, liveSunColumn), listsOn && HitBlendNow && Environment.GetEnvironmentVariable("BLIX_LIST_CELL_BLEND") != "0" ? transportSpacing : 0f))),
+                new("uColumns", new Vector4Uniform(new Vector4(sunNodeKinds.Length, Math.Max(0, Array.IndexOf(sunNodeKinds, 2)), Math.Max(0, liveSunColumn), listsOn && HitBlendNow ? transportSpacing : 0f))),
                 new("uIrr", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 0f))),
                 new("uToSun", new Vector4Uniform(new Vector4(liveSunToward, liveSunColumn))),
-                new("uSunBits", new Vector4Uniform(new Vector4(liveSunWords, sunNodeUnknownSun, 0f, 0f))),
+                new("uSunBits", new Vector4Uniform(new Vector4(liveSunWords, sunNodeUnknownSun, listsOn ? ListCellPoints : 0, 0f))),
                 new("uTexelGrid", new Vector4Uniform(texelGrid)),
                 new("uShade", new Vector4Uniform(new Vector4(0f, 0f, sunNodeHashSlots, sunNodeFoliageSlots))),
                 new("uLookup", new Vector4Uniform(new Vector4(sunNodePlane, sunNodeSigma, cellMarks ? 1 : 0, 0f))),

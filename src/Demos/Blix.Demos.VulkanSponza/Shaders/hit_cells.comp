@@ -194,10 +194,12 @@ void main() {
                     vec3 srgb = unpackUnorm4x8(surfaces[row]).rgb;
                     vec3 albedo = mix(srgb / 12.92, pow((srgb + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), srgb));
                     // w 2 (--lists): the light alone -- a list's entry carries its rays' own albedos, as the gather takes each
-                    // hit's (the row's mean colour put the cells' bounce 1% under the gather's, 2026-10-22).
+                    // hit's (the row's mean colour put the cells' bounce 1% under the gather's, 2026-10-22) -- and the patch
+                    // blend averaged over the cell's area (uSunBits.z x uSunBits.z points): what each hit's own blend (the
+                    // gather's, texel_nodes_shade.glsl's hitPatchLight) averages to over hits spread evenly across it. The
+                    // blend at the centre alone put a sunlit corridor wall's texels 1% under the gather's (2026-10-22).
                     if (u.uRows.w > 1.5) albedo = vec3(1.0);
-                    // and the sun alone: a list takes the bounce from the patches the gather blends at each hit (kind 4).
-                    bool sunAlone = u.uRows.w > 1.5;
+                    uint areaN = u.uRows.w > 1.5 ? uint(u.uSunBits.z) : 0u;
                     uint skyColumn = uint(u.uColumns.y), sunColumn = uint(u.uColumns.z);
                     vec3 cellPos = p;
                     for (uint side = 0u; side < 2u; ++side) {
@@ -205,8 +207,26 @@ void main() {
                         float nl = max(dot(side == 0u ? face : -face, u.uToSun.xyz), 0.0);
                         vec3 direct = u.uIrr.rgb * nl * sun;
                         vec3 sn = side == 0u ? face : -face;
-                        cellLight[4u * cell + 2u * side] = sunAlone ? 0u : packRgb9e5(albedo * blendedPatchColumn(p, cellPos, sn, skyColumn));
-                        cellLight[4u * cell + 2u * side + 1u] = packRgb9e5(albedo * ((sunAlone ? vec3(0.0) : blendedPatchColumn(p, cellPos, sn, sunColumn)) + direct));
+                        vec3 bSky = vec3(0.0), bSun = vec3(0.0);
+                        if (areaN > 0u) {
+                            // The cell's square of barycentrics [i, i+1] x [j, j+1] / r, clipped to the triangle.
+                            float taken = 0.0;
+                            for (uint sa = 0u; sa < areaN; ++sa)
+                                for (uint sb = 0u; sb < areaN; ++sb) {
+                                    vec2 q = (vec2(i, j) + (vec2(sa, sb) + 0.5) / float(areaN)) / float(r);
+                                    if (q.x + q.y > 1.0) continue;
+                                    vec3 x = (1.0 - q.x - q.y) * p0 + q.x * p1 + q.y * p2;
+                                    bSky += blendedPatchColumn(p, x, sn, skyColumn);
+                                    bSun += blendedPatchColumn(p, x, sn, sunColumn);
+                                    taken += 1.0;
+                                }
+                            bSky /= max(taken, 1.0); bSun /= max(taken, 1.0);
+                        } else {
+                            bSky = blendedPatchColumn(p, cellPos, sn, skyColumn);
+                            bSun = blendedPatchColumn(p, cellPos, sn, sunColumn);
+                        }
+                        cellLight[4u * cell + 2u * side] = packRgb9e5(albedo * bSky);
+                        cellLight[4u * cell + 2u * side + 1u] = packRgb9e5(albedo * (bSun + direct));
                     }
                 }
                 continue;

@@ -739,8 +739,8 @@ void main() {
                             kind = 0u; target = uint(b.y * 8 + b.x);
                         } else if (sCell[r] != 0xFFFFFFFFu) { kind = 2u; target = sCell[r]; }
                         else if (sNearTexel[r] >= 0 && sUnknown[r] < 0.5 && h.w > -0.5) { kind = 1u; target = uint(sNearTexel[r]); }
-                        // A miss: rgb its direction x its weight (the bin's rays' mean direction, summed), not the sky's light.
-                        vec3 rgb = kind == 0u && u.uCapture.x < 2.5 ? sDir[r] * sRayWeight[r] : h.rgb;
+                        // rgb: what the hit took -- a miss its sky light (x weight), a hit its albedo x weight / pi.
+                        vec3 rgb = h.rgb;
                         // A near hit: one record a candidate texel the search blended (its share of the ray), as the hit's
                         // sun is the blend of their bits -- the first carries the ray (word 7's bit 8 clear), the rest not.
                         uint sub = 0u;
@@ -755,29 +755,6 @@ void main() {
                                 captured[2u * here + 1u] = uvec4(packHalf2x16(vec2(rgb.b * cw, 0.0)), floatBitsToUint(sub == 0u ? whole : 0.0),
                                     uint(u.uCapture.z) | (uint(u.uShade.w) << 16), uint(r) | (sub == 0u ? 0u : 256u));
                                 sub++;
-                            }
-                        }
-                        // A cell's hit: the cell carries its sun (the side's bits' blend), and the bounce is the patches the gather
-                        // blends at the hit itself (hitPatchLight: farSet at the hit, its normal) -- one record a patch, its share
-                        // of the ray (word 7's bit 8 set: not another ray). The cell's light at its centre, blended there, put a
-                        // sunlit corridor wall's texels 1% under the gather's and the facing wall's over (2026-10-22).
-                        if (kind == 2u && int(h.w) >= 0) {
-                            int pids[FAR_SET];
-                            float pws[FAR_SET];
-                            if (u.uHitBlend.x > 0.5) {
-                                vec3 hitPos = nodeRays[2u * (gl_WorkGroupID.x * uint(RAYS) + uint(r))].xyz + sDir[r] * sDist[r];
-                                farSet(hitPos, sNormal[r], int(h.w), vec4(0.0, u.uHitBlend.y, 0.0, 0.0), pids, pws);
-                            } else {
-                                for (int i = 0; i < FAR_SET; ++i) { pids[i] = -1; pws[i] = 0.0; }
-                                pids[0] = int(h.w); pws[0] = 1.0;
-                            }
-                            for (int i = 0; i < FAR_SET; ++i) {
-                                if (pids[i] < 0 || pws[i] <= 0.0) continue;
-                                uint here = atomicAdd(captureCount, 1u);
-                                if (here >= uint(u.uCapture.w)) break;
-                                captured[2u * here] = uvec4(id, 4u, uint(pids[i]), packHalf2x16(rgb.rg * pws[i]));
-                                captured[2u * here + 1u] = uvec4(packHalf2x16(vec2(rgb.b * pws[i], 0.0)), 0u,
-                                    uint(u.uCapture.z) | (uint(u.uShade.w) << 16), uint(r) | 256u);
                             }
                         }
                         if (sub == 0u) {
