@@ -241,6 +241,7 @@ internal sealed partial class SponzaLoop
         ReadListArgs(args);
         // On by default (2026-10-22: the gate held; Cornell and crevices seams' |error| and noise down, two seeds each).
         guideSun = !args.Flag("no-guide-sun");
+        instantOnly = args.Flag("instant-only");
         // --guide-sky-only: the guides and light lists from the sky's light alone (no sun component, no direct sun) -- the
         // same whatever the sun: for lists cooked once and lit under every sun, so a list cook's default (--list-cook-sun-
         // guides: the cook's sun's). The corridor's lists, two cooks' rays, at three suns: corridor 0.018 / 0.035 / 0.018,
@@ -1052,6 +1053,9 @@ internal sealed partial class SponzaLoop
     private static uint SunNodeSeed(int first, int seedPass, int discover) =>
         unchecked((uint)(first * 2654435761L) ^ (uint)(seedPass + gatherSeedOffset) * 0x9E3779B9u ^ (discover > 0 ? 0xD15C0u : 0u));
     // BLIX_GATHER_SEED=N (a measurement): the gather's rays seeded N passes on -- two cooks' difference is their noise.
+    // BLIX_RAY_CAP=metres (a measurement, the runtime gather's model): every gather ray ends there (past it a miss) -- what
+    // short rays cost the trace against whole ones.
+    private static readonly float rayCapMeasure = float.TryParse(Environment.GetEnvironmentVariable("BLIX_RAY_CAP"), NumberStyles.Float, CultureInfo.InvariantCulture, out var rc) ? rc : 0f;
     private static readonly int gatherSeedOffset = int.TryParse(Environment.GetEnvironmentVariable("BLIX_GATHER_SEED"), out var gs) ? gs : 0;
 
     // On hardware rays the gather's passes run outside the frame graph (IGraphicsDevice.DispatchNow): its rays, the Metal
@@ -1213,6 +1217,16 @@ internal sealed partial class SponzaLoop
                 RunListsNow();
                 return;
             }
+            // --instant-only (a measurement): no gather -- the cook lands on the instant layer's light (texel_patch_light.comp:
+            // the patches' light by each texel's openness), what a light change shows before any ray.
+            if (instantOnly && !fineGathering && sunNodeRefineRound == 0 && sunNodeFirst == 0 && sunNodePass == 0)
+            {
+                Console.WriteLine("[VulkanSponza] sun nodes: --instant-only -- no gather; the instant layer's light lands.");
+                sunNodeStage = SunNodeStage.Done;
+                ResetSunNodeRefine();
+                if (splitCooking) FinishSplitCook();
+                return;
+            }
             var refining = sunNodeRefineRound > 0;
             var live = refining ? sunNodeRefineIds : sunNodeTraceIds;
             var sweepPasses = sunNodeRays / 32;
@@ -1255,7 +1269,7 @@ internal sealed partial class SponzaLoop
                 new("uCookedDims", new Vector4Uniform(cookedDims)),
                 // x 1: the light strategy on; y the patches' disk radius (a patch stands for spacing^2 of surface).
                 new("uLights", new Vector4Uniform(new Vector4(sunNodeLit && !plain ? 1f : 0f, transportSpacing / MathF.Sqrt(MathF.PI), GatherSmoothNow ? 1f : 0f, 0f))),
-                new("uTile", new Vector4Uniform(new Vector4(interleave ? 1f : 0f, texelGrid.W, lightmapTexels ? lightmapFirstRecord : float.MaxValue, !plain && NearCutMode == 2 ? hitCellNear : 0f))),
+                new("uTile", new Vector4Uniform(new Vector4(interleave ? 1f : 0f, texelGrid.W, lightmapTexels ? lightmapFirstRecord : float.MaxValue, !plain && NearCutMode == 2 ? hitCellNear : !plain ? rayCapMeasure : 0f))),
                 new("uFar", new Vector4Uniform(plain && !farCut ? Vector4.Zero : FarUniform(discover))),
             },
             Array.Empty<ShaderTextureBinding>(),
