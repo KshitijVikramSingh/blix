@@ -11,7 +11,18 @@ layout(std430, set = 0, binding = COOKED_BINDING) readonly buffer CookedPatches 
 layout(std430, set = 0, binding = COOKED_BINDING + 1) readonly buffer CookedCells { uint cookedCellStart[]; };
 layout(std430, set = 0, binding = COOKED_BINDING + 2) readonly buffer CookedIds { uint cookedId[]; };
 
-// The nearest patch facing the way n does (dot >= 0.5), or -1.
+// Whether p lies behind patch j's plane, past what its surface's curve can put there (1 cm, and 0.3 of the distance
+// along its plane): a patch across a thin wall or a shell from the hit, its light the other side's. The teacup's saucer: a
+// ray 6 mm under its rim, no texel there, took the rim's sunlit top 4.5 cm above -- 88% of a record's light, 60x its path
+// trace (2026-10-22).
+bool cookedBehind(int j, vec3 p) {
+    vec3 n = cookedPatch[3 * j + 1].xyz;
+    vec3 d = p - cookedPatch[3 * j].xyz;
+    float off = dot(d, n);
+    return off < -(0.01 + 0.3 * length(d - off * n));
+}
+
+// The nearest patch facing the way n does (dot >= 0.5) with p not behind it (cookedBehind), or -1.
 int cookedNearest(vec3 p, vec3 n) {
     if (COOKED_DIMS.w < 0.5) return -1;
     ivec3 dims = ivec3(COOKED_DIMS.xyz);
@@ -31,7 +42,7 @@ int cookedNearest(vec3 p, vec3 n) {
         int cell = (cc.z * dims.y + cc.y) * dims.x + cc.x;
         for (uint k = cookedCellStart[cell]; k < cookedCellStart[cell + 1]; ++k) {
             int j = int(cookedId[k]);
-            if (dot(cookedPatch[3 * j + 1].xyz, n) < 0.5) continue;
+            if (dot(cookedPatch[3 * j + 1].xyz, n) < 0.5 || cookedBehind(j, p)) continue;
             vec3 d = cookedPatch[3 * j].xyz - p;
             float d2 = dot(d, d);
             if (d2 < bestD) { bestD = d2; best = j; }
@@ -41,7 +52,7 @@ int cookedNearest(vec3 p, vec3 n) {
 }
 
 // The nearest patch on the same placement (its position's w, the raw bits: SponzaLoop.Transport.cs, UploadCookedPatches)
-// facing within 60 degrees of n, or -1: where a texel saw none of its own candidates (texel_nodes_shade.glsl). Nearest by
+// facing within 60 degrees of n, p not behind it, or -1: where a texel saw none of its own candidates (texel_nodes_shade.glsl). Nearest by
 // distance alone takes a patch across a wall at a wall's foot; on the same surface it cannot.
 int cookedNearestOn(vec3 p, vec3 n, uint placement) {
     if (COOKED_DIMS.w < 0.5 || placement == 0xFFFFFFFFu) return -1;
@@ -59,7 +70,7 @@ int cookedNearestOn(vec3 p, vec3 n, uint placement) {
         int cell = (cc.z * dims.y + cc.y) * dims.x + cc.x;
         for (uint k = cookedCellStart[cell]; k < cookedCellStart[cell + 1]; ++k) {
             int j = int(cookedId[k]);
-            if (floatBitsToUint(cookedPatch[3 * j].w) != placement || dot(cookedPatch[3 * j + 1].xyz, n) < 0.5) continue;
+            if (floatBitsToUint(cookedPatch[3 * j].w) != placement || dot(cookedPatch[3 * j + 1].xyz, n) < 0.5 || cookedBehind(j, p)) continue;
             vec3 d = cookedPatch[3 * j].xyz - p;
             float d2 = dot(d, d);
             if (d2 < bestD) { bestD = d2; best = j; }

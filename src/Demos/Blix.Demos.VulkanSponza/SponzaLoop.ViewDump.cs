@@ -93,6 +93,8 @@ internal sealed partial class SponzaLoop
         Buffer("guide_patch.u32", sunNodeGuidePatch, (long)texelCount * 4);
         if (cookedPacked is { } packed) Buffer("light_lists.f32x2", liveLights, (long)(packed.Length / 3) * LightListSize * 8);
         Buffer("patches.f32x12", cookedPatchBuffer, cookedPacked is { } cp ? (long)cp.Length * 16 : 0);
+        // The live patch light the gather's hits read when no texel answers ([patch][component]: half rgb, LiveComponents a patch).
+        Buffer("patch_light.u32x2", livePatchLightBuffer, cookedPacked is { } cl && !livePatchLightBuffer.Equals(default(GpuBufferHandle)) ? (long)(cl.Length / 3) * LiveComponents * 8 : 0);
         if (referenceView || referenceSamples > 0)
         {
             Buffer("reference.f32x4", referenceAccum, (long)referenceSize.X * referenceSize.Y * 16);

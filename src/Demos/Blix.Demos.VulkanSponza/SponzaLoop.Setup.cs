@@ -64,6 +64,8 @@ internal sealed partial class SponzaLoop
         if (args.Flag("rt-shadow-interleave")) shadows.Interleave = true;
         if (args.Flag("no-shadow")) shadows.Enabled = false;
         if (args.Float("cloth-transmission") is { } cloth) clothTransmission = Math.Clamp(cloth, 0f, 1f);
+        materialOcclusion = !args.Flag("no-material-ao");
+        materialAoOnGi = args.Flag("material-ao-on-gi");
         // --rt-shadow-full: every pixel traced every frame (ShadowsSettings.Interleave off).
         if (args.Flag("rt-shadow-full")) shadows.Interleave = false;
         if (args.Flag("ao-fullres")) aoScale = 1f;

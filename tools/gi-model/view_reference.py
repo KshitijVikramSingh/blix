@@ -28,17 +28,21 @@ def f11(v, mb):
     return np.where(e == 0, mt / (1 << mb) * 2.0 ** -14, (1 + mt / (1 << mb)) * 2.0 ** (e.astype(float) - 15))
 
 
-def main():
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    maps = sys.argv[sys.argv.index("--maps") + 1] if "--maps" in sys.argv else None
-    if maps in args: args.remove(maps)
-    d = Path(args[0])
+CLASSES = ((1, "opaque"), (2, "two-sided"), (3, "lets light through"), (0, "no lightmap texel"))
+RECORD_CLASSES = ("opaque", "lets light through, a pair's first", "lets light through, a pair's second")
+lum = lambda c: c[..., 0] * 0.2126 + c[..., 1] * 0.7152 + c[..., 2] * 0.0722
+
+
+def measure(d):
+    """The dump's numbers: per class of grid point (count, renderer mean, reference mean, ratio of sums, |error| median and
+    p90) and per class of record (count, resolved mean, traced mean, ratio of sums, median, p10, p90); with the per-point
+    arrays for maps."""
+    d = Path(d)
     m = json.loads((d / "meta.json").read_text()); f = m["files"]; rv = m.get("refView")
-    if not rv: raise SystemExit("no --ref-view in this dump")
+    if not rv: raise SystemExit(f"{d}: no --ref-view in this dump")
     hw, hh = f["hdr.r11g11b10f"]["width"], f["hdr.r11g11b10f"]["height"]
     w = np.frombuffer((d / "hdr.r11g11b10f").read_bytes(), np.uint32).reshape(hh, hw).astype(np.int64)
     lit = np.stack([f11(w & 2047, 6), f11((w >> 11) & 2047, 6), f11((w >> 22) & 1023, 5)], -1)
-    lum = lambda c: c[..., 0] * 0.2126 + c[..., 1] * 0.7152 + c[..., 2] * 0.0722
     s = np.frombuffer((d / "reference_view.f32x4").read_bytes(), np.float32)[:rv["height"] * rv["width"] * 4].reshape(rv["height"], rv["width"], 4)
     paths = s[..., 3]
     ref = s[..., :3] / np.maximum(paths[..., None], 1) / np.pi
@@ -46,8 +50,6 @@ def main():
     gy, gx = np.mgrid[0:rv["height"], 0:rv["width"]]
     py, px = np.minimum(gy * st, hh - 1), np.minimum(gx * st, hw - 1)
     g = lit[py, px]
-    print(f"{d.name}: {rv['width']} x {rv['height']} points every {st} px, paths a point {int(np.median(paths))} "
-          f"(frames {rv['frames']} of {rv['framesWanted']})")
     # The surface under each point: its lightmap record (opaque / pair / transmitting), or none (sky, unmapped).
     n = m["texelCount"]
     tex = np.frombuffer((d / "texels.f32x8").read_bytes(), np.float32).reshape(n, 8)
@@ -61,12 +63,14 @@ def main():
     kind = np.where(~ok, 0, np.where(np.abs(wv) > 4.5, 3, np.where(wv < 0, 2, 1)))
     G, R = lum(g), lum(ref)
     valid = (paths > 0) & (R > 1e-5)
-    for k, name in ((1, "opaque"), (2, "two-sided"), (3, "lets light through"), (0, "no lightmap texel")):
+    out = {"name": d.name, "grid": (rv["width"], rv["height"], st), "paths": int(np.median(paths)), "frames": (rv["frames"], rv["framesWanted"]),
+           "classes": {}, "records": {}, "G": G, "R": R, "valid": valid}
+    for k, name in CLASSES:
         sel = valid & (kind == k)
         if sel.sum() < 5: continue
         r = G[sel] / R[sel] - 1
-        print(f"   {name:18s} {sel.sum():6d} points: renderer {G[sel].mean():.4f} against {R[sel].mean():.4f} ({100 * (G[sel].sum() / R[sel].sum() - 1):+.1f}%), "
-              f"|error| median {100 * np.median(np.abs(r)):.1f}%, p90 {100 * np.percentile(np.abs(r), 90):.1f}%")
+        out["classes"][name] = (int(sel.sum()), float(G[sel].mean()), float(R[sel].mean()), float(G[sel].sum() / R[sel].sum()),
+                                float(np.median(np.abs(r))), float(np.percentile(np.abs(r), 90)))
     # --ref-view-records: lightmap records as surface points (the indirect light arriving, sum / paths), against the GI's
     # resolved light at each (resolved.u32x2: rgb9 with a shared exponent, as ray_capture.py reads it).
     if rv.get("records") and (d / "reference_records.u32").exists():
@@ -78,17 +82,36 @@ def main():
         sc = np.exp2((rw >> 27).astype(np.int64) - 24)
         Gr = (rw & 511) * sc * 0.2126 + ((rw >> 9) & 511) * sc * 0.7152 + ((rw >> 18) & 511) * sc * 0.0722
         wr = tex[ids, 3]
-        print(f"   records as surface points ({len(ids)}): the GI's resolved light against the indirect irradiance traced there")
         # A pair's two records lie side by side (SponzaLoop.Lightmap.cs): the first and the second face, by their place.
         second = ((ids - m["lightmapFirstRecord"]) & 1) == 1
-        for name, sel in (("opaque", np.abs(wr) < 4.5), ("lets light through, a pair's first", (np.abs(wr) > 4.5) & ~second),
-                          ("lets light through, a pair's second", (np.abs(wr) > 4.5) & second)):
+        for name, sel in zip(RECORD_CLASSES, (np.abs(wr) < 4.5, (np.abs(wr) > 4.5) & ~second, (np.abs(wr) > 4.5) & second)):
             sel = sel & (E > 1e-6)
             if sel.sum() < 3: continue
             r = Gr[sel] / E[sel]
-            print(f"      {name:36s} {sel.sum():5d}: resolved {Gr[sel].mean():.4f} against {E[sel].mean():.4f} (ratio of sums {Gr[sel].sum() / E[sel].sum():.3f}, "
-                  f"median {np.median(r):.3f}, p10 {np.percentile(r, 10):.3f}, p90 {np.percentile(r, 90):.3f})")
+            # Excess: the light over the trace's, summed, over all the traced light -- a leak's measure, which dark records'
+            # ratios (a p90) overweight.
+            out["records"][name] = (int(sel.sum()), float(Gr[sel].mean()), float(E[sel].mean()), float(Gr[sel].sum() / E[sel].sum()),
+                                    float(np.median(r)), float(np.percentile(r, 10)), float(np.percentile(r, 90)),
+                                    float(np.maximum(Gr[sel] - E[sel], 0).sum() / E[sel].sum()))
+    return out
+
+
+def main():
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    maps = sys.argv[sys.argv.index("--maps") + 1] if "--maps" in sys.argv else None
+    if maps in args: args.remove(maps)
+    r = measure(args[0])
+    (gw, gh, st), (fr, fw) = r["grid"], r["frames"]
+    print(f"{r['name']}: {gw} x {gh} points every {st} px, paths a point {r['paths']} (frames {fr} of {fw})")
+    for name, (cnt, gm, rm, ratio, med, p90) in r["classes"].items():
+        print(f"   {name:18s} {cnt:6d} points: renderer {gm:.4f} against {rm:.4f} ({100 * (ratio - 1):+.1f}%), "
+              f"|error| median {100 * med:.1f}%, p90 {100 * p90:.1f}%")
+    if r["records"]:
+        print(f"   records as surface points ({sum(v[0] for v in r['records'].values())}): the GI's resolved light against the indirect irradiance traced there")
+        for name, (cnt, gm, em, ratio, med, p10, p90, excess) in r["records"].items():
+            print(f"      {name:36s} {cnt:5d}: resolved {gm:.4f} against {em:.4f} (ratio of sums {ratio:.3f}, median {med:.3f}, p10 {p10:.3f}, p90 {p90:.3f}, excess {excess:.3f})")
     if maps:
+        G, R, valid = r["G"], r["R"], r["valid"]
         out = Path(maps); out.mkdir(parents=True, exist_ok=True)
         e = np.where(valid, G / np.maximum(R, 1e-9) - 1, 0)
         t = np.clip(np.abs(e) / 0.5, 0, 1)

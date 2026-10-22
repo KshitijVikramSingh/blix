@@ -705,7 +705,7 @@ internal sealed partial class SponzaLoop
             .SetTexture(binding: 2, tex.Normal)
             .SetTexture(binding: 3, tex.Emissive)
             .SetTexture(binding: 4, tex.MetallicRoughness)
-            .SetTexture(binding: 5, tex.Occlusion)
+            .SetTexture(binding: 5, materialOcclusion ? tex.Occlusion : textureLoader.Load(null).Occlusion)
             .SetTexture(binding: 6, diffuseTransmissionTexture)
             .SetTexture(binding: 7, tex.DiffuseTransmission)
             .Handle);
@@ -716,6 +716,11 @@ internal sealed partial class SponzaLoop
     // An earlier cook set 0.35 and then 0, because the light through a curtain went unshadowed then; the traced shadows
     // now shadow it (lit.frag's far-side answer: the sun on the curtain's back lights its front).
     private float clothTransmission = -1f;
+    // --no-material-ao (a measurement): every material's occlusion texture white. The lit pass multiplies the indirect
+    // light by it (lit.frag, ao), and a path trace has none: the GI's rays find the occlusion it bakes.
+    private bool materialOcclusion = true;
+    // --material-ao-on-gi: the occlusion texture on the traced field's light too (lit.frag, giAo), as before 2026-10-22.
+    private bool materialAoOnGi;
     private (float Factor, Vector3 Colour)? ClothTransmission(PbrMaterial? gm) =>
         clothTransmission >= 0f && gm is not null && gm.Name.Contains("curtain", StringComparison.OrdinalIgnoreCase)
             ? (clothTransmission, new Vector3(gm.BaseColorFactor.X, gm.BaseColorFactor.Y, gm.BaseColorFactor.Z))

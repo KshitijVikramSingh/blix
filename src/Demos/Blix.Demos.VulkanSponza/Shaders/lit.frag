@@ -746,7 +746,13 @@ void main() {
             incident *= clamp(1.0 + dot(gradient, nLow - vizGeometricN) / lum, 1.0 - range, 1.0 + range);
         }
         vizBounceRaw = incident;
-        bounce = incident * albedo / PI * (1.0 - metallic) * ao * (frame.uIncident.y > 0.5 ? 1.0 : visibility);
+        // A field that holds occlusion (uIncident.y: the texels' rays found it) takes neither GTAO nor the material's
+        // baked occlusion texture: both are stand-ins for what those rays traced, and on top of them the teacup's
+        // occlusion map (0.48 mean) left its wall -16% against the path trace, its shade -59%; without, -1% and -4%
+        // (2026-10-22). uIncident.y 2: --material-ao-on-gi, the map as before.
+        bool fieldOccludes = frame.uIncident.y > 0.5;
+        float giAo = fieldOccludes && frame.uIncident.y < 1.5 ? 1.0 : ao;
+        bounce = incident * albedo / PI * (1.0 - metallic) * giAo * (fieldOccludes ? 1.0 : visibility);
     }
 
     // Sheen's own prefiltered environment, at the sheen roughness rather than the base one, times
@@ -766,7 +772,9 @@ void main() {
     if (diffTrans > 0.0 && frame.uIncidentGradient.w > 0.5 && incidentUsed && lightmapBackIrradiance(vLightmapTexel, N, backGi)) {
         // The GI's far side: the pixel's atlas texels' back records -- their own gathers, the room behind a curtain, the
         // light inside a closed thin shell's walls -- not the sky cube along -N.
-        transmittedIBL = blix_diffuseTransmissionAmbient(backGi, dtColor, diffTrans) / PI * ao * visibility;
+        // Traced as the front's records are: no occlusion stand-in on it (the bounce's rule above), and never the front's
+        // screen-space visibility, which says nothing of the far side.
+        transmittedIBL = blix_diffuseTransmissionAmbient(backGi, dtColor, diffTrans) / PI * (frame.uIncident.y > 1.5 ? ao * visibility : 1.0);
     } else if (diffTrans > 0.0) {
         // The back side's sky visibility. The incident field answers only at the front's geometric
         // normal, so its visibility stands in for -N's (the clipmap resolves enclosure at room scale,

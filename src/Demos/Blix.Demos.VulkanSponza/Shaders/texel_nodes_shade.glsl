@@ -610,15 +610,24 @@ void main() {
         }
         barrier();
         if (lid < uint(suns)) {
-            vec4 known = vec4(0.0);
-            for (int r = 0; r < RAYS; ++r) known += sRayKnown[r * 2 + int(lid)];
-            sUnknownBounce[lid] = known.w > 0.0 ? known.rgb / known.w : vec3(0.0);
+            // The known hits' light, each weighted by what its hit sends back (sHit's rgb: albedo x weight / pi): a sheet hit's
+            // light is per unit of ITS albedo (nearTexelLight: T c of the far side over it), so a plain mean handed a dark
+            // texel's 1 / albedo to hits of any albedo -- the teacup's saucer gap, 1,000x at the albedo's floor and 60x a
+            // record (2026-10-22). Weighted, the mean is the light per unit of albedo the known hits brought.
+            vec3 known = vec3(0.0), knownW = vec3(0.0);
+            float knownN = 0.0;
+            for (int r = 0; r < RAYS; ++r)
+                if (sRayKnown[r * 2 + int(lid)].w > 0.0) { known += sHit[r].rgb * sRayKnown[r * 2 + int(lid)].rgb; knownW += sHit[r].rgb; knownN += 1.0; }
+            sUnknownBounce[lid] = knownN > 0.0 ? known / max(knownW, vec3(1e-8)) : vec3(0.0);
 #if MAX_WORDS == 1
-            vec4 near = vec4(0.0);
+            vec3 near = vec3(0.0), nearW = vec3(0.0);
+            float nearN = 0.0;
             if (u.uNear.z > 0.5)
                 for (int r = 0; r < RAYS; ++r)
-                    if (sHow[r] == 3u && sUnknown[r] < 0.5 && sDist[r] < u.uLookup.z && sHit[r].w >= 0.0) near += sRayKnown[r * 2 + int(lid)];
-            sNearKnown[lid] = near.w > 0.0 ? vec4(near.rgb / near.w, near.w) : vec4(0.0);
+                    if (sHow[r] == 3u && sUnknown[r] < 0.5 && sDist[r] < u.uLookup.z && sHit[r].w >= 0.0) {
+                        near += sHit[r].rgb * sRayKnown[r * 2 + int(lid)].rgb; nearW += sHit[r].rgb; nearN += 1.0;
+                    }
+            sNearKnown[lid] = nearN > 0.0 ? vec4(near / max(nearW, vec3(1e-8)), nearN) : vec4(0.0);
 #endif
         }
         barrier();
@@ -629,6 +638,7 @@ void main() {
             vec3 w = sDir[r];
             float tiltDen = max(dot(dn, w), 0.1);
             float captureBounce = 0.0;
+            float captureLight = -1.0;   // the ray capture: the light the hit took, its sun column's (a hit among no texel)
 #if MAX_WORDS == 1
             sRayNearGlow[r] = vec3(0.0);
 #endif
@@ -655,6 +665,7 @@ void main() {
                     if (sUnknown[r] > 0.5 && sDist[r] < u.uLookup.z && sNearKnown[k].w > 0.0) light = sNearKnown[k].rgb;
 #endif
                     captureBounce += dot(h.rgb * light, lumW);
+                    if (k == int(u.uHitBlend.w)) captureLight = dot(light, lumW);
                     float ndotl = hasSun ? max(dot(sNormal[r], toSun), 0.0) : 0.0;
                     vec3 glow = vec3(0.0);
 #if MAX_WORDS == 1
@@ -706,7 +717,7 @@ void main() {
                         float cosine = dot(tn, tn) > 0.0 ? dot(normalize(tn), w) : 0.0;
                         captured[2u * at] = uvec4(id, uint(u.uCapture.z) | (uint(u.uShade.w) << 16), floatBitsToUint(sDist[r]), how | (uint(r) << 8) | (uint(int(h.w) + 1) << 13));
                         captured[2u * at + 1u] = uvec4(floatBitsToUint(whole), floatBitsToUint(captureBounce),
-                            packHalf2x16(vec2(cosine, sRayWeight[r])), uint(sNearTexel[r]));
+                            packHalf2x16(vec2(cosine, sRayWeight[r])), sNearTexel[r] >= 0 ? uint(sNearTexel[r]) : floatBitsToUint(-max(captureLight, 1e-30)));
                     }
                 }
             }
@@ -779,15 +790,17 @@ void main() {
         // known bounce -- unknown, not dark. It took 0, and those hits gather where the light is darkest (crevices, under
         // the canopy), so the dark was painted in. Now it takes the mean bounce of this texel's hits this pass that have
         // one: the estimate over what is known. (None known: 0, as before.)
-        vec3 knownBounce = vec3(0.0);
+        vec3 knownBounce = vec3(0.0), knownW = vec3(0.0);
         float knownHits = 0.0;
         for (int r = 0; r < RAYS; ++r) {
             float pw = sHit[r].w;
             if (pw < 0.0) continue;
-            knownBounce += hitPatchLight(r, int(k), suns);
+            // Weighted by what the hit sends back, as the fast path's (sUnknownBounce): a sheet hit's light is per unit of its albedo.
+            knownBounce += sHit[r].rgb * hitPatchLight(r, int(k), suns);
+            knownW += sHit[r].rgb;
             knownHits += 1.0;
         }
-        vec3 unknownBounce = knownHits > 0.0 ? knownBounce / knownHits : vec3(0.0);
+        vec3 unknownBounce = knownHits > 0.0 ? knownBounce / max(knownW, vec3(1e-8)) : vec3(0.0);
         for (int r = 0; r < RAYS; ++r) {
             vec4 h = sHit[r];
             vec3 before = sum;

@@ -524,7 +524,7 @@ internal sealed partial class SponzaLoop
             // half of it. x: whether the lit pass takes the field's sky visibility and light (--no-sky turns both off).
             new("uIncident",         new Vector4Uniform(new Vector4(
                 skyVisibilityEnabled ? 1f : 0f,
-                IncidentHoldsOcclusion ? 1f : 0f,
+                IncidentHoldsOcclusion ? (materialAoOnGi ? 2f : 1f) : 0f,
                 IncidentFieldNow ? 1f : 0f,
                 halfShadowsNow ? 1f : 0f))),
             new("uIncidentGradient", new Vector4Uniform(new Vector4(incidentNormalBias, incidentGradientClamp, SheetsInGi && IncidentFieldNow ? 1f : 0f, GiFarSideNow && IncidentFieldNow ? (sheetGlowSplit ? 2f : NearGlowSplitNow ? 3f : 1f) : 0f))),

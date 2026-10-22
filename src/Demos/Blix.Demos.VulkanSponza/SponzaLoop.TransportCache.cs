@@ -28,7 +28,9 @@ internal sealed partial class SponzaLoop
     // bump the stage whose output or format changed, and only its key -- and what is made from it -- moves. The shared
     // version moved for one stage's format re-cooked every stage, the texels and the sun records with them (2026-10-14).
     // 0 adds nothing to a key, so the keys from before these existed still answer.
-    private const int PatchesStageVersion = 0, SunVisStageVersion = 0, CouplingsStageVersion = 0, TexelsStageVersion = 0;
+    // Patches 1, couplings 2: the visibility lift scaled to the line (VisLift), own placement first and no hit on its ray's
+    // own patch or twin (CouplingsOnMetal), 2026-10-22. Patches 3: patch sides and fill spots behind a sheet that lets light through kept.
+    private const int PatchesStageVersion = 3, SunVisStageVersion = 0, CouplingsStageVersion = 2, TexelsStageVersion = 0;
     private static string StageVersion(int v) => v == 0 ? "" : string.Create(CultureInfo.InvariantCulture, $";stage v{v}");
     private string? sceneAssetsRoot;
 
@@ -113,7 +115,7 @@ internal sealed partial class SponzaLoop
             $"patches;spacing {transportSpacing};reach {TexelOpenReach};{(transportFill ? $"fill {transportFillRays} x{transportFillPasses} {finding}" : "no fill")}{StageVersion(PatchesStageVersion)}"));
         var sunVis = Hash(patches + string.Create(CultureInfo.InvariantCulture, $";sun vis {transportVisRes}{StageVersion(SunVisStageVersion)}"));
         var couplings = Hash(patches + string.Create(CultureInfo.InvariantCulture,
-            $";couplings;rays {transportRays};sunlet {transportSunlet};{finding}{(transportOwnFallback ? " own fallback" : "")}{(transportSeed != 0 ? $" seed {transportSeed}" : "")}{StageVersion(CouplingsStageVersion)}"));
+            $";couplings;rays {transportRays};sunlet {transportSunlet};{finding}{(transportOwnFallback ? " own fallback" : "")}{(transportOwnFirst ? " own first" : "")}{(transportSeed != 0 ? $" seed {transportSeed}" : "")}{StageVersion(CouplingsStageVersion)}"));
         var texels = Hash(scenePart + string.Create(CultureInfo.InvariantCulture,
             $"texels {transportTexels};texel {texelSpacing};levels {texelLevels};reach {TexelOpenReach};lightmap {lightmapEnabled} (the atlas is level 0);{(texelFoliage ? "foliage;" : "")}{StageVersion(TexelsStageVersion)}"));
         return new TransportStageKeys(patches, sunVis, couplings, texels, Hash($"{patches};{sunVis};{couplings};{texels}"));

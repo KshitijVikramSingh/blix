@@ -26,7 +26,10 @@ internal sealed record TransportSolveData(
     // transmittance (zero: none) and its twin -- the patch on the sheet's other side, at the same point (-1: none).
     // The sheet's far side glows with the bounce light reaching its near side (texel_nodes_solve.comp).
     Vector3[]? Transmit = null,
-    int[]? Twin = null);
+    int[]? Twin = null,
+    // And T alone, the share the transmission lobe takes (the base lobe keeps 1 - T): the factor times its texture's mean
+    // over the placement. Null: T c's brightest channel (a colour factor at 1, as the testbeds author it).
+    float[]? TransmitFactor = null);
 
 internal sealed partial class SponzaLoop
 {
@@ -179,10 +182,10 @@ internal sealed partial class SponzaLoop
                     {
                         // --sheet-light: the spec's sheet -- T c of the light on the twin's side through (per unit of the
                         // albedo the readers multiply in), 1 - T of its own kept (terms' w: T, incomingThrough). T is the
-                        // factor's brightest channel, the colour factor's at 1 (the testbeds author it so).
+                        // transport's (TransmitFactor: the factor times its texture's mean), else T c's brightest channel.
                         static float Over(float x, float y) => x / MathF.Max(y, 0.02f);
                         transmit[p] = new Vector4(Over(tr[p].X, a.X), Over(tr[p].Y, a.Y), Over(tr[p].Z, a.Z), BitConverter.Int32BitsToSingle(tw[p]));
-                        terms[3 * p].W = MathF.Max(tr[p].X, MathF.Max(tr[p].Y, tr[p].Z));
+                        terms[3 * p].W = d.TransmitFactor is { } tf ? tf[p] : MathF.Max(tr[p].X, MathF.Max(tr[p].Y, tr[p].Z));
                         sheets++;
                         continue;
                     }

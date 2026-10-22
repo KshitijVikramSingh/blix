@@ -30,3 +30,27 @@ done
 # crevices-hashed: the dark crevices with no lightmap, so every texel is a hashed one (Sponza's trees and ivy are).
 rm -rf "${COOKED:?}/crevices-hashed"
 dotnet "$REPO/src/Blix.Tools.Cook/bin/Debug/net8.0/Blix.Tools.Cook.dll" asset "$SRC/crevices-dark/crevices-dark.gltf" --out "$COOKED/crevices-hashed"
+# BLIX_TESTBED_KHRONOS=1: Khronos' diffuse-transmission samples (glTF-Sample-Assets, each under its own licence: its
+# LICENSE.md beside it), downloaded once into "$SRC/khronos", placed by `blix khronos` and cooked: khronos-plant and
+# khronos-teacup in the Cornell room's sunlit shaft, khronos-test on open ground (tools/testbeds/materials.sh judges them).
+if [[ "${BLIX_TESTBED_KHRONOS:-0}" == 1 ]]; then
+    K="$SRC/khronos"
+    for m in DiffuseTransmissionPlant DiffuseTransmissionTeacup DiffuseTransmissionTest; do
+        if [[ ! -f "$K/$m/$m.glb" ]]; then
+            mkdir -p "$K/$m"
+            base="https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/$m"
+            curl -sSfL -o "$K/$m/$m.glb" "$base/glTF-Binary/$m.glb"
+            curl -sSfL -o "$K/$m/LICENSE.md" "$base/LICENSE.md"
+        fi
+    done
+    khronos() {
+        local scene=$1; shift
+        "$REPO/blix" run --build khronos "$@" --out "$SRC/$scene/$scene.gltf"
+        rm -rf "${COOKED:?}/$scene"
+        dotnet "$REPO/src/Blix.Tools.Cook/bin/Debug/net8.0/Blix.Tools.Cook.dll" asset "$SRC/$scene/$scene.gltf" --out "$COOKED/$scene"
+        dotnet "$REPO/src/Blix.Tools.Cook/bin/Debug/net8.0/Blix.Tools.Cook.dll" lightmap "$COOKED/$scene" --write
+    }
+    khronos khronos-plant --model "$K/DiffuseTransmissionPlant/DiffuseTransmissionPlant.glb" --scale 1.5 --at -0.7,0,-1.68 --room cornell
+    khronos khronos-teacup --model "$K/DiffuseTransmissionTeacup/DiffuseTransmissionTeacup.glb" --scale 8 --at -0.7,0,-1.68 --room cornell
+    khronos khronos-test --model "$K/DiffuseTransmissionTest/DiffuseTransmissionTest.glb" --scale 0.5 --at 0,2.13,0 --room ground
+fi
