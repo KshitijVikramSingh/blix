@@ -48,8 +48,10 @@ layout(std430, set = 0, binding = 13) buffer Histogram { uint histogram[]; };   
 layout(std430, set = 0, binding = 14) buffer NextCount { uint nextCount[]; };
 // The texels the round may refine (a bit a texel; uKeep.y on): the fine round's contact-flagged alone.
 layout(std430, set = 0, binding = 15) readonly buffer RefineMask { uint refineMask[]; };
-// The pooled stop: each texel's patch (the cook's pick; -1 none: its own noise alone), and per patch 4 floats (as bits:
-// float atomics by compare-and-swap) -- the relative noise summed, the light summed, the texels.
+// The pooled stop: each texel's patch (the cook's pick; -1 none: its own noise alone), and per patch 8 words -- the
+// relative noise summed and the light summed, each 16.16 fixed point in two words (low, high: exact integer sums, the same
+// in any order -- float compare-and-swap sums came out in the order the threads met, and gave up after 64 tries), then
+// the texels.
 layout(std430, set = 0, binding = 18) readonly buffer TexelPatch { int texelPatch[]; };
 layout(std430, set = 0, binding = 19) buffer Pool { uint pool[]; };
 // --near-glow-split (texel_nodes_shade.glsl, NodeGlow): the slice's glow from sheets within the frame's pass-by, by place
@@ -61,13 +63,12 @@ layout(std430, set = 0, binding = 22) buffer GlowPart { uvec2 glowPart[]; };
 const uint POOL_LEAST = 4u;   // a pool of fewer texels says nothing
 
 void poolAdd(uint at, float v) {
-    uint old = pool[at];
-    for (int i = 0; i < 64; ++i) {
-        uint got = atomicCompSwap(pool[at], old, floatBitsToUint(uintBitsToFloat(old) + v));
-        if (got == old) return;
-        old = got;
-    }
+    uint q = uint(clamp(v, 0.0, 65535.0) * 65536.0 + 0.5);
+    uint old = atomicAdd(pool[at], q);
+    if (old + q < old) atomicAdd(pool[at + 1u], 1u);   // the carry
 }
+
+float poolRead(uint at) { return float(pool[at + 1u]) * 65536.0 + float(pool[at]) / 65536.0; }
 
 uint packRgb9e5(vec3 c) {
     const float maxValue = 65408.0;
@@ -115,9 +116,9 @@ void poolTexel(uint place, uint id, uint suns, uint passes) {
     float judged, own, variance;
     passStats(place, id, suns, passes, judged, own, variance);
     if (own <= 0.0) return;
-    poolAdd(4u * uint(p), min(variance / (own * own), 1e4));
-    poolAdd(4u * uint(p) + 1u, own);
-    atomicAdd(pool[4u * uint(p) + 2u], 1u);
+    poolAdd(8u * uint(p), min(variance / (own * own), 1e4));
+    poolAdd(8u * uint(p) + 2u, own);
+    atomicAdd(pool[8u * uint(p) + 4u], 1u);
 }
 
 bool settled(uint place, uint id, uint suns, uint passes, float bar, out float mean) {
@@ -126,10 +127,10 @@ bool settled(uint place, uint id, uint suns, uint passes, float bar, out float m
     if (float(passes) * 32.0 >= u.uSettle.x) return true;
     if (u.uKeep.w > 0.5) {
         int p = texelPatch[id];
-        uint texels = p >= 0 ? pool[4u * uint(p) + 2u] : 0u;
+        uint texels = p >= 0 ? pool[8u * uint(p) + 4u] : 0u;
         if (texels >= POOL_LEAST) {
-            float rel = uintBitsToFloat(pool[4u * uint(p)]) / float(texels);
-            float light = uintBitsToFloat(pool[4u * uint(p) + 1u]) / float(texels);
+            float rel = poolRead(8u * uint(p)) / float(texels);
+            float light = poolRead(8u * uint(p) + 2u) / float(texels);
             variance = max(variance, rel * light * light);
         }
     }

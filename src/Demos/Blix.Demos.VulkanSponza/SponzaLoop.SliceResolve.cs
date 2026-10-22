@@ -66,7 +66,7 @@ internal sealed partial class SponzaLoop
         device.WriteGpuBuffer(resolveHistogram, 0, new byte[512]);
         if (SettlePoolNow)
         {
-            var bytes = Math.Max(16, cookedPacked!.Length / 3 * 16);
+            var bytes = Math.Max(32, cookedPacked!.Length / 3 * 32);   // 8 words a patch (slice_resolve.comp, poolAdd)
             if (resolvePool.Equals(default(GpuBufferHandle))) resolvePool = Own(device.CreateGpuBuffer(bytes, name: "sponza.resolve.pool"));
             device.WriteGpuBuffer(resolvePool, 0, new byte[bytes]);
         }
@@ -199,9 +199,12 @@ internal sealed partial class SponzaLoop
                 $"[VulkanSponza] sun nodes: round {sunNodeRefineRound} settled {of - left:N0} of {of:N0} ({(of - left) * 100.0 / Math.Max(1, of):0.0}%, under {splitRefineMinShare * 100:0}%): refining stops; {left:N0} keep their light as it is."));
             return false;
         }
-        // The list just appended is the round's; the next round appends into the other.
+        // The list just appended is the round's; the next round appends into the other. In id order: the appends land as
+        // the threads meet (slice_resolve.comp, append), and a round of more than one slice reads the texels its earlier
+        // slices resolved -- which slice a texel fell in moved its light run to run (464 texels apart at 1,024-texel slices,
+        // 2026-10-22; Sponza's rounds span hundreds of slices).
+        sunNodeRefineIds = SortResolveList(resolveNext, left);
         sunNodeRefineBuffer = resolveIds[resolveNext];
-        sunNodeRefineIds = new uint[left];
         resolveNext = 1 - resolveNext;
         device.WriteGpuBuffer(resolveCount, 0, new byte[16]);
         sunNodeRefineRound++;
@@ -220,6 +223,19 @@ internal sealed partial class SponzaLoop
             Console.WriteLine(string.Create(Inv, $"[VulkanSponza] memory, {when}: Metal {allocatedMb:N0} of {recommendedMb:N0} MB recommended."));
         }
         LogMemoryInventory(when);
+    }
+
+    // List k's first count entries (ids and their places) put in id order, read back and written again.
+    private uint[] SortResolveList(int k, int count)
+    {
+        if (count < 2) return MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(resolveIds[k], 0, Math.Max(4, count * 4)).AsSpan())[..count].ToArray();
+        device.WaitIdle();
+        var ids = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(resolveIds[k], 0, count * 4).AsSpan()).ToArray();
+        var places = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(resolvePlaces[k], 0, count * 4).AsSpan()).ToArray();
+        Array.Sort(ids, places);
+        device.WriteGpuBuffer(resolveIds[k], 0, MemoryMarshal.AsBytes(ids.AsSpan()));
+        device.WriteGpuBuffer(resolvePlaces[k], 0, MemoryMarshal.AsBytes(places.AsSpan()));
+        return ids;
     }
 
     private bool IsResolveBuffer(GpuBufferHandle b) => b.Equals(resolveIds[0]) || b.Equals(resolveIds[1]);

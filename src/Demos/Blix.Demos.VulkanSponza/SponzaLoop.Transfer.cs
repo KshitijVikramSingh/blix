@@ -431,13 +431,20 @@ internal sealed partial class SponzaLoop
         // The rest settle at the sweep.
         var mask = fineRefineContactOnly ? new uint[(texelCount + 31) / 32] : null;
         long masked = 0;
+        // The cut's bin: its smallest ids, not its first appended -- the flags land as the threads meet, and which of the
+        // bin's texels made the round moved run to run (2026-10-22).
+        var atCutIds = new List<uint>();
+        for (var i = 0; i < count; i++)
+            if (Bin(BitConverter.UInt32BitsToSingle(words[2 * i + 1])) == cut) atCutIds.Add(words[2 * i]);
+        atCutIds.Sort();
+        var cutLast = atCut > 0 && atCutIds.Count > 0 ? atCutIds[Math.Min(atCut, atCutIds.Count) - 1] : 0u;
         for (var i = 0; i < count && n < take; i++)
         {
             var score = BitConverter.UInt32BitsToSingle(words[2 * i + 1]);
             var b = Bin(score);
-            if (b > cut || (b == cut && atCut-- > 0))
+            var id = words[2 * i];
+            if (b > cut || (b == cut && atCut > 0 && id <= cutLast))
             {
-                var id = words[2 * i];
                 ids[n++] = id;
                 if (mask is not null && score >= (fineRefineCloth ? 500f : 1000f)) { mask[id >> 5] |= 1u << (int)(id & 31); masked++; }
             }
@@ -450,6 +457,7 @@ internal sealed partial class SponzaLoop
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] fine refine: {masked:N0} contact-flagged {(fineRefineCloth ? "and sheet " : "")}texels may refine; the rest settle at the sweep."));
         }
         if (n < take) ids = ids[..n];
+        Array.Sort(ids);   // in id order, whatever order the flags were appended in (the place order below keeps ties so)
         // In place order (the far field's key): picked in the order the flags were appended, a slice's texels lay all over
         // the scene and every hit's lookups missed the caches.
         if (farPlaceKey is { } placeKey && placeKey.Length == texelCount)

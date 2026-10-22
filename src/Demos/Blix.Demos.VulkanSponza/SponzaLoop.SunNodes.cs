@@ -1041,6 +1041,9 @@ internal sealed partial class SponzaLoop
     // queue: counted, the wait (~100 ms) spent a 50 ms budget, one pass a frame -- Sponza's refine took 13.5 s for
     // ~1 s of rays (the rays kernel 1 ms, the frame's first ~100 ms, 2026-10-16). BLIX_LIVE_MS overrides it.
     private const double SunNodeCookScreenMs = 200;
+    // --gather-steps-a-frame N: the gather's loop takes N steps a frame (a pass, a read-back, a record step), not as many as
+    // its time budget holds -- the cook's schedule then the frame count's alone, run to run (a determinism probe).
+    private int gatherStepsAFrame;
     private static readonly double SunNodeLiveMs = double.TryParse(Environment.GetEnvironmentVariable("BLIX_LIVE_MS"), out var ms) ? ms : 80;
 
     // texel_nodes_shade_split.comp: the same shade for up to 32 suns, at ~2.5x the workgroups resident (outside the frame).
@@ -1161,7 +1164,9 @@ internal sealed partial class SponzaLoop
         var clock = Stopwatch.StartNew();
         var budget = CookScreenNow ? SunNodeCookScreenMs : GatherInBackground ? backgroundGatherMs : SunNodeLiveMs;
         sunNodeQueueWaitMs = 0;
-        while (sunNodeStage == SunNodeStage.Tracing && clock.Elapsed.TotalMilliseconds - sunNodeQueueWaitMs < budget)
+        var steps = 0;
+        while (sunNodeStage == SunNodeStage.Tracing
+               && (gatherStepsAFrame > 0 ? steps++ < gatherStepsAFrame : clock.Elapsed.TotalMilliseconds - sunNodeQueueWaitMs < budget))
         {
             if (sunNodeReadback)
             {

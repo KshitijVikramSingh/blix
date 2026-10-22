@@ -34,7 +34,9 @@ void main() {
             return;
         }
         uvec2 other;
-        if (nodeTexelKey(prev, u.uTexelGrid, other) && other == key) return;
+        // Its key's cell taken: the smallest id keeps it, whichever came first -- first-come was the dispatch's race, and
+        // which texel a search found there moved run to run (2026-10-22).
+        if (nodeTexelKey(prev, u.uTexelGrid, other) && other == key) { atomicMin(cookHash[2u * slot], id); return; }
         slot = (slot + 1u) & mask;
     }
 }
