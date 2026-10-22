@@ -24,6 +24,7 @@ internal sealed partial class SponzaLoop
         rayCaptureBits = args.Int("ray-capture") ?? -1;
         rayCaptureRoom = args.Int("ray-capture-room") ?? rayCaptureRoom;
         rayCaptureTexel = args.Int("ray-capture-texel") ?? -1;
+        rayCaptureSun = args.Flag("ray-capture-sun");
         if (rayCaptureTexel >= 0 && rayCaptureBits < 0) rayCaptureBits = 0;
         if (rayCaptureBits >= 0)
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
@@ -34,7 +35,10 @@ internal sealed partial class SponzaLoop
 
     // The round a ray was shot in: the stage's provenance code (1 sweep, 2 refine, 3 fine, 4 visible-changed), the refine
     // round << 4, the near round << 8.
-    private float RayCaptureTag => GatherProvenanceCode + 16f * sunNodeRefineRound + 256f * (fineGathering ? nearRounds - nearRoundsLeft : 0);
+    private float RayCaptureTag => GatherProvenanceCode + 16f * sunNodeRefineRound + 256f * (fineGathering ? nearRounds - nearRoundsLeft : 0)
+        + (rayCaptureSun ? 32768f : 0f);
+    // --ray-capture-sun: the records' word 6 is the hit's whole sun and its texels' bit blend (half2), not cosine and weight.
+    private bool rayCaptureSun;
 
     private Vector4 RayCaptureUniform => RayCaptureOn
         ? new Vector4(1f, rayCaptureTexel >= 0 ? -(rayCaptureTexel + 1f) : rayCaptureBits, RayCaptureTag, rayCaptureRoom) : Vector4.Zero;

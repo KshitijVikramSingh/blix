@@ -94,6 +94,8 @@ internal sealed partial class SponzaLoop
         if (cookedPacked is { } packed) Buffer("light_lists.f32x2", liveLights, (long)(packed.Length / 3) * LightListSize * 8);
         Buffer("patches.f32x12", cookedPatchBuffer, cookedPacked is { } cp ? (long)cp.Length * 16 : 0);
         // The live patch light the gather's hits read when no texel answers ([patch][component]: half rgb, LiveComponents a patch).
+        // The patches' direct sun (texel_live_direct.comp: the n.l x bit sum over its texels, fixed point 4096, and the texels).
+        Buffer("patch_direct.u32x2", liveDirect, cookedPacked is { } cd && !liveDirect.Equals(default(GpuBufferHandle)) ? (long)(cd.Length / 3) * 8 : 0);
         Buffer("patch_light.u32x2", livePatchLightBuffer, cookedPacked is { } cl && !livePatchLightBuffer.Equals(default(GpuBufferHandle)) ? (long)(cl.Length / 3) * LiveComponents * 8 : 0);
         if (referenceView || referenceSamples > 0)
         {

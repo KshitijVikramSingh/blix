@@ -639,6 +639,9 @@ void main() {
             float tiltDen = max(dot(dn, w), 0.1);
             float captureBounce = 0.0;
             float captureLight = -1.0;   // the ray capture: the light the hit took, its sun column's (a hit among no texel)
+            // --ray-capture-sun (the tag's bit 15): the hit's sun at full visibility and n.l 1 (luminance, weight and albedo in),
+            // and n.l times the visibility its texels' sun bits blend to -- what a light-free list would give for the hit's sun.
+            float captureSunFull = 0.0, captureSunBits = 0.0;
 #if MAX_WORDS == 1
             sRayNearGlow[r] = vec3(0.0);
 #endif
@@ -680,6 +683,13 @@ void main() {
 #else
                     float baseLobe = 1.0;
 #endif
+                    if (ndotl > 0.0 && hasSun) {
+                        captureSunFull = dot(h.rgb * u.uSunIrradiance.rgb * baseLobe, lumW);
+                        float vb = sUnknown[r] * u.uSunIrradiance.w;
+                        for (int c = 0; c < NODE_CANDIDATES; ++c)
+                            if ((sBits[(uint(r) * NODE_CANDIDATES + uint(c)) * MAX_WORDS + word] & bit) != 0u) vb += sWeight[r * NODE_CANDIDATES + c];
+                        captureSunBits = ndotl * vb;
+                    }
                     if (ndotl > 0.0) {
                         if (k == exactColumn && sExact[r] >= 0.0) { light += u.uSunIrradiance.rgb * ndotl * sExact[r] * baseLobe; tilts = false; }
                         else {
@@ -690,6 +700,9 @@ void main() {
                         }
                     }
                     add = h.rgb * light + glow;
+                    // The capture's alternative takes the sheet's glow as it is (the twin's sun, which a list carries alike).
+                    if (hasSun && captureSunFull > 0.0) captureSunBits += dot(glow, lumW) / captureSunFull;
+                    else if (hasSun && dot(glow, lumW) > 0.0) { captureSunFull = dot(glow, lumW); captureSunBits = 1.0; }
                     tiltLight = dot(add, lumW);
                 }
                 sRaySum[r * 2 + k] = add;
@@ -717,7 +730,8 @@ void main() {
                         float cosine = dot(tn, tn) > 0.0 ? dot(normalize(tn), w) : 0.0;
                         captured[2u * at] = uvec4(id, uint(u.uCapture.z) | (uint(u.uShade.w) << 16), floatBitsToUint(sDist[r]), how | (uint(r) << 8) | (uint(int(h.w) + 1) << 13));
                         captured[2u * at + 1u] = uvec4(floatBitsToUint(whole), floatBitsToUint(captureBounce),
-                            packHalf2x16(vec2(cosine, sRayWeight[r])), sNearTexel[r] >= 0 ? uint(sNearTexel[r]) : floatBitsToUint(-max(captureLight, 1e-30)));
+                            (uint(u.uCapture.z) & 0x8000u) != 0u ? packHalf2x16(vec2(captureSunFull, captureSunBits)) : packHalf2x16(vec2(cosine, sRayWeight[r])),
+                            sNearTexel[r] >= 0 ? uint(sNearTexel[r]) : floatBitsToUint(-max(captureLight, 1e-30)));
                     }
                 }
             }
