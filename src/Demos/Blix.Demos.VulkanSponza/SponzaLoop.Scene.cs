@@ -332,6 +332,10 @@ internal sealed partial class SponzaLoop
         }
     }
 
+    // Two-sided for the GI (rayPlacementGiTwoSided): double-sided, or letting light through.
+    private bool GiTwoSided(DrawableStaging s) =>
+        s.Pipeline == opaqueDoubleSidedPipeline || s.Pipeline == blendDoubleSidedPipeline || (giFarSide && s.TransmissionFactor > 0f);
+
     // Bundle every staged primitive into the shared buffers, then compose the
     // draw lists/groups over the result. The engine's MeshBundler does the
     // geometry packing (one shared VB + per-width u16/u32 IBs, each primitive a
@@ -378,7 +382,7 @@ internal sealed partial class SponzaLoop
                 var lod0 = ordered[i].Lods[0].Indices32 ?? ordered[i].Lods[0].Indices16?.Select(x => (uint)x).ToArray();
                 if (lod0 is not null)
                     lightmapSources.Add((ordered[i].Name, ordered[i].VertexBytes, sharedLayout.Stride, VertexSemantics.Of(sharedLayout)?.Normal ?? -1, VertexSemantics.Of(sharedLayout)?.Tangent ?? -1, lod0, ordered[i].Worlds[0], t,
-                        ordered[i].Pipeline == opaqueDoubleSidedPipeline || ordered[i].Pipeline == blendDoubleSidedPipeline));
+                        GiTwoSided(ordered[i])));
             }
             sceneLightmapTexels = Own(device.CreateGpuBuffer(texels.Length * 8, MemoryMarshal.AsBytes(texels.AsSpan()), "sponza.scene.lightmap-texels"));
             if (lightmapEnabled)
@@ -413,6 +417,7 @@ internal sealed partial class SponzaLoop
                 rayPlacementMaterials.Add(new RayMaterial(s.Albedo, s.BaseColor, s.AlphaCutoff, s.IsBlend));
                 rayPlacementLightmapped.Add(s.LightmapTexels is not null);
                 rayPlacementDoubleSided.Add(s.Pipeline == opaqueDoubleSidedPipeline || s.Pipeline == blendDoubleSidedPipeline);
+                rayPlacementGiTwoSided.Add(GiTwoSided(s));
                 rayPlacementTransmission.Add(s.Transmission);
                 rayPlacementTransmissionFactor.Add(s.TransmissionFactor);
                 rayPlacementNames.Add(s.Name);

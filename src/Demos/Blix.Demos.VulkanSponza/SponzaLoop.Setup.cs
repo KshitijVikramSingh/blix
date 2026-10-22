@@ -458,6 +458,7 @@ internal sealed partial class SponzaLoop
         if (args.Int("fine-max-rays") is { } fm) fineGatherMaxRays = Math.Max(32, fm / 32 * 32);
         fineRefineContactOnly = !args.Flag("fine-refine-all");
         fineRefineCloth = !args.Flag("no-fine-refine-cloth");
+        giFarSide = !args.Flag("no-gi-far-side");
         regatherSky = args.Flag("regather-sky");
         if (args.Int("live-bounces") is { } lb) LiveBouncesToRest = Math.Max(1, lb);
         // --live-max-rays N (4 x --live-rays): the refine's ceiling a texel in live mode -- the budget's other half. At

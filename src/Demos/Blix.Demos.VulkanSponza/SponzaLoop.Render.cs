@@ -527,7 +527,7 @@ internal sealed partial class SponzaLoop
                 IncidentHoldsOcclusion ? 1f : 0f,
                 IncidentFieldNow ? 1f : 0f,
                 halfShadowsNow ? 1f : 0f))),
-            new("uIncidentGradient", new Vector4Uniform(new Vector4(incidentNormalBias, incidentGradientClamp, SheetsInGi && IncidentFieldNow ? 1f : 0f, 0f))),
+            new("uIncidentGradient", new Vector4Uniform(new Vector4(incidentNormalBias, incidentGradientClamp, SheetsInGi && IncidentFieldNow ? 1f : 0f, GiFarSideNow && IncidentFieldNow ? 1f : 0f))),
             new("uViewProjUnjittered", new Matrix4x4Uniform(viewProj)),
             // Last frame's un-jittered camera, or this frame's on the first (zero motion rather than garbage).
             new("uPrevViewProjUnjittered", new Matrix4x4Uniform(velocityPrevValid ? velocityPrevViewProj : viewProj)),

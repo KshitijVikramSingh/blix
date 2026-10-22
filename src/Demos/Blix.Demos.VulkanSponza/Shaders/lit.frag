@@ -220,6 +220,45 @@ layout(location = 2) in vec3 vWorldPos;
 layout(location = 3) in vec3 vTangentWorld;   // world-space tangent (forwarded glTF TANGENT.xyz)
 layout(location = 4) in float vTangentSign;   // glTF TANGENT.w handedness
 layout(location = 10) in vec2 vLightmapTexel; // --lightmap: the lightmap atlas texel (lit.vert, instances.glsl)
+
+// A sheet's far side as the GI has it (frame.uIncidentGradient.w): the four atlas texels about the pixel's, of each
+// double-sided pair the record facing away from n (the pair: the front's record, then the back's, SponzaLoop.Lightmap.cs),
+// their resolved irradiance (rgb9e5; word 1 bit 16 once gathered) bilinear. Surfaces that transmit get such pairs
+// whether double-sided or not (SponzaLoop.Scene.cs, GiTwoSided): a closed thin shell -- Khronos' teacup, single-sided,
+// T 1 -- reflects almost nothing and showed black where its far side was the sky cube's guess and the GI kept none
+// (tools/gi-model/thin_shell.py: the gap's light settles in the fine round and two near rounds, within 2-4%).
+layout(std430, set = 1, binding = 22) readonly buffer LitTexels { vec4 litTexels[]; };          // 2 a record: pos (w < 0 a pair), normal
+layout(std430, set = 1, binding = 23) readonly buffer LitTexelResolved { uvec2 litResolved[]; };
+bool lightmapBackIrradiance(vec2 texel, vec3 n, out vec3 e) {
+    e = vec3(0.0);
+    uvec2 size = lightmapFrames[0];
+    if (size.x == 0u || dot(texel, texel) < 1e-6) return false;
+    vec2 f = texel - 0.5;
+    ivec2 base = ivec2(floor(f));
+    vec2 t = f - vec2(base);
+    float weight = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        ivec2 o = ivec2(i & 1, i >> 1);
+        ivec2 at = base + o;
+        if (any(lessThan(at, ivec2(0))) || any(greaterThanEqual(at, ivec2(size)))) continue;
+        uint id = LIGHTMAP_CELL_OF(at);
+        if (id == 0xFFFFFFFFu || litTexels[2u * id].w >= 0.0) continue;    // none, or not a pair
+        // The pair's record facing away from n: its back.
+        uint back = dot(litTexels[2u * id + 1u].xyz, n) < 0.0 ? id : id + 1u;
+        if (dot(litTexels[2u * back + 1u].xyz, n) >= 0.0 || abs(litTexels[2u * back].w) < 2.0) continue;
+        uvec2 r = litResolved[back];
+        if ((r.y & 0x10000u) == 0u) continue;
+        uint w9 = r.x;
+        float scale = exp2(float(int(w9 >> 27) - 15 - 9));
+        vec3 l = vec3(float(w9 & 511u), float((w9 >> 9) & 511u), float((w9 >> 18) & 511u)) * scale;
+        float wt = (o.x == 1 ? t.x : 1.0 - t.x) * (o.y == 1 ? t.y : 1.0 - t.y);
+        e += wt * l;
+        weight += wt;
+    }
+    if (weight < 1e-4) return false;
+    e /= weight;
+    return true;
+}
 layout(location = 5) flat in uint vLod;        // the LOD level drawn (instances.glsl): LOD 0 keeps its own frame
 
 // Viz 25, the lightmap's parameterization: a checker one texel wide, tinted per 64-texel block of the atlas -- seams
@@ -706,7 +745,12 @@ void main() {
     // the surface is not facing. A curtain with a bright courtyard behind it glows without any
     // direct sun on it at all, and that is most of what makes cloth read as thin.
     vec3 transmittedIBL = vec3(0.0);
-    if (diffTrans > 0.0) {
+    vec3 backGi;
+    if (diffTrans > 0.0 && frame.uIncidentGradient.w > 0.5 && incidentUsed && lightmapBackIrradiance(vLightmapTexel, N, backGi)) {
+        // The GI's far side: the pixel's atlas texels' back records -- their own gathers, the room behind a curtain, the
+        // light inside a closed thin shell's walls -- not the sky cube along -N.
+        transmittedIBL = blix_diffuseTransmissionAmbient(backGi, dtColor, diffTrans) / PI * ao * visibility;
+    } else if (diffTrans > 0.0) {
         // The back side's sky visibility. The incident field answers only at the front's geometric
         // normal, so its visibility stands in for -N's (the clipmap resolves enclosure at room scale,
         // where the two sides of a sheet share it); without the field the sky is open.

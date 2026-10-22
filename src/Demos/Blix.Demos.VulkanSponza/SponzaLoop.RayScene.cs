@@ -26,6 +26,11 @@ internal sealed partial class SponzaLoop
     private readonly List<bool> rayPlacementLightmapped = new();
     // Per placement: whether it is drawn double-sided -- a sheet with no inside (the lightmap's buried test).
     private readonly List<bool> rayPlacementDoubleSided = new();
+    // Two-sided for the GI: double-sided, or a surface that lets light through (KHR_materials_diffuse_transmission) --
+    // its far side receives light (a closed thin shell's walls: the teacup, single-sided, T 1), so it gets a record pair
+    // (SponzaLoop.Lightmap.cs) and its back faces are no solid's inside in the buried and contact tests. The RT shadows
+    // keep rayPlacementDoubleSided (how a ray counts a sheet's crossings). --no-gi-far-side: double-sided alone.
+    private readonly List<bool> rayPlacementGiTwoSided = new();
     // Per placement: its material's diffuse transmission (factor times colour; zero: none). The sun's shadow rays go
     // through such a sheet (SponzaLoop.RtShadows.cs RtRowTransmit), and what lands behind it is the sunlit sheet's
     // diffuse glow, not a tinted beam (tried as a beam: a sharp coloured copy of the cloth, 2026-10-15).

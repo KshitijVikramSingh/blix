@@ -94,7 +94,7 @@ internal sealed partial class SponzaLoop
     // stage of the GI bundle (--cook-gi): what they depend on beyond the texels key (which names the scene, its
     // .blixlightmap files and the texel settings).
     private sealed record LightmapRecords(Vector4[] Texels, uint[] IndexMap, uint[] Frames, int Count);
-    private const int LightmapRecordsVersion = 2;
+    private const int LightmapRecordsVersion = 3;
     private string? lightmapRecordsKey;
     private string LightmapRecordsRule => string.Create(CultureInfo.InvariantCulture,
         $"records v{LightmapRecordsVersion};atlas {lightmapAtlasWidth}x{lightmapAtlasHeight};{LightmapBuriedRule};contacts {ContactRays} {ContactShare} {ContactStep};budget {LightmapRecordBudgetBytes}");
@@ -262,14 +262,14 @@ internal sealed partial class SponzaLoop
                 Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                     $"[VulkanSponza] lightmap buried test: contact table for Metal, by the {(onBake ? "bake scene's" : "frame's")} rows: {contactTris.Length / 3:N0} partners over {Math.Max(0, contactStart.Length - 1):N0} rows."));
                 flags = metal.TestBuried(texels.AsSpan(0, count * 2), LightmapBuriedTests, LightmapBuriedThreshold, lightmapBuriedReach, LightmapBuriedLift, 173u,
-                    CollectionsMarshal.AsSpan(rayPlacementDoubleSided), LightmapEnclosedTests, contactStart, contactTris, out var buriedGpuMs);
+                    CollectionsMarshal.AsSpan(rayPlacementGiTwoSided), LightmapEnclosedTests, contactStart, contactTris, out var buriedGpuMs);
                 Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                     $"[VulkanSponza] lightmap buried test on Metal ({LightmapBuriedRule}): {count:N0} records in {buriedClock.Elapsed.TotalSeconds:0.0} s ({buriedGpuMs:0} ms GPU)."));
                 ProgressEnd("lightmap: buried test (Metal)");
                 if (lightmapBuriedWhy && LightmapEnclosedTests > 0)
                 {
                     var without = metal.TestBuried(texels.AsSpan(0, count * 2), LightmapBuriedTests, LightmapBuriedThreshold, lightmapBuriedReach, LightmapBuriedLift, 173u,
-                        CollectionsMarshal.AsSpan(rayPlacementDoubleSided), 0, contactStart, contactTris, out _);
+                        CollectionsMarshal.AsSpan(rayPlacementGiTwoSided), 0, contactStart, contactTris, out _);
                     ExplainEnclosed(scene, texels, flags, without);
                     // Metal against the CPU (same rules, same contact table and jitter; their own random rays): the
                     // records they disagree on, of a sample.
@@ -378,7 +378,7 @@ internal sealed partial class SponzaLoop
                 float r = MathF.Sqrt(u1), phi = 2f * MathF.PI * u2;
                 var d = Vector3.Normalize(t1 * (r * MathF.Cos(phi)) + t2 * (r * MathF.Sin(phi)) + n * MathF.Sqrt(MathF.Max(0f, 1f - u1)));
                 if (scene.Closest(new Ray(origin, d), ContactTMin) is not { } hit || hit.FrontFace) continue;
-                if (hit.Instance < rayPlacementDoubleSided.Count && rayPlacementDoubleSided[hit.Instance]) continue;
+                if (hit.Instance < rayPlacementGiTwoSided.Count && rayPlacementGiTwoSided[hit.Instance]) continue;
                 inside++;
                 toward += d;
             }
@@ -555,7 +555,7 @@ internal sealed partial class SponzaLoop
             var r = new Random(911 + k);
             for (var t = 0; t < 64; t++)
                 if (scene.Closest(new Ray(p + n * LightmapBuriedLift, CosineHemisphereCpu(n, r)), 0f, lightmapBuriedReach, (uint)r.Next()) is { FrontFace: false } hit
-                    && !rayPlacementDoubleSided[hit.Instance])
+                    && !rayPlacementGiTwoSided[hit.Instance])
                 {
                     hits++;
                     var name = rayPlacementNames[hit.Instance];
@@ -587,13 +587,13 @@ internal sealed partial class SponzaLoop
         int tests = LightmapBuriedTests, threshold = LightmapBuriedThreshold;
         for (var t = 0; t < tests && back < threshold; t++)
             if (ClosestThroughContacts(scene, new Ray(origin, CosineHemisphereCpu(n, r)), 0f, lightmapBuriedReach, (uint)r.Next()) is { FrontFace: false } hit
-                && !rayPlacementDoubleSided[hit.Instance]) back++;
+                && !rayPlacementGiTwoSided[hit.Instance]) back++;
         if (back >= threshold) return true;
         var escaped = 0;
         for (var t = 0; t < LightmapEnclosedTests; t++)
         {
             if (!(ClosestThroughContacts(scene, new Ray(origin, CosineHemisphereCpu(n, r)), 0f, float.PositiveInfinity, (uint)r.Next()) is { FrontFace: false } hit
-                && !rayPlacementDoubleSided[hit.Instance])) escaped++;
+                && !rayPlacementGiTwoSided[hit.Instance])) escaped++;
             if (escaped * 4 > LightmapEnclosedTests) return false;
         }
         return LightmapEnclosedTests > 0;
@@ -739,7 +739,18 @@ internal sealed partial class SponzaLoop
     {
         if (lightmapFramesBuffer.Equals(default(GpuBufferHandle)))
             lightmapFramesBuffer = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.lightmap.frames.none"));
-        return new[] { new ShaderBufferBinding("LightmapFrames", lightmapFramesBuffer) };
+        // The texels and their resolved light (lit.frag, lightmapBackIrradiance): placeholders until the GI has them.
+        var texelsUp = lightmapEnabled && !texelBuffer.Equals(default(GpuBufferHandle)) && !texelResolvedBuffer.Equals(default(GpuBufferHandle));
+        return new[]
+        {
+            new ShaderBufferBinding("LightmapFrames", lightmapFramesBuffer),
+            new ShaderBufferBinding("LitTexels", texelsUp ? texelBuffer : lightmapFramesBuffer),
+            new ShaderBufferBinding("LitTexelResolved", texelsUp ? texelResolvedBuffer : lightmapFramesBuffer),
+        };
     }
+
+    // A sheet's far side from the GI's back records in the lit pass (lit.frag; --no-gi-far-side: the sky cube along -N).
+    private bool giFarSide = true;
+    private bool GiFarSideNow => giFarSide && lightmapEnabled && !texelBuffer.Equals(default(GpuBufferHandle)) && !texelResolvedBuffer.Equals(default(GpuBufferHandle));
 
 }
