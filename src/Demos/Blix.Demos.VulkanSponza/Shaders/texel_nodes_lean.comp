@@ -4,20 +4,33 @@
 // texel, a thread a ray (RAYS: texel_nodes_shade.glsl's):
 //   a miss    the sky along it (x its weight), as the shade
 //   a hit     its albedo x weight / pi x its cell side's light (hit_cells.comp's CellLight in the lists' form: albedo-free,
-//             the patch blend averaged over the cell's area, and the side's sun -- its bits' blend x n.l x the sun): the
-//             same whatever its distance, contact cells too (the shade's near search, candidates and far set left out)
-//   no cell   the texel's other hits' light, albedo-weighted (the shade's unknown hits: borrowed)
+//             the patch blend averaged over the cell's area, and the side's sun -- its bits' blend x n.l x the sun)
+//   a near    nearer than the cells' near distance, without a cell, in a contact's cell or on a sheet that lets light
+//   hit       through: the shade's search (texel_nodes.glsl, nodeSetAt) -- the likeliest texel's gathered parts, the sun by
+//             the candidates' bits, a sheet's far side through it (the shade's nearTexelLight); its cell when none is
+//             gathered yet. Lean on the near rounds without it, a crease read across itself: the corridor's seams 0.064
+//             against 0.051 (2026-10-23).
+//   no cell   the texel's other hits' light, albedo-weighted (the shade's unknown hits: borrowed; one nearer than the
+//             cells' near distance from the near hits alone, uNear.z)
+// The fine round's near rounds as the shade has them (uNear.x: 1 the first, its far part recorded per fine place; 2 a
+// later one, its rays cut at uNear.y: the cut rays out, the recorded far part in).
 // The pass's sums into NodeAccum and NodeDetail as the shade writes them (texel_nodes_shade.glsl), so the resolve, the
 // refine, the settling and the landing read it unchanged. Not: sheets that let light through, the far field, the census,
 // the ray capture.
 
 #define RAYS 32
 layout(local_size_x = RAYS) in;
+#define NODE_LOOKUP
 
 layout(set = 0, binding = 0) uniform Lean {
     vec4 uShade;    // x the slice's texels, y the columns (suns), w the pass (> 0: add to the last)
     vec4 uSky;      // x the sky's strength, y its lod, z the kept sky's column + 1 (0: none)
     vec4 uDetail;   // x the slice's first id in NodeIds, y 1: the detail
+    vec4 uNear;     // x the near round's mode (0, 1, 2), y the near distance, z 1: an unknown near hit borrows from near hits
+    vec4 uLookup;   // x, y the search's plane and spread (cells), z the cells' near distance, w the hash's slots (0: no search)
+    vec4 uTexelGrid;
+    vec4 uIrr;      // rgb the sun's irradiance; w the sun bits' words a texel
+    vec4 uSheets;   // x 1: sheets that let light through in the GI (SheetRows)
 } u;
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
@@ -31,11 +44,34 @@ layout(std430, set = 0, binding = 8) readonly buffer HitCells { uint hitCells[];
 layout(std430, set = 0, binding = 9) readonly buffer CellLight { uint cellLight[]; };
 layout(std430, set = 0, binding = 10) buffer NodeAccum { vec4 nodeAccum[]; };              // [slice texel][column]
 layout(std430, set = 0, binding = 11) buffer NodeDetail { vec4 nodeDetail[]; };
+layout(std430, set = 0, binding = 12) readonly buffer FinePlace { uint finePlace[]; };   // a fine texel's place + 1 (0: none)
+layout(std430, set = 0, binding = 13) buffer FarPart { vec4 farPart[]; };              // [place][column]: far light, passes
+layout(std430, set = 0, binding = 14) readonly buffer SunNodeHash { uint cookHash[]; };
+layout(std430, set = 0, binding = 15) readonly buffer FoliagePoints { vec4 foliagePoints[]; };   // the search's set 1: unread
+layout(std430, set = 0, binding = 16) readonly buffer FoliageHash { uint foliageHash[]; };
+layout(std430, set = 0, binding = 17) readonly buffer SunNodeBits { uint sunBits[]; };
+layout(std430, set = 0, binding = 18) readonly buffer SplitSky { uvec2 skyPart[]; };
+layout(std430, set = 0, binding = 19) readonly buffer SplitSun { uvec2 sunPart[]; };
+layout(std430, set = 0, binding = 20) readonly buffer TexelProvenance { uint provenance[]; };
+layout(std430, set = 0, binding = 21) readonly buffer SheetRows { uint sheetRows[]; };
+#include "texel_nodes.glsl"
 
 vec3 unpackRgb9e5(uint p) {
     float scale = exp2(float(int(p >> 27) - 15 - 9));
     return vec3(p & 511u, (p >> 9) & 511u, (p >> 18) & 511u) * scale;
 }
+
+// A texel's gathered light for a column (texel_nodes_shade.glsl's texelPartLight), or false before its gather.
+bool partLight(uint t, bool sunColumn, out vec3 l) {
+    uvec2 w = sunColumn ? sunPart[t] : skyPart[t];
+    l = vec3(0.0);
+    if ((w.y & 0x10000u) == 0u) return false;
+    uint code = (provenance[t / 4u] >> (8u * (t % 4u) + (sunColumn ? 0u : 4u))) & 0xFu;
+    if ((code < 1u || code > 4u) && code != 10u) return false;
+    l = unpackRgb9e5(w.x) * (sunColumn ? u.uIrr.rgb : vec3(1.0));
+    return true;
+}
+
 
 const vec3 lumW = vec3(0.2126, 0.7152, 0.0722);
 const float PI = 3.14159265359;
@@ -45,6 +81,8 @@ shared vec3 sAlbedoW[RAYS];     // a hit's albedo x weight / pi (an unknown one'
 shared float sKnown[RAYS];      // 1 a hit with a cell, 2 a hit without, 0 a miss
 shared vec2 sTilt[RAYS * 2];
 shared float sMiss[RAYS];
+shared float sFar[RAYS];        // past the near distance or a miss (not on a sheet's own texel): the near rounds' far part
+shared float sNear[RAYS];       // a hit nearer than the near distance
 shared vec3 sMean[2];
 
 void main() {
@@ -76,13 +114,70 @@ void main() {
         known = 2.0;
         // The hit's cell (texel_nodes_shade.glsl's byCell): its row's r x r square of the barycentrics, lower triangle
         // row by row; the side it was met from.
-        if (h1.z != 0xFFFFFFFFu && (h1.z & 0x80000000u) == 0u) {
+        float dist = uintBitsToFloat(h0.x);
+        vec3 normal = uintBitsToFloat(h2.xyz);
+        vec3 hn = dot(normal, dir) > 0.0 ? -normal : normal;
+        bool hasCell = h1.z != 0xFFFFFFFFu && (h1.z & 0x80000000u) == 0u;
+        uint cellIndex = 0u;
+        if (hasCell) {
             uint r = hitCells[2u + 2u * h1.z];
             vec2 bary = vec2(float(h1.w & 0xFFFFu), float(h1.w >> 16)) / 65535.0;
             uint ci = min(uint(bary.x * float(r)), r - 1u);
             uint cj = min(uint(bary.y * float(r)), r - 1u - ci);
-            uint cellIndex = hitCells[1u + 2u * h1.z] + ci * r - (ci * (ci - 1u)) / 2u + cj;
-            vec3 normal = uintBitsToFloat(h2.xyz);
+            cellIndex = hitCells[1u + 2u * h1.z] + ci * r - (ci * (ci - 1u)) / 2u + cj;
+        }
+        bool contact = hasCell && (hitCells[1u + 2u * hitCells[0] + 2u * cellIndex + 1u] & 0x80000000u) != 0u;
+        vec4 sheet = vec4(0.0);
+        if (u.uSheets.x > 0.5 && h1.z != 0xFFFFFFFFu) {
+            uint sw = sheetRows[h1.z & 0x7FFFFFFFu];
+            if (sw != 0u) sheet = vec4(unpackUnorm4x8(sw).rgb, float(sw >> 24) / 255.0);
+        }
+        if (u.uLookup.w > 0.5 && (dist < u.uLookup.z || !hasCell || contact || sheet.a > 0.0)) {
+            vec3 hitPos = nodeRays[slot * 2u].xyz + dir * dist;
+            int ids[NODE_CANDIDATES];
+            float ws[NODE_CANDIDATES];
+            float total = nodeSetAt(0, hitPos, hn, u.uTexelGrid, uint(u.uLookup.w), u.uLookup.xy, ids, ws);
+            int likeliest = -1;
+            float most = 0.0;
+            for (int c = 0; c < NODE_CANDIDATES; ++c) if (ids[c] >= 0 && ws[c] > most) { most = ws[c]; likeliest = ids[c]; }
+            if (total > 0.0 && likeliest >= 0) {
+                uint t = uint(likeliest);
+                // A sheet's far side: the pair's other record (same position; SponzaLoop.Lightmap.cs).
+                uint twin = t;
+                if (sheet.a > 0.0 && texels[2u * t].w < 0.0) {
+                    vec3 p = texels[2u * t].xyz;
+                    twin = texels[2u * (t + 1u)].w < 0.0 && distance(texels[2u * (t + 1u)].xyz, p) < 1e-4 ? t + 1u
+                         : t > 0u && texels[2u * (t - 1u)].w < 0.0 && distance(texels[2u * (t - 1u)].xyz, p) < 1e-4 ? t - 1u : t;
+                }
+                vec3 albedo = max(unpackUnorm4x8(h2.w).rgb, vec3(1e-3));
+                bool all = true;
+                vec3 cl[2];
+                for (int k = 0; k < suns; ++k) {
+                    uint kind = uint(sunNodes[k].w + 0.5);
+                    bool sunColumn = (kind & 1u) != 0u;
+                    vec3 l;
+                    all = all && partLight(t, sunColumn, l);
+                    if (twin != t) { vec3 far; if (partLight(twin, sunColumn, far)) l = l * (1.0 - sheet.a) + far * sheet.rgb / albedo; }
+                    if (sunColumn) {
+                        // The hit's sun: the candidates' bits blended, its n.l (the shade's, without the exact ray).
+                        float ndotl = max(dot(hn, sunNodes[k].xyz), 0.0);
+                        float visible = 0.0;
+                        uint words = uint(u.uIrr.w), bit = uint(k);
+                        for (int c = 0; c < NODE_CANDIDATES; ++c)
+                            if (ids[c] >= 0 && ((sunBits[uint(ids[c]) * words + bit / 32u] >> (bit % 32u)) & 1u) != 0u) visible += ws[c] / total;
+                        l += u.uIrr.rgb * ndotl * visible;
+                    }
+                    cl[k] = albedoW * l;
+                }
+                if (all) {
+                    l0 = cl[0];
+                    if (suns > 1) l1 = cl[1];
+                    known = 1.0;
+                    hasCell = false;   // answered: not the cell's
+                }
+            }
+        }
+        if (hasCell) {
             uint side = dot(normal, dir) < 0.0 ? 0u : 1u;   // met from its front (the ray against the normal)
             vec3 sky = unpackRgb9e5(cellLight[4u * cellIndex + 2u * side]);
             vec3 sun = unpackRgb9e5(cellLight[4u * cellIndex + 2u * side + 1u]);
@@ -98,12 +193,21 @@ void main() {
     sLight[lid * 2u] = l0;
     sLight[lid * 2u + 1u] = l1;
     sKnown[lid] = known;
+    float dist = hit ? uintBitsToFloat(h0.x) : 1e30;
+    bool sheetTexel = abs(texels[2u * id].w) > 4.5;   // a surface that lets light through keeps no far part
+    sFar[lid] = (dist >= u.uNear.y || !hit) && !sheetTexel ? 1.0 : 0.0;
+    sNear[lid] = hit && dist < u.uNear.y ? 1.0 : 0.0;
     barrier();
     // A hit without a cell: the known hits' light per albedo, by its own albedo (the shade's sUnknownBounce).
     if (known > 1.5) {
+        bool nearOnly = u.uNear.z > 0.5 && sNear[lid] > 0.5;
+        float nearKnown = 0.0;
+        if (nearOnly) for (int r = 0; r < RAYS; ++r) if (sKnown[r] > 0.5 && sKnown[r] < 1.5 && sNear[r] > 0.5) nearKnown += 1.0;
+        nearOnly = nearOnly && nearKnown > 0.0;
         for (int k = 0; k < suns; ++k) {
             vec3 num = vec3(0.0), den = vec3(0.0);
-            for (int r = 0; r < RAYS; ++r) if (sKnown[r] > 0.5 && sKnown[r] < 1.5) { num += sLight[r * 2 + k]; den += sAlbedoW[r]; }
+            for (int r = 0; r < RAYS; ++r)
+                if (sKnown[r] > 0.5 && sKnown[r] < 1.5 && (!nearOnly || sNear[r] > 0.5)) { num += sLight[r * 2 + k]; den += sAlbedoW[r]; }
             vec3 l = sAlbedoW[lid] * num / max(den, vec3(1e-9));
             if (k == 0) l0 = l; else l1 = l;
         }
@@ -126,6 +230,19 @@ void main() {
         vec2 tilt = vec2(0.0);
         float escaped = 0.0;
         for (int r = 0; r < RAYS; ++r) { sum += sLight[r * 2 + k]; tilt += sTilt[r * 2 + k]; escaped += sMiss[r]; }
+        if (u.uNear.x > 0.5) {
+            uint place = finePlace[id];
+            vec3 farSum = vec3(0.0);
+            for (int r = 0; r < RAYS; ++r) farSum += sFar[r] * sLight[r * 2 + k];
+            if (place > 0u) {
+                uint fp = (place - 1u) * 2u + uint(k);
+                if (u.uNear.x < 1.5) farPart[fp] += vec4(farSum / float(RAYS), 1.0);
+                else {
+                    vec4 f = farPart[fp];
+                    sum += (f.w > 0.0 ? f.rgb / f.w : vec3(0.0)) * float(RAYS) - farSum;
+                }
+            }
+        }
         uint at = group * uint(suns) + uint(k);
         if (u.uDetail.y > 0.5) {
             vec4 d = vec4(tilt / float(RAYS), k == 0 ? escaped / float(RAYS) : 0.0, 0.0);

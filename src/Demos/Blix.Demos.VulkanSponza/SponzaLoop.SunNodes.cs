@@ -1105,7 +1105,7 @@ internal sealed partial class SponzaLoop
                 sun: sunNodeBitDirections[hitSun] with { W = sunNodeLift }, reach: rayReach, discTan: hitSunDisc ? SunDiscTangent : 0f);
         else frameTracer!.Trace(sunNodeRaysBuffer, sunNodeHits, slice * 32, SunNodeSeed(first, seedPass, 0), closestOnly: true);
         var t2 = Stopwatch.GetTimestamp();
-        if (leanShade && cells && !fineGathering) device.DispatchNow(new[] { LeanShadeCommand(ids, first, slice, pass) }, "sun-nodes-lean");
+        if (leanShade && cells) device.DispatchNow(new[] { LeanShadeCommand(ids, first, slice, pass) }, "sun-nodes-lean");
         else device.DispatchNow(new[] { SunNodeShadeCommand(ids, first, slice, pass, 0, hitSun >= 0 ? 3f : 0f, few: sunNodeSuns!.Length <= 32,
             cells: cells, exactColumn: Math.Max(hitSun, 0)) }, "sun-nodes-shade");
         var t3 = Stopwatch.GetTimestamp();
@@ -1295,8 +1295,9 @@ internal sealed partial class SponzaLoop
     }
 
     // cells: the hit cells answer the hits (SponzaLoop.HitCells.cs), the trace having shot each hit's sun.
-    // --lean-shade (a prototype, the runtime gather's model): texel_nodes_lean.comp in place of the shade on the coarse
-    // passes -- each hit its cell's light, nothing else -- to price a ray's shade at its least.
+    // --lean-shade (a prototype, the runtime gather's model): texel_nodes_lean.comp in place of the shade on every pass the
+    // hit cells answer -- each hit its cell's light, nothing else; the fine round's near rounds as the shade has them. Not
+    // yet: a hit on a sheet that lets light through takes its cell, not its far side's texels (the shade's search).
     private bool leanShade;
     private ShaderInterface leanShadeInterface = null!;
     private PipelineHandle leanShadePipeline;
@@ -1311,6 +1312,11 @@ internal sealed partial class SponzaLoop
                 new("uShade", new Vector4Uniform(new Vector4(slice, sunNodeSuns!.Length, 0f, pass))),
                 new("uSky", new Vector4Uniform(new Vector4(1f, 1f, skyKept ? SunColumn() + 1 : 0f, 0f))),
                 new("uDetail", new Vector4Uniform(new Vector4(first, detail ? 1f : 0f, 0f, 0f))),
+                new("uNear", new Vector4Uniform(new Vector4(NearCutMode, hitCellNear, nearUnknownLocal ? 1f : 0f, 0f))),
+                new("uLookup", new Vector4Uniform(new Vector4(sunNodePlane, sunNodeSigma, hitCellNear, NearTexelLightNow ? sunNodeHashSlots : 0f))),
+                new("uTexelGrid", new Vector4Uniform(texelGrid)),
+                new("uIrr", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, (sunNodeSuns!.Length + 31) / 32))),
+                new("uSheets", new Vector4Uniform(new Vector4(SheetsInGi ? 1f : 0f, 0f, 0f, 0f))),
             },
             new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
             Buffers: new[]
@@ -1325,6 +1331,16 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("CellLight", cellLightBuffer),
                 new ShaderBufferBinding("NodeAccum", sunNodeAccum),
                 new ShaderBufferBinding("NodeDetail", detail ? sunNodeDetail : sunNodeAccum),
+                new ShaderBufferBinding("FinePlace", finePlaceBuffer.Equals(default(GpuBufferHandle)) ? sunNodeAccum : finePlaceBuffer),
+                new ShaderBufferBinding("FarPart", farPartBuffer.Equals(default(GpuBufferHandle)) ? sunNodeAccum : farPartBuffer),
+                new ShaderBufferBinding("SunNodeHash", sunNodeHash),
+                new ShaderBufferBinding("FoliagePoints", sunNodeFoliagePoints.Equals(default(GpuBufferHandle)) ? sunNodeAccum : sunNodeFoliagePoints),
+                new ShaderBufferBinding("FoliageHash", sunNodeFoliageHash.Equals(default(GpuBufferHandle)) ? sunNodeAccum : sunNodeFoliageHash),
+                new ShaderBufferBinding("SunNodeBits", sunNodeBits),
+                new ShaderBufferBinding("SplitSky", NearTexelLightNow ? splitSkyBuffer : sunNodeAccum),
+                new ShaderBufferBinding("SplitSun", NearTexelLightNow ? splitSunBuffer : sunNodeAccum),
+                NearTexelLightNow ? ProvenanceBinding() : new ShaderBufferBinding("TexelProvenance", sunNodeAccum),
+                new ShaderBufferBinding("SheetRows", SheetsInGi ? SheetRowsBuffer!.Value : sunNodeAccum),
             }.Where(b => declared.Contains(b.Name)).ToArray());
     }
 
