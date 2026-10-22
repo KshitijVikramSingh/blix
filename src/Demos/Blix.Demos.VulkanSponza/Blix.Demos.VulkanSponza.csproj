@@ -104,6 +104,7 @@
     <GlslShader Include="Shaders\sky_vis_filter.comp" />
     <GlslShader Include="Shaders\coarse_filter.comp" />
     <GlslShader Include="Shaders\texel_lists.comp" />
+    <GlslShader Include="Shaders\texel_nodes_lean.comp" />
     <GlslShader Include="Shaders\transfer_fine.comp" />
     <GlslShader Include="Shaders\slice_resolve.comp" />
     <GlslShader Include="Shaders\texel_patch_light.comp" />

@@ -242,6 +242,7 @@ internal sealed partial class SponzaLoop
         // On by default (2026-10-22: the gate held; Cornell and crevices seams' |error| and noise down, two seeds each).
         guideSun = !args.Flag("no-guide-sun");
         instantOnly = args.Flag("instant-only");
+        leanShade = args.Flag("lean-shade");
         // --guide-sky-only: the guides and light lists from the sky's light alone (no sun component, no direct sun) -- the
         // same whatever the sun: for lists cooked once and lit under every sun, so a list cook's default (--list-cook-sun-
         // guides: the cook's sun's). The corridor's lists, two cooks' rays, at three suns: corridor 0.018 / 0.035 / 0.018,
@@ -303,6 +304,7 @@ internal sealed partial class SponzaLoop
         DeclareFarRelight(reflect);
         DeclareSunProvisional(reflect);
         DeclareLists(reflect);
+        leanShadeInterface = reflect(new[] { "texel_nodes_lean.comp" });
         transportCensusPass = graph.ComputePass("sun-nodes-transport-census").Shader(transportCensusInterface).Handle;
         sunNodePrepInterface = reflect(new[] { "texel_nodes_prep.comp" });
         sunNodePrepPass = graph.ComputePass("sun-nodes-prep").Shader(sunNodePrepInterface).Handle;
@@ -334,6 +336,8 @@ internal sealed partial class SponzaLoop
         CreateHitCellsPipeline(shaderDir);
         CreateTransferPipelines(shaderDir);
         CreateListsPipeline(shaderDir);
+        leanShadePipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
+            File.ReadAllBytes(Path.Combine(shaderDir, "texel_nodes_lean.comp.spv")), leanShadeInterface, "texel_nodes_lean")), "texel_nodes_lean"));
         liveDirectPipeline = Make("texel_live_direct", liveDirectInterface);
         liveGuidesPipeline = Make("texel_live_guides", liveGuidesInterface);
         CreateFarPipeline(shaderDir);
@@ -1101,7 +1105,8 @@ internal sealed partial class SponzaLoop
                 sun: sunNodeBitDirections[hitSun] with { W = sunNodeLift }, reach: rayReach, discTan: hitSunDisc ? SunDiscTangent : 0f);
         else frameTracer!.Trace(sunNodeRaysBuffer, sunNodeHits, slice * 32, SunNodeSeed(first, seedPass, 0), closestOnly: true);
         var t2 = Stopwatch.GetTimestamp();
-        device.DispatchNow(new[] { SunNodeShadeCommand(ids, first, slice, pass, 0, hitSun >= 0 ? 3f : 0f, few: sunNodeSuns!.Length <= 32,
+        if (leanShade && cells && !fineGathering) device.DispatchNow(new[] { LeanShadeCommand(ids, first, slice, pass) }, "sun-nodes-lean");
+        else device.DispatchNow(new[] { SunNodeShadeCommand(ids, first, slice, pass, 0, hitSun >= 0 ? 3f : 0f, few: sunNodeSuns!.Length <= 32,
             cells: cells, exactColumn: Math.Max(hitSun, 0)) }, "sun-nodes-shade");
         var t3 = Stopwatch.GetTimestamp();
         sunNodeNowSeconds[0] += Stopwatch.GetElapsedTime(t0, t1).TotalSeconds;
@@ -1290,6 +1295,39 @@ internal sealed partial class SponzaLoop
     }
 
     // cells: the hit cells answer the hits (SponzaLoop.HitCells.cs), the trace having shot each hit's sun.
+    // --lean-shade (a prototype, the runtime gather's model): texel_nodes_lean.comp in place of the shade on the coarse
+    // passes -- each hit its cell's light, nothing else -- to price a ray's shade at its least.
+    private bool leanShade;
+    private ShaderInterface leanShadeInterface = null!;
+    private PipelineHandle leanShadePipeline;
+
+    private DispatchCommand LeanShadeCommand(GpuBufferHandle ids, int first, int slice, int pass)
+    {
+        var detail = splitCooking && sunNodeRefineRound == 0 && !sunNodeDetail.Equals(default(GpuBufferHandle));
+        var declared = leanShadeInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
+        return new DispatchCommand(leanShadePipeline, slice, 1, 1,
+            new ShaderUniform[]
+            {
+                new("uShade", new Vector4Uniform(new Vector4(slice, sunNodeSuns!.Length, 0f, pass))),
+                new("uSky", new Vector4Uniform(new Vector4(1f, 1f, skyKept ? SunColumn() + 1 : 0f, 0f))),
+                new("uDetail", new Vector4Uniform(new Vector4(first, detail ? 1f : 0f, 0f, 0f))),
+            },
+            new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
+            Buffers: new[]
+            {
+                new ShaderBufferBinding("Texels", texelBuffer),
+                new ShaderBufferBinding("NodeRays", sunNodeRaysBuffer),
+                new ShaderBufferBinding("NodeHits", sunNodeHits),
+                new ShaderBufferBinding("SunNodes", sunNodeSunsBuffer),
+                new ShaderBufferBinding("NodeRayWeights", sunNodeRayWeights),
+                new ShaderBufferBinding("NodeIds", ids),
+                new ShaderBufferBinding("HitCells", hitCellsBuffer),
+                new ShaderBufferBinding("CellLight", cellLightBuffer),
+                new ShaderBufferBinding("NodeAccum", sunNodeAccum),
+                new ShaderBufferBinding("NodeDetail", detail ? sunNodeDetail : sunNodeAccum),
+            }.Where(b => declared.Contains(b.Name)).ToArray());
+    }
+
     private DispatchCommand SunNodeShadeCommand(GpuBufferHandle ids, int first, int slice, int pass, int discover, float exactMode, bool few = false, bool cells = false,
         int exactColumn = 0)
     {

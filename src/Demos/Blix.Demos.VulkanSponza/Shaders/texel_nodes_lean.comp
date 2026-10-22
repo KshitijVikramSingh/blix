@@ -1,0 +1,146 @@
+#version 450
+// --lean-shade (a prototype, SponzaLoop.SunNodes.cs; the runtime gather's model): the gather's shade with nothing but a
+// lookup at each hit -- what a runtime gather of short rays, scheduled and budgeted, would pay a ray. A workgroup a
+// texel, a thread a ray (RAYS: texel_nodes_shade.glsl's):
+//   a miss    the sky along it (x its weight), as the shade
+//   a hit     its albedo x weight / pi x its cell side's light (hit_cells.comp's CellLight in the lists' form: albedo-free,
+//             the patch blend averaged over the cell's area, and the side's sun -- its bits' blend x n.l x the sun): the
+//             same whatever its distance, contact cells too (the shade's near search, candidates and far set left out)
+//   no cell   the texel's other hits' light, albedo-weighted (the shade's unknown hits: borrowed)
+// The pass's sums into NodeAccum and NodeDetail as the shade writes them (texel_nodes_shade.glsl), so the resolve, the
+// refine, the settling and the landing read it unchanged. Not: sheets that let light through, the far field, the census,
+// the ray capture.
+
+#define RAYS 32
+layout(local_size_x = RAYS) in;
+
+layout(set = 0, binding = 0) uniform Lean {
+    vec4 uShade;    // x the slice's texels, y the columns (suns), w the pass (> 0: add to the last)
+    vec4 uSky;      // x the sky's strength, y its lod, z the kept sky's column + 1 (0: none)
+    vec4 uDetail;   // x the slice's first id in NodeIds, y 1: the detail
+} u;
+
+layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
+layout(std430, set = 0, binding = 2) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 3) readonly buffer NodeRays { vec4 nodeRays[]; };
+layout(std430, set = 0, binding = 4) readonly buffer NodeHits { uvec4 nodeHits[]; };
+layout(std430, set = 0, binding = 5) readonly buffer SunNodes { vec4 sunNodes[]; };          // per column: toward, kind
+layout(std430, set = 0, binding = 6) readonly buffer NodeRayWeights { float nodeRayWeight[]; };
+layout(std430, set = 0, binding = 7) readonly buffer NodeIds { uint nodeIds[]; };
+layout(std430, set = 0, binding = 8) readonly buffer HitCells { uint hitCells[]; };
+layout(std430, set = 0, binding = 9) readonly buffer CellLight { uint cellLight[]; };
+layout(std430, set = 0, binding = 10) buffer NodeAccum { vec4 nodeAccum[]; };              // [slice texel][column]
+layout(std430, set = 0, binding = 11) buffer NodeDetail { vec4 nodeDetail[]; };
+
+vec3 unpackRgb9e5(uint p) {
+    float scale = exp2(float(int(p >> 27) - 15 - 9));
+    return vec3(p & 511u, (p >> 9) & 511u, (p >> 18) & 511u) * scale;
+}
+
+const vec3 lumW = vec3(0.2126, 0.7152, 0.0722);
+const float PI = 3.14159265359;
+
+shared vec3 sLight[RAYS * 2];   // per ray per column (two at most)
+shared vec3 sAlbedoW[RAYS];     // a hit's albedo x weight / pi (an unknown one's, for its borrow)
+shared float sKnown[RAYS];      // 1 a hit with a cell, 2 a hit without, 0 a miss
+shared vec2 sTilt[RAYS * 2];
+shared float sMiss[RAYS];
+shared vec3 sMean[2];
+
+void main() {
+    uint group = gl_WorkGroupID.x;
+    if (group >= uint(u.uShade.x)) return;
+    uint lid = gl_LocalInvocationID.x;
+    int suns = min(int(u.uShade.y), 2);
+    uint slot = group * uint(RAYS) + lid;
+    uint id = nodeIds[uint(u.uDetail.x) + group];
+    uvec4 h0 = nodeHits[slot * 3u];
+    uvec4 h1 = nodeHits[slot * 3u + 1u];
+    uvec4 h2 = nodeHits[slot * 3u + 2u];
+    vec3 dir = nodeRays[slot * 2u + 1u].xyz;
+    float weight = nodeRayWeight[slot];
+    bool hit = (h0.w & 1u) != 0u;
+    vec3 l0 = vec3(0.0), l1 = vec3(0.0);
+    float known = 0.0;
+    sMiss[lid] = hit ? 0.0 : weight / PI;
+    sAlbedoW[lid] = vec3(0.0);
+    if (!hit) {
+        vec3 sky = weight * textureLod(uSkyRadiance, dir, u.uSky.y).rgb * u.uSky.x;
+        for (int k = 0; k < suns; ++k) {
+            bool hasSky = (uint(sunNodes[k].w + 0.5) & 2u) != 0u;
+            if (k == 0) l0 = hasSky ? sky : vec3(0.0); else l1 = hasSky ? sky : vec3(0.0);
+        }
+    } else {
+        vec3 albedoW = unpackUnorm4x8(h2.w).rgb * weight / PI;
+        sAlbedoW[lid] = albedoW;
+        known = 2.0;
+        // The hit's cell (texel_nodes_shade.glsl's byCell): its row's r x r square of the barycentrics, lower triangle
+        // row by row; the side it was met from.
+        if (h1.z != 0xFFFFFFFFu && (h1.z & 0x80000000u) == 0u) {
+            uint r = hitCells[2u + 2u * h1.z];
+            vec2 bary = vec2(float(h1.w & 0xFFFFu), float(h1.w >> 16)) / 65535.0;
+            uint ci = min(uint(bary.x * float(r)), r - 1u);
+            uint cj = min(uint(bary.y * float(r)), r - 1u - ci);
+            uint cellIndex = hitCells[1u + 2u * h1.z] + ci * r - (ci * (ci - 1u)) / 2u + cj;
+            vec3 normal = uintBitsToFloat(h2.xyz);
+            uint side = dot(normal, dir) < 0.0 ? 0u : 1u;   // met from its front (the ray against the normal)
+            vec3 sky = unpackRgb9e5(cellLight[4u * cellIndex + 2u * side]);
+            vec3 sun = unpackRgb9e5(cellLight[4u * cellIndex + 2u * side + 1u]);
+            // CellLight's two words: the sky column's light, the sun column's (texel_lists.comp reads them alike).
+            for (int k = 0; k < suns; ++k) {
+                uint kind = uint(sunNodes[k].w + 0.5);
+                vec3 c = ((kind & 1u) != 0u ? sun : vec3(0.0)) + ((kind & 2u) != 0u ? sky : vec3(0.0));
+                if (k == 0) l0 = albedoW * c; else l1 = albedoW * c;
+            }
+            known = 1.0;
+        }
+    }
+    sLight[lid * 2u] = l0;
+    sLight[lid * 2u + 1u] = l1;
+    sKnown[lid] = known;
+    barrier();
+    // A hit without a cell: the known hits' light per albedo, by its own albedo (the shade's sUnknownBounce).
+    if (known > 1.5) {
+        for (int k = 0; k < suns; ++k) {
+            vec3 num = vec3(0.0), den = vec3(0.0);
+            for (int r = 0; r < RAYS; ++r) if (sKnown[r] > 0.5 && sKnown[r] < 1.5) { num += sLight[r * 2 + k]; den += sAlbedoW[r]; }
+            vec3 l = sAlbedoW[lid] * num / max(den, vec3(1e-9));
+            if (k == 0) l0 = l; else l1 = l;
+        }
+    }
+    barrier();
+    sLight[lid * 2u] = l0;
+    sLight[lid * 2u + 1u] = l1;
+    if (u.uDetail.y > 0.5) {
+        vec3 n = normalize(texels[2u * id + 1u].xyz);
+        vec3 t1 = normalize(cross(abs(n.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0), n));
+        vec3 t2 = cross(n, t1);
+        vec2 g = vec2(dot(t1, dir), dot(t2, dir)) / max(dot(n, dir), 0.1);
+        sTilt[lid * 2u] = dot(l0, lumW) * g;
+        sTilt[lid * 2u + 1u] = dot(l1, lumW) * g;
+    }
+    barrier();
+    if (lid < uint(suns)) {
+        int k = int(lid);
+        vec3 sum = vec3(0.0);
+        vec2 tilt = vec2(0.0);
+        float escaped = 0.0;
+        for (int r = 0; r < RAYS; ++r) { sum += sLight[r * 2 + k]; tilt += sTilt[r * 2 + k]; escaped += sMiss[r]; }
+        uint at = group * uint(suns) + uint(k);
+        if (u.uDetail.y > 0.5) {
+            vec4 d = vec4(tilt / float(RAYS), k == 0 ? escaped / float(RAYS) : 0.0, 0.0);
+            nodeDetail[at] = u.uShade.w > 0.5 ? nodeDetail[at] + d : d;
+        }
+        vec3 mean = sum / float(RAYS);
+        vec4 before = u.uShade.w > 0.5 ? nodeAccum[at] : vec4(0.0);
+        nodeAccum[at] = vec4(before.rgb + mean, before.w);
+        sMean[k] = mean;
+    }
+    barrier();
+    if (lid == 0u) {
+        float composed = 0.0;
+        for (int k = 0; k < suns; ++k) composed += dot(sMean[k], lumW);
+        if (u.uSky.z > 0.5) composed = dot(sMean[int(u.uSky.z) - 1], lumW);
+        nodeAccum[group * uint(suns)].w += composed * composed;
+    }
+}

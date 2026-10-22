@@ -28,6 +28,8 @@ internal sealed partial class SponzaLoop
     // A cell side's patch blend, averaged over this many points a side of it (hit_cells.comp; 4: 0.0168 on the corridor,
     // the gather's).
     private const int ListCellPoints = 4;
+    // The cells' light in the lists' form (albedo-free, the blend over the area, the sun): the lists' and the lean shade's.
+    private bool ListCellLight => listsOn || leanShade;
     private const string ListsHeader = "texel lists v7";
 
     private sealed class ListAcc
