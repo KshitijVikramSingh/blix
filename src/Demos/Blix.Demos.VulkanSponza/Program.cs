@@ -784,7 +784,10 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
         Vector3 Transmission = default,
         // And the factor alone (the share of the light the transmission lobe takes; the base lobe keeps 1 - it): what the
         // GPU reference's thin sheets reflect and pass (reference_wave.comp).
-        float TransmissionFactor = 0f);
+        float TransmissionFactor = 0f,
+        // KHR_materials_diffuse_transmission's factor texture (default: none -- the factor alone): its alpha, averaged over
+        // each triangle by the rays' surface bake, scales the factor per row (ray_surface_bake.comp, BlixRayTransmission).
+        TextureHandle TransmissionTexture = default);
 
     /// <summary>One placement of a unique primitive: which drawable, its row in the transform table, and its world AABB.</summary>
     /// <remarks>

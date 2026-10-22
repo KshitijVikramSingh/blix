@@ -19,7 +19,7 @@ internal sealed partial class SponzaLoop
     private float rayReach = 1000f;
     // Per ray-scene placement (the transform table's order): the material a surface bake reads.
     // Clear: authored transmission (the panes): no coverage, rays pass (ray_surface_bake.comp).
-    private readonly record struct RayMaterial(TextureHandle Albedo, Vector4 BaseColor, float AlphaCutoff, bool Clear);
+    private readonly record struct RayMaterial(TextureHandle Albedo, Vector4 BaseColor, float AlphaCutoff, bool Clear, TextureHandle Transmission = default);
     private readonly List<RayMaterial> rayPlacementMaterials = new();
     // Per placement (the ray scene's order): whether its surface is in the lightmap atlas (--lightmap). The hashed
     // texels leave those out when the atlas's texels serve them (SponzaLoop.Lightmap.cs).
@@ -43,6 +43,22 @@ internal sealed partial class SponzaLoop
     // One bake dispatch per material: its albedo, factor and cutoff, and its run of triangle rows in BakeRows.
     private readonly List<(RayMaterial Material, int First, int Count)> raySurfaceBakes = new();
     private ShaderBufferBinding[] raySurfaceBakeBuffers = Array.Empty<ShaderBufferBinding>();
+    // Per triangle row, the share of its material's diffuse transmission factor its factor texture keeps (the texture's
+    // alpha averaged over the triangle, unorm8; 255 whole, the default): ray_surface_bake.comp writes it.
+    private GpuBufferHandle rayTransmissionRows;
+    private float[]? rowTransmissionShare;
+    private float RowTransmissionShare(int row)
+    {
+        if (rowTransmissionShare is null)
+        {
+            if (rayTransmissionRows.Equals(default(GpuBufferHandle)) || rayGpuData is not { } d || !raySurfacesChecked) return 1f;
+            device.WaitIdle();
+            var words = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(rayTransmissionRows, 0, d.RowPlacements.Length * 4).AsSpan());
+            rowTransmissionShare = new float[words.Length];
+            for (var i = 0; i < words.Length; i++) rowTransmissionShare[i] = (words[i] & 255u) / 255f;
+        }
+        return row < rowTransmissionShare.Length ? rowTransmissionShare[row] : 1f;
+    }
     private ShaderInterface raySurfaceBakeInterface = null!;
     private PassHandle raySurfaceBakePassHandle;
     private PipelineHandle raySurfaceBakePipeline;
@@ -246,6 +262,8 @@ internal sealed partial class SponzaLoop
             new ShaderBufferBinding("BlixRayUvs", Own(device.CreateGpuBuffer(Math.Max(16, uvBytes.Length), uvBytes, "sponza.ray.uvs"))),
             new ShaderBufferBinding("BakeRows", Own(device.CreateGpuBuffer(Math.Max(16, bakeRowBytes.Length), bakeRowBytes, "sponza.ray.bake-rows"))),
             new ShaderBufferBinding("BlixRaySurfaces", raySurfaces),
+            new ShaderBufferBinding("BlixRayTransmission", rayTransmissionRows = Own(device.CreateGpuBuffer(Math.Max(16, data.RowPlacements.Length * 4),
+                MemoryMarshal.AsBytes(Enumerable.Repeat(255u, Math.Max(4, data.RowPlacements.Length)).ToArray().AsSpan()), "sponza.ray.transmission"))),
         };
         rayBlockBuffers = buffers.ToArray();
         Console.WriteLine(string.Create(Inv,
@@ -418,8 +436,10 @@ internal sealed partial class SponzaLoop
                 {
                     new("uBaseColor", new Vector4Uniform(material.BaseColor)),
                     new("uParams", new Vector4Uniform(new Vector4(first, count, material.AlphaCutoff, material.Clear ? 1f : 0f))),
+                    new("uParams2", new Vector4Uniform(new Vector4(material.Transmission.Equals(default(TextureHandle)) ? 0f : 1f, 0f, 0f, 0f))),
                 },
-                new[] { new ShaderTextureBinding("uAlbedo", material.Albedo) },
+                new[] { new ShaderTextureBinding("uAlbedo", material.Albedo),
+                    new ShaderTextureBinding("uTransmission", material.Transmission.Equals(default(TextureHandle)) ? material.Albedo : material.Transmission) },
                 Buffers: raySurfaceBakeBuffers));
         }
         raySurfacesBaked = true;

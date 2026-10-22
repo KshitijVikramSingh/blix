@@ -120,8 +120,10 @@ internal sealed partial class SponzaLoop
                     {
                         new("uBaseColor", new Vector4Uniform(material.BaseColor)),
                         new("uParams", new Vector4Uniform(new Vector4(first, count, material.AlphaCutoff, material.Clear ? 1f : 0f))),
+                        new("uParams2", new Vector4Uniform(new Vector4(material.Transmission.Equals(default(TextureHandle)) ? 0f : 1f, 0f, 0f, 0f))),
                     },
-                    new[] { new ShaderTextureBinding("uAlbedo", material.Albedo) },
+                    new[] { new ShaderTextureBinding("uAlbedo", material.Albedo),
+                        new ShaderTextureBinding("uTransmission", material.Transmission.Equals(default(TextureHandle)) ? material.Albedo : material.Transmission) },
                     Buffers: bakeSceneSurfaceBuffers));
             bakeSceneSurfacesFrame = postLoadFrames;
             return;
@@ -190,10 +192,11 @@ internal sealed partial class SponzaLoop
         Volatile.Write(ref bakeTracer, null);
         tracer?.Dispose();
         foreach (var b in bakeSceneBlocks) Disown(b);
-        if (bakeSceneSurfaceBuffers.Length == 4)
+        if (bakeSceneSurfaceBuffers.Length == 5)
         {
-            Disown(bakeSceneSurfaceBuffers[1].Buffer);   // the coordinates and rows; triangles and surfaces are blocks
+            Disown(bakeSceneSurfaceBuffers[1].Buffer);   // the coordinates, rows and shares; triangles and surfaces are blocks
             Disown(bakeSceneSurfaceBuffers[2].Buffer);
+            Disown(bakeSceneSurfaceBuffers[4].Buffer);
         }
         bakeSceneBlocks = Array.Empty<GpuBufferHandle>();
         bakeSceneSurfaceBuffers = Array.Empty<ShaderBufferBinding>();
@@ -239,6 +242,8 @@ internal sealed partial class SponzaLoop
             new ShaderBufferBinding("BlixRayUvs", Own(device.CreateGpuBuffer(Math.Max(16, uvBytes.Length), uvBytes, "sponza.bake-scene.uvs"))),
             new ShaderBufferBinding("BakeRows", Own(device.CreateGpuBuffer(Math.Max(16, bakeRowBytes.Length), bakeRowBytes, "sponza.bake-scene.bake-rows"))),
             new ShaderBufferBinding("BlixRaySurfaces", bakeSceneBlocks[6]),
+            // The rows' transmission share (ray_surface_bake.comp): the bake scene's own, unread -- the frame scene's is.
+            new ShaderBufferBinding("BlixRayTransmission", Own(device.CreateGpuBuffer(Math.Max(16, data.RowPlacements.Length * 4), name: "sponza.bake-scene.transmission"))),
         };
         bytes += uvBytes.Length + bakeRowBytes.Length;
         Console.WriteLine(string.Create(Inv,

@@ -88,19 +88,23 @@ internal sealed partial class SponzaLoop
             if (!(refSheets || sheetLight) || rayGpuData is not { } data) return null;
             var rows = new uint[Math.Max(1, data.RowPlacements.Length)];
             var any = 0;
+            double shareSum = 0;
             uint Byte(float x) => (uint)Math.Clamp(MathF.Round(x * 255f), 0f, 255f);
             for (var row = 0; row < data.RowPlacements.Length; row++)
             {
                 var p = (int)data.RowPlacements[row];
                 if (p >= rayPlacementTransmissionFactor.Count) continue;
-                var factor = rayPlacementTransmissionFactor[p];
-                var tc = rayPlacementTransmission[p];
-                if (factor <= 0f) continue;
+                // T: the factor times the row's share of its factor texture (RowTransmissionShare: its alpha over the triangle).
+                var share = RowTransmissionShare(row);
+                var factor = rayPlacementTransmissionFactor[p] * share;
+                var tc = rayPlacementTransmission[p] * share;
+                if (rayPlacementTransmissionFactor[p] <= 0f) continue;
                 rows[row] = Byte(tc.X) | Byte(tc.Y) << 8 | Byte(tc.Z) << 16 | Math.Max(1u, Byte(factor)) << 24;
+                shareSum += share;
                 any++;
             }
             if (any == 0) return null;
-            Console.WriteLine(string.Create(Inv, $"[VulkanSponza] sheets: {any:N0} triangle rows are thin sheets (diffuse transmission), scattered as the spec has them{(refSheets ? " in the reference" : "")}{(sheetLight ? " and the GI" : "")}."));
+            Console.WriteLine(string.Create(Inv, $"[VulkanSponza] sheets: {any:N0} triangle rows are thin sheets (diffuse transmission), scattered as the spec has them{(refSheets ? " in the reference" : "")}{(sheetLight ? " and the GI" : "")}; their factor textures keep {shareSum / Math.Max(1, any):P0} of the factor on average{(raySurfacesChecked ? "" : " (the surface bake not read yet: whole)")}."));
             referenceSheets = Own(device.CreateGpuBuffer(rows.Length * 4, MemoryMarshal.AsBytes(rows.AsSpan()), "sponza.reference.sheets"));
             return referenceSheets;
         }

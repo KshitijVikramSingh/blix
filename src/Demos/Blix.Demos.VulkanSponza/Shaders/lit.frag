@@ -213,6 +213,8 @@ layout(set = 2, binding = 5) uniform sampler2D uOcclusion;
 // KHR_materials_diffuse_transmission's colour texture (sRGB), multiplying the factor beside it.
 // Defaults to 1x1 white, so a material that authors only the factor is unaffected.
 layout(set = 2, binding = 6) uniform sampler2D uDiffuseTransmissionColorTex;
+// Its factor texture: the alpha times diffuseTransmissionFactor is the share that goes through (white by default).
+layout(set = 2, binding = 7) uniform sampler2D uDiffuseTransmissionTex;
 
 layout(location = 0) in vec3 vNormalWorld;
 layout(location = 1) in vec2 vUv;
@@ -563,7 +565,9 @@ void main() {
     // truth for a question that is settled.
     vec3  sheenColor     = mat.uSheenColor.rgb;
     float sheenRoughness = clamp(mat.uMaterialParams2.y, 0.0, 1.0);
-    float diffTrans      = clamp(mat.uMaterialParams2.z, 0.0, 1.0);
+    // T: the factor times the factor texture's alpha (KHR_materials_diffuse_transmission; the teacup's runs 0.14-0.75 over
+    // its rim and body, and the cup read as T 1 everywhere before, 2026-10-22).
+    float diffTrans      = clamp(mat.uMaterialParams2.z * (mat.uMaterialParams2.z > 0.0 ? texture(uDiffuseTransmissionTex, uv).a : 1.0), 0.0, 1.0);
     // <b>The transmitted lobe's colour is the material's, NOT the base colour.</b> glTF makes
     // diffuseTransmissionColor the colour of the light that goes through, in place of baseColor --
     // it does not modulate it. This used to read `* albedo`, and the scene's patches author the

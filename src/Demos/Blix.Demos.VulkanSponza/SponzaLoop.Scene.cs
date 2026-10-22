@@ -328,7 +328,9 @@ internal sealed partial class SponzaLoop
                 pm?.BaseColorFactor ?? Vector4.One, placed.LightmapTexels,
                 ClothTransmission(pm) is { } cloth ? cloth.Factor * cloth.Colour
                     : pm?.Ext is { } ext ? ext.DiffuseTransmissionFactor * ext.DiffuseTransmissionColorFactor : Vector3.Zero,
-                ClothTransmission(pm) is { } clothF ? clothF.Factor : pm?.Ext is { } extF ? extF.DiffuseTransmissionFactor : 0f));
+                ClothTransmission(pm) is { } clothF ? clothF.Factor : pm?.Ext is { } extF ? extF.DiffuseTransmissionFactor : 0f,
+                // The factor texture (its alpha scales the factor), for the rays' surface bake's per-row share.
+                pm?.Ext.DiffuseTransmissionTexture is not null ? textureLoader.Load(pm).DiffuseTransmission : default));
         }
     }
 
@@ -414,7 +416,7 @@ internal sealed partial class SponzaLoop
                 sceneTransformSurfaceKeys.Add(SurfaceKeyOf(s, w, i, surfaceKeys));
                 sceneTransformInstances.Add(s.Instances[w]);
                 rayInstances.Add(new RayQueryScene.Instance(rayMeshes[i], world));
-                rayPlacementMaterials.Add(new RayMaterial(s.Albedo, s.BaseColor, s.AlphaCutoff, s.IsBlend));
+                rayPlacementMaterials.Add(new RayMaterial(s.Albedo, s.BaseColor, s.AlphaCutoff, s.IsBlend, s.TransmissionTexture));
                 rayPlacementLightmapped.Add(s.LightmapTexels is not null);
                 rayPlacementDoubleSided.Add(s.Pipeline == opaqueDoubleSidedPipeline || s.Pipeline == blendDoubleSidedPipeline);
                 rayPlacementGiTwoSided.Add(GiTwoSided(s));
@@ -699,6 +701,7 @@ internal sealed partial class SponzaLoop
             .SetTexture(binding: 4, tex.MetallicRoughness)
             .SetTexture(binding: 5, tex.Occlusion)
             .SetTexture(binding: 6, diffuseTransmissionTexture)
+            .SetTexture(binding: 7, tex.DiffuseTransmission)
             .Handle);
     }
 

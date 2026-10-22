@@ -15,7 +15,11 @@ public readonly record struct MaterialTextures(
     // KHR_materials_diffuse_transmission's colour texture: what a thin sheet tints the light it
     // scatters through. sRGB, and its default is WHITE rather than black -- an absent texture must
     // leave diffuseTransmissionColorFactor exactly as authored, and black would delete the term.
-    TextureHandle DiffuseTransmissionColor);
+    TextureHandle DiffuseTransmissionColor,
+    // KHR_materials_diffuse_transmission's factor texture: its ALPHA times diffuseTransmissionFactor is the share of the
+    // diffuse light that goes through (the spec; OpenPBR's thin-walled subsurface splits the same way). Linear, WHITE by
+    // default: an absent texture leaves the factor as authored.
+    TextureHandle DiffuseTransmission);
 
 // Engine glTF texture loader — the asset-pipeline half of material handling:
 // read/decode/upload/dedup/stream a material's textures into GPU handles. Owns
@@ -120,7 +124,8 @@ public sealed class MaterialTextureLoader : IDisposable
         // Shares the 1x1 white sRGB fallback with albedo: same format, same meaning here (a
         // multiplier that changes nothing), and one texture rather than a second identical one.
         Resolve(material?.Ext.DiffuseTransmissionColorTexture, fallbackAlbedo, TextureFormat.Rgba8Srgb,
-                "diffuse-transmission colour"));
+                "diffuse-transmission colour"),
+        Resolve(material?.Ext.DiffuseTransmissionTexture, defaultAo, TextureFormat.Rgba8, "diffuse-transmission"));
 
     private TextureHandle Resolve(
         TextureData? tex,
