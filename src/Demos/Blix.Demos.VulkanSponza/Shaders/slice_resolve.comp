@@ -24,6 +24,7 @@ layout(set = 0, binding = 0) uniform SliceResolve {
     vec4 uMode;     // x the mode, y the columns (suns), z which column is the sun's (-1 none), w 1 the detail
     vec4 uKeep;     // x 1: the sky's part kept (a sun change: written and judged the sun's alone); y 1: refine the masked alone;
                     // z the provenance code of what this gather is (SponzaLoop.TexelPicker.cs); w 1: the pooled stop
+    vec4 uGlow;     // x 1: the near walls' glow kept apart (--near-glow-split: NodeGlow -> GlowState -> GlowPart)
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer RoundIds { uint roundIds[]; };   // the round's texel ids
@@ -51,6 +52,12 @@ layout(std430, set = 0, binding = 15) readonly buffer RefineMask { uint refineMa
 // float atomics by compare-and-swap) -- the relative noise summed, the light summed, the texels.
 layout(std430, set = 0, binding = 18) readonly buffer TexelPatch { int texelPatch[]; };
 layout(std430, set = 0, binding = 19) buffer Pool { uint pool[]; };
+// --near-glow-split (texel_nodes_shade.glsl, NodeGlow): the slice's glow from sheets within the frame's pass-by, by place
+// as the sums are, and per texel (rgb9e5 per unit of the sun's irradiance, word 1 bit 16 once written) -- what the lit
+// pass leaves out of a sheet pixel's far side, the frame drawing it per pixel (lit.frag, lightmapBackIrradiance).
+layout(std430, set = 0, binding = 20) readonly buffer NodeGlow { vec4 nodeGlow[]; };
+layout(std430, set = 0, binding = 21) buffer GlowState { vec4 glowState[]; };
+layout(std430, set = 0, binding = 22) buffer GlowPart { uvec2 glowPart[]; };
 const uint POOL_LEAST = 4u;   // a pool of fewer texels says nothing
 
 void poolAdd(uint at, float v) {
@@ -184,6 +191,11 @@ void main() {
         }
     }
     statePasses[place] = passes;
+    if (u.uGlow.x > 0.5) {
+        vec4 gs = nodeGlow[t] + (refining ? glowState[place] : vec4(0.0));
+        glowState[place] = gs;
+        glowPart[id] = uvec2(packRgb9e5(gs.rgb / float(passes) * u.uSun.xyz), 0x10000u);
+    }
     if (!refining && u.uKeep.w > 0.5) poolTexel(place, id, suns, passes);
     // Judged without the bar on the sweep (mode 1 judges its unsettled again once the bar is known), with it on a round.
     bool done = settled(place, id, suns, passes, refining ? u.uSettle.w : 0.0, mean);

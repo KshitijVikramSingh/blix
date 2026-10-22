@@ -241,6 +241,7 @@ internal sealed partial class SponzaLoop
         settlePool = !args.Flag("no-settle-pool");
         nearUnknownLocal = !args.Flag("no-near-unknown-local");
         sheetGlowSplit = args.Flag("sheet-glow-split");
+        nearGlowSplit = args.Flag("near-glow-split");
         // On by default (2026-10-22: drapes' curtain, close up, the GI's step at a strip's edge against the path trace
         // 1.10% -> 0.38% rms, under the 0.6% within a texel; the gate and two seeds a scene level).
         gatherSmooth = !args.Flag("no-gather-smooth-normal");
@@ -515,6 +516,12 @@ internal sealed partial class SponzaLoop
             sunNodeExactOccluded = Own(device.CreateGpuBuffer(rays * 4, name: "sponza.sun-nodes.exact-occluded"));
         }
         sunNodeAccum = Own(device.CreateGpuBuffer(checked((int)((long)sunNodeSlice * suns * 16)), name: "sponza.sun-nodes.accum"));
+        if (nearGlowSplit)
+        {
+            sunNodeGlow = Own(device.CreateGpuBuffer(checked(sunNodeSlice * 16), name: "sponza.sun-nodes.glow"));
+            if (texelGlowPart.Equals(default(GpuBufferHandle)))
+                texelGlowPart = Own(device.CreateGpuBuffer(Math.Max(16, texelCount * 8), new byte[Math.Max(16, texelCount * 8)], "sponza.texels.glow-part"));
+        }
         if (liveTexels)
         {
             // --live-texels: the sums in mapped memory, a few slices' worth, read back without a wait (LiveSliceReadbacks).
@@ -1257,7 +1264,7 @@ internal sealed partial class SponzaLoop
                 new("uFarTransport", new Vector4Uniform(new Vector4(FarTransportUniform, 0f, 0f, 0f))),
                 new("uHitBlend", new Vector4Uniform(new Vector4(HitBlendNow ? 1f : 0f, transportSpacing, NearTexelLightNow ? 1f : 0f, SunColumn()))),
                 new("uCapture", new Vector4Uniform(discover == 0 && exactMode is < 0.5f or > 2.5f ? RayCaptureUniform : Vector4.Zero)),
-                new("uNear", new Vector4Uniform(discover == 0 && few ? new Vector4(NearCutMode, hitCellNear, nearUnknownLocal ? 1f : 0f, sheetGlowSplit ? 1f : 0f) : new Vector4(0f, 1e30f, 0f, 0f))),
+                new("uNear", new Vector4Uniform(discover == 0 && few ? new Vector4(NearCutMode, hitCellNear, nearUnknownLocal ? 1f : 0f, sheetGlowSplit ? 1f : NearGlowSplitNow ? 2f : 0f) : new Vector4(0f, 1e30f, 0f, 0f))),
             },
             new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
             Buffers: new[]
@@ -1297,6 +1304,7 @@ internal sealed partial class SponzaLoop
                 NearTexelLightNow ? ProvenanceBinding() : new ShaderBufferBinding("TexelProvenance", sunNodeAccum),
                 new ShaderBufferBinding("SheetRows", SheetsInGi ? SheetRowsBuffer!.Value : sunNodeAccum),
                 RayCaptureBinding(sunNodeAccum),
+                new ShaderBufferBinding("NodeGlow", NearGlowSplitNow ? sunNodeGlow : sunNodeAccum),
                 new ShaderBufferBinding("FinePlace", finePlaceBuffer.Equals(default(GpuBufferHandle)) ? sunNodeAccum : finePlaceBuffer),
                 new ShaderBufferBinding("FarPart", farPartBuffer.Equals(default(GpuBufferHandle)) ? sunNodeAccum : farPartBuffer),
             }.Concat(CookedBuffers()).Where(b => declared.Contains(b.Name)).ToArray());

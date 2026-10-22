@@ -31,6 +31,11 @@ internal sealed partial class SponzaLoop
     // relative noise by patch, and the whole sweep is judged again against it and the bar.
     private bool settlePool;
     private GpuBufferHandle resolvePool;
+    // --near-glow-split: the sheets' near walls' glow kept apart per texel (slice_resolve.comp GlowPart).
+    private bool nearGlowSplit;
+    private GpuBufferHandle sunNodeGlow, resolveGlowState, texelGlowPart;
+    private bool NearGlowSplitNow => nearGlowSplit && !sunNodeGlow.Equals(default(GpuBufferHandle)) && !texelGlowPart.Equals(default(GpuBufferHandle))
+        && !resolveGlowState.Equals(default(GpuBufferHandle));
     private bool SettlePoolNow => settlePool && !liveTexelPatch.Equals(default(GpuBufferHandle)) && cookedPacked is not null;
 
     private bool GpuResolveOn => liveTexels && !cpuResolve && SunNodeRefines && sunNodeSuns is { Length: > 0 };
@@ -45,6 +50,8 @@ internal sealed partial class SponzaLoop
             foreach (var b in new[] { resolveState, resolvePasses, resolveIds[0], resolveIds[1], resolvePlaces[0], resolvePlaces[1] })
                 if (!b.Equals(default(GpuBufferHandle))) RetireGpuBuffer(b);
             resolveState = Own(device.CreateGpuBuffer(checked(n * suns * 16), name: "sponza.resolve.state"));
+            if (!resolveGlowState.Equals(default(GpuBufferHandle))) RetireGpuBuffer(resolveGlowState);
+            resolveGlowState = Own(device.CreateGpuBuffer(checked(n * 16), name: "sponza.resolve.glow-state"));
             resolvePasses = Own(device.CreateGpuBuffer(n * 4, name: "sponza.resolve.passes"));
             for (var i = 0; i < 2; i++)
             {
@@ -87,6 +94,7 @@ internal sealed partial class SponzaLoop
                 new("uSun", new Vector4Uniform(new Vector4(inverse, sunNodeRays / 32))),
                 new("uMode", new Vector4Uniform(new Vector4(mode, suns, SunColumn(), detail ? 1f : 0f))),
                 new("uKeep", new Vector4Uniform(new Vector4(skyKept ? 1f : 0f, refineMasked && fineGathering ? 1f : 0f, GatherProvenanceCode, SettlePoolNow ? 1f : 0f))),
+                new("uGlow", new Vector4Uniform(new Vector4(NearGlowSplitNow ? 1f : 0f, 0f, 0f, 0f))),
             },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
@@ -110,6 +118,9 @@ internal sealed partial class SponzaLoop
                 TexelRaysBinding(),
                 new ShaderBufferBinding("TexelPatch", SettlePoolNow ? liveTexelPatch : resolveCount),
                 new ShaderBufferBinding("Pool", SettlePoolNow ? resolvePool : resolveCount),
+                new ShaderBufferBinding("NodeGlow", NearGlowSplitNow ? sunNodeGlow : resolveCount),
+                new ShaderBufferBinding("GlowState", NearGlowSplitNow ? resolveGlowState : resolveCount),
+                new ShaderBufferBinding("GlowPart", NearGlowSplitNow ? texelGlowPart : resolveCount),
             }.Where(b => declared.Contains(b.Name)).ToArray()) }, "slice-resolve");
     }
 

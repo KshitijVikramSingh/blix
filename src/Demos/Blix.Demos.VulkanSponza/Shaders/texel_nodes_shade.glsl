@@ -94,6 +94,11 @@ layout(std430, set = 0, binding = 39) buffer RayCapture { uint captureCount; uin
 // a texel's place in the fine round + 1 (0 none). The split variant's fast path alone.
 layout(std430, set = 0, binding = 40) readonly buffer FinePlace { uint finePlace[]; };
 layout(std430, set = 0, binding = 41) buffer FarPart { vec4 farPart[]; };
+// --near-glow-split: per slice texel, the passes' means of the sun's glow its rays met on sheets within the frame's
+// pass-by (BlixSheetMinDistance, 5 cm: blix_hwx.mm) -- a thin wall's other face, whose sun the frame draws per pixel
+// through the wall (lit.frag, sunTransmission). The GI keeps it whole; the lit pass leaves it out of a sheet pixel's own
+// far side (slice_resolve.comp writes it per texel, GlowPart), so the wall's sun is the frame's sharp one, once.
+layout(std430, set = 0, binding = 42) buffer NodeGlow { vec4 nodeGlow[]; };
 layout(std430, set = 0, binding = 14) readonly buffer FoliagePoints { vec4 foliagePoints[]; };
 layout(std430, set = 0, binding = 15) readonly buffer FoliageHash { uint foliageHash[]; };
 layout(std430, set = 0, binding = 16) readonly buffer FoliageBits { uint foliageBits[]; };
@@ -209,6 +214,7 @@ shared vec4 sSheet[RAYS];       // the hit's sheet: rgb T c, a T (0: not a sheet
 shared uint sHow[RAYS];         // the ray capture: how the hit was answered (RayCapture's w, before its flags); the
                                 // 256-sun variant (at Metal's 32 KB) captures nothing
 shared float sRayFar[RAYS];     // --near-cut: the ray met nothing within the reach (FarPart)
+shared vec3 sRayNearGlow[RAYS]; // --near-glow-split: the ray's sun glow from a sheet within the pass-by (NodeGlow)
 // The near unknown (default; --no-near-unknown-local): a near hit among no texel (none within the search's reach: a crease's foot, its records moved
 // off the contact or buried) took its nearest patch facing its way -- by distance alone, through the wall at the wall's
 // foot: crevices-dark's corridor corner read the sunlit floor outside, 1.4% of a texel's rays and 14% of its light,
@@ -623,6 +629,9 @@ void main() {
             vec3 w = sDir[r];
             float tiltDen = max(dot(dn, w), 0.1);
             float captureBounce = 0.0;
+#if MAX_WORDS == 1
+            sRayNearGlow[r] = vec3(0.0);
+#endif
             for (int k = 0; k < suns; ++k) {
                 vec3 toSun = sunNodes[k].xyz;
                 uint kind = uint(sunNodes[k].w + 0.5);
@@ -653,9 +662,10 @@ void main() {
                     float baseLobe = 1.0 - sSheet[r].a;
                     // A texel on a surface that lets light through (|w| 5: SponzaLoop.Lightmap.cs) leaves out the glow: the
                     // frame draws the sun through the sheets beyond it per pixel (lit.frag, sheetGlow).
-                    bool ownSheet = u.uNear.w > 0.5 && abs(texels[2u * nodeIds[uint(u.uDetail.x) + group]].w) > 4.5;
+                    bool ownSheet = abs(u.uNear.w - 1.0) < 0.5 && abs(texels[2u * nodeIds[uint(u.uDetail.x) + group]].w) > 4.5;
                     if (hasSun && k == exactColumn && sSheet[r].a > 0.0 && sExact[r] >= 0.0 && !ownSheet)
                         glow = sSheet[r].rgb * u.uSunIrradiance.rgb * max(-dot(sNormal[r], toSun), 0.0) * sExact[r] * sRayWeight[r] / PI;
+                    if (k == exactColumn) sRayNearGlow[r] = sDist[r] < 0.05 ? glow : vec3(0.0);
 #else
                     float baseLobe = 1.0;
 #endif
@@ -734,6 +744,15 @@ void main() {
             vec3 mean = sum / float(RAYS);
             vec4 before = u.uShade.w > 0.5 ? nodeAccum[at] : vec4(0.0);
             nodeAccum[at] = vec4(before.rgb + mean, before.w);
+#if MAX_WORDS == 1
+            if (k == exactColumn && u.uNear.w > 1.5) {
+                vec3 g = vec3(0.0);
+                if (abs(texels[2u * nodeIds[uint(u.uDetail.x) + group]].w) > 4.5)
+                    for (int r = 0; r < RAYS; ++r) g += sRayNearGlow[r];
+                vec4 gb = u.uShade.w > 0.5 ? nodeGlow[group] : vec4(0.0);
+                nodeGlow[group] = vec4(gb.rgb + g / float(RAYS), 0.0);
+            }
+#endif
             sColumnLum[k] = dot(mean, lumW);
             sColumnSource[k] = vec4(0.0); sColumnFar[k] = vec4(0.0); sColumnNear[k] = vec4(0.0); sColumnCompare[k] = vec4(0.0);
         }
@@ -803,7 +822,7 @@ void main() {
 #if MAX_WORDS == 1
             if (hasSun && k == exactColumn && sSheet[r].a > 0.0 && sExact[r] >= 0.0) {
                 // A sheet (as above): 1 - T of the sun on its side, T c of the sun on its far side.
-                bool ownSheet = u.uNear.w > 0.5 && abs(texels[2u * nodeIds[uint(u.uDetail.x) + group]].w) > 4.5;
+                bool ownSheet = abs(u.uNear.w - 1.0) < 0.5 && abs(texels[2u * nodeIds[uint(u.uDetail.x) + group]].w) > 4.5;
                 sum += h.rgb * (light + u.uSunIrradiance.rgb * ndotl * sExact[r] * (1.0 - sSheet[r].a))
                      + (ownSheet ? vec3(0.0) : sSheet[r].rgb * u.uSunIrradiance.rgb * max(-dot(sNormal[r], toSun), 0.0) * sExact[r] * sRayWeight[r] / PI);
                 continue;

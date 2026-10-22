@@ -231,6 +231,10 @@ layout(location = 10) in vec2 vLightmapTexel; // --lightmap: the lightmap atlas 
 // (tools/gi-model/thin_shell.py: the gap's light settles in the fine round and two near rounds, within 2-4%).
 layout(std430, set = 1, binding = 22) readonly buffer LitTexels { vec4 litTexels[]; };          // 2 a record: pos (w < 0 a pair), normal
 layout(std430, set = 1, binding = 23) readonly buffer LitTexelResolved { uvec2 litResolved[]; };
+// --near-glow-split (frame.uIncidentGradient.w 3): each record's glow from the sheets within the frame's pass-by -- its thin
+// wall's other face -- per unit of the sun's irradiance (slice_resolve.comp, GlowPart): left out here, the frame drawing
+// that sun per pixel (sunTransmission), so it is counted once and sharp.
+layout(std430, set = 1, binding = 24) readonly buffer LitGlowPart { uvec2 litGlow[]; };
 bool lightmapBackIrradiance(vec2 texel, vec3 n, out vec3 e) {
     e = vec3(0.0);
     uvec2 size = lightmapFrames[0];
@@ -253,6 +257,11 @@ bool lightmapBackIrradiance(vec2 texel, vec3 n, out vec3 e) {
         uint w9 = r.x;
         float scale = exp2(float(int(w9 >> 27) - 15 - 9));
         vec3 l = vec3(float(w9 & 511u), float((w9 >> 9) & 511u), float((w9 >> 18) & 511u)) * scale;
+        if (frame.uIncidentGradient.w > 2.5 && (litGlow[back].y & 0x10000u) != 0u) {
+            uint g9 = litGlow[back].x;
+            float gs = exp2(float(int(g9 >> 27) - 15 - 9));
+            l = max(l - vec3(float(g9 & 511u), float((g9 >> 9) & 511u), float((g9 >> 18) & 511u)) * gs * frame.uSunIrradiance, vec3(0.0));
+        }
         float wt = (o.x == 1 ? t.x : 1.0 - t.x) * (o.y == 1 ? t.y : 1.0 - t.y);
         e += wt * l;
         weight += wt;
@@ -525,7 +534,7 @@ void main() {
         // that lets light through, whose records leave it out (texel_nodes_shade.glsl, ownSheet): the sun through the
         // sheets beyond it is the frame's, per pixel -- a thin shell's far wall's sun sharp, not its texels' blur (the
         // teacup's smear, 2026-10-22).
-        sheetGlow = frame.uIncidentGradient.z > 0.5 && !(frame.uIncidentGradient.w > 1.5 && mat.uMaterialParams2.z > 0.0)
+        sheetGlow = frame.uIncidentGradient.z > 0.5 && !(abs(frame.uIncidentGradient.w - 2.0) < 0.5 && mat.uMaterialParams2.z > 0.0)
             ? vec3(0.0) : rtSheetGlow(gl_FragCoord.xy) * frame.uShadowStrength;
     } else if (frame.uShadowStrength > 0.0 && shadowNeed > 0.0) {
         sunShadow = blix_sun_shadow_cascaded(
