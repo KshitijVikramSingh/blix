@@ -241,6 +241,13 @@ internal sealed partial class SponzaLoop
         ReadListArgs(args);
         // On by default (2026-10-22: the gate held; Cornell and crevices seams' |error| and noise down, two seeds each).
         guideSun = !args.Flag("no-guide-sun");
+        // --guide-sky-only: the guides and light lists from the sky's light alone (no sun component, no direct sun) -- the
+        // same whatever the sun: for lists cooked once and lit under every sun, so a list cook's default (--list-cook-sun-
+        // guides: the cook's sun's). The corridor's lists, two cooks' rays, at three suns: corridor 0.018 / 0.035 / 0.018,
+        // seams 0.034 / 0.029 / 0.039; the cook's sun's guides 0.014 / 0.034 / 0.017 and 0.033 / 0.029 / 0.043; cosine
+        // alone 0.025 / 0.035 / 0.024 and 0.047 / 0.033 / 0.061 (2026-10-23).
+        guideSkyOnly = args.Flag("guide-sky-only")
+            || ((args.Flag("list-cook") || args.Flag("list-cook-append")) && !args.Flag("list-cook-sun-guides"));
         nearCut = !args.Flag("no-near-cut");
         // On by default (2026-10-22: two seeds, crevices seams' bias -1.2% -> -0.4%, every seed noise down; the gate held).
         settlePool = !args.Flag("no-settle-pool");

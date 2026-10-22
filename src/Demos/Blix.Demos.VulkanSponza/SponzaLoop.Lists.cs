@@ -53,6 +53,9 @@ internal sealed partial class SponzaLoop
         // --list-cook-append: the cook's rays added to the stored lists (another sun's guides: a ray carries its own pdf's
         // weight, so rays guided by several suns sum to one estimate -- a crease's lists cooked under one sun read +1% and
         // half again as noisy under another, the guides aimed elsewhere, 2026-10-23).
+        // Twice the rays: a second cook appended with another seed (BLIX_GATHER_SEED): the corridor's seams 0.034 against
+        // 0.052 at the cook's sun. One cook of 1,024 sweep rays instead did worse (0.039, its corridor 0.024 against 0.018;
+        // not yet understood, 2026-10-23).
         listCookAppend = args.Flag("list-cook-append");
         listCook = args.Flag("list-cook") || listCookAppend;
         listsOn = args.Flag("lists");

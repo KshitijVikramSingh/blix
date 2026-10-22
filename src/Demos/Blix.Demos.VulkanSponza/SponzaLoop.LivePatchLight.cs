@@ -389,7 +389,7 @@ internal sealed partial class SponzaLoop
 
     // The guides and light lists count each patch's own direct sun (texel_live_guides.comp); --no-guide-sun: its bounce
     // alone, as before.
-    private bool guideSun;
+    private bool guideSun, guideSkyOnly;
     private bool GuideSunNow => guideSun && !liveDirect.Equals(default(GpuBufferHandle));
 
     private void RecordLiveGuides(TransportSolveData d)
@@ -409,7 +409,7 @@ internal sealed partial class SponzaLoop
         graph.Dispatch(liveGuidesPass, new DispatchCommand(liveGuidesPipeline, (d.Patches + 63) / 64, 1, 1,
             new ShaderUniform[]
             {
-                new("uGuides", new Vector4Uniform(new Vector4(d.Patches, LiveComponents, GuideSunNow ? 1f : 0f, 0f))),
+                new("uGuides", new Vector4Uniform(new Vector4(d.Patches, LiveComponents, GuideSunNow && !guideSkyOnly ? 1f : 0f, guideSkyOnly ? 1f : 0f))),
                 new("uIrr", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 0f))),
             },
             Array.Empty<ShaderTextureBinding>(),

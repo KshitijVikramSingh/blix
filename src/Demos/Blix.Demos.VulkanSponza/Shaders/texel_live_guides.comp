@@ -15,7 +15,8 @@ layout(local_size_x = 64) in;
 #define GUIDE_BINS 64
 
 layout(set = 0, binding = 0) uniform LiveGuides {
-    vec4 uGuides;   // x the patches, y the components (G), z 1: a patch's own direct sun counted (--guide-sun)
+    vec4 uGuides;   // x the patches, y the components (G), z 1: a patch's own direct sun counted (--guide-sun); w 1: the
+                    // sky's component alone (--guide-sky-only: the same under every sun)
     vec4 uIrr;      // rgb the sun's irradiance
 } u;
 
@@ -67,7 +68,7 @@ void main() {
         vec3 d = cookedPatch[3u * j].xyz - p;
         if (dot(d, d) < 1e-8) continue;
         vec3 out_ = vec3(0.0);
-        for (uint k = 0u; k < G; ++k) out_ += nodeOut[j * G + k].rgb;
+        for (uint k = 0u; k < (u.uGuides.w > 0.5 ? 1u : G); ++k) out_ += nodeOut[j * G + k].rgb;   // component 0: the sky alone
         if (u.uGuides.z > 0.5 && patchDirect[2u * j + 1u] > 0u)
             out_ += patchTerms[3u * j].rgb * u.uIrr.rgb * (float(patchDirect[2u * j]) / 4096.0 / float(patchDirect[2u * j + 1u])) / PI;
         float s = uintBitsToFloat(coupling[c].y) * dot(out_, lum);
