@@ -382,7 +382,7 @@ internal sealed partial class SponzaLoop
                 var lod0 = ordered[i].Lods[0].Indices32 ?? ordered[i].Lods[0].Indices16?.Select(x => (uint)x).ToArray();
                 if (lod0 is not null)
                     lightmapSources.Add((ordered[i].Name, ordered[i].VertexBytes, sharedLayout.Stride, VertexSemantics.Of(sharedLayout)?.Normal ?? -1, VertexSemantics.Of(sharedLayout)?.Tangent ?? -1, lod0, ordered[i].Worlds[0], t,
-                        GiTwoSided(ordered[i])));
+                        GiTwoSided(ordered[i]), giFarSide && ordered[i].TransmissionFactor > 0f));
             }
             sceneLightmapTexels = Own(device.CreateGpuBuffer(texels.Length * 8, MemoryMarshal.AsBytes(texels.AsSpan()), "sponza.scene.lightmap-texels"));
             if (lightmapEnabled)

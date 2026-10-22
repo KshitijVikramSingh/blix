@@ -292,6 +292,7 @@ void main() {
         }
         if (known) tMax = sFarReach;
     }
-    if (u.uTile.w > 0.0) tMax = min(tMax, u.uTile.w);
+    // A near round's cut -- not for a sheet's texel (|w| 5: SponzaLoop.Lightmap.cs), whose far light still settles.
+    if (u.uTile.w > 0.0 && abs(texels[2u * id].w) < 4.5) tMax = min(tMax, u.uTile.w);
     nodeRays[slot * 2u + 1u] = vec4(dir, tMax);
 }

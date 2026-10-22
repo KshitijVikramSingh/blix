@@ -527,7 +527,7 @@ internal sealed partial class SponzaLoop
                 IncidentHoldsOcclusion ? 1f : 0f,
                 IncidentFieldNow ? 1f : 0f,
                 halfShadowsNow ? 1f : 0f))),
-            new("uIncidentGradient", new Vector4Uniform(new Vector4(incidentNormalBias, incidentGradientClamp, SheetsInGi && IncidentFieldNow ? 1f : 0f, GiFarSideNow && IncidentFieldNow ? 1f : 0f))),
+            new("uIncidentGradient", new Vector4Uniform(new Vector4(incidentNormalBias, incidentGradientClamp, SheetsInGi && IncidentFieldNow ? 1f : 0f, GiFarSideNow && IncidentFieldNow ? (sheetGlowSplit ? 2f : 1f) : 0f))),
             new("uViewProjUnjittered", new Matrix4x4Uniform(viewProj)),
             // Last frame's un-jittered camera, or this frame's on the first (zero motion rather than garbage).
             new("uPrevViewProjUnjittered", new Matrix4x4Uniform(velocityPrevValid ? velocityPrevViewProj : viewProj)),
@@ -915,6 +915,7 @@ internal sealed partial class SponzaLoop
                 using (Prof("texels")) RecordTexels(incidentInvProj, incidentInvView, frame.Width, frame.Height);
                 RecordReference(incidentInvProj, incidentInvView, frame.Width, frame.Height);
                 RecordGpuReference();
+                RecordViewReference();
                 if (halfLightingNow)
                 {
                     var (halfWidth, halfHeight) = HalfLightingSize(frame.Width, frame.Height);

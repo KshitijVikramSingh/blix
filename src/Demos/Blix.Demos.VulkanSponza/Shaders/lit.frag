@@ -519,8 +519,12 @@ void main() {
         sunShadow = rtSunVisibility(gl_FragCoord.xy);
         sunShadow = mix(1.0, sunShadow, frame.uShadowStrength);
         // --sheet-light: the sheets' glow is in the incident field (the gather's hits on a sheet's far side, the patch
-        // solve's twins: tools/gi-model/thin_sheet.py) -- the frame's own here as well counted it twice.
-        sheetGlow = frame.uIncidentGradient.z > 0.5 ? vec3(0.0) : rtSheetGlow(gl_FragCoord.xy) * frame.uShadowStrength;
+        // solve's twins: tools/gi-model/thin_sheet.py) -- the frame's own here as well counted it twice. Except on a surface
+        // that lets light through, whose records leave it out (texel_nodes_shade.glsl, ownSheet): the sun through the
+        // sheets beyond it is the frame's, per pixel -- a thin shell's far wall's sun sharp, not its texels' blur (the
+        // teacup's smear, 2026-10-22).
+        sheetGlow = frame.uIncidentGradient.z > 0.5 && !(frame.uIncidentGradient.w > 1.5 && mat.uMaterialParams2.z > 0.0)
+            ? vec3(0.0) : rtSheetGlow(gl_FragCoord.xy) * frame.uShadowStrength;
     } else if (frame.uShadowStrength > 0.0 && shadowNeed > 0.0) {
         sunShadow = blix_sun_shadow_cascaded(
             uCascadeShadowMaps[0], uCascadeShadowMaps[1], uCascadeShadowMaps[2], uLinearClamp,
@@ -812,6 +816,14 @@ void main() {
             // (white 0 at 0.5 m, green 1, blue 2, magenta 3; dimmed while the clipmap has not solved).
             frame.uVizChannel > 22.5 && frame.uVizChannel < 24.5 ? vizClipmap(vWorldPos, vizGeometricN, frame.uVizChannel < 23.5) :
             frame.uVizChannel > 24.5 && frame.uVizChannel < 25.5 ? vizLightmap(vLightmapTexel) :
+            // 26: the diffuse response as the reference's camera paths model it (--ref-view: Lambert's base lobe, 1 - T,
+            // and the sheet's transmission, T c; no specular, no sheen, no Fresnel weight) -- the direct sun on either side
+            // and the indirect light, front and back: what the material and the light make of the pixel, judged against
+            // the path trace pixel for pixel.
+            frame.uVizChannel > 25.5 && frame.uVizChannel < 26.5
+                ? albedo / PI * transScale * (NdotL * frame.uSunIrradiance * sunShadow * terminatorFront
+                      + sheetGlow * max(dot(Nsmooth, L), 0.0) * frame.uSunIrradiance)
+                  + sunTransmission + bounce * transScale + diffuseIBL * transScale * visibility * ao + transmittedIBL :
             // 21 is unused (the retired volume's leak metric); black.
                                        vec3(0.0);
         // Straight out, no exposure and no tonemap — these are directions and flags, and a film

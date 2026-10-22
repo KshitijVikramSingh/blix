@@ -250,15 +250,39 @@ vec3 unpackPart(uint p) {
 // crease_bounce.py: 25 cm patches +2-6% at a texel 2 cm off a crease, the texels' own light within 25 cm +-0.3%, one
 // lagged step of it within 2.3%). The texels' light is the last resolve's, so the gather iterates on it; a texel not
 // gathered yet (word 1 bit 16) leaves the patch's. sNearTexel: the hit's likeliest texel, on the hit's side.
-bool nearTexelLight(int r, int k, out vec3 l) {
-    if (u.uHitBlend.z < 0.5 || sNearTexel[r] < 0) return false;
-    uint id = uint(sNearTexel[r]);
+// A texel's gathered light for a column (its part per unit of the sun's irradiance, scaled), or false before its gather.
+bool texelPartLight(uint id, int k, out vec3 l) {
     bool sunColumn = k == int(u.uHitBlend.w);
     uvec2 w = sunColumn ? sunPart[id] : skyPart[id];
     if ((w.y & 0x10000u) == 0u) return false;
     uint code = (provenance[id / 4u] >> (8u * (id % 4u) + (sunColumn ? 0u : 4u))) & 0xFu;
     if (code < 1u || code > 4u) return false;
     l = unpackPart(w.x) * (sunColumn ? u.uSunIrradiance.rgb : vec3(1.0));
+    return true;
+}
+
+bool nearTexelLight(int r, int k, out vec3 l) {
+    if (u.uHitBlend.z < 0.5 || sNearTexel[r] < 0) return false;
+    uint id = uint(sNearTexel[r]);
+    if (!texelPartLight(id, k, l)) return false;
+#if MAX_WORDS == 1
+    // A hit on a sheet that lets light through (sSheet: T c, T): by the spec 1 - T of the light on the side the ray met
+    // goes to the base lobe (the hit's albedo, in sHit) and T c of the light on its far side comes through -- the far side's
+    // record, the pair's other (same position; SponzaLoop.Lightmap.cs writes the front then the back). Without it only the
+    // sun's glow came through at texel level: a closed thin shell's walls (the teacup, T 1) passed none of the light inside
+    // the cup, and its camera paths read 13x what the renderer did (tools/gi-model/view_reference.py, 2026-10-22).
+    if (sSheet[r].a > 0.0 && texels[2u * id].w < 0.0) {
+        vec3 p = texels[2u * id].xyz;
+        uint twin = texels[2u * (id + 1u)].w < 0.0 && distance(texels[2u * (id + 1u)].xyz, p) < 1e-4 ? id + 1u
+                  : id > 0u && texels[2u * (id - 1u)].w < 0.0 && distance(texels[2u * (id - 1u)].xyz, p) < 1e-4 ? id - 1u : id;
+        vec3 far;
+        if (twin != id && texelPartLight(twin, k, far)) {
+            // sHit's rgb is the hit's albedo x weight / pi: the far side's T c over the albedo, so add = weight / pi x T c x E.
+            vec3 albedo = max(sHit[r].rgb / max(sRayWeight[r] / PI, 1e-8), vec3(1e-3));
+            l = l * (1.0 - sSheet[r].a) + far * sSheet[r].rgb / albedo;
+        }
+    }
+#endif
     return true;
 }
 
@@ -404,6 +428,12 @@ void main() {
             // the hit.
             uint cellAt = 0u;
             bool byCell = u.uLookup.w > 0.5 && h1.z != 0xFFFFFFFFu && (h1.z & 0x80000000u) == 0u && uintBitsToFloat(h0.x) >= u.uLookup.z;
+#if MAX_WORDS == 1
+            // A hit on a sheet that lets light through, however far: the search's texels, so its far side's record comes
+            // through (nearTexelLight); a cell's patch has no far side for a closed shell -- the teacup's 8 patches, the
+            // light across its inside read without what came through its walls.
+            if (sSheet[lid].a > 0.0) byCell = false;
+#endif
             if (byCell) {
                 uint r = hitCells[2u + 2u * h1.z];
                 vec2 bary = vec2(float(h1.w & 0xFFFFu), float(h1.w >> 16)) / 65535.0;
@@ -621,7 +651,10 @@ void main() {
 #if MAX_WORDS == 1
                     // A sheet: the base lobe keeps 1 - T of the sun on its side; T c of the sun on its far side is its glow.
                     float baseLobe = 1.0 - sSheet[r].a;
-                    if (hasSun && k == exactColumn && sSheet[r].a > 0.0 && sExact[r] >= 0.0)
+                    // A texel on a surface that lets light through (|w| 5: SponzaLoop.Lightmap.cs) leaves out the glow: the
+                    // frame draws the sun through the sheets beyond it per pixel (lit.frag, sheetGlow).
+                    bool ownSheet = u.uNear.w > 0.5 && abs(texels[2u * nodeIds[uint(u.uDetail.x) + group]].w) > 4.5;
+                    if (hasSun && k == exactColumn && sSheet[r].a > 0.0 && sExact[r] >= 0.0 && !ownSheet)
                         glow = sSheet[r].rgb * u.uSunIrradiance.rgb * max(-dot(sNormal[r], toSun), 0.0) * sExact[r] * sRayWeight[r] / PI;
 #else
                     float baseLobe = 1.0;
@@ -642,7 +675,9 @@ void main() {
                 sRayTilt[r * 2 + k] = tilts ? tiltLight * vec2(dot(dt1, w), dot(dt2, w)) / tiltDen : vec2(0.0);
             }
 #if MAX_WORDS == 1
-            sRayFar[r] = sDist[r] >= u.uNear.y || h.w < -1.5 ? 1.0 : 0.0;
+            // A sheet's texel keeps no far part: what it sees past the reach includes other sheets' texels, still settling
+            // round by round (its rays are not cut either: texel_nodes_rays.comp).
+            sRayFar[r] = (sDist[r] >= u.uNear.y || h.w < -1.5) && abs(texels[2u * nodeIds[uint(u.uDetail.x) + group]].w) < 4.5 ? 1.0 : 0.0;
             if (u.uCapture.x > 0.5) {
                 uint id = nodeIds[uint(u.uDetail.x) + group];
                 // y < 0: the one texel -y - 1 (--ray-capture-texel), every ray of it.
@@ -768,8 +803,9 @@ void main() {
 #if MAX_WORDS == 1
             if (hasSun && k == exactColumn && sSheet[r].a > 0.0 && sExact[r] >= 0.0) {
                 // A sheet (as above): 1 - T of the sun on its side, T c of the sun on its far side.
+                bool ownSheet = u.uNear.w > 0.5 && abs(texels[2u * nodeIds[uint(u.uDetail.x) + group]].w) > 4.5;
                 sum += h.rgb * (light + u.uSunIrradiance.rgb * ndotl * sExact[r] * (1.0 - sSheet[r].a))
-                     + sSheet[r].rgb * u.uSunIrradiance.rgb * max(-dot(sNormal[r], toSun), 0.0) * sExact[r] * sRayWeight[r] / PI;
+                     + (ownSheet ? vec3(0.0) : sSheet[r].rgb * u.uSunIrradiance.rgb * max(-dot(sNormal[r], toSun), 0.0) * sExact[r] * sRayWeight[r] / PI);
                 continue;
             }
 #endif

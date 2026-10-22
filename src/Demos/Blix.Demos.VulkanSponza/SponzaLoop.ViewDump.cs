@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using Blix.Graphics;
 
@@ -95,6 +96,15 @@ internal sealed partial class SponzaLoop
             Buffer("reference.f32x4", referenceAccum, (long)referenceSize.X * referenceSize.Y * 16);
             Buffer("reference_moments.f32", referenceMoments, (long)referenceSize.X * referenceSize.Y * 4);
         }
+        // --ref-view's camera paths (SponzaLoop.ViewReference.cs): per grid point the radiance sum (rgb, x pi) and paths.
+        object? refView = null;
+        if (viewWave is { } vw)
+        {
+            var sums = ReferenceWaveSums(vw);
+            File.WriteAllBytes(Path.Combine(dir, "reference_view.f32x4"), MemoryMarshal.AsBytes(sums.AsSpan()).ToArray());
+            files["reference_view.f32x4"] = new { bytes = sums.Length * 16 };
+            refView = new { stride = refViewStride, width = refViewW, height = refViewH, frames = vw.Dispatch, framesWanted = ReferenceWaveFrames(vw), lanes = vw.LanesPerPoint, quota = vw.Quota };
+        }
         var irr = EffectiveSunIrradiance;
         var meta = new
         {
@@ -110,6 +120,7 @@ internal sealed partial class SponzaLoop
             reference = new { width = referenceSize.X, height = referenceSize.Y, samples = referenceSamples, on = referenceView },
             pick = new[] { texelPickFraction.X, texelPickFraction.Y },
             rtMask = new[] { rtShadowSize.Width, rtShadowSize.Height },
+            refView,
             seed = Environment.GetEnvironmentVariable("BLIX_GATHER_SEED") ?? "0",
             texelView = TexelViewNames[Math.Clamp(texelView, 0, TexelViewNames.Length - 1)],
             fieldIsGi = true,

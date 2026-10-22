@@ -32,7 +32,10 @@ layout(set = 0, binding = 0) uniform ReferenceWave {
 } u;
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
-// Two vec4s a point: its position, then its normal.
+// Two vec4s a point: its position, then its normal -- or, w 1 on the second (--ref-view, SponzaLoop.ViewReference.cs), a
+// CAMERA point: the camera's position and its pixel's direction, the path's first ray along it (not a cosine ray), so
+// the path's first hit is the surface the pixel shows and its sum the radiance that pixel sees: the material's response
+// (the base lobe and the sheet's transmission, by the rules below) with every light that reaches it.
 layout(std430, set = 0, binding = 2) readonly buffer ReferencePointList { vec4 points[]; };
 // Per lane, its path (the layout beside main); the host starts every lane with no path (hits -1).
 layout(std430, set = 0, binding = 3) buffer ReferenceLanes { vec4 lanes[]; };
@@ -75,6 +78,7 @@ void main() {
 
     if (mode == 0) {
         uint seed = floatBitsToUint(c.w);
+        bool camera = points[2u * (l / uint(u.uParams.w)) + 1u].w > 0.5;
         if (a.w < 0.0) {
             if (b.w >= u.uParams.z) {   // the lane's quota is met: no ray
                 batchRays[2u * l] = vec4(0.0);
@@ -89,7 +93,7 @@ void main() {
             r = vec4(0.0);
             if (seed == 0u) seed = blix_pcg(l * 9781u + uint(u.uCount.y) * 2654435761u + 1u);
         }
-        vec3 dir = referenceCosineAround(b.xyz, referenceRand(seed), referenceRand(seed));
+        vec3 dir = camera && a.w < 0.5 ? b.xyz : referenceCosineAround(b.xyz, referenceRand(seed), referenceRand(seed));
         batchRays[2u * l] = vec4(a.xyz, 0.0);
         batchRays[2u * l + 1u] = vec4(dir, uintBitsToFloat(0x7F800000u));
         lanes[4u * l] = a;

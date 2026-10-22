@@ -24,7 +24,7 @@ internal sealed partial class SponzaLoop
     // The scene atlas's size, from the .blixlightmap files (every file of a scene shares it).
     private static int lightmapAtlasWidth, lightmapAtlasHeight;
     // What the bake rasterizes, captured as the shared buffers are built: each drawable with a lightmap.
-    private readonly List<(string Name, byte[] VertexBytes, int Stride, int NormalOffset, int TangentOffset, uint[] Indices, Matrix4x4 World, Vector2[] Texels, bool DoubleSided)> lightmapSources = new();
+    private readonly List<(string Name, byte[] VertexBytes, int Stride, int NormalOffset, int TangentOffset, uint[] Indices, Matrix4x4 World, Vector2[] Texels, bool DoubleSided, bool Transmits)> lightmapSources = new();
     // Set 1's LightmapFrames (lightmap_frame.glsl): [0] the atlas size, then per record id + 1 its packed LOD 0
     // shading frame; and the index map again, under the lit interface's name for it.
     private GpuBufferHandle lightmapFramesBuffer;
@@ -94,7 +94,7 @@ internal sealed partial class SponzaLoop
     // stage of the GI bundle (--cook-gi): what they depend on beyond the texels key (which names the scene, its
     // .blixlightmap files and the texel settings).
     private sealed record LightmapRecords(Vector4[] Texels, uint[] IndexMap, uint[] Frames, int Count);
-    private const int LightmapRecordsVersion = 3;
+    private const int LightmapRecordsVersion = 4;
     private string? lightmapRecordsKey;
     private string LightmapRecordsRule => string.Create(CultureInfo.InvariantCulture,
         $"records v{LightmapRecordsVersion};atlas {lightmapAtlasWidth}x{lightmapAtlasHeight};{LightmapBuriedRule};contacts {ContactRays} {ContactShare} {ContactStep};budget {LightmapRecordBudgetBytes}");
@@ -178,8 +178,11 @@ internal sealed partial class SponzaLoop
                     if (texels![2 * id].W != 0f) continue;
                     var pos = Inset(pa, pb, pc, wa, wb, wc, boundary![t / 3]);
                     var atlas = BitConverter.Int32BitsToSingle(x | (y << 16));
-                    // Position w: the area weight texel.glsl's hashed path reads (4: whole), negative for a pair.
-                    texels[2 * id] = new Vector4(pos, source.DoubleSided ? -4f : 4f);
+                    // Position w: the area weight texel.glsl's hashed path reads (4: whole), negative for a pair; 5 on a surface
+                    // that lets light through (the gather's hits then leave out other sheets' far-side sun, which the frame
+                    // draws per pixel: texel_nodes_shade.glsl, ownSheet).
+                    var whole = source.Transmits ? 5f : 4f;
+                    texels[2 * id] = new Vector4(pos, source.DoubleSided ? -whole : whole);
                     texels[2 * id + 1] = new Vector4(n, atlas);
                     if (source.NormalOffset >= 0)
                     {
@@ -208,7 +211,7 @@ internal sealed partial class SponzaLoop
                     }
                     if (source.DoubleSided)
                     {
-                        texels[2 * id + 2] = new Vector4(pos, -4f);
+                        texels[2 * id + 2] = new Vector4(pos, -whole);
                         texels[2 * id + 3] = new Vector4(-n, atlas);
                     }
                 }
