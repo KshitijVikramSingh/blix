@@ -19,7 +19,8 @@ internal sealed partial class SponzaLoop
     private float rayReach = 1000f;
     // Per ray-scene placement (the transform table's order): the material a surface bake reads.
     // Clear: authored transmission (the panes): no coverage, rays pass (ray_surface_bake.comp).
-    private readonly record struct RayMaterial(TextureHandle Albedo, Vector4 BaseColor, float AlphaCutoff, bool Clear, TextureHandle Transmission = default);
+    private readonly record struct RayMaterial(TextureHandle Albedo, Vector4 BaseColor, float AlphaCutoff, bool Clear, TextureHandle Transmission = default,
+        TextureHandle TransmissionColor = default);
     private readonly List<RayMaterial> rayPlacementMaterials = new();
     // Per placement (the ray scene's order): whether its surface is in the lightmap atlas (--lightmap). The hashed
     // texels leave those out when the atlas's texels serve them (SponzaLoop.Lightmap.cs).
@@ -36,6 +37,10 @@ internal sealed partial class SponzaLoop
     // diffuse glow, not a tinted beam (tried as a beam: a sharp coloured copy of the cloth, 2026-10-15).
     private readonly List<Vector3> rayPlacementTransmission = new();
     private readonly List<float> rayPlacementTransmissionFactor = new();
+    // Per placement: --cloth-transmission's curtains (DrawableStaging.Cloth).
+    private readonly List<bool> rayPlacementCloth = new();
+    // Per placement: KHR_materials_unlit (DrawableStaging.Unlit).
+    private readonly List<bool> rayPlacementUnlit = new();
     // Per placement: its primitive's name (--texel-inspect).
     private readonly List<string> rayPlacementNames = new();
     private RayQueryGpuData? rayGpuData;
@@ -44,20 +49,26 @@ internal sealed partial class SponzaLoop
     private readonly List<(RayMaterial Material, int First, int Count)> raySurfaceBakes = new();
     private ShaderBufferBinding[] raySurfaceBakeBuffers = Array.Empty<ShaderBufferBinding>();
     // Per triangle row, the share of its material's diffuse transmission factor its factor texture keeps (the texture's
-    // alpha averaged over the triangle, unorm8; 255 whole, the default): ray_surface_bake.comp writes it.
+    // alpha averaged over the triangle, unorm8; 255 whole, the default), and its colour texture's mean (sRGB, the upper
+    // three bytes; white without one): ray_surface_bake.comp writes them.
     private GpuBufferHandle rayTransmissionRows;
-    private float[]? rowTransmissionShare;
-    private float RowTransmissionShare(int row)
+    private uint[]? rowTransmissionWords;
+    private bool RowTransmissionWords()
     {
-        if (rowTransmissionShare is null)
-        {
-            if (rayTransmissionRows.Equals(default(GpuBufferHandle)) || rayGpuData is not { } d || !raySurfacesChecked) return 1f;
-            device.WaitIdle();
-            var words = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(rayTransmissionRows, 0, d.RowPlacements.Length * 4).AsSpan());
-            rowTransmissionShare = new float[words.Length];
-            for (var i = 0; i < words.Length; i++) rowTransmissionShare[i] = (words[i] & 255u) / 255f;
-        }
-        return row < rowTransmissionShare.Length ? rowTransmissionShare[row] : 1f;
+        if (rowTransmissionWords is not null) return true;
+        if (rayTransmissionRows.Equals(default(GpuBufferHandle)) || rayGpuData is not { } d || !raySurfacesChecked) return false;
+        device.WaitIdle();
+        rowTransmissionWords = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(rayTransmissionRows, 0, d.RowPlacements.Length * 4).AsSpan()).ToArray();
+        return true;
+    }
+    private float RowTransmissionShare(int row) =>
+        RowTransmissionWords() && row < rowTransmissionWords!.Length ? (rowTransmissionWords[row] & 255u) / 255f : 1f;
+    private Vector3 RowTransmissionColour(int row)
+    {
+        if (!RowTransmissionWords() || row >= rowTransmissionWords!.Length) return Vector3.One;
+        var w = rowTransmissionWords[row];
+        static float Linear(uint b) { var c = b / 255f; return c <= 0.04045f ? c / 12.92f : MathF.Pow((c + 0.055f) / 1.055f, 2.4f); }
+        return new Vector3(Linear((w >> 8) & 255u), Linear((w >> 16) & 255u), Linear(w >> 24));
     }
     private ShaderInterface raySurfaceBakeInterface = null!;
     private PassHandle raySurfaceBakePassHandle;
@@ -426,7 +437,10 @@ internal sealed partial class SponzaLoop
             else raySurfacesChecked = true;
         }
         if (raySurfaceBakes.Count == 0 && rayGpuData is not null) raySurfacesChecked = true;   // nothing to bake
-        if (raySurfacesBaked || raySurfaceBakes.Count == 0 || !fullyLoaded) return;
+        // Frames in flight past the last mip's upload (ResourceUploader queues it with a frame's commands, no wait): baked on
+        // the first frame after it, the teacup's factor texture read 51%, 0% and 35% of the factor in three runs alike
+        // (2026-10-22) -- and every row's albedo stood on the same race.
+        if (raySurfacesBaked || raySurfaceBakes.Count == 0 || !fullyLoaded || postLoadFrames < device.MaxFramesInFlightCount + 2) return;
         raySurfaceBakeFrame = postLoadFrames;
         raySurfaceBakeTries++;
         foreach (var (material, first, count) in raySurfaceBakes)
@@ -436,10 +450,12 @@ internal sealed partial class SponzaLoop
                 {
                     new("uBaseColor", new Vector4Uniform(material.BaseColor)),
                     new("uParams", new Vector4Uniform(new Vector4(first, count, material.AlphaCutoff, material.Clear ? 1f : 0f))),
-                    new("uParams2", new Vector4Uniform(new Vector4(material.Transmission.Equals(default(TextureHandle)) ? 0f : 1f, 0f, 0f, 0f))),
+                    new("uParams2", new Vector4Uniform(new Vector4(material.Transmission.Equals(default(TextureHandle)) ? 0f : 1f,
+                        material.TransmissionColor.Equals(default(TextureHandle)) ? 0f : 1f, 0f, 0f))),
                 },
                 new[] { new ShaderTextureBinding("uAlbedo", material.Albedo),
-                    new ShaderTextureBinding("uTransmission", material.Transmission.Equals(default(TextureHandle)) ? material.Albedo : material.Transmission) },
+                    new ShaderTextureBinding("uTransmission", material.Transmission.Equals(default(TextureHandle)) ? material.Albedo : material.Transmission),
+                        new ShaderTextureBinding("uTransmissionColor", material.TransmissionColor.Equals(default(TextureHandle)) ? material.Albedo : material.TransmissionColor) },
                 Buffers: raySurfaceBakeBuffers));
         }
         raySurfacesBaked = true;

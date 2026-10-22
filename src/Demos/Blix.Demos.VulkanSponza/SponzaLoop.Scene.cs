@@ -330,7 +330,10 @@ internal sealed partial class SponzaLoop
                     : pm?.Ext is { } ext ? ext.DiffuseTransmissionFactor * ext.DiffuseTransmissionColorFactor : Vector3.Zero,
                 ClothTransmission(pm) is { } clothF ? clothF.Factor : pm?.Ext is { } extF ? extF.DiffuseTransmissionFactor : 0f,
                 // The factor texture (its alpha scales the factor), for the rays' surface bake's per-row share.
-                pm?.Ext.DiffuseTransmissionTexture is not null ? textureLoader.Load(pm).DiffuseTransmission : default));
+                pm?.Ext.DiffuseTransmissionTexture is not null ? textureLoader.Load(pm).DiffuseTransmission : default,
+                ClothTransmission(pm) is null && pm?.Ext.DiffuseTransmissionColorTexture is not null ? textureLoader.Load(pm).DiffuseTransmissionColor : default,
+                ClothTransmission(pm) is not null,
+                pm?.Ext.Unlit ?? false));
         }
     }
 
@@ -416,12 +419,14 @@ internal sealed partial class SponzaLoop
                 sceneTransformSurfaceKeys.Add(SurfaceKeyOf(s, w, i, surfaceKeys));
                 sceneTransformInstances.Add(s.Instances[w]);
                 rayInstances.Add(new RayQueryScene.Instance(rayMeshes[i], world));
-                rayPlacementMaterials.Add(new RayMaterial(s.Albedo, s.BaseColor, s.AlphaCutoff, s.IsBlend, s.TransmissionTexture));
+                rayPlacementMaterials.Add(new RayMaterial(s.Albedo, s.BaseColor, s.AlphaCutoff, s.IsBlend, s.TransmissionTexture, s.TransmissionColorTexture));
                 rayPlacementLightmapped.Add(s.LightmapTexels is not null);
                 rayPlacementDoubleSided.Add(s.Pipeline == opaqueDoubleSidedPipeline || s.Pipeline == blendDoubleSidedPipeline);
                 rayPlacementGiTwoSided.Add(GiTwoSided(s));
                 rayPlacementTransmission.Add(s.Transmission);
                 rayPlacementTransmissionFactor.Add(s.TransmissionFactor);
+                rayPlacementCloth.Add(s.Cloth);
+                rayPlacementUnlit.Add(s.Unlit);
                 rayPlacementNames.Add(s.Name);
                 if (!UniformScale(world)) nonUniform++;
             }
@@ -691,7 +696,8 @@ internal sealed partial class SponzaLoop
                 // lit passes make identical coverage decisions: hashed coverage (positive).
                 new Vector4(transmission, sheenRoughness, diffuseTransmission,
                     MsaaSamples > 1 ? MsaaSamples : 1f))
-            .SetUniform(binding: 0, "uSheenColor", new Vector4(sheen.X, sheen.Y, sheen.Z, 0f))
+            // w 1: KHR_materials_unlit (lit.frag shows its base colour, unshaded).
+            .SetUniform(binding: 0, "uSheenColor", new Vector4(sheen.X, sheen.Y, sheen.Z, ext.Unlit ? 1f : 0f))
             .SetUniform(binding: 0, "uDiffuseTransmissionColor",
                 new Vector4(diffuseTransmissionColor.X, diffuseTransmissionColor.Y,
                             diffuseTransmissionColor.Z, ClothTransmission(gm) is not null ? 1f : 0f))

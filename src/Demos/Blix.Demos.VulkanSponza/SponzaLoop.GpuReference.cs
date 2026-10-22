@@ -94,10 +94,11 @@ internal sealed partial class SponzaLoop
             {
                 var p = (int)data.RowPlacements[row];
                 if (p >= rayPlacementTransmissionFactor.Count) continue;
-                // T: the factor times the row's share of its factor texture (RowTransmissionShare: its alpha over the triangle).
+                // T: the factor times the row's share of its factor texture (RowTransmissionShare: its alpha over the triangle);
+                // c the colour factor times its colour texture's mean there (RowTransmissionColour).
                 var share = RowTransmissionShare(row);
                 var factor = rayPlacementTransmissionFactor[p] * share;
-                var tc = rayPlacementTransmission[p] * share;
+                var tc = rayPlacementTransmission[p] * share * RowTransmissionColour(row);
                 if (rayPlacementTransmissionFactor[p] <= 0f) continue;
                 rows[row] = Byte(tc.X) | Byte(tc.Y) << 8 | Byte(tc.Z) << 16 | Math.Max(1u, Byte(factor)) << 24;
                 shareSum += share;
@@ -107,6 +108,25 @@ internal sealed partial class SponzaLoop
             Console.WriteLine(string.Create(Inv, $"[VulkanSponza] sheets: {any:N0} triangle rows are thin sheets (diffuse transmission), scattered as the spec has them{(refSheets ? " in the reference" : "")}{(sheetLight ? " and the GI" : "")}; their factor textures keep {shareSum / Math.Max(1, any):P0} of the factor on average{(raySurfacesChecked ? "" : " (the surface bake not read yet: whole)")}."));
             referenceSheets = Own(device.CreateGpuBuffer(rows.Length * 4, MemoryMarshal.AsBytes(rows.AsSpan()), "sponza.reference.sheets"));
             return referenceSheets;
+        }
+    }
+
+    // Per triangle row, one bit: KHR_materials_unlit (reference_wave.comp, ReferenceUnlit) -- a camera path's first hit
+    // there sees the base colour and ends. All zeros with none.
+    private GpuBufferHandle? referenceUnlit;
+    private GpuBufferHandle ReferenceUnlitBuffer
+    {
+        get
+        {
+            if (referenceUnlit is { } made) return made;
+            var rows = rayGpuData?.RowPlacements ?? Array.Empty<uint>();
+            var bits = new uint[rows.Length / 32 + 1];
+            var any = 0;
+            for (var row = 0; row < rows.Length; row++)
+                if ((int)rows[row] < rayPlacementUnlit.Count && rayPlacementUnlit[(int)rows[row]]) { bits[row >> 5] |= 1u << (row & 31); any++; }
+            if (any > 0) Console.WriteLine(string.Create(Inv, $"[VulkanSponza] view reference: {any:N0} triangle rows unlit (KHR_materials_unlit), their base colour as the camera sees it."));
+            referenceUnlit = Own(device.CreateGpuBuffer(bits.Length * 4, MemoryMarshal.AsBytes(bits.AsSpan()), "sponza.reference.unlit"));
+            return referenceUnlit.Value;
         }
     }
 
@@ -154,7 +174,9 @@ internal sealed partial class SponzaLoop
             // The sun records when asked (--lightlets, --lightlet-sun): a shot of them before they land measured the
             // traced shadows instead (2026-10-14: a bake closed at 0%).
             var recordsReady = !lightletsAsked || lightlets is not null;
-            if (!lightReady || !referenceReady || !recordsReady) return false;
+            // And --ref-view's camera paths, all of them (a shot before they finished compared a part of them, 2026-10-22).
+            var viewReady = refViewStride <= 0 || viewWave is { } v && v.Dispatch >= ReferenceWaveFrames(v);
+            if (!lightReady || !referenceReady || !recordsReady || !viewReady) return false;
             shotReadyFrame = postLoadFrames;
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] shot: ready at post-load frame {postLoadFrames} (light {(transportTexels ? "at rest" : "not cooked")}, reference {(gpuReference ? "complete" : "none")}{(lightletsAsked ? ", sun records up" : "")}); writing in {ShotReadyMargin} frames."));
@@ -256,6 +278,7 @@ internal sealed partial class SponzaLoop
                 .Append(new ShaderBufferBinding("ReferenceSheets", SheetRowsBuffer ?? w.Occluded))
                 .Append(new ShaderBufferBinding("BatchSunRays", w.SunRays))
                 .Append(new ShaderBufferBinding("BatchSunHits", w.SunHits))
+                .Append(new ShaderBufferBinding("ReferenceUnlit", ReferenceUnlitBuffer))
                 .Where(b => declared.Contains(b.Name)).ToArray());
         graph.Dispatch(referenceWaveStepPass, Wave(0));
         RecordClosestBatch(referenceClosestBatch, w.Rays, w.Hits, count, frameSeed, on);

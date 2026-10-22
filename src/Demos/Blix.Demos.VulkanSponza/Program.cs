@@ -787,7 +787,16 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
         float TransmissionFactor = 0f,
         // KHR_materials_diffuse_transmission's factor texture (default: none -- the factor alone): its alpha, averaged over
         // each triangle by the rays' surface bake, scales the factor per row (ray_surface_bake.comp, BlixRayTransmission).
-        TextureHandle TransmissionTexture = default);
+        TextureHandle TransmissionTexture = default,
+        // And its colour texture (default: none -- white): its mean over each triangle tints the row's light through
+        // (BlixRayTransmission's upper bytes, RowTransmissionColour).
+        TextureHandle TransmissionColorTexture = default,
+        // --cloth-transmission's curtains (ClothTransmission): their light through is the albedo's hue, capped at what
+        // the lit face reflects (lit.frag, RtRowTransmit); an authored material's is its own colour, uncapped.
+        bool Cloth = false,
+        // KHR_materials_unlit: the camera sees its base colour, unshaded (lit.frag; the reference's camera paths alike,
+        // ReferenceUnlit). Light reaching it still reflects off it as off any surface in the GI and the reference.
+        bool Unlit = false);
 
     /// <summary>One placement of a unique primitive: which drawable, its row in the transform table, and its world AABB.</summary>
     /// <remarks>

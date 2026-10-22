@@ -30,7 +30,9 @@ internal sealed partial class SponzaLoop
         if (viewDumpWaiting == 0 && !viewDumpReady)
         {
             var landed = viewDumpAtLanding && !viewDumpDone && texelResting && landedFrame >= 0 && framesRendered >= landedFrame + 60
-                && (viewDumpAtFrame < 0 || postLoadFrames >= viewDumpAtFrame);
+                && (viewDumpAtFrame < 0 || postLoadFrames >= viewDumpAtFrame)
+                // --ref-view: once its camera paths are all in (at landing they were ~10% in, 2026-10-22).
+                && (refViewStride <= 0 || viewWave is { } vw && vw.Dispatch >= ReferenceWaveFrames(vw));
             if (!viewDumpPending && !landed) return;
             viewDumpPending = false;
             if (landed) viewDumpDone = true;
@@ -103,7 +105,13 @@ internal sealed partial class SponzaLoop
             var sums = ReferenceWaveSums(vw);
             File.WriteAllBytes(Path.Combine(dir, "reference_view.f32x4"), MemoryMarshal.AsBytes(sums.AsSpan()).ToArray());
             files["reference_view.f32x4"] = new { bytes = sums.Length * 16 };
-            refView = new { stride = refViewStride, width = refViewW, height = refViewH, frames = vw.Dispatch, framesWanted = ReferenceWaveFrames(vw), lanes = vw.LanesPerPoint, quota = vw.Quota };
+            // --ref-view-records: their points follow the grid's, these their records.
+            if (refViewRecordIds.Count > 0)
+            {
+                File.WriteAllBytes(Path.Combine(dir, "reference_records.u32"), MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(refViewRecordIds)).ToArray());
+                files["reference_records.u32"] = new { bytes = refViewRecordIds.Count * 4 };
+            }
+            refView = new { stride = refViewStride, width = refViewW, height = refViewH, frames = vw.Dispatch, framesWanted = ReferenceWaveFrames(vw), lanes = vw.LanesPerPoint, quota = vw.Quota, records = refViewRecordIds.Count };
         }
         var irr = EffectiveSunIrradiance;
         var meta = new

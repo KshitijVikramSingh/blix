@@ -417,9 +417,13 @@ internal sealed partial class SponzaLoop
             var mean = v.Sum / v.Count;
             var top = MathF.Max(MathF.Max(mean.X, MathF.Max(mean.Y, mean.Z)), 1e-3f);
             var hue = mean / top;
-            // Capped at what its lit face reflects, as lit.frag caps it.
+            // A curtain (--cloth-transmission): its albedo's hue, capped at what its lit face reflects, as lit.frag caps it.
+            // An authored material: T c as the spec has it, c its colour texture's mean over the row (lit.frag, dtColor) --
+            // the cloth's rule on DiffuseTransmissionTest's panels left its T 1 panel passing nothing (cap 1 - T = 0).
             var factor = MathF.Max(rayPlacementTransmission[placement].X, MathF.Max(rayPlacementTransmission[placement].Y, rayPlacementTransmission[placement].Z));
-            var t = rayPlacementTransmission[placement] * hue * MathF.Min(1f, (1f - factor) * top / MathF.Max(factor, 1e-4f)) * RowTransmissionShare(row);
+            var t = rayPlacementCloth[placement]
+                ? rayPlacementTransmission[placement] * hue * MathF.Min(1f, (1f - factor) * top / MathF.Max(factor, 1e-4f)) * RowTransmissionShare(row)
+                : rayPlacementTransmission[placement] * RowTransmissionColour(row) * RowTransmissionShare(row);
             uint Byte(float x) => (uint)Math.Clamp(MathF.Round(x * 255f), 0f, 255f);
             // The top byte: a double-sided sheet counts every crossing, a closed one the faces a ray enters by.
             rows[row] = Math.Max(1u, Byte(t.X) | Byte(t.Y) << 8 | Byte(t.Z) << 16) | (rayPlacementDoubleSided[placement] ? 1u << 24 : 0u);

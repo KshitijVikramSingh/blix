@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using Blix.Core;
 
 namespace Blix.Demos.VulkanSponza;
@@ -14,18 +15,25 @@ namespace Blix.Demos.VulkanSponza;
 // (reference_view.f32x4), and tools/gi-model/view_reference.py holds them against each other. --ref-view-lanes N (64)
 // and --ref-view-paths N (1,024) a point; --ref-bounces as the gate's. Not with --gpu-reference (they share the wave's
 // passes). The camera at the wave's start: a moved view invalidates it.
+// --ref-view-records N: N lightmap records more, as SURFACE points (cosine paths from the record, along its normal): the
+// indirect light arriving there, the GI's resolved light's claim, record by record -- three quarters on surfaces that let
+// light through (|w| 5: both faces, the far side's record among them, which no camera point can see), the rest opaque
+// (the two's units held against each other). The dump lists them (reference_records.u32) after the grid's points.
 internal sealed partial class SponzaLoop
 {
     private int refViewStride;
     private int refViewLanes = 64, refViewPaths = 1024;
     private ReferenceWave? viewWave;
     private int refViewW, refViewH;
+    private int refViewRecords;
+    private readonly List<uint> refViewRecordIds = new();
 
     private void ReadViewReferenceArgs(AppArgs args)
     {
         refViewStride = Math.Max(0, args.Int("ref-view") ?? 0);
         if (args.Int("ref-view-lanes") is { } l) refViewLanes = Math.Max(1, l);
         if (args.Int("ref-view-paths") is { } p) refViewPaths = Math.Max(1, p);
+        refViewRecords = Math.Max(0, args.Int("ref-view-records") ?? 0);
     }
 
     private void RecordViewReference()
@@ -49,6 +57,32 @@ internal sealed partial class SponzaLoop
                 var dir = Vector3.Normalize(new Vector3(far.X, far.Y, far.Z) / far.W - cameraPosition);
                 packed.Add(new Vector4(cameraPosition, 0f));
                 packed.Add(new Vector4(dir, 1f));
+            }
+            if (refViewRecords > 0 && texelCount > lightmapFirstRecord)
+            {
+                var first = lightmapFirstRecord;
+                var count = texelCount - first;
+                var recs = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(texelBuffer, checked(first * 32), checked(count * 32)).AsSpan()).ToArray();
+                var through = new List<int>();
+                var opaque = new List<int>();
+                for (var i = 0; i < count; i++) (MathF.Abs(recs[2 * i].W) > 4.5f ? through : opaque).Add(i);
+                void Pick(List<int> from, int want)
+                {
+                    if (from.Count == 0 || want <= 0) return;
+                    var step = Math.Max(1, from.Count / want) | 1;   // odd: a pair's records lie side by side, and both faces are wanted
+                    for (var k = 0; k < from.Count && want-- > 0; k += step)
+                    {
+                        var i = from[k];
+                        var n = Vector3.Normalize(new Vector3(recs[2 * i + 1].X, recs[2 * i + 1].Y, recs[2 * i + 1].Z));
+                        packed.Add(new Vector4(new Vector3(recs[2 * i].X, recs[2 * i].Y, recs[2 * i].Z) + n * 2e-3f, 0f));
+                        packed.Add(new Vector4(n, 0f));
+                        refViewRecordIds.Add((uint)(first + i));
+                    }
+                }
+                Pick(through, through.Count > 0 ? refViewRecords * 3 / 4 : 0);
+                Pick(opaque, refViewRecords - refViewRecordIds.Count);
+                Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                    $"[VulkanSponza] view reference: {refViewRecordIds.Count:N0} lightmap records as surface points ({through.Count:N0} records let light through)."));
             }
             var quota = (refViewPaths + refViewLanes - 1) / refViewLanes;
             viewWave = CreateReferenceWave(packed, refViewLanes, quota, "view-reference");

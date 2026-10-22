@@ -10,7 +10,14 @@ T c, the direct sun on either side and the indirect light, no specular) and --re
 camera paths through a grid of pixels, by the spec's rules). Per grid pixel the renderer's radiance against the
 reference's, overall and by the surface the pixel's texel lies on: opaque, two-sided (a pair), and letting light through
 (|w| 5, SponzaLoop.Lightmap.cs). The reference's own noise from its paths' spread is not kept: its paths are given, and
-a few thousand put a point within ~2-3%. --maps writes the ratio (grey 1, red brighter, blue darker, full at 50%)."""
+a few thousand put a point within ~2-3%. --maps writes the ratio (grey 1, red brighter, blue darker, full at 50%).
+
+The reference's materials are per triangle row (ray_surface_bake.comp: albedo, T and c, each a 16-point mean over the
+triangle), the renderer's per pixel: on a patterned texture a point reads its pixel's texel against the row's mean.
+DiffuseTransmissionTest's checker rows (T by the factor texture's alpha): the points fell where the alpha means 0.60,
+not the panel's 0.50 -- +12-16% a row, and the checker's dark and light squares p90 ~80% -- with the renderer within
++-2% of its own pixels' T (2026-10-22). Judge textured surfaces by their means over many points, untextured ones by
+the point."""
 import json, sys
 from pathlib import Path
 import numpy as np
@@ -32,7 +39,7 @@ def main():
     w = np.frombuffer((d / "hdr.r11g11b10f").read_bytes(), np.uint32).reshape(hh, hw).astype(np.int64)
     lit = np.stack([f11(w & 2047, 6), f11((w >> 11) & 2047, 6), f11((w >> 22) & 1023, 5)], -1)
     lum = lambda c: c[..., 0] * 0.2126 + c[..., 1] * 0.7152 + c[..., 2] * 0.0722
-    s = np.frombuffer((d / "reference_view.f32x4").read_bytes(), np.float32).reshape(rv["height"], rv["width"], 4)
+    s = np.frombuffer((d / "reference_view.f32x4").read_bytes(), np.float32)[:rv["height"] * rv["width"] * 4].reshape(rv["height"], rv["width"], 4)
     paths = s[..., 3]
     ref = s[..., :3] / np.maximum(paths[..., None], 1) / np.pi
     st = rv["stride"]
@@ -60,6 +67,27 @@ def main():
         r = G[sel] / R[sel] - 1
         print(f"   {name:18s} {sel.sum():6d} points: renderer {G[sel].mean():.4f} against {R[sel].mean():.4f} ({100 * (G[sel].sum() / R[sel].sum() - 1):+.1f}%), "
               f"|error| median {100 * np.median(np.abs(r)):.1f}%, p90 {100 * np.percentile(np.abs(r), 90):.1f}%")
+    # --ref-view-records: lightmap records as surface points (the indirect light arriving, sum / paths), against the GI's
+    # resolved light at each (resolved.u32x2: rgb9 with a shared exponent, as ray_capture.py reads it).
+    if rv.get("records") and (d / "reference_records.u32").exists():
+        ids = np.frombuffer((d / "reference_records.u32").read_bytes(), np.uint32).astype(np.int64)
+        all4 = np.frombuffer((d / "reference_view.f32x4").read_bytes(), np.float32).reshape(-1, 4)
+        extra = all4[rv["height"] * rv["width"]:][:len(ids)]
+        E = lum(extra[:, :3] / np.maximum(extra[:, 3:4], 1))
+        rw = np.frombuffer((d / "resolved.u32x2").read_bytes(), np.uint32).reshape(n, 2)[ids, 0].astype(np.uint64)
+        sc = np.exp2((rw >> 27).astype(np.int64) - 24)
+        Gr = (rw & 511) * sc * 0.2126 + ((rw >> 9) & 511) * sc * 0.7152 + ((rw >> 18) & 511) * sc * 0.0722
+        wr = tex[ids, 3]
+        print(f"   records as surface points ({len(ids)}): the GI's resolved light against the indirect irradiance traced there")
+        # A pair's two records lie side by side (SponzaLoop.Lightmap.cs): the first and the second face, by their place.
+        second = ((ids - m["lightmapFirstRecord"]) & 1) == 1
+        for name, sel in (("opaque", np.abs(wr) < 4.5), ("lets light through, a pair's first", (np.abs(wr) > 4.5) & ~second),
+                          ("lets light through, a pair's second", (np.abs(wr) > 4.5) & second)):
+            sel = sel & (E > 1e-6)
+            if sel.sum() < 3: continue
+            r = Gr[sel] / E[sel]
+            print(f"      {name:36s} {sel.sum():5d}: resolved {Gr[sel].mean():.4f} against {E[sel].mean():.4f} (ratio of sums {Gr[sel].sum() / E[sel].sum():.3f}, "
+                  f"median {np.median(r):.3f}, p10 {np.percentile(r, 10):.3f}, p90 {np.percentile(r, 90):.3f})")
     if maps:
         out = Path(maps); out.mkdir(parents=True, exist_ok=True)
         e = np.where(valid, G / np.maximum(R, 1e-9) - 1, 0)

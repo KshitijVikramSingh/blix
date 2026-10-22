@@ -194,7 +194,7 @@ layout(set = 2, binding = 0) uniform Material {
     //   makes, and a spare component here beat duplicating a std140 layout to reach one float.
     //   See SponzaLoop.Scene.cs, which packs it, and depth_prepass_mask.frag, which reads it.
     vec4 uMaterialParams2;
-    vec4 uSheenColor;              // KHR_materials_sheen colour factor
+    vec4 uSheenColor;              // KHR_materials_sheen colour factor; w 1: KHR_materials_unlit
     vec4 uDiffuseTransmissionColor;// KHR_materials_diffuse_transmission colour; w 1: the colour texture's hue (--cloth-transmission)
 } mat;
 
@@ -788,6 +788,10 @@ void main() {
     vec3 emissive = texture(uEmissive, uv).rgb * mat.uEmissiveFactor.rgb * mat.uEmissiveFactor.a;
 
     vec3 color = direct + ambient + emissive;
+    // KHR_materials_unlit: the base colour, unshaded -- the spec's whole model (DiffuseTransmissionTest's labels and its
+    // swatches read black before, 2026-10-22).
+    bool unlit = mat.uSheenColor.w > 0.5;
+    if (unlit) color = albedo;
 
     // Debug: tint by which cascade shadowed this fragment (red/green/blue,
     // near→far). Helps confirm split placement + texel-snap stability.
@@ -833,6 +837,7 @@ void main() {
             // and the sheet's transmission, T c; no specular, no sheen, no Fresnel weight) -- the direct sun on either side
             // and the indirect light, front and back: what the material and the light make of the pixel, judged against
             // the path trace pixel for pixel.
+            frame.uVizChannel > 25.5 && frame.uVizChannel < 26.5 && unlit ? albedo :
             frame.uVizChannel > 25.5 && frame.uVizChannel < 26.5
                 ? albedo / PI * transScale * (NdotL * frame.uSunIrradiance * sunShadow * terminatorFront
                       + sheetGlow * max(dot(Nsmooth, L), 0.0) * frame.uSunIrradiance)

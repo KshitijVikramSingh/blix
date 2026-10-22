@@ -113,17 +113,19 @@ internal sealed partial class SponzaLoop
         }
         if (bakeSceneSurfacesFrame < 0)
         {
-            if (!fullyLoaded) return;
+            if (!fullyLoaded || postLoadFrames < device.MaxFramesInFlightCount + 2) return;   // past the last mip's upload (RecordRaySurfaceBake)
             foreach (var (material, first, count) in bakeSceneSurfaceRuns)
                 graph.Dispatch(raySurfaceBakePassHandle, new DispatchCommand(raySurfaceBakePipeline, (count + 63) / 64, 1, 1,
                     new ShaderUniform[]
                     {
                         new("uBaseColor", new Vector4Uniform(material.BaseColor)),
                         new("uParams", new Vector4Uniform(new Vector4(first, count, material.AlphaCutoff, material.Clear ? 1f : 0f))),
-                        new("uParams2", new Vector4Uniform(new Vector4(material.Transmission.Equals(default(TextureHandle)) ? 0f : 1f, 0f, 0f, 0f))),
+                        new("uParams2", new Vector4Uniform(new Vector4(material.Transmission.Equals(default(TextureHandle)) ? 0f : 1f,
+                        material.TransmissionColor.Equals(default(TextureHandle)) ? 0f : 1f, 0f, 0f))),
                     },
                     new[] { new ShaderTextureBinding("uAlbedo", material.Albedo),
-                        new ShaderTextureBinding("uTransmission", material.Transmission.Equals(default(TextureHandle)) ? material.Albedo : material.Transmission) },
+                        new ShaderTextureBinding("uTransmission", material.Transmission.Equals(default(TextureHandle)) ? material.Albedo : material.Transmission),
+                        new ShaderTextureBinding("uTransmissionColor", material.TransmissionColor.Equals(default(TextureHandle)) ? material.Albedo : material.TransmissionColor) },
                     Buffers: bakeSceneSurfaceBuffers));
             bakeSceneSurfacesFrame = postLoadFrames;
             return;
