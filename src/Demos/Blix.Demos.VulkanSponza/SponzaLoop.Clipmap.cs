@@ -170,10 +170,10 @@ internal sealed partial class SponzaLoop
                 new("uTexelLevels", new Vector4Uniform(TexelLevelsUniform(frameHeight))),
                 new("uHalf", new Vector4Uniform(new Vector4(half ? 1f : 0f, sub.X, sub.Y, PatchViewColumns))),
                 new("uReuse", new Vector4Uniform(IncidentReuseUniform(half))),
-                new("uSeam", new Vector4Uniform(new Vector4(SeamBlendNow ? 1f : 0f, 0f, 0f, 0f))),
+                new("uSeam", new Vector4Uniform(new Vector4(SeamBlendNow ? 1f : 0f, TexelShapeOn ? 1f : 0f, 0f, 0f))),
             }.Concat(TexelSunUniforms()).ToArray(),
             buffers: new[] { new ShaderBufferBinding("ClipmapState", clipmapState), new ShaderBufferBinding("ScreenProbeTiles", screen.Tiles), new ShaderBufferBinding("ScreenProbes", screen.Probes), new ShaderBufferBinding("SurfaceIndex", surfaceIndex) }.Concat(texel.Buffers).Append(reference.Buffer).Append(new ShaderBufferBinding("IncidentCensus", IncidentCensusBuffer())).Append(AtlasGatherMeta())
-                .Append(ProvenanceBinding()).Append(TexelRaysBinding()).Append(pick.Buffer).Concat(PatchViewBindings()).Append(ReferenceMomentsBinding())
+                .Append(ProvenanceBinding()).Append(new ShaderBufferBinding("TexelShape", ShapeOr(texelShapeBuffer))).Append(TexelRaysBinding()).Append(pick.Buffer).Concat(PatchViewBindings()).Append(ReferenceMomentsBinding())
                 .Concat(SeamBlendBindings())
                 // The ray scene, for --clipmap-exact-visibility (declared always; read only then).
                 .Concat(rayBlockBuffers).ToArray()));

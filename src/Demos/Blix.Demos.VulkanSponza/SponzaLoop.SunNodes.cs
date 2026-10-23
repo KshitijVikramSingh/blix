@@ -1320,12 +1320,27 @@ internal sealed partial class SponzaLoop
     // into texelH4Buffer (64 B a texel: 4 vec4s, texel_nodes_lean.comp) -- dumped (texel_h4.f32x16), read by nothing else yet.
     private bool texelH4;
     private GpuBufferHandle texelH4Buffer;
+    // The record's shape as the frame reads it (texel_shape.glsl, 24 B a texel each): the fine copy's (transfer_fine.comp),
+    // each texel's own and the pooled one (texel_compose.comp, the incident pass's TexelShape).
+    private GpuBufferHandle texelCopyShapeBuffer, texelOwnShapeBuffer, texelShapeBuffer, texelShapeNone;
+    private bool TexelShapeOn => texelH4 && !texelShapeBuffer.Equals(default(GpuBufferHandle));
+    private GpuBufferHandle ShapeOr(GpuBufferHandle b)
+    {
+        if (!b.Equals(default(GpuBufferHandle))) return b;
+        if (texelShapeNone.Equals(default(GpuBufferHandle))) texelShapeNone = Own(device.CreateGpuBuffer(64, new byte[64], "sponza.texel-shape.none"));
+        return texelShapeNone;
+    }
 
     // The record's buffer (made at its first gather) and whether the records' smooth normals are there to read.
     private (bool On, bool Frames) TexelH4Now()
     {
         if (texelH4 && texelH4Buffer.Equals(default(GpuBufferHandle)))
+        {
             texelH4Buffer = Own(device.CreateGpuBuffer(checked(texelCount * 64), new byte[checked(texelCount * 64)], "sponza.texel-h4"));
+            texelCopyShapeBuffer = Own(device.CreateGpuBuffer(checked(texelCount * 24), new byte[checked(texelCount * 24)], "sponza.texel-shape.copy"));
+            texelOwnShapeBuffer = Own(device.CreateGpuBuffer(checked(texelCount * 24), new byte[checked(texelCount * 24)], "sponza.texel-shape.own"));
+            texelShapeBuffer = Own(device.CreateGpuBuffer(checked(texelCount * 24), new byte[checked(texelCount * 24)], "sponza.texel-shape"));
+        }
         var on = texelH4 && !texelH4Buffer.Equals(default(GpuBufferHandle));
         return (on, on && GatherSmoothNow && !lightmapFramesBuffer.Equals(default(GpuBufferHandle)));
     }

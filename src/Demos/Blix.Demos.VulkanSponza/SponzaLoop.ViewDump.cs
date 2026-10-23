@@ -84,6 +84,8 @@ internal sealed partial class SponzaLoop
         Buffer("rays.u16", texelRaysBuffer, Math.Min(texelRaysBytes, (texelCount + 1) / 2 * 4));
         Buffer("patch.i32", liveTexelPatch, (long)texelCount * 4);
         Buffer("texel_h4.f32x16", texelH4Buffer, (long)texelCount * 64);
+        Buffer("texel_shape.u32x6", texelShapeBuffer, (long)texelCount * 24);
+        Buffer("texel_own_shape.u32x6", texelOwnShapeBuffer, (long)texelCount * 24);
         // The cooked visibilities (a byte a texel, 0 none, else 1 + 254 v): contact (the fine flag's ratio), its short
         // reach, the sky's (by its square root).
         var visBytes = (texelCount + 3) / 4 * 4;

@@ -597,7 +597,7 @@ internal sealed partial class SponzaLoop
                     new("uTexelGrid", new Vector4Uniform(texelGrid)),
                     new("uTexelParams", new Vector4Uniform(new Vector4(texelCapacity, texelLevels, debugOn ? 1f : 0f, Luminance(EffectiveSunIrradiance)))),
                     new("uFlag", new Vector4Uniform(new Vector4(lastDarkBar, fineAll ? 1f : 0f, fineContact, fineContactFirst ? 1f : 0f))),
-                    new("uKeep", new Vector4Uniform(new Vector4(skyKept ? 1f : 0f, fineCloth ? 1f : 0f, 0f, 0f))),
+                    new("uKeep", new Vector4Uniform(new Vector4(skyKept ? 1f : 0f, fineCloth ? 1f : 0f, TexelShapeOn ? 1f : 0f, 0f))),
                 },
                 Array.Empty<ShaderTextureBinding>(),
                 Buffers: new[]
@@ -605,6 +605,8 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("TexelHash", texelHashBuffer),
                     new ShaderBufferBinding("Texels", texelBuffer),
                     new ShaderBufferBinding("FineIds", idsBuffer),
+                    new ShaderBufferBinding("TexelH4", ShapeOr(texelH4Buffer)),
+                    new ShaderBufferBinding("TexelCopyShape", ShapeOr(texelCopyShapeBuffer)),
                     new ShaderBufferBinding("SplitSky", sky),
                     new ShaderBufferBinding("SplitSun", sun),
                     new ShaderBufferBinding("SkyDetail", skyDetail),

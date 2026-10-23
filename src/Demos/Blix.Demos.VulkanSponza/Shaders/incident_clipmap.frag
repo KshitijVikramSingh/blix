@@ -56,7 +56,8 @@ layout(set = 0, binding = 0) uniform IncidentClipmap {
                          // the full-res pixel 2p + yz of its 2x2 (a different one each frame; lighting_upsample.frag)
     vec4 uReuse;         // x 1: reuse last frame's answer (SponzaLoop.Clipmap.cs, IncidentReuseNow); y the pixel of each
                          // 2x2 recomputed this frame (x + 2y), every other one reprojected where its surface matches
-    vec4 uSeam;          // x 1: blend across lightmap chart seams (seamBlend; --no-seam-blend off)
+    vec4 uSeam;          // x 1: blend across lightmap chart seams (seamBlend; --no-seam-blend off); y 1 (--texel-h4): the gradient
+                         // the light-agnostic record's shape (TexelShape), not the detail's tilt
 } g;
 
 // Last frame's answer, for reuse: the pixel's motion, its surface key now and a frame ago, the incident light and
@@ -168,6 +169,13 @@ layout(std430, set = 0, binding = 34) readonly buffer TexelResolved { uvec2 texe
 layout(std430, set = 0, binding = 35) readonly buffer TexelDetail { uint texelDetail[]; };
 vec4 detailSum;
 bool detailMissing;
+// --texel-h4: each texel's shape per channel (texel_shape.glsl, pooled by texel_compose.comp), as the frame's gradient:
+// summed over the texels read (shapeSum: xyz the luminance shape -- the channels' by their light -- w the weight), and
+// shapeMissing where a texel with light had none.
+layout(std430, set = 0, binding = 52) readonly buffer TexelShape { uvec2 texelShape[]; };
+#include "texel_shape.glsl"
+vec4 shapeSum;
+bool shapeMissing;
 // The census (uClipExact.y): pixels by path -- 0 sky, 1 the cells alone, then why the probes were read: 2 no texel found,
 // 3 texels not at rest, 4 no detail up, 5 a texel read had no detail, 6 not whole (confidence), 7 a debug view or screen
 // probes; 8 the two levels read (the coarser's weight above zero), 9 lightmapped past the atlas, 11 lightmapped -- among
@@ -390,6 +398,16 @@ bool texelsAtLevel(vec3 worldPos, vec3 n, float faceBin, uint level, out vec3 ir
             debugLit += 1.0;
             sum += weights[i] * unpackRgb9e5(r.x);
             weight += weights[i];
+            if (g.uSeam.y > 0.5) {
+                vec4 q0 = texelShapeUnpack(texelShape[uint(ids[i]) * 3u]);
+                if (q0.w < 0.5) shapeMissing = true;
+                else {
+                    vec3 e = unpackRgb9e5(r.x) * vec3(0.2126, 0.7152, 0.0722);
+                    vec3 s = e.r * q0.xyz + e.g * texelShapeUnpack(texelShape[uint(ids[i]) * 3u + 1u]).xyz
+                           + e.b * texelShapeUnpack(texelShape[uint(ids[i]) * 3u + 2u]).xyz;
+                    shapeSum += weights[i] * vec4(s / max(e.r + e.g + e.b, 1e-12), 1.0);
+                }
+            }
             if (g.uTexelDebug.z > 0.5) {
                 uint d = texelDetail[ids[i]];
                 if ((d >> 24) == 0u) detailMissing = true;
@@ -558,6 +576,8 @@ void main() {
     float confidence;
     detailSum = vec4(0.0);
     detailMissing = false;
+    shapeSum = vec4(0.0);
+    shapeMissing = false;
     pixelLightmapTexel = g.uLightmap.x > 0.5 ? texelFetch(uLightmapTexel, pixel, 0).r : 0u;
     pixelAt = pixel;
     bool texelFound = g.uTexelParams.y > 0.5 && g.uClipParams.y < 0.5 && texelsAt(worldPos, N, nSample.w, viewDepth, gathered, confidence);
@@ -689,7 +709,9 @@ void main() {
         vec3 d = detailSum.xyz / detailSum.w;
         outIncident = vec4(gathered, d.z);
         float lum = dot(gathered, vec3(0.2126, 0.7152, 0.0722));
-        outIncidentGradient = g.uScreen.w < 0.5 ? vec4((t1 * d.x + t2 * d.y) * lum, 0.0) : vec4(0.0);
+        vec3 grad = t1 * d.x + t2 * d.y;
+        if (g.uSeam.y > 0.5 && !shapeMissing && shapeSum.w > 1e-6) grad = shapeSum.xyz / shapeSum.w;
+        outIncidentGradient = g.uScreen.w < 0.5 ? vec4(grad * lum, 0.0) : vec4(0.0);
         return;
     }
 

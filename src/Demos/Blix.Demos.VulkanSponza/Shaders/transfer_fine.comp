@@ -11,7 +11,8 @@ layout(set = 0, binding = 0) uniform TransferFine {
     vec4 uFine;        // x the fine texels, y the dispatch's first, z the coarse level, w the coarsest
     vec4 uTexelGrid;   // the finest level's grid: xyz the origin, w the spacing
     vec4 uTexelParams; // x the hash's capacity
-    vec4 uKeep;        // x 1: the sky's part kept (a sun change: the copy writes the sun's alone)
+    vec4 uKeep;        // x 1: the sky's part kept (a sun change: the copy writes the sun's alone); y 1 the cloth's flag; z 1 (--texel-h4)
+                       // the copy's shape (TexelCopyShape)
     vec4 uFlag;        // x the dark bar (the coarse sweep's: a tenth of its median light); y 1: flag every texel (--fine-all); z the contact ratio under which a texel is flagged
                        // (--fine-contact), w 1: those first (--fine-contact-first)
 } u;
@@ -22,6 +23,10 @@ layout(std430, set = 0, binding = 3) readonly buffer FineIds { uint fineIds[]; }
 layout(std430, set = 0, binding = 4) buffer SplitSky { uvec2 skyPart[]; };
 layout(std430, set = 0, binding = 5) buffer SplitSun { uvec2 sunPart[]; };
 layout(std430, set = 0, binding = 11) buffer TexelProvenance { uint provenance[]; };
+// --texel-h4 (uKeep.z): the light-agnostic record's shape for the copy -- its coarse texels' (their records, the gather's:
+// texel_record_h4.glsl), blended with the light's weights; world space, so no frame to turn (texel_shape.glsl).
+layout(std430, set = 0, binding = 12) readonly buffer TexelH4 { vec4 texelH4[]; };
+layout(std430, set = 0, binding = 13) writeonly buffer TexelCopyShape { uvec2 copyShape[]; };
 #include "provenance.glsl"
 layout(std430, set = 0, binding = 6) buffer SkyDetail { uint skyDetail[]; };
 layout(std430, set = 0, binding = 7) buffer SunDetail { uint sunDetail[]; };
@@ -39,6 +44,7 @@ layout(std430, set = 0, binding = 10) buffer FineFlags { uint fineFlags[]; };
 #define TEXEL_POSITION(i) texels[2 * (i)]
 #define TEXEL_NORMAL(i) texels[2 * (i) + 1]
 #include "texel.glsl"
+#include "texel_shape.glsl"
 
 uint packRgb9e5(vec3 c) {
     const float maxValue = 65408.0;
@@ -89,6 +95,8 @@ void main() {
     vec3 sky = vec3(0.0), sun = vec3(0.0);
     vec3 skyD = vec3(0.0), sunD = vec3(0.0);
     float total = 0.0, coarseAo = 0.0, aoWeight = 0.0;
+    vec3 shapeSum0 = vec3(0.0), shapeSum1 = vec3(0.0), shapeSum2 = vec3(0.0);
+    float shapeW = 0.0;
     float keptMin = 1e30, keptMax = 0.0, cutMin = 1e30, cutMax = 0.0;
     vec3 f1 = normalize(cross(abs(n.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0), n));
     vec3 f2 = cross(n, f1);
@@ -136,6 +144,10 @@ void main() {
             sunD += w * vec3(dot(gSun, f1), dot(gSun, f2), cSun.z);
             float a = ao(cid);
             if (a >= 0.0) { coarseAo += w * a; aoWeight += w; }
+            vec3 q0, q1, q2;
+            if (u.uKeep.z > 0.5 && w > 0.0 && texelShapeFromRecord(texelH4[cid * 4u], texelH4[cid * 4u + 1u], texelH4[cid * 4u + 2u], texelH4[cid * 4u + 3u], q0, q1, q2)) {
+                shapeSum0 += w * q0; shapeSum1 += w * q1; shapeSum2 += w * q2; shapeW += w;
+            }
             total += w;
         }
     }
@@ -189,6 +201,12 @@ void main() {
     // sees of the sky it sees past that. The cells' alone put bright cell outlines on the wall and the lamps where a
     // cell's centroid sank and its rays left through the wall (2026-10-19); its own alone, the gallery's openness, is far
     // above its sky and lit everything too bright.
+    if (u.uKeep.z > 0.5) {
+        bool has = shapeW > 0.0;
+        copyShape[id * 3u] = has ? texelShapePack(shapeSum0 / shapeW) : uvec2(0u);
+        copyShape[id * 3u + 1u] = has ? texelShapePack(shapeSum1 / shapeW) : uvec2(0u);
+        copyShape[id * 3u + 2u] = has ? texelShapePack(shapeSum2 / shapeW) : uvec2(0u);
+    }
     if (u.uKeep.x < 0.5) skyDetail[id] = texelDetailPack(skyD.xy, min(skyD.z, texelDetailUnpack(skyDetail[id]).z));
     sunDetail[id] = texelDetailPack(sunD.xy, min(sunD.z, texelDetailUnpack(sunDetail[id]).z));
 }

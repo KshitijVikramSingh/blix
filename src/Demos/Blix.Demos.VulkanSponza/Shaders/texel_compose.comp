@@ -12,7 +12,9 @@
 layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) uniform TexelCompose {
-    vec4 uCompose;   // x live texels, y the mode, z 1: the sky visibility cooked (SkyVis), not the parts' detail
+    vec4 uCompose;   // x live texels, y the mode, z 1: the sky visibility cooked (SkyVis), not the parts' detail; w 1 (--texel-h4):
+                     // the light-agnostic record's shape (texel_shape.glsl) -- mode 0 each texel's own into TexelOwnShape and
+                     // TexelShape, mode 1 pooled over the filter's neighbours into TexelShape
     vec4 uSky;       // rgb the sky's scale (1: as solved)
     vec4 uSun;       // rgb the sun's irradiance (its part is stored per unit of it); w 0: no sun part yet
     vec4 uTexelGrid;  // mode 1: xyz the cells' origin, w the spacing
@@ -41,12 +43,50 @@ layout(std430, set = 0, binding = 12) readonly buffer TexelSunDetail { uint texe
 layout(std430, set = 0, binding = 13) writeonly buffer TexelDetail { uint texelDetail[]; };
 // The texels' cooked sky visibility (texel_ao.comp): a byte a texel id, 1..255, 0 none.
 layout(std430, set = 0, binding = 14) readonly buffer TexelSkyVis { uint texelSkyVis[]; };
+// --texel-h4: a texel's own shape -- its record's where a gather wrote its light last (texel_record_h4.glsl), else the
+// fine copy's (transfer_fine.comp) -- and the frame's, pooled over its neighbours: their shapes by the filter's weight
+// and their light's likeness, exp(-|ln(L_o / L)| / 0.3) (tools/gi-model/direction_pooling.py: 128-ray directions within
+// 20 cm, the error above the truth's floor halved, no smear at creases).
+layout(std430, set = 0, binding = 15) readonly buffer TexelH4 { vec4 texelH4[]; };
+layout(std430, set = 0, binding = 16) readonly buffer TexelCopyShape { uvec2 copyShape[]; };
+layout(std430, set = 0, binding = 17) buffer TexelOwnShape { uvec2 ownShape[]; };
+layout(std430, set = 0, binding = 18) writeonly buffer TexelShape { uvec2 texelShape[]; };
+layout(std430, set = 0, binding = 19) readonly buffer TexelProvenance { uint provenance[]; };
 #define TEXEL_INDEX_MAP(i) texelFetch(uLightmapIndexTex, ivec2(int(i) % textureSize(uLightmapIndexTex, 0).x, int(i) / textureSize(uLightmapIndexTex, 0).x), 0).r
 #define TEXEL_HASH(i) texelHash[i]
 #define TEXEL_POSITION(i) texels[2 * (i)]
 #define TEXEL_NORMAL(i) texels[2 * (i) + 1]
 #include "texel.glsl"
 #include "texel_filter_neighbour.glsl"
+#include "texel_shape.glsl"
+
+// The texel's own shape (three channels) or false: its record's when both its parts were last a gather's (provenance
+// 1-4), else the fine copy's (5) where the copy wrote one.
+bool ownShapeOf(uint id, out uvec2 w0, out uvec2 w1, out uvec2 w2) {
+    w0 = uvec2(0u); w1 = uvec2(0u); w2 = uvec2(0u);
+    uint p = (provenance[id / 4u] >> (8u * (id % 4u))) & 255u;
+    uint sunCode = p & 15u, skyCode = p >> 4;
+    bool gathered = skyCode >= 1u && skyCode <= 4u && sunCode >= 1u && sunCode <= 4u;
+    vec3 s0, s1, s2;
+    if (gathered && texelShapeFromRecord(texelH4[id * 4u], texelH4[id * 4u + 1u], texelH4[id * 4u + 2u], texelH4[id * 4u + 3u], s0, s1, s2)) {
+        w0 = texelShapePack(s0); w1 = texelShapePack(s1); w2 = texelShapePack(s2);
+        return true;
+    }
+    if (skyCode == 5u || sunCode == 5u) {
+        w0 = copyShape[id * 3u]; w1 = copyShape[id * 3u + 1u]; w2 = copyShape[id * 3u + 2u];
+        return texelShapeUnpack(w0).w > 0.5;
+    }
+    return false;
+}
+
+void shapeAdd(uint other, float w, inout vec3 a0, inout vec3 a1, inout vec3 a2, inout float aw) {
+    vec4 q0 = texelShapeUnpack(ownShape[other * 3u]);
+    if (q0.w < 0.5 || w <= 0.0) return;
+    a0 += w * q0.xyz;
+    a1 += w * texelShapeUnpack(ownShape[other * 3u + 1u]).xyz;
+    a2 += w * texelShapeUnpack(ownShape[other * 3u + 2u]).xyz;
+    aw += w;
+}
 
 uint packRgb9e5(vec3 c) {
     const float maxValue = 65408.0;
@@ -93,6 +133,12 @@ void main() {
         }
         // Valid where the sky's part is (every live texel the cook traced); its confidence the cook's (full).
         texelComposed[id] = uvec2(packRgb9e5(light), sky.y);
+        if (u.uCompose.w > 0.5) {
+            uvec2 w0, w1, w2;
+            ownShapeOf(id, w0, w1, w2);
+            ownShape[id * 3u] = w0; ownShape[id * 3u + 1u] = w1; ownShape[id * 3u + 2u] = w2;
+            texelShape[id * 3u] = w0; texelShape[id * 3u + 1u] = w1; texelShape[id * 3u + 2u] = w2;
+        }
         return;
     }
     uvec2 own = texelComposed[id];
@@ -107,6 +153,10 @@ void main() {
     finestGrid.capacity = uint(u.uTexelParams.x);
     finestGrid.level = 0u;
     vec4 acc = vec4(0.0);
+    bool shapes = u.uCompose.w > 0.5;
+    vec3 sa0 = vec3(0.0), sa1 = vec3(0.0), sa2 = vec3(0.0);
+    float saw = 0.0;
+    float lc = max(centre, 1e-12);
     for (uint k = 0u; k < 27u; ++k) {
         TexelGrid tg;
         int other = texelFilterNeighbour(int(id), k, position, n, finestGrid, u.uLightmap, tg);
@@ -116,6 +166,7 @@ void main() {
         vec3 light = unpackRgb9e5(o.x);
         float w = texelFilterWeight(other, position, n, tg, centre, dot(light, luma), u.uEdge);
         acc += vec4(w * light, w);
+        if (shapes) shapeAdd(uint(other), w * exp(-abs(log(max(dot(light, luma), 1e-12) / lc)) / 0.3), sa0, sa1, sa2, saw);
     }
     if (u.uLightmap.x > 0.5 && float(id) >= u.uLightmap.w - 0.5 && u.uLightmap.w > 0.5) {
         TexelGrid tg = finestGrid;
@@ -128,6 +179,16 @@ void main() {
             vec3 light = unpackRgb9e5(o.x);
             float w = texelFilterWeight(other, position, n, tg, centre, dot(light, luma), u.uEdge);
             acc += vec4(w * light, w);
+            if (shapes) shapeAdd(uint(other), w * exp(-abs(log(max(dot(light, luma), 1e-12) / lc)) / 0.3), sa0, sa1, sa2, saw);
+        }
+    }
+    if (shapes) {
+        // its own in the pool whatever the filter made of it (a texel the filter's weights left alone keeps its own)
+        shapeAdd(id, 1.0, sa0, sa1, sa2, saw);
+        if (saw > 0.0) {
+            texelShape[id * 3u] = texelShapePack(sa0 / saw);
+            texelShape[id * 3u + 1u] = texelShapePack(sa1 / saw);
+            texelShape[id * 3u + 2u] = texelShapePack(sa2 / saw);
         }
     }
     texelResolved[id] = acc.w > 1e-6 ? uvec2(packRgb9e5(acc.rgb / acc.w), own.y) : own;
