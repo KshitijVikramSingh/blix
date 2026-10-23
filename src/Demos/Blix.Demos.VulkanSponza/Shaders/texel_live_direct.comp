@@ -55,8 +55,10 @@ void main() {
         vec3 n = texels[2u * id + 1u].xyz;
         if (dot(n, n) < 1e-12 || abs(texels[2u * id].w) < 2.0) return;   // no normal, or buried
         n = normalize(n);
+        // A texel with no patch of its own lights none: the nearest facing patch anywhere lay through walls -- the
+        // sunlit floor strip outside crevices' far wall (the floor running on under the wall) lit the corridor's
+        // floor patch 0.4 m inside it, and the corridor's dark leg read 1.6-2.2x its path trace (2026-10-23).
         int p = texelPatch[id];
-        if (p < 0) p = cookedNearest(texels[2u * id].xyz, n);
         if (p < 0) return;
         uint bit = uint(u.uToSun.w);
         uint words = uint(u.uIrr.w);

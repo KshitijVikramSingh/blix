@@ -85,6 +85,8 @@ void main() {
     if (dot(n, n) < 1e-12) return;
     n = normalize(n);
     int fp = texelPatch[id];
+    // A texel with no patch of its own adds to none (texel_live_direct.comp: the nearest facing patch lay through walls).
+    if (fp < 0 && u.uPass.w < 0.5) return;
     if (fp < 0) fp = cookedNearest(p, n);
     if (fp < 0) return;   // none near: its provisional light stands
     uint myOpen = dirOpen[id];
