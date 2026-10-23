@@ -3,12 +3,6 @@
 # dependencies = ["numpy"]
 # ///
 
-2026-10-23 (7 foot texels captured at both seeds, sky part's noise at 128 rays): cosine 1.03; today's binned guide ~0.29.
-The patches' centres mostly miss the slit (patch 8396: 0 of 1,024 escaped; 8433: 13) -- own patch's list for 43% of
-the texels, 0.24 there at 10 deg; the neighbours' within 0.5 m for all, but from the texel 5-6% of those directions still
-pass the slit: 0.36-0.45. The texel's own sky finds in its first 128 rays (79% found one), 5 deg: 47% of guided rays find
-the sky, 0.15 -- for 128 rays more, where today's guide at 256 rays would be ~0.20. A parallax problem: a direction list
-is only good from where it was cast.
 """A guide from the patch's escaped directions, for the sky through a slit (uv run tools/gi-model/escape_guide.py [HS_DIR]).
 
 At the crevices corridor's end wall's foot near z 0.8 the sky through the doorway is 46-49% of the light; the gather's
@@ -21,6 +15,12 @@ balance heuristic -- each cast from the texel itself against the scene's triangl
 noise and its bias against a 20,000-ray truth, the chance a guided ray finds the sky, and the patch's escaped directions'
 count (the list's size) -- against cosine alone (128 rays) and the capture's measured noise of today's guide at the foot
 (0.131 at 128 rays, tools/gi-model/rare_light_flag.py).
+2026-10-23 (7 foot texels captured at both seeds, sky part's noise at 128 rays): cosine 1.03; today's binned guide ~0.29.
+The patches' centres mostly miss the slit (patch 8396: 0 of 1,024 escaped; 8433: 13) -- own patch's list for 43% of
+the texels, 0.24 there at 10 deg; the neighbours' within 0.5 m for all, but from the texel 5-6% of those directions still
+pass the slit: 0.36-0.45. The texel's own sky finds in its first 128 rays (79% found one), 5 deg: 47% of guided rays find
+the sky, 0.15 -- for 128 rays more, where today's guide at 256 rays would be ~0.20. A parallax problem: a direction list
+is only good from where it was cast.
 """
 import json
 import sys

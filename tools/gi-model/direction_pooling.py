@@ -3,10 +3,6 @@
 # dependencies = ["numpy", "scipy"]
 # ///
 
-2026-10-23 (6,525 corridor fine texels, all within 40 cm of a crease; --shape: the direction alone): 128 rays 6.5 / 13.3%,
-pooled 10 cm 5.6 / 11.1%, 20 cm 5.5 / 10.7%, similarity-weighted 20 cm 5.1 / 9.9%, against the truth's own floor 3.7 /
-6.9% -- the error above the floor halved, no smear at creases (0-5 cm: 5.5 -> 4.5 at 20 deg). No direction: 28.7 / 55.7%.
-The capture holds 1 texel in 4: a real 20 cm pool has ~4x the neighbours.
 """How hard the texel record's direction can be pooled across neighbours (uv run tools/gi-model/direction_pooling.py
 [HS_DIR]).
 
@@ -24,6 +20,10 @@ On the lean fine round's capture of the crevices corridor (dumps cd0, cd1: 1 in 
 The prediction at a tilted normal n: the texel's own irradiance x the shape's value at n over its value at the normal.
 Reported: the worst channel's |error| over its irradiance, max over normals tilted <=20 / <=40 deg, median over texels,
 binned by the distance to the nearest surface turned over 45 deg (a crease), for each R.
+2026-10-23 (6,525 corridor fine texels, all within 40 cm of a crease; --shape: the direction alone): 128 rays 6.5 / 13.3%,
+pooled 10 cm 5.6 / 11.1%, 20 cm 5.5 / 10.7%, similarity-weighted 20 cm 5.1 / 9.9%, against the truth's own floor 3.7 /
+6.9% -- the error above the floor halved, no smear at creases (0-5 cm: 5.5 -> 4.5 at 20 deg). No direction: 28.7 / 55.7%.
+The capture holds 1 texel in 4: a real 20 cm pool has ~4x the neighbours.
 """
 import json
 import sys

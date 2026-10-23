@@ -225,6 +225,7 @@ internal sealed partial class SponzaLoop
         sheetLight = !args.Flag("no-sheet-light");
         interleave = !args.Flag("no-interleave") || args.Flag("interleave");
         nearRounds = Math.Max(0, args.Int("near-rounds") ?? (nearTexelLight ? 2 : 0));
+        texelH4 = args.Flag("texel-h4");
         switch (args.String("hit-sun"))
         {
             case null or "disc": break;
@@ -1315,8 +1316,17 @@ internal sealed partial class SponzaLoop
     private ShaderInterface leanShadeInterface = null!;
     private PipelineHandle leanShadePipeline;
 
+    // --texel-h4 (the light-agnostic record, stage 1; --lean-shade): every gather pass's H4 per channel, beside the parts,
+    // into texelH4Buffer (64 B a texel: 4 vec4s, texel_nodes_lean.comp) -- dumped (texel_h4.f32x16), read by nothing else yet.
+    private bool texelH4;
+    private GpuBufferHandle texelH4Buffer;
+
     private DispatchCommand LeanShadeCommand(GpuBufferHandle ids, int first, int slice, int pass, bool exactSun)
     {
+        if (texelH4 && texelH4Buffer.Equals(default(GpuBufferHandle)))
+            texelH4Buffer = Own(device.CreateGpuBuffer(checked(texelCount * 64), new byte[checked(texelCount * 64)], "sponza.texel-h4"));
+        var h4On = texelH4 && !texelH4Buffer.Equals(default(GpuBufferHandle));
+        var framesOn = GatherSmoothNow && !lightmapFramesBuffer.Equals(default(GpuBufferHandle));
         var detail = splitCooking && sunNodeRefineRound == 0 && !sunNodeDetail.Equals(default(GpuBufferHandle));
         var declared = leanShadeInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
         return new DispatchCommand(leanShadePipeline, slice, 1, 1,
@@ -1337,7 +1347,8 @@ internal sealed partial class SponzaLoop
                     ? (captureFineOnly || captureDist ? RayCaptureUniform with { Z = -1f } : RayCaptureUniform) : Vector4.Zero)),
                 new("uCone", new Vector4Uniform(new Vector4(coneLookups ? sunNodeRays : 0f, hitCellSize, transportSpacing, sunNodeKinds.Length))),
                 new("uLevels", new Vector4Uniform(new Vector4(coneLookups && patchLevelsOn && PatchLevelsReady ? PatchLevelCount : 0, 0f, 0f, 0f))),
-                new("uExact", new Vector4Uniform(new Vector4(exactSun ? 1f : 0f, Environment.GetEnvironmentVariable("BLIX_LEAN_SEARCH_ALL") == "1" ? 1f : 0f, 0f, 0f))),
+                new("uExact", new Vector4Uniform(new Vector4(exactSun ? 1f : 0f, Environment.GetEnvironmentVariable("BLIX_LEAN_SEARCH_ALL") == "1" ? 1f : 0f,
+                    h4On ? 1f : 0f, h4On && framesOn ? 1f : 0f))),
             },
             new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
             Buffers: new[]
@@ -1371,6 +1382,8 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("LevelParents", PatchLevelsReady ? levelParentsBuffer : sunNodeAccum),
                 new ShaderBufferBinding("LevelNeighbours", PatchLevelsReady ? levelNeighboursBuffer : sunNodeAccum),
                 new ShaderBufferBinding("LevelLight", PatchLevelsReady ? levelLightBuffer : sunNodeAccum),
+                new ShaderBufferBinding("LightmapFrames", h4On && framesOn ? lightmapFramesBuffer : sunNodeAccum),
+                new ShaderBufferBinding("TexelH4", h4On ? texelH4Buffer : sunNodeAccum),
             }.Where(b => declared.Contains(b.Name)).ToArray());
     }
 

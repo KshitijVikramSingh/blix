@@ -3,9 +3,6 @@
 # dependencies = ["numpy"]
 # ///
 
-2026-10-23 (--channels, the worst channel): one shared shape (H4lum) 5.5-5.9% / 8.9-9.8% at <=20 / <=40 deg from all
-rays against per channel H4's 1.3-1.5% / 1.9-2.5%, on Cornell and the corridor alike; from 128 rays 10.4-12.1% against
-8.6-9.8%. Luminance hides it. Per channel it is.
 """A texel's light as a function of the normal, in a few bases, from the gather's own rays (uv run
 tools/gi-model/directional_bases.py DUMP [DUMP ...]).
 
@@ -27,6 +24,9 @@ same fit from every ray gives the basis's own error, without the noise.
   HL2lum   the same with HL2's shape (12 numbers)
   rays     no basis: the irradiance at each normal from the subset's rays themselves -- a gather per pixel along its own
            normal (voxel cone tracing's per-pixel response), RAYS of them however many frames they took
+2026-10-23 (--channels, the worst channel): one shared shape (H4lum) 5.5-5.9% / 8.9-9.8% at <=20 / <=40 deg from all
+rays against per channel H4's 1.3-1.5% / 1.9-2.5%, on Cornell and the corridor alike; from 128 rays 10.4-12.1% against
+8.6-9.8%. Luminance hides it. Per channel it is.
 """
 import json
 import sys
