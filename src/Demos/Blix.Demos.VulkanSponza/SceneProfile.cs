@@ -192,6 +192,15 @@ internal sealed record SceneProfile(
         Packs = new ScenePack[] { new("sheetshell", Required: true) },
     };
 
+    /// <summary>The sheet shell at 4 mm (<c>blix sheetslab --shell 0.004</c>): the teacup saucer's well, thinner than the gather's
+    /// 1 cm lift; the same closed form (the gap's height does not enter it).</summary>
+    public static readonly SceneProfile SheetShellThin = SheetSlab with
+    {
+        Name = "sheetshell-thin",
+        Title = "Vulkan sheet shell, 4 mm",
+        Packs = new ScenePack[] { new("sheetshell-thin", Required: true) },
+    };
+
     /// <summary>Khronos' DiffuseTransmissionPlant x1.5 in the Cornell room's sunlit shaft (<c>blix khronos</c>): leaves that
     /// transmit red, on a model with reference renders elsewhere (Babylon.js; edited for path tracers' ground truth).</summary>
     public static readonly SceneProfile KhronosPlant = Cornell with
@@ -306,7 +315,7 @@ internal sealed record SceneProfile(
         StartPitch = 5f,
     };
 
-    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, CornellPanel, Drapes, SheetSlab, SheetShell, ThinWall, Crevices, CrevicesDark, CrevicesHashed, KhronosPlant, KhronosTeacup, KhronosTest, CrytekSponza };
+    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, CornellPanel, Drapes, SheetSlab, SheetShell, SheetShellThin, ThinWall, Crevices, CrevicesDark, CrevicesHashed, KhronosPlant, KhronosTeacup, KhronosTest, CrytekSponza };
 
     /// <summary>The profile <c>--scene</c> names, Sponza when it names none.</summary>
     public static SceneProfile Named(string? name)

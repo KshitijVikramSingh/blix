@@ -81,6 +81,7 @@
     <GlslShader Include="Shaders\texel_resolve.comp" />
     <GlslShader Include="Shaders\texel_nodes_prep.comp" />
     <GlslShader Include="Shaders\texel_nodes_rays.comp" />
+    <GlslShader Include="Shaders\texel_clear.comp" />
     <GlslShader Include="Shaders\texel_nodes_shade.comp" />
     <GlslShader Include="Shaders\texel_nodes_shade_split.comp" />
     <GlslShader Include="Shaders\texel_nodes_solve.comp" />

@@ -272,6 +272,7 @@ internal sealed partial class SponzaLoop
         if (args.Int("sun-nodes-bounces") is { } nb) sunNodeBouncesAsked = Math.Max(0, nb);
         if (args.Float("sun-nodes-plane") is { } pl) sunNodePlane = Math.Max(0.01f, pl);
         nodePlanes = !args.Flag("no-node-planes");
+        gatherClear = !args.Flag("no-gather-clear");
         if (args.Float("sun-nodes-sigma") is { } sg) sunNodeSigma = Math.Max(0.05f, sg);
         // Study only: every S-th live texel traced (the sun bits and the hash still hold them all), and one sun's hits by
         // a shadow ray each. A grid kept for the run needs every texel, and every sun.
@@ -317,6 +318,7 @@ internal sealed partial class SponzaLoop
         sunNodePrepInterface = reflect(new[] { "texel_nodes_prep.comp" });
         sunNodePrepPass = graph.ComputePass("sun-nodes-prep").Shader(sunNodePrepInterface).Handle;
         sunNodeRaysInterface = reflect(new[] { "texel_nodes_rays.comp" });
+        texelClearInterface = reflect(new[] { "texel_clear.comp" });
 
         sunNodePatchInterface = reflect(new[] { "texel_nodes_patch.comp" });
         sunNodePatchAPass = graph.ComputePass("sun-nodes-patch-a").Shader(sunNodePatchInterface).Handle;
@@ -357,6 +359,7 @@ internal sealed partial class SponzaLoop
         sunNodePrepPipeline = Make("texel_nodes_prep", sunNodePrepInterface);
         sunNodePatchPipeline = Make("texel_nodes_patch", sunNodePatchInterface);
         sunNodeRaysPipeline = Make("texel_nodes_rays", sunNodeRaysInterface);
+        texelClearPipeline = Make("texel_clear", texelClearInterface);
         sunNodeShadePipeline = Make("texel_nodes_shade", sunNodeShadeInterface);
         sunNodeShadeSplitPipeline = Make("texel_nodes_shade_split", sunNodeShadeSplitInterface);
     }
@@ -580,10 +583,49 @@ internal sealed partial class SponzaLoop
     // one a key hid the teacup's floor under its saucer's bottom, 1.9 cm above it facing the same way (2026-10-23).
     // --no-node-planes: one a key, as before.
     private bool nodePlanes = true;
+    // Each live texel's room along its normal (texel_clear.comp), traced once before the gathers: their rays' lift half of
+    // it at most (texel_nodes_rays.comp). --no-gather-clear: 1 cm, as before.
+    private bool gatherClear = true;
+    private ShaderInterface texelClearInterface = null!;
+    private PipelineHandle texelClearPipeline;
+    private GpuBufferHandle texelClearBuffer;
+    private bool GatherClearOn => gatherClear && !texelClearBuffer.Equals(default(GpuBufferHandle));
+    private string GatherLiftKey => gatherClear ? ";lift clear" : "";
+    private const float TexelClearReach = 0.02f;
+
+    private void BuildTexelClear()
+    {
+        if (!gatherClear || !texelClearBuffer.Equals(default(GpuBufferHandle)) || frameTracer is null || texelLiveIds is not { } live) return;
+        var clock = Stopwatch.StartNew();
+        var fill = new float[Math.Max(1, texelCount)];
+        Array.Fill(fill, TexelClearReach);
+        texelClearBuffer = Own(device.CreateGpuBuffer(fill.Length * 4, MemoryMarshal.AsBytes(fill.AsSpan()), "sponza.texels.clear"));
+        var chunk = sunNodeSlice * 32;
+        DispatchCommand Clear(int first, int count, int mode) => new(texelClearPipeline, (count + 63) / 64, 1, 1,
+            new ShaderUniform[] { new("uClear", new Vector4Uniform(new Vector4(first, count, TexelClearReach, mode))) },
+            Array.Empty<ShaderTextureBinding>(),
+            Buffers: new[]
+            {
+                new ShaderBufferBinding("Texels", texelBuffer),
+                new ShaderBufferBinding("SunNodesLive", sunNodeLive),
+                new ShaderBufferBinding("NodeRays", sunNodeRaysBuffer),
+                new ShaderBufferBinding("NodeHits", sunNodeHits),
+                new ShaderBufferBinding("TexelClear", texelClearBuffer),
+            });
+        for (var first = 0; first < live.Length; first += chunk)
+        {
+            var count = Math.Min(chunk, live.Length - first);
+            device.DispatchNow(new[] { Clear(first, count, 0) }, "texel-clear-rays");
+            frameTracer.Trace(sunNodeRaysBuffer, sunNodeHits, count, 0xC1EA5u + (uint)first, closestOnly: true);
+            device.DispatchNow(new[] { Clear(first, count, 1) }, "texel-clear");
+        }
+        Console.WriteLine(string.Create(Inv, $"[VulkanSponza] texels: each one's room along its normal, {live.Length:N0} rays to {TexelClearReach * 100:0} cm, in {clock.Elapsed.TotalMilliseconds:0} ms (the gather's lift half of it at most)."));
+    }
     private float NodePlaneStep => nodePlanes ? sunNodePlane * texelGrid.W : 0f;
 
     private void RecordSunNodePrep()
     {
+        BuildTexelClear();
         var live = texelLiveIds!.Length;
         var buffers = new[]
         {
@@ -1290,7 +1332,7 @@ internal sealed partial class SponzaLoop
                 new("uCookedGrid", new Vector4Uniform(cookedGrid)),
                 new("uCookedDims", new Vector4Uniform(cookedDims)),
                 // x 1: the light strategy on; y the patches' disk radius (a patch stands for spacing^2 of surface).
-                new("uLights", new Vector4Uniform(new Vector4(sunNodeLit && !plain ? 1f : 0f, transportSpacing / MathF.Sqrt(MathF.PI), GatherSmoothNow ? 1f : 0f, 0f))),
+                new("uLights", new Vector4Uniform(new Vector4(sunNodeLit && !plain ? 1f : 0f, transportSpacing / MathF.Sqrt(MathF.PI), GatherSmoothNow ? 1f : 0f, GatherClearOn ? 1f : 0f))),
                 new("uTile", new Vector4Uniform(new Vector4(interleave ? 1f : 0f, texelGrid.W, lightmapTexels ? lightmapFirstRecord : float.MaxValue, !plain && NearCutMode == 2 ? hitCellNear : !plain ? rayCapMeasure : 0f))),
                 new("uFar", new Vector4Uniform(plain && !farCut ? Vector4.Zero : FarUniform(discover))),
             },
@@ -1308,6 +1350,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("FarRecord", FarRecordBuffer),
                 new ShaderBufferBinding("PatchNeighbours", FarNeighboursBuffer),
                 new ShaderBufferBinding("LightmapFrames", GatherSmoothNow ? lightmapFramesBuffer : sunNodeAccum),
+                new ShaderBufferBinding("TexelClear", GatherClearOn ? texelClearBuffer : sunNodeAccum),
             }.Concat(CookedBuffers()).Where(b => raysDeclared.Contains(b.Name)).ToArray());
     }
 
@@ -1528,7 +1571,7 @@ internal sealed partial class SponzaLoop
     // combined key and the discovery's settings -- the geometry's; their sun bits are this cook's.
     // "rays 512" fixed: a discovery pass is one pass of 32 rays a texel whatever the sweep's count (--live-rays changed it,
     // and a live boot re-ran a 14 s discovery the bundle had, 2026-10-16).
-    private string DiscoveredHeader => string.Create(Inv, $"discovered {(nodePlanes ? "v2" : "v1")};stride {sunNodeDiscoverStride};room {DiscoverRoom};rays 512;slice {sunNodeSlice};texels {texelCount}");
+    private string DiscoveredHeader => string.Create(Inv, $"discovered {(nodePlanes ? "v2" : "v1")}{GatherLiftKey};stride {sunNodeDiscoverStride};room {DiscoverRoom};rays 512;slice {sunNodeSlice};texels {texelCount}");
 
     private void RecordSunNodeDiscover()
     {

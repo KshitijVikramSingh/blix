@@ -1,0 +1,34 @@
+#version 450
+// Each live texel's room along its normal (SponzaLoop.SunNodes.cs, BuildTexelClear), once before the gathers: the gather's
+// rays start half of it off the texel at most (texel_nodes_rays.comp) -- a 1 cm lift put a record's rays past walls
+// thinner than it: the sheet shell at 4 mm read the sky inside it and the floor on its top wall's underside, the teacup's
+// saucer well (4 mm of porcelain) its outside (tools/gi-model/shell_slab.py, 2026-10-24).
+//   mode 0  a ray per live texel of the chunk into NodeRays: from the texel (0.5 mm on) along its normal, to the reach
+//   mode 1  after the CLOSEST trace, each answer's distance (none: the reach) into TexelClear
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform TexelClearParams {
+    vec4 uClear;   // x the chunk's first live texel, y its texels, z the reach, w the mode
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 2) readonly buffer SunNodesLive { uint liveIds[]; };
+layout(std430, set = 0, binding = 3) buffer NodeRays { vec4 nodeRays[]; };          // 2 a ray: origin, tMin; dir, tMax
+layout(std430, set = 0, binding = 4) readonly buffer NodeHits { uvec4 nodeHits[]; };  // 3 a ray: t, bary, flags (1 hit); ...
+layout(std430, set = 0, binding = 5) buffer TexelClear { float texelClear[]; };
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= uint(u.uClear.y)) return;
+    uint id = liveIds[uint(u.uClear.x) + i];
+    if (u.uClear.w < 0.5) {
+        vec3 n = texels[2u * id + 1u].xyz;
+        float len = length(n);
+        nodeRays[2u * i] = vec4(texels[2u * id].xyz, len > 1e-12 ? 5e-4 : 0.0);
+        nodeRays[2u * i + 1u] = len > 1e-12 ? vec4(n / len, u.uClear.z) : vec4(0.0, 1.0, 0.0, 0.0);
+        return;
+    }
+    uvec4 h0 = nodeHits[3u * i];
+    texelClear[id] = (h0.w & 1u) != 0u ? uintBitsToFloat(h0.x) : u.uClear.z;
+}

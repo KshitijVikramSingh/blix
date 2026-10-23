@@ -21,7 +21,7 @@ layout(set = 0, binding = 0) uniform SunNodesRays {
     vec4 uCookedGrid;
     vec4 uCookedDims;
     vec4 uLights;  // x 1: the light strategy; y the patches' disk radius; z 1: a lightmap record gathers about its smooth
-                   // normal (the smooth gather, LightmapFrames)
+                   // normal (the smooth gather, LightmapFrames); w 1: a texel's lift bounded by its room (TexelClear)
     vec4 uFar;     // the far field (texel_far.glsl); x 2: a ray in a bin the record knows stops at the texel's reach
     vec4 uTile;    // --interleave: x 1 on, y the finest cells' spacing, z the first lightmap record (its texels by atlas);
                    // w a near round's reach (--near-cut, texel_nodes_shade.glsl FarPart; 0 none)
@@ -48,6 +48,8 @@ layout(std430, set = 0, binding = 11) readonly buffer TexelPatch { int texelPatc
 // user's vertical stripes, 2026-10-22). The rays (their lift, directions, cosines) about the smooth normal; the patches
 // picked by the face's.
 layout(std430, set = 0, binding = 14) readonly buffer LightmapFrames { uvec2 lightmapFrames[]; };
+// Each texel's room along its normal (texel_clear.comp): the rays' lift half of it at most.
+layout(std430, set = 0, binding = 15) readonly buffer TexelClear { float texelClear[]; };
 vec3 recordSmoothNormal(uint id, vec3 face) {
     if (u.uLights.z < 0.5 || lightmapFrames[0].x == 0u) return face;
     uint packed = lightmapFrames[1u + id].x;
@@ -258,7 +260,13 @@ void main() {
     uint stratum = aimed ? ray - guideEnd : guided ? ray - cosineEnd : ray;
     // The rays about the record's smooth normal (--gather-smooth-normal); the guide and far patches above by its face's.
     n = recordSmoothNormal(id, n);
-    vec3 origin = position + n * 0.01;
+    // The lift: 1 cm, and half the texel's room along its normal at most (a quarter of a millimetre at least, off its own
+    // surface) -- 1 cm crossed walls thinner than it: the sheet shell at 4 mm read the sky inside itself, the teacup's
+    // saucer well its outside (texel_clear.comp, 2026-10-24).
+    // A lightmap record's alone (it lies on its triangle): a hashed texel's position is its cell's centroid, between the two
+    // faces of a wall thinner than the cell that face the same way, and its room from there is the wall's inside.
+    float lift = u.uLights.w > 0.5 && float(id) >= u.uTile.z ? min(0.01, max(0.5 * texelClear[id], 2.5e-4)) : 0.01;
+    vec3 origin = position + n * lift;
     vec3 dir;
     if (aimed) {
         uint s1 = blix_pcg(seed ^ 0x85EBCA77u), s2 = blix_pcg(s1);
