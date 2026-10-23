@@ -182,7 +182,7 @@ internal sealed partial class SponzaLoop
         if (cachePath is not null) WriteHitCells(cachePath, bytes, work.ToArray());
     }
 
-    private const int HitCellsVersion = 1;
+    private const int HitCellsVersion = 2;   // 2: a cell whose centre finds no texel takes a corner's patch (hit_cells.comp cellOwnPatch)
 
     // The cells' file in the GI bundle: keyed by the transport's stages (the geometry, the patches, the texels), the rows,
     // the cell size and the build's marks.

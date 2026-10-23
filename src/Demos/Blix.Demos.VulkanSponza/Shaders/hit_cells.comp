@@ -112,17 +112,40 @@ vec3 blendedPatchColumn(int p, vec3 x, vec3 nx, uint column) {
     return l;
 }
 
-// The shade's answer for a point on a side: the patch its likeliest texel sees, else the nearest on its placement
-// facing; among no texel, the nearest anywhere.
-int cellPatch(vec3 p, vec3 n, uint placement) {
+// The patch a point's likeliest texel sees (-1: none), or -2 where the search finds no texel.
+int texelPatchAt(vec3 p, vec3 n) {
     int ids[NODE_CANDIDATES];
     float weights[NODE_CANDIDATES];
     float total = nodeSetAt(0, p, n, u.uTexelGrid, uint(u.uShade.z), u.uLookup.xy, ids, weights);
-    if (total <= 0.0) return cookedNearest(p, n);
+    if (total <= 0.0) return -2;
     int likeliest = -1;
     float most = 0.0;
     for (int c = 0; c < NODE_CANDIDATES; ++c) if (ids[c] >= 0 && weights[c] > most) { most = weights[c]; likeliest = ids[c]; }
-    int patchIndex = max(texelPatch[likeliest], -1);
+    return max(texelPatch[likeliest], -1);
+}
+
+// The shade's answer for a point on a side: the patch its likeliest texel sees, else the nearest on its placement
+// facing; among no texel, the nearest anywhere.
+int cellPatch(vec3 p, vec3 n, uint placement) {
+    int patchIndex = texelPatchAt(p, n);
+    if (patchIndex == -2) return cookedNearest(p, n);
+    if (patchIndex < 0) patchIndex = cookedNearestOn(p, n, placement);
+    return patchIndex;
+}
+
+// A cell's own patch: its centre's, or where the centre finds no texel (under a wall standing on it), the patch a texel
+// at one of its corners sees before the nearest anywhere. The nearest anywhere crossed the wall: the crevices corridor's
+// floor cell at its side wall (20 cm, its centre under the wall) took the sunlit floor outside's patch, 55x the
+// corridor floor's light, and the end wall's texels beside it, whose near hits there found no texel and read the cell,
+// came out +14-23% (2026-10-23).
+int cellOwnPatch(vec3 p, vec3 corners[3], vec3 n, uint placement) {
+    int patchIndex = texelPatchAt(p, n);
+    if (patchIndex == -2)
+        for (uint k = 0u; k < 3u && patchIndex < 0; ++k) {
+            int there = texelPatchAt(corners[k], n);
+            if (there >= 0) patchIndex = there;
+        }
+    if (patchIndex == -2) return cookedNearest(p, n);
     if (patchIndex < 0) patchIndex = cookedNearestOn(p, n, placement);
     return patchIndex;
 }
@@ -231,7 +254,7 @@ void main() {
                 }
                 continue;
             }
-            int front = cellPatch(p, face, placement), back = cellPatch(p, -face, placement);
+            int front = cellOwnPatch(p, corners, face, placement), back = cellOwnPatch(p, corners, -face, placement);
             // A contact across it (a corner's patch on either side not its centre's: a crease, a box on a floor): its
             // hits take the search, at the hit (word 1's bit 31). One patch a cell side read the creases' light from
             // across them (crevices' seams 0.83 of the reference against the search's 0.86, 2026-10-19).
