@@ -246,7 +246,8 @@ internal sealed partial class SponzaLoop
         coneLookups = args.Flag("cone-lookups");
         // --no-patch-levels: cones read a patch and its neighbours at most (the A/B for SponzaLoop.PatchLevels.cs).
         patchLevelsOn = !args.Flag("no-patch-levels");
-        coneVolumeOn = args.Flag("cone-volume");
+        // (--cone-volume, VCT's opacity along the cone in front of the exact hit, was tried and taken out: one-sided, every
+        // corridor 7-10% dark -- c24a5c9c.)
         // --guide-sky-only: the guides and light lists from the sky's light alone (no sun component, no direct sun) -- the
         // same whatever the sun: for lists cooked once and lit under every sun, so a list cook's default (--list-cook-sun-
         // guides: the cook's sun's). The corridor's lists, two cooks' rays, at three suns: corridor 0.018 / 0.035 / 0.018,
@@ -1230,7 +1231,6 @@ internal sealed partial class SponzaLoop
             }
             // --cone-lookups: the surface cache's coarser levels, for this light (SponzaLoop.PatchLevels.cs).
             if (leanShade && coneLookups && patchLevelsOn) { BuildPatchLevels(); LightPatchLevelsNow(); }
-            if (leanShade && coneLookups) BuildConeVolumeNow();
             // --instant-only (a measurement): no gather -- the cook lands on the instant layer's light (texel_patch_light.comp:
             // the patches' light by each texel's openness), what a light change shows before any ray.
             if (instantOnly && !fineGathering && sunNodeRefineRound == 0 && sunNodeFirst == 0 && sunNodePass == 0)
@@ -1333,7 +1333,6 @@ internal sealed partial class SponzaLoop
                 new("uCapture", new Vector4Uniform(RayCaptureOn && !listCook ? RayCaptureUniform : Vector4.Zero)),
                 new("uCone", new Vector4Uniform(new Vector4(coneLookups ? sunNodeRays : 0f, hitCellSize, transportSpacing, sunNodeKinds.Length))),
                 new("uLevels", new Vector4Uniform(new Vector4(coneLookups && patchLevelsOn && PatchLevelsReady ? PatchLevelCount : 0, 0f, 0f, 0f))),
-                new("uVolume", new Vector4Uniform(new Vector4(coneLookups && ConeVolumeReady ? coneVolumeLevels : 0, coneVolumeVoxel, coneVolumeExtent, 0f))),
             },
             new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
             Buffers: new[]
@@ -1367,8 +1366,6 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("LevelParents", PatchLevelsReady ? levelParentsBuffer : sunNodeAccum),
                 new ShaderBufferBinding("LevelNeighbours", PatchLevelsReady ? levelNeighboursBuffer : sunNodeAccum),
                 new ShaderBufferBinding("LevelLight", PatchLevelsReady ? levelLightBuffer : sunNodeAccum),
-                new ShaderBufferBinding("ConeVolume", ConeVolumeReady ? coneVolumeBuffer : sunNodeAccum),
-                new ShaderBufferBinding("ConeVolumeMeta", ConeVolumeReady ? coneVolumeMetaBuffer : sunNodeAccum),
             }.Where(b => declared.Contains(b.Name)).ToArray());
     }
 
