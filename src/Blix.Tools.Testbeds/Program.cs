@@ -328,8 +328,21 @@ public static class Program
         var p = mesh.UsePrimitive(white);
         const float t = 0.2f, height = 4f;
         var h = size / 2f;
+        // --corridor-wall W (0.2 m): the corridor's outer walls, grown outward; --roof R (0.2 m) its roof's thickness;
+        // --floor-inside: floor only under the courtyard and the corridor, none under the walls or outside -- the
+        // corridor's light held against what lies beyond its walls (its dead end 1.6-1.8x bright, 2026-10-23).
+        var cw = args.Float("corridor-wall") ?? t;
+        var roof = args.Float("roof") ?? t;
+        if (cw <= 0f || roof <= 0f) throw new AppArgsException("--corridor-wall and --roof must be positive.");
+        var floorInside = args.Flag("floor-inside");
         // Floor, under the corridor too.
-        Box(p, new Vector3(-h - t, -t, -h - 1.5f), new Vector3(h + 4.5f, 0f, h + t));
+        if (!floorInside) Box(p, new Vector3(-h - t, -t, -h - 1.5f), new Vector3(h + 4.3f + cw, 0f, MathF.Max(h + t, 2f + cw)));
+        else
+        {
+            Box(p, new Vector3(-h, -t, -h), new Vector3(h, 0f, h));                          // the courtyard's
+            Box(p, new Vector3(h, -t, 1f), new Vector3(h + t + 4f, 0f, 2f));                 // the doorway's and the first leg's
+            Box(p, new Vector3(h + t + 3f, -t, -2f), new Vector3(h + t + 4f, 0f, 1f));       // the second leg's
+        }
         // Front (+Z) and left (-X) walls.
         Box(p, new Vector3(-h - t, 0f, h), new Vector3(h + t, height, h + t));
         Box(p, new Vector3(-h - t, 0f, -h - 1.5f), new Vector3(-h, height, h));
@@ -346,11 +359,11 @@ public static class Program
         Box(p, new Vector3(h, 2.5f, 1f), new Vector3(h + t, height, 2f));
         // The corridor: 1 m wide, 2.5 m tall, roofed; out along +X to x = h + 4, then toward -Z to z = -2.
         var c0 = h + t;
-        Box(p, new Vector3(c0, 0f, 2f), new Vector3(c0 + 4f, 2.5f, 2f + t));                 // its +Z side, along the first leg
-        Box(p, new Vector3(c0, 0f, -2f), new Vector3(c0 + 3f, 2.5f, 1f));                    // the inner corner block
-        Box(p, new Vector3(c0 + 4f, 0f, -2f - t), new Vector3(c0 + 4f + t, 2.5f, 2f + t));   // its far +X side
-        Box(p, new Vector3(c0 + 3f, 0f, -2f - t), new Vector3(c0 + 4f, 2.5f, -2f));          // the dead end
-        Box(p, new Vector3(c0, 2.5f, -2f - t), new Vector3(c0 + 4f + t, 2.5f + t, 2f + t));  // the roof
+        Box(p, new Vector3(c0, 0f, 2f), new Vector3(c0 + 4f, 2.5f, 2f + cw));                    // its +Z side, along the first leg
+        Box(p, new Vector3(c0, 0f, -2f), new Vector3(c0 + 3f, 2.5f, 1f));                        // the inner corner block
+        Box(p, new Vector3(c0 + 4f, 0f, -2f - cw), new Vector3(c0 + 4f + cw, 2.5f, 2f + cw));    // its far +X side
+        Box(p, new Vector3(c0 + 3f, 0f, -2f - cw), new Vector3(c0 + 4f, 2.5f, -2f));             // the dead end
+        Box(p, new Vector3(c0, 2.5f, -2f - cw), new Vector3(c0 + 4f + cw, 2.5f + roof, 2f + cw)); // the roof
         Box(mesh.UsePrimitive(red), new Vector3(c0 + 3f, 0f, -2f), new Vector3(c0 + 4f, 0.6f, -1.6f));   // red, at the dead end
         // The shelf along the left wall: 1.2 m deep, 0.4 m up, 3 m long, 0.1 m thick.
         Box(p, new Vector3(-h, 0.4f, -2f), new Vector3(-h + 1.2f, 0.5f, 1f));

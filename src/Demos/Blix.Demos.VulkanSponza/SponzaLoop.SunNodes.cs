@@ -1332,8 +1332,9 @@ internal sealed partial class SponzaLoop
                 new("uSheets", new Vector4Uniform(new Vector4(SheetsInGi ? 1f : 0f, 0f, 0f, 0f))),
                 // BLIX_CAPTURE_FINE_ONLY: the capture in the fine round's first pass alone (its crease texels, small); every ray
                 // the same tag, so the hit's distance in the tag's place (z -1: texel_nodes_lean.comp).
+                // BLIX_CAPTURE_DIST: every round's rays with their hits' distance (no tag), for where rays end.
                 new("uCapture", new Vector4Uniform(RayCaptureOn && !listCook && (!captureFineOnly || fineGathering && nearRounds == nearRoundsLeft)
-                    ? (captureFineOnly ? RayCaptureUniform with { Z = -1f } : RayCaptureUniform) : Vector4.Zero)),
+                    ? (captureFineOnly || captureDist ? RayCaptureUniform with { Z = -1f } : RayCaptureUniform) : Vector4.Zero)),
                 new("uCone", new Vector4Uniform(new Vector4(coneLookups ? sunNodeRays : 0f, hitCellSize, transportSpacing, sunNodeKinds.Length))),
                 new("uLevels", new Vector4Uniform(new Vector4(coneLookups && patchLevelsOn && PatchLevelsReady ? PatchLevelCount : 0, 0f, 0f, 0f))),
                 new("uExact", new Vector4Uniform(new Vector4(exactSun ? 1f : 0f, Environment.GetEnvironmentVariable("BLIX_LEAN_SEARCH_ALL") == "1" ? 1f : 0f, 0f, 0f))),

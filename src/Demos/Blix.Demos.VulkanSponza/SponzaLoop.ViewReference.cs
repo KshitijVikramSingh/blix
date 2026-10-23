@@ -93,6 +93,21 @@ internal sealed partial class SponzaLoop
                         packed.Add(new Vector4(n, 0f));
                         refViewRecordIds.Add((uint)id);
                     }
+                // BLIX_REF_RECORDS_BOX x0,y0,z0,x1,y1,z1: up to N live records inside the box, evenly -- a place, whatever
+                // the geometry's records are (a variant of a scene numbers them anew).
+                else if (Environment.GetEnvironmentVariable("BLIX_REF_RECORDS_BOX") is { Length: > 0 } boxText)
+                {
+                    var b = boxText.Split(',').Select(v => float.Parse(v, CultureInfo.InvariantCulture)).ToArray();
+                    var lo = new Vector3(b[0], b[1], b[2]);
+                    var hi = new Vector3(b[3], b[4], b[5]);
+                    var inside = new List<int>();
+                    for (var i = 0; i < count; i++)
+                    {
+                        var p = new Vector3(recs[2 * i].X, recs[2 * i].Y, recs[2 * i].Z);
+                        if (MathF.Abs(recs[2 * i].W) >= 2f && p.X >= lo.X && p.Y >= lo.Y && p.Z >= lo.Z && p.X <= hi.X && p.Y <= hi.Y && p.Z <= hi.Z) inside.Add(i);
+                    }
+                    Pick(inside, refViewRecords);
+                }
                 else
                 {
                     Pick(through, through.Count > 0 ? refViewRecords * 3 / 4 : 0);
