@@ -82,8 +82,22 @@ internal sealed partial class SponzaLoop
                         refViewRecordIds.Add((uint)(first + i));
                     }
                 }
-                Pick(through, through.Count > 0 ? refViewRecords * 3 / 4 : 0);
-                Pick(opaque, refViewRecords - refViewRecordIds.Count);
+                // BLIX_REF_RECORDS_FILE: the records named there (one id a line, up to N), not an even pick -- a model's texels.
+                if (Environment.GetEnvironmentVariable("BLIX_REF_RECORDS_FILE") is { Length: > 0 } listFile)
+                    foreach (var line in File.ReadLines(listFile))
+                    {
+                        if (refViewRecordIds.Count >= refViewRecords || !int.TryParse(line.Trim(), out var id) || id < first || id >= texelCount) continue;
+                        var i = id - first;
+                        var n = Vector3.Normalize(new Vector3(recs[2 * i + 1].X, recs[2 * i + 1].Y, recs[2 * i + 1].Z));
+                        packed.Add(new Vector4(new Vector3(recs[2 * i].X, recs[2 * i].Y, recs[2 * i].Z) + n * 2e-3f, 0f));
+                        packed.Add(new Vector4(n, 0f));
+                        refViewRecordIds.Add((uint)id);
+                    }
+                else
+                {
+                    Pick(through, through.Count > 0 ? refViewRecords * 3 / 4 : 0);
+                    Pick(opaque, refViewRecords - refViewRecordIds.Count);
+                }
                 Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                     $"[VulkanSponza] view reference: {refViewRecordIds.Count:N0} lightmap records as surface points ({through.Count:N0} records let light through)."));
             }
