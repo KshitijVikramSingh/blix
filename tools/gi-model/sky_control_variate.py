@@ -129,7 +129,7 @@ def capture(tag, N):
     L = np.stack([R[:, 2], R[:, 3], R[:, 4]], 1).copy().view(np.float32).astype(float) @ LUM
     w = R[:, 5].copy().view(np.float32).astype(float)              # the ray's weight (cos / mixture pdf)
     c = L * np.maximum(np.einsum('ij,ij->i', dirs, N[ids]), 0)    # its contribution
-    return dict(ids=ids, miss=kind == 0, dirs=dirs, w=w, c=c)
+    return dict(ids=ids, miss=kind == 0, dirs=dirs, w=w, c=c, passid=R[:, 6] & 0xFF)
 
 
 def main():
