@@ -410,11 +410,13 @@ internal sealed partial class SponzaLoop
     private Vector4[]? cachedReferenceSums;
     private string? referenceCacheFile;
 
+    // The geometry by the transport's patches key (the scene's triangles): a variant of a scene under its name, its points
+    // where the last one's were (a thicker roof over the same corridor), read the other's reference (2026-10-23).
     private string ReferenceCacheKey(List<Vector4> packed)
     {
         using var sha = System.Security.Cryptography.SHA256.Create();
         var head = string.Create(CultureInfo.InvariantCulture,
-            $"ref v1;{sunDirection.X:G9},{sunDirection.Y:G9},{sunDirection.Z:G9};{EffectiveSunIrradiance.X:G9},{EffectiveSunIrradiance.Y:G9},{EffectiveSunIrradiance.Z:G9};sky {refSky:G9};seed {refSeed};bounces {refBounces};lanes {ReferenceLanesPerPoint};quota {ReferenceLaneQuota};disc {refSunDisc};sheets {refSheets};closest {refSunClosest};scene {scene.Name};probe {probeName}");
+            $"ref v1;{sunDirection.X:G9},{sunDirection.Y:G9},{sunDirection.Z:G9};{EffectiveSunIrradiance.X:G9},{EffectiveSunIrradiance.Y:G9},{EffectiveSunIrradiance.Z:G9};sky {refSky:G9};seed {refSeed};bounces {refBounces};lanes {ReferenceLanesPerPoint};quota {ReferenceLaneQuota};disc {refSunDisc};sheets {refSheets};closest {refSunClosest};scene {scene.Name};geometry {transportPatchesKey ?? "-"};probe {probeName}");
         var bytes = System.Text.Encoding.UTF8.GetBytes(head).Concat(MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(packed)).ToArray()).ToArray();
         return Convert.ToHexString(sha.ComputeHash(bytes))[..24].ToLowerInvariant();
     }
