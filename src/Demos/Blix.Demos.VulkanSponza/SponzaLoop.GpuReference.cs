@@ -170,7 +170,7 @@ internal sealed partial class SponzaLoop
                 && (sunChange is null || sunChangeApplied && postLoadFrames > sunChangeAppliedAt + 1);
             var referenceReady = !gpuReference || referenceMonolithic
                 ? !gpuReference || gpuReferencePaths >= GpuReferenceTarget
-                : gateWave is { } w && w.Dispatch >= ReferenceWaveFrames(w);
+                : cachedReferenceSums is not null || gateWave is { } w && w.Dispatch >= ReferenceWaveFrames(w);
             // The sun records when asked (--lightlets, --lightlet-sun): a shot of them before they land measured the
             // traced shadows instead (2026-10-14: a bake closed at 0%).
             var recordsReady = !lightletsAsked || lightlets is not null;
@@ -233,6 +233,7 @@ internal sealed partial class SponzaLoop
     // The gate's wave: started as many frames before the shot as its lanes' quota can take.
     private void RecordGateReferenceWave(RayQueryScene scene)
     {
+        if (cachedReferenceSums is not null) return;
         if (gateWave is null)
         {
             if (!shotWhenReady && postLoadFrames < shotFrame - ReferenceLaneQuota * (refBounces + 2) - 4) return;
@@ -243,6 +244,7 @@ internal sealed partial class SponzaLoop
             if (FrameRaysOnHardware && frameTracer is null) return;
             PickGpuReferencePoints(scene);
             if (gpuReferencePackedPoints is not { Count: > 0 } packed) return;
+            if (LoadCachedReference(packed)) return;
             gateWave = CreateReferenceWave(packed, ReferenceLanesPerPoint, ReferenceLaneQuota, "reference");
         }
         RecordReferenceWave(gateWave);
@@ -401,6 +403,42 @@ internal sealed partial class SponzaLoop
             $"[VulkanSponza] GPU surface reference: {points.Count} of {GpuReferenceGrid * GpuReferenceGrid} pixels off depth edges, {GpuReferenceTarget} paths x {refBounces} bounces, from post-load frame {postLoadFrames}."));
     }
 
+    // BLIX_REF_CACHE=dir: the gate's reference kept on disk by what decides it -- its points (the scene and the camera
+    // through them), the sun, the sky, the seed and the paths' rules -- and read back instead of traced again: a variant of
+    // the GI against the same reference waited ~1 min of the reference's frames each run (2026-10-23).
+    private static readonly string? referenceCacheDir = Environment.GetEnvironmentVariable("BLIX_REF_CACHE") is { Length: > 0 } rc ? rc : null;
+    private Vector4[]? cachedReferenceSums;
+    private string? referenceCacheFile;
+
+    private string ReferenceCacheKey(List<Vector4> packed)
+    {
+        using var sha = System.Security.Cryptography.SHA256.Create();
+        var head = string.Create(CultureInfo.InvariantCulture,
+            $"ref v1;{sunDirection.X:G9},{sunDirection.Y:G9},{sunDirection.Z:G9};{EffectiveSunIrradiance.X:G9},{EffectiveSunIrradiance.Y:G9},{EffectiveSunIrradiance.Z:G9};sky {refSky:G9};seed {refSeed};bounces {refBounces};lanes {ReferenceLanesPerPoint};quota {ReferenceLaneQuota};disc {refSunDisc};sheets {refSheets};closest {refSunClosest};scene {scene.Name};probe {probeName}");
+        var bytes = System.Text.Encoding.UTF8.GetBytes(head).Concat(MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(packed)).ToArray()).ToArray();
+        return Convert.ToHexString(sha.ComputeHash(bytes))[..24].ToLowerInvariant();
+    }
+
+    private bool LoadCachedReference(List<Vector4> packed)
+    {
+        if (referenceCacheDir is null) return false;
+        referenceCacheFile = Path.Combine(referenceCacheDir, ReferenceCacheKey(packed) + ".ref");
+        if (!File.Exists(referenceCacheFile)) return false;
+        var sums = MemoryMarshal.Cast<byte, Vector4>(File.ReadAllBytes(referenceCacheFile)).ToArray();
+        if (sums.Length != gpuReferencePoints!.Count) return false;
+        cachedReferenceSums = sums;
+        Console.WriteLine($"[VulkanSponza] GPU surface reference: read from the cache ({referenceCacheFile}), not traced.");
+        return true;
+    }
+
+    private void SaveCachedReference(Vector4[] sums)
+    {
+        if (referenceCacheFile is null) return;
+        Directory.CreateDirectory(referenceCacheDir!);
+        File.WriteAllBytes(referenceCacheFile, MemoryMarshal.AsBytes(sums.AsSpan()).ToArray());
+        Console.WriteLine($"[VulkanSponza] GPU surface reference: kept in the cache ({referenceCacheFile}).");
+    }
+
     // The wavefront's lanes summed per point: (sum of pi x radiance, paths).
     private Vector4[] ReferenceWaveSums(ReferenceWave w)
     {
@@ -452,9 +490,10 @@ internal sealed partial class SponzaLoop
     private void WriteGpuSurfaceReference()
     {
         if (!gpuReference || gpuReferencePoints is not { Count: > 0 } points) return;
-        var accum = referenceMonolithic
+        var accum = cachedReferenceSums ?? (referenceMonolithic
             ? MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(gpuReferenceAccum, 0, points.Count * 16).AsSpan()).ToArray()
-            : ReferenceWaveSums(gateWave!);
+            : ReferenceWaveSums(gateWave!));
+        if (cachedReferenceSums is null && !referenceMonolithic) SaveCachedReference(accum);
         var incident = device.ReadTexture(graph.GetColorTexture(incidentHandle), out var iw, out var ih, out _);
         static double Lum(Vector3 v) => 0.2126 * v.X + 0.7152 * v.Y + 0.0722 * v.Z;
         if (incidentPointFrames > 0)

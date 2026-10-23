@@ -39,10 +39,12 @@ build=(--build)
 reference=(--gpu-reference --ref-bounces 32)
 if [[ "${BLIX_GATE_CPU_REFERENCE:-0}" == 1 ]]; then reference+=(--probe-reference); fi
 paths=(--gpu-ref-paths 16384)
+runFlags="${*:-defaults}"   # this gate's extra flags, for the windows' titles
 frames=3000
 run() {
     local name=$1; shift
-    "$REPO/blix" run ${build[@]+"${build[@]}"} Blix.Demos.VulkanSponza "$@" --no-fog --render-scale 1 --win=960 540 "${reference[@]}" "${paths[@]}" \
+    # The window's title names the run (SponzaLoop: BLIX_RUN_LABEL): which of the gate's scenes, with what flags.
+    BLIX_RUN_LABEL="gate $name: $runFlags${BLIX_GATHER_SEED:+ [seed $BLIX_GATHER_SEED]}" "$REPO/blix" run ${build[@]+"${build[@]}"} Blix.Demos.VulkanSponza "$@" --no-fog --render-scale 1 --win=960 540 "${reference[@]}" "${paths[@]}" \
         --shot-when-ready --shot-frames=$frames --shot="$LOGS/$name.png" > "$LOGS/$name.log" 2>&1 || {
         echo "gate: the $name run failed; its log is $LOGS/$name.log" >&2
         tail -5 "$LOGS/$name.log" >&2

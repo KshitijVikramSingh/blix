@@ -34,7 +34,8 @@ gi=(--lightmap --transport-texels --rt-shadows --lod-pixels 0 --split-light --tr
 reference=(--viz 26 --ref-view 16 --ref-bounces 32 --ref-view-records 2048 --view-dump)
 run() {
     local name=$1; shift
-    BLIX_DUMP_DIR="$OUT/$name" "$REPO/blix" run ${build[@]+"${build[@]}"} Blix.Demos.VulkanSponza "${gi[@]}" "$@" --no-fog --render-scale 1 \
+    # The window's title names the run (SponzaLoop: BLIX_RUN_LABEL): which scene, with what flags.
+    BLIX_RUN_LABEL="materials $name: ${*:-defaults}${BLIX_GATHER_SEED:+ [seed $BLIX_GATHER_SEED]}" BLIX_DUMP_DIR="$OUT/$name" "$REPO/blix" run ${build[@]+"${build[@]}"} Blix.Demos.VulkanSponza "${gi[@]}" "$@" --no-fog --render-scale 1 \
         --win=960 540 "${reference[@]}" --shot-when-ready --shot-frames=6000 --shot="$OUT/$name.png" > "$OUT/$name.log" 2>&1 || {
         echo "materials: the $name run failed; its log is $OUT/$name.log" >&2
         tail -5 "$OUT/$name.log" >&2

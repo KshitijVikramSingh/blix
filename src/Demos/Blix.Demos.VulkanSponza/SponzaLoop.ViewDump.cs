@@ -110,7 +110,12 @@ internal sealed partial class SponzaLoop
         object? refView = null;
         if (viewWave is { } vw)
         {
-            var sums = ReferenceWaveSums(vw);
+            var sums = cachedViewSums ?? ReferenceWaveSums(vw);
+            if (cachedViewSums is null && viewCacheFile is not null)
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(viewCacheFile)!);
+                File.WriteAllBytes(viewCacheFile, MemoryMarshal.AsBytes(sums.AsSpan()).ToArray());
+            }
             File.WriteAllBytes(Path.Combine(dir, "reference_view.f32x4"), MemoryMarshal.AsBytes(sums.AsSpan()).ToArray());
             files["reference_view.f32x4"] = new { bytes = sums.Length * 16 };
             // --ref-view-records: their points follow the grid's, these their records.

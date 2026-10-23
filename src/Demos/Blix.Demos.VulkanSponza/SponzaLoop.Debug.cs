@@ -159,6 +159,7 @@ internal sealed partial class SponzaLoop
         //
         // Level 0 is deliberately not drawn: at a sane budget most of the scene is at full detail,
         // and outlining all of it would bury the handful of primitives the question is about.
+        DrawGatherRays(debug);
         if (debug.Draw.Layer("lod", visible: false))
         {
             for (var i = 0; i < lodLevels.Length && i < opaquePlacements.Count; i++)

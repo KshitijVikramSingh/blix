@@ -1112,7 +1112,7 @@ internal sealed partial class SponzaLoop
                 sun: sunNodeBitDirections[hitSun] with { W = sunNodeLift }, reach: rayReach, discTan: hitSunDisc ? SunDiscTangent : 0f);
         else frameTracer!.Trace(sunNodeRaysBuffer, sunNodeHits, slice * 32, SunNodeSeed(first, seedPass, 0), closestOnly: true);
         var t2 = Stopwatch.GetTimestamp();
-        if (leanShade && cells) device.DispatchNow(new[] { LeanShadeCommand(ids, first, slice, pass) }, "sun-nodes-lean");
+        if (leanShade && cells) device.DispatchNow(new[] { LeanShadeCommand(ids, first, slice, pass, hitSun >= 0) }, "sun-nodes-lean");
         else device.DispatchNow(new[] { SunNodeShadeCommand(ids, first, slice, pass, 0, hitSun >= 0 ? 3f : 0f, few: sunNodeSuns!.Length <= 32,
             cells: cells, exactColumn: Math.Max(hitSun, 0)) }, "sun-nodes-shade");
         var t3 = Stopwatch.GetTimestamp();
@@ -1315,7 +1315,7 @@ internal sealed partial class SponzaLoop
     private ShaderInterface leanShadeInterface = null!;
     private PipelineHandle leanShadePipeline;
 
-    private DispatchCommand LeanShadeCommand(GpuBufferHandle ids, int first, int slice, int pass)
+    private DispatchCommand LeanShadeCommand(GpuBufferHandle ids, int first, int slice, int pass, bool exactSun)
     {
         var detail = splitCooking && sunNodeRefineRound == 0 && !sunNodeDetail.Equals(default(GpuBufferHandle));
         var declared = leanShadeInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
@@ -1330,9 +1330,11 @@ internal sealed partial class SponzaLoop
                 new("uTexelGrid", new Vector4Uniform(texelGrid)),
                 new("uIrr", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, (sunNodeSuns!.Length + 31) / 32))),
                 new("uSheets", new Vector4Uniform(new Vector4(SheetsInGi ? 1f : 0f, 0f, 0f, 0f))),
-                new("uCapture", new Vector4Uniform(RayCaptureOn && !listCook ? RayCaptureUniform : Vector4.Zero)),
+                // BLIX_CAPTURE_FINE_ONLY: the capture in the fine round alone (its crease texels, small).
+                new("uCapture", new Vector4Uniform(RayCaptureOn && !listCook && (fineGathering || Environment.GetEnvironmentVariable("BLIX_CAPTURE_FINE_ONLY") != "1") ? RayCaptureUniform : Vector4.Zero)),
                 new("uCone", new Vector4Uniform(new Vector4(coneLookups ? sunNodeRays : 0f, hitCellSize, transportSpacing, sunNodeKinds.Length))),
                 new("uLevels", new Vector4Uniform(new Vector4(coneLookups && patchLevelsOn && PatchLevelsReady ? PatchLevelCount : 0, 0f, 0f, 0f))),
+                new("uExact", new Vector4Uniform(new Vector4(exactSun ? 1f : 0f, Environment.GetEnvironmentVariable("BLIX_LEAN_SEARCH_ALL") == "1" ? 1f : 0f, 0f, 0f))),
             },
             new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
             Buffers: new[]

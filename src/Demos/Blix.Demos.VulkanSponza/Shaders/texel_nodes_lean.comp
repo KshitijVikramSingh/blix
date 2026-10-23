@@ -38,6 +38,8 @@ layout(set = 0, binding = 0) uniform Lean {
     vec4 uCapture;  // --ray-capture (SponzaLoop.RayCapture.cs): x 1 on, y the texels sampled (1 in 2^y), z the tag, w the room
     vec4 uCone;     // --cone-lookups: x the texel's rays (0 off), y the cells' size, z the patch spacing, w the patch light's columns
     vec4 uLevels;   // the coarser patch levels (SponzaLoop.PatchLevels.cs): x how many (0: none)
+    vec4 uExact;    // x 1: each hit's own shadow ray toward the sun was traced (the hit record's bit 3), its sun the exact one;
+                    // y 1 (BLIX_LEAN_SEARCH_ALL, a measurement): every hit by the search, none by its cell
 } u;
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
@@ -182,6 +184,7 @@ void main() {
     vec3 dir = nodeRays[slot * 2u + 1u].xyz;
     float weight = nodeRayWeight[slot];
     bool hit = (h0.w & 1u) != 0u;
+    uint hitKind = 0u, nearId = 0xFFFFFFFFu;   // for the capture: 0 a miss, 1 its cell, 2 a near texel (nearId), 3 borrowed
     vec3 l0 = vec3(0.0), l1 = vec3(0.0);
     float known = 0.0;
     sMiss[lid] = hit ? 0.0 : weight / PI;
@@ -216,7 +219,7 @@ void main() {
             uint sw = sheetRows[h1.z & 0x7FFFFFFFu];
             if (sw != 0u) sheet = vec4(unpackUnorm4x8(sw).rgb, float(sw >> 24) / 255.0);
         }
-        if (u.uLookup.w > 0.5 && (dist < u.uLookup.z || !hasCell || contact || sheet.a > 0.0)) {
+        if (u.uLookup.w > 0.5 && (dist < u.uLookup.z || !hasCell || contact || sheet.a > 0.0 || u.uExact.y > 0.5)) {
             vec3 hitPos = nodeRays[slot * 2u].xyz + dir * dist;
             int ids[NODE_CANDIDATES];
             float ws[NODE_CANDIDATES];
@@ -249,6 +252,7 @@ void main() {
                         uint words = uint(u.uIrr.w), bit = uint(k);
                         for (int c = 0; c < NODE_CANDIDATES; ++c)
                             if (ids[c] >= 0 && ((sunBits[uint(ids[c]) * words + bit / 32u] >> (bit % 32u)) & 1u) != 0u) visible += ws[c] / total;
+                        if (u.uExact.x > 0.5) visible = (h0.w & 8u) != 0u ? 1.0 : 0.0;   // the hit's own shadow ray
                         l += u.uIrr.rgb * ndotl * visible;
                     }
                     cl[k] = albedoW * l;
@@ -257,6 +261,7 @@ void main() {
                     l0 = cl[0];
                     if (suns > 1) l1 = cl[1];
                     known = 1.0;
+                    hitKind = 2u; nearId = t;
                     hasCell = false;   // answered: not the cell's
                 }
             }
@@ -265,6 +270,17 @@ void main() {
             uint side = dot(normal, dir) < 0.0 ? 0u : 1u;   // met from its front (the ray against the normal)
             vec3 sky = unpackRgb9e5(cellLight[4u * cellIndex + 2u * side]);
             vec3 sun = unpackRgb9e5(cellLight[4u * cellIndex + 2u * side + 1u]);
+            if (u.uExact.x > 0.5) {
+                // The cell's direct sun (hit_cells.comp: its side's bits' blend x the side's n.l x the sun) out, the hit's own in.
+                vec3 toSun = vec3(0.0);
+                for (int k = 0; k < suns; ++k) if ((uint(sunNodes[k].w + 0.5) & 1u) != 0u) toSun = sunNodes[k].xyz;
+                uint cellAt0 = 1u + 2u * hitCells[0] + 2u * cellIndex;
+                float frac = float(hitCells[cellAt0] >> 24) / 255.0;
+                vec3 sideN = side == 0u ? normal : -normal;
+                float cellNl = max(dot(sideN, toSun), 0.0);
+                float exactVis = (h0.w & 8u) != 0u ? 1.0 : 0.0;
+                sun = max(sun - u.uIrr.rgb * cellNl * frac, vec3(0.0)) + u.uIrr.rgb * max(dot(hn, toSun), 0.0) * exactVis;
+            }
             if (u.uCone.x > 0.5) {
                 vec3 n0 = normalize(texels[2u * id + 1u].xyz);
                 float c0 = max(dot(n0, dir), 1e-3);
@@ -294,6 +310,7 @@ void main() {
                 if (k == 0) l0 = albedoW * c; else l1 = albedoW * c;
             }
             known = 1.0;
+            hitKind = 1u;
         }
     }
     sLight[lid * 2u] = l0;
@@ -323,7 +340,9 @@ void main() {
     sLight[lid * 2u + 1u] = l1;
     if (u.uCapture.x > 0.5 && u.uCapture.x < 1.5) {
         uint bits = uint(max(u.uCapture.y, 0.0));
-        if (bits == 0u || ((id * 2654435761u) >> (32u - bits)) == 0u) {
+        // y < 0: the one texel -y - 1 (the texel picker's gather rays: SponzaLoop.GatherRays.cs).
+        bool single = u.uCapture.y < 0.0;
+        if (single ? id == uint(-u.uCapture.y - 1.0) : (bits == 0u || ((id * 2654435761u) >> (32u - bits)) == 0u)) {
             uint at = atomicAdd(captureCount, 1u);
             if (at < uint(u.uCapture.w)) {
                 vec3 n0 = normalize(texels[2u * id + 1u].xyz);
@@ -333,7 +352,12 @@ void main() {
                 vec2 o = d.z >= 0.0 ? d.xy : (1.0 - abs(d.yx)) * vec2(d.x >= 0.0 ? 1.0 : -1.0, d.y >= 0.0 ? 1.0 : -1.0);
                 uint od = packSnorm2x16(o);
                 captured[2u * at] = uvec4(id, od, floatBitsToUint(l.r), floatBitsToUint(l.g));
-                captured[2u * at + 1u] = uvec4(floatBitsToUint(l.b), floatBitsToUint(c0), uint(u.uShade.w), uint(u.uCapture.z));
+                // word 6: the pass | the hit's kind << 8 | the capture's tag << 16; word 7: the near texel a near hit read.
+                uint kindNow = known > 1.5 ? 3u : hitKind;
+                // One texel: the hit's distance (half) in the tag's place, for drawing the ray to its end.
+                uint top = single ? (packHalf2x16(vec2(hit ? min(uintBitsToFloat(h0.x), 60000.0) : 60000.0, 0.0)) & 0xFFFFu) : (uint(u.uCapture.z) & 0xFFFFu);
+                captured[2u * at + 1u] = uvec4(floatBitsToUint(l.b), floatBitsToUint(c0),
+                    (uint(u.uShade.w) & 0xFFu) | (kindNow << 8) | (top << 16), nearId);
             }
         }
     }

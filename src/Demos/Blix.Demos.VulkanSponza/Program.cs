@@ -55,7 +55,10 @@ public static class Program
         // Opens with the overlay showing, as a research renderer is mostly read through it. ` hides it.
         var scene = SceneProfile.Named(args.String("scene"));
         LogBuild();
-        var defaults = new WindowOptions($"Blix — {scene.Title}", 1440, 810) { Diagnostics = true };
+        // BLIX_RUN_LABEL: what this run is (its tag, its flags), in the title -- so a window in a sequence of runs says which
+        // one it is.
+        var runLabel = Environment.GetEnvironmentVariable("BLIX_RUN_LABEL") is { Length: > 0 } rl ? " — " + rl : "";
+        var defaults = new WindowOptions($"Blix — {scene.Title}{runLabel}", 1440, 810) { Diagnostics = true };
         if (args.Values("win", 2) is [var w, var h])
         {
             var width = int.Parse(w, CultureInfo.InvariantCulture);

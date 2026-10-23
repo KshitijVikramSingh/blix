@@ -195,6 +195,14 @@ internal sealed partial class SponzaLoop
             // The whole view's pixels and texels to a folder (SponzaLoop.ViewDump.cs; tools/gi-model/view_dump.py reads it).
             if (ImGui.Button("Dump view")) viewDumpPending = true;
             if (viewDumpLast is { } last) { ImGui.SameLine(); ImGui.TextUnformatted(last); }
+            // The heaviest texel the pixel reads, gathered again and its rays drawn (SponzaLoop.GatherRays.cs).
+            if (texelPickRows.Count > 0)
+            {
+                ImGui.SameLine();
+                if (ImGui.Button("Gather rays")) { gatherRaysTexel = texelPickRows.MaxBy(r => r.Share)!.Id; gatherRaysPending = true; }
+                if (gatherRays.Count > 0) { ImGui.SameLine(); if (ImGui.Button("Clear rays")) { gatherRays.Clear(); gatherRaysNote = null; } }
+            }
+            if (gatherRaysNote is { } note) ImGui.TextUnformatted(note);
             DrawTexelPickBody();
         }
         ImGui.End();

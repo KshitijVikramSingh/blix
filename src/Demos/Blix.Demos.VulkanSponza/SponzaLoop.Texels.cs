@@ -829,6 +829,7 @@ internal sealed partial class SponzaLoop
         using (Prof("texels.visible")) RecordTexelVisible(invProjection, invView, width, height);
         DumpAtRest();
         LogTexelPick();
+        RunGatherRaysIfPending();
         DumpViewIfDue();
         using (Prof("texels.live-patch-light")) RecordLivePatchLight();
         // A live split cook (SponzaLoop.SplitLanding.cs) takes --split-passes-per-frame passes of the frame, as the cook

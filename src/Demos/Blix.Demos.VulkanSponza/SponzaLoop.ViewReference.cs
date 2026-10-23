@@ -36,6 +36,9 @@ internal sealed partial class SponzaLoop
         refViewRecords = Math.Max(0, args.Int("ref-view-records") ?? 0);
     }
 
+    private Vector4[]? cachedViewSums;
+    private string? viewCacheFile;
+
     private void RecordViewReference()
     {
         if (refViewStride <= 0 || gpuReference || rayBlockBuffers.Length == 0 || !RaySurfacesReady) return;
@@ -86,6 +89,17 @@ internal sealed partial class SponzaLoop
             }
             var quota = (refViewPaths + refViewLanes - 1) / refViewLanes;
             viewWave = CreateReferenceWave(packed, refViewLanes, quota, "view-reference");
+            // BLIX_REF_CACHE (SponzaLoop.GpuReference.cs): the camera paths' sums read back when the same points, sun, sky
+            // and rules were traced before -- the wave then counts as done.
+            if (referenceCacheDir is not null)
+            {
+                viewCacheFile = Path.Combine(referenceCacheDir, "view-" + ReferenceCacheKey(packed) + $"-{refViewLanes}x{quota}.ref");
+                if (File.Exists(viewCacheFile))
+                {
+                    var sums = MemoryMarshal.Cast<byte, Vector4>(File.ReadAllBytes(viewCacheFile)).ToArray();
+                    if (sums.Length == viewWave.PointCount) { cachedViewSums = sums; viewWave.Dispatch = (uint)ReferenceWaveFrames(viewWave); Console.WriteLine($"[VulkanSponza] view reference: read from the cache ({viewCacheFile}), not traced."); }
+                }
+            }
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] view reference: {refViewW} x {refViewH} camera points (every {refViewStride} px of {iw} x {ih}), {refViewLanes} lanes a point, {quota * refViewLanes:N0} paths each, {refBounces} bounces; done in ~{ReferenceWaveFrames(viewWave)} frames."));
         }
