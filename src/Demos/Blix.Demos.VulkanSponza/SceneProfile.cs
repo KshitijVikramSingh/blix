@@ -279,7 +279,20 @@ internal sealed record SceneProfile(
         Packs = new ScenePack[] { new("crevices-hashed", Required: true) },
     };
 
-    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, CornellPanel, Drapes, SheetSlab, ThinWall, Crevices, CrevicesDark, CrevicesHashed, KhronosPlant, KhronosTeacup, KhronosTest };
+    /// <summary>Crytek Sponza (Khronos glTF-Sample-Assets' Sponza: the CRYENGINE Limited License, downloaded, not kept in the
+    /// repo; tools/testbeds/setup.sh with BLIX_TESTBED_KHRONOS=1): the atrium at ~262 k triangles, normal-mapped stone
+    /// throughout -- Sponza's layout at a testbed's cost, where a light-change or a texel record's direction is quick to run.</summary>
+    public static readonly SceneProfile CrytekSponza = Sponza with
+    {
+        Name = "crytek-sponza",
+        Title = "Vulkan Crytek Sponza (testbed)",
+        AssetsVariable = "BLIX_TESTBED_ASSETS",
+        SetupHint = "tools/testbeds/setup.sh with BLIX_TESTBED_KHRONOS=1 downloads and cooks it",
+        Packs = new ScenePack[] { new("crytek-sponza", Required: true) },
+        ProbeCandidates = Array.Empty<string>(),
+    };
+
+    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, CornellPanel, Drapes, SheetSlab, ThinWall, Crevices, CrevicesDark, CrevicesHashed, KhronosPlant, KhronosTeacup, KhronosTest, CrytekSponza };
 
     /// <summary>The profile <c>--scene</c> names, Sponza when it names none.</summary>
     public static SceneProfile Named(string? name)
