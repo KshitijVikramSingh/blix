@@ -59,6 +59,11 @@ internal sealed partial class SponzaLoop
     // The reference's sun rays traced as closest rays, anything met shade (reference_wave.comp, BatchSunRays): the paths'
     // own trace, independent of the frame's shadow kernel and its sheets. --ref-shadow-batch: the shadow batch, as before.
     private bool refSunClosest = true;
+    // --ref-lift M: how far off a hit a reference path, and its sun ray, go on (reference_wave.comp; 1 mm). It was 1 cm:
+    // the teacup's saucer stands 1.9 cm over the floor, and the floor under it read 0.33 there against 0.18 at 1 mm and
+    // 0.16 at 0.2 mm -- converged by 1 mm, every other face of the saucer unchanged; the sheet slab's floor within 0.3%
+    // of its closed form (2026-10-23).
+    private float refLift = 0.001f;
     private int ReferenceLaneQuota => (GpuReferenceTarget + ReferenceLanesPerPoint - 1) / ReferenceLanesPerPoint;
     // The gate's points as PickGpuReferencePoints packed them (position, normal), and their wave.
     private List<Vector4>? gpuReferencePackedPoints;
@@ -266,6 +271,7 @@ internal sealed partial class SponzaLoop
                 new("uParams", new Vector4Uniform(new Vector4(mode, refBounces, w.Quota, w.LanesPerPoint))),
                 new("uCount", new Vector4Uniform(new Vector4(count, w.Dispatch + (uint)refSeed * 7919u, refSunDisc ? SunDiscTangent : 0f,
                     (refSheets && SheetRowsBuffer is not null ? 1f : 0f) + (refSunClosest ? 2f : 0f)))),
+                new("uLift", new Vector4Uniform(new Vector4(refLift, 0f, 0f, 0f))),
             },
             new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
             Buffers: rayBlockBuffers
@@ -416,7 +422,7 @@ internal sealed partial class SponzaLoop
     {
         using var sha = System.Security.Cryptography.SHA256.Create();
         var head = string.Create(CultureInfo.InvariantCulture,
-            $"ref v1;{sunDirection.X:G9},{sunDirection.Y:G9},{sunDirection.Z:G9};{EffectiveSunIrradiance.X:G9},{EffectiveSunIrradiance.Y:G9},{EffectiveSunIrradiance.Z:G9};sky {refSky:G9};seed {refSeed};bounces {refBounces};lanes {ReferenceLanesPerPoint};quota {ReferenceLaneQuota};disc {refSunDisc};sheets {refSheets};closest {refSunClosest};scene {scene.Name};geometry {transportPatchesKey ?? "-"};probe {probeName}");
+            $"ref v1;{sunDirection.X:G9},{sunDirection.Y:G9},{sunDirection.Z:G9};{EffectiveSunIrradiance.X:G9},{EffectiveSunIrradiance.Y:G9},{EffectiveSunIrradiance.Z:G9};sky {refSky:G9};seed {refSeed};bounces {refBounces};lanes {ReferenceLanesPerPoint};quota {ReferenceLaneQuota};disc {refSunDisc};sheets {refSheets};closest {refSunClosest};lift {refLift:G6};scene {scene.Name};geometry {transportPatchesKey ?? "-"};probe {probeName}");
         var bytes = System.Text.Encoding.UTF8.GetBytes(head).Concat(MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(packed)).ToArray()).ToArray();
         return Convert.ToHexString(sha.ComputeHash(bytes))[..24].ToLowerInvariant();
     }

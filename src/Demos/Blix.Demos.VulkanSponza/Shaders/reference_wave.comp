@@ -29,6 +29,7 @@ layout(set = 0, binding = 0) uniform ReferenceWave {
     vec4 uParams;          // x the mode (0 step, 1 shade, 2 resolve), y bounces, z paths a lane in all, w lanes a point
     vec4 uCount;           // x lanes, y the frame (seed), z the tangent of the sun's angular radius (--ref-sun-disc; 0 a point sun),
                            // w bit 0: thin sheets (ReferenceSheets), bit 1: the sun's rays as closest rays (BatchSunRays)
+    vec4 uLift;            // x how far off a hit a path and its sun ray go on (--ref-lift; 1 mm)
 } u;
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
@@ -151,14 +152,14 @@ void main() {
             }
             float ndl = dot(hn, toSun);
             if (ndl > 0.0) {
-                batchOrigins[l] = vec4(hp + hn * 0.01, uintBitsToFloat(0x7F800000u));
-                batchSunRays[2u * l] = vec4(hp + hn * 0.01, 0.0);
+                batchOrigins[l] = vec4(hp + hn * u.uLift.x, uintBitsToFloat(0x7F800000u));
+                batchSunRays[2u * l] = vec4(hp + hn * u.uLift.x, 0.0);
                 batchSunRays[2u * l + 1u] = vec4(toSun, uintBitsToFloat(0x7F800000u));
                 sums[2u * l] = vec4(c.rgb * albedo * (1.0 - share) * u.uSunIrradiance.rgb * ndl / PI, 0.0);
             } else if (sheet != 0u && ndl < 0.0) {
                 // The sun on the sheet's far side: its glow on this one, the shadow ray from there.
-                batchOrigins[l] = vec4(hp - hn * 0.01, uintBitsToFloat(0x7F800000u));
-                batchSunRays[2u * l] = vec4(hp - hn * 0.01, 0.0);
+                batchOrigins[l] = vec4(hp - hn * u.uLift.x, uintBitsToFloat(0x7F800000u));
+                batchSunRays[2u * l] = vec4(hp - hn * u.uLift.x, 0.0);
                 batchSunRays[2u * l + 1u] = vec4(toSun, uintBitsToFloat(0x7F800000u));
                 sums[2u * l] = vec4(c.rgb * passed * u.uSunIrradiance.rgb * (-ndl) / PI, 0.0);
             }
@@ -167,11 +168,11 @@ void main() {
             bool through = sheet != 0u && referenceRand(seedNow) < share;
             if (through) {
                 c.rgb *= passed / max(share, 1e-4);
-                a = vec4(hp - hn * 0.01, a.w + 1.0);
+                a = vec4(hp - hn * u.uLift.x, a.w + 1.0);
                 b.xyz = -hn;
             } else {
                 c.rgb *= albedo;
-                a = vec4(hp + hn * 0.01, a.w + 1.0);
+                a = vec4(hp + hn * u.uLift.x, a.w + 1.0);
                 b.xyz = hn;
             }
         }
