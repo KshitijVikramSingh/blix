@@ -30,7 +30,8 @@ internal sealed partial class SponzaLoop
     private const int ListCellPoints = 4;
     // The cells' light in the lists' form (albedo-free, the blend over the area, the sun): the lists' and the lean shade's.
     private bool ListCellLight => listsOn || leanShade;
-    private const string ListsHeader = "texel lists v7";
+    // v8: the search finds a texel a plane within a key (texel_nodes_prep.comp; --no-node-planes keeps v7).
+    private string ListsHeader => (nodePlanes ? "texel lists v8" : "texel lists v7");
 
     private sealed class ListAcc
     {

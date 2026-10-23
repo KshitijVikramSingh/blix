@@ -220,7 +220,9 @@ internal sealed partial class SponzaLoop
         return true;
     }
 
-    private const int HitCellsVersion = 2;   // 2: a cell whose centre finds no texel takes a corner's patch (hit_cells.comp cellOwnPatch)
+    // 2: a cell whose centre finds no texel takes a corner's patch (hit_cells.comp cellOwnPatch); 3: the search finds a
+    // texel a plane within a key (texel_nodes_prep.comp, --no-node-planes keeps 2).
+    private int HitCellsVersion => nodePlanes ? 3 : 2;
 
     // The cells' file in the GI bundle: keyed by the transport's stages (the geometry, the patches, the texels), the rows,
     // the cell size and the build's marks.

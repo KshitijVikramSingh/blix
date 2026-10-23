@@ -2,13 +2,13 @@
 // Sun nodes (SponzaLoop.SunNodes.cs), once before the trace: one thread a live texel, into the cook's hash -- every live
 // texel, the atlas's and the hashed ones, keyed as the hashed texels are (texel.glsl: the finest cell of its position,
 // the bin of its normal), so a gather ray's hit finds the texels it landed among. A slot holds a texel id; its key is
-// the texel's own, its fingerprint beside it (texel_nodes.glsl, nodeFind). The first texel of a key keeps it (a cell an atlas chart crosses
-// obliquely can hold two). The texels' sun bits come from Metal (SunNodeBitsFor).
+// the texel's own, its fingerprint beside it (texel_nodes.glsl, nodeNext). A key holds one texel a plane (nodePlane,
+// uPrep.y its step): the smallest id of each. The texels' sun bits come from Metal (SunNodeBitsFor).
 
 layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) uniform SunNodesPrep {
-    vec4 uPrep;       // x the first live texel of this dispatch, w the hash's slots (a power of two)
+    vec4 uPrep;       // x the first live texel of this dispatch, y the planes' step (0: one texel a key), w the hash's slots (a power of two)
     vec4 uRange;      // x the live texels
     vec4 uTexelGrid;  // xyz the cells' origin, w the finest spacing
 } u;
@@ -25,6 +25,7 @@ void main() {
     uint id = liveIds[i];
     uvec2 key;
     if (!nodeTexelKey(id, u.uTexelGrid, key)) return;
+    int plane = nodePlane(id, u.uPrep.y);
     uint mask = uint(u.uPrep.w) - 1u;
     uint slot = texelMix(key) & mask;
     for (int probe = 0; probe < NODE_HASH_PROBES; ++probe) {
@@ -36,7 +37,7 @@ void main() {
         uvec2 other;
         // Its key's cell taken: the smallest id keeps it, whichever came first -- first-come was the dispatch's race, and
         // which texel a search found there moved run to run (2026-10-22).
-        if (nodeTexelKey(prev, u.uTexelGrid, other) && other == key) { atomicMin(cookHash[2u * slot], id); return; }
+        if (nodeTexelKey(prev, u.uTexelGrid, other) && other == key && nodePlane(prev, u.uPrep.y) == plane) { atomicMin(cookHash[2u * slot], id); return; }
         slot = (slot + 1u) & mask;
     }
 }

@@ -271,6 +271,7 @@ internal sealed partial class SponzaLoop
         ReadFarTransportArgs(args);
         if (args.Int("sun-nodes-bounces") is { } nb) sunNodeBouncesAsked = Math.Max(0, nb);
         if (args.Float("sun-nodes-plane") is { } pl) sunNodePlane = Math.Max(0.01f, pl);
+        nodePlanes = !args.Flag("no-node-planes");
         if (args.Float("sun-nodes-sigma") is { } sg) sunNodeSigma = Math.Max(0.05f, sg);
         // Study only: every S-th live texel traced (the sun bits and the hash still hold them all), and one sun's hits by
         // a shadow ray each. A grid kept for the run needs every texel, and every sun.
@@ -575,6 +576,12 @@ internal sealed partial class SponzaLoop
         sunNodeStage = SunNodeStage.Prep;
     }
 
+    // The cook's hash holds one texel a plane within a key (texel_nodes_prep.comp), in steps of the search's plane reach:
+    // one a key hid the teacup's floor under its saucer's bottom, 1.9 cm above it facing the same way (2026-10-23).
+    // --no-node-planes: one a key, as before.
+    private bool nodePlanes = true;
+    private float NodePlaneStep => nodePlanes ? sunNodePlane * texelGrid.W : 0f;
+
     private void RecordSunNodePrep()
     {
         var live = texelLiveIds!.Length;
@@ -589,7 +596,7 @@ internal sealed partial class SponzaLoop
             graph.Dispatch(sunNodePrepPass, new DispatchCommand(sunNodePrepPipeline, (Math.Min(chunk, live - first) + 63) / 64, 1, 1,
                 new ShaderUniform[]
                 {
-                    new("uPrep", new Vector4Uniform(new Vector4(first, 0f, 0f, sunNodeHashSlots))),
+                    new("uPrep", new Vector4Uniform(new Vector4(first, NodePlaneStep, 0f, sunNodeHashSlots))),
                     new("uRange", new Vector4Uniform(new Vector4(live, 0f, 0f, 0f))),
                     new("uTexelGrid", new Vector4Uniform(texelGrid)),
                 },
@@ -1521,7 +1528,7 @@ internal sealed partial class SponzaLoop
     // combined key and the discovery's settings -- the geometry's; their sun bits are this cook's.
     // "rays 512" fixed: a discovery pass is one pass of 32 rays a texel whatever the sweep's count (--live-rays changed it,
     // and a live boot re-ran a 14 s discovery the bundle had, 2026-10-16).
-    private string DiscoveredHeader => string.Create(Inv, $"discovered v1;stride {sunNodeDiscoverStride};room {DiscoverRoom};rays 512;slice {sunNodeSlice};texels {texelCount}");
+    private string DiscoveredHeader => string.Create(Inv, $"discovered {(nodePlanes ? "v2" : "v1")};stride {sunNodeDiscoverStride};room {DiscoverRoom};rays 512;slice {sunNodeSlice};texels {texelCount}");
 
     private void RecordSunNodeDiscover()
     {
