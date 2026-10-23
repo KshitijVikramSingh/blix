@@ -1321,6 +1321,7 @@ internal sealed partial class SponzaLoop
                 new("uTexelGrid", new Vector4Uniform(texelGrid)),
                 new("uIrr", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, (sunNodeSuns!.Length + 31) / 32))),
                 new("uSheets", new Vector4Uniform(new Vector4(SheetsInGi ? 1f : 0f, 0f, 0f, 0f))),
+                new("uCapture", new Vector4Uniform(RayCaptureOn && !listCook ? RayCaptureUniform : Vector4.Zero)),
             },
             new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
             Buffers: new[]
@@ -1345,6 +1346,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("SplitSun", NearTexelLightNow ? splitSunBuffer : sunNodeAccum),
                 NearTexelLightNow ? ProvenanceBinding() : new ShaderBufferBinding("TexelProvenance", sunNodeAccum),
                 new ShaderBufferBinding("SheetRows", SheetsInGi ? SheetRowsBuffer!.Value : sunNodeAccum),
+                RayCaptureBinding(sunNodeAccum),
             }.Where(b => declared.Contains(b.Name)).ToArray());
     }
 
