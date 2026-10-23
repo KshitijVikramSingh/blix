@@ -14,7 +14,8 @@ layout(local_size_x = 64) in;
 layout(set = 0, binding = 0) uniform LiveSun {
     vec4 uChunk;   // x the chunk's texels, y its first among the live, z the mode, w the bit words a texel
     vec4 uToSun;   // xyz toward the sun; w the sun's column (its bit)
-    vec4 uRay;     // x the lift, y the reach, z 1: points (no ids)
+    vec4 uRay;     // x the lift, y the reach, z 1: points (no ids); w the first lightmap record when a record's lift is
+                   // half its room at most (TexelClear: texel_clear.comp), 0 none
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
@@ -22,6 +23,7 @@ layout(std430, set = 0, binding = 2) readonly buffer LiveIds { uint liveIds[]; }
 layout(std430, set = 0, binding = 3) buffer LiveSunOrigins { vec4 origins[]; };
 layout(std430, set = 0, binding = 4) readonly buffer LiveSunOccluded { uint occluded[]; };
 layout(std430, set = 0, binding = 5) buffer SunNodeBits { uint sunBits[]; };
+layout(std430, set = 0, binding = 6) readonly buffer TexelClear { float texelClear[]; };
 
 void main() {
     uint t = gl_GlobalInvocationID.x;
@@ -31,7 +33,10 @@ void main() {
         vec4 p = texels[2u * id];
         vec3 n = texels[2u * id + 1u].xyz;
         bool facing = dot(n, n) > 1e-12 && dot(normalize(n), u.uToSun.xyz) > 0.0;
-        origins[t] = facing ? vec4(p.xyz + normalize(n) * u.uRay.x, u.uRay.y) : vec4(p.xyz, -1.0);
+        // A record's lift half its room along its normal at most: lifted 1 cm, one inside a wall thinner than that shot its
+        // sun from outside it -- the sheet shell at 4 mm lit inside (2026-10-24).
+        float lift = u.uRay.w > 0.5 && u.uRay.z < 0.5 && float(id) >= u.uRay.w ? min(u.uRay.x, max(0.5 * texelClear[id], 2.5e-4)) : u.uRay.x;
+        origins[t] = facing ? vec4(p.xyz + normalize(n) * lift, u.uRay.y) : vec4(p.xyz, -1.0);
         return;
     }
     uint words = uint(u.uChunk.w);

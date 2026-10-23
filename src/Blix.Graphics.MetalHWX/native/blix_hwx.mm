@@ -331,7 +331,16 @@ kernel void blix_trace(device const float4* rays [[buffer(0)]],
         // sun there being the glow on this one (the consumer reads which side from n.l's sign).
         if (dot(hn, p.sun.xyz) <= 0.0f && (p.flags & 4u) != 0u && rowTransmit[sheetRow] != 0u) hn = -hn;
         if (dot(hn, p.sun.xyz) > 0.0f) {
-            float3 from = o.xyz + d.xyz * t + hn * p.sun.w;
+            // The lift along the side's normal; sun.w < 0: at most half the room there (a short closest ray from the hit
+            // first, a quarter of a millimetre at least) -- lifted 1 cm, a hit inside a wall thinner than that shot its sun
+            // from outside it: the sheet shell at 4 mm lit inside, its floor 2.4x its closed form (2026-10-24).
+            float lift = abs(p.sun.w);
+            if (p.sun.w < 0.0f) {
+                uint probeSeed = seed ^ 0x2F6B1D35u;
+                auto room = isect.intersect(ray(o.xyz + d.xyz * t, hn, 1e-4f, 2.0f * lift), tlas, 0xFFu, table, probeSeed);
+                if (room.type != intersection_type::none) lift = max(min(lift, 0.5f * room.distance), 2.5e-4f);
+            }
+            float3 from = o.xyz + d.xyz * t + hn * lift;
             float3 toward = p.sun.xyz;
             if (p.discTan > 0.0f) {
                 // A uniform point of the disc: radius sqrt(u1), angle 2 pi u2, in a frame about the sun's direction.

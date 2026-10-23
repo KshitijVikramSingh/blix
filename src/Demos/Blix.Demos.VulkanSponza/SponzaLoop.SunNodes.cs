@@ -595,30 +595,38 @@ internal sealed partial class SponzaLoop
 
     private void BuildTexelClear()
     {
-        if (!gatherClear || !texelClearBuffer.Equals(default(GpuBufferHandle)) || frameTracer is null || texelLiveIds is not { } live) return;
+        if (!gatherClear || !texelClearBuffer.Equals(default(GpuBufferHandle)) || !EnsureFrameTracer() || frameTracer is null || texelLiveIds is not { } live) return;
         var clock = Stopwatch.StartNew();
         var fill = new float[Math.Max(1, texelCount)];
         Array.Fill(fill, TexelClearReach);
         texelClearBuffer = Own(device.CreateGpuBuffer(fill.Length * 4, MemoryMarshal.AsBytes(fill.AsSpan()), "sponza.texels.clear"));
-        var chunk = sunNodeSlice * 32;
+        // Its own rays, hits and ids: it runs before the sun bits (RecordLiveSunBits), ahead of the sun nodes' buffers.
+        const int chunk = 1 << 20;
+        var idsBuffer = device.CreateGpuBuffer(Math.Max(16, live.Length * 4), MemoryMarshal.AsBytes(live.AsSpan()), "sponza.texels.clear-ids");
+        var raysBuffer = device.CreateGpuBuffer(chunk * 32, name: "sponza.texels.clear-rays");
+        var hitsBuffer = device.CreateGpuBuffer(chunk * 48 + 80, name: "sponza.texels.clear-hits");
         DispatchCommand Clear(int first, int count, int mode) => new(texelClearPipeline, (count + 63) / 64, 1, 1,
             new ShaderUniform[] { new("uClear", new Vector4Uniform(new Vector4(first, count, TexelClearReach, mode))) },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
             {
                 new ShaderBufferBinding("Texels", texelBuffer),
-                new ShaderBufferBinding("SunNodesLive", sunNodeLive),
-                new ShaderBufferBinding("NodeRays", sunNodeRaysBuffer),
-                new ShaderBufferBinding("NodeHits", sunNodeHits),
+                new ShaderBufferBinding("SunNodesLive", idsBuffer),
+                new ShaderBufferBinding("NodeRays", raysBuffer),
+                new ShaderBufferBinding("NodeHits", hitsBuffer),
                 new ShaderBufferBinding("TexelClear", texelClearBuffer),
             });
         for (var first = 0; first < live.Length; first += chunk)
         {
             var count = Math.Min(chunk, live.Length - first);
             device.DispatchNow(new[] { Clear(first, count, 0) }, "texel-clear-rays");
-            frameTracer.Trace(sunNodeRaysBuffer, sunNodeHits, count, 0xC1EA5u + (uint)first, closestOnly: true);
+            frameTracer.Trace(raysBuffer, hitsBuffer, count, 0xC1EA5u + (uint)first, closestOnly: true);
             device.DispatchNow(new[] { Clear(first, count, 1) }, "texel-clear");
         }
+        device.WaitIdle();
+        device.DestroyGpuBuffer(idsBuffer);
+        device.DestroyGpuBuffer(raysBuffer);
+        device.DestroyGpuBuffer(hitsBuffer);
         Console.WriteLine(string.Create(Inv, $"[VulkanSponza] texels: each one's room along its normal, {live.Length:N0} rays to {TexelClearReach * 100:0} cm, in {clock.Elapsed.TotalMilliseconds:0} ms (the gather's lift half of it at most)."));
     }
     private float NodePlaneStep => nodePlanes ? sunNodePlane * texelGrid.W : 0f;
@@ -1159,7 +1167,7 @@ internal sealed partial class SponzaLoop
         }
         if (hitSun >= 0)
             frameTracer!.Trace(sunNodeRaysBuffer, sunNodeHits, slice * 32, SunNodeSeed(first, seedPass, 0), closestOnly: true,
-                sun: sunNodeBitDirections[hitSun] with { W = sunNodeLift }, reach: rayReach, discTan: hitSunDisc ? SunDiscTangent : 0f);
+                sun: sunNodeBitDirections[hitSun] with { W = gatherClear ? -sunNodeLift : sunNodeLift }, reach: rayReach, discTan: hitSunDisc ? SunDiscTangent : 0f);
         else frameTracer!.Trace(sunNodeRaysBuffer, sunNodeHits, slice * 32, SunNodeSeed(first, seedPass, 0), closestOnly: true);
         var t2 = Stopwatch.GetTimestamp();
         if (leanShade && cells) device.DispatchNow(new[] { LeanShadeCommand(ids, first, slice, pass, hitSun >= 0) }, "sun-nodes-lean");

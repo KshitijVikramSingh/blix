@@ -131,6 +131,7 @@ internal sealed partial class SponzaLoop
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
             {
+                new ShaderBufferBinding("TexelClear", liveSunBits),
                 new ShaderBufferBinding("Texels", sunNodeFoliagePoints),
                 new ShaderBufferBinding("LiveIds", splitLiveBuffer),
                 new ShaderBufferBinding("LiveSunOrigins", liveSunOrigins),
@@ -150,6 +151,7 @@ internal sealed partial class SponzaLoop
     private void RecordLiveSunBits()
     {
         if (liveSunDone || texelLiveIds is not { } live || liveSunRecordedFrame == framesRendered) return;
+        BuildTexelClear();
         liveSunRecordedFrame = framesRendered;
         var n = Math.Min(LiveSunChunk, live.Length - liveSunNext);
         var reach = rayReach;
@@ -158,11 +160,13 @@ internal sealed partial class SponzaLoop
             {
                 new("uChunk", new Vector4Uniform(new Vector4(n, liveSunNext, mode, liveSunWords))),
                 new("uToSun", new Vector4Uniform(new Vector4(liveSunToward, liveSunColumn))),
-                new("uRay", new Vector4Uniform(new Vector4(sunNodeLift, reach, 0f, 0f))),
+                // w: the first lightmap record when its lift is bounded by its room (TexelClear), 0 none.
+                new("uRay", new Vector4Uniform(new Vector4(sunNodeLift, reach, 0f, GatherClearOn && lightmapTexels ? lightmapFirstRecord : 0f))),
             },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
             {
+                new ShaderBufferBinding("TexelClear", GatherClearOn ? texelClearBuffer : liveSunBits),
                 new ShaderBufferBinding("Texels", texelBuffer),
                 new ShaderBufferBinding("LiveIds", splitLiveBuffer),
                 new ShaderBufferBinding("LiveSunOrigins", liveSunOrigins),
