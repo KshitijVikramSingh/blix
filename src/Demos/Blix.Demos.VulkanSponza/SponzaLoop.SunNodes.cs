@@ -243,6 +243,7 @@ internal sealed partial class SponzaLoop
         guideSun = !args.Flag("no-guide-sun");
         instantOnly = args.Flag("instant-only");
         leanShade = args.Flag("lean-shade");
+        coneLookups = args.Flag("cone-lookups");
         // --guide-sky-only: the guides and light lists from the sky's light alone (no sun component, no direct sun) -- the
         // same whatever the sun: for lists cooked once and lit under every sun, so a list cook's default (--list-cook-sun-
         // guides: the cook's sun's). The corridor's lists, two cooks' rays, at three suns: corridor 0.018 / 0.035 / 0.018,
@@ -1302,7 +1303,7 @@ internal sealed partial class SponzaLoop
     // Searching only contacts and sheets (not the near distance) put the seams back to 0.064; the fine rounds' passes cost
     // the same with no search at all (~55 ms, the rays kernel slowed alike): the frame's own work beside them, not the
     // shade (2026-10-23).
-    private bool leanShade;
+    private bool leanShade, coneLookups;
     private ShaderInterface leanShadeInterface = null!;
     private PipelineHandle leanShadePipeline;
 
@@ -1322,6 +1323,7 @@ internal sealed partial class SponzaLoop
                 new("uIrr", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, (sunNodeSuns!.Length + 31) / 32))),
                 new("uSheets", new Vector4Uniform(new Vector4(SheetsInGi ? 1f : 0f, 0f, 0f, 0f))),
                 new("uCapture", new Vector4Uniform(RayCaptureOn && !listCook ? RayCaptureUniform : Vector4.Zero)),
+                new("uCone", new Vector4Uniform(new Vector4(coneLookups ? sunNodeRays : 0f, hitCellSize, transportSpacing, sunNodeKinds.Length))),
             },
             new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
             Buffers: new[]
@@ -1347,6 +1349,10 @@ internal sealed partial class SponzaLoop
                 NearTexelLightNow ? ProvenanceBinding() : new ShaderBufferBinding("TexelProvenance", sunNodeAccum),
                 new ShaderBufferBinding("SheetRows", SheetsInGi ? SheetRowsBuffer!.Value : sunNodeAccum),
                 RayCaptureBinding(sunNodeAccum),
+                new ShaderBufferBinding("SunNodePatchLight", sunNodePatchLight),
+                new ShaderBufferBinding("PatchNeighbours", FarNeighboursBuffer),
+                new ShaderBufferBinding("CookedPatches", cookedPatchBuffer),
+                new ShaderBufferBinding("PatchDirect", liveDirect.Equals(default(GpuBufferHandle)) ? sunNodeAccum : liveDirect),
             }.Where(b => declared.Contains(b.Name)).ToArray());
     }
 

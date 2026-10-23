@@ -14,6 +14,10 @@
 //             cells' near distance from the near hits alone, uNear.z)
 // The fine round's near rounds as the shade has them (uNear.x: 1 the first, its far part recorded per fine place; 2 a
 // later one, its rays cut at uNear.y: the cut rays out, the recorded far part in).
+// --cone-lookups (uCone.x the texel's rays: voxel cone tracing's pre-filtering, in our surface cache): a ray stands for
+// a cone of its share of the hemisphere (its solid angle weight / (rays x its cosine)), and a hit reads the light over
+// the cone's footprint there (its distance x the cone's radius, over the hit's facing) -- the cell's below the cell size,
+// else the patches blended with that reach (their incident light per column + their own direct sun: the cells' form).
 // The pass's sums into NodeAccum and NodeDetail as the shade writes them (texel_nodes_shade.glsl), so the resolve, the
 // refine, the settling and the landing read it unchanged. Not: sheets that let light through, the far field, the census,
 // the ray capture.
@@ -32,6 +36,7 @@ layout(set = 0, binding = 0) uniform Lean {
     vec4 uIrr;      // rgb the sun's irradiance; w the sun bits' words a texel
     vec4 uSheets;   // x 1: sheets that let light through in the GI (SheetRows)
     vec4 uCapture;  // --ray-capture (SponzaLoop.RayCapture.cs): x 1 on, y the texels sampled (1 in 2^y), z the tag, w the room
+    vec4 uCone;     // --cone-lookups: x the texel's rays (0 off), y the cells' size, z the patch spacing, w the patch light's columns
 } u;
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
@@ -58,12 +63,50 @@ layout(std430, set = 0, binding = 21) readonly buffer SheetRows { uint sheetRows
 // --ray-capture under --lean-shade (the directional bases' model, tools/gi-model): a sampled texel's every ray -- its id,
 // its direction (octahedral, 2 x 16 bits), its light per unit density (the ray's light over the cosine about the texel's
 // normal: L / pdf, both columns, the sun's absolute) and that cosine, the pass.
+layout(std430, set = 0, binding = 23) readonly buffer SunNodePatchLight { uvec2 patchLight[]; };   // [patch][column]: half rgb
+layout(std430, set = 0, binding = 24) readonly buffer PatchNeighbours { int farNeighbours[]; };     // 8 a patch
+layout(std430, set = 0, binding = 25) readonly buffer CookedPatches { vec4 cookedPatch[]; };       // 3 a patch: pos, normal, ...
+layout(std430, set = 0, binding = 26) readonly buffer PatchDirect { uint patchDirect[]; };         // 2 a patch: n.l x 4096, texels
 layout(std430, set = 0, binding = 22) buffer RayCapture { uint captureCount; uint capturePad[3]; uvec4 captured[]; };
 #include "texel_nodes.glsl"
 
 vec3 unpackRgb9e5(uint p) {
     float scale = exp2(float(int(p >> 27) - 15 - 9));
     return vec3(p & 511u, (p >> 9) & 511u, (p >> 18) & 511u) * scale;
+}
+
+vec3 patchColumn(int p, uint column) {
+    uvec2 w = patchLight[uint(p) * uint(u.uCone.w) + column];
+    return vec3(unpackHalf2x16(w.x), unpackHalf2x16(w.y).x);
+}
+
+// The patches' light over a footprint of radius reach about x (normal nx), its own patch first: the kernel the far set
+// and the cells use (zero at the reach, by the normals' agreement) over the patch and its 8 neighbours, the heaviest 4.
+void footprintLight(int p, vec3 x, vec3 nx, float reach, uint skyColumn, uint sunColumn, out vec3 sky, out vec3 sun) {
+    int ids[4] = int[4](-1, -1, -1, -1);
+    float ws[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    for (int i = -1; i < 8; ++i) {
+        int c = i < 0 ? p : farNeighbours[p * 8 + i];
+        if (c < 0) continue;
+        float d = length(x - cookedPatch[3 * c].xyz) / reach;
+        float k = max(1.0 - d * d, 0.0);
+        float w = k * k * smoothstep(0.5, 0.9, dot(nx, normalize(cookedPatch[3 * c + 1].xyz)));
+        if (w <= ws[3]) continue;
+        int at = 3;
+        while (at > 0 && ws[at - 1] < w) { ws[at] = ws[at - 1]; ids[at] = ids[at - 1]; --at; }
+        ws[at] = w; ids[at] = c;
+    }
+    float total = ws[0] + ws[1] + ws[2] + ws[3];
+    if (total <= 0.0) { ids[0] = p; ws[0] = 1.0; total = 1.0; }
+    sky = vec3(0.0); sun = vec3(0.0);
+    for (int i = 0; i < 4; ++i) {
+        if (ids[i] < 0 || ws[i] <= 0.0) continue;
+        uint q = uint(ids[i]);
+        float direct = patchDirect[2u * q + 1u] > 0u ? float(patchDirect[2u * q]) / 4096.0 / float(patchDirect[2u * q + 1u]) : 0.0;
+        sky += ws[i] * patchColumn(ids[i], skyColumn);
+        sun += ws[i] * (patchColumn(ids[i], sunColumn) + u.uIrr.rgb * direct);
+    }
+    sky /= total; sun /= total;
 }
 
 // A texel's gathered light for a column (texel_nodes_shade.glsl's texelPartLight), or false before its gather.
@@ -186,6 +229,26 @@ void main() {
             uint side = dot(normal, dir) < 0.0 ? 0u : 1u;   // met from its front (the ray against the normal)
             vec3 sky = unpackRgb9e5(cellLight[4u * cellIndex + 2u * side]);
             vec3 sun = unpackRgb9e5(cellLight[4u * cellIndex + 2u * side + 1u]);
+            if (u.uCone.x > 0.5) {
+                vec3 n0 = normalize(texels[2u * id + 1u].xyz);
+                float c0 = max(dot(n0, dir), 1e-3);
+                float omega = weight / (u.uCone.x * c0);                       // the ray's share of the hemisphere (sr)
+                float radius = dist * sqrt(omega / PI) / max(abs(dot(normal, dir)), 0.25);
+                if (radius > u.uCone.y) {
+                    uint cellAt = 1u + 2u * hitCells[0] + 2u * cellIndex;
+                    int p = int(hitCells[cellAt + side] & 0xFFFFFFu) - 1;
+                    if (p >= 0) {
+                        vec3 hitPos = nodeRays[slot * 2u].xyz + dir * dist;
+                        uint skyColumn = 0u, sunColumn = 0u;
+                        for (int k = 0; k < suns; ++k) {
+                            uint kind = uint(sunNodes[k].w + 0.5);
+                            if ((kind & 2u) != 0u) skyColumn = uint(k);
+                            if ((kind & 1u) != 0u) sunColumn = uint(k);
+                        }
+                        footprintLight(p, hitPos, hn, max(radius, u.uCone.z), skyColumn, sunColumn, sky, sun);
+                    }
+                }
+            }
             // CellLight's two words: the sky column's light, the sun column's (texel_lists.comp reads them alike).
             for (int k = 0; k < suns; ++k) {
                 uint kind = uint(sunNodes[k].w + 0.5);
