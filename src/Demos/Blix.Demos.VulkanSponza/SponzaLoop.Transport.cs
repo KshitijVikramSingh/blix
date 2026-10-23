@@ -41,7 +41,14 @@ internal sealed partial class SponzaLoop
     // The lift for a line of this length: a quarter of it at most. Lifted 2 cm at both ends, a line across a thinner gap
     // started and ended past what bounds it -- the teacup's floor under its saucer (1.9 cm) saw the cup's bottom through
     // the saucer, and every hit in the gap took a patch across it (2026-10-22). Past 8 cm, the full lift.
-    private float VisLift(Vector3 line) => MathF.Min(transportVisLift, 0.25f * line.Length());
+    // And at each end half the room above it along its normal (clear: how far the first surface there is, a short ray's;
+    // ClearReach when none): a quarter of the line bounds the gap a line crosses, not the wall it starts in -- the
+    // teacup's saucer is 4 mm of porcelain at its well, and a hit on the wall's inside lifted 2 cm came out past the
+    // well's top and took a patch outside it: the wall's inside 1.45x its path trace, the closed hollow under the
+    // saucer 3-4x (2026-10-24). Each end its own room: the patch's from its own ray (patchClear), the hit's from its.
+    private float VisLift(Vector3 line, float clear) => MathF.Min(MathF.Min(transportVisLift, 0.25f * line.Length()), 0.5f * clear);
+    private float ClearReach => 2f * transportVisLift;
+    private const float ClearStart = 5e-4f;
     // --transport-own-fallback (SponzaLoop.Transport.cs, OwnFallback), and how near its patch must be.
     private bool transportOwnFallback;
     // --transport-seed N (0): the couplings' rays drawn from another sequence -- the cook's noise measured by recooking
@@ -97,6 +104,7 @@ internal sealed partial class SponzaLoop
         public readonly byte[] Tried, AnyTried;
         public readonly ulong[] SunKeys;
         public readonly uint[] TriedOut, Hits, Answers;
+        public readonly float[] Clear;   // each hit's room along its normal (VisLift)
 
         public CouplingWorker(int maxTotal, int c)
         {
@@ -110,6 +118,7 @@ internal sealed partial class SponzaLoop
             Tried = new byte[maxTotal]; AnyTried = new byte[maxTotal];
             SunKeys = new ulong[maxTotal];
             TriedOut = new uint[maxTotal * 2]; Hits = new uint[maxTotal * 12]; Answers = new uint[maxTotal * 12];
+            Clear = new float[maxTotal];
         }
     }
 
@@ -373,6 +382,9 @@ internal sealed partial class SponzaLoop
         var nrm = new List<Vector3>();
         var albedo = new List<Vector3>();
         var placement = new List<uint>();   // each patch's placement (the hit records' numbering)
+        // Each patch's triangle row (uint.MaxValue: none -- the fill's spots): its sheet's T and c are its row's, as the
+        // gather's and the reference's are, not its placement's mean (the solve, below).
+        var patchRow = new List<uint>();
         if (patchStage is null)
         {
         var rng = new Random(5);
@@ -395,6 +407,7 @@ internal sealed partial class SponzaLoop
                 var front = Vector3.Normalize(cross);
                 var alb = Albedo(i, t);
                 var onPlacement = data.RowPlacements[data.RowOf(i, t)];
+                var onRow = (uint)data.RowOf(i, t);
                 // Stratified, not uniform: the R2 low-discrepancy sequence from a random start, folded into the triangle.
                 // Uniform random placement clustered some patches and left holes between others, which the
                 // interpolation then read across (and a hit found no patch near it: 5.25% of rays at 0.125 m).
@@ -415,6 +428,7 @@ internal sealed partial class SponzaLoop
                         nrm.Add(side == 0 ? front : -front);
                         albedo.Add(alb);
                         placement.Add(onPlacement);
+                        patchRow.Add(onRow);
                     }
                 }
             }
@@ -447,16 +461,17 @@ internal sealed partial class SponzaLoop
                 }
                 keep[i] = back * 2 < tests;
             });
-            var p2 = new List<Vector3>(); var n2 = new List<Vector3>(); var a2 = new List<Vector3>(); var o2 = new List<uint>();
-            for (var i = 0; i < pos.Count; i++) if (keep[i]) { p2.Add(pos[i]); n2.Add(nrm[i]); a2.Add(albedo[i]); o2.Add(placement[i]); }
+            var p2 = new List<Vector3>(); var n2 = new List<Vector3>(); var a2 = new List<Vector3>(); var o2 = new List<uint>(); var r2 = new List<uint>();
+            for (var i = 0; i < pos.Count; i++) if (keep[i]) { p2.Add(pos[i]); n2.Add(nrm[i]); a2.Add(albedo[i]); o2.Add(placement[i]); r2.Add(patchRow[i]); }
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] transport: {pos.Count:N0} patch sides placed, {p2.Count:N0} kept (the rest inside a solid)."));
-            pos = p2; nrm = n2; albedo = a2; placement = o2;
+            pos = p2; nrm = n2; albedo = a2; placement = o2; patchRow = r2;
         }
         }
         else
         {
             pos = patchStage.Pos.ToList(); nrm = patchStage.Nrm.ToList(); albedo = patchStage.Albedo.ToList();
             placement = patchStage.Placement.ToList();
+            patchRow = patchStage.Row.ToList();
         }
         Mark("patches");
         var patches = pos.Count;
@@ -486,6 +501,13 @@ internal sealed partial class SponzaLoop
         int NearestVisible(Vector3 p, Vector3 n, uint seed, bool anyFacing) => NearestVisibleOr(p, n, seed, anyFacing, out _);
         // As NearestVisible; nearest: the nearest candidate, seen or not (-1: none), for OwnFallback.
         Mark("dense-done");
+        // Each patch's room along its normal (VisLift): one short ray each.
+        float ClearOf(int j) => scene.Closest(new Ray(pos[j], nrm[j]), ClearStart, ClearReach, (uint)j) is { } c ? c.T : ClearReach;
+        var patchClear = new float[patches];
+        Parallel.For(0, patches, j => patchClear[j] = ClearOf(j));
+        // The fill's spots (--transport-fill) join the patches as it goes: theirs asked when met, the array made whole after.
+        float PatchClear(int j) => j < patchClear.Length ? patchClear[j] : ClearOf(j);
+        Mark("patch-clear");
         var facingPenalty = transportSpacing * transportFacingWeight;
         int NearestVisibleOr(Vector3 p, Vector3 n, uint seed, bool anyFacing, out int nearest)
         {
@@ -520,13 +542,13 @@ internal sealed partial class SponzaLoop
             // Nearest over transportFarCutoff away: likely a hidden cavity, where every candidate fails; past the first
             // BaseCandidates they cost most and find least there (Sponza, 8 candidates: 580 of a 956 s cook).
             var tried = firstDistance2 > transportFarCutoff * transportFarCutoff ? Math.Min(candidates, BaseCandidates) : candidates;
+            var clearHere = best[0] >= 0 && scene.Closest(new Ray(p, n), ClearStart, ClearReach, seed) is { } room ? room.T : ClearReach;
             for (var rank = 0; rank < tried; rank++)
             {
                 var j = best[rank];
                 if (j < 0) break;
-                var lift = VisLift(pos[j] - p);
-                var origin = p + n * lift;
-                var target = pos[j] + nrm[j] * lift;
+                var origin = p + n * VisLift(pos[j] - p, clearHere);
+                var target = pos[j] + nrm[j] * VisLift(pos[j] - p, PatchClear(j));
                 var d = target - origin;
                 var length = d.Length();
                 if (length < 1e-4f) { nearestHow = rank; return j; }
@@ -547,9 +569,9 @@ internal sealed partial class SponzaLoop
         {
             if (!transportOwnFallback || own < 0 || nearest < 0) return -1;
             var started = transportMissWhy ? Stopwatch.GetTimestamp() : 0L;
-            var lift = VisLift(pos[nearest] - p);
-            var origin = p + n * lift;
-            var to = pos[nearest] + nrm[nearest] * lift - origin;
+            var clearHere = scene.Closest(new Ray(p, n), ClearStart, ClearReach, seed) is { } room ? room.T : ClearReach;
+            var origin = p + n * VisLift(pos[nearest] - p, clearHere);
+            var to = pos[nearest] + nrm[nearest] * VisLift(pos[nearest] - p, PatchClear(nearest)) - origin;
             var length = to.Length();
             var taken = length < 1e-4f
                 || scene.Closest(new Ray(origin, to / length), 0f, length * 0.999f, seed) is { } blocker && blocker.Instance == own;
@@ -649,7 +671,7 @@ internal sealed partial class SponzaLoop
                 if (!take[s]) continue;
                 var (sp, sn, sa, inst, onPlacement) = spots[s];
                 var at = pos.Count;
-                pos.Add(sp); nrm.Add(sn); albedo.Add(sa); placement.Add(onPlacement);
+                pos.Add(sp); nrm.Add(sn); albedo.Add(sa); placement.Add(onPlacement); patchRow.Add(uint.MaxValue);
                 var key = Key(sp);
                 if (!grid.TryGetValue(key, out var list)) grid[key] = list = new List<int>();
                 list.Add(at);
@@ -658,6 +680,13 @@ internal sealed partial class SponzaLoop
             }
             var added = pos.Count - patches;
             patches = pos.Count;
+            if (patchClear.Length < patches)
+            {
+                var whole = new float[patches];
+                Array.Copy(patchClear, whole, patchClear.Length);
+                for (var j = patchClear.Length; j < patches; j++) whole[j] = ClearOf(j);
+                patchClear = whole;
+            }
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] transport fill, pass {pass}: {spots.Length:N0} spots where hits found no patch facing their way ({transportFillRays} rays a patch); {added:N0} patches added, {hidden:N0} hidden from open air, {inside:N0} inside a solid; {fillClock.Elapsed.TotalSeconds:0.0} s."));
             foreach (var (name, c) in byName.OrderByDescending(x => x.Value).Take(12))
@@ -1001,6 +1030,21 @@ internal sealed partial class SponzaLoop
                 });
                 if (useSunlets) AssignSunlets(total, sunKeys, inst, triOf, hp, hn, state, sunletOf, sunOrder, Pending);
                 Lap(5);
+                // Each pending hit's room along its normal (VisLift): one short ray each, in the block's own ray and hit
+                // arrays (their closest hits read above).
+                {
+                    var clear = w.Clear;
+                    Parallel.For(0, total, at =>
+                    {
+                        var pending = state[at] == Pending;
+                        rays[2 * at] = new Vector4(hp[at], pending ? ClearStart : 0f);
+                        rays[2 * at + 1] = pending ? new Vector4(hn[at], ClearReach) : new Vector4(0f, 1f, 0f, 0f);
+                    });
+                    metal.TraceFromHost(rays.AsSpan(0, total * 2), hits, (uint)(first * R) ^ 0xC1EAu, closestOnly: true, out var clearMs);
+                    AddGpu(clearMs);
+                    Parallel.For(0, total, at => clear[at] = (hits[at * 12 + 3] & 1u) != 0 ? BitConverter.UInt32BitsToSingle(hits[at * 12]) : ClearReach);
+                    Lap(1);
+                }
                 // The pending hits' candidates, on the GPU (as CollectCandidates), scattered back.
                 void CandidatesOnGpu(bool anyFacing, int[] intoCand, byte[] intoTried, int[]? intoNearest)
                 {
@@ -1082,9 +1126,8 @@ internal sealed partial class SponzaLoop
                     {
                         var at = visIds[q];
                         var j = visTargets[q];
-                        var lift = VisLift(pos[j] - hp[at]);
-                        var origin = hp[at] + hn[at] * lift;
-                        var to = pos[j] + nrm[j] * lift - origin;
+                        var origin = hp[at] + hn[at] * VisLift(pos[j] - hp[at], w.Clear[at]);
+                        var to = pos[j] + nrm[j] * VisLift(pos[j] - hp[at], patchClear[j]) - origin;
                         var len = to.Length();
                         visNone[q] = len < 1e-4f;
                         vis[2 * q] = new Vector4(origin, 0f);
@@ -1126,9 +1169,8 @@ internal sealed partial class SponzaLoop
                             var r = start[q] + k;
                             var j = cands[at * C + fromRank + k];
                             target[r] = j;
-                            var lift = VisLift(pos[j] - hp[at]);
-                            var origin = hp[at] + hn[at] * lift;
-                            var to = pos[j] + nrm[j] * lift - origin;
+                            var origin = hp[at] + hn[at] * VisLift(pos[j] - hp[at], w.Clear[at]);
+                            var to = pos[j] + nrm[j] * VisLift(pos[j] - hp[at], patchClear[j]) - origin;
                             var len = to.Length();
                             none[r] = len < 1e-4f;
                             batch[2 * r] = new Vector4(origin, 0f);
@@ -1176,9 +1218,8 @@ internal sealed partial class SponzaLoop
                         {
                             var at = visIds[q];
                             var j = visTargets[q];
-                            var lift = VisLift(pos[j] - hp[at]);
-                            var origin = hp[at] + hn[at] * lift;
-                            var to = pos[j] + nrm[j] * lift - origin;
+                            var origin = hp[at] + hn[at] * VisLift(pos[j] - hp[at], w.Clear[at]);
+                            var to = pos[j] + nrm[j] * VisLift(pos[j] - hp[at], patchClear[j]) - origin;
                             var len = to.Length();
                             visNone[q] = len < 1e-4f;
                             vis[2 * q] = new Vector4(origin, 0f);
@@ -1786,8 +1827,15 @@ internal sealed partial class SponzaLoop
                     var t = rayPlacementTransmission[pl];
                     if (t == Vector3.Zero) continue;
                     var n = Math.Max(1, rowsOf[pl]);
-                    transmit[i] = rayPlacementCloth[pl] ? t : t * tintSum[pl] / n;
-                    transmitFactor[i] = rayPlacementCloth[pl] ? MathF.Max(t.X, MathF.Max(t.Y, t.Z)) : rayPlacementTransmissionFactor[pl] * (float)(shareSum[pl] / n);
+                    // The patch's own row's share and colour when it has one: the placement's mean passed the teacup's
+                    // saucer its rim's T at its centre, where its factor texture keeps far less -- the closed hollow
+                    // under the saucer lit through it 3-4x its path trace (2026-10-24).
+                    var row = i < patchRow.Count ? patchRow[i] : uint.MaxValue;
+                    var own = row != uint.MaxValue && row < data.RowPlacements.Length;
+                    var share = own ? RowTransmissionShare((int)row) : (float)(shareSum[pl] / n);
+                    var tint = own ? share * RowTransmissionColour((int)row) : tintSum[pl] / n;
+                    transmit[i] = rayPlacementCloth[pl] ? t : t * tint;
+                    transmitFactor[i] = rayPlacementCloth[pl] ? MathF.Max(t.X, MathF.Max(t.Y, t.Z)) : rayPlacementTransmissionFactor[pl] * share;
                     if (transmit[i] == Vector3.Zero) continue;
                     foreach (var j in new[] { i - 1, i + 1 })
                         if (j >= 0 && j < patches && placement[j] == placement[i] && pos[j] == pos[i] && Vector3.Dot(nrm[j], nrm[i]) < -0.99f)
@@ -1979,7 +2027,7 @@ internal sealed partial class SponzaLoop
             });
         Mark("openness");
         if (transportGpu && patchStage is null)
-            SavePatches(stageKeys.Patches, new PatchStage { Pos = pos.ToArray(), Nrm = nrm.ToArray(), Albedo = albedo.ToArray(), Openness = openness, Placement = placement.ToArray() });
+            SavePatches(stageKeys.Patches, new PatchStage { Pos = pos.ToArray(), Nrm = nrm.ToArray(), Albedo = albedo.ToArray(), Openness = openness, Placement = placement.ToArray(), Row = patchRow.ToArray() });
         // --live-texels: the guides are the live light's, on the GPU (texel_live_guides.comp); the CPU's (~6 s of the boot,
         // 2026-10-16) would be read by nothing -- uniform ones stand in for the binding.
         Mark("guides");

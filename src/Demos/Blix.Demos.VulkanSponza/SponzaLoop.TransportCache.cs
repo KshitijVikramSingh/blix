@@ -30,7 +30,7 @@ internal sealed partial class SponzaLoop
     // 0 adds nothing to a key, so the keys from before these existed still answer.
     // Patches 1, couplings 2: the visibility lift scaled to the line (VisLift), own placement first and no hit on its ray's
     // own patch or twin (CouplingsOnMetal), 2026-10-22. Patches 3: patch sides and fill spots behind a sheet that lets light through kept.
-    private const int PatchesStageVersion = 3, SunVisStageVersion = 0, CouplingsStageVersion = 2, TexelsStageVersion = 0;
+    private const int PatchesStageVersion = 4, SunVisStageVersion = 0, CouplingsStageVersion = 3, TexelsStageVersion = 0;   // patches 4: each its triangle row (PatchStage.Row); couplings 3: the visibility lift bounded by each end's room (VisLift)
     private static string StageVersion(int v) => v == 0 ? "" : string.Create(CultureInfo.InvariantCulture, $";stage v{v}");
     private string? sceneAssetsRoot;
 
@@ -50,6 +50,7 @@ internal sealed partial class SponzaLoop
         public Vector3[] Pos = Array.Empty<Vector3>(), Nrm = Array.Empty<Vector3>(), Albedo = Array.Empty<Vector3>();
         public float[] Openness = Array.Empty<float>();
         public uint[] Placement = Array.Empty<uint>();   // the placement each patch lies on (the ray scene's numbering)
+        public uint[] Row = Array.Empty<uint>();         // the triangle row each lies on (uint.MaxValue: none, the fill's)
     }
 
     internal sealed class CouplingStage
@@ -194,10 +195,10 @@ internal sealed partial class SponzaLoop
     }
 
     private static PatchStage? LoadPatches(string key) => LoadStage(key, "patches", r => new PatchStage
-        { Pos = ReadArray<Vector3>(r), Nrm = ReadArray<Vector3>(r), Albedo = ReadArray<Vector3>(r), Openness = ReadArray<float>(r), Placement = ReadArray<uint>(r) });
+        { Pos = ReadArray<Vector3>(r), Nrm = ReadArray<Vector3>(r), Albedo = ReadArray<Vector3>(r), Openness = ReadArray<float>(r), Placement = ReadArray<uint>(r), Row = ReadArray<uint>(r) });
 
     private static void SavePatches(string key, PatchStage p) => SaveStage(key, "patches", w =>
-        { WriteArray(w, p.Pos); WriteArray(w, p.Nrm); WriteArray(w, p.Albedo); WriteArray(w, p.Openness); WriteArray(w, p.Placement); });
+        { WriteArray(w, p.Pos); WriteArray(w, p.Nrm); WriteArray(w, p.Albedo); WriteArray(w, p.Openness); WriteArray(w, p.Placement); WriteArray(w, p.Row); });
 
     // skipSunlets (--live-texels, which never reads them: the live patch light has its own sun): the sunlets and their
     // couplings are seeked past, ~1.07 GB of Sponza's 1.65 GB file (2026-10-20), and every patch gets an empty list.
