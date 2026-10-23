@@ -154,7 +154,8 @@ internal sealed partial class SponzaLoop
     private void FindFarNeighbours(int patches)
     {
         var clock = System.Diagnostics.Stopwatch.StartNew();
-        var header = string.Create(CultureInfo.InvariantCulture, $"neighbours {FarNeighbours} spacing {transportSpacing:G6} patches {patches}");
+        BuildPatchClear();
+        var header = string.Create(CultureInfo.InvariantCulture, $"neighbours {FarNeighbours} spacing {transportSpacing:G6} patches {patches}{(PatchClearOn ? ";lift clear" : "")}");
         if (transportPatchesKey is { } key && LoadStage(key, "far-neighbours", r => r.ReadString() != header ? null : ReadArray<int>(r)) is { } stored)
         {
             farNeighbours = Own(device.CreateGpuBuffer(checked(patches * FarNeighbours * 4), MemoryMarshal.AsBytes(stored.AsSpan()), "sponza.far.neighbours"));
@@ -172,6 +173,7 @@ internal sealed partial class SponzaLoop
                     new("uNeighbours", new Vector4Uniform(new Vector4(first, count, mode, transportSpacing))),
                     new("uCookedGrid", new Vector4Uniform(cookedGrid)),
                     new("uCookedDims", new Vector4Uniform(cookedDims)),
+                    new("uClear", new Vector4Uniform(new Vector4(PatchClearOn ? 1f : 0f, 0f, 0f, 0f))),
                 },
                 Array.Empty<ShaderTextureBinding>(),
                 Buffers: new[]
@@ -179,6 +181,7 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("NodeRays", sunNodeRaysBuffer),
                     new ShaderBufferBinding("NodeHits", sunNodeHits),
                     new ShaderBufferBinding("PatchNeighbours", farNeighbours),
+                    new ShaderBufferBinding("PatchClear", PatchClearOn ? patchClearBuffer : farNeighbours),
                 }.Concat(CookedBuffers()).Where(b => declared.Contains(b.Name)).ToArray());
             device.DispatchNow(new[] { Pass(0) }, "sun-nodes-far-neighbours");
             frameTracer!.Trace(sunNodeRaysBuffer, sunNodeHits, count * FarNeighbours, 0x7E1Bu, closestOnly: true);

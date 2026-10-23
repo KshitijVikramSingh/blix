@@ -15,11 +15,15 @@ layout(set = 0, binding = 0) uniform FarNeighbours {
     vec4 uNeighbours;   // x the chunk's first patch, y its patches, z the mode, w the spacing
     vec4 uCookedGrid;
     vec4 uCookedDims;
+    vec4 uClear;        // x 1: each end lifts half its patch's room at most (PatchClear: texel_clear.comp)
 } u;
 
 layout(std430, set = 0, binding = 1) buffer NodeRays { vec4 nodeRays[]; };            // 2 a ray: origin, tMin; dir, tMax
 layout(std430, set = 0, binding = 2) readonly buffer NodeHits { uvec4 nodeHits[]; };  // 3 a ray
 layout(std430, set = 0, binding = 3) buffer PatchNeighbours { int neighbours[]; };    // [patch][FAR_NEIGHBOURS]
+
+// Each cooked patch's room along its normal (texel_clear.comp, modes 2-3).
+layout(std430, set = 0, binding = 7) readonly buffer PatchClear { float patchClear[]; };
 
 #define COOKED_BINDING 4
 #define COOKED_GRID u.uCookedGrid
@@ -62,12 +66,17 @@ void main() {
                 best[at] = j;
             }
         }
-        vec3 origin = pos + n * 0.01;
+        // Each end 1 cm off its surface, half its patch's room at most: lifted 1 cm, a 4 mm wall's two faces turned the
+        // same way saw each other over it, and a hit's patch blend (farSet) averaged them -- the sheet shell's floor 0.77
+        // of its reference (2026-10-24).
+        float liftHere = u.uClear.x > 0.5 ? min(0.01, max(0.5 * patchClear[p], 2.5e-4)) : 0.01;
+        vec3 origin = pos + n * liftHere;
         for (int k = 0; k < FAR_NEIGHBOURS; ++k) {
             uint slot = t * uint(FAR_NEIGHBOURS) + uint(k);
             neighbours[uint(p) * uint(FAR_NEIGHBOURS) + uint(k)] = best[k];
             if (best[k] < 0) { nodeRays[slot * 2u] = vec4(0.0); nodeRays[slot * 2u + 1u] = vec4(0.0); continue; }
-            vec3 target = cookedPatch[3 * best[k]].xyz + normalize(cookedPatch[3 * best[k] + 1].xyz) * 0.01;
+            float liftThere = u.uClear.x > 0.5 ? min(0.01, max(0.5 * patchClear[best[k]], 2.5e-4)) : 0.01;
+            vec3 target = cookedPatch[3 * best[k]].xyz + normalize(cookedPatch[3 * best[k] + 1].xyz) * liftThere;
             vec3 d = target - origin;
             float len = length(d);
             nodeRays[slot * 2u] = vec4(origin, 0.0);

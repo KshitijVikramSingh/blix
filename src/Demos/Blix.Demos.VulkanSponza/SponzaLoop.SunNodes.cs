@@ -591,12 +591,12 @@ internal sealed partial class SponzaLoop
     private GpuBufferHandle texelClearBuffer;
     private bool GatherClearOn => gatherClear && !texelClearBuffer.Equals(default(GpuBufferHandle));
     private GpuBufferHandle patchClearBuffer;
-    private bool PatchClearOn => GatherClearOn && !patchClearBuffer.Equals(default(GpuBufferHandle));
+    private bool PatchClearOn => gatherClear && !patchClearBuffer.Equals(default(GpuBufferHandle));
 
     // Each cooked patch's room along its normal (texel_clear.comp modes 2-3), once the patches are up: the pick's patch end.
     private void BuildPatchClear()
     {
-        if (!GatherClearOn || !patchClearBuffer.Equals(default(GpuBufferHandle)) || cookedPacked is not { } packed || frameTracer is null) return;
+        if (!gatherClear || !patchClearBuffer.Equals(default(GpuBufferHandle)) || cookedPacked is not { } packed || !EnsureFrameTracer() || frameTracer is null) return;
         var patches = packed.Length / 3;
         if (patches == 0) return;
         var fill = new float[patches];
@@ -611,11 +611,11 @@ internal sealed partial class SponzaLoop
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
             {
-                new ShaderBufferBinding("Texels", texelBuffer),
-                new ShaderBufferBinding("SunNodesLive", texelClearBuffer),
+                new ShaderBufferBinding("Texels", patchClearBuffer),
+                new ShaderBufferBinding("SunNodesLive", patchClearBuffer),
                 new ShaderBufferBinding("NodeRays", raysBuffer),
                 new ShaderBufferBinding("NodeHits", hitsBuffer),
-                new ShaderBufferBinding("TexelClear", texelClearBuffer),
+                new ShaderBufferBinding("TexelClear", patchClearBuffer),
                 cooked,
                 new ShaderBufferBinding("PatchClear", patchClearBuffer),
             });
