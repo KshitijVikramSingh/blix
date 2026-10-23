@@ -2,6 +2,10 @@
 # requires-python = ">=3.10"
 # dependencies = ["numpy"]
 # ///
+
+2026-10-23 (--channels, the worst channel): one shared shape (H4lum) 5.5-5.9% / 8.9-9.8% at <=20 / <=40 deg from all
+rays against per channel H4's 1.3-1.5% / 1.9-2.5%, on Cornell and the corridor alike; from 128 rays 10.4-12.1% against
+8.6-9.8%. Luminance hides it. Per channel it is.
 """A texel's light as a function of the normal, in a few bases, from the gather's own rays (uv run
 tools/gi-model/directional_bases.py DUMP [DUMP ...]).
 
@@ -19,6 +23,8 @@ same fit from every ray gives the basis's own error, without the noise.
   H6       H4 and xy, x^2 - y^2 per channel (the H-basis' span)
   HL2      the nine quadratic terms per channel
   hybrid   H4 per channel + the texel's colour x (luminance HL2 - luminance H4): 17 numbers
+  H4lum    one H4 shape for every channel: fitted on luminance, times the texel's colour at its normal (6 numbers)
+  HL2lum   the same with HL2's shape (12 numbers)
   rays     no basis: the irradiance at each normal from the subset's rays themselves -- a gather per pixel along its own
            normal (voxel cone tracing's per-pixel response), RAYS of them however many frames they took
 """
@@ -86,6 +92,12 @@ def predict(name, w, l, n_eval):
         up = w[:, 2] > 0
         g = (w[up, :2].T @ l[up]) / len(w)          # 2 x 3
         return e0[None] + n_eval[:, :2] @ g
+    if name in ("H4lum", "HL2lum"):
+        b = name[:-3]
+        lum = e_fit @ LUM
+        c = np.linalg.lstsq(basis(FIT, b), lum, rcond=None)[0]
+        chroma = e0 / max(e0 @ LUM, 1e-12)
+        return (basis(n_eval, b) @ c)[:, None] * chroma[None]
     if name == "hybrid":
         c4 = np.linalg.lstsq(basis(FIT, "H4"), e_fit, rcond=None)[0]
         lum = e_fit @ LUM
@@ -99,7 +111,8 @@ def predict(name, w, l, n_eval):
 
 
 def main():
-    variants = ["flat", "tilt", "H4", "H6", "HL2", "hybrid", "rays"]
+    variants = ["flat", "tilt", "H4", "H6", "HL2", "hybrid", "rays", "H4lum", "HL2lum"]
+    channels = '--channels' in sys.argv
     for dump in [a for a in sys.argv[1:] if not a.startswith('--')]:
         d = sorted(Path(dump).glob("view-*"))[-1]
         meta = json.loads((d / "meta.json").read_text())
@@ -148,15 +161,15 @@ def main():
                         errs.append(row)
                     stats[v][kind].append(np.mean(errs, 0))
         print(f"\n{d.parent.name}: {used} texels of >= 1500 rays; fit from {RAYS} rays ({SUBSETS} subsets) and from all of them")
-        print("  per texel: max |error| over normals tilted <=20 / <=40 (luminance, over the texel's own irradiance); "
-              "median and p90 over texels")
+        print("  per texel: max |error| over normals tilted <=20 / <=40 (" + ("the worst channel, over that channel's own irradiance"
+              if channels else "luminance, over the texel's own irradiance") + "); median and p90 over texels")
         print(f"  {'':8s} {'from all rays (the basis)':>34s}   {'from ' + str(RAYS) + ' rays (basis + noise)':>34s}")
         print(f"  {'':8s} {'<=20 med':>9s} {'p90':>7s} {'<=40 med':>9s} {'p90':>7s}   {'<=20 med':>9s} {'p90':>7s} {'<=40 med':>9s} {'p90':>7s}")
         for v in variants:
             cells = []
             for kind in ("basis", "noisy"):
                 arr = np.array(stats[v][kind])
-                for col in (0, 3):
+                for col in ((2, 5) if channels else (0, 3)):
                     cells += [np.median(arr[:, col]), np.percentile(arr[:, col], 90)]
             print(f"  {v:8s} " + " ".join(f"{100 * c:8.1f}%" if i % 2 == 0 else f"{100 * c:6.1f}%" for i, c in enumerate(cells[:4]))
                   + "   " + " ".join(f"{100 * c:8.1f}%" if i % 2 == 0 else f"{100 * c:6.1f}%" for i, c in enumerate(cells[4:])))
