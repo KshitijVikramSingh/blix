@@ -354,9 +354,10 @@ void main() {
                 captured[2u * at] = uvec4(id, od, floatBitsToUint(l.r), floatBitsToUint(l.g));
                 // word 6: the pass | the hit's kind << 8 | the capture's tag << 16; word 7: the near texel a near hit read.
                 uint kindNow = known > 1.5 ? 3u : hitKind;
-                // One texel: the hit's distance (half) in the tag's place, for drawing the ray to its end.
-                uint top = single ? (packHalf2x16(vec2(hit ? min(uintBitsToFloat(h0.x), 60000.0) : 60000.0, 0.0)) & 0xFFFFu) : (uint(u.uCapture.z) & 0xFFFFu);
-                captured[2u * at + 1u] = uvec4(floatBitsToUint(l.b), floatBitsToUint(c0),
+                // One texel (or z < 0, the fine round's capture): the hit's distance (half) in the tag's place.
+                uint top = single || u.uCapture.z < 0.0 ? (packHalf2x16(vec2(hit ? min(uintBitsToFloat(h0.x), 60000.0) : 60000.0, 0.0)) & 0xFFFFu) : (uint(u.uCapture.z) & 0xFFFFu);
+                // z < 0: the ray's weight in the cosine's place (the cosine is the direction's against the texel's normal).
+                captured[2u * at + 1u] = uvec4(floatBitsToUint(l.b), floatBitsToUint(u.uCapture.z < 0.0 && !single ? weight : c0),
                     (uint(u.uShade.w) & 0xFFu) | (kindNow << 8) | (top << 16), nearId);
             }
         }
