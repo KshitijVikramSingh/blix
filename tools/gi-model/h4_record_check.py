@@ -4,10 +4,11 @@
 # ///
 """The light-agnostic record's stage 1, held against what it stands beside (uv run tools/gi-model/h4_record_check.py DUMP ...).
 
---lean-shade --texel-h4 writes every gather pass's H4 per channel into texel_h4.f32x16 (texel_nodes_lean.comp): per
-texel [0..2] each channel's (a, bx, by, bz) in the record's frame (its smooth normal's), [3] the same rays' plain mean
-irradiance and their passes, summed over the passes of the slice that last gathered it. Checks, on texels a gather wrote:
-  fit      the H4 irradiance at the record's normal (a + bz) against the same rays' plain mean -- the fit's own error
+--texel-h4 writes every gather pass's H4 per channel into texel_h4.f32x16 (texel_record_h4.glsl; both shades): per
+texel [0..2] each channel's (a, b.xyz) in world space, E(n) = a + b . n; [3] the same rays' plain mean irradiance
+(luminance), the record's normal (snorm2x16 octahedral, as bits), 0, the passes -- summed over the passes of the slice
+that last gathered it. Checks, on texels a gather wrote:
+  fit      the H4 irradiance at the record's normal (a + b . n) against the same rays' plain mean -- the fit's own error
   parts    the plain mean against today's parts (sky + sun x its irradiance), where a gather wrote both last -- the same
            light from the same passes, any gap a pass set apart (a refine's passes after a reset) or a stage that overwrote
   tilt     the H4 shape's tangent slope (bx, by over a + bz, luminance) against today's detail tilt (texel.glsl's
@@ -44,15 +45,21 @@ def main():
         print(f'\n== {d.parent.name}: {n:,} texels, {live.sum():,} live; with H4 {got.sum():,} '
               f'({got.sum() / max(live.sum(), 1):.0%}); last written by a gather, both parts: {gathered.sum():,}; '
               f'passes median {np.median(passes[got]):.0f}')
-        coef = h4[:, :3, :] / np.maximum(passes, 1)[:, None, None]          # [texel][channel](a, bx, by, bz)
-        plain = h4[:, 3, :3] / np.maximum(passes, 1)[:, None]
-        e_fit = coef[:, :, 0] + coef[:, :, 3]                                # H4 at the record's normal, rgb
-        lp, lf = plain @ LUM, e_fit @ LUM
+        coef = h4[:, :3, :] / np.maximum(passes, 1)[:, None, None]          # [texel][channel](a, b.xyz), world
+        lp = h4[:, 3, 0] / np.maximum(passes, 1)                             # the rays' plain mean, luminance
+        o = np.frombuffer(h4[:, 3, 1].astype(np.float32).tobytes(), np.uint32)
+        ox = (o & 0xFFFF).astype(np.uint16).view(np.int16) / 32767.0
+        oy = (o >> 16).astype(np.uint16).view(np.int16) / 32767.0
+        oz = 1 - np.abs(ox) - np.abs(oy)
+        neg = oz < 0
+        ox2 = np.where(neg, (1 - np.abs(oy)) * np.sign(ox), ox); oy2 = np.where(neg, (1 - np.abs(ox)) * np.sign(oy), oy)
+        ns = np.stack([ox2, oy2, oz], 1); ns /= np.maximum(np.linalg.norm(ns, axis=1, keepdims=True), 1e-9)
+        e_fit = coef[:, :, 0] + np.einsum('tcj,tj->tc', coef[:, :, 1:], ns)    # H4 at the record's normal, rgb
+        lf = e_fit @ LUM
         q = got & (lp > 1e-7)
         r = lf[q] / lp[q]
         print(f'  fit:   H4 at the normal / the plain mean, luminance: median {np.median(r):.4f}, p10 {np.percentile(r, 10):.4f}, '
-              f'p90 {np.percentile(r, 90):.4f}; worst channel |ratio - 1| median '
-              f'{np.median(np.abs(e_fit[q] / np.maximum(plain[q], 1e-12) - 1).max(1)):.4f}')
+              f'p90 {np.percentile(r, 90):.4f}')
         sky = u9(np.frombuffer((d / 'sky.u32x2').read_bytes(), np.uint32).reshape(n, 2)[:, 0])
         sun = u9(np.frombuffer((d / 'sun.u32x2').read_bytes(), np.uint32).reshape(n, 2)[:, 0])
         irr = np.array(m['sunIrradiance'], float)
@@ -67,9 +74,13 @@ def main():
         tx = np.where(tx > 127, tx - 256, tx) / 127.0 * 2.0
         ty = ((det >> 8) & 255)
         ty = np.where(ty > 127, ty - 256, ty) / 127.0 * 2.0
-        lum_a = (coef[:, :, 0] @ LUM) + (coef[:, :, 3] @ LUM)
-        hx = (coef[:, :, 1] @ LUM) / np.maximum(lum_a, 1e-12)
-        hy = (coef[:, :, 2] @ LUM) / np.maximum(lum_a, 1e-12)
+        # H4's slope along today's detail frame (texel.glsl texelDetailFrame, about the face normal), over its irradiance
+        fn = t[:, 4:7].astype(float); fn /= np.maximum(np.linalg.norm(fn, axis=1, keepdims=True), 1e-9)
+        up = np.where((np.abs(fn[:, 1]) < 0.999)[:, None], np.array([0.0, 1.0, 0.0]), np.array([1.0, 0.0, 0.0]))
+        t1 = np.cross(up, fn); t1 /= np.maximum(np.linalg.norm(t1, axis=1, keepdims=True), 1e-9); t2 = np.cross(fn, t1)
+        blum = np.einsum('c,tcj->tj', LUM, coef[:, :, 1:])
+        hx = np.einsum('tj,tj->t', blum, t1) / np.maximum(lf, 1e-12)
+        hy = np.einsum('tj,tj->t', blum, t2) / np.maximum(lf, 1e-12)
         q = got & present & (lp > 1e-7)
         strong = q & (np.hypot(tx, ty) > 0.2) & (np.hypot(hx, hy) > 0.2)
         cosang = (tx * hx + ty * hy)[strong] / (np.hypot(tx, ty)[strong] * np.hypot(hx, hy)[strong])

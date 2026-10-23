@@ -1321,12 +1321,18 @@ internal sealed partial class SponzaLoop
     private bool texelH4;
     private GpuBufferHandle texelH4Buffer;
 
-    private DispatchCommand LeanShadeCommand(GpuBufferHandle ids, int first, int slice, int pass, bool exactSun)
+    // The record's buffer (made at its first gather) and whether the records' smooth normals are there to read.
+    private (bool On, bool Frames) TexelH4Now()
     {
         if (texelH4 && texelH4Buffer.Equals(default(GpuBufferHandle)))
             texelH4Buffer = Own(device.CreateGpuBuffer(checked(texelCount * 64), new byte[checked(texelCount * 64)], "sponza.texel-h4"));
-        var h4On = texelH4 && !texelH4Buffer.Equals(default(GpuBufferHandle));
-        var framesOn = GatherSmoothNow && !lightmapFramesBuffer.Equals(default(GpuBufferHandle));
+        var on = texelH4 && !texelH4Buffer.Equals(default(GpuBufferHandle));
+        return (on, on && GatherSmoothNow && !lightmapFramesBuffer.Equals(default(GpuBufferHandle)));
+    }
+
+    private DispatchCommand LeanShadeCommand(GpuBufferHandle ids, int first, int slice, int pass, bool exactSun)
+    {
+        var (h4On, framesOn) = TexelH4Now();
         var detail = splitCooking && sunNodeRefineRound == 0 && !sunNodeDetail.Equals(default(GpuBufferHandle));
         var declared = leanShadeInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
         return new DispatchCommand(leanShadePipeline, slice, 1, 1,
@@ -1392,6 +1398,8 @@ internal sealed partial class SponzaLoop
     {
         // The cells' detail (SponzaLoop.SplitDetail.cs) from the sweep of a split cook; never discovering or refining.
         var detail = splitCooking && discover == 0 && sunNodeRefineRound == 0 && !sunNodeDetail.Equals(default(GpuBufferHandle));
+        // --texel-h4: the split variant's (few) gather passes, not a discovery's.
+        var shadeH4 = few && discover == 0 ? TexelH4Now() : (On: false, Frames: false);
         var declared = sunNodeShadeInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
         return new DispatchCommand(few ? sunNodeShadeSplitPipeline : sunNodeShadePipeline, slice, 1, 1,
             new ShaderUniform[]
@@ -1409,7 +1417,7 @@ internal sealed partial class SponzaLoop
                 new("uDetail", new Vector4Uniform(new Vector4(first, detail ? 1f : 0f, CensusOn(discover) ? 1f : 0f, censusPlacements))),
                 new("uFar", new Vector4Uniform(exactMode is > 0f and < 2.5f ? Vector4.Zero : FarUniform(discover))),
                 new("uTransport", new Vector4Uniform(TransportUniform(discover))),
-                new("uFarTransport", new Vector4Uniform(new Vector4(FarTransportUniform, 0f, 0f, 0f))),
+                new("uFarTransport", new Vector4Uniform(new Vector4(FarTransportUniform, shadeH4.On ? 1f : 0f, shadeH4.Frames ? 1f : 0f, 0f))),
                 new("uHitBlend", new Vector4Uniform(new Vector4(HitBlendNow ? 1f : 0f, transportSpacing, NearTexelLightNow ? 1f : 0f, SunColumn()))),
                 new("uCapture", new Vector4Uniform(discover == 0 && exactMode is < 0.5f or > 2.5f ? RayCaptureUniform : Vector4.Zero)),
                 new("uNear", new Vector4Uniform(discover == 0 && few ? new Vector4(NearCutMode, hitCellNear, nearUnknownLocal ? 1f : 0f, sheetGlowSplit ? 1f : NearGlowSplitNow ? 2f : 0f) : new Vector4(0f, 1e30f, 0f, 0f))),
@@ -1453,6 +1461,8 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("SheetRows", SheetsInGi ? SheetRowsBuffer!.Value : sunNodeAccum),
                 RayCaptureBinding(sunNodeAccum),
                 new ShaderBufferBinding("NodeGlow", NearGlowSplitNow ? sunNodeGlow : sunNodeAccum),
+                new ShaderBufferBinding("LightmapFrames", shadeH4.Frames ? lightmapFramesBuffer : sunNodeAccum),
+                new ShaderBufferBinding("TexelH4", shadeH4.On ? texelH4Buffer : sunNodeAccum),
                 new ShaderBufferBinding("FinePlace", finePlaceBuffer.Equals(default(GpuBufferHandle)) ? sunNodeAccum : finePlaceBuffer),
                 new ShaderBufferBinding("FarPart", farPartBuffer.Equals(default(GpuBufferHandle)) ? sunNodeAccum : farPartBuffer),
             }.Concat(CookedBuffers()).Where(b => declared.Contains(b.Name)).ToArray());

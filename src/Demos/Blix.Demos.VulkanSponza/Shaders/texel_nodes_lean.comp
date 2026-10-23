@@ -76,27 +76,12 @@ layout(std430, set = 0, binding = 28) readonly buffer LevelParents { int levelPa
 layout(std430, set = 0, binding = 29) readonly buffer LevelNeighbours { int levelNeighbours[]; }; // 8 a node
 layout(std430, set = 0, binding = 30) readonly buffer LevelLight { vec4 levelLight[]; };          // 2 a node: sky, sun rgb
 layout(std430, set = 0, binding = 22) buffer RayCapture { uint captureCount; uint capturePad[3]; uvec4 captured[]; };
-// --texel-h4 (the light-agnostic record, stage 1: written beside the parts, read by nothing but the dump): per texel, the
-// H4 coefficients (a, bx, by, bz) of its irradiance in its frame per channel ([0..2]), and [3] the same rays' plain mean
-// irradiance (rgb) and their passes -- every light's rays alike, summed over the passes of the slice that last gathered
-// it (reset at its first pass; a near round's cut rays left out).
+// --texel-h4: the light-agnostic record (texel_record_h4.glsl).
 layout(std430, set = 0, binding = 31) readonly buffer LightmapFrames { uvec2 lightmapFrames[]; };
 layout(std430, set = 0, binding = 32) buffer TexelH4 { vec4 texelH4[]; };
 #include "texel_nodes.glsl"
 #include "h4_kernel.glsl"
-
-// The record's smooth normal, as the rays were drawn about it (texel_nodes_rays.comp's recordSmoothNormal).
-vec3 recordNormal(uint id, vec3 face) {
-    if (u.uExact.w < 0.5 || lightmapFrames[0].x == 0u) return face;
-    uint packed = lightmapFrames[1u + id].x;
-    if (packed == 0u) return face;
-    vec2 o = unpackSnorm2x16(packed);
-    vec3 v = vec3(o, 1.0 - abs(o.x) - abs(o.y));
-    if (v.z < 0.0) v.xy = (1.0 - abs(v.yx)) * vec2(v.x >= 0.0 ? 1.0 : -1.0, v.y >= 0.0 ? 1.0 : -1.0);
-    v = normalize(v);
-    if (dot(v, face) < 0.0) v = -v;
-    return dot(v, face) > 0.866 ? v : face;
-}
+#include "texel_record_h4.glsl"
 
 vec3 unpackRgb9e5(uint p) {
     float scale = exp2(float(int(p >> 27) - 15 - 9));
@@ -386,16 +371,8 @@ void main() {
     }
     bool h4 = u.uExact.z > 0.5 && u.uNear.x < 1.5;
     if (h4) {
-        vec3 ns = recordNormal(id, normalize(texels[2u * id + 1u].xyz));
-        vec3 t1 = normalize(cross(abs(ns.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0), ns));
-        vec3 t2 = cross(ns, t1);
-        float cs = dot(ns, dir);
-        // the ray's contribution is its irradiance's share about the smooth normal (L / pdf x cos): over the cosine, L / pdf
-        vec3 r = cs > 1e-4 ? (l0 + l1) / cs : vec3(0.0);
-        vec4 k = h4Kernel(vec3(dot(t1, dir), dot(t2, dir), cs));
-        sH4[lid * 3u] = r.r * k;
-        sH4[lid * 3u + 1u] = r.g * k;
-        sH4[lid * 3u + 2u] = r.b * k;
+        vec3 ns = recordH4Normal(id, normalize(texels[2u * id + 1u].xyz), u.uExact.w > 0.5);
+        recordH4Ray(ns, dir, l0 + l1, sH4[lid * 3u], sH4[lid * 3u + 1u], sH4[lid * 3u + 2u]);
     }
     if (u.uDetail.y > 0.5) {
         vec3 n = normalize(texels[2u * id + 1u].xyz);
@@ -438,9 +415,15 @@ void main() {
     if (h4 && lid < 4u) {
         vec4 sum = vec4(0.0);
         if (lid < 3u) for (int r = 0; r < RAYS; ++r) sum += sH4[uint(r) * 3u + lid];
-        else { for (int r = 0; r < RAYS; ++r) sum.rgb += sLight[r * 2] + sLight[r * 2 + 1]; sum.w = float(RAYS); }
         uint at4 = id * 4u + lid;
-        texelH4[at4] = (u.uShade.w > 0.5 ? texelH4[at4] : vec4(0.0)) + sum / float(RAYS);
+        vec4 before = u.uShade.w > 0.5 ? texelH4[at4] : vec4(0.0);
+        if (lid < 3u) texelH4[at4] = before + sum / float(RAYS);
+        else {
+            float plain = 0.0;
+            for (int r = 0; r < RAYS; ++r) plain += dot(sLight[r * 2] + sLight[r * 2 + 1], lumW);
+            vec3 ns = recordH4Normal(id, normalize(texels[2u * id + 1u].xyz), u.uExact.w > 0.5);
+            texelH4[at4] = vec4(before.x + plain / float(RAYS), uintBitsToFloat(packSnorm2x16(recordH4Oct(ns))), 0.0, before.w + 1.0);
+        }
     }
     barrier();
     if (lid == 0u) {

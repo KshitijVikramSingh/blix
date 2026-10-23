@@ -42,7 +42,8 @@ layout(set = 0, binding = 0) uniform SunNodesShade {
                           // patch spacing; z a known bin's weight (fixed point); w the columns
     vec4 uTransport;      // the transport census (N2, SponzaLoop.TransportCensus.cs): x 1 on; y the patch spacing; z the
                           // patches; w 1: the near-field comparison (N3: PatchDirectSums read, census slot 9)
-    vec4 uFarTransport;   // the far field's light-free record (SponzaLoop.FarTransport.cs): x 1 recording it
+    vec4 uFarTransport;   // the far field's light-free record (SponzaLoop.FarTransport.cs): x 1 recording it; y 1 (--texel-h4):
+                          // the light-agnostic record into TexelH4 (texel_record_h4.glsl), z 1 the records' smooth normals
     vec4 uHitBlend;       // x 1: a hit's bounce blended over its patch and the patch's neighbours (hitPatchLight); y the
                           // patches' spacing (the blend's reach); z 1: a near hit's bounce the texels' about it
                           // (--near-texel-light), w the sun's column (its part per unit of uSunIrradiance)
@@ -170,6 +171,12 @@ layout(std430, set = 0, binding = 29) buffer NodeHarmonic { vec2 nodeHarmonic[];
 #define FAR_RECORD_ACCESS
 #define FAR_NEIGHBOURS_BINDING 28
 #include "texel_far.glsl"
+// --texel-h4: the light-agnostic record (texel_record_h4.glsl), written by the split variant's fast path alone; declared in
+// both variants, as the command binds by the 256-sun variant's names.
+layout(std430, set = 0, binding = 43) readonly buffer LightmapFrames { uvec2 lightmapFrames[]; };
+layout(std430, set = 0, binding = 44) buffer TexelH4 { vec4 texelH4[]; };
+#include "h4_kernel.glsl"
+#include "texel_record_h4.glsl"
 
 void nodeCount(uint k) {
     if (atomicAdd(nodeStats[2u * k], 1u) == 0xFFFFFFFFu) atomicAdd(nodeStats[2u * k + 1u], 1u);
@@ -223,6 +230,7 @@ shared vec3 sRayNearGlow[RAYS]; // --near-glow-split: the ray's sun glow from a 
 // the seam point +12-16% (2026-10-22, --ray-capture-texel). Such a hit lies a few cm from the texel's near hits that
 // found texels; it takes their mean light this pass, per column (w: how many).
 shared vec4 sNearKnown[2];
+shared vec4 sH4[RAYS * 3];      // --texel-h4: per ray per channel, its world-space H4 terms
 #define HOW(r, v) sHow[r] = v
 #else
 #define HOW(r, v)
@@ -717,6 +725,12 @@ void main() {
             // A sheet's texel keeps no far part: what it sees past the reach includes other sheets' texels, still settling
             // round by round (its rays are not cut either: texel_nodes_rays.comp).
             sRayFar[r] = (sDist[r] >= u.uNear.y || h.w < -1.5) && abs(texels[2u * nodeIds[uint(u.uDetail.x) + group]].w) < 4.5 ? 1.0 : 0.0;
+            if (u.uFarTransport.y > 0.5 && u.uNear.x < 1.5) {
+                uint hid = nodeIds[uint(u.uDetail.x) + group];
+                vec3 ns = recordH4Normal(hid, normalize(texels[2u * hid + 1u].xyz), u.uFarTransport.z > 0.5);
+                vec3 all = sRaySum[r * 2] + (suns > 1 ? sRaySum[r * 2 + 1] : vec3(0.0));
+                recordH4Ray(ns, w, all, sH4[r * 3], sH4[r * 3 + 1], sH4[r * 3 + 2]);
+            }
             if (u.uCapture.x > 0.5) {
                 uint id = nodeIds[uint(u.uDetail.x) + group];
                 // y < 0: the one texel -y - 1 (--ray-capture-texel), every ray of it.
@@ -784,6 +798,23 @@ void main() {
 #endif
         }
         barrier();
+#if MAX_WORDS == 1
+        if (u.uFarTransport.y > 0.5 && u.uNear.x < 1.5 && lid < 4u) {
+            uint hid = nodeIds[uint(u.uDetail.x) + group];
+            uint at4 = hid * 4u + lid;
+            vec4 before = u.uShade.w > 0.5 ? texelH4[at4] : vec4(0.0);
+            if (lid < 3u) {
+                vec4 sum = vec4(0.0);
+                for (int r = 0; r < RAYS; ++r) sum += sH4[r * 3 + int(lid)];
+                texelH4[at4] = before + sum / float(RAYS);
+            } else {
+                float plain = 0.0;
+                for (int r = 0; r < RAYS; ++r) plain += dot(sRaySum[r * 2] + (suns > 1 ? sRaySum[r * 2 + 1] : vec3(0.0)), lumW);
+                vec3 ns = recordH4Normal(hid, normalize(texels[2u * hid + 1u].xyz), u.uFarTransport.z > 0.5);
+                texelH4[at4] = vec4(before.x + plain / float(RAYS), uintBitsToFloat(packSnorm2x16(recordH4Oct(ns))), 0.0, before.w + 1.0);
+            }
+        }
+#endif
         if (lid < uint(suns)) {
             int k = int(lid);
             vec3 sum = vec3(0.0);
