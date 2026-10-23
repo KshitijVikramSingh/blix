@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Numerics;
 using System.Runtime.InteropServices;
+using Blix.Geometry;
 using Blix.Graphics;
 
 namespace Blix.Demos.VulkanSponza;
@@ -12,8 +13,10 @@ namespace Blix.Demos.VulkanSponza;
 // against 2.9% inside a chart, p90 61% against 28%; the borders unbiased, signed mean -0.07%, but twice as noisy -- they
 // have the fewest neighbours of their own). The user saw it as blocks of stone lit each its own way.
 // So each atlas texel also lists the texels of OTHER charts that touch it in the world: within a texel (4.5 cm), on its
-// plane (1 cm), facing its way (cos 0.95), and not its neighbours in the atlas. Built once from the records, here, as a
-// list (start a texel, from the first atlas record; then the ids).
+// plane (1 cm), facing its way (cos 0.95), not its neighbours in the atlas -- and in sight of it, a millimetre off both
+// (the CPU's ray scene, while it is there): a wall thinner than the plane's centimetre has two faces turned the same way
+// on one plane, and the 4 mm sheet shell's outer faces took its insides' light across it, 1.17x (2026-10-24). Built once
+// from the records, here, as a list (start a texel, from the first atlas record; then the ids).
 internal sealed partial class SponzaLoop
 {
     private const int SeamNeighbourCap = 6;
@@ -33,7 +36,7 @@ internal sealed partial class SponzaLoop
     {
         if (firstAtlas < 0 || firstAtlas >= count) return;
         // A stage of the GI bundle (--cook-gi), under the lightmap records' key: the same records, so the same seams.
-        var seamKey = lightmapRecordsKey;
+        var seamKey = lightmapRecordsKey is { } recordsKey ? recordsKey + (rayQueries is not null ? "-seen" : "") : null;
         if (seamKey is not null && LoadStage(seamKey, "seams", r => r.ReadInt32() != firstAtlas || r.ReadInt32() != count
                 ? null : new SeamLists(ReadArray<uint>(r), ReadArray<uint>(r))) is { } stored)
         {
@@ -57,6 +60,7 @@ internal sealed partial class SponzaLoop
     private (uint[] Start, uint[] Ids) FindSeamNeighbours(Vector4[] texels, int count, int firstAtlas)
     {
         var clock = Stopwatch.StartNew();
+        var scene = rayQueries;
         const float Cell = 0.04f;
         var n = count - firstAtlas;
         var keys = new long[n];
@@ -105,6 +109,13 @@ internal sealed partial class SponzaLoop
                     if (MathF.Abs(Vector3.Dot(d, nn)) > 0.01f) continue;
                     var oat = BitConverter.SingleToUInt32Bits(on.W);
                     if (Math.Abs((int)(oat & 0xFFFF) - ax) <= 2 && Math.Abs((int)(oat >> 16) - ay) <= 2) continue;
+                    if (scene is not null)
+                    {
+                        var from = p + nn * 1e-3f;
+                        var to = new Vector3(o4.X, o4.Y, o4.Z) + Vector3.Normalize(new Vector3(on.X, on.Y, on.Z)) * 1e-3f - from;
+                        var len = to.Length();
+                        if (len > 1e-5f && scene.Any(new Ray(from, to / len), 0f, len, (uint)(id * 31 + other))) continue;
+                    }
                     found[k * SeamNeighbourCap + c++] = other;
                 }
             }
