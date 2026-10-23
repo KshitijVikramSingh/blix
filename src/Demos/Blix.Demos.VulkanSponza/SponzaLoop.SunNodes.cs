@@ -590,6 +590,46 @@ internal sealed partial class SponzaLoop
     private PipelineHandle texelClearPipeline;
     private GpuBufferHandle texelClearBuffer;
     private bool GatherClearOn => gatherClear && !texelClearBuffer.Equals(default(GpuBufferHandle));
+    private GpuBufferHandle patchClearBuffer;
+    private bool PatchClearOn => GatherClearOn && !patchClearBuffer.Equals(default(GpuBufferHandle));
+
+    // Each cooked patch's room along its normal (texel_clear.comp modes 2-3), once the patches are up: the pick's patch end.
+    private void BuildPatchClear()
+    {
+        if (!GatherClearOn || !patchClearBuffer.Equals(default(GpuBufferHandle)) || cookedPacked is not { } packed || frameTracer is null) return;
+        var patches = packed.Length / 3;
+        if (patches == 0) return;
+        var fill = new float[patches];
+        Array.Fill(fill, TexelClearReach);
+        patchClearBuffer = Own(device.CreateGpuBuffer(patches * 4, MemoryMarshal.AsBytes(fill.AsSpan()), "sponza.patches.clear"));
+        const int chunk = 1 << 20;
+        var raysBuffer = device.CreateGpuBuffer(Math.Min(chunk, patches) * 32, name: "sponza.patches.clear-rays");
+        var hitsBuffer = device.CreateGpuBuffer(Math.Min(chunk, patches) * 48 + 80, name: "sponza.patches.clear-hits");
+        var cooked = CookedBuffers().First(b => b.Name == "CookedPatches");
+        DispatchCommand Clear(int first, int count, int mode) => new(texelClearPipeline, (count + 63) / 64, 1, 1,
+            new ShaderUniform[] { new("uClear", new Vector4Uniform(new Vector4(first, count, TexelClearReach, mode))) },
+            Array.Empty<ShaderTextureBinding>(),
+            Buffers: new[]
+            {
+                new ShaderBufferBinding("Texels", texelBuffer),
+                new ShaderBufferBinding("SunNodesLive", texelClearBuffer),
+                new ShaderBufferBinding("NodeRays", raysBuffer),
+                new ShaderBufferBinding("NodeHits", hitsBuffer),
+                new ShaderBufferBinding("TexelClear", texelClearBuffer),
+                cooked,
+                new ShaderBufferBinding("PatchClear", patchClearBuffer),
+            });
+        for (var first = 0; first < patches; first += chunk)
+        {
+            var count = Math.Min(chunk, patches - first);
+            device.DispatchNow(new[] { Clear(first, count, 2) }, "patch-clear-rays");
+            frameTracer.Trace(raysBuffer, hitsBuffer, count, 0xC1EA7u + (uint)first, closestOnly: true);
+            device.DispatchNow(new[] { Clear(first, count, 3) }, "patch-clear");
+        }
+        device.WaitIdle();
+        device.DestroyGpuBuffer(raysBuffer);
+        device.DestroyGpuBuffer(hitsBuffer);
+    }
     private string GatherLiftKey => gatherClear ? ";lift clear" : "";
     private const float TexelClearReach = 0.02f;
 
@@ -615,6 +655,8 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("NodeRays", raysBuffer),
                 new ShaderBufferBinding("NodeHits", hitsBuffer),
                 new ShaderBufferBinding("TexelClear", texelClearBuffer),
+                new ShaderBufferBinding("CookedPatches", texelClearBuffer),
+                new ShaderBufferBinding("PatchClear", texelClearBuffer),
             });
         for (var first = 0; first < live.Length; first += chunk)
         {
@@ -1689,10 +1731,11 @@ internal sealed partial class SponzaLoop
     // Each texel's nearest visible patch: a stage of the GI bundle (under the transport's combined key -- the patches and
     // the texels both), picked on the GPU when it is not there.
     // v2/v3: candidates the texel lies behind left out, the rays' lift a quarter of the line at most (v3: re-picked once, as a first boot now adopts it into the live solve; 2026-10-22).
-    private string TexelPatchHeader => string.Create(Inv, $"texel patch {(patchPickOld ? "v1" : "v3")};candidates {PatchCandidates};texels {texelCount}");
+    private string TexelPatchHeader => string.Create(Inv, $"texel patch {(patchPickOld ? "v1" : "v3")}{GatherLiftKey};candidates {PatchCandidates};texels {texelCount}");
 
     private void RecordSunNodePatchPick()
     {
+        BuildPatchClear();
         var live = texelLiveIds!;
         // The live solve's copy, read from the same stage: aliased without reading the 66 MB again.
         if (sunNodePatchFirst == 0 && liveTexels && liveTexelPatchStored && !liveTexelPatch.Equals(default(GpuBufferHandle)))
@@ -1746,6 +1789,7 @@ internal sealed partial class SponzaLoop
                 new("uPatch", new Vector4Uniform(new Vector4(sunNodePatchFirst, count, mode, patchPickOld ? 0f : 1f))),
                 new("uCookedGrid", new Vector4Uniform(cookedGrid)),
                 new("uCookedDims", new Vector4Uniform(cookedDims)),
+                new("uClear", new Vector4Uniform(new Vector4(PatchClearOn ? 1f : 0f, lightmapTexels ? lightmapFirstRecord : float.MaxValue, 0f, 0f))),
             },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
@@ -1756,6 +1800,8 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("NodeHits", sunNodeHits),
                 new ShaderBufferBinding("PatchCandidates", sunNodePatchCandidates),
                 new ShaderBufferBinding("TexelPatch", sunNodeTexelPatch),
+                new ShaderBufferBinding("TexelClear", PatchClearOn ? texelClearBuffer : sunNodeTexelPatch),
+                new ShaderBufferBinding("PatchClear", PatchClearOn ? patchClearBuffer : sunNodeTexelPatch),
             }.Concat(CookedBuffers()).Where(b => declared.Contains(b.Name)).ToArray());
         graph.Dispatch(sunNodePatchAPass, Pick(0));
         RecordClosestBatch(sunNodePatchBatch, sunNodeRaysBuffer, sunNodeHits, count * PatchCandidates, 0x9A7C3u);

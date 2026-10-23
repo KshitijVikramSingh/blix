@@ -15,6 +15,7 @@ layout(set = 0, binding = 0) uniform NodesPatch {
     vec4 uPatch;      // x the slice's first live texel, y its texels, z the mode, w 1: the behind rule and the scaled lift
     vec4 uCookedGrid;
     vec4 uCookedDims;
+    vec4 uClear;      // x 1: each end's lift half its room at most (TexelClear, PatchClear: texel_clear.comp); y the first lightmap record
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
@@ -23,6 +24,8 @@ layout(std430, set = 0, binding = 3) buffer NodeRays { vec4 nodeRays[]; };      
 layout(std430, set = 0, binding = 4) readonly buffer NodeHits { uvec4 nodeHits[]; };  // 3 a ray: the CLOSEST answer
 layout(std430, set = 0, binding = 5) buffer PatchCandidates { int candidates[]; };    // [slice texel][candidate]
 layout(std430, set = 0, binding = 6) buffer TexelPatch { int texelPatch[]; };          // [texel id]
+layout(std430, set = 0, binding = 10) readonly buffer TexelClear { float texelClear[]; };
+layout(std430, set = 0, binding = 11) readonly buffer PatchClear { float patchClear[]; };
 
 #define COOKED_BINDING 7
 #define COOKED_GRID u.uCookedGrid
@@ -70,8 +73,16 @@ void main() {
             // Lifted 1 cm, a quarter of the line at most (SponzaLoop.Transport.cs, VisLift): lifted 1 cm at both ends a line
             // across a 2 cm gap ran past what bounds it.
             float lift = u.uPatch.w > 0.5 ? min(0.01, 0.25 * length(cookedPatch[3 * best[k]].xyz - p)) : 0.01;
-            vec3 origin = p + n * lift;
-            vec3 target = cookedPatch[3 * best[k]].xyz + cookedPatch[3 * best[k] + 1].xyz * lift;
+            // Each end half its room along its normal at most: lifted 1 cm, the line from a sunlit texel on a 4 mm wall
+            // to a patch inside it passed over the wall, the texel lent the inside its sun, and the sheet shell's floor
+            // read the glow through it 1.4x its path trace (texel_live_direct.comp, 2026-10-24).
+            float liftTexel = lift, liftPatch = lift;
+            if (u.uClear.x > 0.5) {
+                if (float(id) >= u.uClear.y) liftTexel = min(lift, max(0.5 * texelClear[id], 2.5e-4));
+                liftPatch = min(lift, max(0.5 * patchClear[best[k]], 2.5e-4));
+            }
+            vec3 origin = p + n * liftTexel;
+            vec3 target = cookedPatch[3 * best[k]].xyz + cookedPatch[3 * best[k] + 1].xyz * liftPatch;
             vec3 d = target - origin;
             float len = length(d);
             nodeRays[slot * 2u] = vec4(origin, 0.0);
