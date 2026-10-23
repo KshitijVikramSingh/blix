@@ -671,7 +671,9 @@ internal sealed partial class SponzaLoop
         device.DestroyGpuBuffer(hitsBuffer);
         Console.WriteLine(string.Create(Inv, $"[VulkanSponza] texels: each one's room along its normal, {live.Length:N0} rays to {TexelClearReach * 100:0} cm, in {clock.Elapsed.TotalMilliseconds:0} ms (the gather's lift half of it at most)."));
     }
-    private float NodePlaneStep => nodePlanes ? sunNodePlane * texelGrid.W : 0f;
+    // A quarter of the plane reach (~3 mm): surfaces nearer than the reach apart keep an entry each -- the reach's own step
+    // merged a 4 mm wall's two faces turned the same way (the sheet shell, 2026-10-24).
+    private float NodePlaneStep => nodePlanes ? 0.25f * sunNodePlane * texelGrid.W : 0f;
 
     private void RecordSunNodePrep()
     {
@@ -1621,7 +1623,7 @@ internal sealed partial class SponzaLoop
     // combined key and the discovery's settings -- the geometry's; their sun bits are this cook's.
     // "rays 512" fixed: a discovery pass is one pass of 32 rays a texel whatever the sweep's count (--live-rays changed it,
     // and a live boot re-ran a 14 s discovery the bundle had, 2026-10-16).
-    private string DiscoveredHeader => string.Create(Inv, $"discovered {(nodePlanes ? "v2" : "v1")}{GatherLiftKey};stride {sunNodeDiscoverStride};room {DiscoverRoom};rays 512;slice {sunNodeSlice};texels {texelCount}");
+    private string DiscoveredHeader => string.Create(Inv, $"discovered {(nodePlanes ? "v3" : "v1")}{GatherLiftKey};stride {sunNodeDiscoverStride};room {DiscoverRoom};rays 512;slice {sunNodeSlice};texels {texelCount}");
 
     private void RecordSunNodeDiscover()
     {

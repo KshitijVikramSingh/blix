@@ -91,6 +91,7 @@ float nodeSetAt(int set, vec3 p, vec3 n, vec4 grid, uint slots, vec2 lookup, out
             uint fingerprint = nodeFingerprint(key);
             uint slot = texelMix(key) & (slots - 1u);
             int probe = 0;
+            float nearestPlane = 1e30;
             // The cell's texels, one a plane: the best weighed. One a cell hid a surface beside another facing the same
             // way -- the teacup's floor under its saucer's bottom (1.9 cm up, past the plane's reach): the saucer's texel
             // kept the cell, and the floor's hits found none and took the nearest patch anywhere, the sunlit one at the
@@ -103,11 +104,16 @@ float nodeSetAt(int set, vec3 p, vec3 n, vec4 grid, uint slots, vec2 lookup, out
                 if (set == 0 && abs(tp.w) < 2.0) continue;
                 vec3 tn = normalize(nodeNormal(set, uint(id)).xyz);
                 float facing = dot(tn, n);
-                if (facing <= 0.0 || abs(dot(tn, tp.xyz - p)) > lookup.x * grid.w) continue;
+                float plane = abs(dot(tn, tp.xyz - p));
+                if (facing <= 0.0 || plane > lookup.x * grid.w) continue;
                 vec3 dp = (tp.xyz - p) / grid.w;
                 float f2 = facing * facing;
                 float weight = exp(-dot(dp, dp) / (2.0 * lookup.y * lookup.y)) * min(abs(tp.w) / 4.0, 1.0) * f2 * f2;
-                if (weight > weights[i]) { ids[i] = id; weights[i] = weight; }
+                // The entry on the hit's own surface first (its plane nearest, by a millimetre), then the weight: a 4 mm
+                // wall's two faces turned the same way share the cell, and the sheet shell's floor read its top wall's
+                // underside through the bottom wall, 0.77 of its path trace (2026-10-24).
+                bool nearer = plane < nearestPlane - 1e-3;
+                if (nearer || (plane < nearestPlane + 1e-3 && weight > weights[i])) { ids[i] = id; weights[i] = weight; nearestPlane = min(nearestPlane, plane); }
             }
             total += weights[i];
         }
