@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """The GI correctness gate's verdict, from --probe-reference logs of the correctness scenes.
 
-usage: gate.py LOG_DIR      (reads cornell.log, thinwall-sealed.log, thinwall-open.log, crevices-corridor.log; the last
-                             with --gpu-ref-seams)
+usage: gate.py LOG_DIR      (reads cornell.log, thinwall-sealed.log, thinwall-open.log, crevices-corridor.log, the last
+                             with --gpu-ref-seams; and crevices-deadend.log where it is there)
 
 Every metric carries two bars:
   target   what correct is. Reported MET or NOT MET; a metric short of it is known work, not a failure.
@@ -53,6 +53,8 @@ def main():
     corridor = samples(os.path.join(logs, 'crevices-corridor.log'))
     seams = samples(os.path.join(logs, 'crevices-corridor.log'), SEAM)
     corridor_ref = mean(r for _, r in corridor)
+    deadend_log = os.path.join(logs, 'crevices-deadend.log')
+    deadend = samples(deadend_log) if os.path.exists(deadend_log) else []
 
     cornell_ref = mean(r for _, r in cornell)
     floor = 0.02 * cornell_ref
@@ -102,9 +104,20 @@ def main():
          'the creases\' light over the path trace\'s: the texels beside a buried one answer for it (2026-10-16: 0.886; '
          '2026-10-22: 1.005)'),
     ]
+    if deadend:
+        deadend_ref = mean(r for _, r in deadend)
+        metrics += [
+            ('crevices dead end energy', mean(f for f, _ in deadend) / deadend_ref,
+             lambda v: abs(v - 1) <= 0.03, '|x - 1| <= 0.03', lambda v: abs(v - 1) <= 0.06, '|x - 1| <= 0.06',
+             'the corridor\'s second leg to its dead end, lit only round the corner: light through its walls shows here first '
+             '(2026-10-23: 1.023 / 1.022; with patchless texels lighting the nearest patch through the far wall, 1.324)'),
+            ('crevices dead end |error|', mean(abs(f - r) for f, r in deadend) / deadend_ref,
+             lambda v: v <= 0.02, '<= 0.02', lambda v: v <= 0.05, '<= 0.05',
+             'how far each dead-end point is, over its mean light (2026-10-23: 0.037 / 0.037)'),
+        ]
 
     failed = 0
-    print(f'GI correctness gate ({len(cornell)} / {len(sealed)} / {len(lit)} / {len(corridor)} + {len(seams)} seam samples):')
+    print(f'GI correctness gate ({len(cornell)} / {len(sealed)} / {len(lit)} / {len(corridor)} + {len(seams)} seam{f' / {len(deadend)}' if deadend else ''} samples):')
     for name, value, target, target_text, ratchet, ratchet_text, what in metrics:
         held = ratchet(value)
         met = target(value)
