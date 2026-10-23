@@ -106,7 +106,7 @@ internal sealed partial class SponzaLoop
         return on;
     }
 
-    private bool HitCellsReady => liveTexels && hitCellsOn && !hitCellsBuffer.Equals(default(GpuBufferHandle));
+    private bool HitCellsReady => liveTexels && hitCellsOn && !hitCellsBuffer.Equals(default(GpuBufferHandle)) && hitCellsBuild is null;
 
     private void DeclareHitCells(Func<string[], ShaderInterface> reflect)
     {
@@ -117,8 +117,28 @@ internal sealed partial class SponzaLoop
         hitCellsPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "hit_cells.comp.spv")), hitCellsInterface, "hit_cells")), "hit_cells"));
 
+    // A fresh build's patches pass, stepped over frames (StepHitCells): whole in one frame it held Crytek Sponza's merge
+    // frame 1.2 s (2026-10-23).
+    private sealed class HitCellsBuild
+    {
+        public required string? Path;
+        public required int Bytes;
+        public required uint[] Work;
+        public required Stopwatch Clock;
+        public required double LayoutMs;
+        public int First;
+    }
+    private HitCellsBuild? hitCellsBuild;
+    private const string HitCellsProgress = "hit cells: their patches";
+
     // Once the cook's setup is done (MergeDiscovered): the layout from the packed rows, then each cell's patches.
     private void BuildHitCells()
+    {
+        BeginHitCells();
+        while (!StepHitCells(double.PositiveInfinity)) { }
+    }
+
+    private void BeginHitCells()
     {
         if (!liveTexels || !hitCellsOn || !hitCellsBuffer.Equals(default(GpuBufferHandle)) || rayGpuData is not { } data) return;
         var clock = Stopwatch.StartNew();
@@ -170,16 +190,34 @@ internal sealed partial class SponzaLoop
         hitCellItems = work.Count / 2;
         hitCellWork = Own(device.CreateGpuBuffer(Math.Max(16, work.Count * 4), MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(work)), "sponza.hit-cells.work"));
         hitCellCount = cells;
-        var layoutMs = clock.Elapsed.TotalMilliseconds;
-        // A dispatch a quarter-million work items (of up to 256 cells each): Sponza's whole build in one ran past the GPU's
-        // watchdog once a cell's corners were read too, and the device was lost (2026-10-19).
-        const int perDispatch = 4096 * 64;
-        for (var first = 0; first < hitCellItems; first += perDispatch)
-            device.DispatchNow(new[] { HitCellsCommand(Math.Min(perDispatch, hitCellItems - first), first) }, "hit-cells-build");
+        hitCellsBuild = new HitCellsBuild { Path = cachePath, Bytes = bytes, Work = work.ToArray(), Clock = clock, LayoutMs = clock.Elapsed.TotalMilliseconds };
+        ProgressBegin(HitCellsProgress, hitCellItems);
+    }
+
+    // Dispatches until budgetMs is spent; true once the build is done (and logged, and written).
+    private bool StepHitCells(double budgetMs)
+    {
+        if (hitCellsBuild is not { } b) return true;
+        // A dispatch at most a quarter-million work items (of up to 256 cells each): Sponza's whole build in one ran past
+        // the GPU's watchdog once a cell's corners were read too, and the device was lost (2026-10-19). Stepped, a
+        // sixteenth of that, so a frame's budget is met closely.
+        var perDispatch = double.IsPositiveInfinity(budgetMs) ? 4096 * 64 : 4096 * 4;
+        var step = Stopwatch.StartNew();
+        while (b.First < hitCellItems && step.Elapsed.TotalMilliseconds < budgetMs)
+        {
+            var n = Math.Min(perDispatch, hitCellItems - b.First);
+            device.DispatchNow(new[] { HitCellsCommand(n, b.First) }, "hit-cells-build");
+            b.First += n;
+            ProgressAdd(HitCellsProgress, n);
+        }
+        if (b.First < hitCellItems) return false;
+        ProgressEnd(HitCellsProgress);
+        hitCellsBuild = null;
         hitCellsSun = hitCellsSunFor = (new Vector3(float.NaN), -1);
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[VulkanSponza] hit cells: {cells:N0} cells over {rows:N0} triangle rows at {cellSize * 100:0} cm ({bytes / 1048576.0:0} MB), laid out in {layoutMs:0} ms, their patches in {clock.Elapsed.TotalMilliseconds - layoutMs:0} ms."));
-        if (cachePath is not null) WriteHitCells(cachePath, bytes, work.ToArray());
+            $"[VulkanSponza] hit cells: {hitCellCount:N0} cells over {hitCellRows:N0} triangle rows at {hitCellSize * 100:0} cm ({b.Bytes / 1048576.0:0} MB), laid out in {b.LayoutMs:0} ms, their patches in {b.Clock.Elapsed.TotalMilliseconds - b.LayoutMs:0} ms over frames."));
+        if (b.Path is not null) WriteHitCells(b.Path, b.Bytes, b.Work);
+        return true;
     }
 
     private const int HitCellsVersion = 2;   // 2: a cell whose centre finds no texel takes a corner's patch (hit_cells.comp cellOwnPatch)

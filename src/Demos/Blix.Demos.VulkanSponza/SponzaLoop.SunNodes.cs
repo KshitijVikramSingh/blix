@@ -1573,17 +1573,46 @@ internal sealed partial class SponzaLoop
         sunNodeStage = SunNodeStage.Merge;
     }
 
+    // The merge, over frames: the sun points and bits in one, the hit cells' patches stepped (StepHitCells), the transfer
+    // in one, then the patch texels' contact cook a ray pass at a time within 50 ms a frame (BuildPatchTexels) -- whole in one frame
+    // it froze a fresh cook's window for 49.5 s.
+    private int mergeStep;
+    private double mergeUploadMs, mergeCellsMs, mergeTransferMs;
+    private Stopwatch? mergeContactClock;
+
     private void MergeDiscovered()
     {
-        if (sunNodeDiscoverTask is not { IsCompleted: true } done) return;
-        var (added, bits) = done.Result;
-        sunNodeDiscoverTask = null;
-        UploadSunPoints(sunNodePoints.Concat(added).ToArray(), sunNodePointBits.Concat(bits).ToArray());
-        ResetSunNodeCounters();
-        if (liveTexels) BeginLivePointBits();
-        BuildHitCells();
-        BuildTransfer();
-        BuildPatchTexels();
+        if (mergeStep == 0)
+        {
+            if (sunNodeDiscoverTask is not { IsCompleted: true } done) return;
+            var (added, bits) = done.Result;
+            sunNodeDiscoverTask = null;
+            var mergeClock = Stopwatch.StartNew();
+            double Lap() { var s = mergeClock.Elapsed.TotalMilliseconds; mergeClock.Restart(); return s; }
+            UploadSunPoints(sunNodePoints.Concat(added).ToArray(), sunNodePointBits.Concat(bits).ToArray());
+            ResetSunNodeCounters();
+            if (liveTexels) BeginLivePointBits();
+            mergeUploadMs = Lap();
+            BeginHitCells();
+            mergeContactClock = Stopwatch.StartNew();
+            mergeStep = 1;
+            return;
+        }
+        if (mergeStep == 1)
+        {
+            if (!StepHitCells(50)) return;
+            mergeCellsMs = mergeContactClock!.Elapsed.TotalMilliseconds;
+            var transferClock = Stopwatch.StartNew();
+            BuildTransfer();
+            mergeTransferMs = transferClock.Elapsed.TotalMilliseconds;
+            mergeContactClock.Restart();
+            mergeStep = 2;
+            return;
+        }
+        if (!BuildPatchTexels()) return;
+        mergeStep = 0;
+        Console.WriteLine(string.Create(Inv,
+            $"[VulkanSponza] sun nodes: the merge -- sun points and bits {mergeUploadMs:0} ms (one frame), hit cells {mergeCellsMs:0} ms of frames, transfer {mergeTransferMs:0} ms (one frame); then the patch texels over {mergeContactClock!.Elapsed.TotalSeconds:0.0} s of frames."));
         // The trace proper counts afresh.
         RetireGpuBuffer(sunNodeStats);
         sunNodeStats = Own(device.CreateGpuBuffer(64, new byte[64], "sponza.sun-nodes.stats"));

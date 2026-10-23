@@ -47,10 +47,12 @@ internal sealed partial class SponzaLoop
     private ShaderInterface texelPatchLightInterface = null!;
     private PipelineHandle texelPatchLightPipeline;
 
-    private void BuildPatchTexels()
+    // True once built (or not wanted); false while its contact cook is still stepping, 50 ms a frame.
+    private bool BuildPatchTexels()
     {
-        if (!livePatchTexels || transferReady || frameTracer is null || texelLiveIds is not { } all) return;
-        CookTexelAo(all);
+        if (!livePatchTexels || transferReady || frameTracer is null || texelLiveIds is not { } all) return true;
+        if (texelAoCook is null || !ReferenceEquals(texelAoCook.All, all)) BeginTexelAo(all);
+        if (!StepTexelAo(50)) return false;
         // Each patch's octant openness, the mean of its texels' (texel_patch_light.comp mode 0): the geometry's, once.
         var patches = transportSolve!.Patches;
         patchOpenBuffer = Own(device.CreateGpuBuffer(patches * 18 * 4, new byte[patches * 18 * 4], "sponza.transfer.patch-open"));
@@ -69,6 +71,7 @@ internal sealed partial class SponzaLoop
                 $"[VulkanSponza] patch texels, refined: {coarse.Length:N0} coarse texels gathered at each light change, {fine.Length:N0} fine from them."));
         }
         transferReady = true;
+        return true;
     }
 
     private void ApplyPatchTexelsNow()
@@ -250,7 +253,28 @@ internal sealed partial class SponzaLoop
     private PipelineHandle texelAoPipeline, transferFinePipeline;
 
     // Every live texel's contact visibility (texel_ao.comp): cosine rays, a slice at a time through the gather's buffers.
+    // Stepped (BeginTexelAo, StepTexelAo, FinishTexelAo): a fresh cook is ~48 s of rays on Crytek Sponza's 6.8 M texels,
+    // and run in one frame it held the merge's frame for 49.5 s, the window frozen (2026-10-23). CookTexelAo runs it whole.
+    private sealed class TexelAoCook
+    {
+        public required uint[] All;
+        public required GpuBufferHandle Counts;
+        public required int Passes, AoPasses;
+        public required string? Path;
+        public required Stopwatch Clock;
+        public int First, Pass;
+        public bool Done;
+    }
+    private TexelAoCook? texelAoCook;
+    private const string TexelAoProgress = "transfer: contact visibility";
+
     private void CookTexelAo(uint[] all)
+    {
+        BeginTexelAo(all);
+        while (!StepTexelAo(double.PositiveInfinity)) { }
+    }
+
+    private void BeginTexelAo(uint[] all)
     {
         var clock = Stopwatch.StartNew();
         texelAoBuffer = Own(device.CreateGpuBuffer(Math.Max(16, (texelCount + 3) / 4 * 4), new byte[Math.Max(16, (texelCount + 3) / 4 * 4)], "sponza.transfer.ao"));
@@ -266,13 +290,24 @@ internal sealed partial class SponzaLoop
         // The geometry's: read from the GI bundle when cooked before for the same stages, texels and settings (52 s of
         // Sponza's boot, 2026-10-19).
         var contactPath = Environment.GetEnvironmentVariable("BLIX_NO_CONTACT_CACHE") == "1" ? null : ContactPath(all.Length);
+        texelAoCook = new TexelAoCook { All = all, Counts = counts, Passes = passes, AoPasses = aoPasses, Path = contactPath, Clock = clock };
         if (contactPath is not null && ReadContact(contactPath))
         {
             RetireGpuBuffer(counts);
+            texelAoCook.Done = true;
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] transfer: contact visibility of {all.Length:N0} texels read from {contactPath} in {clock.Elapsed.TotalSeconds:0.0} s."));
             return;
         }
+        ProgressBegin(TexelAoProgress, all.Length);
+    }
+
+    // Ray passes until budgetMs is spent; true once the cook is done (and finished).
+    private bool StepTexelAo(double budgetMs)
+    {
+        if (texelAoCook is not { } c) return true;
+        if (c.Done) return true;
+        var all = c.All;
         var declared = texelAoInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
         DispatchCommand Ao(int threads, int slice, int mode, int first, bool contact = true) => new(texelAoPipeline, (threads + 63) / 64, 1, 1,
             new ShaderUniform[] { new("uAo", new Vector4Uniform(new Vector4(slice, transferAoReach, mode, first))), new("uAo2", new Vector4Uniform(new Vector4(transferAoShortReach, contact ? 1f : 0f, 0f, 0f))) },
@@ -281,7 +316,7 @@ internal sealed partial class SponzaLoop
             {
                 new ShaderBufferBinding("NodeHits", sunNodeHits),
                 new ShaderBufferBinding("NodeRayWeights", sunNodeRayWeights),
-                new ShaderBufferBinding("AoCounts", counts),
+                new ShaderBufferBinding("AoCounts", c.Counts),
                 new ShaderBufferBinding("AoBytes", texelAoBuffer),
                 new ShaderBufferBinding("AoIds", sunNodeLive),
                 new ShaderBufferBinding("NodeRays", sunNodeRaysBuffer),
@@ -289,24 +324,39 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("AoShort", texelAoShortBuffer),
                 new ShaderBufferBinding("SkyVis", texelSkyVisBuffer),
             }.Where(b => declared.Contains(b.Name)).ToArray());
-        for (var first = 0; first < all.Length; first += sunNodeSlice)
+        var step = Stopwatch.StartNew();
+        // A pass (32 rays a texel over a slice) at a time: a whole slice's passes ran ~700 ms on Crytek Sponza, past the
+        // budget (2026-10-23).
+        while (c.First < all.Length && step.Elapsed.TotalMilliseconds < budgetMs)
         {
+            var first = c.First;
             var slice = Math.Min(sunNodeSlice, all.Length - first);
-            for (var pass = 0; pass < passes; pass++)
-            {
-                device.DispatchNow(new[] { SunNodeRaysCommand(sunNodeLive, first, slice, pass + aoSeedOffset, plain: true) }, "texel-ao-rays");
-                frameTracer!.Trace(sunNodeRaysBuffer, sunNodeHits, slice * 32, SunNodeSeed(first, pass + aoSeedOffset, 0) ^ 0xA0u, closestOnly: true);
-                // The contact counts every ray the sky's cook shoots (the rays are shot either way): at 64 a dark crease's
-                // ratio was a few rays, and its texels came out black in blotches (2026-10-21).
-                device.DispatchNow(new[] { Ao(slice * 32, slice, 0, first, contact: contactAllRays || pass < aoPasses) }, "texel-ao");
-            }
+            var pass = c.Pass;
+            device.DispatchNow(new[] { SunNodeRaysCommand(sunNodeLive, first, slice, pass + aoSeedOffset, plain: true) }, "texel-ao-rays");
+            frameTracer!.Trace(sunNodeRaysBuffer, sunNodeHits, slice * 32, SunNodeSeed(first, pass + aoSeedOffset, 0) ^ 0xA0u, closestOnly: true);
+            // The contact counts every ray the sky's cook shoots (the rays are shot either way): at 64 a dark crease's
+            // ratio was a few rays, and its texels came out black in blotches (2026-10-21).
+            device.DispatchNow(new[] { Ao(slice * 32, slice, 0, first, contact: contactAllRays || pass < c.AoPasses) }, "texel-ao");
+            if (++c.Pass < c.Passes) continue;
             device.DispatchNow(new[] { Ao(slice, slice, 1, first) }, "texel-ao-finish");
+            c.Pass = 0;
+            c.First += slice;
+            ProgressAdd(TexelAoProgress, slice);
         }
-        RetireGpuBuffer(counts);
-        FilterSkyVis(passes * 32);
+        if (c.First < all.Length) return false;
+        FinishTexelAo(c);
+        return true;
+    }
+
+    private void FinishTexelAo(TexelAoCook c)
+    {
+        RetireGpuBuffer(c.Counts);
+        FilterSkyVis(c.Passes * 32);
+        ProgressEnd(TexelAoProgress);
+        c.Done = true;
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[VulkanSponza] transfer: contact visibility (within {transferAoReach * 100:0} cm) of {all.Length:N0} texels, {(contactAllRays ? passes : aoPasses) * 32} rays each, and their sky visibility, {passes * 32} rays each, filtered {skyVisFilterPasses} times, in {clock.Elapsed.TotalSeconds:0.0} s."));
-        if (contactPath is not null) WriteContact(contactPath);
+            $"[VulkanSponza] transfer: contact visibility (within {transferAoReach * 100:0} cm) of {c.All.Length:N0} texels, {(contactAllRays ? c.Passes : c.AoPasses) * 32} rays each, and their sky visibility, {c.Passes * 32} rays each, filtered {skyVisFilterPasses} times, in {c.Clock.Elapsed.TotalSeconds:0.0} s."));
+        if (c.Path is not null) WriteContact(c.Path);
     }
 
     // The contact cook's file in the GI bundle: keyed by the transport's stages (the geometry, the patches, the hashed
