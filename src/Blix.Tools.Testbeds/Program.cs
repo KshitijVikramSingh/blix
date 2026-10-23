@@ -222,7 +222,7 @@ public static class Program
     /// rho_f times that (tools/gi-model/thin_sheet.py). The defaults: floor 0.5, sheet 0.8 at T 0.5, white, 0.5 m up --
     /// at the default sun (cos_s 0.957) the floor 0.598 E_s, the underside 0.299 E_s. <c>--transmission T</c>.
     /// </remarks>
-    [BlixApp("sheetslab", Summary = "write a 60 m thin sheet over a floor, as glTF: the closed form for thin-sheet transport")]
+    [BlixApp("sheetslab", Summary = "write a 60 m thin sheet over a floor (--shell M: a closed slab M thick), as glTF: the closed form for thin-sheet transport")]
     public static int SheetSlab(AppArgs args)
     {
         var output = args.String("out") ?? "sheetslab.gltf";
@@ -232,14 +232,30 @@ public static class Program
         Quad(floor.UsePrimitive(Matte("floor", new Vector3(0.5f))), new Vector3(-half - 0.5f, 0f, -half - 0.5f),
             new(2f * half + 1f, 0, 0), new(0, 0, 2f * half + 1f), Vector3.UnitY);
         var sheet = new Mesh("sheet");
-        Quad(sheet.UsePrimitive(Cloth("sheet", new Vector3(0.8f), t, Vector3.One)), new Vector3(-half, height, -half),
-            new(2f * half, 0, 0), new(0, 0, 2f * half), Vector3.UnitY);
+        // --shell M: a closed slab M thick in place of the sheet (single-sided, as the teacup's walls: each face a thin
+        // sheet, the gap between them air) -- its bottom face at the height. The closed form for light through two walls.
+        var shell = args.Float("shell") ?? 0f;
+        if (shell > 0f)
+        {
+            var mat = Matte("shell", new Vector3(0.8f)).WithDiffuseTransmissionFactor(null, t).WithDiffuseTransmissionColor(null, Vector3.One);
+            var prim = sheet.UsePrimitive(mat);
+            var top = height + shell;
+            Quad(prim, new Vector3(-half, top, -half), new(2f * half, 0, 0), new(0, 0, 2f * half), Vector3.UnitY);
+            Quad(prim, new Vector3(-half, height, -half), new(2f * half, 0, 0), new(0, 0, 2f * half), -Vector3.UnitY);
+            Quad(prim, new Vector3(-half, height, -half), new(2f * half, 0, 0), new(0, shell, 0), -Vector3.UnitZ);
+            Quad(prim, new Vector3(-half, height, half), new(2f * half, 0, 0), new(0, shell, 0), Vector3.UnitZ);
+            Quad(prim, new Vector3(-half, height, -half), new(0, 0, 2f * half), new(0, shell, 0), -Vector3.UnitX);
+            Quad(prim, new Vector3(half, height, -half), new(0, 0, 2f * half), new(0, shell, 0), Vector3.UnitX);
+        }
+        else
+            Quad(sheet.UsePrimitive(Cloth("sheet", new Vector3(0.8f), t, Vector3.One)), new Vector3(-half, height, -half),
+                new(2f * half, 0, 0), new(0, 0, 2f * half), Vector3.UnitY);
         var scene = new SceneBuilder();
         scene.AddRigidMesh(floor, Matrix4x4.Identity);
         scene.AddRigidMesh(sheet, Matrix4x4.Identity);
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!);
         scene.ToGltf2().SaveGLTF(output);
-        Console.WriteLine($"sheetslab: a {2 * half:0} m sheet (0.8, transmission {t:0.##}) {height} m over a 0.5 floor -> {output}");
+        Console.WriteLine($"sheetslab: a {2 * half:0} m {(shell > 0f ? $"closed shell {shell} m thick" : "sheet")} (0.8, transmission {t:0.##}) {height} m over a 0.5 floor -> {output}");
         return 0;
     }
 

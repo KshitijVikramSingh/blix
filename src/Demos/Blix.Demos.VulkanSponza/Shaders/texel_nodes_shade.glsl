@@ -267,15 +267,18 @@ vec3 unpackPart(uint p) {
 // lagged step of it within 2.3%). The texels' light is the last resolve's, so the gather iterates on it; a texel not
 // gathered yet (word 1 bit 16) leaves the patch's. sNearTexel: the hit's likeliest texel, on the hit's side.
 // A texel's gathered light for a column (its part per unit of the sun's irradiance, scaled), or false before its gather.
-bool texelPartLight(uint id, int k, out vec3 l) {
+// anyStage: whatever wrote the part (a fine copy's coarse estimate too) -- a sheet's far side (nearTexelLight), which a
+// near hit reads for what comes through, not to replace a coarse estimate with its own gather.
+bool texelPartLight(uint id, int k, out vec3 l, bool anyStage) {
     bool sunColumn = k == int(u.uHitBlend.w);
     uvec2 w = sunColumn ? sunPart[id] : skyPart[id];
     if ((w.y & 0x10000u) == 0u) return false;
     uint code = (provenance[id / 4u] >> (8u * (id % 4u) + (sunColumn ? 0u : 4u))) & 0xFu;
-    if ((code < 1u || code > 4u) && code != 10u) return false;   // a gather's, or the lists' (texel_lists.comp)
+    if (!anyStage && (code < 1u || code > 4u) && code != 10u) return false;   // a gather's, or the lists' (texel_lists.comp)
     l = unpackPart(w.x) * (sunColumn ? u.uSunIrradiance.rgb : vec3(1.0));
     return true;
 }
+bool texelPartLight(uint id, int k, out vec3 l) { return texelPartLight(id, k, l, false); }
 
 bool nearTexelLight(int r, int k, out vec3 l) {
     if (u.uHitBlend.z < 0.5 || sNearTexel[r] < 0) return false;
@@ -291,12 +294,19 @@ bool nearTexelLight(int r, int k, out vec3 l) {
         vec3 p = texels[2u * id].xyz;
         uint twin = texels[2u * (id + 1u)].w < 0.0 && distance(texels[2u * (id + 1u)].xyz, p) < 1e-4 ? id + 1u
                   : id > 0u && texels[2u * (id - 1u)].w < 0.0 && distance(texels[2u * (id - 1u)].xyz, p) < 1e-4 ? id - 1u : id;
+        // The base lobe keeps 1 - T of the near side's light whatever the far side holds; the far side's light through
+        // it from whatever wrote the twin's part (a fine copy's too). Both were taken only with the twin's light a
+        // gather's: a closed shell's outer faces are mostly fine copies, so a near round's hits inside it reflected
+        // the whole of the near side and passed none of the far -- each wall an opaque mirror, the sheet shell's
+        // inside 1.26-1.47x its closed form, rising round by round (tools/gi-model/shell_slab.py, 2026-10-24).
         vec3 far;
-        if (twin != id && texelPartLight(twin, k, far)) {
+        vec3 through = vec3(0.0);
+        if (twin != id && texelPartLight(twin, k, far, true)) {
             // sHit's rgb is the hit's albedo x weight / pi: the far side's T c over the albedo, so add = weight / pi x T c x E.
             vec3 albedo = max(sHit[r].rgb / max(sRayWeight[r] / PI, 1e-8), vec3(1e-3));
-            l = l * (1.0 - sSheet[r].a) + far * sSheet[r].rgb / albedo;
+            through = far * sSheet[r].rgb / albedo;
         }
+        l = l * (1.0 - sSheet[r].a) + through;
     }
 #endif
     return true;

@@ -15,12 +15,14 @@ COOKED="$BLIX_TESTBED_ASSETS"
 SRC="${BLIX_TESTBED_SRC:-${COOKED%/}-src}"
 dotnet build "$REPO/src/Blix.Tools.Cook" -v quiet --nologo >/dev/null
 # cornell-panel: the Cornell box with a panel hung from the skylight's edge (`--mover panel` swings it across the light).
-for scene in cornell cornell-panel thinwall crevices crevices-dark drapes sheetslab; do
+for scene in cornell cornell-panel thinwall crevices crevices-dark drapes sheetslab sheetshell; do
     app="${scene%-panel}"
     app="${app%-dark}"
     extra=()
     [[ "$scene" == *-panel ]] && extra=(--panel)
     [[ "$scene" == *-dark ]] && extra=(--albedo 0.25)
+    # sheetshell: the sheet slab with a closed shell 1.5 cm thick (light through two walls, as the teacup's saucer).
+    [[ "$scene" == sheetshell ]] && { app=sheetslab; extra=(--shell 0.015); }
     "$REPO/blix" run --build "$app" ${extra[@]+"${extra[@]}"} --out "$SRC/$scene/$scene.gltf"
     rm -rf "${COOKED:?}/$scene"
     dotnet "$REPO/src/Blix.Tools.Cook/bin/Debug/net8.0/Blix.Tools.Cook.dll" asset "$SRC/$scene/$scene.gltf" --out "$COOKED/$scene"
