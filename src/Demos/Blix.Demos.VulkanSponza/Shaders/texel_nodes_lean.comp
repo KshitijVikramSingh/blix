@@ -37,6 +37,8 @@ layout(set = 0, binding = 0) uniform Lean {
     vec4 uSheets;   // x 1: sheets that let light through in the GI (SheetRows)
     vec4 uCapture;  // --ray-capture (SponzaLoop.RayCapture.cs): x 1 on, y the texels sampled (1 in 2^y), z the tag, w the room
     vec4 uCone;     // --cone-lookups: x the texel's rays (0 off), y the cells' size, z the patch spacing, w the patch light's columns
+    vec4 uLevels;   // the coarser patch levels (SponzaLoop.PatchLevels.cs): x how many (0: none)
+    vec4 uVolume;   // --cone-volume (SponzaLoop.ConeVolume.cs): x its levels (0: none), y the finest voxel, z the scene's extent
 } u;
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
@@ -67,6 +69,12 @@ layout(std430, set = 0, binding = 23) readonly buffer SunNodePatchLight { uvec2 
 layout(std430, set = 0, binding = 24) readonly buffer PatchNeighbours { int farNeighbours[]; };     // 8 a patch
 layout(std430, set = 0, binding = 25) readonly buffer CookedPatches { vec4 cookedPatch[]; };       // 3 a patch: pos, normal, ...
 layout(std430, set = 0, binding = 26) readonly buffer PatchDirect { uint patchDirect[]; };         // 2 a patch: n.l x 4096, texels
+layout(std430, set = 0, binding = 27) readonly buffer LevelNodes { vec4 levelNodes[]; };          // 2 a node: pos (w level), normal
+layout(std430, set = 0, binding = 28) readonly buffer LevelParents { int levelParents[]; };       // [patch][level - 1]
+layout(std430, set = 0, binding = 29) readonly buffer LevelNeighbours { int levelNeighbours[]; }; // 8 a node
+layout(std430, set = 0, binding = 30) readonly buffer LevelLight { vec4 levelLight[]; };          // 2 a node: sky, sun rgb
+layout(std430, set = 0, binding = 31) readonly buffer ConeVolume { uvec4 coneVolume[]; };   // [voxel][direction]: halves a, sky, sun
+layout(std430, set = 0, binding = 32) readonly buffer ConeVolumeMeta { vec4 coneMeta[]; };  // 2 a level: origin + voxel, dims + offset
 layout(std430, set = 0, binding = 22) buffer RayCapture { uint captureCount; uint capturePad[3]; uvec4 captured[]; };
 #include "texel_nodes.glsl"
 
@@ -83,6 +91,37 @@ vec3 patchColumn(int p, uint column) {
 // The patches' light over a footprint of radius reach about x (normal nx), its own patch first: the kernel the far set
 // and the cells use (zero at the reach, by the normals' agreement) over the patch and its 8 neighbours, the heaviest 4.
 void footprintLight(int p, vec3 x, vec3 nx, float reach, uint skyColumn, uint sunColumn, out vec3 sky, out vec3 sun) {
+    // Past a patch and its neighbours: the level whose spacing is the reach -- its node of this patch and its neighbours.
+    int levels = int(u.uLevels.x + 0.5);
+    // A node no wider than the footprint (rounded down): rounded to nearest, a node twice the footprint read a doorway's
+    // sunlit floor into the corridor's dark seams (+43% at points, 2026-10-23).
+    if (levels > 0 && reach >= 2.0 * u.uCone.z) {
+        int k = clamp(int(floor(log2(reach / u.uCone.z))), 1, levels);
+        int node = levelParents[p * levels + k - 1];
+        int ids[4] = int[4](-1, -1, -1, -1);
+        float ws[4] = float[4](0.0, 0.0, 0.0, 0.0);
+        for (int i = -1; i < 8; ++i) {
+            int c = i < 0 ? node : levelNeighbours[node * 8 + i];
+            if (c < 0) continue;
+            float d = length(x - levelNodes[2 * c].xyz) / reach;
+            float kk = max(1.0 - d * d, 0.0);
+            float w = kk * kk * smoothstep(0.5, 0.9, dot(nx, levelNodes[2 * c + 1].xyz));
+            if (w <= ws[3]) continue;
+            int at = 3;
+            while (at > 0 && ws[at - 1] < w) { ws[at] = ws[at - 1]; ids[at] = ids[at - 1]; --at; }
+            ws[at] = w; ids[at] = c;
+        }
+        float total = ws[0] + ws[1] + ws[2] + ws[3];
+        if (total <= 0.0) { ids[0] = node; ws[0] = 1.0; total = 1.0; }
+        sky = vec3(0.0); sun = vec3(0.0);
+        for (int i = 0; i < 4; ++i) {
+            if (ids[i] < 0 || ws[i] <= 0.0) continue;
+            sky += ws[i] * levelLight[2 * ids[i]].rgb;
+            sun += ws[i] * levelLight[2 * ids[i] + 1].rgb;
+        }
+        sky /= total; sun /= total;
+        return;
+    }
     int ids[4] = int[4](-1, -1, -1, -1);
     float ws[4] = float[4](0.0, 0.0, 0.0, 0.0);
     for (int i = -1; i < 8; ++i) {
@@ -107,6 +146,65 @@ void footprintLight(int p, vec3 x, vec3 nx, float reach, uint skyColumn, uint su
         sun += ws[i] * (patchColumn(ids[i], sunColumn) + u.uIrr.rgb * direct);
     }
     sky /= total; sun /= total;
+}
+
+// The volume at p for a ray along dir (SponzaLoop.ConeVolume.cs): its coverage and the light back toward the ray
+// (premultiplied), the three axes' entries facing the ray blended by dir's squares.
+void volumeVoxel(int level, ivec3 v, vec3 dir, float wt, inout float a, inout vec3 cs, inout vec3 cn) {
+    vec4 m1 = coneMeta[2 * level + 1];
+    ivec3 dims = ivec3(m1.xyz);
+    if (any(lessThan(v, ivec3(0))) || any(greaterThanEqual(v, dims))) return;
+    uint base = uint(m1.w) + uint(((v.z * dims.y + v.y) * dims.x + v.x) * 6);
+    vec3 w = dir * dir * wt;
+    for (int i = 0; i < 3; ++i) {
+        uvec4 e = coneVolume[base + uint(2 * i + (dir[i] >= 0.0 ? 0 : 1))];
+        vec2 h0 = unpackHalf2x16(e.x), h1 = unpackHalf2x16(e.y), h2 = unpackHalf2x16(e.z), h3 = unpackHalf2x16(e.w);
+        a += w[i] * h0.x;
+        cs += w[i] * vec3(h0.y, h1.x, h1.y);
+        cn += w[i] * vec3(h2.x, h2.y, h3.x);
+    }
+}
+
+// Trilinear over the level's voxel centres (nearest, a coarse voxel's floor read as a wall across a cone grazing over it).
+void volumeSample(int level, vec3 p, vec3 dir, out float a, out vec3 cs, out vec3 cn) {
+    a = 0.0; cs = vec3(0.0); cn = vec3(0.0);
+    vec4 m0 = coneMeta[2 * level];
+    vec3 c = (p - m0.xyz) / m0.w - 0.5;
+    ivec3 b = ivec3(floor(c));
+    vec3 f = c - vec3(b);
+    for (int k = 0; k < 8; ++k) {
+        ivec3 o = ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1);
+        vec3 t = mix(1.0 - f, f, vec3(o));
+        volumeVoxel(level, b + o, dir, t.x * t.y * t.z, a, cs, cn);
+    }
+}
+
+// The cone's march in front of its end (VCT's): from where its footprint reaches a voxel to tEnd, the level by its
+// footprint, front to back. Out: what it met (light per column, premultiplied, not yet x the ray's weight) and its
+// occlusion.
+float coneMarch(vec3 origin, vec3 dir, float r1, float tEnd, out vec3 sky, out vec3 sun) {
+    sky = vec3(0.0); sun = vec3(0.0);
+    int levels = int(u.uVolume.x + 0.5);
+    float v0 = u.uVolume.y;
+    float t = max(v0 / (2.0 * r1), v0);
+    float occ = 0.0;
+    for (int it = 0; it < 96 && t < tEnd && occ < 0.99; ++it) {
+        float dia = 2.0 * r1 * t;
+        int level = min(int(floor(log2(max(dia, v0) / v0))), levels - 1);   // no wider than the footprint
+        float vs = v0 * exp2(float(level));
+        float a; vec3 cs, cn;
+        volumeSample(level, origin + dir * t, dir, a, cs, cn);
+        float step = max(dia, vs) * 0.5;
+        if (a > 1e-4) {
+            float a2 = 1.0 - pow(1.0 - min(a, 0.999), step / vs);   // the coverage over this step's length
+            float k = a2 / a;
+            sky += (1.0 - occ) * cs * k;
+            sun += (1.0 - occ) * cn * k;
+            occ += (1.0 - occ) * a2;
+        }
+        t += step;
+    }
+    return occ;
 }
 
 // A texel's gathered light for a column (texel_nodes_shade.glsl's texelPartLight), or false before its gather.
@@ -233,7 +331,9 @@ void main() {
                 vec3 n0 = normalize(texels[2u * id + 1u].xyz);
                 float c0 = max(dot(n0, dir), 1e-3);
                 float omega = weight / (u.uCone.x * c0);                       // the ray's share of the hemisphere (sr)
-                float radius = dist * sqrt(omega / PI) / max(abs(dot(normal, dir)), 0.25);
+                // The cone's radius at the hit (not stretched by the hit's obliquity: a grazing footprint is a thin ellipse along
+                // the ray, and a disk that wide read the sunlit floor beside it).
+                float radius = dist * sqrt(omega / PI);
                 if (radius > u.uCone.y) {
                     uint cellAt = 1u + 2u * hitCells[0] + 2u * cellIndex;
                     int p = int(hitCells[cellAt + side] & 0xFFFFFFu) - 1;
@@ -256,6 +356,22 @@ void main() {
                 if (k == 0) l0 = albedoW * c; else l1 = albedoW * c;
             }
             known = 1.0;
+        }
+    }
+    // --cone-volume: the cone's occlusion and light in front of its end; what is left of it sees its end (the hit's
+    // footprint, or the sky). Not a near hit's (the search's): those end before a cone reaches a voxel.
+    if (u.uVolume.x > 0.5 && u.uCone.x > 0.5 && known < 1.5) {
+        vec3 n0v = normalize(texels[2u * id + 1u].xyz);
+        float r1 = sqrt(weight / (u.uCone.x * max(dot(n0v, dir), 1e-3)) / PI);
+        float tEnd = hit ? uintBitsToFloat(h0.x) * (1.0 - 2.0 * r1) : u.uVolume.z;
+        vec3 vs, vn;
+        float occ = coneMarch(nodeRays[slot * 2u].xyz, dir, r1, tEnd, vs, vn);
+        if (occ > 0.0) {
+            for (int k = 0; k < suns; ++k) {
+                uint kind = uint(sunNodes[k].w + 0.5);
+                vec3 met = weight * (((kind & 1u) != 0u ? vn : vec3(0.0)) + ((kind & 2u) != 0u ? vs : vec3(0.0)));
+                if (k == 0) l0 = (1.0 - occ) * l0 + met; else l1 = (1.0 - occ) * l1 + met;
+            }
         }
     }
     sLight[lid * 2u] = l0;

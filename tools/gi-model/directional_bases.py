@@ -19,6 +19,8 @@ same fit from every ray gives the basis's own error, without the noise.
   H6       H4 and xy, x^2 - y^2 per channel (the H-basis' span)
   HL2      the nine quadratic terms per channel
   hybrid   H4 per channel + the texel's colour x (luminance HL2 - luminance H4): 17 numbers
+  rays     no basis: the irradiance at each normal from the subset's rays themselves -- a gather per pixel along its own
+           normal (voxel cone tracing's per-pixel response), RAYS of them however many frames they took
 """
 import json
 import sys
@@ -26,7 +28,7 @@ from pathlib import Path
 
 import numpy as np
 
-RAYS = 128
+RAYS = int(next((a.split("=")[1] for a in sys.argv if a.startswith("--rays=")), 128))
 SHAPE_ONLY = '--shape' in sys.argv
 SUBSETS = 4
 LUM = np.array([0.2126, 0.7152, 0.0722])
@@ -75,6 +77,8 @@ def irradiance(w, l, n):
 def predict(name, w, l, n_eval):
     e_fit = irradiance(w, l, FIT)
     e0 = irradiance(w, l, np.array([[0.0, 0.0, 1.0]]))[0]
+    if name == "rays":
+        return irradiance(w, l, n_eval)   # a per-pixel gather: its rays about the pixel's own normal, no basis
     if name == "flat":
         return np.repeat(e0[None], len(n_eval), 0)
     if name == "tilt":
@@ -95,7 +99,7 @@ def predict(name, w, l, n_eval):
 
 
 def main():
-    variants = ["flat", "tilt", "H4", "H6", "HL2", "hybrid"]
+    variants = ["flat", "tilt", "H4", "H6", "HL2", "hybrid", "rays"]
     for dump in [a for a in sys.argv[1:] if not a.startswith('--')]:
         d = sorted(Path(dump).glob("view-*"))[-1]
         meta = json.loads((d / "meta.json").read_text())

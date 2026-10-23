@@ -1,0 +1,39 @@
+#version 450
+// Coarser patch levels (SponzaLoop.PatchLevels.cs): each node's light, its patches' mean -- per column their incident
+// light (SunNodePatchLight), the sun's column with their own direct sun (PatchDirect: their texels' mean n.l x
+// visibility, x the sun's irradiance): the form a footprint reads (texel_nodes_lean.comp, footprintLight). A thread a
+// node; LevelLight two vec4 a node: the sky column's rgb, the sun column's.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform Levels {
+    vec4 uLevels;   // x the nodes, y the patch light's columns, z the sky's column, w the sun's
+    vec4 uIrr;      // rgb the sun's irradiance
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer LevelMemberStart { uint memberStart[]; };
+layout(std430, set = 0, binding = 2) readonly buffer LevelMembers { uint members[]; };
+layout(std430, set = 0, binding = 3) readonly buffer SunNodePatchLight { uvec2 patchLight[]; };
+layout(std430, set = 0, binding = 4) readonly buffer PatchDirect { uint patchDirect[]; };   // 2 a patch: n.l x 4096, texels
+layout(std430, set = 0, binding = 5) writeonly buffer LevelLight { vec4 levelLight[]; };
+
+vec3 column(uint p, uint c) {
+    uvec2 w = patchLight[p * uint(u.uLevels.y) + c];
+    return vec3(unpackHalf2x16(w.x), unpackHalf2x16(w.y).x);
+}
+
+void main() {
+    uint node = gl_GlobalInvocationID.x;
+    if (node >= uint(u.uLevels.x)) return;
+    vec3 sky = vec3(0.0), sun = vec3(0.0);
+    uint a = memberStart[node], b = memberStart[node + 1u];
+    for (uint m = a; m < b; ++m) {
+        uint p = members[m];
+        float direct = patchDirect[2u * p + 1u] > 0u ? float(patchDirect[2u * p]) / 4096.0 / float(patchDirect[2u * p + 1u]) : 0.0;
+        sky += column(p, uint(u.uLevels.z));
+        sun += column(p, uint(u.uLevels.w)) + u.uIrr.rgb * direct;
+    }
+    float n = max(float(b - a), 1.0);
+    levelLight[2u * node] = vec4(sky / n, 0.0);
+    levelLight[2u * node + 1u] = vec4(sun / n, 0.0);
+}
