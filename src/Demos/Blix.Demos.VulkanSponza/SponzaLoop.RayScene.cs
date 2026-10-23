@@ -76,11 +76,13 @@ internal sealed partial class SponzaLoop
     private bool raySurfacesBaked;
     // --ray-region-triangles N: the most triangles a region holds before it is split (RayQueryScene).
     private int rayRegionTriangles = RayQueryScene.DefaultRegionTriangles;
-    // --ray-lod-error M: trace each mesh at its coarsest cooked level whose geometric error, carried into the world
-    // by the largest scale any of its placements gives it, stays within M metres. 0 traces full detail. 2 cm by
-    // default: the traced probe field's error against the full-detail reference is unchanged there (Sponza 0.0027,
-    // Bistro 0.0050) for 506 MB on the GPU rather than 781 (Sponza).
-    private float rayLodError = 0.02f;
+    // --ray-lod-error M (a measurement): trace each mesh at its coarsest cooked level whose geometric error, carried into
+    // the world by the largest scale any of its placements gives it, stays within M metres. Full detail (0) by default:
+    // every texel, its lift and its visibility rays stand on the surface the rays are traced against. At 2 cm (the old
+    // default, 506 MB on Sponza's GPU rather than 781) Crytek Sponza's vaults sat up to 2 cm behind their coarse
+    // surface: their texels' rays started inside it, 61% of the arcade ceilings' texels found no patch they could see
+    // (271 of 283 of their lines clear on the real triangles), and the vaults went black in the bounce (2026-10-23).
+    private float rayLodError = 0f;
 
     // At each mesh's coarsest level within lodError (null: rayLodError; 0: full detail -- the bake scene's).
     private RayMesh[] BuildRayMeshes(List<DrawableStaging> ordered, float? lodError = null)

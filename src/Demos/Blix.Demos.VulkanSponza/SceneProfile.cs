@@ -290,6 +290,11 @@ internal sealed record SceneProfile(
         SetupHint = "tools/testbeds/setup.sh with BLIX_TESTBED_KHRONOS=1 downloads and cooks it",
         Packs = new ScenePack[] { new("crytek-sponza", Required: true) },
         ProbeCandidates = Array.Empty<string>(),
+        // On the hall's floor at standing height, down the hall: Sponza's (-9, 3, 0) stands inside this model's west-end
+        // gallery floor (between its vaults' tops and the floor slab), where 8% of the first view read only buried
+        // records -- black where the camera saw the shell's inside (2026-10-23).
+        StartPosition = new Vector3(-6f, 1.7f, 0f),
+        StartPitch = 5f,
     };
 
     public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, CornellPanel, Drapes, SheetSlab, ThinWall, Crevices, CrevicesDark, CrevicesHashed, KhronosPlant, KhronosTeacup, KhronosTest, CrytekSponza };

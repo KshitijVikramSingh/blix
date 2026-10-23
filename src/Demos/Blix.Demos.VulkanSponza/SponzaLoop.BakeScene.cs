@@ -52,7 +52,8 @@ internal sealed partial class SponzaLoop
         var light = lightBakeOff || splitLight || File.Exists(lightPath) || File.Exists(ResolvedPathFor(lightPath));
         var buried = !lightmapEnabled || texelsStageKey is { } tk
             && (File.Exists(BuriedCachePath(tk)) || File.Exists(TransportStagePath(tk, "lightmap-records")));
-        if (light && buried)
+        // --lightmap-buried-why re-traces buried records against the bake scene: built for it.
+        if (light && buried && !lightmapBuriedWhy)
         {
             bakeSceneSkipped = true;
             Console.WriteLine("[VulkanSponza] bake scene: not built -- the buried flags and this sun's light are both cached.");

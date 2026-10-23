@@ -77,7 +77,8 @@ internal sealed partial class SponzaLoop
     private (Vector4[] Texels, uint[] IndexMap, uint[] Frames, int Count)? BakeLightmapTexels(RayQueryScene scene, string cacheKey)
     {
         lightmapRecordsKey = cacheKey;
-        var stored = LoadStage(cacheKey, "lightmap-records", r => r.ReadString() != LightmapRecordsRule ? null
+        // --lightmap-buried-why explains from where the camera stands: built each time, never read back.
+        var stored = lightmapBuriedWhy ? null : LoadStage(cacheKey, "lightmap-records", r => r.ReadString() != LightmapRecordsRule ? null
             : new LightmapRecords(ReadArray<Vector4>(r), ReadArray<uint>(r), ReadArray<uint>(r), r.ReadInt32()));
         if (stored is { } done) return (done.Texels, done.IndexMap, done.Frames, done.Count);
         var baked = BakeLightmapTexelsNow(scene, cacheKey);
@@ -97,7 +98,7 @@ internal sealed partial class SponzaLoop
     private const int LightmapRecordsVersion = 4;
     private string? lightmapRecordsKey;
     private string LightmapRecordsRule => string.Create(CultureInfo.InvariantCulture,
-        $"records v{LightmapRecordsVersion};atlas {lightmapAtlasWidth}x{lightmapAtlasHeight};{LightmapBuriedRule};contacts {ContactRays} {ContactShare} {ContactStep};budget {LightmapRecordBudgetBytes}");
+        $"records v{LightmapRecordsVersion};atlas {lightmapAtlasWidth}x{lightmapAtlasHeight};{LightmapBuriedRule};contacts {ContactRays} {ContactShare} {ContactStep};budget {LightmapRecordBudgetBytes}{(lightmapBuriedWhy ? ";why" : "")}");
 
     private (Vector4[] Texels, uint[] IndexMap, uint[] Frames, int Count)? BakeLightmapTexelsNow(RayQueryScene scene, string cacheKey)
     {
@@ -248,7 +249,8 @@ internal sealed partial class SponzaLoop
         var buriedCached = false;
         {
             var count = (int)records;
-            var flags = ReadBuriedCache(cacheKey, count, LightmapBuriedRule);
+            // --lightmap-buried-why: the test runs again (Metal, then held against the CPU's same rules).
+            var flags = lightmapBuriedWhy ? null : ReadBuriedCache(cacheKey, count, LightmapBuriedRule);
             buriedCached = flags is not null;
             flags ??= new bool[count];
             // On Metal when frame rays are (the frame tracer, built a few frames in; this runs on the cook's thread):
@@ -293,13 +295,15 @@ internal sealed partial class SponzaLoop
             }
             else if (!buriedCached)
                 Parallel.For(0, count, k => flags[k] = BuriedOnCpu(scene, texels!, k));
-            if (!buriedCached) WriteBuriedCache(cacheKey, flags, LightmapBuriedRule);
+            if (!buriedCached && !lightmapBuriedWhy) WriteBuriedCache(cacheKey, flags, LightmapBuriedRule);
             if (lightmapBuriedWhy) ExplainBuried(scene, texels!, flags);
+            testBuried = flags;
             for (var k = 0; k < count; k++)
                 if (flags[k]) { texels![2 * k].W = MathF.Sign(texels[2 * k].W); buried++; }
         }
         var (moved, buriedAfter) = LiftOffContacts(scene, texels!, map, w, h);
         buried += buriedAfter;
+        if (lightmapBuriedWhy && testBuried is { } tb) CountVisibleBuried(scene, texels!, tb);
         long gutter = 0;
         for (var pass = 0; pass < 2; pass++)
         {
@@ -551,20 +555,41 @@ internal sealed partial class SponzaLoop
         var byName = new Dictionary<string, int>();
         var distances = new int[5];   // < 1 cm, < 5 cm, < 10 cm, < 30 cm, beyond
         int behindBack = 0, behindFront = 0, behindNone = 0, hits = 0;
+        // Per record: its near back-face rays (of 64, within the reach: the near rule's count), and of 64 more at any
+        // distance, the back faces met first and the open ones (a front face past 1 m, or nothing) -- a record inside
+        // a solid or at a joint against one against a visible one beside open shells (2026-10-23, crytek-sponza).
+        var nearHist = new int[9];
+        var openHist = new int[9];
+        var anyBackHist = new int[9];
         foreach (var k in picked)
         {
             var p = new Vector3(texels[2 * k].X, texels[2 * k].Y, texels[2 * k].Z);
             var n = Vector3.Normalize(new Vector3(texels[2 * k + 1].X, texels[2 * k + 1].Y, texels[2 * k + 1].Z));
             var r = new Random(911 + k);
+            var near = 0;
+            {
+                var r2 = new Random(1911 + k);
+                int open = 0, anyBack = 0;
+                for (var t = 0; t < 64; t++)
+                {
+                    var far = scene.Closest(new Ray(p + n * LightmapBuriedLift, CosineHemisphereCpu(n, r2)), 0f, float.PositiveInfinity, (uint)r2.Next());
+                    if (far is not { } f || (f.FrontFace && f.T > 1f)) open++;
+                    else if (!f.FrontFace && !rayPlacementGiTwoSided[f.Instance]) anyBack++;
+                }
+                openHist[Math.Min(8, open / 8)]++;
+                anyBackHist[Math.Min(8, anyBack / 8)]++;
+            }
             for (var t = 0; t < 64; t++)
                 if (scene.Closest(new Ray(p + n * LightmapBuriedLift, CosineHemisphereCpu(n, r)), 0f, lightmapBuriedReach, (uint)r.Next()) is { FrontFace: false } hit
                     && !rayPlacementGiTwoSided[hit.Instance])
                 {
+                    near++;
                     hits++;
                     var name = rayPlacementNames[hit.Instance];
                     byName[name] = byName.GetValueOrDefault(name) + 1;
                     distances[hit.T < 0.01f ? 0 : hit.T < 0.05f ? 1 : hit.T < 0.1f ? 2 : hit.T < 0.3f ? 3 : 4]++;
                 }
+            nearHist[Math.Min(8, near / 8)]++;
             var behind = scene.Closest(new Ray(p + n * 0.005f, -n), 0f, 0.02f, 1u);
             if (behind is null) behindNone++;
             else if (behind.Value.FrontFace) behindFront++;
@@ -574,12 +599,57 @@ internal sealed partial class SponzaLoop
             $"[VulkanSponza] buried, why ({picked.Count:N0} records the camera sees within 12 m, {hits:N0} back-face hits): met at < 1 cm {distances[0]:N0}, < 5 cm {distances[1]:N0}, < 10 cm {distances[2]:N0}, < 30 cm {distances[3]:N0}; straight behind each: its own front face {behindFront:N0}, a back face {behindBack:N0}, nothing within 2 cm {behindNone:N0}."));
         foreach (var (name, c) in byName.OrderByDescending(x => x.Value).Take(12))
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {c,7:N0}  {name}"));
+        string Hist(int[] h) => string.Join(" ", h.Select((c, i) => i < 8 ? $"{i * 8}-{i * 8 + 7}:{c}" : $"64:{c}"));
+        Console.WriteLine($"    per record, of 64 rays -- near back faces (the rule's): {Hist(nearHist)}");
+        Console.WriteLine($"    per record, of 64 rays -- back faces met first at any distance: {Hist(anyBackHist)}");
+        Console.WriteLine($"    per record, of 64 rays -- open (a front face past 1 m, or nothing): {Hist(openHist)}");
+    }
+
+    private bool[]? testBuried;
+
+    // --lightmap-buried-why: every buried record the camera sees within 12 m (not capped), by what buried it -- the test
+    // with its near rule confirmed on the CPU (back faces within the reach in a quarter of 64 rays), the test where the
+    // CPU sees no such quarter (the contact table's touching triangles, Metal's own), or the contact mover (LiftOffContacts).
+    private void CountVisibleBuried(RayQueryScene scene, Vector4[] texels, bool[] byTest)
+    {
+        var eye = cameraPosition;
+        int confirmed = 0, enclosed = 0, testOnly = 0, mover = 0, live = 0;
+        var moverNames = new Dictionary<string, int>();
+        var testOnlyNames = new Dictionary<string, int>();
+        for (var k = 0; k < byTest.Length; k++)
+        {
+            var p = new Vector3(texels[2 * k].X, texels[2 * k].Y, texels[2 * k].Z);
+            var toward = p - eye;
+            var d = toward.Length();
+            if (d > 12f || d < 0.1f) continue;
+            if (!(scene.Closest(new Ray(eye, toward / d), 0f, d + 0.02f, 1u) is { } seen && seen.T > d - 0.02f)) continue;
+            var buriedNow = MathF.Abs(texels[2 * k].W) < 2f;
+            if (!buriedNow) { live++; continue; }
+            var n = Vector3.Normalize(new Vector3(texels[2 * k + 1].X, texels[2 * k + 1].Y, texels[2 * k + 1].Z));
+            var under = scene.Closest(new Ray(p + n * 0.01f, -n), 0f, 0.05f, 1u);
+            var name = under is { } h ? rayPlacementNames[h.Instance] : "(nothing under it)";
+            if (!byTest[k]) { mover++; moverNames[name] = moverNames.GetValueOrDefault(name) + 1; continue; }
+            // The CPU's own rule, the same contact table and jitter (BuriedOnCpu): its near rule, then its enclosed one.
+            var cpu = BuriedOnCpu(scene, texels, k, out var byNear);
+            if (!cpu) { testOnly++; testOnlyNames[name] = testOnlyNames.GetValueOrDefault(name) + 1; }
+            else if (byNear) confirmed++;
+            else enclosed++;
+        }
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[VulkanSponza] buried in sight (12 m): live {live:N0}; buried by Metal and the CPU's near rule {confirmed:N0}, and its enclosed rule {enclosed:N0}; by Metal alone {testOnly:N0}; by the contact mover {mover:N0}."));
+        foreach (var (nm, c) in testOnlyNames.OrderByDescending(x => x.Value).Take(6))
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    Metal alone        {c,7:N0}  on {nm}"));
+        foreach (var (nm, c) in moverNames.OrderByDescending(x => x.Value).Take(6))
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    contact mover      {c,7:N0}  on {nm}"));
     }
 
     // The buried test on the CPU, one record: as the Metal kernel (blix_buried), on the CPU scene with the same contact
     // table and jitter (ClosestThroughContacts).
-    private bool BuriedOnCpu(RayQueryScene scene, Vector4[] texels, int k)
+    private bool BuriedOnCpu(RayQueryScene scene, Vector4[] texels, int k) => BuriedOnCpu(scene, texels, k, out _);
+
+    private bool BuriedOnCpu(RayQueryScene scene, Vector4[] texels, int k, out bool byNear)
     {
+        byNear = false;
         var p = new Vector3(texels[2 * k].X, texels[2 * k].Y, texels[2 * k].Z);
         var n = new Vector3(texels[2 * k + 1].X, texels[2 * k + 1].Y, texels[2 * k + 1].Z);
         if (n.LengthSquared() < 1e-12f) return false;
@@ -591,7 +661,7 @@ internal sealed partial class SponzaLoop
         for (var t = 0; t < tests && back < threshold; t++)
             if (ClosestThroughContacts(scene, new Ray(origin, CosineHemisphereCpu(n, r)), 0f, lightmapBuriedReach, (uint)r.Next()) is { FrontFace: false } hit
                 && !rayPlacementGiTwoSided[hit.Instance]) back++;
-        if (back >= threshold) return true;
+        if (back >= threshold) { byNear = true; return true; }
         var escaped = 0;
         for (var t = 0; t < LightmapEnclosedTests; t++)
         {
