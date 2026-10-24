@@ -32,6 +32,7 @@ layout(set = 0, binding = 12) uniform sampler2D uTexelCascadeMaps[3];
 #include "shadow.glsl"
 layout(std430, set = 0, binding = 3) readonly buffer TexelHash { uvec4 texelHash[]; };
 layout(std430, set = 0, binding = 4) readonly buffer Texels { vec4 texels[]; };
+#include "texel_record.glsl"
 layout(std430, set = 0, binding = 5) readonly buffer TexelLight { vec4 texelLight[]; };
 layout(std430, set = 0, binding = 6) buffer TexelStamp { uint texelStamp[]; };
 // [parity * 4 + list] the counts; the four lists after them at 8 + list * capacity.
@@ -52,8 +53,6 @@ layout(set = 0, binding = 13) uniform usampler2D uLightmapTexel;
 layout(set = 0, binding = 14) uniform usampler2D uLightmapIndexTex;
 #define TEXEL_INDEX_MAP(i) texelFetch(uLightmapIndexTex, ivec2(int(i) % textureSize(uLightmapIndexTex, 0).x, int(i) / textureSize(uLightmapIndexTex, 0).x), 0).r
 #define TEXEL_HASH(i) texelHash[i]
-#define TEXEL_POSITION(i) texels[2 * (i)]
-#define TEXEL_NORMAL(i) texels[2 * (i) + 1]
 #include "texel.glsl"
 
 // The pixel's own direct sun, 0-1, for its texel level (texelLevelFor): facing away, or shadowed in the cascades, is

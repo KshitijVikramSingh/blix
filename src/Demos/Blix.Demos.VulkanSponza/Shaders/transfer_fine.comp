@@ -19,6 +19,7 @@ layout(set = 0, binding = 0) uniform TransferFine {
 
 layout(std430, set = 0, binding = 1) readonly buffer TexelHash { uvec4 texelHash[]; };
 layout(std430, set = 0, binding = 2) readonly buffer Texels { vec4 texels[]; };
+#include "texel_record.glsl"
 layout(std430, set = 0, binding = 3) readonly buffer FineIds { uint fineIds[]; };
 layout(std430, set = 0, binding = 4) buffer SplitSky { uvec2 skyPart[]; };
 layout(std430, set = 0, binding = 5) buffer SplitSun { uvec2 sunPart[]; };
@@ -41,8 +42,6 @@ layout(std430, set = 0, binding = 10) buffer FineFlags { uint fineFlags[]; };
 
 
 #define TEXEL_HASH(i) texelHash[i]
-#define TEXEL_POSITION(i) texels[2 * (i)]
-#define TEXEL_NORMAL(i) texels[2 * (i) + 1]
 #include "texel.glsl"
 #define TEXEL_SHAPE_NO_STORE
 #include "texel_shape.glsl"
@@ -82,8 +81,8 @@ void main() {
     uint t = gl_GlobalInvocationID.x + uint(u.uFine.y);
     if (t >= uint(u.uFine.x)) return;
     uint id = fineIds[t];
-    vec3 p = texels[2u * id].xyz;
-    vec3 n = texels[2u * id + 1u].xyz;
+    vec3 p = TEXEL_POSITION(id).xyz;
+    vec3 n = TEXEL_NORMAL(id).xyz;
     if (dot(n, n) < 1e-12) return;
     n = normalize(n);
     TexelGrid g;
@@ -112,7 +111,7 @@ void main() {
             uint k = 0u;
             for (int c = 0; c < TEXEL_CANDIDATES && k < 15u; ++c) {
                 if (ids[c] < 0 || weights[c] <= 0.0) continue;
-                vec3 dn = texels[2u * uint(ids[c]) + 1u].xyz;
+                vec3 dn = TEXEL_NORMAL(uint(ids[c])).xyz;
                 fineDebug[t * 32u + 2u * k] = uint(ids[c]);
                 // Negative: cut by the normal.
                 fineDebug[t * 32u + 2u * k + 1u] = floatBitsToUint(dot(dn, dn) > 1e-12 && dot(n, normalize(dn)) > 0.95 ? weights[c] : -weights[c]);
@@ -125,7 +124,7 @@ void main() {
             // Turned its way only: a coarse cell can average a wall with the ledge under it (its normal 45 degrees down,
             // and its gather the sunlit floor's bounce -- right for it, cell-sized bright blocks copied onto the wall,
             // 2026-10-19). None turned its way: its instant light stands.
-            vec3 cn = texels[2u * cid + 1u].xyz;
+            vec3 cn = TEXEL_NORMAL(cid).xyz;
             // The lookup also reads the bins a tilt away (texel.glsl): a wall's texel with no wall cell near took the ledge
             // cell's whole light once the weights were normalised -- a soft weight did not keep it out.
             float w = dot(n, cn) * inversesqrt(max(dot(cn, cn), 1e-12)) > 0.95 ? weights[c] : 0.0;
@@ -185,8 +184,8 @@ void main() {
         // both its sides, so the copy is wrong there in a way no flag above sees, and the ones the flags did pick sat
         // among copied ones a step apart -- the folded curtains stair-stepped along the atlas's texels, the steps exactly
         // the flags' patchwork (Sponza, 2026-10-21). Ranked after the contacts (1000 and over), before the rest.
-        bool pairFront = texels[2u * id].w < 0.0;
-        bool pairBack = id > 0u && texels[2u * (id - 1u)].w < 0.0 && texels[2u * id + 1u].w == texels[2u * (id - 1u) + 1u].w;
+        bool pairFront = TEXEL_POSITION(id).w < 0.0;
+        bool pairBack = id > 0u && TEXEL_POSITION(id - 1u).w < 0.0 && TEXEL_NORMAL(id).w == TEXEL_NORMAL(id - 1u).w;
         bool cloth = u.uKeep.y > 0.5 && (pairFront || pairBack);
         if (cloth && score < 500.0) flag(11u, 500.0 + score / 1000.0);   // its copy below still written: what a cut leaves it
         else if (score > 2.0) flag(disagree >= max(keptRatio, cutRatio) ? 3u : keptRatio >= cutRatio ? 2u : 10u, score);

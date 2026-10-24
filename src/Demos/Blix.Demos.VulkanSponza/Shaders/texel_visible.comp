@@ -19,14 +19,13 @@ layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
 layout(set = 0, binding = 2) uniform sampler2D uPrepassNormal;
 layout(std430, set = 0, binding = 3) readonly buffer TexelHash { uvec4 texelHash[]; };
 layout(std430, set = 0, binding = 4) readonly buffer Texels { vec4 texels[]; };
+#include "texel_record.glsl"
 layout(std430, set = 0, binding = 5) buffer TexelVisibleBits { uint visibleBits[]; };
 layout(set = 0, binding = 6) uniform usampler2D uLightmapTexel;
 // The atlas's map from texel to record, as an R32UI texture (SponzaLoop.LightmapGather.cs).
 layout(set = 0, binding = 7) uniform usampler2D uLightmapIndexTex;
 #define TEXEL_INDEX_MAP(i) texelFetch(uLightmapIndexTex, ivec2(int(i) % textureSize(uLightmapIndexTex, 0).x, int(i) / textureSize(uLightmapIndexTex, 0).x), 0).r
 #define TEXEL_HASH(i) texelHash[i]
-#define TEXEL_POSITION(i) texels[2 * (i)]
-#define TEXEL_NORMAL(i) texels[2 * (i) + 1]
 #include "texel.glsl"
 
 void markTexel(int id) {

@@ -19,6 +19,7 @@ layout(set = 0, binding = 0) uniform TexelFilter {
 
 layout(std430, set = 0, binding = 1) readonly buffer TexelHash { uvec4 texelHash[]; };
 layout(std430, set = 0, binding = 2) readonly buffer Texels { vec4 texels[]; };
+#include "texel_record.glsl"
 layout(std430, set = 0, binding = 3) readonly buffer TexelBlend { vec4 texelBlend[]; };
 layout(std430, set = 0, binding = 4) buffer TexelFiltered { vec4 texelFiltered[]; };
 // [parity] the counts (this frame's mark adds to set frame & 1; this pass zeroes the other), the list after them.
@@ -28,8 +29,6 @@ layout(std430, set = 0, binding = 5) buffer TexelFilterList { uint texelFilterLi
 layout(set = 0, binding = 6) uniform usampler2D uLightmapIndexTex;
 #define TEXEL_INDEX_MAP(i) texelFetch(uLightmapIndexTex, ivec2(int(i) % textureSize(uLightmapIndexTex, 0).x, int(i) / textureSize(uLightmapIndexTex, 0).x), 0).r
 #define TEXEL_HASH(i) texelHash[i]
-#define TEXEL_POSITION(i) texels[2 * (i)]
-#define TEXEL_NORMAL(i) texels[2 * (i) + 1]
 #include "texel.glsl"
 #include "texel_filter_neighbour.glsl"
 

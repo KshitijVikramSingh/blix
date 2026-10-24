@@ -45,6 +45,7 @@ layout(set = 0, binding = 0) uniform Lean {
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
 layout(std430, set = 0, binding = 2) readonly buffer Texels { vec4 texels[]; };
+#include "texel_record.glsl"
 layout(std430, set = 0, binding = 3) readonly buffer NodeRays { vec4 nodeRays[]; };
 layout(std430, set = 0, binding = 4) readonly buffer NodeHits { uvec4 nodeHits[]; };
 layout(std430, set = 0, binding = 5) readonly buffer SunNodes { vec4 sunNodes[]; };          // per column: toward, kind
@@ -243,10 +244,10 @@ void main() {
                 uint t = uint(likeliest);
                 // A sheet's far side: the pair's other record (same position; SponzaLoop.Lightmap.cs).
                 uint twin = t;
-                if (sheet.a > 0.0 && texels[2u * t].w < 0.0) {
-                    vec3 p = texels[2u * t].xyz;
-                    twin = texels[2u * (t + 1u)].w < 0.0 && distance(texels[2u * (t + 1u)].xyz, p) < 1e-4 ? t + 1u
-                         : t > 0u && texels[2u * (t - 1u)].w < 0.0 && distance(texels[2u * (t - 1u)].xyz, p) < 1e-4 ? t - 1u : t;
+                if (sheet.a > 0.0 && TEXEL_POSITION(t).w < 0.0) {
+                    vec3 p = TEXEL_POSITION(t).xyz;
+                    twin = TEXEL_POSITION(t + 1u).w < 0.0 && distance(TEXEL_POSITION(t + 1u).xyz, p) < 1e-4 ? t + 1u
+                         : t > 0u && TEXEL_POSITION(t - 1u).w < 0.0 && distance(TEXEL_POSITION(t - 1u).xyz, p) < 1e-4 ? t - 1u : t;
                 }
                 vec3 albedo = max(unpackUnorm4x8(h2.w).rgb, vec3(1e-3));
                 bool all = true;
@@ -294,7 +295,7 @@ void main() {
                 sun = max(sun - u.uIrr.rgb * cellNl * frac, vec3(0.0)) + u.uIrr.rgb * max(dot(hn, toSun), 0.0) * exactVis;
             }
             if (u.uCone.x > 0.5) {
-                vec3 n0 = normalize(texels[2u * id + 1u].xyz);
+                vec3 n0 = normalize(TEXEL_NORMAL(id).xyz);
                 float c0 = max(dot(n0, dir), 1e-3);
                 float omega = weight / (u.uCone.x * c0);                       // the ray's share of the hemisphere (sr)
                 // The cone's radius at the hit (not stretched by the hit's obliquity: a grazing footprint is a thin ellipse along
@@ -329,7 +330,7 @@ void main() {
     sLight[lid * 2u + 1u] = l1;
     sKnown[lid] = known;
     float dist = hit ? uintBitsToFloat(h0.x) : 1e30;
-    bool sheetTexel = abs(texels[2u * id].w) > 4.5;   // a surface that lets light through keeps no far part
+    bool sheetTexel = abs(TEXEL_POSITION(id).w) > 4.5;   // a surface that lets light through keeps no far part
     sFar[lid] = (dist >= u.uNear.y || !hit) && !sheetTexel ? 1.0 : 0.0;
     sNear[lid] = hit && dist < u.uNear.y ? 1.0 : 0.0;
     barrier();
@@ -357,7 +358,7 @@ void main() {
         if (single ? id == uint(-u.uCapture.y - 1.0) : (bits == 0u || ((id * 2654435761u) >> (32u - bits)) == 0u)) {
             uint at = atomicAdd(captureCount, 1u);
             if (at < uint(u.uCapture.w)) {
-                vec3 n0 = normalize(texels[2u * id + 1u].xyz);
+                vec3 n0 = normalize(TEXEL_NORMAL(id).xyz);
                 float c0 = dot(n0, dir);
                 vec3 l = (l0 + l1) / max(c0, 1e-4);   // the ray's contribution over its cosine: radiance / pdf
                 vec3 d = dir / (abs(dir.x) + abs(dir.y) + abs(dir.z));
@@ -376,11 +377,11 @@ void main() {
     }
     bool h4 = u.uExact.z > 0.5 && u.uNear.x < 1.5;
     if (h4) {
-        vec3 ns = recordH4Normal(id, normalize(texels[2u * id + 1u].xyz), u.uExact.w > 0.5);
+        vec3 ns = recordH4Normal(id, normalize(TEXEL_NORMAL(id).xyz), u.uExact.w > 0.5);
         recordH4Ray(ns, dir, l0 + l1, sH4[lid * 3u], sH4[lid * 3u + 1u], sH4[lid * 3u + 2u]);
     }
     if (u.uDetail.y > 0.5) {
-        vec3 n = normalize(texels[2u * id + 1u].xyz);
+        vec3 n = normalize(TEXEL_NORMAL(id).xyz);
         vec3 t1 = normalize(cross(abs(n.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0), n));
         vec3 t2 = cross(n, t1);
         vec2 g = vec2(dot(t1, dir), dot(t2, dir)) / max(dot(n, dir), 0.1);
@@ -427,7 +428,7 @@ void main() {
         else {
             float plain = 0.0;
             for (int r = 0; r < RAYS; ++r) plain += dot(sLight[r * 2] + sLight[r * 2 + 1], lumW);
-            vec3 ns = recordH4Normal(id, normalize(texels[2u * id + 1u].xyz), u.uExact.w > 0.5);
+            vec3 ns = recordH4Normal(id, normalize(TEXEL_NORMAL(id).xyz), u.uExact.w > 0.5);
             after = vec4(before.x + plain / float(RAYS), uintBitsToFloat(packSnorm2x16(recordH4Oct(ns))), 0.0, before.w + 1.0);
         }
         texelH4[at4] = after;

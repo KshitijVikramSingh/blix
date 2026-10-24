@@ -23,6 +23,7 @@ layout(set = 0, binding = 0) uniform LiveDirect {
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
+#include "texel_record.glsl"
 layout(std430, set = 0, binding = 2) readonly buffer LiveIds { uint liveIds[]; };
 layout(std430, set = 0, binding = 3) readonly buffer TexelPatch { int texelPatch[]; };
 layout(std430, set = 0, binding = 4) readonly buffer SunNodeBits { uint sunBits[]; };
@@ -52,8 +53,8 @@ void main() {
     }
     if (mode == 1) {
         uint id = liveIds[uint(u.uDirect.z) + t];
-        vec3 n = texels[2u * id + 1u].xyz;
-        if (dot(n, n) < 1e-12 || abs(texels[2u * id].w) < 2.0) return;   // no normal, or buried
+        vec3 n = TEXEL_NORMAL(id).xyz;
+        if (dot(n, n) < 1e-12 || abs(TEXEL_POSITION(id).w) < 2.0) return;   // no normal, or buried
         n = normalize(n);
         // A texel with no patch of its own lights none: the nearest facing patch anywhere lay through walls -- the
         // sunlit floor strip outside crevices' far wall (the floor running on under the wall) lit the corridor's

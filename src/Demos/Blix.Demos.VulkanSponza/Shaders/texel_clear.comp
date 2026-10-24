@@ -15,6 +15,7 @@ layout(set = 0, binding = 0) uniform TexelClearParams {
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
+#include "texel_record.glsl"
 layout(std430, set = 0, binding = 2) readonly buffer SunNodesLive { uint liveIds[]; };
 layout(std430, set = 0, binding = 3) buffer NodeRays { vec4 nodeRays[]; };          // 2 a ray: origin, tMin; dir, tMax
 layout(std430, set = 0, binding = 4) readonly buffer NodeHits { uvec4 nodeHits[]; };  // 3 a ray: t, bary, flags (1 hit); ...
@@ -40,9 +41,9 @@ void main() {
     }
     uint id = liveIds[uint(u.uClear.x) + i];
     if (u.uClear.w < 0.5) {
-        vec3 n = texels[2u * id + 1u].xyz;
+        vec3 n = TEXEL_NORMAL(id).xyz;
         float len = length(n);
-        nodeRays[2u * i] = vec4(texels[2u * id].xyz, len > 1e-12 ? 5e-4 : 0.0);
+        nodeRays[2u * i] = vec4(TEXEL_POSITION(id).xyz, len > 1e-12 ? 5e-4 : 0.0);
         nodeRays[2u * i + 1u] = len > 1e-12 ? vec4(n / len, u.uClear.z) : vec4(0.0, 1.0, 0.0, 0.0);
         return;
     }

@@ -34,6 +34,7 @@ layout(std430, set = 0, binding = 5) buffer TransferTable { uint table[]; };   /
 layout(std430, set = 0, binding = 10) buffer TransferStats { uint stats[]; };
 layout(std430, set = 0, binding = 11) readonly buffer FarRecord { uint farRecord[]; };
 layout(std430, set = 0, binding = 12) readonly buffer Texels { vec4 texels[]; };
+#include "texel_record.glsl"
 
 // A direction's bin about a normal (6 x 6 octahedral over its hemisphere, texel_far.glsl's farBin's mapping and frame).
 int hemiBin(vec3 n, vec3 d) {
@@ -109,7 +110,7 @@ void main() {
         bool far = !isinf(nodeRays[2u * slot + 1u].w);
         uint room = uint(u.uSlice.w);
         uint pid = liveIds[uint(u.uSlice.z) + texel];
-        int hb = far ? primaryBin(pid, dir) : hemiBin(normalize(texels[2u * pid + 1u].xyz), dir);
+        int hb = far ? primaryBin(pid, dir) : hemiBin(normalize(TEXEL_NORMAL(pid).xyz), dir);
         if (hb < 0) return;   // cut, so its patch knew it -- or below the texel: none would be a mismatch
         uint bin = uint(hb);
         uint binsAt = room * uint(TABLE) * 5u + room + (far ? 0u : room * 64u) + texel * 64u + bin;

@@ -25,6 +25,7 @@ layout(set = 0, binding = 0) uniform TexelPatchLight {
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
+#include "texel_record.glsl"
 layout(std430, set = 0, binding = 2) readonly buffer LiveIds { uint liveIds[]; };
 layout(std430, set = 0, binding = 3) readonly buffer TexelPatch { int texelPatch[]; };
 layout(std430, set = 0, binding = 4) readonly buffer SunNodePatchLight { uvec2 patchLight[]; };   // [patch][column]: half rgb
@@ -80,8 +81,8 @@ void main() {
     uint t = gl_GlobalInvocationID.x + uint(u.uPass.y);
     if (t >= uint(u.uPass.x)) return;
     uint id = liveIds[t];
-    vec3 p = texels[2u * id].xyz;
-    vec3 n = texels[2u * id + 1u].xyz;
+    vec3 p = TEXEL_POSITION(id).xyz;
+    vec3 n = TEXEL_NORMAL(id).xyz;
     if (dot(n, n) < 1e-12) return;
     n = normalize(n);
     int fp = texelPatch[id];

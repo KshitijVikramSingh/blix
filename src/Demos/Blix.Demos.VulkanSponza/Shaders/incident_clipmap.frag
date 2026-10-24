@@ -153,6 +153,7 @@ layout(std430, set = 0, binding = 9) readonly buffer SurfaceIndex { uint surface
 #include "probe_surface.glsl"
 layout(std430, set = 0, binding = 10) readonly buffer TexelHash { uvec4 texelHash[]; };
 layout(std430, set = 0, binding = 11) readonly buffer Texels { vec4 texels[]; };
+#include "texel_record.glsl"
 layout(std430, set = 0, binding = 12) readonly buffer TexelLight { vec4 texelLight[]; };
 // A texel's old light while its gather for a new sun is young (texel_gather.comp): blended out over 256 rays.
 layout(std430, set = 0, binding = 13) readonly buffer TexelPrior { vec4 texelPrior[]; };
@@ -243,8 +244,6 @@ float viewFacing = 0.0, viewFacingWeight = 0.0, viewAway = 0.0;
 uint pixelLightmapTexel;
 ivec2 pixelAt;   // the pixel whose lightmap texel pixelLightmapTexel is (uLightmapTexel's)
 #define TEXEL_HASH(i) texelHash[i]
-#define TEXEL_POSITION(i) texels[2 * (i)]
-#define TEXEL_NORMAL(i) texels[2 * (i) + 1]
 #include "texel.glsl"
 
 // The pixel's own direct sun, 0-1, for its texel level (texelLevelFor): facing away, or shadowed in the cascades, is

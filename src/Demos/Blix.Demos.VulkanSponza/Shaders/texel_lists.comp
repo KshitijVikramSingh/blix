@@ -29,6 +29,7 @@ layout(std430, set = 0, binding = 3) readonly buffer ListStart { uint listStart[
 layout(std430, set = 0, binding = 4) readonly buffer ListWords { uint words[]; };
 layout(std430, set = 0, binding = 5) readonly buffer ListNorm { vec2 listNorm[]; };       // 1 / its rays, its scale
 layout(std430, set = 0, binding = 6) readonly buffer Texels { vec4 texels[]; };
+#include "texel_record.glsl"
 layout(std430, set = 0, binding = 7) readonly buffer SunNodeBits { uint sunBits[]; };
 layout(std430, set = 0, binding = 8) readonly buffer CellLight { uint cellLight[]; };
 layout(std430, set = 0, binding = 9) readonly buffer PrevSky { uvec2 prevSky[]; };
@@ -90,7 +91,7 @@ void main() {
         uint step = w >> 22;
         t = step == 1023u ? words[at++] : t + step;
         vec3 rgb = entryRgb(w);
-        vec3 n = texels[2u * t + 1u].xyz;
+        vec3 n = TEXEL_NORMAL(t).xyz;
         float nl = dot(n, n) > 1e-12 ? max(dot(normalize(n), u.uToSun.xyz), 0.0) : 0.0;
         float lit = (sunBits[t * sunWords + bit / 32u] >> (bit % 32u)) & 1u;
         vec3 s = rgb * unpackRgb9e5(prevSky[t].x);

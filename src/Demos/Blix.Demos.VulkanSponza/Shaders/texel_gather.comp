@@ -39,6 +39,7 @@ layout(set = 0, binding = 2) uniform sampler2D uCascadeShadowMaps[3];
 #include "shadow.glsl"
 #include "cascade_receivers.glsl"
 layout(std430, set = 0, binding = 3) readonly buffer Texels { vec4 texels[]; };
+#include "texel_record.glsl"
 layout(std430, set = 0, binding = 4) buffer TexelLight { vec4 texelLight[]; };
 layout(std430, set = 0, binding = 5) buffer TexelQueue { uint texelQueue[]; };
 // The patch light a texel's rays were read from: a texel from an older epoch keeps its estimate as one pass's worth.
@@ -156,8 +157,8 @@ void main() {
         return;
     }
 
-    vec3 position = texels[2 * id].xyz;
-    vec3 n = texels[2 * id + 1].xyz;
+    vec3 position = TEXEL_POSITION(id).xyz;
+    vec3 n = TEXEL_NORMAL(id).xyz;
     uint ray = gl_LocalInvocationID.x;
     if (ray == 0u) sGuide = cookedNearest(position, n);
     barrier();

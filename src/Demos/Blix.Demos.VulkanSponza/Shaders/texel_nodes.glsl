@@ -4,8 +4,7 @@
 #ifndef TEXEL_NODES_GLSL
 #define TEXEL_NODES_GLSL
 
-#define TEXEL_POSITION(i) texels[2 * (i)]
-#define TEXEL_NORMAL(i) texels[2 * (i) + 1]
+#include "texel_record.glsl"
 #define TEXEL_HASH(i) uvec4(0xFFFFFFFFu)   // texel.glsl's own hash is not read here
 #include "texel.glsl"
 
@@ -28,15 +27,15 @@ uint nodeFingerprint(uvec2 key) { return key.x * 0x2C1B3C6Du ^ (key.y + 0x9E3779
 // beside the foot 2-7x its path trace (2026-10-24).
 int nodePlane(uint id, float step) {
     if (step <= 0.0) return 0;
-    vec3 d = normalize(clamp(floor(normalize(texels[2u * id + 1u].xyz) * 1.5 + 0.5), vec3(-1.0), vec3(1.0)));
-    return 2 * int(floor(dot(d, texels[2u * id].xyz) / step)) + (texels[2u * id].w < 0.0 ? 1 : 0);
+    vec3 d = normalize(clamp(floor(normalize(TEXEL_NORMAL(id).xyz) * 1.5 + 0.5), vec3(-1.0), vec3(1.0)));
+    return 2 * int(floor(dot(d, TEXEL_POSITION(id).xyz) / step)) + (TEXEL_POSITION(id).w < 0.0 ? 1 : 0);
 }
 
 bool nodeTexelKey(uint id, vec4 grid, out uvec2 key) {
-    vec3 n = texels[2u * id + 1u].xyz;
+    vec3 n = TEXEL_NORMAL(id).xyz;
     key = uvec2(0u);
     if (dot(n, n) < 1e-12) return false;
-    ivec3 cell = ivec3(floor((texels[2u * id].xyz - grid.xyz) / grid.w));
+    ivec3 cell = ivec3(floor((TEXEL_POSITION(id).xyz - grid.xyz) / grid.w));
     if (any(lessThan(cell, ivec3(0))) || any(greaterThan(cell, ivec3(65535)))) return false;
     key = texelKey(cell, texelBin(normalize(n)), 0u);
     return true;
@@ -45,8 +44,8 @@ bool nodeTexelKey(uint id, vec4 grid, out uvec2 key) {
 #ifdef NODE_LOOKUP
 // Two sets share the lookup: 0 the live texels (Texels, SunNodeHash), 1 the foliage's sun points (FoliagePoints,
 // FoliageHash: SponzaLoop.SunNodesFoliage.cs) -- the includer declares both.
-vec4 nodePosition(int set, uint id) { return set == 0 ? texels[2u * id] : foliagePoints[2u * id]; }
-vec4 nodeNormal(int set, uint id) { return set == 0 ? texels[2u * id + 1u] : foliagePoints[2u * id + 1u]; }
+vec4 nodePosition(int set, uint id) { return set == 0 ? TEXEL_POSITION(id) : foliagePoints[2u * id]; }
+vec4 nodeNormal(int set, uint id) { return set == 0 ? TEXEL_NORMAL(id) : foliagePoints[2u * id + 1u]; }
 uint nodeSlot(int set, uint slot) { return set == 0 ? cookHash[2u * slot] : foliageHash[slot]; }
 
 bool nodeKeyOf(int set, uint id, vec4 grid, out uvec2 key) {

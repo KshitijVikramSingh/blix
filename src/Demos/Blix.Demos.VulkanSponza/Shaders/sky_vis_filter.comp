@@ -16,6 +16,7 @@ layout(set = 0, binding = 0) uniform SkyVisFilter {
 
 layout(std430, set = 0, binding = 1) readonly buffer TexelHash { uvec4 texelHash[]; };
 layout(std430, set = 0, binding = 2) readonly buffer Texels { vec4 texels[]; };
+#include "texel_record.glsl"
 layout(set = 0, binding = 3) uniform usampler2D uLightmapIndexTex;
 layout(std430, set = 0, binding = 4) readonly buffer SkyIn { uint skyIn[]; };    // [texel id / 4]: the cook's, 1..255, 0 none
 layout(std430, set = 0, binding = 5) buffer SkyOut { uint skyOut[]; };           // the last pass's, the same, zeroed before
@@ -25,8 +26,6 @@ layout(std430, set = 0, binding = 6) readonly buffer SkyFrom { float skyFrom[]; 
 layout(std430, set = 0, binding = 7) writeonly buffer SkyInto { float skyInto[]; };
 #define TEXEL_INDEX_MAP(i) texelFetch(uLightmapIndexTex, ivec2(int(i) % textureSize(uLightmapIndexTex, 0).x, int(i) / textureSize(uLightmapIndexTex, 0).x), 0).r
 #define TEXEL_HASH(i) texelHash[i]
-#define TEXEL_POSITION(i) texels[2 * (i)]
-#define TEXEL_NORMAL(i) texels[2 * (i) + 1]
 #include "texel.glsl"
 #include "texel_filter_neighbour.glsl"
 

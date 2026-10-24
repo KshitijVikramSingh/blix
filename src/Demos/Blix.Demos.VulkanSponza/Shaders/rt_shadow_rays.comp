@@ -53,6 +53,7 @@ layout(set = 0, binding = 7) uniform usampler2D uLightmapTexel;
 // The atlas's map from texel to record, as an R32UI texture (SponzaLoop.LightmapGather.cs).
 layout(set = 0, binding = 8) uniform usampler2D uLightmapIndexTex;
 layout(std430, set = 0, binding = 9) readonly buffer Texels { vec4 texels[]; };
+#include "texel_record.glsl"
 layout(std430, set = 0, binding = 10) readonly buffer LightletIndex { uint lightletIndex[]; };
 layout(std430, set = 0, binding = 11) readonly buffer LightletPool { uint lightletPool[]; };
 // uCompact.x: the rays that trace, packed -- origin, direction, and the pixel each answers -- counted into
@@ -67,8 +68,6 @@ layout(std430, set = 0, binding = 15) writeonly buffer RtShadowMaskWords { uvec4
 layout(std430, set = 0, binding = 16) readonly buffer TexelClear { float texelClear[]; };
 #define TEXEL_INDEX_MAP(i) texelFetch(uLightmapIndexTex, ivec2(int(i) % textureSize(uLightmapIndexTex, 0).x, int(i) / textureSize(uLightmapIndexTex, 0).x), 0).r
 #define TEXEL_HASH(i) uvec4(0u)
-#define TEXEL_POSITION(i) texels[2 * (i)]
-#define TEXEL_NORMAL(i) texels[2 * (i) + 1]
 #include "texel.glsl"
 #define LIGHTLET_INDEX(i) lightletIndex[i]
 #define LIGHTLET_POOL(i) lightletPool[i]

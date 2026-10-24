@@ -27,6 +27,7 @@ layout(set = 0, binding = 0) uniform TransferApply {
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
 layout(std430, set = 0, binding = 2) readonly buffer Texels { vec4 texels[]; };
+#include "texel_record.glsl"
 layout(std430, set = 0, binding = 3) readonly buffer LiveIds { uint liveIds[]; };
 layout(std430, set = 0, binding = 4) readonly buffer TransferEntries { uvec2 entries[]; };
 layout(std430, set = 0, binding = 5) readonly buffer CellLight { uint cellLight[]; };
@@ -57,8 +58,6 @@ vec3 patchColumn(uint p, uint column) {
     return vec3(unpackHalf2x16(w.x), unpackHalf2x16(w.y).x);
 }
 
-#define TEXEL_POSITION(i) texels[2 * (i)]
-#define TEXEL_NORMAL(i) texels[2 * (i) + 1]
 #define TEXEL_HASH(i) uvec4(0xFFFFFFFFu)
 #include "texel.glsl"
 
@@ -90,7 +89,7 @@ void main() {
     uint id = liveIds[t];
     uint K = uint(u.uApply.y);
     vec3 dn, dt1, dt2;
-    vec3 tn = texels[2u * id + 1u].xyz;
+    vec3 tn = TEXEL_NORMAL(id).xyz;
     texelDetailFrame(dot(tn, tn) > 1e-12 ? normalize(tn) : vec3(0.0, 1.0, 0.0), dn, dt1, dt2);
     const vec3 lumW = vec3(0.2126, 0.7152, 0.0722);
     vec3 sky = vec3(0.0), sun = vec3(0.0);
@@ -103,7 +102,7 @@ void main() {
     for (int i = 0; i < FAR_SET; ++i) farIds[i] = -1;
     int fp = int(bins[t * 19u + 18u] & 0xFFFFFFu) - 1;   // the cook's (transfer_finalize.comp)
     if (u.uFar.x > 1.5 && fp >= 0) {
-        farSet(texels[2u * id].xyz, dot(tn, tn) > 1e-12 ? normalize(tn) : vec3(0.0, 1.0, 0.0), fp, u.uFar, farIds, farWs);
+        farSet(TEXEL_POSITION(id).xyz, dot(tn, tn) > 1e-12 ? normalize(tn) : vec3(0.0, 1.0, 0.0), fp, u.uFar, farIds, farWs);
         for (int i = 0; i < FAR_SET; ++i) if (farIds[i] >= 0) farFrame(farIds[i], farN[i], farT[i], farB[i]);
     }
     vec3 pn = vec3(0.0, 1.0, 0.0), pt = vec3(1.0, 0.0, 0.0), pbv = vec3(0.0, 0.0, 1.0);   // the first (primary) patch's frame

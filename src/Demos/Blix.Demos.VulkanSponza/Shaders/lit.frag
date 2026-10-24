@@ -230,6 +230,8 @@ layout(location = 10) in vec2 vLightmapTexel; // --lightmap: the lightmap atlas 
 // T 1 -- reflects almost nothing and showed black where its far side was the sky cube's guess and the GI kept none
 // (tools/gi-model/thin_shell.py: the gap's light settles in the fine round and two near rounds, within 2-4%).
 layout(std430, set = 1, binding = 22) readonly buffer LitTexels { vec4 litTexels[]; };          // 2 a record: pos (w < 0 a pair), normal
+#define TEXEL_ARRAY litTexels
+#include "texel_record.glsl"
 layout(std430, set = 1, binding = 23) readonly buffer LitTexelResolved { uvec2 litResolved[]; };
 // --near-glow-split (frame.uIncidentGradient.w 3): each record's glow from the sheets within the frame's pass-by -- its thin
 // wall's other face -- per unit of the sun's irradiance (slice_resolve.comp, GlowPart): left out here, the frame drawing
@@ -248,10 +250,10 @@ bool lightmapBackIrradiance(vec2 texel, vec3 n, out vec3 e) {
         ivec2 at = base + o;
         if (any(lessThan(at, ivec2(0))) || any(greaterThanEqual(at, ivec2(size)))) continue;
         uint id = LIGHTMAP_CELL_OF(at);
-        if (id == 0xFFFFFFFFu || litTexels[2u * id].w >= 0.0) continue;    // none, or not a pair
+        if (id == 0xFFFFFFFFu || TEXEL_POSITION(id).w >= 0.0) continue;    // none, or not a pair
         // The pair's record facing away from n: its back.
-        uint back = dot(litTexels[2u * id + 1u].xyz, n) < 0.0 ? id : id + 1u;
-        if (dot(litTexels[2u * back + 1u].xyz, n) >= 0.0 || abs(litTexels[2u * back].w) < 2.0) continue;
+        uint back = dot(TEXEL_NORMAL(id).xyz, n) < 0.0 ? id : id + 1u;
+        if (dot(TEXEL_NORMAL(back).xyz, n) >= 0.0 || abs(TEXEL_POSITION(back).w) < 2.0) continue;
         uvec2 r = litResolved[back];
         if ((r.y & 0x10000u) == 0u) continue;
         uint w9 = r.x;
@@ -293,8 +295,8 @@ bool lightmapShape(vec2 texel, vec3 n, out vec3 s0, out vec3 s1, out vec3 s2) {
         uint id = LIGHTMAP_CELL_OF(at);
         if (id == 0xFFFFFFFFu) continue;
         // A pair: the record facing n (the front's, then the back's).
-        if (litTexels[2u * id].w < 0.0 && dot(litTexels[2u * id + 1u].xyz, n) < 0.0) id += 1u;
-        if (abs(litTexels[2u * id].w) < 2.0) continue;   // buried
+        if (TEXEL_POSITION(id).w < 0.0 && dot(TEXEL_NORMAL(id).xyz, n) < 0.0) id += 1u;
+        if (abs(TEXEL_POSITION(id).w) < 2.0) continue;   // buried
         vec4 q0 = texelShapeUnpack(litShape[3u * id]);
         if (q0.w < 0.5) continue;
         float wt = (o.x == 1 ? t.x : 1.0 - t.x) * (o.y == 1 ? t.y : 1.0 - t.y);

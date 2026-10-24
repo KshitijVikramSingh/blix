@@ -28,6 +28,7 @@ layout(set = 0, binding = 0) uniform SunNodesRays {
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
+#include "texel_record.glsl"
 layout(std430, set = 0, binding = 2) readonly buffer SunNodesLive { uint liveIds[]; };
 layout(std430, set = 0, binding = 3) writeonly buffer NodeRays { vec4 nodeRays[]; };   // 2 a ray: origin, tMin; dir, tMax
 layout(std430, set = 0, binding = 4) writeonly buffer NodeRayWeights { float nodeRayWeight[]; };
@@ -176,12 +177,12 @@ vec2 interleaveShift = vec2(0.0);   // the guide's and the light strategy's two 
 // neighbours do not share, it cannot cancel (ray_mix.py).
 uint interleaveTile(uint id, vec3 position, out uint place) {
     if (float(id) >= u.uTile.z) {
-        uint packed = floatBitsToUint(texels[2u * id + 1u].w);
+        uint packed = floatBitsToUint(TEXEL_NORMAL(id).w);
         uvec2 at = uvec2(packed & 0xFFFFu, packed >> 16);
         place = (at.x % 3u) + 3u * (at.y % 3u);
         return blix_pcg((at.x / 3u) * 73856093u ^ (at.y / 3u) * 19349663u ^ 0x5EED1u);
     }
-    float level = texels[2u * id + 1u].w;
+    float level = TEXEL_NORMAL(id).w;
     float spacing = u.uTile.y * exp2(floor(level + 0.5));
     ivec3 c = ivec3(floor(position / spacing));
     ivec3 m = ((c % 3) + 3) % 3;
@@ -201,8 +202,8 @@ void main() {
         return;
     }
     uint id = liveIds[uint(u.uSlice.x) + group];
-    vec3 position = texels[2u * id].xyz;
-    vec3 n = normalize(texels[2u * id + 1u].xyz);
+    vec3 position = TEXEL_POSITION(id).xyz;
+    vec3 n = normalize(TEXEL_NORMAL(id).xyz);
     if (ray == 0u) {
         // The texel's patch (its nearest): the guide's, and the far field's where the cook's pick saw none -- found
         // unguided too (the transfer's cook, SponzaLoop.Transfer.cs, reads the far field with cosine rays).
@@ -301,6 +302,6 @@ void main() {
         if (known) tMax = sFarReach;
     }
     // A near round's cut -- not for a sheet's texel (|w| 5: SponzaLoop.Lightmap.cs), whose far light still settles.
-    if (u.uTile.w > 0.0 && abs(texels[2u * id].w) < 4.5) tMax = min(tMax, u.uTile.w);
+    if (u.uTile.w > 0.0 && abs(TEXEL_POSITION(id).w) < 4.5) tMax = min(tMax, u.uTile.w);
     nodeRays[slot * 2u + 1u] = vec4(dir, tMax);
 }

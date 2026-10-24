@@ -31,6 +31,7 @@ layout(set = 0, binding = 0) uniform FarFinish {
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
+#include "texel_record.glsl"
 layout(std430, set = 0, binding = 2) readonly buffer NodeIds { uint nodeIds[]; };
 layout(std430, set = 0, binding = 3) readonly buffer TexelPatch { int texelPatch[]; };
 layout(std430, set = 0, binding = 4) readonly buffer NodeGuidePatch { uint guidePatch[]; };
@@ -64,8 +65,8 @@ void main() {
         evidence[t * uint(EVIDENCE) + 6u] = vec4(0.0);   // no patch: no evidence, its sums stand
         return;
     }
-    vec3 x = texels[2u * id].xyz;
-    vec3 n = normalize(texels[2u * id + 1u].xyz);
+    vec3 x = TEXEL_POSITION(id).xyz;
+    vec3 n = normalize(TEXEL_NORMAL(id).xyz);
     int ids[FAR_SET];
     float ws[FAR_SET];
     farSet(x, n, p, u.uFar, ids, ws);

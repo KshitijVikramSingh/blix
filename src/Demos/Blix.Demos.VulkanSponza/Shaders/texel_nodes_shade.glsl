@@ -57,6 +57,7 @@ layout(set = 0, binding = 0) uniform SunNodesShade {
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
 layout(std430, set = 0, binding = 2) readonly buffer Texels { vec4 texels[]; };
+#include "texel_record.glsl"
 layout(std430, set = 0, binding = 3) readonly buffer NodeRays { vec4 nodeRays[]; };
 layout(std430, set = 0, binding = 4) readonly buffer NodeHits { uvec4 nodeHits[]; };    // 3 a ray: the CLOSEST answer
 layout(std430, set = 0, binding = 5) readonly buffer SunNodes { vec4 sunNodes[]; };
@@ -295,10 +296,10 @@ bool nearTexelLight(int r, int k, out vec3 l) {
     // record, the pair's other (same position; SponzaLoop.Lightmap.cs writes the front then the back). Without it only the
     // sun's glow came through at texel level: a closed thin shell's walls (the teacup, T 1) passed none of the light inside
     // the cup, and its camera paths read 13x what the renderer did (tools/gi-model/view_reference.py, 2026-10-22).
-    if (sSheet[r].a > 0.0 && texels[2u * id].w < 0.0) {
-        vec3 p = texels[2u * id].xyz;
-        uint twin = texels[2u * (id + 1u)].w < 0.0 && distance(texels[2u * (id + 1u)].xyz, p) < 1e-4 ? id + 1u
-                  : id > 0u && texels[2u * (id - 1u)].w < 0.0 && distance(texels[2u * (id - 1u)].xyz, p) < 1e-4 ? id - 1u : id;
+    if (sSheet[r].a > 0.0 && TEXEL_POSITION(id).w < 0.0) {
+        vec3 p = TEXEL_POSITION(id).xyz;
+        uint twin = TEXEL_POSITION(id + 1u).w < 0.0 && distance(TEXEL_POSITION(id + 1u).xyz, p) < 1e-4 ? id + 1u
+                  : id > 0u && TEXEL_POSITION(id - 1u).w < 0.0 && distance(TEXEL_POSITION(id - 1u).xyz, p) < 1e-4 ? id - 1u : id;
         // The base lobe keeps 1 - T of the near side's light whatever the far side holds; the far side's light through
         // it from whatever wrote the twin's part (a fine copy's too). Both were taken only with the twin's light a
         // gather's: a closed shell's outer faces are mostly fine copies, so a near round's hits inside it reflected
@@ -358,10 +359,10 @@ void main() {
             fp = texelPatch[id];
             if (fp < 0) fp = int(guidePatch[id]) - 2;
             if (fp >= 0) {
-                vec3 x = texels[2u * id].xyz;
+                vec3 x = TEXEL_POSITION(id).xyz;
                 int ids[FAR_SET];
                 float ws[FAR_SET];
-                farSet(x, normalize(texels[2u * id + 1u].xyz), fp, u.uFar, ids, ws);
+                farSet(x, normalize(TEXEL_NORMAL(id).xyz), fp, u.uFar, ids, ws);
                 reach = farSetReach(x, ids, u.uFar);
                 // Recording, the rays go into the texel's own patch's record alone (slot 0), past the set's reach.
                 if (farRecording) { ids[0] = fp; ws[0] = 1.0; for (int i = 1; i < FAR_SET; ++i) { ids[i] = -1; ws[i] = 0.0; } }
@@ -382,7 +383,7 @@ void main() {
     if (lid == 0u && u.uTransport.x > 0.5) {
         uint id = nodeIds[uint(u.uDetail.x) + group];
         int tp = texelPatch[id];
-        sTransportReach = tp >= 0 ? max(u.uTransport.y, length(texels[2u * id].xyz - cookedPatch[3 * tp].xyz) / 0.2126) : 4.0 * u.uTransport.y;
+        sTransportReach = tp >= 0 ? max(u.uTransport.y, length(TEXEL_POSITION(id).xyz - cookedPatch[3 * tp].xyz) / 0.2126) : 4.0 * u.uTransport.y;
         uint own = tp >= 0 ? floatBitsToUint(cookedPatch[3 * tp].w) : 0xFFFFFFFFu;
         uint placements = uint(u.uDetail.w);
         sTransportObject = own < placements ? censusObject[own] : own;
@@ -625,7 +626,7 @@ void main() {
         const vec3 lumW = vec3(0.2126, 0.7152, 0.0722);
         bool detail = u.uDetail.y > 0.5;
         vec3 dn = vec3(0.0, 1.0, 0.0), dt1 = vec3(1.0, 0.0, 0.0), dt2 = vec3(0.0, 0.0, 1.0);
-        if (detail) texelDetailFrame(normalize(texels[2u * nodeIds[uint(u.uDetail.x) + group] + 1u].xyz), dn, dt1, dt2);
+        if (detail) texelDetailFrame(normalize(TEXEL_NORMAL(nodeIds[uint(u.uDetail.x) + group]).xyz), dn, dt1, dt2);
         // Each ray's known bounce (its patch's light), for the unknown hits' estimate.
         if (lid < uint(RAYS)) {
             int r = int(lid);
@@ -704,7 +705,7 @@ void main() {
                     float baseLobe = 1.0 - sSheet[r].a;
                     // A texel on a surface that lets light through (|w| 5: SponzaLoop.Lightmap.cs) leaves out the glow: the
                     // frame draws the sun through the sheets beyond it per pixel (lit.frag, sheetGlow).
-                    bool ownSheet = abs(u.uNear.w - 1.0) < 0.5 && abs(texels[2u * nodeIds[uint(u.uDetail.x) + group]].w) > 4.5;
+                    bool ownSheet = abs(u.uNear.w - 1.0) < 0.5 && abs(TEXEL_POSITION(nodeIds[uint(u.uDetail.x) + group]).w) > 4.5;
                     if (hasSun && k == exactColumn && sSheet[r].a > 0.0 && sExact[r] >= 0.0 && !ownSheet)
                         glow = sSheet[r].rgb * u.uSunIrradiance.rgb * max(-dot(sNormal[r], toSun), 0.0) * sExact[r] * sRayWeight[r] / PI;
                     if (k == exactColumn) sRayNearGlow[r] = sDist[r] < 0.05 ? glow : vec3(0.0);
@@ -739,10 +740,10 @@ void main() {
 #if MAX_WORDS == 1
             // A sheet's texel keeps no far part: what it sees past the reach includes other sheets' texels, still settling
             // round by round (its rays are not cut either: texel_nodes_rays.comp).
-            sRayFar[r] = (sDist[r] >= u.uNear.y || h.w < -1.5) && abs(texels[2u * nodeIds[uint(u.uDetail.x) + group]].w) < 4.5 ? 1.0 : 0.0;
+            sRayFar[r] = (sDist[r] >= u.uNear.y || h.w < -1.5) && abs(TEXEL_POSITION(nodeIds[uint(u.uDetail.x) + group]).w) < 4.5 ? 1.0 : 0.0;
             if (u.uFarTransport.y > 0.5 && u.uNear.x < 1.5) {
                 uint hid = nodeIds[uint(u.uDetail.x) + group];
-                vec3 ns = recordH4Normal(hid, normalize(texels[2u * hid + 1u].xyz), u.uFarTransport.z > 0.5);
+                vec3 ns = recordH4Normal(hid, normalize(TEXEL_NORMAL(hid).xyz), u.uFarTransport.z > 0.5);
                 vec3 all = sRaySum[r * 2] + (suns > 1 ? sRaySum[r * 2 + 1] : vec3(0.0));
                 recordH4Ray(ns, w, all, sH4[r * 3], sH4[r * 3 + 1], sH4[r * 3 + 2]);
             }
@@ -801,7 +802,7 @@ void main() {
                         vec3 near;
                         if (how >= 2u && h.w >= 0.0 && nearTexelLight(r, int(u.uHitBlend.w), near)) how += 8u;
                         if (how >= 2u && h.w < 0.0) how += 16u;
-                        vec3 tn = texels[2u * id + 1u].xyz;
+                        vec3 tn = TEXEL_NORMAL(id).xyz;
                         float cosine = dot(tn, tn) > 0.0 ? dot(normalize(tn), w) : 0.0;
                         captured[2u * at] = uvec4(id, uint(u.uCapture.z) | (uint(u.uShade.w) << 16), floatBitsToUint(sDist[r]), how | (uint(r) << 8) | (uint(int(h.w) + 1) << 13));
                         captured[2u * at + 1u] = uvec4(floatBitsToUint(whole), floatBitsToUint(captureBounce),
@@ -826,7 +827,7 @@ void main() {
             } else {
                 float plain = 0.0;
                 for (int r = 0; r < RAYS; ++r) plain += dot(sRaySum[r * 2] + (suns > 1 ? sRaySum[r * 2 + 1] : vec3(0.0)), lumW);
-                vec3 ns = recordH4Normal(hid, normalize(texels[2u * hid + 1u].xyz), u.uFarTransport.z > 0.5);
+                vec3 ns = recordH4Normal(hid, normalize(TEXEL_NORMAL(hid).xyz), u.uFarTransport.z > 0.5);
                 after = vec4(before.x + plain / float(RAYS), uintBitsToFloat(packSnorm2x16(recordH4Oct(ns))), 0.0, before.w + 1.0);
             }
             texelH4[at4] = after;
@@ -870,7 +871,7 @@ void main() {
 #if MAX_WORDS == 1
             if (k == exactColumn && u.uNear.w > 1.5) {
                 vec3 g = vec3(0.0);
-                if (abs(texels[2u * nodeIds[uint(u.uDetail.x) + group]].w) > 4.5)
+                if (abs(TEXEL_POSITION(nodeIds[uint(u.uDetail.x) + group]).w) > 4.5)
                     for (int r = 0; r < RAYS; ++r) g += sRayNearGlow[r];
                 vec4 gb = u.uShade.w > 0.5 ? nodeGlow[group] : vec4(0.0);
                 nodeGlow[group] = vec4(gb.rgb + g / float(RAYS), 0.0);
@@ -892,7 +893,7 @@ void main() {
         // The cells' detail: the texel's frame, and each ray's contribution's luminance times its direction's tilt.
         bool detail = u.uDetail.y > 0.5;
         vec3 dn = vec3(0.0, 1.0, 0.0), dt1 = vec3(1.0, 0.0, 0.0), dt2 = vec3(0.0, 0.0, 1.0);
-        if (detail) texelDetailFrame(normalize(texels[2u * nodeIds[uint(u.uDetail.x) + group] + 1u].xyz), dn, dt1, dt2);
+        if (detail) texelDetailFrame(normalize(TEXEL_NORMAL(nodeIds[uint(u.uDetail.x) + group]).xyz), dn, dt1, dt2);
         vec2 tilt = vec2(0.0);
         const vec3 lumW = vec3(0.2126, 0.7152, 0.0722);
         vec4 source = vec4(0.0);
@@ -947,7 +948,7 @@ void main() {
 #if MAX_WORDS == 1
             if (hasSun && k == exactColumn && sSheet[r].a > 0.0 && sExact[r] >= 0.0) {
                 // A sheet (as above): 1 - T of the sun on its side, T c of the sun on its far side.
-                bool ownSheet = abs(u.uNear.w - 1.0) < 0.5 && abs(texels[2u * nodeIds[uint(u.uDetail.x) + group]].w) > 4.5;
+                bool ownSheet = abs(u.uNear.w - 1.0) < 0.5 && abs(TEXEL_POSITION(nodeIds[uint(u.uDetail.x) + group]).w) > 4.5;
                 sum += h.rgb * (light + u.uSunIrradiance.rgb * ndotl * sExact[r] * (1.0 - sSheet[r].a))
                      + (ownSheet ? vec3(0.0) : sSheet[r].rgb * u.uSunIrradiance.rgb * max(-dot(sNormal[r], toSun), 0.0) * sExact[r] * sRayWeight[r] / PI);
                 continue;

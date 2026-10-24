@@ -40,6 +40,7 @@ layout(set = 0, binding = 0) uniform FarPool {
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
+#include "texel_record.glsl"
 layout(std430, set = 0, binding = 2) readonly buffer NodeIds { uint nodeIds[]; };
 layout(std430, set = 0, binding = 3) readonly buffer SunNodeHash { uint cookHash[]; };
 layout(std430, set = 0, binding = 4) readonly buffer FarSliceMap { uint sliceMap[]; };   // [texel id]: serial << 16 | t
@@ -92,8 +93,8 @@ void main() {
     int columns = int(u.uPool.w + 0.5);
     float passes = u.uPool.z;
     uint id = nodeIds[uint(u.uPool.x) + t];
-    vec3 x = texels[2u * id].xyz;
-    vec3 n = normalize(texels[2u * id + 1u].xyz);
+    vec3 x = TEXEL_POSITION(id).xyz;
+    vec3 n = normalize(TEXEL_NORMAL(id).xyz);
     vec3 t1 = normalize(abs(n.y) < 0.999 ? cross(vec3(0.0, 1.0, 0.0), n) : cross(vec3(1.0, 0.0, 0.0), n));
     vec3 t2 = cross(n, t1);
     float cellSize = u.uTexelGrid.w;
@@ -140,11 +141,11 @@ void main() {
             vec4 oi = evidence[at + 6u];
             if (oi.w <= 0.0) continue;
             // Geometry and estimator.
-            vec3 xo = texels[2u * uint(other)].xyz;
+            vec3 xo = TEXEL_POSITION(uint(other)).xyz;
             vec3 d = xo - x;
             float dist = length(d);
             if (dist > radius || abs(dot(d, n)) > 0.5 * cellSize) { if (counting) atomicAdd(poolStats[67], 1u); continue; }
-            if (dot(normalize(texels[2u * uint(other) + 1u].xyz), n) < 0.9) { if (counting) atomicAdd(poolStats[68], 1u); continue; }
+            if (dot(normalize(TEXEL_NORMAL(uint(other)).xyz), n) < 0.9) { if (counting) atomicAdd(poolStats[68], 1u); continue; }
             float lo = composed(s, columns);
             float vo = oi.x + oi.y;
             float pu = dot(d, t1), pv = dot(d, t2);
@@ -202,10 +203,10 @@ void main() {
             uint s = tag & 0xFFFFu;
             vec4 oi = evidence[s * uint(EVIDENCE) + 6u];
             if (oi.w <= 0.0) continue;
-            vec3 d = texels[2u * uint(other)].xyz - x;
+            vec3 d = TEXEL_POSITION(uint(other)).xyz - x;
             float dist = length(d);
             if (dist > radius || abs(dot(d, n)) > 0.5 * cellSize) continue;
-            if (dot(normalize(texels[2u * uint(other) + 1u].xyz), n) < 0.9) continue;
+            if (dot(normalize(TEXEL_NORMAL(uint(other)).xyz), n) < 0.9) continue;
             float lo = composed(s, columns);
             float vo = oi.x + oi.y;
             float plane = m0 + slopeU * dot(d, t1) + slopeV * dot(d, t2);

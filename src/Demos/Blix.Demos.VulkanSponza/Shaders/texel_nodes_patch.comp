@@ -19,6 +19,7 @@ layout(set = 0, binding = 0) uniform NodesPatch {
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
+#include "texel_record.glsl"
 layout(std430, set = 0, binding = 2) readonly buffer SunNodesLive { uint liveIds[]; };
 layout(std430, set = 0, binding = 3) buffer NodeRays { vec4 nodeRays[]; };          // 2 a ray: origin, tMin; dir, tMax
 layout(std430, set = 0, binding = 4) readonly buffer NodeHits { uvec4 nodeHits[]; };  // 3 a ray: the CLOSEST answer
@@ -36,8 +37,8 @@ void main() {
     uint t = gl_GlobalInvocationID.x;
     if (t >= uint(u.uPatch.y)) return;
     uint id = liveIds[uint(u.uPatch.x) + t];
-    vec3 p = texels[2u * id].xyz;
-    vec3 n = normalize(texels[2u * id + 1u].xyz);
+    vec3 p = TEXEL_POSITION(id).xyz;
+    vec3 n = normalize(TEXEL_NORMAL(id).xyz);
     if (int(u.uPatch.z) == 0) {
         // The nearest few, insertion-sorted, over the cells around (as cookedNearest searches them).
         int best[PATCH_CANDIDATES];
