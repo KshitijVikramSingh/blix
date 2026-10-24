@@ -109,6 +109,11 @@ internal sealed partial class SponzaLoop
     private int clipmapFreeze = int.MaxValue;
     private ShaderInterface incidentClipmapInterface = null!;
     private bool incidentLean = true;
+    // --incident-split: the half-res pass as two (incident_fast.frag, incident_slow.frag). Off by default: the slow pass's
+    // discarded pixels still launch its shader, 1.25 ms a run for 3% of them, the pair 2.33 against the one pass's 1.98
+    // (Crytek Sponza's courtyard, 2026-10-24). It pays once the slow pass launches on the marked pixels alone -- a stencil
+    // test, or an indirect draw over the marked tiles, neither of which the engine has yet.
+    private bool incidentSplit;
     private PipelineHandle incidentClipmapPipeline;
 
     private Vector4 ClipmapOrigin(int level) => clipmap is { } c
@@ -139,18 +144,16 @@ internal sealed partial class SponzaLoop
         // The lean build where nothing it compiles out is on (incident_lean.frag); --no-incident-lean: never.
         var lean = incidentLean && pick.Code == 0f && reference.Params.X <= 0.5f && reference.Params.W <= 0.5f
             && screen.Screen.X <= 0.5f && IncidentStop == 0f;
-        graph.Pass(half ? incidentHalfPassHandle : incidentPassHandle, scope => fullscreen.Draw(
-            scope, half ? (lean ? incidentHalfLeanPipeline : incidentHalfPipeline) : (lean ? incidentLeanPipeline : incidentClipmapPipeline),
-            new[]
+        // Built once: the uniforms count this frame's reuse and census as they are made.
+        var textures = new[]
             {
                 new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
                 new ShaderTextureBinding("uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
                 new ShaderTextureBinding("uClipmapIrradiance", clipmapIrradiance),
                 new ShaderTextureBinding("uClipmapDepth", clipmapDepth),
                 new ShaderTextureBinding("uIrradiance", irradianceCubeTexture),
-            }.Concat(TexelCascadeTextures()).Append(LightmapTexelTexture()).Concat(IncidentReuseTextures()).ToArray(),
-            pushConstants: null,
-            uniforms: new ShaderUniform[]
+            }.Concat(TexelCascadeTextures()).Append(LightmapTexelTexture()).Concat(IncidentReuseTextures()).ToArray();
+        var uniforms = new ShaderUniform[]
             {
                 new("uInvProjection", new Matrix4x4Uniform(invProjection)),
                 new("uInvView", new Matrix4x4Uniform(invView)),
@@ -176,12 +179,25 @@ internal sealed partial class SponzaLoop
                 new("uHalf", new Vector4Uniform(new Vector4(half ? 1f : 0f, sub.X, sub.Y, PatchViewColumns))),
                 new("uReuse", new Vector4Uniform(IncidentReuseUniform(half))),
                 new("uSeam", new Vector4Uniform(new Vector4(SeamBlendNow ? 1f : 0f, TexelShapeOn ? 1f : 0f, LightmapCellsNow ? 1f : 0f, IncidentStop))),
-            }.Concat(TexelSunUniforms()).ToArray(),
-            buffers: new[] { new ShaderBufferBinding("ClipmapState", clipmapState), new ShaderBufferBinding("ScreenProbeTiles", screen.Tiles), new ShaderBufferBinding("ScreenProbes", screen.Probes), new ShaderBufferBinding("SurfaceIndex", surfaceIndex) }.Concat(texel.Buffers).Append(reference.Buffer).Append(new ShaderBufferBinding("IncidentCensus", IncidentCensusBuffer())).Append(AtlasGatherMeta()).Append(AtlasIndexBuffer()).Append(LightmapCellsBinding())
+            }.Concat(TexelSunUniforms()).ToArray();
+        var buffers = new[] { new ShaderBufferBinding("ClipmapState", clipmapState), new ShaderBufferBinding("ScreenProbeTiles", screen.Tiles), new ShaderBufferBinding("ScreenProbes", screen.Probes), new ShaderBufferBinding("SurfaceIndex", surfaceIndex) }.Concat(texel.Buffers).Append(reference.Buffer).Append(new ShaderBufferBinding("IncidentCensus", IncidentCensusBuffer())).Append(AtlasGatherMeta()).Append(AtlasIndexBuffer()).Append(LightmapCellsBinding())
                 .Append(ProvenanceBinding()).Append(new ShaderBufferBinding("TexelShape", ShapeOr(texelShapeBuffer))).Append(TexelRaysBinding()).Append(pick.Buffer).Concat(PatchViewBindings()).Append(ReferenceMomentsBinding())
                 .Concat(SeamBlendBindings())
                 // The ray scene, for --clipmap-exact-visibility (declared always; read only then).
-                .Concat(rayBlockBuffers).ToArray()));
+                .Concat(rayBlockBuffers).ToArray();
+        // The half-res split (incident_fast.frag, incident_slow.frag) where the lean build runs, with --incident-split.
+        if (half && lean && incidentSplit)
+        {
+            graph.Pass(incidentHalfFastPassHandle, scope => fullscreen.Draw(scope, incidentHalfFastPipeline, textures,
+                pushConstants: null, uniforms: uniforms, buffers: buffers));
+            var slowTextures = textures.Append(new ShaderTextureBinding("uSlowMask", graph.GetColorTexture(incidentSlowHalfHandle))).ToArray();
+            graph.Pass(incidentHalfSlowPassHandle, scope => fullscreen.Draw(scope, incidentHalfSlowPipeline, slowTextures,
+                pushConstants: null, uniforms: uniforms, buffers: buffers));
+            return;
+        }
+        graph.Pass(half ? incidentHalfPassHandle : incidentPassHandle, scope => fullscreen.Draw(
+            scope, half ? (lean ? incidentHalfLeanPipeline : incidentHalfPipeline) : (lean ? incidentLeanPipeline : incidentClipmapPipeline),
+            textures, pushConstants: null, uniforms: uniforms, buffers: buffers));
     }
 
     // BLIX_INCIDENT_STOP=1 / 2: the incident pass out before / right after its texels are read (incident_clipmap.frag) --

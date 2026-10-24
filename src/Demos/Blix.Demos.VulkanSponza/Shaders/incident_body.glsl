@@ -18,6 +18,16 @@ layout(location = 0) out vec4 outIncident;
 // presented image's median per-pixel variation went 3.40% -> 5.70% with it, its directional bands being the
 // noisiest part.) Applied relative, to whatever light the pixel ends with. w unused.
 layout(location = 1) out vec4 outIncidentGradient;
+// The half-res pass split (SponzaLoop.Clipmap.cs): INCIDENT_FAST (incident_fast.frag) answers where the atlas cells
+// answer alone -- 97% of Crytek Sponza's courtyard -- and marks the rest (outSlow 1), its slow lookups compiled out;
+// INCIDENT_SLOW (incident_slow.frag) answers the marked pixels, the targets loaded, the rest discarded. One build paid
+// the slow paths' registers at every pixel: 1.98 ms a run, the fast path alone 1.25 (2026-10-24).
+#ifdef INCIDENT_FAST
+layout(location = 2) out float outSlow;
+#endif
+#ifdef INCIDENT_SLOW
+layout(set = 0, binding = 60) uniform sampler2D uSlowMask;
+#endif
 
 layout(set = 0, binding = 0) uniform IncidentClipmap {
     mat4 uInvProjection;
@@ -643,6 +653,9 @@ bool texelsAt(vec3 worldPos, vec3 n, float faceBin, float viewDepth, out vec3 ir
             }
         }
     }
+#ifdef INCIDENT_FAST
+    return false;   // the slow pass's
+#endif
     float levelWanted = atlasOnly ? 0.0 : texelLevelFor(viewDepth, g.uTexelLevels, g.uTexelGrid.w, texelSunlit(worldPos, n));
     int finest = int(floor(levelWanted));
     float fraction = clamp((levelWanted - float(finest) - (1.0 - TEXEL_LEVEL_BAND)) / TEXEL_LEVEL_BAND, 0.0, 1.0);
@@ -717,6 +730,12 @@ bool texelsAt(vec3 worldPos, vec3 n, float faceBin, float viewDepth, out vec3 ir
 }
 
 void main() {
+#ifdef INCIDENT_FAST
+    outSlow = 0.0;
+#endif
+#ifdef INCIDENT_SLOW
+    if (texelFetch(uSlowMask, ivec2(gl_FragCoord.xy), 0).r < 0.5) discard;
+#endif
     clipLiftKnob = g.uClipParams.z;
     clipVisibilityKnob = g.uClipParams.w;
     clipExactKnob = g.uClipExact.x;
@@ -919,6 +938,13 @@ void main() {
         outIncidentGradient = g.uScreen.w < 0.5 ? vec4(grad * lum, 0.0) : vec4(0.0);
         return;
     }
+#ifdef INCIDENT_FAST
+    // Not the cells' alone: the slow pass answers it.
+    outSlow = 1.0;
+    outIncident = vec4(0.0);
+    outIncidentGradient = vec4(0.0);
+    return;
+#endif
 
     countPath(!texelFound ? 2u : g.uTexelDebug.y < 0.5 ? 3u : g.uTexelDebug.z < 0.5 ? 4u : detailMissing || detailSum.w <= 1e-6 ? 5u
         : confidence <= 0.999 ? 6u : 7u);

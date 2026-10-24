@@ -155,6 +155,7 @@ internal sealed partial class SponzaLoop
         texelShapeNearest = !args.Flag("texel-shape-bilinear");
         litLean = !args.Flag("no-lit-lean");
         incidentLean = !args.Flag("no-incident-lean");
+        incidentSplit = args.Flag("incident-split");
         cascadesAlways = args.Flag("cascades-always");
         shadowKeep = !args.Flag("no-shadow-keep");
         // --ray-check: also trace a fixed batch of rays on the GPU every frame and hold them against the CPU at the shot.
@@ -715,6 +716,8 @@ internal sealed partial class SponzaLoop
         }
         incidentHalfHandle = graph.ColorTarget("incident-light-half", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(0.5f));
         incidentGradientHalfHandle = graph.ColorTarget("incident-gradient-half", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(0.5f));
+        // The half-res split's marks (incident_fast.frag): 1 where the slow pass answers.
+        incidentSlowHalfHandle = graph.ColorTarget("incident-slow-half", TextureFormat.R8, new MatchSwapchainGraphSize(0.5f));
 
         // The pre-pass writes geometric normals for incident reconstruction instead of inferring
         // them from depth. That inference measured 5.31 mean sRGB error. Rgba16F avoids directional
@@ -941,6 +944,30 @@ internal sealed partial class SponzaLoop
             halfBuilder = halfBuilder.Read(lightmapEnabled ? lightmapTexelHandle : surfaceKeyHandle);
             halfBuilder = IncidentReuseReads(halfBuilder);
             incidentHalfPassHandle = halfBuilder.Shader(incidentClipmapInterface).Handle;
+            // The half-res pass split in two (incident_body.glsl, INCIDENT_FAST / INCIDENT_SLOW): the cells' answers and
+            // the marks, then the marked pixels over them. Declared before the shadows' join, as the pass they replace.
+            incidentFastInterface = Reflect("present.vert", "incident_fast.frag");
+            incidentSlowInterface = Reflect("present.vert", "incident_slow.frag");
+            var fastBuilder = graph.GraphicsPass("incident-light-half-fast")
+                .Target(incidentHalfHandle, LoadOp.Clear, StoreOp.Store)
+                .Target(incidentGradientHalfHandle, LoadOp.Clear, StoreOp.Store)
+                .Target(incidentSlowHalfHandle, LoadOp.Clear, StoreOp.Store)
+                .Read(SampleableSceneDepth)
+                .Read(SampleablePrepassNormal);
+            for (var c = 0; c < CascadeCount; c++) fastBuilder = fastBuilder.Read(cascadeHandles[c]);
+            fastBuilder = fastBuilder.Read(lightmapEnabled ? lightmapTexelHandle : surfaceKeyHandle);
+            fastBuilder = IncidentReuseReads(fastBuilder);
+            incidentHalfFastPassHandle = fastBuilder.Shader(incidentFastInterface).Handle;
+            var slowBuilder = graph.GraphicsPass("incident-light-half-slow")
+                .Target(incidentHalfHandle, LoadOp.Load, StoreOp.Store)
+                .Target(incidentGradientHalfHandle, LoadOp.Load, StoreOp.Store)
+                .Read(incidentSlowHalfHandle)
+                .Read(SampleableSceneDepth)
+                .Read(SampleablePrepassNormal);
+            for (var c = 0; c < CascadeCount; c++) slowBuilder = slowBuilder.Read(cascadeHandles[c]);
+            slowBuilder = slowBuilder.Read(lightmapEnabled ? lightmapTexelHandle : surfaceKeyHandle);
+            slowBuilder = IncidentReuseReads(slowBuilder);
+            incidentHalfSlowPassHandle = slowBuilder.Shader(incidentSlowInterface).Handle;
         }
 
 
@@ -1234,6 +1261,14 @@ internal sealed partial class SponzaLoop
                 presentVertSpv, incidentLeanSpv, incidentClipmapInterface, "incident_lean_half")),
             VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
             new[] { BlendState.Disabled, BlendState.Disabled }, incidentHalfPassHandle, "incident_lean_half");
+        incidentHalfFastPipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
+                presentVertSpv, File.ReadAllBytes(Path.Combine(shaderDir, "incident_fast.frag.spv")), incidentFastInterface, "incident_fast")),
+            VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
+            new[] { BlendState.Disabled, BlendState.Disabled, BlendState.Disabled }, incidentHalfFastPassHandle, "incident_fast");
+        incidentHalfSlowPipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
+                presentVertSpv, File.ReadAllBytes(Path.Combine(shaderDir, "incident_slow.frag.spv")), incidentSlowInterface, "incident_slow")),
+            VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
+            new[] { BlendState.Disabled, BlendState.Disabled }, incidentHalfSlowPassHandle, "incident_slow");
         lightingUpsamplePipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
                 presentVertSpv, File.ReadAllBytes(Path.Combine(shaderDir, "lighting_upsample.frag.spv")), lightingUpsampleInterface, "lighting_upsample")),
             VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,

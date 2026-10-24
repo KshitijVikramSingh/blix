@@ -133,6 +133,8 @@
     <GlslShader Include="Shaders\screen_probe_filter.comp" />
     <GlslShader Include="Shaders\incident_clipmap.frag" />
     <GlslShader Include="Shaders\incident_lean.frag" />
+    <GlslShader Include="Shaders\incident_fast.frag" />
+    <GlslShader Include="Shaders\incident_slow.frag" />
     <GlslShader Include="Shaders\present.vert" />
     <GlslShader Include="Shaders\present.frag" />
     <GlslShader Include="Shaders\hiz_build.frag" />
