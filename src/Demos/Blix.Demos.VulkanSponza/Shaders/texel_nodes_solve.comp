@@ -41,7 +41,8 @@ layout(std430, set = 0, binding = 5) readonly buffer SunletOccluded { uint sunle
 layout(std430, set = 0, binding = 6) readonly buffer SunletCouplingStart { uint sunletStart[]; };
 layout(std430, set = 0, binding = 7) readonly buffer SunletCouplings { uvec2 sunletCoupling[]; };   // to, weight bits
 layout(std430, set = 0, binding = 8) readonly buffer CouplingStart { uint couplingStart[]; };
-layout(std430, set = 0, binding = 9) readonly buffer Couplings { uvec2 coupling[]; };               // to, weight bits
+layout(std430, set = 0, binding = 9) readonly buffer Couplings { uint coupling[]; };               // couplings.glsl
+#include "couplings.glsl"
 layout(std430, set = 0, binding = 10) readonly buffer PatchTerms { vec4 patchTerms[]; };            // 3 a patch: albedo, sky, boot answer
 layout(std430, set = 0, binding = 11) buffer NodeFirst { vec4 nodeFirst[]; };
 layout(std430, set = 0, binding = 12) buffer NodeIncoming { vec4 nodeIn[]; };
@@ -114,7 +115,7 @@ void main() {
     } else if (mode == 4) {
         vec3 h = vec3(0.0);
         for (uint c = couplingStart[p]; c < couplingStart[p + 1u]; ++c)
-            h += uintBitsToFloat(coupling[c].y) * nodeOut[coupling[c].x * G + k].rgb;
+            h += couplingWeight(coupling[c]) * nodeOut[couplingTo(coupling[c]) * G + k].rgb;
         nodeIn[i] = vec4(skyWeight[uint(u.uCount.y) + k] * patchTerms[3u * p + 1u].rgb + nodeFirst[i].rgb + h * PI, 0.0);
     } else if (mode == 5) {
         vec3 c = incomingThrough(p, k, G);

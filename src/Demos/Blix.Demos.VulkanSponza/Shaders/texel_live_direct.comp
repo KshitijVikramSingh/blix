@@ -29,7 +29,8 @@ layout(std430, set = 0, binding = 3) readonly buffer TexelPatch { int texelPatch
 layout(std430, set = 0, binding = 4) readonly buffer SunNodeBits { uint sunBits[]; };
 layout(std430, set = 0, binding = 5) buffer PatchDirect { uint patchDirect[]; };   // 2 a patch: sum of n.l x 4096, texels
 layout(std430, set = 0, binding = 6) readonly buffer CouplingStart { uint couplingStart[]; };
-layout(std430, set = 0, binding = 7) readonly buffer Couplings { uvec2 coupling[]; };   // (to, weight bits)
+layout(std430, set = 0, binding = 7) readonly buffer Couplings { uint coupling[]; };   // couplings.glsl
+#include "couplings.glsl"
 layout(std430, set = 0, binding = 8) readonly buffer PatchTerms { vec4 patchTerms[]; };  // 3 a patch: albedo, sky, boot
 layout(std430, set = 0, binding = 9) buffer NodeFirst { vec4 nodeFirst[]; };
 // Per patch: rgb what of the light on its twin's side its sheet passes, per unit of its albedo; w its twin (int bits).
@@ -72,7 +73,7 @@ void main() {
     // mode 2: patch t's first bounce.
     vec3 s = vec3(0.0);
     for (uint c = couplingStart[t]; c < couplingStart[t + 1u]; ++c) {
-        uint j = coupling[c].x;
+        uint j = couplingTo(coupling[c]);
         uint texelsThere = patchDirect[2u * j + 1u];
         if (texelsThere == 0u) continue;
         float d = float(patchDirect[2u * j]) / Fixed / float(texelsThere);
@@ -85,7 +86,7 @@ void main() {
             float dt = twinTexels > 0u ? float(patchDirect[2u * twin]) / Fixed / float(twinTexels) : 0.0;
             sent = d * (1.0 - share) + tr.rgb * dt;
         }
-        s += uintBitsToFloat(coupling[c].y) * patchTerms[3u * j].rgb * sent;
+        s += couplingWeight(coupling[c]) * patchTerms[3u * j].rgb * sent;
     }
     nodeFirst[t * uint(u.uDirect.w) + uint(u.uToSun.w)] = vec4(s * u.uIrr.rgb, 0.0);
 }

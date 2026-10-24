@@ -22,7 +22,8 @@ layout(set = 0, binding = 0) uniform LiveGuides {
 
 layout(std430, set = 0, binding = 1) readonly buffer CookedPatches { vec4 cookedPatch[]; };   // 3 a patch: pos, normal, indirect
 layout(std430, set = 0, binding = 2) readonly buffer CouplingStart { uint couplingStart[]; };
-layout(std430, set = 0, binding = 3) readonly buffer Couplings { uvec2 coupling[]; };
+layout(std430, set = 0, binding = 3) readonly buffer Couplings { uint coupling[]; };
+#include "couplings.glsl"
 layout(std430, set = 0, binding = 4) readonly buffer NodeOutgoing { vec4 nodeOut[]; };      // [patch][component]
 layout(std430, set = 0, binding = 5) writeonly buffer PatchGuides { float guide[]; };       // [patch][bin]: the CDF
 // And its light list (texel_nodes_rays.comp's light strategy, BuildLights' layout): the LIGHT_K patches sending it the
@@ -64,14 +65,14 @@ void main() {
     float topW[LIGHT_K];
     int n = 0;
     for (uint c = couplingStart[i]; c < couplingStart[i + 1u]; ++c) {
-        uint j = coupling[c].x;
+        uint j = couplingTo(coupling[c]);
         vec3 d = cookedPatch[3u * j].xyz - p;
         if (dot(d, d) < 1e-8) continue;
         vec3 out_ = vec3(0.0);
         for (uint k = 0u; k < (u.uGuides.w > 0.5 ? 1u : G); ++k) out_ += nodeOut[j * G + k].rgb;   // component 0: the sky alone
         if (u.uGuides.z > 0.5 && patchDirect[2u * j + 1u] > 0u)
             out_ += patchTerms[3u * j].rgb * u.uIrr.rgb * (float(patchDirect[2u * j]) / 4096.0 / float(patchDirect[2u * j + 1u])) / PI;
-        float s = uintBitsToFloat(coupling[c].y) * dot(out_, lum);
+        float s = couplingWeight(coupling[c]) * dot(out_, lum);
         h[octBin(normalize(d))] += s;
         if (j == i || s <= 0.0) continue;
         if (n < LIGHT_K) { topTo[n] = int(j); topW[n] = s; n++; continue; }

@@ -124,29 +124,34 @@ internal sealed partial class SponzaLoop
         var specSheets = sheetLight;
         solvePack = Task.Run(() =>
         {
-            (uint[], uint[]) Csr((int To, float W)[][] rows)
+            // packed: one word a coupling (couplings.glsl: the patch's couplings); else (to, weight bits) pairs (the sunlets').
+            (uint[], uint[]) Csr((int To, float W)[][] rows, bool packed)
             {
                 var start = new uint[rows.Length + 1];
                 long total = 0;
                 for (var p = 0; p < rows.Length; p++) { start[p] = (uint)total; total += rows[p]?.Length ?? 0; }
                 start[rows.Length] = (uint)total;
-                var pairs = new uint[total * 2];
+                var pairs = new uint[total * (packed ? 1 : 2)];
                 Parallel.For(0, rows.Length, p =>
                 {
                     long at = start[p];
                     if (rows[p] is null) return;
                     foreach (var (to, w) in rows[p])
                     {
-                        pairs[at * 2] = (uint)to;
-                        pairs[at * 2 + 1] = BitConverter.SingleToUInt32Bits(w);
+                        if (packed) pairs[at] = PackCoupling(to, w);
+                        else
+                        {
+                            pairs[at * 2] = (uint)to;
+                            pairs[at * 2 + 1] = BitConverter.SingleToUInt32Bits(w);
+                        }
                         at++;
                     }
                 });
                 return (start, pairs);
             }
-            var (start, pairs) = Csr(d.Couplings);
-            solveCouplings = pairs.Length / 2;
-            var (sStart, sPairs) = withSunlets ? Csr(d.SunletCouplings) : (new uint[] { 0u }, Array.Empty<uint>());
+            var (start, pairs) = Csr(d.Couplings, packed: true);
+            solveCouplings = pairs.Length;
+            var (sStart, sPairs) = withSunlets ? Csr(d.SunletCouplings, packed: false) : (new uint[] { 0u }, Array.Empty<uint>());
             var n = withSunlets ? d.SunletPos.Count : 0;
             var sunlets = new Vector4[n * 3];
             for (var s = 0; s < n; s++)
@@ -328,6 +333,14 @@ internal sealed partial class SponzaLoop
             });
     }
 
+    // A patch coupling in one word (couplings.glsl): the patch in 20 bits, the weight's log2 over [-24, 0] in 12.
+    private static uint PackCoupling(int to, float w)
+    {
+        if ((uint)to >= 1u << 20) throw new InvalidOperationException($"coupling to patch {to}: past the 20 bits a coupling keeps for it");
+        var code = (uint)Math.Clamp(MathF.Round((MathF.Log2(MathF.Max(w, 1e-30f)) + 24f) * (4095f / 24f)), 0f, 4095f);
+        return (uint)to | (code << 20);
+    }
+
     private void UploadGpuSolve((uint[] Start, uint[] Pairs, uint[] SunletStart, uint[] SunletPairs, Vector4[] Sunlets, Vector4[] Terms,
         Vector4[] Transmit) packed)
     {
@@ -359,7 +372,7 @@ internal sealed partial class SponzaLoop
         var bytes = n * 48L + (packed.SunletStart.Length + packed.SunletPairs.Length + packed.Start.Length + packed.Pairs.Length) * 4L
             + packed.Terms.Length * 16L + 3L * items + n * 20L;
         Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] sun nodes: the solve's inputs packed and up in {solveClock.Elapsed.TotalSeconds:0.0} s ({bytes / 1048576.0:0} MB: {packed.Pairs.Length / 2:N0} couplings, {packed.SunletPairs.Length / 2:N0} sunlet couplings, {n:N0} sunlets)."));
+            $"[VulkanSponza] sun nodes: the solve's inputs packed and up in {solveClock.Elapsed.TotalSeconds:0.0} s ({bytes / 1048576.0:0} MB: {packed.Pairs.Length:N0} couplings, {packed.SunletPairs.Length / 2:N0} sunlet couplings, {n:N0} sunlets)."));
     }
 
     // The band's own state (a group of suns' first bounce, incoming and outgoing light; the sunlets' rays): made with the
