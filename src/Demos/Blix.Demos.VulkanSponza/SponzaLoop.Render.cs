@@ -981,11 +981,14 @@ internal sealed partial class SponzaLoop
 
         // Resolve before the graph executes, so the pass is recorded with the rest of the frame.
         using (Prof("taa")) RecordTaaResolve();
-        // Last: this frame's surface keys become the next frame's history (after TAA and screen probes read it).
-        if (SurfaceTargets)
+        // Last: this frame's surface keys become the next frame's history (after TAA and screen probes read it). Only for a
+        // reader: the full-res incident pass's reuse, TAA, the screen probes -- under the half-res lighting with neither of
+        // the others on, nothing read it and it was 0.85 ms a frame at 2880 x 1620 (2026-10-24).
+        if (SurfaceTargets && (IncidentReuseOn && !halfLightingNow || render.Taa > 0f || screenProbesEnabled))
         {
             graph.Pass(surfaceKeyHistoryPassHandle, scope => fullscreen.Draw(scope, surfaceKeyHistoryPipeline,
                 new[] { new ShaderTextureBinding("uSource", graph.GetColorTexture(surfaceKeyHandle)) }));
+            surfaceKeyHistoryFrame = framesRendered;
         }
         using (Prof("upload")) UploadVisible();
         using (Prof("execute")) graph.Execute(commandList);

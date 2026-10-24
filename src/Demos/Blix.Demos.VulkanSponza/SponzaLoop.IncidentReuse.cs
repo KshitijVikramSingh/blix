@@ -20,6 +20,8 @@ internal sealed partial class SponzaLoop
     private long incidentHistoryFrame = -10, incidentDirtyFrame = -10;
     private Matrix4x4 incidentLastView, incidentLastProjection;
     private int incidentStillFrames;
+    // The frame whose surface keys the history holds (RenderFrame records the copy only for a reader).
+    private long surfaceKeyHistoryFrame = -10;
     private long incidentSkipped, incidentReused, incidentFull, incidentDirtyFrames;
     private string IncidentReuseCounts() { var t = $"incident: skipped {incidentSkipped}, reused {incidentReused}, full {incidentFull} frames (dirty {incidentDirtyFrames}); shadow masks kept {rtShadowKept}"; incidentSkipped = incidentReused = incidentFull = incidentDirtyFrames = 0; rtShadowKept = 0; return t; }
 
@@ -37,7 +39,8 @@ internal sealed partial class SponzaLoop
     // A census (IncidentCensusNow) is taken by a frame that runs the pass in full; census: false asks without taking one.
     private bool IncidentReuseNow(bool half, bool census = true) =>
         IncidentReuseOn && SurfaceTargets && !half && texelResting && !MoverActive
-        && framesRendered - incidentDirtyFrame > 1 && incidentHistoryFrame == framesRendered - 1 && !(census && IncidentCensusNow(half));
+        && framesRendered - incidentDirtyFrame > 1 && incidentHistoryFrame == framesRendered - 1 && surfaceKeyHistoryFrame == framesRendered - 1
+        && !(census && IncidentCensusNow(half));
 
     // The reuse textures and uniform for RecordIncidentClipmap.
     private IEnumerable<ShaderTextureBinding> IncidentReuseTextures() => new[]
