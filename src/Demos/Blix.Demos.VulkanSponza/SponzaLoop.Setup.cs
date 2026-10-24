@@ -442,7 +442,9 @@ internal sealed partial class SponzaLoop
         // 512 with the refine (2026-10-21; 384 before): the coarse cells' ray noise is what the fine copies carry as clouds
         // on every wall (tools/gi-model/cell_noise.py); 512 takes ~15% off them (two seeds: surfaces' noise 1.17-1.19x
         // less), the light landing a few frames later on the testbeds. --live-rays N.
-        if (liveTransfer && args.Int("live-rays") is null && args.Int("sun-nodes-rays") is null) { liveRays = 512; sunNodeRays = liveRays; }
+        // 128 since 2026-10-25 (the refine takes the noisy up to 4 x): every gate and materials ratchet holds beside 512's
+        // (the dead end's |error| 0.034 -> 0.042, ratchet 0.05), at ~1/3 the rays -- a sun change in the frame at 512 was
+        // ~1 G rays, minutes behind a 120 fps frame.
         if (liveTransfer && args.Int("live-max-rays") is null && args.Int("texel-max-rays") is null) texelMaxRays = 4 * sunNodeRays;
         if (liveTransfer && args.Int("live-min-level") is null) liveMinLevel = 0;
         if (args.Float("hit-cell") is { } hc) hitCellSize = Math.Clamp(hc, 0.01f, 1f);
