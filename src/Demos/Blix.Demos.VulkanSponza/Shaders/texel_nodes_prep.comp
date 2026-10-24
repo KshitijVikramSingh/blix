@@ -8,7 +8,7 @@
 layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) uniform SunNodesPrep {
-    vec4 uPrep;       // x the first live texel of this dispatch, y the planes' step (0: one texel a key), w the hash's slots (a power of two)
+    vec4 uPrep;       // x the first live texel of this dispatch, y the planes' step (0: one texel a key), w the hash's slots (any count: slots by modulo)
     vec4 uRange;      // x the live texels
     vec4 uTexelGrid;  // xyz the cells' origin, w the finest spacing
 } u;
@@ -26,8 +26,8 @@ void main() {
     uvec2 key;
     if (!nodeTexelKey(id, u.uTexelGrid, key)) return;
     int plane = nodePlane(id, u.uPrep.y);
-    uint mask = uint(u.uPrep.w) - 1u;
-    uint slot = texelMix(key) & mask;
+    uint slots = uint(u.uPrep.w);
+    uint slot = texelMix(key) % slots;
     for (int probe = 0; probe < NODE_HASH_PROBES; ++probe) {
         uint prev = atomicCompSwap(cookHash[2u * slot], NODE_EMPTY, id);
         if (prev == NODE_EMPTY) {
@@ -38,6 +38,6 @@ void main() {
         // Its key's cell taken: the smallest id keeps it, whichever came first -- first-come was the dispatch's race, and
         // which texel a search found there moved run to run (2026-10-22).
         if (nodeTexelKey(prev, u.uTexelGrid, other) && other == key && nodePlane(prev, u.uPrep.y) == plane) { atomicMin(cookHash[2u * slot], id); return; }
-        slot = (slot + 1u) & mask;
+        slot = slot + 1u == slots ? 0u : slot + 1u;
     }
 }

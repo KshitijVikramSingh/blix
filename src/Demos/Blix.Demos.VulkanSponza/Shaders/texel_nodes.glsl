@@ -65,7 +65,7 @@ int nodeNext(int set, uvec2 key, uint fingerprint, vec4 grid, uint slots, inout 
         uint e = nodeSlot(set, slot);
         if (e == NODE_EMPTY) { probe = NODE_HASH_PROBES; return -1; }
         uint at = slot;
-        slot = (slot + 1u) & (slots - 1u);
+        slot = slot + 1u == slots ? 0u : slot + 1u;
         ++probe;
         uvec2 k;
         if ((set != 0 || cookHash[2u * at + 1u] == fingerprint) && nodeKeyOf(set, e, grid, k) && k == key) return int(e);
@@ -91,7 +91,7 @@ float nodeSetAt(int set, vec3 p, vec3 n, vec4 grid, uint slots, vec2 lookup, out
             if (any(lessThan(cell, ivec3(0))) || any(greaterThan(cell, ivec3(65535)))) continue;
             uvec2 key = texelKey(cell, bins[b], 0u);
             uint fingerprint = nodeFingerprint(key);
-            uint slot = texelMix(key) & (slots - 1u);
+            uint slot = texelMix(key) % slots;
             int probe = 0;
             float nearestPlane = 1e30;
             // The cell's texels, one a plane: the best weighed. One a cell hid a surface beside another facing the same

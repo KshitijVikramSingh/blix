@@ -484,7 +484,9 @@ internal sealed partial class SponzaLoop
         var live = texelLiveIds!;
         var words = (suns + 31) / 32;
         if (words > 8) throw new InvalidOperationException($"--sun-nodes: at most 256 suns ({suns} asked).");
-        sunNodeHashSlots = (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(live.Length * 2, 1024));
+        // 1.5 slots a live texel, by modulo (texel_nodes.glsl): a power of two at twice the texels left Sponza's 17.4 M at 64 M
+        // slots, 512 MB at 27% full; ~210 MB now, two thirds full at most (a key holds one texel a plane, so fewer entries).
+        sunNodeHashSlots = Math.Max(live.Length * 3 / 2, 1024);
         var empty = new uint[sunNodeHashSlots * 2];   // id, fingerprint a slot (texel_nodes.glsl)
         Array.Fill(empty, 0xFFFFFFFFu);
         if (!sunNodeLive.Equals(default(GpuBufferHandle)) && !sunNodeLive.Equals(splitLiveBuffer)) RetireGpuBuffer(sunNodeLive);   // a cook before this one's

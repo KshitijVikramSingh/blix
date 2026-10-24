@@ -60,7 +60,7 @@ int poolFind(ivec3 cell, uint bin) {
     if (any(lessThan(cell, ivec3(0))) || any(greaterThan(cell, ivec3(65535)))) return -1;
     uvec2 key = texelKey(cell, bin, 0u);
     uint slots = uint(u.uSerial.y);
-    uint slot = texelMix(key) & (slots - 1u);
+    uint slot = texelMix(key) % slots;
     uint fingerprint = nodeFingerprint(key);
     // The key's smallest id (a key holds one texel a plane: texel_nodes_prep.comp), the one it held before.
     int best = -1;
@@ -69,7 +69,7 @@ int poolFind(ivec3 cell, uint bin) {
         if (e == NODE_EMPTY) break;
         uvec2 k;
         if (cookHash[2u * slot + 1u] == fingerprint && nodeTexelKey(e, u.uTexelGrid, k) && k == key && (best < 0 || int(e) < best)) best = int(e);
-        slot = (slot + 1u) & (slots - 1u);
+        slot = slot + 1u == slots ? 0u : slot + 1u;
     }
     return best;
 }
