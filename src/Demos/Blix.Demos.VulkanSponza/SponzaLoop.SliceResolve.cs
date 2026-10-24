@@ -76,7 +76,9 @@ internal sealed partial class SponzaLoop
 
     private int SunColumn() => Array.IndexOf(sunNodeKinds, 1);
 
-    private void ResolveDispatch(int mode, int first, int count, int passes, bool refining, GpuBufferHandle ids, GpuBufferHandle places, float bar)
+    // inFrame: recorded in that pass of the frame (SponzaLoop.SweepFrame.cs) rather than run at once.
+    private void ResolveDispatch(int mode, int first, int count, int passes, bool refining, GpuBufferHandle ids, GpuBufferHandle places, float bar,
+        PassHandle? inFrame = null)
     {
         if (count == 0) return;
         var suns = sunNodeSuns!.Length;
@@ -86,7 +88,7 @@ internal sealed partial class SponzaLoop
         var skyDetail = EnsureDetailBuffer(sunPart: false);
         var sunDetail = EnsureDetailBuffer(sunPart: true);
         var declared = sliceResolveInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
-        device.DispatchNow(new[] { new DispatchCommand(sliceResolvePipeline, (count + 63) / 64, 1, 1,
+        var command = new DispatchCommand(sliceResolvePipeline, (count + 63) / 64, 1, 1,
             new ShaderUniform[]
             {
                 new("uSlice", new Vector4Uniform(new Vector4(first, count, passes, refining ? 1f : 0f))),
@@ -121,7 +123,9 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("NodeGlow", NearGlowSplitNow ? sunNodeGlow : resolveCount),
                 new ShaderBufferBinding("GlowState", NearGlowSplitNow ? resolveGlowState : resolveCount),
                 new ShaderBufferBinding("GlowPart", NearGlowSplitNow ? texelGlowPart : resolveCount),
-            }.Where(b => declared.Contains(b.Name)).ToArray()) }, "slice-resolve");
+            }.Where(b => declared.Contains(b.Name)).ToArray());
+        if (inFrame is { } pass) graph.Dispatch(pass, command);
+        else device.DispatchNow(new[] { command }, "slice-resolve");
     }
 
     private GpuBufferHandle EnsureDetailBuffer(bool sunPart)

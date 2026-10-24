@@ -50,7 +50,7 @@ internal sealed partial class SponzaLoop
     private GpuBufferHandle TransportRecordsBuffer => transportRecords.Equals(default(GpuBufferHandle)) ? sunNodeAccum : transportRecords;
 
     // After a sweep slice's passes: its texels' relationships counted.
-    private void TransportCensusFinish(bool now, int slice, int passes)
+    private void TransportCensusFinish(bool now, int slice, int passes, PassHandle? censusPass = null)
     {
         if (!TransportCensusOn(0)) return;
         var declared = transportCensusInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
@@ -63,7 +63,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("TransportStats", transportStats),
             }.Where(b => declared.Contains(b.Name)).ToArray());
         if (now) device.DispatchNow(new[] { command }, "sun-nodes-transport-census");
-        else graph.Dispatch(transportCensusPass, command);
+        else graph.Dispatch(censusPass ?? transportCensusPass, command);
     }
 
     private PassHandle transportCensusPass;

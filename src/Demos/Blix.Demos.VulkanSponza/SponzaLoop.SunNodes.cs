@@ -343,6 +343,7 @@ internal sealed partial class SponzaLoop
             sunNodeExactBatches[c] = DeclareShadowBatch("sun-nodes-exact" + tag);
             sunNodeShadePasses[c] = graph.ComputePass("sun-nodes-shade" + tag).Shader(sunNodeShadeInterface).Handle;
         }
+        DeclareSweepFrame();
     }
 
     private void CreateSunNodePipelines(string shaderDir)
@@ -1316,12 +1317,18 @@ internal sealed partial class SponzaLoop
             TransferCheckSnapshot();
             transferChecked = true;
         }
+        // The in-frame sweep: a pass a frame, and a round's end a frame after its last resolve was recorded
+        // (SponzaLoop.SweepFrame.cs).
+        if (SweepRecordedThisFrame) return;
+        if (sweepRoundEndPending && !SweepRoundEnd()) return;
         var clock = Stopwatch.StartNew();
         var budget = CookScreenNow ? SunNodeCookScreenMs : GatherInBackground ? backgroundGatherMs : SunNodeLiveMs;
         sunNodeQueueWaitMs = 0;
         var steps = 0;
-        while (sunNodeStage == SunNodeStage.Tracing
-               && (gatherStepsAFrame > 0 ? steps++ < gatherStepsAFrame : clock.Elapsed.TotalMilliseconds - sunNodeQueueWaitMs < budget))
+        // In the frame: one pass a frame (SweepFramePass), recorded, not timed.
+        while (sunNodeStage == SunNodeStage.Tracing && !sweepRoundEndPending
+               && (gatherStepsAFrame > 0 ? steps++ < gatherStepsAFrame : SweepInFrameNow ? steps++ < 1
+                   : clock.Elapsed.TotalMilliseconds - sunNodeQueueWaitMs < budget))
         {
             if (sunNodeReadback)
             {
@@ -1358,17 +1365,26 @@ internal sealed partial class SponzaLoop
             var live = refining ? sunNodeRefineIds : sunNodeTraceIds;
             var sweepPasses = sunNodeRays / 32;
             var passes = refining ? RefinePasses : sweepPasses;
-            var slice = Math.Min(sunNodeSlice, live.Length - sunNodeFirst);
             var seedPass = refining ? sweepPasses + (sunNodeRefineRound - 1) * RefinePasses + sunNodePass : sunNodePass;
             if (GpuResolveOn && !gpuResolving && !refining && sunNodeFirst == 0 && sunNodePass == 0) BeginGpuResolve();
+            // In the frame (SponzaLoop.SweepFrame.cs): the slice's passes recorded, a smaller slice; needs the GPU resolve.
+            var inFrame = SweepInFrameNow && gpuResolving;
+            var slice = Math.Min(inFrame ? sweepSlice : sunNodeSlice, live.Length - sunNodeFirst);
             if (syncAll) device.WaitIdle();
-            SunNodePassNow(refining ? sunNodeRefineBuffer : sunNodeTraceBuffer, sunNodeFirst, slice, sunNodePass, seedPass);
+            if (inFrame) SweepFramePass(refining ? sunNodeRefineBuffer : sunNodeTraceBuffer, sunNodeFirst, slice, sunNodePass, seedPass);
+            else SunNodePassNow(refining ? sunNodeRefineBuffer : sunNodeTraceBuffer, sunNodeFirst, slice, sunNodePass, seedPass);
             if (syncAll) device.WaitIdle();
             if (++sunNodePass == passes)
             {
                 sunNodePass = 0;
-                FarFinish(now: true, refining ? sunNodeRefineBuffer : sunNodeTraceBuffer, sunNodeFirst, slice, passes);
-                TransportCensusFinish(now: true, slice, passes);
+                FarFinish(now: !inFrame, refining ? sunNodeRefineBuffer : sunNodeTraceBuffer, sunNodeFirst, slice, passes,
+                    inFrame ? sweepFarFinishPass : null, inFrame ? sweepFarPoolPass : null);
+                TransportCensusFinish(now: !inFrame, slice, passes, inFrame ? sweepCensusPass : null);
+                if (inFrame)
+                {
+                    if (!SweepResolveFrame(slice, passes)) return;
+                    continue;
+                }
                 // On the GPU (SponzaLoop.SliceResolve.cs): resolved where it lies, nothing read back.
                 if (gpuResolving)
                 {

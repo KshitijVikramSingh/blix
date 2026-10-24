@@ -508,7 +508,9 @@ internal sealed partial class SponzaLoop
         string Share(int k) => counts[65] > 0 ? string.Create(CultureInfo.InvariantCulture, $"{100.0 * counts[k] / counts[65]:0.0}%") : "-";
     }
 
-    private void FarFinish(bool now, GpuBufferHandle ids, int first, int slice, int passes)
+    // finishPass, poolPass: the frame's passes to record in (the in-frame sweep's, SponzaLoop.SweepFrame.cs), else the
+    // gather's own.
+    private void FarFinish(bool now, GpuBufferHandle ids, int first, int slice, int passes, PassHandle? finishPass = null, PassHandle? poolPass = null)
     {
         if (!farOn || farRecording) return;
         farSerial = farSerial % 65535 + 1;
@@ -522,8 +524,8 @@ internal sealed partial class SponzaLoop
         }
         else
         {
-            graph.Dispatch(farFinishPass, command);
-            if (pool is { } p) graph.Dispatch(farPoolPass, p);
+            graph.Dispatch(finishPass ?? farFinishPass, command);
+            if (pool is { } p) graph.Dispatch(poolPass ?? farPoolPass, p);
         }
     }
 }
