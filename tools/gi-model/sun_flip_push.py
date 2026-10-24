@@ -34,7 +34,12 @@ Crytek Sponza from the authored sun (180, -72), 2026-10-25, 2.43 M matched sweep
              (1.37%): ~10 M push rays at 128 a flipped texel, against the ~0.46 G a sun change gathers
   10.07 deg  0.76%; 17.1%; flip 83%, angle 22%, bounce 7%; linear to 0.01%; keep 0.219 (23.0%), + angle + flip
              0.047 (12.9%), all three 0.000; 177,442 flipped (3.12%): ~23 M push rays
-Open: the bounce part's source (the live patch light's change), and the push's noise simulated, not by reciprocity."""
+The bounce (3, 4): a ray's old bounce scaled by its hit texel's change (instant or final) 0.0131 / 0.0446 (3 / 10 deg),
+by the receiver's own change 0.085 / 0.170 -- no better than leaving it out (0.0101 / 0.0467, energy 1.000): left to a
+slow regather in the background. Only 9.2% of the gather's rays hit a texel (the rest answered by hit cells and patches:
+~75-80% of the flip change); the push simulated over those: 32-64 rays a finest flipped texel (4.5-20 M rays in all)
+leave the receivers 0.0048-0.0060 (3 deg) and 0.0029-0.0055 (10 deg) off, where a fresh 128-ray gather's own noise
+there is 0.12."""
 import json
 import sys
 from pathlib import Path
@@ -152,10 +157,67 @@ def main():
         n = ma['texelCount']
         ba, bb = bits_of(args[2], n), bits_of(args[3], n)
         live = np.abs(ta[:, 3]) >= 2
+        area = np.abs(ta[:, 3]).astype(float)   # the record's sample area (texel_filter_neighbour.glsl's area weight)
         flipped = live & (ba != bb)
-        print(f'\nthe push\'s sources: {flipped.sum():,} of {live.sum():,} live texels flipped ({flipped.sum() / live.sum():.2%})')
-        print('  (the push matches a 128-ray gather\'s noise at 128 x the flipped area over the receiver\'s area: '
-              'at the finest texels, 128 rays a flipped finest texel)')
+        print(f'\nthe push\'s sources: {flipped.sum():,} of {live.sum():,} live texels flipped ({flipped.sum() / live.sum():.2%}), '
+              f'{area[flipped].sum() / area[live].sum():.2%} of the live area')
+
+        # 3. The bounce's source: a ray's old bounce times its hit texel's change (its sun part, luminance), from the
+        # instant layer (the patches': at once) or the final light (a second pass's, once the push landed).
+        def sun_part(prefix, stage):
+            raw = Path(f'{prefix}.{stage}').read_bytes()
+            count = int(np.frombuffer(raw[:4], np.int32)[0])
+            w = np.frombuffer(raw[4 + 8 * count:4 + 16 * count], np.uint32).reshape(count, 2)[:, 0].astype(np.int64)
+            sc = np.exp2((w >> 27) - 24.0)
+            return ((w & 511) * 0.2126 + ((w >> 9) & 511) * 0.7152 + ((w >> 18) & 511) * 0.0722) * sc
+        on_texel = A['ntex'] >= 0
+        print(f'rays whose hit is a texel: {on_texel.mean():.1%}; of the bounce change they carry '
+              f'{np.abs(np.where(on_texel, bounce, 0)).sum() / max(np.abs(bounce).sum(), 1e-12):.1%}, of the flip change '
+              f'{np.abs(np.where(on_texel, flip, 0)).sum() / max(np.abs(flip).sum(), 1e-12):.1%}')
+        for stage in ('instant.0', 'final.0'):
+            xa, xb = sun_part(args[2], stage), sun_part(args[3], stage)
+            ratio = np.clip(xb / np.maximum(xa, 1e-9), 0.0, 16.0)
+            est = np.where(on_texel, A['bounce'] * ratio[np.maximum(A['ntex'], 0)], A['bounce']) - A['bounce']
+            p = t_a + d_angle + d_flip + mean(est)
+            e = err(p)
+            print(f'  + angle + flip + bounce by the hit texel\'s {stage.split(".")[0]} change: mean error {e.mean():.4f}, '
+                  f'over 10% off {(e > 0.1).mean():.2%}, over 50% {(e > 0.5).mean():.2%}, energy {p.sum() / t_b.sum():.4f}')
+            # The receiver's own: its bounce (its rays' bounce mean) times its own change there.
+            rb = mean(A['bounce']) * (ratio[u] - 1.0)
+            p = t_a + d_angle + d_flip + rb
+            e = err(p)
+            print(f'  + angle + flip + bounce by the receiver\'s {stage.split(".")[0]} change: mean error {e.mean():.4f}, '
+                  f'over 10% off {(e > 0.1).mean():.2%}, over 50% {(e > 0.5).mean():.2%}, energy {p.sum() / t_b.sum():.4f}')
+
+        # 4. The push, simulated: per receiver t and flipped source h its rays hit, Poisson(M_h P_t(h) A_t / A_h) deposits
+        # of dL_h A_h / (A_t M_h); M_h = m A_h / A_ref (A_ref the finest live area). Against the receiver's own 128-ray
+        # gather noise (its rays' spread over sqrt N) and the expected flip change d_flip.
+        rng = np.random.default_rng(1)
+        src = flipped_ray & on_texel
+        pair = inv[src] * np.int64(n + 1) + A['ntex'][src]
+        up, pinv = np.unique(pair, return_inverse=True)
+        hits = np.bincount(pinv).astype(float)
+        dl = np.bincount(pinv, weights=flip[src]) / hits
+        rt, hs = up // (n + 1), up % (n + 1)
+        p_th = hits / cnt[rt]
+        a_t = np.maximum(area[u[rt]], 1e-9)
+        a_h = np.maximum(area[hs], 1e-9)
+        a_ref = np.percentile(area[live], 5)
+        not_texel = np.bincount(inv, weights=np.where(flipped_ray & ~on_texel, flip, 0.0)) / cnt
+        sd = np.sqrt(np.maximum(mean(whole_b ** 2) - t_b ** 2, 0) / cnt)
+        floor_e = (sd / np.maximum(t_b, floor)).mean()
+        print(f'the push simulated over {len(up):,} receiver-source pairs (flipped hits that are texels; the rest, '
+              f'{np.abs(not_texel).sum() / max(np.abs(d_flip).sum(), 1e-12):.1%} of the flip change, taken exactly here); '
+              f'a 128-ray gather\'s own noise over these texels {floor_e:.4f}')
+        for m_rays in (16, 32, 64, 128, 256):
+            m_h = m_rays * a_h / a_ref
+            k = rng.poisson(m_h * p_th * a_t / a_h)
+            push = np.bincount(rt, weights=k * dl * a_h / (a_t * m_h), minlength=len(u)) + not_texel
+            p = t_a + d_angle + d_bounce + push
+            e = err(p)
+            total = (m_rays * area[flipped] / a_ref).sum()
+            print(f'  {m_rays:4d} rays a finest flipped texel ({total / 1e6:6.1f} M rays in all): mean error {e.mean():.4f}, '
+                  f'over 10% off {(e > 0.1).mean():.2%}, over 50% {(e > 0.5).mean():.2%}, energy {p.sum() / t_b.sum():.4f}')
 
 if __name__ == '__main__':
     main()
