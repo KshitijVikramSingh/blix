@@ -211,6 +211,21 @@ static float3 blix_sheet_light(float3 transmit, float cosine, float d) {
 //
 // With p.sky, each ray also has a sky ray (skyRays, two float4s: origin and tMax, tMax 0 for none, sky seen; then its
 // direction), and the word gains 2 where it meets anything: "does this point see the sky that way".
+// The packed shadow dispatch's size from its live count (limit[0], at most count): a threadgroup of 64 per 64 rays. The
+// trace was dispatched over every pixel, the threads past the count returning at once -- and a ray-tracing kernel's
+// threads are not free to launch: Crytek Sponza's 0 rays cost 3.0 ms at 2880 x 1620, 72k rays 1.16 ms at half (2026-10-24).
+kernel void blix_limit_args(device const uint* limit [[buffer(0)]],
+                            device uint* args [[buffer(1)]],
+                            constant uint& count [[buffer(2)]],
+                            uint i [[thread_position_in_grid]])
+{
+    if (i != 0u) return;
+    uint n = min(limit[0], count);
+    args[0] = (n + 63u) / 64u;
+    args[1] = 1u;
+    args[2] = 1u;
+}
+
 kernel void blix_shadow(device const float4* origins [[buffer(0)]],
                         device uint* occluded [[buffer(1)]],
                         instance_acceleration_structure tlas [[buffer(2)]],
@@ -686,6 +701,8 @@ struct HwxContext {
     id<MTLComputePipelineState> pso;
     id<MTLIntersectionFunctionTable> table;
     id<MTLComputePipelineState> shadowPso;
+    id<MTLComputePipelineState> limitArgsPso;   // blix_limit_args: the packed shadow dispatch's size from its live count
+    id<MTLBuffer> limitArgs;                    // its three words (threadgroups x, y, z), GPU-private
     id<MTLComputePipelineState> buriedPso;            // blix_buried, with its own table
     id<MTLIntersectionFunctionTable> buriedTable;
     id<MTLComputePipelineState> contactPso;           // blix_contact_trace, with its own table
@@ -779,6 +796,8 @@ HWX_EXPORT HwxContext* hwx_create(void* mtlDevice, char* err, int errLength) {
         id<MTLIntersectionFunctionTable> contactTable;
         id<MTLComputePipelineState> contactPso = pipeline(@"blix_contact_trace", &contactTable);
         if (!contactPso) return report([@"contact-trace pipeline: " stringByAppendingString:error.localizedDescription]);
+        id<MTLComputePipelineState> limitArgsPso = [device newComputePipelineStateWithFunction:[library newFunctionWithName:@"blix_limit_args"] error:&error];
+        if (!limitArgsPso) return report([@"limit-args pipeline: " stringByAppendingString:error.localizedDescription]);
         id<MTLComputePipelineState> candidatesPso = [device newComputePipelineStateWithFunction:[library newFunctionWithName:@"blix_candidates"] error:&error];
         if (!candidatesPso) return report([@"candidates pipeline: " stringByAppendingString:error.localizedDescription]);
         id<MTLIntersectionFunctionTable> lightletDenseTable, lightletRingsTable;
@@ -806,6 +825,8 @@ HWX_EXPORT HwxContext* hwx_create(void* mtlDevice, char* err, int errLength) {
         ctx->contactPso = contactPso;
         ctx->contactTable = contactTable;
         ctx->candidatesPso = candidatesPso;
+        ctx->limitArgsPso = limitArgsPso;
+        ctx->limitArgs = [device newBufferWithLength:16 options:MTLResourceStorageModePrivate];
         ctx->lightletDensePso = lightletDensePso;
         ctx->lightletDenseTable = lightletDenseTable;
         ctx->lightletRingsPso = lightletRingsPso;
@@ -1222,6 +1243,16 @@ HWX_EXPORT int hwx_encode_shadow(HwxContext* ctx, void* sharedEvent, uint64_t wa
             result = Fail(ctx, "the occlusion buffer has no room for the sheets' light past throughAt");
         if (result == 0 && count > 0) {
             id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            // The live count's dispatch size first (blix_limit_args), then the trace over that alone.
+            if (limitBuffer) {
+                uint32_t cap = count;
+                [enc setComputePipelineState:ctx->limitArgsPso];
+                [enc setBuffer:limitBuffer offset:limitOffset atIndex:0];
+                [enc setBuffer:ctx->limitArgs offset:0 atIndex:1];
+                [enc setBytes:&cap length:sizeof(cap) atIndex:2];
+                [enc dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+                [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            }
             [enc setComputePipelineState:ctx->shadowPso];
             [enc setBuffer:originBuffer offset:originsOffset atIndex:0];
             [enc setBuffer:occludedBuffer offset:occludedOffset atIndex:1];
@@ -1249,7 +1280,9 @@ HWX_EXPORT int hwx_encode_shadow(HwxContext* ctx, void* sharedEvent, uint64_t wa
             // The materials' textures are reached through the argument buffer alone.
             if (alpha && !ctx->alphaTextures.empty())
                 [enc useResources:ctx->alphaTextures.data() count:ctx->alphaTextures.size() usage:MTLResourceUsageRead];
-            [enc dispatchThreads:MTLSizeMake(count, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+            if (limitBuffer)
+                [enc dispatchThreadgroupsWithIndirectBuffer:ctx->limitArgs indirectBufferOffset:0 threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+            else [enc dispatchThreads:MTLSizeMake(count, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
             [enc endEncoding];
         }
         if (!grouped) [cb encodeSignalEvent:event value:signalValue];
