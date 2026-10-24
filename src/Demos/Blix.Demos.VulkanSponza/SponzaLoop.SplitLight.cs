@@ -166,7 +166,9 @@ internal sealed partial class SponzaLoop
             sunNodeDirsAsked = null;
             ReleaseSunNodeCook();
         }
-        Console.WriteLine("[VulkanSponza] split light: the cook landed; the texels rest on the sky's part and the sun's.");
+        Console.WriteLine("[VulkanSponza] split light: the cook landed; the texels rest on the sky's part and the sun's."
+            + (lightChangeClock.IsRunning ? string.Create(CultureInfo.InvariantCulture, $" The light change took {lightChangeClock.Elapsed.TotalSeconds:0.0} s.") : ""));
+        lightChangeClock.Reset();
         restDumpFrame = framesRendered + 30;
         landedFrame = framesRendered;   // BLIX_DUMP_PARTS: the light the image reads, once composed (Recall.cs)
         // The sky's part gathered whole: a sun change gathers the sun's alone from here (SponzaLoop.SliceResolve.cs).

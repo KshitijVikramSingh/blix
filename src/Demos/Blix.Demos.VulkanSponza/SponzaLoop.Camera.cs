@@ -159,5 +159,7 @@ internal sealed partial class SponzaLoop
         if (input[Key.C].Pressed)
             Console.WriteLine($"[VulkanSponza] camera pose: --cam {camera.Pose} (post-load frame {postLoadFrames})");
         if (input[Key.P].Pressed && texelPicker) texelPickFrozen = !texelPickFrozen;
+        // M: the sun moving, or held (SponzaLoop.SunMove.cs).
+        if (input[Key.M].Pressed) ToggleSunMove();
     }
 }

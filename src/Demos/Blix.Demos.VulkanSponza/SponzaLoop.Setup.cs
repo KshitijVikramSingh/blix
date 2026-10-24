@@ -473,6 +473,7 @@ internal sealed partial class SponzaLoop
         if (args.Int("sky-vis-filter") is { } svf) skyVisFilterPasses = Math.Max(0, svf);
         backgroundGather = args.Flag("background-gather");
         ParseSweepFrame(args);
+        ParseSunMove(args);
         if (args.Float("background-gather-ms") is { } bgMs) backgroundGatherMs = Math.Max(0f, bgMs);
         gatherStepsAFrame = Math.Max(0, args.Int("gather-steps-a-frame") ?? 0);
         patchPickOld = args.Flag("patch-pick-old");

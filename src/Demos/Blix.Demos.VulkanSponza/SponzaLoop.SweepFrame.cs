@@ -136,7 +136,9 @@ internal sealed partial class SponzaLoop
 
     private void ParseSweepFrame(AppArgs args)
     {
-        sweepInFrame = args.Flag("sweep-in-frame");
+        // On by default since 2026-10-25 (Crytek Sponza: a sun change at ~102-113 fps, against ~25 s of the cook screen at
+        // ~4 fps); --no-sweep-in-frame: the host's passes under the cook screen, as before (the parts dumps read at once).
+        sweepInFrame = !args.Flag("no-sweep-in-frame");
         if (args.Int("sweep-slice") is { } s) { sweepSlice = Math.Clamp(s, 256, 32768); sweepSliceFixed = true; }
         if (args.Float("sweep-gpu-ms") is { } gm) sweepGpuMs = Math.Max(0.5f, gm);
         if (args.Int("sweep-instant-chunk") is { } ic) sweepInstantChunk = Math.Max(65536, ic);

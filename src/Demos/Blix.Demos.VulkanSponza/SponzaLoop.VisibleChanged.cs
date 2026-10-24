@@ -190,11 +190,15 @@ internal sealed partial class SponzaLoop
     }
 
     // ApplyFineNow: the fine texels the copy writes -- all of them but those the first gather took.
+    // --sun-change-select-fine: nor the fine texels the relit instant did not move (they keep it, as the coarse left out do).
     private (GpuBufferHandle Ids, int Count, bool Own) FineCopyIds()
     {
-        if (visibleChangedMask is not { } mask || texelLiveIds is not { } all || liveCoarseLevels is not { } levels)
+        var moved = sunChangeSelectFine ? sunChangeMask : null;
+        if ((visibleChangedMask is null && moved is null) || texelLiveIds is not { } all || liveCoarseLevels is not { } levels)
             return (transferFineIdsBuffer, transferFineCount, false);
-        var fine = all.Where(id => levels[id] < transferMinLevel && (mask[id >> 5] >> (int)(id & 31) & 1u) == 0).ToArray();
+        var mask = visibleChangedMask;
+        var fine = all.Where(id => levels[id] < transferMinLevel && (mask is null || (mask[id >> 5] >> (int)(id & 31) & 1u) == 0)
+            && (moved is null || (moved[id >> 5] >> (int)(id & 31) & 1u) != 0)).ToArray();
         return (SweepBuffer(Math.Max(16, fine.Length * 4), MemoryMarshal.AsBytes(fine.AsSpan()), "sponza.transfer.fine-ids.copy"), fine.Length, true);
     }
 }

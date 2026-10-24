@@ -21,7 +21,7 @@ internal sealed partial class SponzaLoop
     private bool livePatchLight, liveAlways, liveTexels;
     // The live answer settled for the lights as they are: what --live-texels' gather waits for.
     private bool LivePatchLightRested => liveInjected && liveBounces >= LiveBouncesToRest
-        && Vector3.Distance(liveToSun, -Vector3.Normalize(sunDirection)) < 1e-6f;
+        && Vector3.Distance(liveToSun, GiToSun) < 1e-6f;
     // A sun that turned while the cook was in its setup (tasks off the frame thread): restarted once the setup is done.
     private Vector3? liveRestartPending;
     private const int LiveBouncesPerFrame = 1;
@@ -331,8 +331,12 @@ internal sealed partial class SponzaLoop
     // on screen first. The setup took ~20 s a turn (2026-10-16).
     private bool liveCookWarm, liveRetargeting;
 
+    // A light change's time, the turn to its landing (the split light's landing line).
+    private readonly System.Diagnostics.Stopwatch lightChangeClock = new();
+
     private void LiveRetarget(Vector3 toSun)
     {
+        lightChangeClock.Restart();
         device.WaitIdle();
         RestoreGatherScratch();
         ResetSunNodeRefine();
@@ -504,7 +508,7 @@ internal sealed partial class SponzaLoop
         if (liveRestartPending is { } pending && sunNodeStage is not (SunNodeStage.Relighting or SunNodeStage.Prep or SunNodeStage.PatchPick or SunNodeStage.Discover or SunNodeStage.Merge))
             LiveRestart(pending);
         if (!EnsureLiveInputs(d)) return;
-        var toSun = -Vector3.Normalize(sunDirection);
+        var toSun = GiToSun;
         var irr = EffectiveSunIrradiance;
         var noSun = toSun.Y <= 0f || irr == Vector3.Zero;
         var changed = !liveInjected || toSun != liveToSun || irr != liveIrr;

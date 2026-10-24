@@ -1840,7 +1840,7 @@ internal sealed partial class SponzaLoop
                 device.WriteGpuBuffer(liveTexelPatch, 0, MemoryMarshal.AsBytes(picked.AsSpan()));
                 liveTexelPatchStored = true;
                 liveInjected = false;
-                liveRestartPending = -Vector3.Normalize(sunDirection);
+                liveRestartPending = GiToSun;
                 Console.WriteLine("[VulkanSponza] sun nodes: the pick was not stored -- the live solve and the cook restart from it (a first boot).");
             }
             int blocked = 0, none = 0;

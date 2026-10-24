@@ -702,6 +702,7 @@ internal sealed partial class SponzaLoop
     private void FollowSun()
     {
         StepSunSweep();
+        StepSunMove();
         // At or after its frame, once: FollowSun runs only once the texels are up, which can be after the frame named.
         if (sunChange is { } change && !sunChangeApplied && postLoadFrames >= change.Frame)
         {
@@ -740,7 +741,7 @@ internal sealed partial class SponzaLoop
             relightTask = null;
         }
         if (relightTask is not null) return;
-        var toSun = -Vector3.Normalize(sunDirection);
+        var toSun = GiToSun;
         var irradiance = EffectiveSunIrradiance;
         var turned = MathF.Acos(Math.Clamp(Vector3.Dot(toSun, transportRelightSun.ToSun), -1f, 1f)) * 180f / MathF.PI;
         var changed = Vector3.Distance(irradiance, transportRelightSun.Irradiance) > 1e-3f * MathF.Max(1f, transportRelightSun.Irradiance.Length());
