@@ -91,8 +91,6 @@ internal sealed partial class SponzaLoop
         if (liveSunBits.Equals(default(GpuBufferHandle)))
         {
             liveSunBits = Own(device.CreateGpuBuffer(bytes, new byte[bytes], "sponza.live.sun-bits"));
-            liveSunOrigins = Own(device.CreateGpuBuffer(LiveSunChunk * 16, name: "sponza.live.sun-origins"));
-            liveSunOccluded = Own(device.CreateGpuBuffer(LiveSunChunk * 4, name: "sponza.live.sun-occluded"));
         }
         liveSunNext = 0;
         liveSunDone = liveSunColumn < 0;
@@ -100,6 +98,23 @@ internal sealed partial class SponzaLoop
     }
 
     private long liveSunRecordedFrame = -1;
+
+    // The shooting's scratch (a chunk's origins and answers, 80 MB): made when a sun's bits are shot, let go once the texels'
+    // and the sun points' are (its Metal batch is the frame's, done with it) -- it sat idle at rest (2026-10-24).
+    private void EnsureLiveSunScratch()
+    {
+        if (!liveSunOrigins.Equals(default(GpuBufferHandle))) return;
+        liveSunOrigins = Own(device.CreateGpuBuffer(LiveSunChunk * 16, name: "sponza.live.sun-origins"));
+        liveSunOccluded = Own(device.CreateGpuBuffer(LiveSunChunk * 4, name: "sponza.live.sun-occluded"));
+    }
+
+    private void ReleaseLiveSunScratch()
+    {
+        if (!liveSunDone || !LivePointsDone || liveSunOrigins.Equals(default(GpuBufferHandle))) return;
+        RetireGpuBuffer(liveSunOrigins);
+        RetireGpuBuffer(liveSunOccluded);
+        liveSunOrigins = liveSunOccluded = default;
+    }
 
     // The sun points' bits (sunNodeFoliagePoints into sunNodeFoliageBits) for the cook's sun, the same way, after the
     // texels': live mode shoots none through the host (ShootSunBits). -1: none asked.
@@ -119,6 +134,7 @@ internal sealed partial class SponzaLoop
     {
         if (LivePointsDone || !liveSunDone || liveSunColumn < 0 || liveSunRecordedFrame == framesRendered) return;
         liveSunRecordedFrame = framesRendered;
+        EnsureLiveSunScratch();
         var n = Math.Min(LiveSunChunk, livePointCount - livePointNext);
         var reach = rayReach;
         DispatchCommand Pass(int mode) => new(liveSunPipeline, (n + 63) / 64, 1, 1,
@@ -145,6 +161,7 @@ internal sealed partial class SponzaLoop
         if (livePointNext < livePointCount) return;
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] live texels: sun bits for {livePointCount:N0} sun points shot in the frame in {livePointClock.Elapsed.TotalSeconds:0.0} s."));
+        ReleaseLiveSunScratch();
     }
 
     // Called by the live solve and by the cook's setup alike: one chunk a frame (its Metal pass takes one piece).
@@ -153,6 +170,7 @@ internal sealed partial class SponzaLoop
         if (liveSunDone || texelLiveIds is not { } live || liveSunRecordedFrame == framesRendered) return;
         BuildTexelClear();
         liveSunRecordedFrame = framesRendered;
+        EnsureLiveSunScratch();
         var n = Math.Min(LiveSunChunk, live.Length - liveSunNext);
         var reach = rayReach;
         DispatchCommand Pass(int mode) => new(liveSunPipeline, (n + 63) / 64, 1, 1,
@@ -181,6 +199,7 @@ internal sealed partial class SponzaLoop
         liveSunDone = true;
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] live texels: sun bits for {live.Length:N0} texels shot in the frame, {(live.Length + LiveSunChunk - 1) / LiveSunChunk} chunks in {liveSunClock.Elapsed.TotalSeconds:0.0} s."));
+        ReleaseLiveSunScratch();
     }
 
     // The sun turned: the texels' cook for the old one is dropped (nothing of it kept but what landed) and both columns
