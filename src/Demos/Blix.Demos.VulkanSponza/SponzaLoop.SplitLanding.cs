@@ -92,11 +92,11 @@ internal sealed partial class SponzaLoop
             {
                 new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
                 new ShaderTextureBinding("uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
-                AtlasGatherTexture(),
                 LightmapTexelTexture(),
             },
             Buffers: new[]
             {
+                AtlasIndexBuffer(),
                 new ShaderBufferBinding("TexelHash", texelHashBuffer),
                 new ShaderBufferBinding("Texels", texelBuffer),
                 new ShaderBufferBinding("TexelVisibleBits", texelVisibleBits),

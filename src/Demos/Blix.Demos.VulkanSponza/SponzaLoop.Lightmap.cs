@@ -822,6 +822,7 @@ internal sealed partial class SponzaLoop
         return new[]
         {
             new ShaderBufferBinding("LightmapFrames", lightmapFramesBuffer),
+            AtlasIndexBuffer(),
             new ShaderBufferBinding("LitTexels", texelsUp ? texelBuffer : lightmapFramesBuffer),
             new ShaderBufferBinding("LitTexelResolved", texelsUp ? texelResolvedBuffer : lightmapFramesBuffer),
             new ShaderBufferBinding("LitGlowPart", texelsUp && !texelGlowPart.Equals(default(GpuBufferHandle)) ? texelGlowPart : lightmapFramesBuffer),

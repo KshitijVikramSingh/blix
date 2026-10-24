@@ -27,12 +27,13 @@ layout(std430, set = 0, binding = 1) readonly buffer CoarseIds { uint coarseIds[
 layout(std430, set = 0, binding = 2) readonly buffer TexelHash { uint texelHash[]; };
 layout(std430, set = 0, binding = 3) readonly buffer Texels { uvec4 texels[]; };
 #include "texel_record.glsl"
-layout(set = 0, binding = 4) uniform usampler2D uLightmapIndexTex;
+layout(std430, set = 0, binding = 4) readonly buffer LightmapIndex { uint lightmapIndex[]; };
+#include "lightmap_index.glsl"
 layout(std430, set = 0, binding = 5) buffer SplitSky { uvec2 skyPart[]; };
 layout(std430, set = 0, binding = 6) buffer SplitSun { uvec2 sunPart[]; };
 layout(std430, set = 0, binding = 7) buffer FilteredSky { uint filteredSky[]; };   // [coarse cell]
 layout(std430, set = 0, binding = 8) buffer FilteredSun { uint filteredSun[]; };
-#define TEXEL_INDEX_MAP(i) texelFetch(uLightmapIndexTex, ivec2(int(i) % textureSize(uLightmapIndexTex, 0).x, int(i) / textureSize(uLightmapIndexTex, 0).x), 0).r
+#define TEXEL_INDEX_MAP(i) lightmapIndexAt(ivec2(int(i) % int(lightmapIndex[0]), int(i) / int(lightmapIndex[0])))
 #define TEXEL_HASH(i) uvec3(texelHash[3u * uint(i)], texelHash[3u * uint(i) + 1u], texelHash[3u * uint(i) + 2u])
 #include "texel.glsl"
 #include "texel_filter_neighbour.glsl"

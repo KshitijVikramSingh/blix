@@ -323,7 +323,6 @@ internal sealed partial class SponzaLoop
     {
         var ib = g.IsU32 ? sharedIbU32 : sharedIbU16;
         // Every lit-layout draw reads LOD 0's frames through the atlas's index texture (lightmap_frame.glsl).
-        if (litLayout) textures = WithLightmapCells(textures);
         if (gpuCull)
         {
             scope.DrawIndexedIndirect(sharedVb, ib, pipeline, sceneArgs,

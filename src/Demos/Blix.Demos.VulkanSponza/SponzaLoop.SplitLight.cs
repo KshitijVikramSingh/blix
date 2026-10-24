@@ -248,9 +248,10 @@ internal sealed partial class SponzaLoop
                     new("uLightmap", new Vector4Uniform(LightmapUniform)),
                     new("uEdge", new Vector4Uniform(new Vector4(texelFilterSymmetric ? 1f : 0f, texelFilterArea ? 1f : 0f, texelShapePool, 0f))),
                 },
-                new[] { AtlasGatherTexture() },
+                Array.Empty<ShaderTextureBinding>(),
                 Buffers: new[]
                 {
+                    AtlasIndexBuffer(),
                     new ShaderBufferBinding("SunNodesLive", splitLiveBuffer),
                     new ShaderBufferBinding("TexelSky", splitSkyBuffer),
                     new ShaderBufferBinding("TexelSun", splitSunUp ? splitSunBuffer : splitSkyBuffer),

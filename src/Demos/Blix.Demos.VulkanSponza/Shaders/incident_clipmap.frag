@@ -193,8 +193,9 @@ float debugStamped, debugLit;
 layout(set = 0, binding = 19) uniform usampler2D uLightmapTexel;
 // The atlas's map from texel to record, as an R32UI texture, and the records' meta words (texelsAroundLightmapGather,
 // uClipExact.w; SponzaLoop.LightmapGather.cs).
-layout(set = 0, binding = 44) uniform usampler2D uLightmapIndexTex;
-#define TEXEL_INDEX_MAP(i) texelFetch(uLightmapIndexTex, ivec2(int(i) % textureSize(uLightmapIndexTex, 0).x, int(i) / textureSize(uLightmapIndexTex, 0).x), 0).r
+layout(std430, set = 0, binding = 44) readonly buffer LightmapIndex { uint lightmapIndex[]; };
+#include "lightmap_index.glsl"
+#define TEXEL_INDEX_MAP(i) lightmapIndexAt(ivec2(int(i) % int(lightmapIndex[0]), int(i) / int(lightmapIndex[0])))
 layout(std430, set = 0, binding = 45) readonly buffer TexelMeta { uint texelMeta[]; };
 // The texel picker and the provenance view (SponzaLoop.TexelPicker.cs). Provenance: a byte a texel id (provenance.glsl).
 // The pick, at the one pixel uTexelDebug.w names (1 + x + 4096 y; 0 none): [0] the levels read, [1..15] the pixel (world
@@ -237,7 +238,6 @@ bool viewFirstLevel = true;
 // The facing view (uReference.w 12): the finest level's texels, weighted, by how their record's normal meets the pixel's.
 float viewFacing = 0.0, viewFacingWeight = 0.0, viewAway = 0.0;
 #define TEXEL_ATLAS_GATHER
-#define TEXEL_INDEX_TEX uLightmapIndexTex
 #define TEXEL_META(id) texelMeta[(id) - uint(g.uLightmap.w)]
 // This pixel's packed atlas texel (main sets it): not 0, the atlas's texels are its level 0 and the hashed cells its
 // coarser levels; 0 (no lightmap, or a surface the atlas leaves out), the hashed cells at every level.

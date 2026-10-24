@@ -51,7 +51,8 @@ layout(std430, set = 0, binding = 5) writeonly buffer RtShadowDirections { vec4 
 layout(std430, set = 0, binding = 6) writeonly buffer RtShadowBaked { uint baked[]; };
 layout(set = 0, binding = 7) uniform usampler2D uLightmapTexel;
 // The atlas's map from texel to record, as an R32UI texture (SponzaLoop.LightmapGather.cs).
-layout(set = 0, binding = 8) uniform usampler2D uLightmapIndexTex;
+layout(std430, set = 0, binding = 8) readonly buffer LightmapIndex { uint lightmapIndex[]; };
+#include "lightmap_index.glsl"
 layout(std430, set = 0, binding = 9) readonly buffer Texels { uvec4 texels[]; };
 #include "texel_record.glsl"
 layout(std430, set = 0, binding = 10) readonly buffer LightletIndex { uint lightletIndex[]; };
@@ -66,7 +67,7 @@ layout(std430, set = 0, binding = 14) buffer RtShadowCounters { uint counters[];
 layout(std430, set = 0, binding = 15) writeonly buffer RtShadowMaskWords { uvec4 maskHeader; uint maskWords[]; };
 // Each texel's room along its normal (texel_clear.comp): a record's, the pixel's nearest atlas texel's.
 layout(std430, set = 0, binding = 16) readonly buffer TexelClear { float texelClear[]; };
-#define TEXEL_INDEX_MAP(i) texelFetch(uLightmapIndexTex, ivec2(int(i) % textureSize(uLightmapIndexTex, 0).x, int(i) / textureSize(uLightmapIndexTex, 0).x), 0).r
+#define TEXEL_INDEX_MAP(i) lightmapIndexAt(ivec2(int(i) % int(lightmapIndex[0]), int(i) / int(lightmapIndex[0])))
 #define TEXEL_HASH(i) uvec3(0u)
 #include "texel.glsl"
 #define LIGHTLET_INDEX(i) lightletIndex[i]

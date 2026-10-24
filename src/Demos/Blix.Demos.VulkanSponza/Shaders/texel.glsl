@@ -261,7 +261,7 @@ void texelsAroundLightmap(vec2 texel, vec3 n, ivec2 atlasSize, out int ids[4], o
 }
 
 #ifdef TEXEL_ATLAS_GATHER
-// The same four with one gather of the index map as a texture (TEXEL_INDEX_TEX, a usampler2D) and a 4-byte meta word a
+// The same four from the index map's words (lightmap_index.glsl; a texture gather before) and a 4-byte meta word a
 // record (TEXEL_META(id), SponzaLoop.LightmapGather.cs) for everything the choice reads: bits 0-23 the face normal
 // (octahedral, 12 + 12 bits), 29 the normal is not zero, 30 a double-sided pair's front (the back is id + 1), 31 not
 // buried. ~35 dependent loads a pixel -> one gather and ~8 (2026-10-20). False where the full lookup must answer: the
@@ -279,9 +279,8 @@ bool texelsAroundLightmapGather(vec2 texel, vec3 n, ivec2 atlasSize, out int ids
     vec2 t = f - vec2(base);
     for (int i = 0; i < 4; ++i) { ids[i] = -1; weights[i] = 0.0; }
     if (any(lessThan(base, ivec2(0))) || any(greaterThanEqual(base + 1, atlasSize))) return false;
-    // Gather order: w (x0, y0), z (x1, y0), x (x0, y1), y (x1, y1) -- as i = o.x + 2 o.y below.
-    uvec4 quad = textureGather(TEXEL_INDEX_TEX, (vec2(base) + 1.0) / vec2(atlasSize));
-    uint raw[4] = uint[4](quad.w, quad.z, quad.x, quad.y);
+    // The four as i = o.x + 2 o.y below (lightmap_index.glsl: one tile's words for most).
+    uint raw[4] = uint[4](lightmapIndexAt(base), lightmapIndexAt(base + ivec2(1, 0)), lightmapIndexAt(base + ivec2(0, 1)), lightmapIndexAt(base + ivec2(1, 1)));
     uint id[4];
     uint meta[4];
     vec3 normals[4];

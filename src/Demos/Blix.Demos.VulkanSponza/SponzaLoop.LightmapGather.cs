@@ -11,12 +11,14 @@ namespace Blix.Demos.VulkanSponza;
 // --no-atlas-gather: the buffer walk; --ab atlasgather alternates the two.
 internal sealed partial class SponzaLoop
 {
-    private TextureHandle lightmapIndexTexture, lightmapIndexTextureNone;
+    // The atlas's index map, tile-sparse (lightmap_index.glsl; a dense R32 texture before, 64 MB on Crytek Sponza).
+    private GpuBufferHandle lightmapIndexBuffer, lightmapIndexNone;
+    private int lightmapIndexWords;
     private GpuBufferHandle texelMetaBuffer, texelMetaNone;
     private bool atlasGather = true;
-    // The index map on the CPU, kept only for --texel-inspect (the GPU's is a texture).
+    // The index map on the CPU, kept only for --texel-inspect (the GPU's is tile-sparse).
     private uint[]? lightmapIndexMapCpu;
-    private bool AtlasGatherNow => atlasGather && lightmapTexels && !lightmapIndexTexture.Equals(default(TextureHandle))
+    private bool AtlasGatherNow => atlasGather && lightmapTexels && !lightmapIndexBuffer.Equals(default(GpuBufferHandle))
         && !(abMode == "atlasgather" && AbOffPhase);
 
     // Called where the atlas's records and index map go up (UploadLightmapTexels): `texels` every record (two Vector4 a
@@ -38,8 +40,9 @@ internal sealed partial class SponzaLoop
         }
         if (texelInspect is not null) lightmapIndexMapCpu = map;
         texelMetaBuffer = Own(device.CreateGpuBuffer(meta.Length * 4, MemoryMarshal.AsBytes(meta.AsSpan()), "sponza.lightmap.texel-meta"));
-        lightmapIndexTexture = Own(device.CreateTexture2D(new TextureDescription(lightmapAtlasWidth, lightmapAtlasHeight, TextureFormat.R32Uint,
-            SamplerDescription.NearestClamp), MemoryMarshal.AsBytes(map.AsSpan()), "sponza.lightmap.index-texture"));
+        var index = PackLightmapIndex(map, lightmapAtlasWidth, lightmapAtlasHeight);
+        lightmapIndexWords = index.Length;
+        lightmapIndexBuffer = Own(device.CreateGpuBuffer(index.Length * 4, MemoryMarshal.AsBytes(index.AsSpan()), "sponza.lightmap.index"));
     }
 
     // Octahedral, 12 bits a component (texel.glsl's texelMetaNormal).
@@ -52,13 +55,61 @@ internal sealed partial class SponzaLoop
         return Q(p.X) | Q(p.Y) << 12;
     }
 
-    private ShaderTextureBinding AtlasGatherTexture()
+    // lightmap_index.glsl's words: the atlas size and its 8 x 8 tiles, a word a tile (its ids' first word, 0xFFFFFFFF none),
+    // then the covered tiles' 64 ids each.
+    private static uint[] PackLightmapIndex(uint[] map, int width, int height)
     {
-        if (!lightmapIndexTexture.Equals(default(TextureHandle))) return new ShaderTextureBinding("uLightmapIndexTex", lightmapIndexTexture);
-        if (lightmapIndexTextureNone.Equals(default(TextureHandle)))
-            lightmapIndexTextureNone = Own(device.CreateTexture2D(new TextureDescription(1, 1, TextureFormat.R32Uint, SamplerDescription.NearestClamp),
-                new byte[] { 0xFF, 0xFF, 0xFF, 0xFF }, "sponza.lightmap.index-texture.none"));
-        return new ShaderTextureBinding("uLightmapIndexTex", lightmapIndexTextureNone);
+        int tw = (width + 7) / 8, th = (height + 7) / 8;
+        var tiles = new uint[tw * th];
+        var covered = 0;
+        for (var t = 0; t < tiles.Length; t++)
+        {
+            int x0 = t % tw * 8, y0 = t / tw * 8;
+            var any = false;
+            for (var y = y0; y < Math.Min(y0 + 8, height) && !any; y++)
+                for (var x = x0; x < Math.Min(x0 + 8, width); x++)
+                    if (map[y * width + x] != 0xFFFFFFFFu) { any = true; break; }
+            tiles[t] = any ? (uint)covered++ : 0xFFFFFFFFu;
+        }
+        var head = 4 + tiles.Length;
+        var words = new uint[head + covered * 64];
+        Array.Fill(words, 0xFFFFFFFFu, head, covered * 64);
+        words[0] = (uint)width; words[1] = (uint)height; words[2] = (uint)tw; words[3] = (uint)tiles.Length;
+        for (var t = 0; t < tiles.Length; t++)
+        {
+            if (tiles[t] == 0xFFFFFFFFu) { words[4 + t] = 0xFFFFFFFFu; continue; }
+            var at = (uint)(head + tiles[t] * 64);
+            words[4 + t] = at;
+            int x0 = t % tw * 8, y0 = t / tw * 8;
+            for (var y = y0; y < Math.Min(y0 + 8, height); y++)
+                for (var x = x0; x < Math.Min(x0 + 8, width); x++)
+                    words[at + (y - y0) * 8 + (x - x0)] = map[y * width + x];
+        }
+        return words;
+    }
+
+    // The dense map back (the dumps' lightmap_index.r32u, as the tools read it).
+    private uint[] ReadLightmapIndexDense(out int width, out int height)
+    {
+        var all = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(lightmapIndexBuffer, 0, checked(lightmapIndexWords * 4)).AsSpan()).ToArray();
+        width = (int)all[0]; height = (int)all[1];
+        var tw = (int)all[2];
+        var dense = new uint[width * height];
+        for (var y = 0; y < height; y++)
+            for (var x = 0; x < width; x++)
+            {
+                var tile = all[4 + y / 8 * tw + x / 8];
+                dense[y * width + x] = tile == 0xFFFFFFFFu ? 0xFFFFFFFFu : all[tile + (y % 8) * 8 + x % 8];
+            }
+        return dense;
+    }
+
+    private ShaderBufferBinding AtlasIndexBuffer()
+    {
+        if (!lightmapIndexBuffer.Equals(default(GpuBufferHandle))) return new ShaderBufferBinding("LightmapIndex", lightmapIndexBuffer);
+        if (lightmapIndexNone.Equals(default(GpuBufferHandle)))
+            lightmapIndexNone = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.lightmap.index.none"));   // a 0 x 0 atlas
+        return new ShaderBufferBinding("LightmapIndex", lightmapIndexNone);
     }
 
     private ShaderBufferBinding AtlasGatherMeta()
@@ -68,12 +119,4 @@ internal sealed partial class SponzaLoop
         return new ShaderBufferBinding("TexelMeta", texelMetaNone);
     }
 
-    private IReadOnlyList<ShaderTextureBinding> WithLightmapCells(IReadOnlyList<ShaderTextureBinding> textures)
-    {
-        var cells = AtlasGatherTexture();
-        var all = new ShaderTextureBinding[textures.Count + 1];
-        for (var i = 0; i < textures.Count; i++) all[i] = textures[i];
-        all[^1] = new ShaderTextureBinding("uLightmapCells", cells.Texture);
-        return all;
-    }
 }

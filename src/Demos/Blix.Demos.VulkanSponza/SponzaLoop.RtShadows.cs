@@ -244,12 +244,12 @@ internal sealed partial class SponzaLoop
             {
                 new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
                 new ShaderTextureBinding("uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
-                AtlasGatherTexture(),
                 LightmapTexelTexture(),
             },
             // Without sky rays the shader writes none, and the placeholder only fills the binding.
             Buffers: new[]
             {
+                AtlasIndexBuffer(),
                 new ShaderBufferBinding("RtShadowOrigins", origins), new ShaderBufferBinding("RtShadowSky", sky ?? RtShadowPlaceholder),
                 new ShaderBufferBinding("RtShadowDirections", directions),
                 new ShaderBufferBinding("RtShadowBaked", rtShadowBaked[slot]),

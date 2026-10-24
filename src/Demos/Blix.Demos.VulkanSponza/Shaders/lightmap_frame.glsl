@@ -6,17 +6,15 @@
 // the drawn LOD moves the silhouette, not the light. Pixels without one (foliage: left out of the atlas) keep their own.
 //
 // Set 1 on the lit interface, bound by name with ClipmapState (SponzaLoop.Render.cs, LitClipmapBuffer):
-//   uLightmapCells  the atlas's map from texel to its record id (R32UI texture), 0xFFFFFFFF where none covers it
+//   LightmapIndex   the atlas's map from texel to its record id (lightmap_index.glsl), 0xFFFFFFFF where none covers it
 //   LightmapFrames  [0] the atlas size (zero: no atlas); [1 + id] record id's packed frame (zero: none)
 #ifndef SPONZA_LIGHTMAP_FRAME_GLSL
 #define SPONZA_LIGHTMAP_FRAME_GLSL
 
-// The atlas's map from texel to record as an R32UI texture (SponzaLoop.LightmapGather.cs; a buffer of 256 MB until
-// 2026-10-20, the same map the incident pass gathers from).
-layout(set = 1, binding = 14) uniform utexture2D uLightmapCells;
-//@sampler NearestClamp
-layout(set = 1, binding = 16) uniform sampler uLightmapCellSampler;
-#define LIGHTMAP_CELL_OF(at) texelFetch(usampler2D(uLightmapCells, uLightmapCellSampler), (at), 0).r
+// The atlas's map from texel to record, tile-sparse (lightmap_index.glsl; the same words the texel passes read).
+layout(std430, set = 1, binding = 14) readonly buffer LightmapIndex { uint lightmapIndex[]; };
+#include "lightmap_index.glsl"
+#define LIGHTMAP_CELL_OF(at) lightmapIndexAt(at)
 layout(std430, set = 1, binding = 15) readonly buffer LightmapFrames { uvec2 lightmapFrames[]; };
 
 vec3 lightmapOctDecode(uint packed) {

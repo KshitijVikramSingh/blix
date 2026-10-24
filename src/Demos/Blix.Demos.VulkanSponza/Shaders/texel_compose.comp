@@ -33,7 +33,8 @@ layout(std430, set = 0, binding = 6) readonly buffer TexelHash { uint texelHash[
 layout(std430, set = 0, binding = 7) readonly buffer Texels { uvec4 texels[]; };
 #include "texel_record.glsl"
 // The atlas's map from texel to record, as an R32UI texture (SponzaLoop.LightmapGather.cs).
-layout(set = 0, binding = 8) uniform usampler2D uLightmapIndexTex;
+layout(std430, set = 0, binding = 8) readonly buffer LightmapIndex { uint lightmapIndex[]; };
+#include "lightmap_index.glsl"
 // Mode 1: each atlas texel's neighbours across a chart seam (SponzaLoop.Seams.cs) -- start an atlas record (from the first
 // one), then the ids -- so a chart's border is filtered with the chart it meets, not on its own.
 layout(std430, set = 0, binding = 9) readonly buffer TexelSeamStart { uint seamStart[]; };
@@ -52,7 +53,7 @@ layout(std430, set = 0, binding = 14) readonly buffer TexelSkyVis { uint texelSk
 layout(std430, set = 0, binding = 17) buffer TexelOwnShape { uint ownShape[]; };
 layout(std430, set = 0, binding = 18) writeonly buffer TexelShape { uint texelShape[]; };
 layout(std430, set = 0, binding = 19) readonly buffer TexelProvenance { uint provenance[]; };
-#define TEXEL_INDEX_MAP(i) texelFetch(uLightmapIndexTex, ivec2(int(i) % textureSize(uLightmapIndexTex, 0).x, int(i) / textureSize(uLightmapIndexTex, 0).x), 0).r
+#define TEXEL_INDEX_MAP(i) lightmapIndexAt(ivec2(int(i) % int(lightmapIndex[0]), int(i) / int(lightmapIndex[0])))
 #define TEXEL_HASH(i) uvec3(texelHash[3u * uint(i)], texelHash[3u * uint(i) + 1u], texelHash[3u * uint(i) + 2u])
 #include "texel.glsl"
 #include "texel_filter_neighbour.glsl"

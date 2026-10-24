@@ -934,10 +934,10 @@ internal sealed partial class SponzaLoop
             {
                 new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
                 new ShaderTextureBinding("uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
-                AtlasGatherTexture(),
             }.Concat(TexelCascadeTextures()).Append(LightmapTexelTexture()).ToArray(),
             Buffers: new[]
             {
+                AtlasIndexBuffer(),
                 new ShaderBufferBinding("TexelHash", texelHashBuffer),
                 new ShaderBufferBinding("Texels", texelBuffer),
                 new ShaderBufferBinding("TexelLight", texelLightBuffer),
@@ -966,10 +966,10 @@ internal sealed partial class SponzaLoop
                 {
                     new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
                     new ShaderTextureBinding("uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
-                    AtlasGatherTexture(),
                 }.Concat(TexelCascadeTextures()).Append(LightmapTexelTexture()).ToArray(),
                 Buffers: new[]
                 {
+                    AtlasIndexBuffer(),
                     new ShaderBufferBinding("TexelHash", texelHashBuffer),
                     new ShaderBufferBinding("Texels", texelBuffer),
                     new ShaderBufferBinding("TexelLight", texelLightBuffer),
@@ -1061,9 +1061,10 @@ internal sealed partial class SponzaLoop
                     new("uLightmap", new Vector4Uniform(LightmapUniform)),
                     new("uEdge", new Vector4Uniform(new Vector4(texelFilterSymmetric ? 1f : 0f, texelFilterArea ? 1f : 0f, 0f, 0f))),
                 },
-                new[] { AtlasGatherTexture() },
+                Array.Empty<ShaderTextureBinding>(),
                 Buffers: new[]
                 {
+                    AtlasIndexBuffer(),
                     new ShaderBufferBinding("TexelHash", texelHashBuffer),
                     new ShaderBufferBinding("Texels", texelBuffer),
                     new ShaderBufferBinding("TexelBlend", texelBlendBuffer),

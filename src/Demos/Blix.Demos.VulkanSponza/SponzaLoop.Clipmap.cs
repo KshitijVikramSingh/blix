@@ -143,7 +143,7 @@ internal sealed partial class SponzaLoop
                 new ShaderTextureBinding("uClipmapIrradiance", clipmapIrradiance),
                 new ShaderTextureBinding("uClipmapDepth", clipmapDepth),
                 new ShaderTextureBinding("uIrradiance", irradianceCubeTexture),
-            }.Concat(TexelCascadeTextures()).Append(LightmapTexelTexture()).Concat(IncidentReuseTextures()).Append(AtlasGatherTexture()).ToArray(),
+            }.Concat(TexelCascadeTextures()).Append(LightmapTexelTexture()).Concat(IncidentReuseTextures()).ToArray(),
             pushConstants: null,
             uniforms: new ShaderUniform[]
             {
@@ -172,7 +172,7 @@ internal sealed partial class SponzaLoop
                 new("uReuse", new Vector4Uniform(IncidentReuseUniform(half))),
                 new("uSeam", new Vector4Uniform(new Vector4(SeamBlendNow ? 1f : 0f, TexelShapeOn ? 1f : 0f, 0f, 0f))),
             }.Concat(TexelSunUniforms()).ToArray(),
-            buffers: new[] { new ShaderBufferBinding("ClipmapState", clipmapState), new ShaderBufferBinding("ScreenProbeTiles", screen.Tiles), new ShaderBufferBinding("ScreenProbes", screen.Probes), new ShaderBufferBinding("SurfaceIndex", surfaceIndex) }.Concat(texel.Buffers).Append(reference.Buffer).Append(new ShaderBufferBinding("IncidentCensus", IncidentCensusBuffer())).Append(AtlasGatherMeta())
+            buffers: new[] { new ShaderBufferBinding("ClipmapState", clipmapState), new ShaderBufferBinding("ScreenProbeTiles", screen.Tiles), new ShaderBufferBinding("ScreenProbes", screen.Probes), new ShaderBufferBinding("SurfaceIndex", surfaceIndex) }.Concat(texel.Buffers).Append(reference.Buffer).Append(new ShaderBufferBinding("IncidentCensus", IncidentCensusBuffer())).Append(AtlasGatherMeta()).Append(AtlasIndexBuffer())
                 .Append(ProvenanceBinding()).Append(new ShaderBufferBinding("TexelShape", ShapeOr(texelShapeBuffer))).Append(TexelRaysBinding()).Append(pick.Buffer).Concat(PatchViewBindings()).Append(ReferenceMomentsBinding())
                 .Concat(SeamBlendBindings())
                 // The ray scene, for --clipmap-exact-visibility (declared always; read only then).
