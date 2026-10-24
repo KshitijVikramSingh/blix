@@ -90,7 +90,9 @@ internal sealed partial class SponzaLoop
         var bytes = checked(texelCount * liveSunWords * 4);
         if (liveSunBits.Equals(default(GpuBufferHandle)))
         {
-            liveSunBits = Own(device.CreateGpuBuffer(bytes, new byte[bytes], "sponza.live.sun-bits"));
+            // --sweep-in-frame: readable where it lies, the visible and changed's diff reading it without a wait (SunColumnBits).
+            liveSunBits = Own(sweepInFrame ? device.CreateReadableGpuBuffer(bytes, "sponza.live.sun-bits")
+                : device.CreateGpuBuffer(bytes, new byte[bytes], "sponza.live.sun-bits"));
         }
         liveSunNext = 0;
         liveSunDone = liveSunColumn < 0;

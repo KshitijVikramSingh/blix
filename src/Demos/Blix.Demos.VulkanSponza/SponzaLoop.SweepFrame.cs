@@ -26,6 +26,7 @@ internal sealed partial class SponzaLoop
     private PassHandle sweepCellsPass;
     // The instant layer at a light change (ApplyPatchTexelsNow: patch_dir.comp, texel_patch_light.comp, texel_ratio.comp).
     private PassHandle sweepPatchDirPass, sweepPatchTexelsPass, sweepRatioPass;
+    private int sweepInstantChunk = 1 << 20;
     // A light change under --sweep-in-frame: its setup's dispatches recorded in the frame (SetupDispatch), not run at once.
     private bool SetupInFrame => sweepInFrame && liveSkyGathered;
 
@@ -67,6 +68,7 @@ internal sealed partial class SponzaLoop
     {
         sweepInFrame = args.Flag("sweep-in-frame");
         if (args.Int("sweep-slice") is { } s) sweepSlice = Math.Clamp(s, 256, 32768);
+        if (args.Int("sweep-instant-chunk") is { } ic) sweepInstantChunk = Math.Max(65536, ic);
         if (args.Int("sweep-cells-chunk") is { } cc) sweepCellsChunk = Math.Clamp(cc, 1024, 4096 * 64);
         // Behind the frame is where the in-frame sweep runs (GatherInBackground).
         if (sweepInFrame) backgroundGather = true;

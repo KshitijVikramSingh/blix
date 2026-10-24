@@ -48,10 +48,18 @@ internal sealed partial class SponzaLoop
     private bool VisibleChangedOn => visibleChanged && liveTexels && livePatchTexels && livePatchRefine && TransferOn;
 
     // The column's bit a texel, from the sun bits as the GPU holds them.
+    // --sweep-in-frame: read where it lies, no WaitIdle and no copy -- the bits were shot frames before (at the re-aim, and
+    // the gather waits for them once a sun: liveBitsSyncedFor). Drained and copied, it held a frame ~90 ms on Crytek Sponza.
     private uint[] SunColumnBits()
     {
-        device.WaitIdle();
-        var words = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(liveSunBits, 0, texelCount * liveSunWords * 4).AsSpan()).ToArray();
+        using var profScope = Prof("sun-bits-read");
+        var words = new uint[texelCount * liveSunWords];
+        if (sweepInFrame) device.ReadMappedGpuBuffer(liveSunBits, 0, MemoryMarshal.AsBytes(words.AsSpan()));
+        else
+        {
+            device.WaitIdle();
+            words = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(liveSunBits, 0, texelCount * liveSunWords * 4).AsSpan()).ToArray();
+        }
         var bits = new uint[(texelCount + 31) / 32];
         int stride = liveSunWords, word = liveSunColumn / 32, bit = liveSunColumn % 32;
         Parallel.For(0, bits.Length, w =>

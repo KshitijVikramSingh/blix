@@ -74,10 +74,14 @@ internal sealed partial class SponzaLoop
         return true;
     }
 
-    private void ApplyPatchTexelsNow()
+    // A light change's instant layer. --sweep-in-frame (SetupInFrame): its texels a chunk a frame (--sweep-instant-chunk,
+    // 1 M), recorded -- in one frame it was ~100 ms of the GPU on Crytek Sponza (2026-10-25); false until the last chunk.
+    private int instantFirst;
+    private bool ApplyPatchTexelsNow()
     {
         using var profScope = Prof("instant-layer");
-        if (!transferReady || texelLiveIds is not { } live) return;
+        if (!transferReady || texelLiveIds is not { } live) return true;
+        var chunked = SetupInFrame;
         var clock = Stopwatch.StartNew();
         var sky = EnsureLivePart(false);
         var sun = EnsureLivePart(true);
@@ -88,6 +92,7 @@ internal sealed partial class SponzaLoop
         // The patches' light by where it comes from (patch_dir.comp), for this light.
         var d = transportSolve!;
         var declaredDir = patchDirInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
+        if (!chunked || instantFirst == 0)
         SetupDispatch(sweepPatchDirPass, new DispatchCommand(patchDirPipeline, (d.Patches + 63) / 64, 1, 1,
             new ShaderUniform[] { new("uDir", new Vector4Uniform(new Vector4(d.Patches, LiveComponents, liveSkyEscapeBuffer.Equals(default(GpuBufferHandle)) ? 99f : LiveSky, 0f))) },
             Array.Empty<ShaderTextureBinding>(),
@@ -101,7 +106,15 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("SkyGuideLum", liveSkyLumBuffer.Equals(default(GpuBufferHandle)) ? patchDirSharesBuffer : liveSkyLumBuffer),
                 new ShaderBufferBinding("PatchDirShares", patchDirSharesBuffer),
             }.Where(b => declaredDir.Contains(b.Name)).ToArray()), "patch-dir");
-        PatchTexelsPass(1, sky, sun, skyDetail, sunDetail);
+        if (chunked)
+        {
+            var n = Math.Min(sweepInstantChunk, live.Length - instantFirst);
+            PatchTexelsPass(1, sky, sun, skyDetail, sunDetail, instantFirst, n);
+            instantFirst += n;
+            if (instantFirst < live.Length) return false;
+            instantFirst = 0;
+        }
+        else PatchTexelsPass(1, sky, sun, skyDetail, sunDetail);
         RatioAtInstant();
         splitDetailLanded = true;
         splitComposeDirty = true;
@@ -112,6 +125,7 @@ internal sealed partial class SponzaLoop
         splitComposeDirty = true;
         instantShowFrames = 3;
         DumpParts("instant", sunBits: true);   // BLIX_DUMP_PARTS: the instant layer, before any gather (ratio-relight study)
+        return true;
     }
 
     // Mode 1 (the instant layer) is a light change's setup (SetupDispatch); mode 0 (the cook's openness) runs at once.
@@ -121,7 +135,9 @@ internal sealed partial class SponzaLoop
         else device.DispatchNow(new[] { command }, "texel-patch-light");
     }
 
-    private void PatchTexelsPass(int mode, GpuBufferHandle sky = default, GpuBufferHandle sun = default, GpuBufferHandle skyDetail = default, GpuBufferHandle sunDetail = default)
+    // rangeFirst, rangeCount: these of the live texels alone (the in-frame instant layer's chunk); all by default.
+    private void PatchTexelsPass(int mode, GpuBufferHandle sky = default, GpuBufferHandle sun = default, GpuBufferHandle skyDetail = default, GpuBufferHandle sunDetail = default,
+        int rangeFirst = 0, int rangeCount = -1)
     {
         if (texelLiveIds is not { } live) return;
         if (sky.Equals(default(GpuBufferHandle))) sky = sun = skyDetail = sunDetail = patchOpenBuffer;   // mode 0: unwritten
@@ -129,8 +145,9 @@ internal sealed partial class SponzaLoop
         var inv = new Vector3(irr.X > 0 ? 1f / irr.X : 0f, irr.Y > 0 ? 1f / irr.Y : 0f, irr.Z > 0 ? 1f / irr.Z : 0f);
         var declared = texelPatchLightInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
         const int perDispatch = 65535 * 64;
-        for (var first = 0; first < live.Length; first += perDispatch)
-            PatchTexelsDispatch(mode, new DispatchCommand(texelPatchLightPipeline, (Math.Min(perDispatch, live.Length - first) + 63) / 64, 1, 1,
+        var rangeEnd = rangeCount < 0 ? live.Length : Math.Min(live.Length, rangeFirst + rangeCount);
+        for (var first = rangeFirst; first < rangeEnd; first += perDispatch)
+            PatchTexelsDispatch(mode, new DispatchCommand(texelPatchLightPipeline, (Math.Min(perDispatch, rangeEnd - first) + 63) / 64, 1, 1,
                 new ShaderUniform[]
                 {
                     new("uPass", new Vector4Uniform(new Vector4(live.Length, first, sunNodeKinds.Length, mode))),
