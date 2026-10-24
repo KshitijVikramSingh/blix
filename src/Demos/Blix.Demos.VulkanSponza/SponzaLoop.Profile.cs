@@ -17,6 +17,8 @@ internal sealed partial class SponzaLoop
     private static readonly bool profileOn = Environment.GetEnvironmentVariable("BLIX_PROFILE") != "0";
     private const double ProfileWindowSeconds = 5.0;
     private const double SpikeMs = 50.0, SpikeOverMedian = 2.5;
+    // BLIX_PROFILE_SPIKES=N: the slow frames a window prints (6 by default) -- every one of a light change's, say.
+    private static readonly int ProfileSpikesAWindow = int.TryParse(Environment.GetEnvironmentVariable("BLIX_PROFILE_SPIKES"), out var spikes) ? spikes : 6;
 
     private readonly struct ProfFrame
     {
@@ -114,7 +116,7 @@ internal sealed partial class SponzaLoop
         if (profSession.Count > 200_000) profSession.RemoveRange(0, 100_000);
         // A slow frame, at once: against a fixed bar and the window's median so far.
         var median = profWindow.Count >= 10 ? Percentile(profWindow.Select(f => f.Interval), 0.5) : 16.7;
-        if ((interval > SpikeMs || interval > SpikeOverMedian * median) && interval > 20.0 && profSpikesThisWindow < 6)
+        if ((interval > SpikeMs || interval > SpikeOverMedian * median) && interval > 20.0 && profSpikesThisWindow < ProfileSpikesAWindow)
         {
             profSpikesThisWindow++;
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,

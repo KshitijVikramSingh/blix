@@ -33,7 +33,9 @@ internal sealed partial class SponzaLoop
     // screen (2026-10-21). Worth it once the passes are recorded in the frame. --background-gather-ms N: the budget.
     private bool backgroundGather, gatherBehind;
     private double backgroundGatherMs = 8;
-    private bool GatherInBackground => gatherBehind && backgroundGather && SplitCookRunning;
+    // --sweep-in-frame: the visible and changed too (its gather's passes recorded in the frame, SponzaLoop.SweepFrame.cs):
+    // on the host it was ~5 frames of 85-135 ms after a sun change on Crytek Sponza (2026-10-25).
+    private bool GatherInBackground => (gatherBehind && backgroundGather || sweepInFrame && visibleChangedGathering) && SplitCookRunning;
 
     private void StartBackgroundGather()
     {
