@@ -101,6 +101,7 @@ internal sealed partial class SponzaLoop
         {
             if (texelResolvedBuffer.Equals(default(GpuBufferHandle)))
                 texelResolvedBuffer = Own(device.CreateGpuBuffer(texelCount * 8, name: "sponza.texels.resolved"));
+            lightmapCellsCurrent = false;   // the cells were the compose's light (SponzaLoop.LightmapCells.cs)
             graph.Dispatch(texelResolvePassHandle, new DispatchCommand(texelResolvePipeline, (texelCount + 63) / 64, 1, 1,
                 new ShaderUniform[] { new("uResolve", new Vector4Uniform(new System.Numerics.Vector4(texelCount, texelFilter ? 1f : 0f, texelTrust, 0f))) },
                 Array.Empty<ShaderTextureBinding>(),

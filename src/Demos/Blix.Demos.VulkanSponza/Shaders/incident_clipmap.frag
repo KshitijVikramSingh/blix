@@ -184,6 +184,8 @@ bool shapeMissing;
 // the cells-alone pixels.
 layout(std430, set = 0, binding = 36) buffer IncidentCensus { uint census[]; };
 void countPath(uint path) { if (g.uClipExact.y > 0.5) atomicAdd(census[path], 1u); }
+// BLIX_INCIDENT_STOP=9 (a cost probe): how often the lookup's branches run, every frame, from word 32 (SponzaLoop.IncidentCensus.cs).
+void probeCount(uint i) { if (g.uSeam.w > 8.5) atomicAdd(census[i], 1u); }
 vec3 unpackRgb9e5(uint v) {
     float scale = exp2(float(int(v >> 27) - 15 - 9));
     return vec3(float(v & 511u), float((v >> 9) & 511u), float((v >> 18) & 511u)) * scale;
@@ -194,6 +196,10 @@ layout(set = 0, binding = 19) uniform usampler2D uLightmapTexel;
 // The atlas's map from texel to record, as an R32UI texture, and the records' meta words (texelsAroundLightmapGather,
 // uClipExact.w; SponzaLoop.LightmapGather.cs).
 layout(std430, set = 0, binding = 44) readonly buffer LightmapIndex { uint lightmapIndex[]; };
+// The atlas resolve's cells (lightmap_cells.comp; uSeam.z 1: current): a lightmapped pixel's four cells answer it where
+// none asks for the full lookup (texelsAt).
+layout(std430, set = 0, binding = 53) readonly buffer LightmapCellLight { uvec2 cellLight[]; };
+#define LIGHTMAP_CELLS
 #include "lightmap_index.glsl"
 #define TEXEL_INDEX_MAP(i) lightmapIndexAt(ivec2(int(i) % int(lightmapIndex[0]), int(i) / int(lightmapIndex[0])))
 layout(std430, set = 0, binding = 45) readonly buffer TexelMeta { uint texelMeta[]; };
@@ -323,13 +329,21 @@ bool texelsAtLevel(vec3 worldPos, vec3 n, float faceBin, uint level, out vec3 ir
         for (int i = 0; i < TEXEL_CANDIDATES; ++i) { ids[i] = -1; weights[i] = 0.0; }
         int lm[4];
         float lw[4];
-        if (!(g.uClipExact.w > 0.5 && texelsAroundLightmapGather(atlasTexel, n, ivec2(g.uLightmap.yz), lm, lw)))
+        if (!(g.uClipExact.w > 0.5 && texelsAroundLightmapGather(atlasTexel, n, ivec2(g.uLightmap.yz), lm, lw))) {
+            probeCount(33u);
             texelsAroundLightmap(atlasTexel, n, ivec2(g.uLightmap.yz), lm, lw);
+        }
+        if (g.uSeam.w > 2.5 && g.uSeam.w < 3.5) {   // stop 3: the four found
+            irradiance = vec3(float(lm[0] + lm[1] + lm[2] + lm[3]), lw[0] + lw[2], lw[1] + lw[3]);
+            confidence = 1.0;
+            return true;
+        }
         // None of the four answers: a layer under another, nearly coplanar (Sponza's door ornaments are stacked so), wins
         // the depth test along thin lines, and its texels are rightly buried -- the pixel read nothing and took the
         // probes' light, bright dashes along the ornaments (2026-10-15). The neighbours' lightmap texels instead, out to
         // two pixels: mostly the layer on top, and texelsAroundLightmap keeps only the ones facing as this pixel does.
         if (lm[0] < 0 && lm[1] < 0 && lm[2] < 0 && lm[3] < 0) {
+            probeCount(34u);
             ivec2 size = textureSize(uLightmapTexel, 0);
             for (int k = 0; k < 16 && lm[0] < 0 && lm[1] < 0 && lm[2] < 0 && lm[3] < 0; ++k) {
                 int r = k < 8 ? 1 : 2;
@@ -342,6 +356,14 @@ bool texelsAtLevel(vec3 worldPos, vec3 n, float faceBin, uint level, out vec3 ir
         }
         for (int i = 0; i < 4; ++i) { ids[i] = lm[i]; weights[i] = lw[i]; }
         if (g.uSeam.x > 0.5) seamBlend(worldPos, n, ids, weights);
+        if (g.uSeam.w > 8.5 && ids[4] >= 0) probeCount(35u);
+        if (g.uSeam.w > 3.5 && g.uSeam.w < 4.5) {   // stop 4: the candidates ready, none read
+            float sum = 0.0;
+            for (int i = 0; i < TEXEL_CANDIDATES; ++i) sum += ids[i] >= 0 ? weights[i] + float(ids[i]) : 0.0;
+            irradiance = vec3(sum);
+            confidence = 1.0;
+            return true;
+        }
     } else {
         texelsAround(tg, worldPos, n, faceBin, ids, weights);
         // The face's own bins found nothing: a thin stem turning through bins its cell holds no record in (few records a
@@ -451,7 +473,115 @@ bool texelsAtLevel(vec3 worldPos, vec3 n, float faceBin, uint level, out vec3 ir
 // only where its weight is above zero or the finest is not whole.
 #define TEXEL_LEVEL_BAND 0.25
 bool texelsAt(vec3 worldPos, vec3 n, float faceBin, float viewDepth, out vec3 irradiance, out float confidence) {
-    float levelWanted = texelLevelFor(viewDepth, g.uTexelLevels, g.uTexelGrid.w, texelSunlit(worldPos, n));
+    // A lightmapped pixel reads level 0 whatever its level would be (below): the level -- and the cascades' sample the
+    // sunlit test takes for it -- only for the rest (every pixel sampled the cascades for it, 2026-10-24).
+    vec2 atlasAt;
+    bool atlasOnly = g.uTexelSun.w > 0.5 && pixelLightmapTexel != 0u && texelLightmapUnpack(pixelLightmapTexel, atlasAt);
+    // The atlas resolve's cells (uSeam.z): the four about the pixel, as the gather weighs them (the bilinear weights,
+    // floored at 1/64; the one turned most its way within 25 degrees of the pixel, the others within 25 degrees of it) --
+    // at rest, with the record's shapes, no debug view. A cell asking for the full lookup (not whole, a pair, seams), or
+    // none answering: the full lookup below.
+    if (atlasOnly && g.uSeam.z > 0.5 && g.uSeam.y > 0.5 && g.uTexelDebug.y > 0.5 && g.uReference.w < 0.5 && !pickHere) {
+        vec2 f = atlasAt - 0.5;
+        ivec2 base = ivec2(floor(f));
+        vec2 t = f - vec2(base);
+        if (!(all(greaterThanEqual(base, ivec2(0))) && all(lessThan(base + 1, ivec2(g.uLightmap.yz))))) probeCount(42u);
+        if (all(greaterThanEqual(base, ivec2(0))) && all(lessThan(base + 1, ivec2(g.uLightmap.yz)))) {
+            uvec2 c[4];
+            bool back[4];
+            uint whyFlags = 0u;
+            vec3 cn[4];
+            bool slow = false;
+            float bestDot = -2.0;
+            vec3 own = vec3(0.0);
+            for (int i = 0; i < 4; ++i) {
+                c[i] = lightmapCellAt(base + ivec2(i & 1, i >> 1));
+                uint fl = lightmapCellFlags(c[i]);
+                slow = slow || (fl & LIGHTMAP_CELL_SLOW) != 0u;
+                whyFlags |= fl;
+                cn[i] = vec3(0.0);
+                back[i] = false;
+                if ((fl & LIGHTMAP_CELL_NONE) != 0u) continue;
+                cn[i] = lightmapCellNormal(c[i]);
+                // A pair: the side the pixel's normal agrees with (the gather's rule); its back's own words.
+                if ((fl & LIGHTMAP_CELL_PAIR) != 0u && dot(cn[i], n) < 0.0) {
+                    back[i] = true;
+                    slow = slow || (fl & LIGHTMAP_CELL_BACK_SLOW) != 0u;
+                    cn[i] = -cn[i];
+                }
+                float d = dot(cn[i], n);
+                if (d > bestDot) { bestDot = d; own = cn[i]; }
+            }
+            if (g.uSeam.w > 8.5) {   // why the cells did not answer (BLIX_INCIDENT_STOP=9)
+                if ((whyFlags & 2u) != 0u) probeCount(38u);
+                if ((whyFlags & 16u) != 0u) probeCount(39u);
+                if ((whyFlags & 8u) != 0u) probeCount(40u);
+                if (!slow && bestDot < 0.9) probeCount(41u);
+            }
+            if (!slow && bestDot >= 0.9) {
+                vec3 sum = vec3(0.0);
+                float sky = 0.0, weight = 0.0;
+                bool seamsWhole = true;
+                for (int i = 0; i < 4; ++i) {
+                    if ((lightmapCellFlags(c[i]) & LIGHTMAP_CELL_NONE) != 0u || dot(cn[i], own) < 0.9) continue;
+                    ivec2 o = ivec2(i & 1, i >> 1);
+                    float w = max((o.x == 1 ? t.x : 1.0 - t.x) * (o.y == 1 ? t.y : 1.0 - t.y), 1.0 / 64.0);
+                    // The seam blend (seamBlend's rule): the cell's neighbour across a seam the pixel lies toward -- the
+                    // least to the side of the line between them -- takes its share of the cell's weight by how far
+                    // across the pixel lies, 1/2 at the midpoint. A neighbour not whole: the full lookup decides.
+                    if (g.uSeam.x > 0.5 && !back[i] && (lightmapCellFlags(c[i]) & LIGHTMAP_CELL_SEAMS) != 0u) {
+                        uint id = lightmapCellId(base + o);
+                        uint first = uint(g.uLightmap.w);
+                        vec3 po = TEXEL_POSITION(id).xyz;
+                        vec3 rel = worldPos - po;
+                        int best = -1;
+                        float bestSide = 1e30, bestT = 0.0;
+                        for (uint k = seamStart[id - first]; k < seamStart[id - first + 1u]; ++k) {
+                            uint j = seamIds[k];
+                            vec4 pj = TEXEL_POSITION(j);
+                            if (abs(pj.w) < 2.0) continue;
+                            vec3 d = pj.xyz - po;
+                            float dd = dot(d, d);
+                            if (dd < 1e-8) continue;
+                            float along = dot(rel, d) / dd;
+                            if (along <= 0.0) continue;
+                            float side = length(rel - d * along);
+                            if (side < bestSide) { bestSide = side; best = int(j); bestT = along; }
+                        }
+                        if (best >= 0) {
+                            uvec2 rj = texelResolved[uint(best)];
+                            uint dj = texelDetail[uint(best)];
+                            if ((rj.y & 0x10000u) == 0u || (rj.y & 0xFFFFu) != 0xFFFFu || (dj >> 24) == 0u) { seamsWhole = false; break; }
+                            float share = min(bestT, 0.5) * w;
+                            sum += share * unpackRgb9e5(rj.x);
+                            sky += share * texelDetailUnpack(dj).z;
+                            weight += share;
+                            w -= share;
+                        }
+                    }
+                    if (back[i]) {
+                        uint b = lightmapCellId(base + o) + 1u;
+                        sum += w * unpackRgb9e5(texelResolved[b].x);
+                        vec3 bd = texelDetailUnpack(texelDetail[b]);
+                        sky += w * bd.z;
+                    } else {
+                        sum += w * unpackRgb9e5(c[i].x);
+                        sky += w * lightmapCellSky(c[i]);
+                    }
+                    weight += w;
+                }
+                if (seamsWhole && weight > 0.0) {
+                    irradiance = sum / weight;
+                    confidence = 1.0;
+                    detailSum = vec4(0.0, 0.0, sky / weight, 1.0);
+                    detailMissing = false;
+                    probeCount(37u);
+                    return true;
+                }
+            }
+        }
+    }
+    float levelWanted = atlasOnly ? 0.0 : texelLevelFor(viewDepth, g.uTexelLevels, g.uTexelGrid.w, texelSunlit(worldPos, n));
     int finest = int(floor(levelWanted));
     float fraction = clamp((levelWanted - float(finest) - (1.0 - TEXEL_LEVEL_BAND)) / TEXEL_LEVEL_BAND, 0.0, 1.0);
     // uClipExact.z: a pixel the atlas leaves out (foliage, small props: the hashed cells, up to 8 corners x bins a
@@ -465,8 +595,7 @@ bool texelsAt(vec3 worldPos, vec3 n, float faceBin, float viewDepth, out vec3 ir
     // four reads whatever the distance, so a coarser level saves nothing, and its hashed cells (8 cm and up, across a
     // crease) put the contacts' light out by 10-14% where the path trace and the atlas agree -- the floor at the Cornell
     // box's base 8 m off read level 1 (2026-10-21).
-    vec2 atlasAt;
-    if (g.uTexelSun.w > 0.5 && pixelLightmapTexel != 0u && texelLightmapUnpack(pixelLightmapTexel, atlasAt)) {
+    if (atlasOnly) {
         finest = 0;
         fraction = 0.0;
     }
@@ -476,6 +605,11 @@ bool texelsAt(vec3 worldPos, vec3 n, float faceBin, float viewDepth, out vec3 ir
     vec3 fineValue;
     float fineC;
     bool fine = texelsAtLevel(worldPos, n, faceBin, uint(finest), fineValue, fineC);
+    if (g.uSeam.w > 2.5 && g.uSeam.w < 5.5) {   // stops 3-5: level 0 alone (5: its reads done, no coarser level)
+        irradiance = fineValue;
+        confidence = fineC;
+        return fine;
+    }
     dbgFinest = finest;
     dbgFraction = fraction;
     if (fine) { dbgFine = fineValue; dbgFineC = fineC; }
@@ -485,6 +619,7 @@ bool texelsAt(vec3 worldPos, vec3 n, float faceBin, float viewDepth, out vec3 ir
         && !(g.uClipExact.z > 0.5 && pixelLightmapTexel == 0u && fine);
     vec3 coarseValue;
     float coarseC;
+    if (needCoarse) probeCount(36u);
     bool coarse = needCoarse && texelsAtLevel(worldPos, n, faceBin, uint(coarsest), coarseValue, coarseC);
     if (needCoarse) {
         dbgCoarsest = coarsest;
@@ -580,7 +715,11 @@ void main() {
     shapeMissing = false;
     pixelLightmapTexel = g.uLightmap.x > 0.5 ? texelFetch(uLightmapTexel, pixel, 0).r : 0u;
     pixelAt = pixel;
+    // BLIX_INCIDENT_STOP (uSeam.w; a cost probe): 1 out before the texels are read, 2 right after (3-5 inside texelsAt).
+    probeCount(32u);
+    if (g.uSeam.w > 0.5 && g.uSeam.w < 1.5) { outIncident = vec4(N * 0.5 + 0.5, 1.0); outIncidentGradient = vec4(0.0); return; }
     bool texelFound = g.uTexelParams.y > 0.5 && g.uClipParams.y < 0.5 && texelsAt(worldPos, N, nSample.w, viewDepth, gathered, confidence);
+    if (g.uSeam.w > 1.5) { outIncident = vec4(texelFound ? gathered : vec3(0.0), 1.0); outIncidentGradient = vec4(0.0); return; }
     vec3 t1 = normalize(cross(abs(N.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0), N));
     vec3 t2 = cross(N, t1);
     if (pickHere) {

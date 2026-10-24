@@ -273,6 +273,7 @@ internal sealed partial class SponzaLoop
         // 1.10% -> 0.38% rms, under the 0.6% within a texel; the gate and two seeds a scene level).
         gatherSmooth = !args.Flag("no-gather-smooth-normal");
         seamBlend = !args.Flag("no-seam-blend");
+        atlasCells = !args.Flag("no-atlas-cells");
         ReadFarArgs(args);
         ReadTransportCensusArgs(args);
         ReadFarTransportArgs(args);

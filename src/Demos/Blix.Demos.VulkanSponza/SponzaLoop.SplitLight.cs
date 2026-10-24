@@ -263,6 +263,7 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("TexelShape", ShapeOr(texelShapeBuffer)),
                     ProvenanceBinding(),
                 }.Concat(SeamBindings()).Concat(DetailBindings()).ToArray()));
+        RecordLightmapCells();   // the atlas resolve: the cells from this light (SponzaLoop.LightmapCells.cs)
         texelResting = true;
         texelResolveCurrent = true;
         texelsSettled = true;

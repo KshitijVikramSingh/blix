@@ -42,6 +42,7 @@ internal sealed partial class SponzaLoop
         texelMetaBuffer = Own(device.CreateGpuBuffer(meta.Length * 4, MemoryMarshal.AsBytes(meta.AsSpan()), "sponza.lightmap.texel-meta"));
         var index = PackLightmapIndex(map, lightmapAtlasWidth, lightmapAtlasHeight);
         lightmapIndexWords = index.Length;
+        CreateLightmapCells(index);
         lightmapIndexBuffer = Own(device.CreateGpuBuffer(index.Length * 4, MemoryMarshal.AsBytes(index.AsSpan()), "sponza.lightmap.index"));
     }
 

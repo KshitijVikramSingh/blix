@@ -715,7 +715,7 @@ void main() {
     // KHR_materials_diffuse_transmission that once put a flat translucency on every cell of the
     // light-transport bake.
     bool inDepthPrepass = mat.uMaterialParams2.x <= 0.0;
-    float visibility = inDepthPrepass ? ambientVis.r : 1.0;
+    float visibility = inDepthPrepass && frame.uTexelShape.y > 0.5 ? ambientVis.r : 1.0;
 
     // IBL uses the shading normal. (GTAO no longer writes a bent normal: nothing shaded with it.)
     vec3 cubeN   = N;

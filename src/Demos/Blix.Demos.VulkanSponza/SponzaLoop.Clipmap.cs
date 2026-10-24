@@ -119,6 +119,7 @@ internal sealed partial class SponzaLoop
             ? clipmapStatePlaceholder = Own(device.CreateGpuBuffer(16, name: "sponza.clipmap.state.none")) : clipmapStatePlaceholder;
 
     // The clipmap is what the incident field and the lit pass read once it has been solved at least once.
+    private bool probeUpdatesOff;
     private bool ClipmapActive => clipmap is not null && clipmapFrame > 0;
 
     // The incident field from the clipmap (incident_clipmap.frag): rgb the light arriving, a sky visibility.
@@ -170,14 +171,18 @@ internal sealed partial class SponzaLoop
                 new("uTexelLevels", new Vector4Uniform(TexelLevelsUniform(frameHeight))),
                 new("uHalf", new Vector4Uniform(new Vector4(half ? 1f : 0f, sub.X, sub.Y, PatchViewColumns))),
                 new("uReuse", new Vector4Uniform(IncidentReuseUniform(half))),
-                new("uSeam", new Vector4Uniform(new Vector4(SeamBlendNow ? 1f : 0f, TexelShapeOn ? 1f : 0f, 0f, 0f))),
+                new("uSeam", new Vector4Uniform(new Vector4(SeamBlendNow ? 1f : 0f, TexelShapeOn ? 1f : 0f, LightmapCellsNow ? 1f : 0f, IncidentStop))),
             }.Concat(TexelSunUniforms()).ToArray(),
-            buffers: new[] { new ShaderBufferBinding("ClipmapState", clipmapState), new ShaderBufferBinding("ScreenProbeTiles", screen.Tiles), new ShaderBufferBinding("ScreenProbes", screen.Probes), new ShaderBufferBinding("SurfaceIndex", surfaceIndex) }.Concat(texel.Buffers).Append(reference.Buffer).Append(new ShaderBufferBinding("IncidentCensus", IncidentCensusBuffer())).Append(AtlasGatherMeta()).Append(AtlasIndexBuffer())
+            buffers: new[] { new ShaderBufferBinding("ClipmapState", clipmapState), new ShaderBufferBinding("ScreenProbeTiles", screen.Tiles), new ShaderBufferBinding("ScreenProbes", screen.Probes), new ShaderBufferBinding("SurfaceIndex", surfaceIndex) }.Concat(texel.Buffers).Append(reference.Buffer).Append(new ShaderBufferBinding("IncidentCensus", IncidentCensusBuffer())).Append(AtlasGatherMeta()).Append(AtlasIndexBuffer()).Append(LightmapCellsBinding())
                 .Append(ProvenanceBinding()).Append(new ShaderBufferBinding("TexelShape", ShapeOr(texelShapeBuffer))).Append(TexelRaysBinding()).Append(pick.Buffer).Concat(PatchViewBindings()).Append(ReferenceMomentsBinding())
                 .Concat(SeamBlendBindings())
                 // The ray scene, for --clipmap-exact-visibility (declared always; read only then).
                 .Concat(rayBlockBuffers).ToArray()));
     }
+
+    // BLIX_INCIDENT_STOP=1 / 2: the incident pass out before / right after its texels are read (incident_clipmap.frag) --
+    // a probe of where its time goes, not a mode to run.
+    private static readonly float IncidentStop = float.TryParse(Environment.GetEnvironmentVariable("BLIX_INCIDENT_STOP"), out var stop) ? stop : 0f;
 
     private const int ClipmapLevels = 4;
     // Probes per level, x y z. --clipmap-height N sets y (16: level 0 reaches +-4 m vertically, 32: +-8 m); stage 4g-viii.

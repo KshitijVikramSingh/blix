@@ -450,6 +450,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private const int AbPeriodFrames = 120;
     /// <summary>--orbit: a closed camera path, one revolution per A/B phase. See ApplyOrbit.</summary>
     private bool orbit;
+    private Vector4? orbitAt;
     // --orbit-frames N: a slower revolution, for what a walking camera sees (screen-probe history); the A/B
     // alignment above holds only at the default.
     private int OrbitFrames = AbPeriodFrames;

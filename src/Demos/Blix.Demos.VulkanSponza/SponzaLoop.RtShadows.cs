@@ -147,9 +147,10 @@ internal sealed partial class SponzaLoop
             if (frameTracerFailed) rtShadows = false;
             return;
         }
-        if (abMode == "rtshadow" && AbOffPhase)
+        // The A/B's OFF phase (the cascades shade), or shadows off (--no-shadow: the lit pass applies none, so the frame
+        // traces none -- the tracer stays for the GI, its batches a group of their own): no external pass splits the frame.
+        if (abMode == "rtshadow" && AbOffPhase || !shadows.Enabled)
         {
-            // The A/B's OFF phase: the cascades shade, and no external pass splits the frame.
             rtShadowPrevSlot = -1;
             if (!rtShadowBound.Equals(default(GpuBufferHandle)))
             {

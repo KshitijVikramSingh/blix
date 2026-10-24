@@ -127,13 +127,17 @@ public sealed class MaterialTextureLoader : IDisposable
                 "diffuse-transmission colour"),
         Resolve(material?.Ext.DiffuseTransmissionTexture, defaultAo, TextureFormat.Rgba8, "diffuse-transmission"));
 
+    /// <summary>Every material on the defaults (white albedo, flat normal, ...), nothing uploaded: a renderer's cost
+    /// without its textures' bandwidth and memory. Set before the first <see cref="Load"/>.</summary>
+    public bool SkipTextures { get; set; }
+
     private TextureHandle Resolve(
         TextureData? tex,
         TextureHandle fallback,
         TextureFormat uploadFormat,
         string channelTag)
     {
-        if (tex is null) return fallback;
+        if (tex is null || SkipTextures) return fallback;
 
         return registry.GetOrAdd(tex, uploadFormat, () => Upload(tex, uploadFormat, channelTag, fallback));
     }

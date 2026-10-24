@@ -542,7 +542,7 @@ internal sealed partial class SponzaLoop
                 AbOffPhase && abMode == "pbr"      ? 1f : 0f,
                 AbOffPhase && abMode == "ibl"      ? 1f : 0f,
                 AbOffPhase && abMode == "normal"   ? 1f : 0f))),
-            new("uTexelShape",       new Vector4Uniform(new Vector4(litShapesBound && IncidentFieldNow ? 1f : 0f, 0f, 0f, 0f))),
+            new("uTexelShape",       new Vector4Uniform(new Vector4(litShapesBound && IncidentFieldNow ? 1f : 0f, ambient.Enabled ? 1f : 0f, 0f, 0f))),
         };
         // The remaining //@tune uniforms (shadow slope scale, uVisualizeCascades) are appended by
         // name from the overlay panel — reflection lands each at its offset. The intensity and
@@ -819,12 +819,12 @@ internal sealed partial class SponzaLoop
         RecordRayView(frame.Width, frame.Height);
 
         // Hi-Z pyramid: level 0 reduces the resolved depth, each level after reduces its parent.
-        RecordPyramid(hiZPassHandles, hiZPipelines, hiZHandles, frame.Width, frame.Height, skip: abMode == "hiz" && AbOffPhase);
+        RecordPyramid(hiZPassHandles, hiZPipelines, hiZHandles, frame.Width, frame.Height, skip: abMode == "hiz" && AbOffPhase || !ambient.Enabled);
 
         // Ambient visibility. Reads the 1x depth the pre-pass just resolved, writes bent normal +
-        // visibility for the lit pass. When disabled the pass still runs and clears to white-ish —
-        // a stale buffer would be worse than a cleared one, and "disabled" must mean "the term is
-        // one", not "the term is whatever was here last frame".
+        // visibility for the lit pass. Disabled, neither it nor the pyramid runs, and the lit pass takes the term as one
+        // (frame.uTexelShape.y) -- it ran at radius 0 before, 1.7 ms of nothing at 2880 x 1620 (2026-10-24).
+        if (ambient.Enabled)   // off (--no-ao): GTAO and its pyramid not run at all; the lit pass reads no AO (frame.uTexelShape.y)
         {
             Matrix4x4.Invert(cameraProjection, out var invProjection);
             Matrix4x4.Invert(cameraView, out var invView);
@@ -909,9 +909,14 @@ internal sealed partial class SponzaLoop
                 Matrix4x4.Invert(cameraProjection * cameraJitter, out var incidentInvProj);
                 Matrix4x4.Invert(cameraView, out var incidentInvView);
                 ReadIncidentCensus();
-                RecordSurfaceReclaim();
-                RecordClipmapMark(incidentInvProj, incidentInvView, frame.Width, frame.Height);
-                RecordScreenProbes(frame.Width, frame.Height);
+                // --no-probe-updates: after their first solve the probes stand as they are -- no marking, reclaim or screen
+                // probes a frame (what a run that measures the texels' own cost leaves out).
+                if (!probeUpdatesOff)
+                {
+                    RecordSurfaceReclaim();
+                    RecordClipmapMark(incidentInvProj, incidentInvView, frame.Width, frame.Height);
+                    RecordScreenProbes(frame.Width, frame.Height);
+                }
                 using (Prof("texels")) RecordTexels(incidentInvProj, incidentInvView, frame.Width, frame.Height);
                 RecordReference(incidentInvProj, incidentInvView, frame.Width, frame.Height);
                 RecordGpuReference();
@@ -1681,6 +1686,14 @@ internal sealed partial class SponzaLoop
             }
         }
 
+        if (IncidentStop > 8.5 && !incidentCensus.Equals(default(GpuBufferHandle)))
+        {
+            device.WaitIdle();
+            var w = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(incidentCensus, 128, 44).AsSpan()).ToArray();
+            double Pct(uint v) => w[0] > 0 ? 100.0 * v / w[0] : 0.0;
+            Console.WriteLine(string.Create(Inv,
+                $"[VulkanSponza] incident lookup branches (BLIX_INCIDENT_STOP=9): {w[0]:N0} pixels computed; the full walk (no gather) {Pct(w[1]):0.00}%, the neighbour search {Pct(w[2]):0.00}%, a seam candidate {Pct(w[3]):0.00}%, the coarser level {Pct(w[4]):0.00}%; the atlas cells answered {Pct(w[5]):0.00}% (not: a cell not whole {Pct(w[6]):0.00}%, a pair {Pct(w[7]):0.00}%, seams {Pct(w[8]):0.00}%, turned over 25 deg {Pct(w[9]):0.00}%, the atlas's edge {Pct(w[10]):0.00}%)."));
+        }
         if (host.Timing.IsolatePasses)
         {
             // Per-run cost describes one execution; per-frame cost includes scheduling frequency.

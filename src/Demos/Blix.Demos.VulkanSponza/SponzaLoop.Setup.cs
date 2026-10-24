@@ -45,6 +45,8 @@ internal sealed partial class SponzaLoop
         }
         gpuPasses = new GpuPassWindow(host.Timing);
         textureLoader = new MaterialTextureLoader(device);
+        // --no-textures: every material on the defaults, no texture loaded (what the frame costs without them).
+        if (args.Flag("no-textures")) textureLoader.SkipTextures = true;
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
         renderHeightPx = host.LogicalSize.Height;
 
@@ -322,6 +324,14 @@ internal sealed partial class SponzaLoop
         // --orbit: drive the camera on a fixed path so a measurement is of the renderer rather than
         // of one photograph of it. Ignores --cam, which is the still counterpart.
         if (args.Flag("orbit")) orbit = true;
+        // --no-probe-updates: the probe clipmap solved once, then frozen, its marking and screen probes off (SponzaLoop.Render.cs).
+        if (args.Flag("no-probe-updates")) { probeUpdatesOff = true; clipmapFreeze = 1; }
+        if (args.Values("orbit-at", 4) is [var ox, var oy, var oz, var orad])
+        {
+            float F(string v) => float.Parse(v, CultureInfo.InvariantCulture);
+            orbitAt = new Vector4(F(ox), F(oy), F(oz), F(orad));
+            orbit = true;
+        }
         ReadWalkArgs(args);
         ReadWatchArgs(args);
         ReadSurfaceArgs(args);
@@ -811,6 +821,7 @@ internal sealed partial class SponzaLoop
         // --sun-nodes: the texels' light for many suns from one trace (SponzaLoop.SunNodes.cs), among the texels' passes.
         DeclareSunNodePasses(stages => Reflect(stages));
         DeclareSplitLightPass(stages => Reflect(stages));
+        DeclareLightmapCellsPass(stages => Reflect(stages));
 
         // --rt-shadows: the shadow rays as soon as the pre-pass has the depth and normals they start from, and the Metal
         // pass that traces them; the lit pass joins it (rt-shadow-join, below). Everything between (Hi-Z, GTAO, the
@@ -1239,6 +1250,7 @@ internal sealed partial class SponzaLoop
             File.ReadAllBytes(Path.Combine(shaderDir, "texel_bake.comp.spv")), lightBakeInterface, "texel_bake")), "texel_bake"));
         CreateSunNodePipelines(shaderDir);
         CreateSplitLightPipeline(shaderDir);
+        CreateLightmapCellsPipeline(shaderDir);
         texelGatherPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "texel_gather.comp.spv")), texelGatherInterface, "texel_gather")), "texel_gather"));
         clipmapMarkPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(

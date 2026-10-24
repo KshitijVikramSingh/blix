@@ -20,7 +20,7 @@ internal sealed partial class SponzaLoop
     private GpuBufferHandle IncidentCensusBuffer()
     {
         if (incidentCensus.Equals(default(GpuBufferHandle)))
-            incidentCensus = Own(device.CreateGpuBuffer(64, new byte[64], "sponza.incident.census"));
+            incidentCensus = Own(device.CreateGpuBuffer(256, new byte[256], "sponza.incident.census"));   // words 32-36: BLIX_INCIDENT_STOP=9's counts
         return incidentCensus;
     }
 

@@ -99,6 +99,9 @@ internal sealed partial class SponzaLoop
         // foliage and the cascade transitions all are, and an exterior orbit sees none of them.
         var radius = MathF.Min(sceneBoundsSpan.X, sceneBoundsSpan.Z) * 0.20f;
         var eyeY = centre.Y * 0.55f + sceneBoundsMin.Y * 0.45f;
+        // --orbit-at x,y,z,r: round a chosen point at its height, looking at it level (the bounds' path circles mid-air
+        // in a scene taller than its floor plan: Crytek Sponza's, 2026-10-24).
+        if (orbitAt is { } at) { centre = new Vector3(at.X, at.Y, at.Z); radius = at.W; eyeY = at.Y; }
         var eye = new Vector3(
             centre.X + MathF.Cos(angle) * radius,
             eyeY,
