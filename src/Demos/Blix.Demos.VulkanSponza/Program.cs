@@ -1154,19 +1154,21 @@ internal sealed class RenderSettings
     // retuning rather than relying on noisy frame time alone.
     [Tune(0f, 8f)]     public float LodErrorPixels = 2.0f;
     // The incident light and the traced sun shadows at half resolution, each half-res pixel standing for one of its
-    // 2x2 (a different one each frame, TAA gathering all four), brought back to full resolution along the depth and
-    // normals (lighting_upsample.frag). Off (the default): the incident light at full resolution -- 4x its cost, the
-    // frame's largest pass there (incident-light, Metal System Trace 2026-10-12), but no upsample guessing across edges.
-    // On: --half-res-lighting.
-    [Tune]             public bool HalfResLighting = false;
+    // 2x2 (a different one each frame with TAA, gathering all four; without, the same one), brought back to full
+    // resolution along the depth and normals (lighting_upsample.frag). On by default since 2026-10-24 (the user's, with
+    // HalfResShadows): moving through Crytek Sponza 60 -> ~78 fps and steady, its 40-50 ms frames gone. --full-res-lighting:
+    // the incident light at full resolution, 4x its cost, no upsample guessing across edges.
+    [Tune]             public bool HalfResLighting = true;
     // The scene's resolution as a fraction of the window's, per axis (RenderGraph.RenderScale): every scene pass renders
     // at it, TAA resolves at it, and the present pass scales the result up to the window. --render-scale S. 1 by default
     // (the user's, 2026-10-22: the image judged at full resolution, as the gate runs; 0.75 was the 2026-10-20 baseline,
     // the tree view 21.5 -> 28.5 fps).
     [Tune(0.5f, 1f)]   public float RenderScale = 1f;
-    // The traced sun shadows at half resolution too (only with HalfResLighting: the upsample brings the mask back). Off
-    // by default: half-res shadows left blocky patches the upsample could not hide, worst on cloth.
-    [Tune]             public bool HalfResShadows = false;
+    // The traced sun shadows at half resolution too (only with HalfResLighting: the upsample brings the mask back). On by
+    // default since 2026-10-24: the trace grows with the sunlit pixels, 7.5-18 ms a frame close to a sunlit wall at full
+    // resolution, 0.6-1.8 at half. Cloth's shadows stair-step at either (to come). --full-res-shadows: off (it was, for
+    // blocky patches the upsample could not hide, worst on cloth).
+    [Tune]             public bool HalfResShadows = true;
     // Two-phase occlusion culling of the camera's opaque placements (scene_occlusion.comp; --no-occlusion turns it off
     // for the whole run). Off: the frustum alone decides -- the reference, for geometry that breaks up and comes back.
     [Tune]             public bool OcclusionCull = true;

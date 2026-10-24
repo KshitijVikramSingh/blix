@@ -160,7 +160,7 @@ internal sealed partial class SponzaLoop
     private bool RtShadowKeep(int slot, int width, int height)
     {
         if (rtShadowSlotKey.Length != device.MaxFramesInFlightCount) rtShadowSlotKey = new (Matrix4x4, Vector3, float, int, int, bool)?[device.MaxFramesInFlightCount];
-        var keyable = shadowKeep && rtShadowPacked.Length > 0 && !halfShadowsNow && !RtSkyRays && !RtPerPixel && !shadows.Interleave
+        var keyable = shadowKeep && rtShadowPacked.Length > 0 && (!halfShadowsNow || render.Taa <= 0f) && !RtSkyRays && !RtPerPixel && !shadows.Interleave
             && SunDiscTangent <= 0f && !rtCoverageCoin && !rtAlphaAb && !MoverActive && framesRendered - incidentDirtyFrame > 1;
         var key = (viewProjJittered, -Vector3.Normalize(sunDirection), rayReach, width, height, texelsUploaded);
         var keep = keyable && rtShadowSlotKey[slot] == key;

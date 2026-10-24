@@ -200,6 +200,7 @@ internal sealed partial class SponzaLoop
         if (args.Flag("half-res-lighting")) render.HalfResLighting = true;
         if (args.Flag("full-res-lighting")) render.HalfResLighting = false;
         if (args.Flag("half-res-shadows")) render.HalfResShadows = true;
+        if (args.Flag("full-res-shadows")) render.HalfResShadows = false;
         metalDeviceQueue = args.Flag("metal-device-queue");
         tracerBatchesApart = args.Flag("tracer-batches-apart");
         clipmapWaveInFrame = args.Flag("clipmap-wave-inframe");

@@ -482,7 +482,9 @@ internal sealed partial class SponzaLoop
         // on it); not under --rt-isolated, whose sky rays are read per full-res pixel.
         halfLightingNow = render.HalfResLighting && incidentField && !(abMode == "incident" && AbOffPhase) && ClipmapActive && !rtIsolated;
         halfShadowsNow = halfLightingNow && render.HalfResShadows;
-        lightingFrame++;
+        // The 2x2's sampled pixel turns each frame for TAA to gather; with no TAA it stays (the first), so a still frame is
+        // the same frame -- turning, the half-res lighting shimmered on a four-frame cycle with the camera still.
+        if (render.Taa > 0f) lightingFrame++;
         // --ab queue: the Metal tracers on the Vulkan device's queue (ON) or their own (OFF), switched at each phase. Safe
         // mid-run: the hand-offs still wait on the frame timeline, so work already on the other queue stays ordered.
         if (abMode == "queue" && frameTracer is { } queueTracer && tracerOnDeviceQueue == AbOffPhase)
@@ -922,13 +924,13 @@ internal sealed partial class SponzaLoop
                 RecordReference(incidentInvProj, incidentInvView, frame.Width, frame.Height);
                 RecordGpuReference();
                 RecordViewReference();
-                if (halfLightingNow)
+                if (halfLightingNow && IncidentHalfPassNeeded())
                 {
                     var (halfWidth, halfHeight) = HalfLightingSize(frame.Width, frame.Height);
                     RecordIncidentClipmap(incidentInvProj, incidentInvView, halfWidth, halfHeight, frame.Width, frame.Height, half: true);
                     RecordLightingUpsample(incidentInvProj, incidentInvView, frame.Height);
                 }
-                else if (IncidentPassNeeded())
+                else if (!halfLightingNow && IncidentPassNeeded())
                 {
                     RecordIncidentClipmap(incidentInvProj, incidentInvView, frame.Width, frame.Height, frame.Width, frame.Height);
                     RecordIncidentHistory();

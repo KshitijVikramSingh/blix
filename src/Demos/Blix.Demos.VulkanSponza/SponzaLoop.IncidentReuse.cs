@@ -76,6 +76,22 @@ internal sealed partial class SponzaLoop
         return true;
     }
 
+    // The half-res pass and its upsample, as IncidentPassNeeded: skipped with the camera still four frames and nothing they
+    // read changed -- the upsample writes the targets the lit pass reads, which hold its last answer. No TAA only: with it,
+    // the 2x2's sampled pixel turns each frame. Without this, a still frame paid the pass, the upsample and the mark,
+    // ~10-12 ms where the full-res frame rested at 8.3 (2026-10-24).
+    private bool IncidentHalfPassNeeded()
+    {
+        var same = cameraView == incidentLastView && cameraProjection == incidentLastProjection;
+        incidentLastView = cameraView;
+        incidentLastProjection = cameraProjection;
+        var restable = IncidentReuseOn && render.Taa <= 0f && texelResting && !MoverActive && framesRendered - incidentDirtyFrame > 1;
+        if (!same || !restable) { incidentStillFrames = 0; return true; }
+        if (incidentStillFrames >= 4) { incidentSkipped++; return false; }
+        incidentStillFrames++;
+        return true;
+    }
+
     // After the full-res incident pass: its answer becomes the next frame's history.
     private void RecordIncidentHistory()
     {

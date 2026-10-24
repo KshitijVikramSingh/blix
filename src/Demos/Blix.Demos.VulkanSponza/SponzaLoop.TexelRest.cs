@@ -102,6 +102,10 @@ internal sealed partial class SponzaLoop
             if (texelResolvedBuffer.Equals(default(GpuBufferHandle)))
                 texelResolvedBuffer = Own(device.CreateGpuBuffer(texelCount * 8, name: "sponza.texels.resolved"));
             lightmapCellsCurrent = false;   // the cells were the compose's light (SponzaLoop.LightmapCells.cs)
+            // Every texel's light rewritten: the incident pass recomputes, as after a compose. A camera still four frames
+            // had it skipped past this, the last answer kept -- Cornell's gate points 20-35% off, one run of four, under
+            // the half-res lighting's skip at rest (2026-10-24).
+            MarkIncidentDirty();
             graph.Dispatch(texelResolvePassHandle, new DispatchCommand(texelResolvePipeline, (texelCount + 63) / 64, 1, 1,
                 new ShaderUniform[] { new("uResolve", new Vector4Uniform(new System.Numerics.Vector4(texelCount, texelFilter ? 1f : 0f, texelTrust, 0f))) },
                 Array.Empty<ShaderTextureBinding>(),
