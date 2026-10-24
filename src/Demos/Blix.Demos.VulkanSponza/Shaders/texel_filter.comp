@@ -17,7 +17,7 @@ layout(set = 0, binding = 0) uniform TexelFilter {
                           // y 1: each neighbour weighed by the surface it holds (--texel-filter-area)
 } u;
 
-layout(std430, set = 0, binding = 1) readonly buffer TexelHash { uvec4 texelHash[]; };
+layout(std430, set = 0, binding = 1) readonly buffer TexelHash { uint texelHash[]; };
 layout(std430, set = 0, binding = 2) readonly buffer Texels { uvec4 texels[]; };
 #include "texel_record.glsl"
 layout(std430, set = 0, binding = 3) readonly buffer TexelBlend { vec4 texelBlend[]; };
@@ -28,7 +28,7 @@ layout(std430, set = 0, binding = 5) buffer TexelFilterList { uint texelFilterLi
 // The atlas's map from texel to record, as an R32UI texture (SponzaLoop.LightmapGather.cs).
 layout(set = 0, binding = 6) uniform usampler2D uLightmapIndexTex;
 #define TEXEL_INDEX_MAP(i) texelFetch(uLightmapIndexTex, ivec2(int(i) % textureSize(uLightmapIndexTex, 0).x, int(i) / textureSize(uLightmapIndexTex, 0).x), 0).r
-#define TEXEL_HASH(i) texelHash[i]
+#define TEXEL_HASH(i) uvec3(texelHash[3u * uint(i)], texelHash[3u * uint(i) + 1u], texelHash[3u * uint(i) + 2u])
 #include "texel.glsl"
 #include "texel_filter_neighbour.glsl"
 

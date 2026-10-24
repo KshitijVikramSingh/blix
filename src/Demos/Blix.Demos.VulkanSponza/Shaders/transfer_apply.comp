@@ -58,7 +58,7 @@ vec3 patchColumn(uint p, uint column) {
     return vec3(unpackHalf2x16(w.x), unpackHalf2x16(w.y).x);
 }
 
-#define TEXEL_HASH(i) uvec4(0xFFFFFFFFu)
+#define TEXEL_HASH(i) uvec3(0xFFFFFFFFu)
 #include "texel.glsl"
 
 uint packRgb9e5(vec3 c) {

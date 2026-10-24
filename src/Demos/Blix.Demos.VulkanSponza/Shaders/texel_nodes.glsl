@@ -5,7 +5,7 @@
 #define TEXEL_NODES_GLSL
 
 #include "texel_record.glsl"
-#define TEXEL_HASH(i) uvec4(0xFFFFFFFFu)   // texel.glsl's own hash is not read here
+#define TEXEL_HASH(i) uvec3(0xFFFFFFFFu)   // texel.glsl's own hash is not read here
 #include "texel.glsl"
 
 #define NODE_EMPTY 0xFFFFFFFFu

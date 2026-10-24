@@ -9,7 +9,7 @@
 // The bin is the FACE normal's (texel_bin.glsl: 26 directions, axis and 45-degree normals at bins' centres), so a
 // corner's two walls, or a sheet's two sides, never share a texel; the pre-pass writes each pixel's face bins.
 //
-// The includer defines TEXEL_HASH(i) (the hash table's slot i: uvec4 key x, key y, texel index, unused) and
+// The includer defines TEXEL_HASH(i) (the hash table's slot i, three words of TexelHash: uvec3 key x, key y, texel index; slots by modulo) and
 // TEXEL_POSITION(i) / TEXEL_NORMAL(i) (a texel's vec4s: xyz its position, w its surface samples; xyz its mean face
 // normal, w its level).
 #ifndef TEXEL_GLSL
@@ -75,12 +75,12 @@ uint texelMix(uvec2 k) {
 int texelFind(TexelGrid g, ivec3 cell, uint bin) {
     if (any(lessThan(cell, ivec3(0))) || any(greaterThan(cell, ivec3(65535)))) return -1;
     uvec2 key = texelKey(cell, bin, g.level);
-    uint slot = texelMix(key) & (g.capacity - 1u);
+    uint slot = texelMix(key) % g.capacity;
     for (int i = 0; i < TEXEL_PROBES; ++i) {
-        uvec4 e = TEXEL_HASH(slot);
+        uvec3 e = TEXEL_HASH(slot);
         if (e.x == TEXEL_EMPTY) return -1;
         if (e.x == key.x && e.y == key.y) return int(e.z);
-        slot = (slot + 1u) & (g.capacity - 1u);
+        slot = slot + 1u == g.capacity ? 0u : slot + 1u;
     }
     return -1;
 }

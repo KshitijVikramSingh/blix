@@ -30,7 +30,7 @@ layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
 layout(set = 0, binding = 2) uniform sampler2D uPrepassNormal;
 layout(set = 0, binding = 12) uniform sampler2D uTexelCascadeMaps[3];
 #include "shadow.glsl"
-layout(std430, set = 0, binding = 3) readonly buffer TexelHash { uvec4 texelHash[]; };
+layout(std430, set = 0, binding = 3) readonly buffer TexelHash { uint texelHash[]; };
 layout(std430, set = 0, binding = 4) readonly buffer Texels { uvec4 texels[]; };
 #include "texel_record.glsl"
 layout(std430, set = 0, binding = 5) readonly buffer TexelLight { vec4 texelLight[]; };
@@ -52,7 +52,7 @@ layout(set = 0, binding = 13) uniform usampler2D uLightmapTexel;
 // The atlas's map from texel to record, as an R32UI texture (SponzaLoop.LightmapGather.cs).
 layout(set = 0, binding = 14) uniform usampler2D uLightmapIndexTex;
 #define TEXEL_INDEX_MAP(i) texelFetch(uLightmapIndexTex, ivec2(int(i) % textureSize(uLightmapIndexTex, 0).x, int(i) / textureSize(uLightmapIndexTex, 0).x), 0).r
-#define TEXEL_HASH(i) texelHash[i]
+#define TEXEL_HASH(i) uvec3(texelHash[3u * uint(i)], texelHash[3u * uint(i) + 1u], texelHash[3u * uint(i) + 2u])
 #include "texel.glsl"
 
 // The pixel's own direct sun, 0-1, for its texel level (texelLevelFor): facing away, or shadowed in the cascades, is

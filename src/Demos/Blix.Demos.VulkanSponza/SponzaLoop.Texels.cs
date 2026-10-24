@@ -188,6 +188,31 @@ internal sealed partial class SponzaLoop
     }
 
     // texel.glsl's texelHash.
+    // The hash as the shaders read it (texel.glsl, texelFind): 12 B a slot (key lo, key hi, texel), 2 slots a texel by
+    // modulo -- the cook's table (cached as it is) is a power of two at twice the texels or more, 16 B a slot: Crytek
+    // Sponza's 1.2 M hashed texels 64 -> 29 MB (2026-10-24). At 1.5 a texel Cornell's longest probe run was 66, past the
+    // shaders' 64: the keys cluster.
+    private static uint[] GpuTexelTable(uint[] table, out int slots)
+    {
+        var entries = 0;
+        for (var i = 0; i < table.Length; i += 4) if (table[i] != 0xFFFFFFFFu) entries++;
+        slots = Math.Max(entries * 2, 16);
+        var gpu = new uint[slots * 3];
+        Array.Fill(gpu, 0xFFFFFFFFu);
+        var longest = 0;
+        for (var i = 0; i < table.Length; i += 4)
+        {
+            if (table[i] == 0xFFFFFFFFu) continue;
+            var slot = TexelHash(table[i], table[i + 1]) % (uint)slots;
+            var probe = 0;
+            while (gpu[slot * 3] != 0xFFFFFFFFu) { slot = slot + 1 == slots ? 0u : slot + 1; probe++; }
+            longest = Math.Max(longest, probe);
+            gpu[slot * 3] = table[i]; gpu[slot * 3 + 1] = table[i + 1]; gpu[slot * 3 + 2] = table[i + 2];
+        }
+        if (longest >= 64) Console.WriteLine($"[VulkanSponza] texels: WARNING the GPU hash's longest probe run is {longest}, past the shaders' 64 (TEXEL_PROBES).");
+        return gpu;
+    }
+
     private static uint TexelHash(uint lo, uint hi)
     {
         unchecked
@@ -572,7 +597,8 @@ internal sealed partial class SponzaLoop
         Array.Fill(stamps, 0xFFFFFFFFu);
         if (!texelBudgetGiven && FrameRaysOnHardware) texelBudget = 32768;
         var queueWords = 8 + 4 * Math.Max(texelBudget, LightBakeBudget);
-        texelHashBuffer = Own(device.CreateGpuBuffer(bake.Table.Length * 4, MemoryMarshal.AsBytes(bake.Table.AsSpan()), "sponza.texels.hash"));
+        var gpuTable = GpuTexelTable(bake.Table, out texelCapacity);
+        texelHashBuffer = Own(device.CreateGpuBuffer(gpuTable.Length * 4, MemoryMarshal.AsBytes(gpuTable.AsSpan()), "sponza.texels.hash"));
         var packedRecords = PackTexelRecords(bake.Texels, texelCount, firstAtlas);   // 16 B a record (SponzaLoop.TexelRecords.cs)
         texelBuffer = Own(device.CreateGpuBuffer(packedRecords.Length * 4, MemoryMarshal.AsBytes(packedRecords.AsSpan()), "sponza.texels"));
         // The gather's buffers (zeroed by CreateGpuBuffer where nothing is given); with a resolved cache, placeholders
@@ -770,7 +796,7 @@ internal sealed partial class SponzaLoop
     private void EnsureTexelPlaceholders()
     {
         if (!texelHashBuffer.Equals(default(GpuBufferHandle))) return;
-        texelHashBuffer = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.texels.hash.none"));
+        texelHashBuffer = Own(device.CreateGpuBuffer(16, Enumerable.Repeat((byte)0xFF, 16).ToArray(), "sponza.texels.hash.none"));
         texelBuffer = Own(device.CreateGpuBuffer(TexelRecordHeaderBytes + 16, new byte[TexelRecordHeaderBytes + 16], "sponza.texels.none"));
         texelLightBuffer = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.texels.light.none"));
         texelPriorBuffer = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.texels.prior.none"));

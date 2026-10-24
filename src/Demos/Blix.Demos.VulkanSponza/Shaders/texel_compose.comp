@@ -29,7 +29,7 @@ layout(std430, set = 0, binding = 2) readonly buffer TexelSky { uvec2 texelSky[]
 layout(std430, set = 0, binding = 3) readonly buffer TexelSun { uvec2 texelSun[]; };
 layout(std430, set = 0, binding = 4) writeonly buffer TexelResolved { uvec2 texelResolved[]; };
 layout(std430, set = 0, binding = 5) buffer TexelComposed { uvec2 texelComposed[]; };
-layout(std430, set = 0, binding = 6) readonly buffer TexelHash { uvec4 texelHash[]; };
+layout(std430, set = 0, binding = 6) readonly buffer TexelHash { uint texelHash[]; };
 layout(std430, set = 0, binding = 7) readonly buffer Texels { uvec4 texels[]; };
 #include "texel_record.glsl"
 // The atlas's map from texel to record, as an R32UI texture (SponzaLoop.LightmapGather.cs).
@@ -53,7 +53,7 @@ layout(std430, set = 0, binding = 17) buffer TexelOwnShape { uint ownShape[]; };
 layout(std430, set = 0, binding = 18) writeonly buffer TexelShape { uint texelShape[]; };
 layout(std430, set = 0, binding = 19) readonly buffer TexelProvenance { uint provenance[]; };
 #define TEXEL_INDEX_MAP(i) texelFetch(uLightmapIndexTex, ivec2(int(i) % textureSize(uLightmapIndexTex, 0).x, int(i) / textureSize(uLightmapIndexTex, 0).x), 0).r
-#define TEXEL_HASH(i) texelHash[i]
+#define TEXEL_HASH(i) uvec3(texelHash[3u * uint(i)], texelHash[3u * uint(i) + 1u], texelHash[3u * uint(i) + 2u])
 #include "texel.glsl"
 #include "texel_filter_neighbour.glsl"
 #define TEXEL_SHAPE_NO_STORE

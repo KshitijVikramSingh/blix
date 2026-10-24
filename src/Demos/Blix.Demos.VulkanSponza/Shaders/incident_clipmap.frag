@@ -151,7 +151,7 @@ float clipmapTracedVisibility(vec3 world, vec3 n, vec3 probe) {
 layout(std430, set = 0, binding = 9) readonly buffer SurfaceIndex { uint surfaceIndex[]; };
 #define BLIX_SURFACE_INDEX(i) surfaceIndex[i]
 #include "probe_surface.glsl"
-layout(std430, set = 0, binding = 10) readonly buffer TexelHash { uvec4 texelHash[]; };
+layout(std430, set = 0, binding = 10) readonly buffer TexelHash { uint texelHash[]; };
 layout(std430, set = 0, binding = 11) readonly buffer Texels { uvec4 texels[]; };
 #include "texel_record.glsl"
 layout(std430, set = 0, binding = 12) readonly buffer TexelLight { vec4 texelLight[]; };
@@ -243,7 +243,7 @@ float viewFacing = 0.0, viewFacingWeight = 0.0, viewAway = 0.0;
 // coarser levels; 0 (no lightmap, or a surface the atlas leaves out), the hashed cells at every level.
 uint pixelLightmapTexel;
 ivec2 pixelAt;   // the pixel whose lightmap texel pixelLightmapTexel is (uLightmapTexel's)
-#define TEXEL_HASH(i) texelHash[i]
+#define TEXEL_HASH(i) uvec3(texelHash[3u * uint(i)], texelHash[3u * uint(i) + 1u], texelHash[3u * uint(i) + 2u])
 #include "texel.glsl"
 
 // The pixel's own direct sun, 0-1, for its texel level (texelLevelFor): facing away, or shadowed in the cascades, is

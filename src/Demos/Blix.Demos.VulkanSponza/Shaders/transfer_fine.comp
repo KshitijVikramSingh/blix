@@ -17,7 +17,7 @@ layout(set = 0, binding = 0) uniform TransferFine {
                        // (--fine-contact), w 1: those first (--fine-contact-first)
 } u;
 
-layout(std430, set = 0, binding = 1) readonly buffer TexelHash { uvec4 texelHash[]; };
+layout(std430, set = 0, binding = 1) readonly buffer TexelHash { uint texelHash[]; };
 layout(std430, set = 0, binding = 2) readonly buffer Texels { uvec4 texels[]; };
 #include "texel_record.glsl"
 layout(std430, set = 0, binding = 3) readonly buffer FineIds { uint fineIds[]; };
@@ -41,7 +41,7 @@ layout(std430, set = 0, binding = 9) buffer FineDebug { uint fineDebug[]; };
 layout(std430, set = 0, binding = 10) buffer FineFlags { uint fineFlags[]; };
 
 
-#define TEXEL_HASH(i) texelHash[i]
+#define TEXEL_HASH(i) uvec3(texelHash[3u * uint(i)], texelHash[3u * uint(i) + 1u], texelHash[3u * uint(i) + 2u])
 #include "texel.glsl"
 #define TEXEL_SHAPE_NO_STORE
 #include "texel_shape.glsl"
