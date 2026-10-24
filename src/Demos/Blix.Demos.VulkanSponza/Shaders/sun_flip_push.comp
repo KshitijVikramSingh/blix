@@ -2,11 +2,14 @@
 // The moving sun's relight (SponzaLoop.FlipPush.cs): a small sun step's change to the texels' sun part pushed out from
 // where it starts -- the texels whose own sun bit flipped, the surfaces a shadow edge crossed -- instead of gathered
 // again at every texel (tools/gi-model/sun_flip_push.py: ~80% of the change, from 1-3% of the texels). Each flipped
-// texel shoots cosine rays; what they meet takes, by reciprocity, the source's sun term (albedo / pi times its normal,
+// texel shoots cosine rays; what they meet takes, by reciprocity, the source's sun term (albedo times its normal,
 // in the sun-linear record's units: texel_nodes_shade.glsl uSunW), plus where it came lit, minus where it went dark,
 // scaled by the source's area over the receiver's and the rays shot. The hits that stayed lit change with the angle
 // alone, which the record gives with no rays.
-//   mode 0  the flip list: each live texel whose sun bit (the new bits) differs from the old sun's (OldBits)
+//   mode 0  the flip list: each live texel whose sun bit (the new bits) differs from the old sun's (OldBits), an entry a
+//           block of M rays, its blocks its area over a finest cell's (blocks()): a ray's flux the same from any
+//           texel -- M rays a texel whatever its size sent a 64-cell texel's rays with 64x the light, light and dark
+//           blotches over the whole screen (2026-10-25)
 //   mode 1  a chunk of the list's rays: M cosine rays a flipped texel, about its normal, lifted
 //   mode 2  the chunk's hits: the receivers about each (the cook's lookup, nodeSetAt: hashed and atlas texels) take the
 //           source's term into Accum (fixed point)
@@ -22,7 +25,8 @@ layout(set = 0, binding = 0) uniform FlipPush {
     vec4 uOldSun;  // xyz toward the old sun; w the rays' reach
     vec4 uGrid;    // the finest texel grid (origin, spacing)
     vec4 uLookup;  // x the plane's reach, y the sigma (nodeSetAt), z the cook hash's slots, w the seed
-    vec4 uBits;    // x the bit words a texel, y the sun's column
+    vec4 uBits;    // x the bit words a texel, y the sun's column, z the list's room (entries), w the coarse levels' first
+                   // (transferMinLevel): a hashed texel at or past it is a coarse cell, over the fine texels' surface
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer Texels { uvec4 texels[]; };
@@ -76,6 +80,9 @@ bool oldLit(uint id) { return ((oldBits[id >> 5] >> (id & 31u)) & 1u) != 0u; }
 
 float area(uint id) { return max(abs(TEXEL_POSITION(id).w), 1.0); }
 
+// A flipped texel's blocks of M rays: its area in finest cells (4 a cell), at least one, at most 256.
+uint blocks(uint id) { return uint(clamp(round(area(id) / 4.0), 1.0, 256.0)); }
+
 void main() {
     uint t = gl_GlobalInvocationID.x;
     if (t >= uint(u.uPass.x)) return;
@@ -85,8 +92,17 @@ void main() {
     if (mode == 0) {
         uint id = liveIds[t];
         if (abs(TEXEL_POSITION(id).w) < 2.0) return;
+        // The fine texels alone emit: a coarse cell lies over the same surface as its fine texels, and both flipping, the
+        // surface sent its change twice -- the step's net 2.4x the true (2026-10-25). Coarse cells still receive.
+        // --flip-sources (uBits.w's sign): + the fine alone (the default), - the coarse alone (-1 - the level), 0 both.
+        bool coarseCell = id < texels[1].x && TEXEL_NORMAL(id).w >= abs(u.uBits.w) - (u.uBits.w < 0.0 ? 1.0 : 0.0);
+        if (u.uBits.w > 0.0 && coarseCell) return;
+        if (u.uBits.w < 0.0 && !coarseCell) return;
         bool lit = newLit(id);
-        if (lit != oldLit(id)) flips[atomicAdd(flipCount, 1u)] = id | (lit ? 0x80000000u : 0u);
+        if (lit == oldLit(id)) return;
+        uint k = blocks(id);
+        uint at = atomicAdd(flipCount, k);
+        for (uint b = 0u; b < k && at + b < uint(u.uBits.z); ++b) flips[at + b] = id | (lit ? 0x80000000u : 0u);
     } else if (mode == 1) {
         uint r = uint(u.uPass.w) + t;
         uint id = flips[r / m] & 0x7FFFFFFFu;
@@ -103,7 +119,8 @@ void main() {
     } else if (mode == 2) {
         uint r = uint(u.uPass.w) + t;
         uvec4 h0 = hits[3u * t];
-        if ((h0.w & 1u) == 0u) return;
+        // The census (flipPad): [0] rays that met nothing, [1] hits with no receiver about them, [2] hits that took one.
+        if ((h0.w & 1u) == 0u) { atomicAdd(flipPad[0], 1u); return; }
         uint entry = flips[r / m];
         uint src = entry & 0x7FFFFFFFu;
         float sign = (entry & 0x80000000u) != 0u ? 1.0 : -1.0;
@@ -114,36 +131,68 @@ void main() {
         int ids[NODE_CANDIDATES];
         float weights[NODE_CANDIDATES];
         float total = nodeSetAt(0, hp, hn, u.uGrid, uint(u.uLookup.z), u.uLookup.xy, ids, weights);
-        if (total <= 0.0) return;
+        if (total <= 0.0) { atomicAdd(flipPad[1], 1u); return; }
         int srcPatch = texelPatch[src];
         float albedo = srcPatch >= 0 ? dot(patchTerms[3 * srcPatch].rgb, lumW) : 0.5;
-        vec3 term = sign * albedo / PI * normalize(TEXEL_NORMAL(src).xyz) * area(src) / float(m);
+        // The albedo alone: the gather's rays weigh cos / pdf (pi for a cosine ray: texel_nodes_rays.comp), so a hit's term
+        // in the record and the parts is albedo x the sun's cosine -- with a 1 / pi more the push moved the texels a third of
+        // the model's flips (slope 0.33 on Crytek Sponza's 10 deg step, 2026-10-25).
+        vec3 term = sign * albedo * normalize(TEXEL_NORMAL(src).xyz) * area(src) / float(m * blocks(src));
+        // The one fine texel at the hit (the best weighed of the fine candidates: the fine texels tile the surface once),
+        // over its own area: each takes the landings on its own patch. Spread over the lookup's candidates by weight (a cell
+        // or two about the hit) the change beside a moving shadow strip was smeared over its neighbourhood -- right in
+        // total, and at 75 M rays a 10 deg step no nearer a full gather than the old light (2026-10-25). The coarse cells
+        // take the record's angle alone.
+        int best = -1;
+        float bestW = 0.0;
         for (int c = 0; c < NODE_CANDIDATES; ++c) {
-            if (ids[c] < 0 || weights[c] <= 0.0) continue;
-            uint rid = uint(ids[c]);
-            // Over the lookup's footprint, not the receiver's area: nodeSetAt finds a texel by its finest cell (a coarse
-            // texel's centre), so each takes the landings of about one finest cell (4 a cell, the area's units) -- over its
-            // own area a 16-cell texel took a sixteenth of its share.
-            vec3 v = term * (weights[c] / total) / 4.0;
-            atomicAdd(accum[rid * 4u], int(round(v.x * FIXED)));
-            atomicAdd(accum[rid * 4u + 1u], int(round(v.y * FIXED)));
-            atomicAdd(accum[rid * 4u + 2u], int(round(v.z * FIXED)));
+            if (ids[c] < 0 || weights[c] <= bestW) continue;
+            uint cid = uint(ids[c]);
+            if (cid < texels[1].x && TEXEL_NORMAL(cid).w >= abs(u.uBits.w)) continue;
+            best = ids[c];
+            bestW = weights[c];
         }
+        if (best < 0) { atomicAdd(flipPad[1], 1u); return; }
+        uint rid = uint(best);
+        vec3 v = term / area(rid);
+        atomicAdd(accum[rid * 4u], int(round(v.x * FIXED)));
+        atomicAdd(accum[rid * 4u + 1u], int(round(v.y * FIXED)));
+        atomicAdd(accum[rid * 4u + 2u], int(round(v.z * FIXED)));
+        atomicAdd(flipPad[2], 1u);
     } else {
         uint id = liveIds[t];
         vec3 d = vec3(accum[id * 4u], accum[id * 4u + 1u], accum[id * 4u + 2u]) / FIXED;
         vec4 rec = texelSunW[id];
         if (rec.w <= 0.0 && dot(d, d) == 0.0) return;
-        float passes = max(rec.w, 1.0);
-        vec3 before = rec.xyz / passes, after = before + d;
-        float litBefore = max(dot(before, u.uOldSun.xyz), 0.0), litAfter = max(dot(after, u.uNewSun.xyz), 0.0);
         vec3 part = unpackRgb9e5(sunPart[id].x);
         float l = dot(part, lumW);
-        float target = max(l + litAfter - litBefore, 0.0);
+        // The debt (Accum's w, kept across steps): what the part's floor at zero took off it. A step's noise darkening a
+        // texel past nothing was lost while its brightenings stayed: the net change 2x the true (2026-10-25).
+        float debt = float(accum[id * 4u + 3u]) / FIXED;
+        if (rec.w <= 0.0) {
+            // No record (a fine texel copied, not gathered): the push's change alone, signed, and no record made of it --
+            // as one (its lit share max(d.s, 0)) the dark flips were clamped away and such texels only brightened: up to
+            // 2.2x after 20 steps, the sun part's energy +22% (2026-10-25).
+            float want = l + dot(d, u.uNewSun.xyz) + debt;
+            float moved = max(want, 0.0);
+            sunPart[id].x = packRgb9e5(l > 1e-9 ? part * (moved / l) : vec3(moved));
+            accum[id * 4u] = 0; accum[id * 4u + 1u] = 0; accum[id * 4u + 2u] = 0;
+            accum[id * 4u + 3u] = int(round(min(want, 0.0) * FIXED));
+            return;
+        }
+        float passes = rec.w;
+        vec3 before = rec.xyz / passes, after = before + d;
+        // Signed, the part alone clamped: each clamped at zero, a dark flip's deposit on a texel whose lit hits were few took
+        // its after below zero and was lost while the lit flips' stayed -- the step's change 2.5x the true net (2026-10-25).
+        float litBefore = dot(before, u.uOldSun.xyz), litAfter = dot(after, u.uNewSun.xyz);
+        // A record over its own part (6% of the gathered: its last round's rays against every round's) moves it by its share.
+        if (litBefore > l && l > 0.0) { float k = l / litBefore; litBefore *= k; litAfter *= k; }
+        float want = l + litAfter - litBefore + debt;
+        float target = max(want, 0.0);
         vec3 moved = l > 1e-9 ? part * (target / l) : vec3(target);
         sunPart[id].x = packRgb9e5(moved);
-        if (rec.w > 0.0) texelSunW[id] = vec4(after * passes, rec.w);
-        else texelSunW[id] = vec4(after, 1.0);
+        texelSunW[id] = vec4(after * passes, rec.w);
         accum[id * 4u] = 0; accum[id * 4u + 1u] = 0; accum[id * 4u + 2u] = 0;
+        accum[id * 4u + 3u] = int(round(min(want, 0.0) * FIXED));
     }
 }

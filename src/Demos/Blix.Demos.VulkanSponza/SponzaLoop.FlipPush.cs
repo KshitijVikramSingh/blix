@@ -20,6 +20,10 @@ namespace Blix.Demos.VulkanSponza;
 internal sealed partial class SponzaLoop
 {
     private bool flipPushOff;
+    // --flip-push-change (a measurement): a --sun-change taken as one push step, not a regather -- the push judged on a
+    // single step against full gathers at its sun (tools/gi-model/sun_flip_push.py's sun pairs).
+    private bool flipPushChange, flipDumpedSingle;
+    private string flipSources = "fine";
     private int flipRaysPer = 32, flipChunkRays = 1 << 18;
     private float flipStepDeg = 0.5f;
     private ShaderInterface flipPushInterface = null!;
@@ -28,21 +32,38 @@ internal sealed partial class SponzaLoop
     private RayBatchPasses flipClosestBatch;
     private GpuBufferHandle flipOldBits, flipList, flipRays, flipHits, flipAccum;
     private int flipStage, flipCount, flipFirst;
-    private long flipFrame, flipBitsFrame = -1;
+    // The list's entries (a block of rays each): 4 M, 128 M rays at 32 a block -- past it a step's tail is dropped.
+    private const int FlipListRoom = 1 << 22;
+    private long flipFrame, flipBitsFrame = -1, flipCensusFrame = -1;
     private Vector3 flipOldSun, flipNewSun;
     private uint flipSeed = 1;
     private readonly System.Diagnostics.Stopwatch flipClock = new();
     private int flipSteps;
 
+    private void DumpFlipParts(string stage)
+    {
+        if (Environment.GetEnvironmentVariable("BLIX_DUMP_PARTS") is not { } prefix) return;
+        DumpParts(stage, sunBits: true);
+        if (!texelSunWBuffer.Equals(default(GpuBufferHandle)))
+            File.WriteAllBytes($"{prefix}.{stage}.0.sunw", device.ReadGpuBuffer(texelSunWBuffer, 0, texelCount * 16));
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] flip push: parts dumped ({stage}); the sun toward {GiToSun}."));
+    }
+
     private void ParseFlipPush(AppArgs args)
     {
-        flipPushOff = args.Flag("no-flip-push");
+        // Opt-in (--flip-push): judged on Crytek Sponza's 10 deg step against a full gather at its sun, the push's totals came
+        // right but not its texels -- whole-light error 0.32-0.42 against the old light's 0.31 at 4.7-75 M rays, its
+        // landings spread over the lookup's candidates or given to the one at the hit (2026-10-25). The moving sun chases
+        // with regathers (the selects) by default.
+        flipPushOff = !args.Flag("flip-push");
+        flipPushChange = args.Flag("flip-push-change");
+        flipSources = args.String("flip-sources", "fine");
         if (args.Int("flip-rays") is { } fr) flipRaysPer = Math.Clamp(fr, 1, 1024);
         if (args.Float("flip-step") is { } fs) flipStepDeg = Math.Max(0.05f, fs);
     }
 
     // The push steers the moving sun: a gather has landed (its records are up) and no regather is in flight.
-    private bool FlipPushSteering => sunMoving && !flipPushOff && SunLinearOn && liveSkyGathered && liveCookWarm
+    private bool FlipPushSteering => (sunMoving || flipPushChange) && !flipPushOff && SunLinearOn && liveSkyGathered && liveCookWarm
         && !texelSunWBuffer.Equals(default(GpuBufferHandle)) && (flipStage > 0 || !LightChangeInFlight);
 
     private void DeclareFlipPush(Func<string[], ShaderInterface> reflect)
@@ -64,7 +85,7 @@ internal sealed partial class SponzaLoop
         if (!flipAccum.Equals(default(GpuBufferHandle))) return;
         var live = texelLiveIds!.Length;
         flipOldBits = Own(device.CreateReadableGpuBuffer((texelCount + 31) / 32 * 4, "sponza.flip.old-bits"));
-        flipList = Own(device.CreateReadableGpuBuffer(16 + live * 4, "sponza.flip.list"));
+        flipList = Own(device.CreateReadableGpuBuffer(16 + FlipListRoom * 4, "sponza.flip.list"));
         flipRays = Own(device.CreateGpuBuffer(flipChunkRays * 32, name: "sponza.flip.rays"));
         flipHits = Own(device.CreateGpuBuffer(flipChunkRays * 48 + 80, name: "sponza.flip.hits"));
         flipAccum = Own(device.CreateGpuBuffer(checked(texelCount * 16), name: "sponza.flip.accum"));
@@ -82,7 +103,8 @@ internal sealed partial class SponzaLoop
                 new("uOldSun", new Vector4Uniform(new Vector4(flipOldSun, rayReach))),
                 new("uGrid", new Vector4Uniform(texelGrid)),
                 new("uLookup", new Vector4Uniform(new Vector4(sunNodePlane, sunNodeSigma, sunNodeHashSlots, flipSeed))),
-                new("uBits", new Vector4Uniform(new Vector4(liveSunWords, liveSunColumn, 0f, 0f))),
+                new("uBits", new Vector4Uniform(new Vector4(liveSunWords, liveSunColumn, FlipListRoom,
+                    flipSources == "both" ? 0f : flipSources == "coarse" ? -1f - transferMinLevel : TransferOn ? transferMinLevel : 99f))),
             },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
@@ -114,10 +136,31 @@ internal sealed partial class SponzaLoop
         {
             case 0:
             {
+                // A single step's result (--flip-push-change): dumped once its apply has run (the frame after it).
+                if (flipPushChange && flipSteps == 1 && !flipDumpedSingle)
+                {
+                    flipDumpedSingle = true;
+                    DumpFlipParts("push-after-1");
+                    // A measurement's run: done once its step is dumped (it sat out its timeout before).
+                    if (Environment.GetEnvironmentVariable("BLIX_DUMP_PARTS") is not null) host.RequestClose();
+                }
                 // The GI's sun's bits must be in (a step starts from them), and the sun far enough on.
                 if (!liveSunDone || liveSunToward != giSunTarget || sunNodeHash.Equals(default(GpuBufferHandle))) return true;
                 var turned = MathF.Acos(Math.Clamp(Vector3.Dot(giSunTarget, frameSun), -1f, 1f)) * 180f / MathF.PI;
                 if (turned < flipStepDeg) return true;
+                // BLIX_DUMP_PARTS: the parts before the first step and after the 1st, 2nd and 20th (the apply is done by
+                // the next step's start), with the records (.sunw) beside each.
+                if (flipSteps is 0 or 1 or 2 or 20) DumpFlipParts(flipSteps == 0 ? "push-before" : $"push-after-{flipSteps}");
+                // The last step's census (its deposits are done by now).
+                if (flipCensusFrame >= 0 && (flipSteps <= 20 || flipSteps % 20 == 0))
+                {
+                    var census = new uint[4];
+                    device.ReadMappedGpuBuffer(flipList, 0, MemoryMarshal.AsBytes(census.AsSpan()));
+                    long missed = census[1], none = census[2], took = census[3];
+                    Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                        $"[VulkanSponza] flip push #{flipSteps} census: rays that met nothing {missed:N0}, hits with no receiver {none:N0} ({100.0 * none / Math.Max(1, none + took):0.0}% of the hits), hits that took one {took:N0}."));
+                    flipCensusFrame = -1;
+                }
                 EnsureFlipBuffers();
                 device.WriteMappedGpuBuffer(flipOldBits, 0, MemoryMarshal.AsBytes(SunColumnBits().AsSpan()));
                 flipOldSun = giSunTarget;
@@ -143,7 +186,7 @@ internal sealed partial class SponzaLoop
             case 2:
             {
                 if (framesRendered < flipFrame + Math.Max(1, device.MaxFramesInFlightCount) + 1) return true;
-                flipCount = (int)ReadMappedWord(flipList);
+                flipCount = (int)Math.Min(ReadMappedWord(flipList), (uint)FlipListRoom);
                 flipFirst = 0;
                 flipStage = flipCount > 0 ? 3 : 4;
                 return true;
@@ -163,6 +206,7 @@ internal sealed partial class SponzaLoop
             default:
             {
                 graph.Dispatch(flipApplyPass, FlipCommand(3, texelLiveIds!.Length, 0));
+                flipCensusFrame = framesRendered;
                 splitComposeDirty = true;
                 MarkIncidentDirty();
                 flipSeed++;
@@ -170,7 +214,7 @@ internal sealed partial class SponzaLoop
                 var step = MathF.Acos(Math.Clamp(Vector3.Dot(flipOldSun, flipNewSun), -1f, 1f)) * 180f / MathF.PI;
                 if (flipSteps <= 20 || flipSteps % 20 == 0)
                     Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                        $"[VulkanSponza] flip push #{flipSteps}: a {step:0.00} deg step, {flipCount:N0} texels flipped, {(long)flipCount * flipRaysPer / 1e6:0.00} M rays, in {flipClock.Elapsed.TotalMilliseconds:0} ms."));
+                        $"[VulkanSponza] flip push #{flipSteps}: a {step:0.00} deg step, {flipCount:N0} blocks of {flipRaysPer} rays from the flipped texels, {(long)flipCount * flipRaysPer / 1e6:0.00} M rays, in {flipClock.Elapsed.TotalMilliseconds:0} ms."));
                 flipStage = 0;
                 return true;
             }

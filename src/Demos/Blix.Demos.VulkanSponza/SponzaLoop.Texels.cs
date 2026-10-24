@@ -703,6 +703,11 @@ internal sealed partial class SponzaLoop
     {
         StepSunSweep();
         StepSunMove();
+        if (flipPushChange && !sunMoving)
+        {
+            if (giSunTarget == Vector3.Zero) giSunTarget = -Vector3.Normalize(sunDirection);
+            FlipPushStep();
+        }
         // At or after its frame, once: FollowSun runs only once the texels are up, which can be after the frame named.
         if (sunChange is { } change && !sunChangeApplied && postLoadFrames >= change.Frame)
         {
