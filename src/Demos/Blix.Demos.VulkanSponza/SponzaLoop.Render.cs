@@ -544,7 +544,7 @@ internal sealed partial class SponzaLoop
                 AbOffPhase && abMode == "pbr"      ? 1f : 0f,
                 AbOffPhase && abMode == "ibl"      ? 1f : 0f,
                 AbOffPhase && abMode == "normal"   ? 1f : 0f))),
-            new("uTexelShape",       new Vector4Uniform(new Vector4(litShapesBound && IncidentFieldNow ? 1f : 0f, ambient.Enabled ? 1f : 0f, texelShapeNearest ? 1f : 0f, 0f))),
+            new("uTexelShape",       new Vector4Uniform(new Vector4(litShapesBound && IncidentFieldNow ? 1f : 0f, ambient.Enabled ? 1f : 0f, texelShapeNearest ? 1f : 0f, LitStop))),
         };
         // The remaining //@tune uniforms (shadow slope scale, uVisualizeCascades) are appended by
         // name from the overlay panel — reflection lands each at its offset. The intensity and
@@ -952,6 +952,7 @@ internal sealed partial class SponzaLoop
             // filled above — ~800 per-object draws collapse to ~one per material.
             // All draws in a group share set0 + set2 (material) + set 3 (the scene's placements),
             // the multidraw constraint.
+            var leanNow = LitLeanNow;
             foreach (var g in opaqueGroups)
             {
                 var pipeline = g.Pipeline;
@@ -962,8 +963,9 @@ internal sealed partial class SponzaLoop
                 }
                 else if (!g.IsMask && litEarlyZ)
                 {
-                    if (pipeline == opaqueSolidPipeline) pipeline = opaqueSolidPipelineEarly;
-                    else if (pipeline == opaqueDoubleSidedPipeline) pipeline = opaqueDoubleSidedPipelineEarly;
+                    var lean = leanNow && !richMaterials.Contains(g.Material);
+                    if (pipeline == opaqueSolidPipeline) pipeline = lean ? opaqueSolidPipelineLean : opaqueSolidPipelineEarly;
+                    else if (pipeline == opaqueDoubleSidedPipeline) pipeline = lean ? opaqueDoubleSidedPipelineLean : opaqueDoubleSidedPipelineEarly;
                 }
                 if (litFlat) pipeline = g.Pipeline == opaqueDoubleSidedPipeline ? flatPipeline : flatSolidPipeline;
                 DrawSceneGroup(scope, occlusionNow ? SceneListCameraFinal : SceneListCamera, g, pipeline, perFrame, passBindings, g.Material);
@@ -1770,6 +1772,17 @@ internal sealed partial class SponzaLoop
     }
 
     // Record one parity pass. The unrecorded target keeps the previous frame and becomes history.
+    // The lean build this frame (lit_lean.frag): none of its compiled-out branches can be taken -- no debug view, no fog,
+    // and the sun's shadow from the traced mask (or no shadow), not the cascades' fallback. --no-lit-lean: never.
+    private bool litLean = true;
+    private bool LitLeanNow => litLean && vizChannel <= 0f && !fog.Enabled
+        && tunePanel.Value("uVisualizeAmbient") <= 0.5f && tunePanel.Value("uVisualizeCascades") <= 0.5f
+        && (!rtShadowBound.Equals(default(GpuBufferHandle)) || !shadows.Enabled || abMode == "shadow" && AbOffPhase);
+
+    // BLIX_LIT_STOP=1..4: lit_body.glsl out after the albedo and normal map / the direct sun / the cloth / the ambient -- a
+    // cost probe (frame.uTexelShape.w), its picture garbage.
+    private static readonly float LitStop = float.TryParse(Environment.GetEnvironmentVariable("BLIX_LIT_STOP"), out var stop) ? stop : 0f;
+
     private void RecordTaaResolve()
     {
         if (render.Taa <= 0f) { taaHistoryValid = false; return; }

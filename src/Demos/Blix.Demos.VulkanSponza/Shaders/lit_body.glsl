@@ -35,6 +35,15 @@
 #ifdef LIT_OPAQUE
 layout(early_fragment_tests) in;
 #endif
+// LIT_RARE(c): a branch most pixels never take -- sheen, diffuse transmission, the cascades' fallback, the debug views,
+// fog. The lean build (lit_lean.frag) compiles them out: a pixel pays for the registers of code it does not run, and
+// the opaque pass went 3.6 -> 3.1 ms at 2880 x 1620 without them (2026-10-24). SponzaLoop.Render.cs picks it only
+// where none can be taken: a material with neither sheen nor diffuse transmission, a frame with none of the rest.
+#ifdef LIT_LEAN
+#define LIT_RARE(c) false
+#else
+#define LIT_RARE(c) (c)
+#endif
 
 #include "shadow.glsl"
 #include "sheen.glsl"
@@ -519,6 +528,9 @@ void main() {
     // multiplies it by alpha = F, giving the Fresnel split. Transmission opens
     // the head-on view to the scene behind instead of reading near-black.
     // (No refraction/absorption tint yet — that's the KHR transmission pass.)
+    // Not in the opaque build (LIT_OPAQUE): a transmissive material is a blend one (PickPipeline), drawn by lit.frag's.
+    // Its clipmap lookup was registers every opaque pixel paid for (2026-10-24).
+#ifndef LIT_OPAQUE
     float transmission = mat.uMaterialParams2.x;
     if (transmission > 0.0) {
         float lod = roughness * (frame.uEnvMipCount - 1.0);
@@ -557,6 +569,7 @@ void main() {
         outColor = vec4(envRefl, glassAlpha);
         return;
     }
+#endif
 
     // --- Direct sun: Cook-Torrance (diffuse + analytic specular) --------
     vec3 L = -normalize(frame.uSunDirection);
@@ -590,7 +603,7 @@ void main() {
         // teacup's smear, 2026-10-22).
         sheetGlow = frame.uIncidentGradient.z > 0.5 && !(abs(frame.uIncidentGradient.w - 2.0) < 0.5 && mat.uMaterialParams2.z > 0.0)
             ? vec3(0.0) : rtSheetGlow(gl_FragCoord.xy) * frame.uShadowStrength;
-    } else if (frame.uShadowStrength > 0.0 && shadowNeed > 0.0) {
+    } else if (LIT_RARE(frame.uShadowStrength > 0.0 && shadowNeed > 0.0)) {
         sunShadow = blix_sun_shadow_cascaded(
             uCascadeShadowMaps[0], uCascadeShadowMaps[1], uCascadeShadowMaps[2], uLinearClamp,
             frame.uCascadeViewProj[0], frame.uCascadeViewProj[1], frame.uCascadeViewProj[2],
@@ -647,7 +660,7 @@ void main() {
     // scene pays a sampler fetch for a value it discards, which is the per-pixel tax `shadowNeed`
     // above already declines to pay for shadow filtering.
     vec3 dtColor = vec3(0.0);
-    if (diffTrans > 0.0) {
+    if (LIT_RARE(diffTrans > 0.0)) {
         vec3 dtTex = texture(uDiffuseTransmissionColorTex, uv).rgb;
         // --cloth-transmission: the texture is the cloth's albedo, and the light through is its hue at the factor's
         // strength (over its brightest channel), as the cooked bounce has it (SponzaLoop.SunNodesSolve.cs). The albedo
@@ -663,7 +676,7 @@ void main() {
         dtColor = mat.uDiffuseTransmissionColor.rgb * dtTex;
     }
     // A probe older than v4 has no Charlie cube, so sheen is off rather than approximated.
-    bool  hasSheen       = dot(sheenColor, vec3(1.0)) > 0.0 && frame.uSheenMipCount > 0.0;
+    bool  hasSheen       = LIT_RARE(dot(sheenColor, vec3(1.0)) > 0.0 && frame.uSheenMipCount > 0.0);
 
     // How much light the sheen layer takes, so the base layer beneath can be darkened by it.
     // Without this, sheen is added energy and cloth ends up brighter than the light falling on it.
@@ -681,7 +694,7 @@ void main() {
     // The sun through the cloth. Its own shadow term is deliberately the SAME sunShadow: a curtain
     // in shade transmits nothing, and a curtain in sun glows whichever side you are on.
     vec3 sunTransmission = vec3(0.0);
-    if (diffTrans > 0.0) {
+    if (LIT_RARE(diffTrans > 0.0)) {
         sunTransmission = blix_diffuseTransmission(
             N, L, frame.uSunIrradiance * sunShadow * terminatorBack, dtColor, diffTrans);
         // A curtain whose sun side is behind another sunlit curtain: that one's glow on its far side passes through it
@@ -827,13 +840,13 @@ void main() {
     // direct sun on it at all, and that is most of what makes cloth read as thin.
     vec3 transmittedIBL = vec3(0.0);
     vec3 backGi;
-    if (diffTrans > 0.0 && frame.uIncidentGradient.w > 0.5 && incidentUsed && lightmapBackIrradiance(vLightmapTexel, N, backGi)) {
+    if (LIT_RARE(diffTrans > 0.0) && frame.uIncidentGradient.w > 0.5 && incidentUsed && lightmapBackIrradiance(vLightmapTexel, N, backGi)) {
         // The GI's far side: the pixel's atlas texels' back records -- their own gathers, the room behind a curtain, the
         // light inside a closed thin shell's walls -- not the sky cube along -N.
         // Traced as the front's records are: no occlusion stand-in on it (the bounce's rule above), and never the front's
         // screen-space visibility, which says nothing of the far side.
         transmittedIBL = blix_diffuseTransmissionAmbient(backGi, dtColor, diffTrans) / PI * (frame.uIncident.y > 1.5 ? ao * visibility : 1.0);
-    } else if (diffTrans > 0.0) {
+    } else if (LIT_RARE(diffTrans > 0.0)) {
         // The back side's sky visibility. The incident field answers only at the front's geometric
         // normal, so its visibility stands in for -N's (the clipmap resolves enclosure at room scale,
         // where the two sides of a sheet share it); without the field the sky is open.
@@ -861,7 +874,7 @@ void main() {
 
     // Debug: tint by which cascade shadowed this fragment (red/green/blue,
     // near→far). Helps confirm split placement + texel-snap stability.
-    if (frame.uVizChannel > 0.5) {
+    if (LIT_RARE(frame.uVizChannel > 0.5)) {
         vec3 c =
             frame.uVizChannel < 1.5 ? vizGeometricN * 0.5 + 0.5 :
             frame.uVizChannel < 2.5 ? N * 0.5 + 0.5 :
@@ -918,11 +931,11 @@ void main() {
         return;
     }
 
-    if (frame.uVisualizeAmbient > 0.5) {
+    if (LIT_RARE(frame.uVisualizeAmbient > 0.5)) {
         color = vec3(visibility);
     }
 
-    if (frame.uVisualizeCascades > 0.5) {
+    if (LIT_RARE(frame.uVisualizeCascades > 0.5)) {
         color = mix(color, blix_cascade_tint(shadowCascade) * (0.5 + 0.5 * NdotL * sunShadow), 0.4);
     }
 
@@ -930,7 +943,7 @@ void main() {
     // Sample the pre-integrated scattering grid at this fragment's screen UV
     // and radial distance, then apply: lit*transmittance + in-scatter. The
     // grid is filled by the froxel compute pass earlier this frame.
-    if (frame.uFog.w > 0.5) {
+    if (LIT_RARE(frame.uFog.w > 0.5)) {
         vec2 fuv = gl_FragCoord.xy / frame.uFog.xy;
         float dist = length(vWorldPos - frame.uCameraPos);
         // The grid's slices are not uniform in distance, so neither is this lookup — the curve is

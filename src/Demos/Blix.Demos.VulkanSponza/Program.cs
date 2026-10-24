@@ -338,6 +338,11 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // lit_opaque.frag: opaque materials' build, without the cutout, keeping the early depth test (lit_body.glsl).
     private ShaderProgramHandle litOpaqueProgram;
     private PipelineHandle opaqueSolidPipelineEarly, opaqueDoubleSidedPipelineEarly;
+    // lit_lean.frag: the opaque build without the branches its materials never take (LIT_RARE), for the materials with
+    // neither sheen nor diffuse transmission (not in richMaterials) on a frame where the rest cannot be taken (LitLeanNow).
+    private ShaderProgramHandle litLeanProgram;
+    private PipelineHandle opaqueSolidPipelineLean, opaqueDoubleSidedPipelineLean;
+    private readonly HashSet<MaterialHandle> richMaterials = new();
     private PipelineHandle opaqueSolidPipeline;
     private PipelineHandle opaqueDoubleSidedPipeline;
     // Depth-WRITING twins of the opaque lit pipelines, for --ab prepass. The normal pair tests

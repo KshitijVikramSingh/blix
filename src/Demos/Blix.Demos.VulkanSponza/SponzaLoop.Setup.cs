@@ -153,6 +153,7 @@ internal sealed partial class SponzaLoop
         // --no-lit-early-z: opaque groups shade with the cutout build too (late depth test), as before 2026-10-24.
         litEarlyZ = !args.Flag("no-lit-early-z");
         texelShapeNearest = !args.Flag("texel-shape-bilinear");
+        litLean = !args.Flag("no-lit-lean");
         cascadesAlways = args.Flag("cascades-always");
         shadowKeep = !args.Flag("no-shadow-keep");
         // --ray-check: also trace a fixed batch of rays on the GPU every frame and hold them against the CPU at the shot.
@@ -1066,6 +1067,14 @@ internal sealed partial class SponzaLoop
         opaqueDoubleSidedPipelineEarly = Pipeline(litOpaqueProgram, VertexPosition3NormalTangentTexture.Layout,
             DepthState.LessEqualNoWrite, RasterizerState.NoCulling,
             new[] { BlendState.Disabled }, litPassHandle, "lit.opaque.doubleSided.early");
+        litLeanProgram = Own(device.CreateShaderProgramFromSpv(litVertSpv,
+            File.ReadAllBytes(Path.Combine(shaderDir, "lit_lean.frag.spv")), litInterface, "lit.lean"));
+        opaqueSolidPipelineLean = Pipeline(litLeanProgram, VertexPosition3NormalTangentTexture.Layout,
+            DepthState.LessEqualNoWrite, RasterizerState.BackFaceCulling,
+            new[] { BlendState.Disabled }, litPassHandle, "lit.lean");
+        opaqueDoubleSidedPipelineLean = Pipeline(litLeanProgram, VertexPosition3NormalTangentTexture.Layout,
+            DepthState.LessEqualNoWrite, RasterizerState.NoCulling,
+            new[] { BlendState.Disabled }, litPassHandle, "lit.lean.doubleSided");
 
         // Blend: depth-test (so windows don't draw behind walls) but no
         // depth-write (so successive translucent fragments don't z-fight),

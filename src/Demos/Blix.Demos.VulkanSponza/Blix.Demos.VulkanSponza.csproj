@@ -52,6 +52,7 @@
     <GlslShader Include="Shaders\lit.vert" />
     <GlslShader Include="Shaders\lit.frag" />
     <GlslShader Include="Shaders\lit_opaque.frag" />
+    <GlslShader Include="Shaders\lit_lean.frag" />
     <GlslShader Include="Shaders\shadow.vert" />
     <GlslShader Include="Shaders\shadow.frag" />
     <GlslShader Include="Shaders\shadow_mask.vert" />

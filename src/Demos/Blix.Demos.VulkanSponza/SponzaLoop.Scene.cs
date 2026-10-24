@@ -681,7 +681,7 @@ internal sealed partial class SponzaLoop
         if (ClothTransmission(gm) is { } cloth)
             (diffuseTransmission, diffuseTransmissionColor, diffuseTransmissionTexture) = (cloth.Factor, cloth.Colour, tex.Albedo);
 
-        return Own(device.CreateMaterial(litProgram, name: "sponza.material")
+        var built = Own(device.CreateMaterial(litProgram, name: "sponza.material")
             .SetUniform(binding: 0, "uBaseColorFactor", baseColorFactor)
             .SetUniform(binding: 0, "uEmissiveFactor",
                 new Vector4(emissiveFactor.X, emissiveFactor.Y, emissiveFactor.Z, emissiveStrength))
@@ -709,6 +709,9 @@ internal sealed partial class SponzaLoop
             .SetTexture(binding: 6, diffuseTransmissionTexture)
             .SetTexture(binding: 7, tex.DiffuseTransmission)
             .Handle);
+        // Sheen or diffuse transmission: the full opaque build (lit_lean.frag compiles both out).
+        if (sheen != Vector3.Zero || diffuseTransmission > 0f) richMaterials.Add(built);
+        return built;
     }
 
     // --cloth-transmission F: the curtains' KHR_materials_diffuse_transmission, which Sponza does not author -- factor F,
