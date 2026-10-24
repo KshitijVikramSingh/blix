@@ -243,7 +243,7 @@ internal sealed partial class SponzaLoop
                 new("uLightlet", new Vector4Uniform(LightletUniform(towardSun))),
                 new("uLightmap", new Vector4Uniform(LightmapUniform)),
                 new("uCompact", new Vector4Uniform(new Vector4(pack ? 1f : 0f, counter, rtShadowOrigins.Length > 0 ? 1f : 0f, historyGood ? 1f + phase : 0f))),
-                new("uClear", new Vector4Uniform(new Vector4(GatherClearOn && texelsUploaded ? 1f : 0f, 0f, 0f, 0f))),
+                new("uClear", new Vector4Uniform(new Vector4(GatherClearOn && texelsUploaded ? 1f : 0f, RaysStop, 0f, 0f))),
             },
             new[]
             {
@@ -464,6 +464,10 @@ internal sealed partial class SponzaLoop
         }
         return (materials, rowMaterial);
     }
+
+    // BLIX_RAYS_STOP=1 / 2 / 3: rt_shadow_rays.comp out after the depth and normal / the record / its room -- a probe of
+    // where the pass's time goes, its mask garbage (2026-10-24).
+    private static readonly float RaysStop = float.TryParse(Environment.GetEnvironmentVariable("BLIX_RAYS_STOP"), out var stop) ? stop : 0f;
 
     private void WriteRtShadows(string basePath)
     {

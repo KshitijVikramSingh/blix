@@ -166,6 +166,8 @@ void main() {
         if (u.uSky.z > 0.5) baked[index] = 2u;
         return;
     }
+    // BLIX_RAYS_STOP (uClear.y, a probe of this pass's cost): 1 out after the depth and normal, 2 after the record, 3 after its room.
+    if (u.uClear.y > 0.5 && u.uClear.y < 1.5) { maskWords[index] = floatBitsToUint(raw + nSample.x); return; }
     vec2 ndc = (vec2(q) + 0.5) / vec2(fullSize) * 2.0 - 1.0;
     vec4 world = u.uInvViewProj * vec4(ndc, raw, 1.0);
     vec3 position = world.xyz / world.w;
@@ -182,6 +184,7 @@ void main() {
     // back blocked anyway: 54% of the rays at Crytek Sponza's courtyard (2026-10-24). Sheets that transmit (|w| 5) and
     // pixels with no record (foliage) keep theirs.
     uint rec = pixelRecord(q);   // the pixel's atlas record, once (the lift's room and the test below)
+    if (u.uClear.y > 1.5 && u.uClear.y < 2.5) { maskWords[index] = rec == 0xFFFFFFFFu ? 0u : floatBitsToUint(TEXEL_POSITION(rec).w + position.x); return; }
     if (away && packing) {
         if (rec != 0xFFFFFFFFu && abs(TEXEL_POSITION(rec).w) < 4.5 && abs(TEXEL_POSITION(rec).w) >= 2.0) {
             maskWords[index] = 1u;
@@ -191,6 +194,7 @@ void main() {
         }
     }
     float room = pixelRoom(rec, n, away);
+    if (u.uClear.y > 2.5) { maskWords[index] = floatBitsToUint(room + position.x); return; }
     float sunLift = room > 0.0 ? min(lift, max(0.5 * room, 0.001 * length(position - u.uCamera.xyz) + 2.5e-4)) : lift;
     vec3 origin = position + n * (away ? -sunLift : sunLift);
     uint answer = bakedSun(q, n);
