@@ -192,9 +192,13 @@ internal sealed partial class SponzaLoop
                 .Select(s => Own(device.CreateGpuBuffer(width * height * 16, name: $"sponza.rt-shadow.directions{s}"))).ToArray();
             rtShadowSky = Enumerable.Range(0, RtSkyRays ? slots : 0)
                 .Select(s => Own(device.CreateGpuBuffer(width * height * 32, name: $"sponza.rt-shadow.sky{s}"))).ToArray();
-            rtShadowPacked = Enumerable.Range(0, RtPack ? slots : 0)
+            // The packed rays and their pixels live from this frame's rays pass to its trace (joined inside the frame), and
+            // the frames are chained on the GPU (VulkanGraphicsDevice.ChainFrames): one copy, not one a frame in flight --
+            // 36 B a pixel twice over, ~340 MB at 2880x1620 (2026-10-24). --no-frame-chain: one a slot again.
+            var rayCopies = device is Blix.Graphics.Vulkan.VulkanGraphicsDevice { ChainFrames: false } ? slots : 1;
+            rtShadowPacked = Enumerable.Range(0, RtPack ? rayCopies : 0)
                 .Select(s => Own(device.CreateGpuBuffer(width * height * 32, name: $"sponza.rt-shadow.packed{s}"))).ToArray();
-            rtShadowPixelOf = Enumerable.Range(0, RtPack ? slots : 0)
+            rtShadowPixelOf = Enumerable.Range(0, RtPack ? rayCopies : 0)
                 .Select(s => Own(device.CreateGpuBuffer(width * height * 4, name: $"sponza.rt-shadow.pixel-of{s}"))).ToArray();
             rtShadowCounters = Enumerable.Range(0, RtPack ? slots : 0)
                 .Select(s => Own(device.CreateGpuBuffer(16, new byte[16], $"sponza.rt-shadow.counters{s}"))).ToArray();
@@ -256,8 +260,8 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("Texels", texelsUploaded ? texelBuffer : RtShadowPlaceholder),
                 new ShaderBufferBinding("LightletIndex", lightlets is null ? LightletPlaceholder : lightletIndexBuffer),
                 new ShaderBufferBinding("LightletPool", lightlets is null ? LightletPlaceholder : lightletPoolBuffer),
-                new ShaderBufferBinding("RtShadowPacked", pack ? rtShadowPacked[slot] : RtShadowPlaceholder),
-                new ShaderBufferBinding("RtShadowPixelOf", pack ? rtShadowPixelOf[slot] : RtShadowPlaceholder),
+                new ShaderBufferBinding("RtShadowPacked", pack ? rtShadowPacked[slot % rtShadowPacked.Length] : RtShadowPlaceholder),
+                new ShaderBufferBinding("RtShadowPixelOf", pack ? rtShadowPixelOf[slot % rtShadowPixelOf.Length] : RtShadowPlaceholder),
                 new ShaderBufferBinding("RtShadowCounters", pack ? rtShadowCounters[slot] : RtShadowPlaceholder),
                 new ShaderBufferBinding("RtShadowMaskWords", mask),
                 new ShaderBufferBinding("TexelClear", GatherClearOn && texelsUploaded ? texelClearBuffer : RtShadowPlaceholder),
@@ -273,8 +277,8 @@ internal sealed partial class SponzaLoop
         uint? throughAt = rtSheetRows > 0 ? (uint)count : null;
         if (pack)
         {
-            var packed = rtShadowPacked[slot];
-            var pixelOf = rtShadowPixelOf[slot];
+            var packed = rtShadowPacked[slot % rtShadowPacked.Length];
+            var pixelOf = rtShadowPixelOf[slot % rtShadowPixelOf.Length];
             var counters = rtShadowCounters[slot];
             graph.External(rtShadowTracePassHandle, sync => tracer.EncodeGroup(sync, () =>
             {
