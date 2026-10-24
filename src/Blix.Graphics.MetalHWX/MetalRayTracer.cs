@@ -545,13 +545,17 @@ public sealed class MetalRayTracer : IDisposable
     /// rest of the frame on. Returns without waiting; never throws for a bad argument (counted in <see cref="TraceStats"/>).
     /// </summary>
     /// <param name="limit">Optional: the live count, as <see cref="EncodeShadow"/>'s.</param>
+    /// <param name="sun">Optional: each hit's own sun ray too, as <see cref="Trace"/>'s (direction, lift), with
+    /// <paramref name="reach"/> and <paramref name="discTan"/>.</param>
     public unsafe void EncodeTrace(ExternalWorkSync sync, GpuBufferHandle rays, long raysOffset, GpuBufferHandle hits, long hitsOffset,
-        int count, uint seedBase, GpuBufferHandle? limit = null, long limitOffset = 0)
+        int count, uint seedBase, GpuBufferHandle? limit = null, long limitOffset = 0, Vector4? sun = null, float reach = 0f, float discTan = 0f)
     {
         ObjectDisposedException.ThrowIf(ctx == 0, this);
+        var s = sun ?? Vector4.Zero;
         HwxNative.hwx_encode_trace(ctx, sync.MetalSharedEvent, sync.WaitValue, sync.SignalValue,
             device.ExportMetalBuffer(rays), (ulong)raysOffset, device.ExportMetalBuffer(hits), (ulong)hitsOffset,
-            (uint)Math.Max(count, 0), seedBase, limit is { } l ? device.ExportMetalBuffer(l) : 0, (ulong)limitOffset);
+            (uint)Math.Max(count, 0), seedBase, limit is { } l ? device.ExportMetalBuffer(l) : 0, (ulong)limitOffset,
+            sun.HasValue ? (float*)&s : null, reach, discTan);
     }
 
     /// <summary>

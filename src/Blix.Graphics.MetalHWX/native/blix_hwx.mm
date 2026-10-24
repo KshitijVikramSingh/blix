@@ -1309,9 +1309,12 @@ HWX_EXPORT int hwx_encode_shadow(HwxContext* ctx, void* sharedEvent, uint64_t wa
 // `hits` (three uint4 each from hitsOffset), signals `signalValue`. Returns at once. As hwx_encode_shadow, the signal is
 // encoded whatever happens, since a frame waits for it; a skipped or failed dispatch is counted (hwx_trace_stats).
 // `limit` (or null): the live count at limitOffset, as hwx_encode_shadow's.
+// `sun` (or null: none), `reach`, `discTan`: each hit's own sun ray too, as hwx_trace's (direction and lift; hit flag 8
+// where nothing meets it) -- the in-frame sun sweep's, which the blocking trace alone had.
 HWX_EXPORT int hwx_encode_trace(HwxContext* ctx, void* sharedEvent, uint64_t waitValue, uint64_t signalValue,
                                 void* rays, uint64_t raysOffset, void* hits, uint64_t hitsOffset,
-                                uint32_t count, uint32_t seedBase, void* limit, uint64_t limitOffset) {
+                                uint32_t count, uint32_t seedBase, void* limit, uint64_t limitOffset,
+                                const float* sun, float reach, float discTan) {
     @autoreleasepool {
         id<MTLSharedEvent> event = (__bridge id<MTLSharedEvent>)sharedEvent;
         id<MTLBuffer> rayBuffer = (__bridge id<MTLBuffer>)rays;
@@ -1336,8 +1339,11 @@ HWX_EXPORT int hwx_encode_trace(HwxContext* ctx, void* sharedEvent, uint64_t wai
             [enc setBuffer:hitBuffer offset:hitsOffset atIndex:1];
             [enc setAccelerationStructure:ctx->tlas atBufferIndex:2];
             [enc setIntersectionFunctionTable:ctx->table atBufferIndex:3];
-            uint32_t params[12] = {count, seedBase, 1u, limitBuffer ? 1u : 0u, 0, 0, 0, 0, 0, 0, 0, 0};
-            [enc setBytes:params length:sizeof(params) atIndex:4];
+            // Params, as hwx_trace's: flags 1 the live count, 2 each hit's sun, 4 through sheets that transmit.
+            struct { uint32_t count, seedBase, closestOnly, flags; float sun[4]; float reach; float discTan; uint32_t pad[2]; } params = {
+                count, seedBase, 1u, (limitBuffer ? 1u : 0u) | (sun ? 2u : 0u) | (sun && ctx->rowTransmit ? 4u : 0u),
+                {sun ? sun[0] : 0.0f, sun ? sun[1] : 0.0f, sun ? sun[2] : 0.0f, sun ? sun[3] : 0.0f}, reach, discTan, {0, 0}};
+            [enc setBytes:&params length:sizeof(params) atIndex:4];
             [enc setBuffer:limitBuffer ? limitBuffer : rayBuffer offset:limitBuffer ? limitOffset : raysOffset atIndex:12];
             [enc setBuffer:(ctx->rowTransmit ? ctx->rowTransmit : ctx->surfaces) offset:0 atIndex:13];
             [enc setBuffer:ctx->primRows offset:0 atIndex:5];
