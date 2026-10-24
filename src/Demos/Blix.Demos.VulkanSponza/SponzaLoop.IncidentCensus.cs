@@ -13,6 +13,8 @@ internal sealed partial class SponzaLoop
     private const int IncidentCensusPeriod = 240;
     private GpuBufferHandle incidentCensus;
     private long incidentCensusFrame = -1;
+    // The counts as last read: the buffer is never cleared (a write would wait on the device), each census the difference.
+    private uint[] incidentCensusLast = new uint[16];
 
     private static readonly string[] IncidentPaths =
         { "sky", "cells alone", "no texel found", "texels not at rest", "no detail up", "a texel without detail", "not whole", "debug view or screen probes" };
@@ -20,7 +22,9 @@ internal sealed partial class SponzaLoop
     private GpuBufferHandle IncidentCensusBuffer()
     {
         if (incidentCensus.Equals(default(GpuBufferHandle)))
-            incidentCensus = Own(device.CreateGpuBuffer(256, new byte[256], "sponza.incident.census"));   // words 32-36: BLIX_INCIDENT_STOP=9's counts
+            // Readable where it lies (ReadIncidentCensus, no copy and no wait): its read every census was a queue wait, and
+            // with the census's forced incident pass a ~25 ms frame every 2 s at rest (2026-10-24). Zero-filled.
+            incidentCensus = Own(device.CreateReadableGpuBuffer(256, "sponza.incident.census"));   // words 32-36: BLIX_INCIDENT_STOP=9's counts
         return incidentCensus;
     }
 
@@ -32,14 +36,17 @@ internal sealed partial class SponzaLoop
         return true;
     }
 
-    // Each frame: a census counted frames ago read, logged and cleared.
+    // Each frame: a census counted frames ago read and logged -- past the frames in flight, so the GPU is done with it.
     private void ReadIncidentCensus()
     {
         if (incidentCensusFrame < 0 || framesRendered < incidentCensusFrame + device.MaxFramesInFlightCount + 1) return;
         incidentCensusFrame = -1;
-        device.WaitIdle();
-        var c = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(incidentCensus, 0, 64).AsSpan()).ToArray();
-        device.WriteGpuBuffer(incidentCensus, 0, new byte[64]);
+        var bytes = new byte[64];
+        device.ReadMappedGpuBuffer(incidentCensus, 0, bytes);
+        var now = MemoryMarshal.Cast<byte, uint>(bytes.AsSpan()).ToArray();
+        var c = new uint[now.Length];
+        for (var i = 0; i < now.Length; i++) c[i] = unchecked(now[i] - incidentCensusLast[i]);
+        incidentCensusLast = now;
         long surface = 0;
         for (var i = 1; i < IncidentPaths.Length; i++) surface += c[i];
         if (surface == 0) return;

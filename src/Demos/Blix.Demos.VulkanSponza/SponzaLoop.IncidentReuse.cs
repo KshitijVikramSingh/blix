@@ -21,7 +21,7 @@ internal sealed partial class SponzaLoop
     private Matrix4x4 incidentLastView, incidentLastProjection;
     private int incidentStillFrames;
     private long incidentSkipped, incidentReused, incidentFull, incidentDirtyFrames;
-    private string IncidentReuseCounts() { var t = $"incident: skipped {incidentSkipped}, reused {incidentReused}, full {incidentFull} frames (dirty {incidentDirtyFrames})"; incidentSkipped = incidentReused = incidentFull = incidentDirtyFrames = 0; return t; }
+    private string IncidentReuseCounts() { var t = $"incident: skipped {incidentSkipped}, reused {incidentReused}, full {incidentFull} frames (dirty {incidentDirtyFrames}); shadow masks kept {rtShadowKept}"; incidentSkipped = incidentReused = incidentFull = incidentDirtyFrames = 0; rtShadowKept = 0; return t; }
 
     private GraphicsPassBuilder IncidentReuseReads(GraphicsPassBuilder b)
     {
@@ -34,9 +34,10 @@ internal sealed partial class SponzaLoop
     private bool IncidentReuseOn => incidentReuse && !(abMode == "increuse" && AbOffPhase) && !TexelToolsOn;
 
     // Whether this frame's incident pass may reuse last frame's: everything it reads at rest, last frame's answer kept.
-    private bool IncidentReuseNow(bool half) =>
+    // A census (IncidentCensusNow) is taken by a frame that runs the pass in full; census: false asks without taking one.
+    private bool IncidentReuseNow(bool half, bool census = true) =>
         IncidentReuseOn && SurfaceTargets && !half && texelResting && !MoverActive
-        && framesRendered - incidentDirtyFrame > 1 && incidentHistoryFrame == framesRendered - 1 && !IncidentCensusNow(half);
+        && framesRendered - incidentDirtyFrame > 1 && incidentHistoryFrame == framesRendered - 1 && !(census && IncidentCensusNow(half));
 
     // The reuse textures and uniform for RecordIncidentClipmap.
     private IEnumerable<ShaderTextureBinding> IncidentReuseTextures() => new[]
@@ -62,13 +63,15 @@ internal sealed partial class SponzaLoop
         var same = cameraView == incidentLastView && cameraProjection == incidentLastProjection;
         incidentLastView = cameraView;
         incidentLastProjection = cameraProjection;
-        if (!same || !IncidentReuseNow(half: false)) { incidentStillFrames = 0; return true; }
-        if (incidentStillFrames >= 4)
+        // Skipped at rest before any census is asked for: a census forced the pass in full every 240 frames (with the
+        // camera still, the last census stands).
+        if (same && incidentStillFrames >= 4 && IncidentReuseNow(half: false, census: false))
         {
             incidentHistoryFrame = framesRendered;   // the history still matches the targets: neither was written
             incidentSkipped++;
             return false;
         }
+        if (!same || !IncidentReuseNow(half: false)) { incidentStillFrames = 0; return true; }
         incidentStillFrames++;
         return true;
     }

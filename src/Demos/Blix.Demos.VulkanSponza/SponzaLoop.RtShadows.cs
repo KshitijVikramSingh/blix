@@ -148,6 +148,26 @@ internal sealed partial class SponzaLoop
     private bool CascadesRead => cascadesAlways || !rtShadows || frameTracer is null || rayGpuData is null
         || abMode == "rtshadow" && AbOffPhase || !texelSunRays || fog.Enabled || screenProbesEnabled;
 
+    // A slot's mask kept at rest (--no-shadow-keep: traced every frame). With no TAA there is no jitter, so a still camera's
+    // pixels are the same pixels: the mask a slot traced under the same camera, sun and size is this frame's answer, so long
+    // as nothing moved and nothing the rays pass reads changed (MarkIncidentDirty's events). Packed rays only, and none of
+    // what varies by frame (interleave, the disc's sequence, sky rays, the per-pixel census, the coverage coin). The
+    // rays pass and trace were ~6 ms of a still ~14 ms frame at Crytek Sponza's courtyard (2026-10-24).
+    private bool shadowKeep = true;
+    private (Matrix4x4 ViewProj, Vector3 Sun, float Reach, int W, int H, bool Uploaded)?[] rtShadowSlotKey = Array.Empty<(Matrix4x4, Vector3, float, int, int, bool)?>();
+    private long rtShadowKept;
+
+    private bool RtShadowKeep(int slot, int width, int height)
+    {
+        if (rtShadowSlotKey.Length != device.MaxFramesInFlightCount) rtShadowSlotKey = new (Matrix4x4, Vector3, float, int, int, bool)?[device.MaxFramesInFlightCount];
+        var keyable = shadowKeep && rtShadowPacked.Length > 0 && !halfShadowsNow && !RtSkyRays && !RtPerPixel && !shadows.Interleave
+            && SunDiscTangent <= 0f && !rtCoverageCoin && !rtAlphaAb && !MoverActive && framesRendered - incidentDirtyFrame > 1;
+        var key = (viewProjJittered, -Vector3.Normalize(sunDirection), rayReach, width, height, texelsUploaded);
+        var keep = keyable && rtShadowSlotKey[slot] == key;
+        rtShadowSlotKey[slot] = keyable ? key : null;
+        return keep;
+    }
+
     private void RecordRtShadows(int width, int height)
     {
         if (!rtShadows || rayGpuData is null) return;
@@ -219,6 +239,19 @@ internal sealed partial class SponzaLoop
         }
 
         var slot = device.CurrentFrameSlot;
+        // At rest: the slot's mask already answers this frame (RtShadowKeep) -- no rays, no trace; the tracer's group still
+        // encodes the frame's deferred batches.
+        if (RtShadowKeep(slot, width, height))
+        {
+            var keepTracer = frameTracer!;
+            graph.External(rtShadowTracePassHandle, sync => keepTracer.EncodeGroup(sync, () => EncodeDeferredBatches(sync, keepTracer)));
+            tracerGroupRecorded = ReferenceEquals(keepTracer, frameTracer);
+            rtShadowKept++;
+            rtShadowBound = rtShadowMasks[slot];
+            litClipmapBuffer = null;
+            litSceneBuffers = null;
+            return;
+        }
         // Per pixel only when something reads them (RtPerPixel); the shader writes none otherwise.
         var origins = rtShadowOrigins.Length > 0 ? rtShadowOrigins[slot] : RtShadowPlaceholder;
         var mask = rtShadowMasks[slot];
