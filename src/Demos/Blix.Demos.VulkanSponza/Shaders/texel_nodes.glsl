@@ -22,11 +22,14 @@ uint nodeFingerprint(uvec2 key) { return key.x * 0x2C1B3C6Du ^ (key.y + 0x9E3779
 // A texel's key in the cook's hash: its position's finest cell and its normal's bin (level 0).
 // A texel's plane within its key: its place along its bin's direction, in steps of `step` (the search's plane reach) --
 // so a key holds one texel a plane (texel_nodes_prep.comp), and two surfaces facing the same way within a cell both
-// keep one. step 0: one a key.
+// keep one. step 0: one a key. A sheet's side (w < 0: a pair, a double-sided point) keeps a plane of its own beside an
+// opaque surface's: the teacup's saucer foot stands on the floor, its contact face's inside lies in the floor's plane,
+// and with the smaller id it took the floor's entries -- the floor's hits under the saucer read the sheet, the crease
+// beside the foot 2-7x its path trace (2026-10-24).
 int nodePlane(uint id, float step) {
     if (step <= 0.0) return 0;
     vec3 d = normalize(clamp(floor(normalize(texels[2u * id + 1u].xyz) * 1.5 + 0.5), vec3(-1.0), vec3(1.0)));
-    return int(floor(dot(d, texels[2u * id].xyz) / step));
+    return 2 * int(floor(dot(d, texels[2u * id].xyz) / step)) + (texels[2u * id].w < 0.0 ? 1 : 0);
 }
 
 bool nodeTexelKey(uint id, vec4 grid, out uvec2 key) {

@@ -1623,7 +1623,7 @@ internal sealed partial class SponzaLoop
     // combined key and the discovery's settings -- the geometry's; their sun bits are this cook's.
     // "rays 512" fixed: a discovery pass is one pass of 32 rays a texel whatever the sweep's count (--live-rays changed it,
     // and a live boot re-ran a 14 s discovery the bundle had, 2026-10-16).
-    private string DiscoveredHeader => string.Create(Inv, $"discovered {(nodePlanes ? "v3" : "v1")}{GatherLiftKey};stride {sunNodeDiscoverStride};room {DiscoverRoom};rays 512;slice {sunNodeSlice};texels {texelCount}");
+    private string DiscoveredHeader => string.Create(Inv, $"discovered {(nodePlanes ? "v4" : "v1")}{GatherLiftKey};stride {sunNodeDiscoverStride};room {DiscoverRoom};rays 512;slice {sunNodeSlice};texels {texelCount}");
 
     private void RecordSunNodeDiscover()
     {
