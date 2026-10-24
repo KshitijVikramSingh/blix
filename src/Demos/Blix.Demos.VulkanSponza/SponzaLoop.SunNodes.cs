@@ -226,6 +226,8 @@ internal sealed partial class SponzaLoop
         interleave = !args.Flag("no-interleave") || args.Flag("interleave");
         nearRounds = Math.Max(0, args.Int("near-rounds") ?? (nearTexelLight ? 2 : 0));
         texelH4 = args.Flag("texel-h4");
+        // --texel-shape-luma: the lit pass takes the incident pass's luminance gradient, not the records' shapes per channel.
+        texelShapeLuma = args.Flag("texel-shape-luma");
         switch (args.String("hit-sun"))
         {
             case null or "disc": break;
@@ -1422,7 +1424,7 @@ internal sealed partial class SponzaLoop
     // passes in texelH4Buffer (64 B a texel of the slice, by its place, as the parts' sums; texel_record_h4.glsl), each pass
     // leaving the shape the sums make in texelOwnShapeBuffer. BLIX_TEXEL_H4_FULL=1: the sums kept for every texel (64 B a
     // texel, dumped as texel_h4.f32x16) for tools/gi-model/h4_record_check.py.
-    private bool texelH4;
+    private bool texelH4, texelShapeLuma;
     private readonly bool texelH4Full = Environment.GetEnvironmentVariable("BLIX_TEXEL_H4_FULL") == "1";
     private float TexelH4Mode => texelH4Full ? 2f : 1f;
     private GpuBufferHandle texelH4Buffer;
@@ -1448,6 +1450,8 @@ internal sealed partial class SponzaLoop
             texelH4Buffer = Own(device.CreateGpuBuffer(sums, new byte[sums], "sponza.texel-h4"));
             texelOwnShapeBuffer = Own(device.CreateGpuBuffer(checked(texelCount * 12), new byte[checked(texelCount * 12)], "sponza.texel-shape.own"));
             texelShapeBuffer = Own(device.CreateGpuBuffer(checked(texelCount * 12), new byte[checked(texelCount * 12)], "sponza.texel-shape"));
+            litClipmapBuffer = null;   // the lit pass binds the shapes from here (LitLightmapBuffers)
+            litSceneBuffers = null;
         }
         var on = texelH4 && !texelH4Buffer.Equals(default(GpuBufferHandle));
         return (on, on && GatherSmoothNow && !lightmapFramesBuffer.Equals(default(GpuBufferHandle)));

@@ -270,6 +270,43 @@ bool lightmapBackIrradiance(vec2 texel, vec3 n, out vec3 e) {
     e /= weight;
     return true;
 }
+// --texel-h4 (frame.uTexelShape.x): the records' pooled shapes (texel_compose.comp; texel_shape.glsl), one uint a record and
+// channel -- the four atlas texels about the pixel's, of a pair the record facing n, bilinear: per channel c, the light
+// at a normal n' near the record's E_c (1 + s_c . (n' - n)). The incident pass's one gradient is luminance: a bump between
+// the red wall's bounce and the white ceiling's took the mix's tilt in both colours (the model: 31-36% of the direction
+// term's colour, tools/gi-model/directional_bases.py).
+layout(std430, set = 1, binding = 25) readonly buffer LitTexelShape { uint litShape[]; };
+#define TEXEL_SHAPE_NO_STORE
+#include "texel_shape.glsl"
+bool lightmapShape(vec2 texel, vec3 n, out vec3 s0, out vec3 s1, out vec3 s2) {
+    s0 = vec3(0.0); s1 = vec3(0.0); s2 = vec3(0.0);
+    uvec2 size = lightmapFrames[0];
+    if (frame.uTexelShape.x < 0.5 || size.x == 0u || dot(texel, texel) < 1e-6) return false;
+    vec2 f = texel - 0.5;
+    ivec2 base = ivec2(floor(f));
+    vec2 t = f - vec2(base);
+    float weight = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        ivec2 o = ivec2(i & 1, i >> 1);
+        ivec2 at = base + o;
+        if (any(lessThan(at, ivec2(0))) || any(greaterThanEqual(at, ivec2(size)))) continue;
+        uint id = LIGHTMAP_CELL_OF(at);
+        if (id == 0xFFFFFFFFu) continue;
+        // A pair: the record facing n (the front's, then the back's).
+        if (litTexels[2u * id].w < 0.0 && dot(litTexels[2u * id + 1u].xyz, n) < 0.0) id += 1u;
+        if (abs(litTexels[2u * id].w) < 2.0) continue;   // buried
+        vec4 q0 = texelShapeUnpack(litShape[3u * id]);
+        if (q0.w < 0.5) continue;
+        float wt = (o.x == 1 ? t.x : 1.0 - t.x) * (o.y == 1 ? t.y : 1.0 - t.y);
+        s0 += wt * q0.xyz;
+        s1 += wt * texelShapeUnpack(litShape[3u * id + 1u]).xyz;
+        s2 += wt * texelShapeUnpack(litShape[3u * id + 2u]).xyz;
+        weight += wt;
+    }
+    if (weight < 1e-4) return false;
+    s0 /= weight; s1 /= weight; s2 /= weight;
+    return true;
+}
 layout(location = 5) flat in uint vLod;        // the LOD level drawn (instances.glsl): LOD 0 keeps its own frame
 
 // Viz 25, the lightmap's parameterization: a checker one texel wide, tinted per 64-texel block of the atlas -- seams
@@ -743,7 +780,11 @@ void main() {
                         * normalScale * (1.0 - frame.uAbFlags.w);
             vec3 nLow = normalize(mat3(T, B, vizGeometricN) * vec3(nxyLow, sqrt(max(0.0, 1.0 - dot(nxyLow, nxyLow)))));
             float range = frame.uIncidentGradient.y;
-            incident *= clamp(1.0 + dot(gradient, nLow - vizGeometricN) / lum, 1.0 - range, 1.0 + range);
+            vec3 dn = nLow - vizGeometricN;
+            vec3 s0, s1, s2;
+            if (lightmapShape(vLightmapTexel, vizGeometricN, s0, s1, s2))
+                incident *= clamp(vec3(1.0) + vec3(dot(s0, dn), dot(s1, dn), dot(s2, dn)), vec3(1.0 - range), vec3(1.0 + range));
+            else incident *= clamp(1.0 + dot(gradient, dn) / lum, 1.0 - range, 1.0 + range);
         }
         vizBounceRaw = incident;
         // A field that holds occlusion (uIncident.y: the texels' rays found it) takes neither GTAO nor the material's

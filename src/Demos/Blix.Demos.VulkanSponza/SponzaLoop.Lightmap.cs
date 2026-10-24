@@ -818,14 +818,21 @@ internal sealed partial class SponzaLoop
             lightmapFramesBuffer = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.lightmap.frames.none"));
         // The texels and their resolved light (lit.frag, lightmapBackIrradiance): placeholders until the GI has them.
         var texelsUp = lightmapEnabled && !texelBuffer.Equals(default(GpuBufferHandle)) && !texelResolvedBuffer.Equals(default(GpuBufferHandle));
+        litShapesBound = LitShapesOn;   // the frame's flag follows what these cached bindings hold, not what is ready now
         return new[]
         {
             new ShaderBufferBinding("LightmapFrames", lightmapFramesBuffer),
             new ShaderBufferBinding("LitTexels", texelsUp ? texelBuffer : lightmapFramesBuffer),
             new ShaderBufferBinding("LitTexelResolved", texelsUp ? texelResolvedBuffer : lightmapFramesBuffer),
             new ShaderBufferBinding("LitGlowPart", texelsUp && !texelGlowPart.Equals(default(GpuBufferHandle)) ? texelGlowPart : lightmapFramesBuffer),
+            new ShaderBufferBinding("LitTexelShape", litShapesBound ? texelShapeBuffer : lightmapFramesBuffer),
         };
     }
+
+    // --texel-h4: the lit pass reads the records' pooled shapes per channel (lit.frag, lightmapShape; frame.uTexelShape).
+    private bool litShapesBound;
+    private bool LitShapesOn => lightmapEnabled && TexelShapeOn && !texelShapeLuma && !texelBuffer.Equals(default(GpuBufferHandle))
+        && !texelResolvedBuffer.Equals(default(GpuBufferHandle)) && !lightmapFramesBuffer.Equals(default(GpuBufferHandle));
 
     // A sheet's far side from the GI's back records in the lit pass (lit.frag; --no-gi-far-side: the sky cube along -N).
     private bool giFarSide = true;
