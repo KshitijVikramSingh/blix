@@ -522,7 +522,10 @@ bool texelsAt(vec3 worldPos, vec3 n, float faceBin, float viewDepth, out vec3 ir
             // records carry their face's normal, the pixel its vertex normal: a smoothed column's facets, 8% of Crytek
             // Sponza's pixels): the ring of twelve around, the first four facing as the pixel does, by 1 / (1 + d^2) --
             // from the cells. One not whole, with seams or a pair's back not whole: the full lookup; none: the four.
-            if (!slow && bestDot > -2.0 && bestDot < 0.9) {
+            // Not where the best faces away from the pixel (dot < 0): the back of a surface, seen from inside a wall the
+            // camera clipped into -- no cell faces its way, the ring found none and the four answered after it anyway.
+            // 60% of the pixels walked the ring there and the pass doubled, ~16 ms (2026-10-24); a groove turns 25-60 deg.
+            if (!slow && bestDot >= 0.0 && bestDot < 0.9) {
                 vec3 sum = vec3(0.0);
                 float sky = 0.0, weight = 0.0;
                 int found = 0;

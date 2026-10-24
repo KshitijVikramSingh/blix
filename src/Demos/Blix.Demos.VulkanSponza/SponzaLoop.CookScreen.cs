@@ -119,9 +119,6 @@ internal sealed partial class SponzaLoop : IUiSource
     {
         ReportCookProgress();
         DrawTexelPicker();
-        // C: the camera's pose into the log, as --cam takes it -- a spot to point at, reproduced exactly.
-        if (ImGui.IsKeyPressed(ImGuiKey.C) && !ImGui.GetIO().WantCaptureKeyboard)
-            Console.WriteLine($"[VulkanSponza] camera pose: --cam {camera.Pose} (post-load frame {postLoadFrames})");
         var loading = !sceneLoaded;
         var streaming = sceneLoaded && !fullyLoaded;
         var cooking = CookScreenNow;

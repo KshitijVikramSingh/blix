@@ -176,7 +176,6 @@ internal sealed partial class SponzaLoop
     {
         if (!texelPicker) return;
         var io = ImGui.GetIO();
-        if (ImGui.IsKeyPressed(ImGuiKey.P) && !io.WantCaptureKeyboard) texelPickFrozen = !texelPickFrozen;
         if (!texelPickFrozen && !io.WantCaptureMouse && io.DisplaySize.X > 0 && io.DisplaySize.Y > 0)
             texelPickFraction = new Vector2(io.MousePos.X / io.DisplaySize.X, io.MousePos.Y / io.DisplaySize.Y);
         // A marker where the pick is (magenta once frozen).

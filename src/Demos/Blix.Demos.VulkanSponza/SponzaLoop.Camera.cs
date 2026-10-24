@@ -153,5 +153,11 @@ internal sealed partial class SponzaLoop
         // The mouse, the cursor capture and the wheel are the camera controller's (Drive, in OnUpdate).
         if (input[Key.Escape].Pressed) host.RequestClose();
         ToggleReference(input);
+        // C: the camera's pose into the log, as --cam takes it -- a spot to point at, reproduced exactly. P: the texel
+        // picker frozen (SponzaLoop.TexelPicker). The demo's own input: ImGui is given no keys, so its IsKeyPressed never
+        // fired and neither key did anything (2026-10-24).
+        if (input[Key.C].Pressed)
+            Console.WriteLine($"[VulkanSponza] camera pose: --cam {camera.Pose} (post-load frame {postLoadFrames})");
+        if (input[Key.P].Pressed && texelPicker) texelPickFrozen = !texelPickFrozen;
     }
 }
