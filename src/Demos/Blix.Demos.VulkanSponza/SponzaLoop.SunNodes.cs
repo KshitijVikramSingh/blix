@@ -1418,13 +1418,18 @@ internal sealed partial class SponzaLoop
     private ShaderInterface leanShadeInterface = null!;
     private PipelineHandle leanShadePipeline;
 
-    // --texel-h4 (the light-agnostic record, stage 1; --lean-shade): every gather pass's H4 per channel, beside the parts,
-    // into texelH4Buffer (64 B a texel: 4 vec4s, texel_nodes_lean.comp) -- dumped (texel_h4.f32x16), read by nothing else yet.
+    // --texel-h4 (the light-agnostic record): every gather pass's H4 per channel, beside the parts, summed over a slice's
+    // passes in texelH4Buffer (64 B a texel of the slice, by its place, as the parts' sums; texel_record_h4.glsl), each pass
+    // leaving the shape the sums make in texelOwnShapeBuffer. BLIX_TEXEL_H4_FULL=1: the sums kept for every texel (64 B a
+    // texel, dumped as texel_h4.f32x16) for tools/gi-model/h4_record_check.py.
     private bool texelH4;
+    private readonly bool texelH4Full = Environment.GetEnvironmentVariable("BLIX_TEXEL_H4_FULL") == "1";
+    private float TexelH4Mode => texelH4Full ? 2f : 1f;
     private GpuBufferHandle texelH4Buffer;
-    // The record's shape as the frame reads it (texel_shape.glsl, 24 B a texel each): the fine copy's (transfer_fine.comp),
-    // each texel's own and the pooled one (texel_compose.comp, the incident pass's TexelShape).
-    private GpuBufferHandle texelCopyShapeBuffer, texelOwnShapeBuffer, texelShapeBuffer, texelShapeNone;
+    // The record's shape (texel_shape.glsl, 24 B a texel each): each texel's own -- its gather's, or its fine copy's
+    // (transfer_fine.comp), its provenance telling which -- and the pooled one the frame reads (texel_compose.comp, the
+    // incident pass's TexelShape). 48 B a texel in all, the sums a slice's (136 B a texel before, 2026-10-24).
+    private GpuBufferHandle texelOwnShapeBuffer, texelShapeBuffer, texelShapeNone;
     private bool TexelShapeOn => texelH4 && !texelShapeBuffer.Equals(default(GpuBufferHandle));
     private GpuBufferHandle ShapeOr(GpuBufferHandle b)
     {
@@ -1438,8 +1443,8 @@ internal sealed partial class SponzaLoop
     {
         if (texelH4 && texelH4Buffer.Equals(default(GpuBufferHandle)))
         {
-            texelH4Buffer = Own(device.CreateGpuBuffer(checked(texelCount * 64), new byte[checked(texelCount * 64)], "sponza.texel-h4"));
-            texelCopyShapeBuffer = Own(device.CreateGpuBuffer(checked(texelCount * 24), new byte[checked(texelCount * 24)], "sponza.texel-shape.copy"));
+            var sums = checked((texelH4Full ? texelCount : sunNodeSlice) * 64);
+            texelH4Buffer = Own(device.CreateGpuBuffer(sums, new byte[sums], "sponza.texel-h4"));
             texelOwnShapeBuffer = Own(device.CreateGpuBuffer(checked(texelCount * 24), new byte[checked(texelCount * 24)], "sponza.texel-shape.own"));
             texelShapeBuffer = Own(device.CreateGpuBuffer(checked(texelCount * 24), new byte[checked(texelCount * 24)], "sponza.texel-shape"));
         }
@@ -1471,7 +1476,7 @@ internal sealed partial class SponzaLoop
                 new("uCone", new Vector4Uniform(new Vector4(coneLookups ? sunNodeRays : 0f, hitCellSize, transportSpacing, sunNodeKinds.Length))),
                 new("uLevels", new Vector4Uniform(new Vector4(coneLookups && patchLevelsOn && PatchLevelsReady ? PatchLevelCount : 0, 0f, 0f, 0f))),
                 new("uExact", new Vector4Uniform(new Vector4(exactSun ? 1f : 0f, Environment.GetEnvironmentVariable("BLIX_LEAN_SEARCH_ALL") == "1" ? 1f : 0f,
-                    h4On ? 1f : 0f, h4On && framesOn ? 1f : 0f))),
+                    h4On ? TexelH4Mode : 0f, h4On && framesOn ? 1f : 0f))),
             },
             new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
             Buffers: new[]
@@ -1507,6 +1512,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("LevelLight", PatchLevelsReady ? levelLightBuffer : sunNodeAccum),
                 new ShaderBufferBinding("LightmapFrames", h4On && framesOn ? lightmapFramesBuffer : sunNodeAccum),
                 new ShaderBufferBinding("TexelH4", h4On ? texelH4Buffer : sunNodeAccum),
+                new ShaderBufferBinding("TexelOwnShape", h4On ? texelOwnShapeBuffer : sunNodeAccum),
             }.Where(b => declared.Contains(b.Name)).ToArray());
     }
 
@@ -1534,7 +1540,7 @@ internal sealed partial class SponzaLoop
                 new("uDetail", new Vector4Uniform(new Vector4(first, detail ? 1f : 0f, CensusOn(discover) ? 1f : 0f, censusPlacements))),
                 new("uFar", new Vector4Uniform(exactMode is > 0f and < 2.5f ? Vector4.Zero : FarUniform(discover))),
                 new("uTransport", new Vector4Uniform(TransportUniform(discover))),
-                new("uFarTransport", new Vector4Uniform(new Vector4(FarTransportUniform, shadeH4.On ? 1f : 0f, shadeH4.Frames ? 1f : 0f, 0f))),
+                new("uFarTransport", new Vector4Uniform(new Vector4(FarTransportUniform, shadeH4.On ? TexelH4Mode : 0f, shadeH4.Frames ? 1f : 0f, 0f))),
                 new("uHitBlend", new Vector4Uniform(new Vector4(HitBlendNow ? 1f : 0f, transportSpacing, NearTexelLightNow ? 1f : 0f, SunColumn()))),
                 new("uCapture", new Vector4Uniform(discover == 0 && exactMode is < 0.5f or > 2.5f ? RayCaptureUniform : Vector4.Zero)),
                 new("uNear", new Vector4Uniform(discover == 0 && few ? new Vector4(NearCutMode, hitCellNear, nearUnknownLocal ? 1f : 0f, sheetGlowSplit ? 1f : NearGlowSplitNow ? 2f : 0f) : new Vector4(0f, 1e30f, 0f, 0f))),
@@ -1580,6 +1586,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("NodeGlow", NearGlowSplitNow ? sunNodeGlow : sunNodeAccum),
                 new ShaderBufferBinding("LightmapFrames", shadeH4.Frames ? lightmapFramesBuffer : sunNodeAccum),
                 new ShaderBufferBinding("TexelH4", shadeH4.On ? texelH4Buffer : sunNodeAccum),
+                new ShaderBufferBinding("TexelOwnShape", shadeH4.On ? texelOwnShapeBuffer : sunNodeAccum),
                 new ShaderBufferBinding("FinePlace", finePlaceBuffer.Equals(default(GpuBufferHandle)) ? sunNodeAccum : finePlaceBuffer),
                 new ShaderBufferBinding("FarPart", farPartBuffer.Equals(default(GpuBufferHandle)) ? sunNodeAccum : farPartBuffer),
             }.Concat(CookedBuffers()).Where(b => declared.Contains(b.Name)).ToArray());

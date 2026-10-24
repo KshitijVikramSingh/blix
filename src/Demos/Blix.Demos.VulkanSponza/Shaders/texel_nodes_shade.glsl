@@ -175,8 +175,13 @@ layout(std430, set = 0, binding = 29) buffer NodeHarmonic { vec2 nodeHarmonic[];
 // both variants, as the command binds by the 256-sun variant's names.
 layout(std430, set = 0, binding = 43) readonly buffer LightmapFrames { uvec2 lightmapFrames[]; };
 layout(std430, set = 0, binding = 44) buffer TexelH4 { vec4 texelH4[]; };
+// Its sums a slice's (uFarTransport.y 1, by the texel's place in the slice) or every texel's (2, BLIX_TEXEL_H4_FULL), and
+// the shape they make into TexelOwnShape (texel_shape.glsl), as the lean shade's.
+layout(std430, set = 0, binding = 45) writeonly buffer TexelOwnShape { uvec2 ownShape[]; };
+shared vec4 sRecord[4];
 #include "h4_kernel.glsl"
 #include "texel_record_h4.glsl"
+#include "texel_shape.glsl"
 
 void nodeCount(uint k) {
     if (atomicAdd(nodeStats[2u * k], 1u) == 0xFFFFFFFFu) atomicAdd(nodeStats[2u * k + 1u], 1u);
@@ -811,19 +816,25 @@ void main() {
 #if MAX_WORDS == 1
         if (u.uFarTransport.y > 0.5 && u.uNear.x < 1.5 && lid < 4u) {
             uint hid = nodeIds[uint(u.uDetail.x) + group];
-            uint at4 = hid * 4u + lid;
+            uint at4 = (u.uFarTransport.y > 1.5 ? hid : group) * 4u + lid;
             vec4 before = u.uShade.w > 0.5 ? texelH4[at4] : vec4(0.0);
+            vec4 after;
             if (lid < 3u) {
                 vec4 sum = vec4(0.0);
                 for (int r = 0; r < RAYS; ++r) sum += sH4[r * 3 + int(lid)];
-                texelH4[at4] = before + sum / float(RAYS);
+                after = before + sum / float(RAYS);
             } else {
                 float plain = 0.0;
                 for (int r = 0; r < RAYS; ++r) plain += dot(sRaySum[r * 2] + (suns > 1 ? sRaySum[r * 2 + 1] : vec3(0.0)), lumW);
                 vec3 ns = recordH4Normal(hid, normalize(texels[2u * hid + 1u].xyz), u.uFarTransport.z > 0.5);
-                texelH4[at4] = vec4(before.x + plain / float(RAYS), uintBitsToFloat(packSnorm2x16(recordH4Oct(ns))), 0.0, before.w + 1.0);
+                after = vec4(before.x + plain / float(RAYS), uintBitsToFloat(packSnorm2x16(recordH4Oct(ns))), 0.0, before.w + 1.0);
             }
+            texelH4[at4] = after;
+            sRecord[lid] = after;
         }
+        barrier();
+        if (u.uFarTransport.y > 0.5 && u.uNear.x < 1.5 && lid == 0u)
+            texelShapeStore(nodeIds[uint(u.uDetail.x) + group], sRecord[0], sRecord[1], sRecord[2], sRecord[3]);
 #endif
         if (lid < uint(suns)) {
             int k = int(lid);

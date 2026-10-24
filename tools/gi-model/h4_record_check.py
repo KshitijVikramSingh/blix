@@ -4,10 +4,11 @@
 # ///
 """The light-agnostic record's stage 1, held against what it stands beside (uv run tools/gi-model/h4_record_check.py DUMP ...).
 
---texel-h4 writes every gather pass's H4 per channel into texel_h4.f32x16 (texel_record_h4.glsl; both shades): per
+--texel-h4 sums every gather pass's H4 per channel (dumped as texel_h4.f32x16) (texel_record_h4.glsl; both shades): per
 texel [0..2] each channel's (a, b.xyz) in world space, E(n) = a + b . n; [3] the same rays' plain mean irradiance
 (luminance), the record's normal (snorm2x16 octahedral, as bits), 0, the passes -- summed over the passes of the slice
-that last gathered it. Checks, on texels a gather wrote:
+that last gathered it. The renderer keeps those sums for a slice alone (each texel's shape is what it keeps): run with
+BLIX_TEXEL_H4_FULL=1 for every texel's, which this reads. Checks, on texels a gather wrote:
   fit      the H4 irradiance at the record's normal (a + b . n) against the same rays' plain mean -- the fit's own error
   parts    the plain mean against today's parts (sky + sun x its irradiance), where a gather wrote both last -- the same
            light from the same passes, any gap a pass set apart (a refine's passes after a reset) or a stage that overwrote

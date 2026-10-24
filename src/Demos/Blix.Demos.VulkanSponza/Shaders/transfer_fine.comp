@@ -12,7 +12,7 @@ layout(set = 0, binding = 0) uniform TransferFine {
     vec4 uTexelGrid;   // the finest level's grid: xyz the origin, w the spacing
     vec4 uTexelParams; // x the hash's capacity
     vec4 uKeep;        // x 1: the sky's part kept (a sun change: the copy writes the sun's alone); y 1 the cloth's flag; z 1 (--texel-h4)
-                       // the copy's shape (TexelCopyShape)
+                       // the copy's shape (into TexelOwnShape)
     vec4 uFlag;        // x the dark bar (the coarse sweep's: a tenth of its median light); y 1: flag every texel (--fine-all); z the contact ratio under which a texel is flagged
                        // (--fine-contact), w 1: those first (--fine-contact-first)
 } u;
@@ -23,10 +23,10 @@ layout(std430, set = 0, binding = 3) readonly buffer FineIds { uint fineIds[]; }
 layout(std430, set = 0, binding = 4) buffer SplitSky { uvec2 skyPart[]; };
 layout(std430, set = 0, binding = 5) buffer SplitSun { uvec2 sunPart[]; };
 layout(std430, set = 0, binding = 11) buffer TexelProvenance { uint provenance[]; };
-// --texel-h4 (uKeep.z): the light-agnostic record's shape for the copy -- its coarse texels' (their records, the gather's:
-// texel_record_h4.glsl), blended with the light's weights; world space, so no frame to turn (texel_shape.glsl).
-layout(std430, set = 0, binding = 12) readonly buffer TexelH4 { vec4 texelH4[]; };
-layout(std430, set = 0, binding = 13) writeonly buffer TexelCopyShape { uvec2 copyShape[]; };
+// --texel-h4 (uKeep.z): the light-agnostic record's shape for the copy -- its coarse texels' own (their gathers' shapes,
+// texel_shape.glsl), blended with the light's weights; world space, so no frame to turn. Into the same buffer, the fine
+// texel's own: its provenance (5, the copy's) tells texel_compose.comp whose it is.
+layout(std430, set = 0, binding = 13) buffer TexelOwnShape { uvec2 ownShape[]; };
 #include "provenance.glsl"
 layout(std430, set = 0, binding = 6) buffer SkyDetail { uint skyDetail[]; };
 layout(std430, set = 0, binding = 7) buffer SunDetail { uint sunDetail[]; };
@@ -44,6 +44,7 @@ layout(std430, set = 0, binding = 10) buffer FineFlags { uint fineFlags[]; };
 #define TEXEL_POSITION(i) texels[2 * (i)]
 #define TEXEL_NORMAL(i) texels[2 * (i) + 1]
 #include "texel.glsl"
+#define TEXEL_SHAPE_NO_STORE
 #include "texel_shape.glsl"
 
 uint packRgb9e5(vec3 c) {
@@ -144,9 +145,10 @@ void main() {
             sunD += w * vec3(dot(gSun, f1), dot(gSun, f2), cSun.z);
             float a = ao(cid);
             if (a >= 0.0) { coarseAo += w * a; aoWeight += w; }
-            vec3 q0, q1, q2;
-            if (u.uKeep.z > 0.5 && w > 0.0 && texelShapeFromRecord(texelH4[cid * 4u], texelH4[cid * 4u + 1u], texelH4[cid * 4u + 2u], texelH4[cid * 4u + 3u], q0, q1, q2)) {
-                shapeSum0 += w * q0; shapeSum1 += w * q1; shapeSum2 += w * q2; shapeW += w;
+            vec4 q0 = u.uKeep.z > 0.5 && w > 0.0 ? texelShapeUnpack(ownShape[cid * 3u]) : vec4(0.0);
+            if (q0.w > 0.5) {
+                shapeSum0 += w * q0.xyz; shapeSum1 += w * texelShapeUnpack(ownShape[cid * 3u + 1u]).xyz;
+                shapeSum2 += w * texelShapeUnpack(ownShape[cid * 3u + 2u]).xyz; shapeW += w;
             }
             total += w;
         }
@@ -203,9 +205,9 @@ void main() {
     // above its sky and lit everything too bright.
     if (u.uKeep.z > 0.5) {
         bool has = shapeW > 0.0;
-        copyShape[id * 3u] = has ? texelShapePack(shapeSum0 / shapeW) : uvec2(0u);
-        copyShape[id * 3u + 1u] = has ? texelShapePack(shapeSum1 / shapeW) : uvec2(0u);
-        copyShape[id * 3u + 2u] = has ? texelShapePack(shapeSum2 / shapeW) : uvec2(0u);
+        ownShape[id * 3u] = has ? texelShapePack(shapeSum0 / shapeW) : uvec2(0u);
+        ownShape[id * 3u + 1u] = has ? texelShapePack(shapeSum1 / shapeW) : uvec2(0u);
+        ownShape[id * 3u + 2u] = has ? texelShapePack(shapeSum2 / shapeW) : uvec2(0u);
     }
     if (u.uKeep.x < 0.5) skyDetail[id] = texelDetailPack(skyD.xy, min(skyD.z, texelDetailUnpack(skyDetail[id]).z));
     sunDetail[id] = texelDetailPack(sunD.xy, min(sunD.z, texelDetailUnpack(sunDetail[id]).z));

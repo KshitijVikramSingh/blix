@@ -258,8 +258,6 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("TexelComposed", splitComposedBuffer),
                     new ShaderBufferBinding("TexelHash", texelHashBuffer),
                     new ShaderBufferBinding("Texels", texelBuffer),
-                    new ShaderBufferBinding("TexelH4", ShapeOr(texelH4Buffer)),
-                    new ShaderBufferBinding("TexelCopyShape", ShapeOr(texelCopyShapeBuffer)),
                     new ShaderBufferBinding("TexelOwnShape", ShapeOr(texelOwnShapeBuffer)),
                     new ShaderBufferBinding("TexelShape", ShapeOr(texelShapeBuffer)),
                     ProvenanceBinding(),

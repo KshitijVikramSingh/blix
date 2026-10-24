@@ -76,12 +76,16 @@ layout(std430, set = 0, binding = 28) readonly buffer LevelParents { int levelPa
 layout(std430, set = 0, binding = 29) readonly buffer LevelNeighbours { int levelNeighbours[]; }; // 8 a node
 layout(std430, set = 0, binding = 30) readonly buffer LevelLight { vec4 levelLight[]; };          // 2 a node: sky, sun rgb
 layout(std430, set = 0, binding = 22) buffer RayCapture { uint captureCount; uint capturePad[3]; uvec4 captured[]; };
-// --texel-h4: the light-agnostic record (texel_record_h4.glsl).
+// --texel-h4: the light-agnostic record (texel_record_h4.glsl): its sums a slice's (uExact.z 1, by the texel's place in
+// the slice, as NodeAccum) or every texel's (2, BLIX_TEXEL_H4_FULL: for tools/gi-model/h4_record_check.py), and the shape
+// they make each pass into TexelOwnShape (texel_shape.glsl) -- the slice's last pass's stands.
 layout(std430, set = 0, binding = 31) readonly buffer LightmapFrames { uvec2 lightmapFrames[]; };
 layout(std430, set = 0, binding = 32) buffer TexelH4 { vec4 texelH4[]; };
+layout(std430, set = 0, binding = 33) writeonly buffer TexelOwnShape { uvec2 ownShape[]; };
 #include "texel_nodes.glsl"
 #include "h4_kernel.glsl"
 #include "texel_record_h4.glsl"
+#include "texel_shape.glsl"
 
 vec3 unpackRgb9e5(uint p) {
     float scale = exp2(float(int(p >> 27) - 15 - 9));
@@ -177,6 +181,7 @@ shared float sFar[RAYS];        // past the near distance or a miss (not on a sh
 shared float sNear[RAYS];       // a hit nearer than the near distance
 shared vec3 sMean[2];
 shared vec4 sH4[RAYS * 3];      // --texel-h4: per ray per channel, its L / pdf x its H4 weights
+shared vec4 sRecord[4];         // --texel-h4: the record after this pass, for its shape
 
 void main() {
     uint group = gl_WorkGroupID.x;
@@ -415,17 +420,21 @@ void main() {
     if (h4 && lid < 4u) {
         vec4 sum = vec4(0.0);
         if (lid < 3u) for (int r = 0; r < RAYS; ++r) sum += sH4[uint(r) * 3u + lid];
-        uint at4 = id * 4u + lid;
+        uint at4 = (u.uExact.z > 1.5 ? id : group) * 4u + lid;
         vec4 before = u.uShade.w > 0.5 ? texelH4[at4] : vec4(0.0);
-        if (lid < 3u) texelH4[at4] = before + sum / float(RAYS);
+        vec4 after;
+        if (lid < 3u) after = before + sum / float(RAYS);
         else {
             float plain = 0.0;
             for (int r = 0; r < RAYS; ++r) plain += dot(sLight[r * 2] + sLight[r * 2 + 1], lumW);
             vec3 ns = recordH4Normal(id, normalize(texels[2u * id + 1u].xyz), u.uExact.w > 0.5);
-            texelH4[at4] = vec4(before.x + plain / float(RAYS), uintBitsToFloat(packSnorm2x16(recordH4Oct(ns))), 0.0, before.w + 1.0);
+            after = vec4(before.x + plain / float(RAYS), uintBitsToFloat(packSnorm2x16(recordH4Oct(ns))), 0.0, before.w + 1.0);
         }
+        texelH4[at4] = after;
+        sRecord[lid] = after;
     }
     barrier();
+    if (h4 && lid == 0u) texelShapeStore(id, sRecord[0], sRecord[1], sRecord[2], sRecord[3]);
     if (lid == 0u) {
         float composed = 0.0;
         for (int k = 0; k < suns; ++k) composed += dot(sMean[k], lumW);

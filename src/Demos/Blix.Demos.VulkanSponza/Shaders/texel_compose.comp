@@ -13,8 +13,9 @@ layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) uniform TexelCompose {
     vec4 uCompose;   // x live texels, y the mode, z 1: the sky visibility cooked (SkyVis), not the parts' detail; w 1 (--texel-h4):
-                     // the light-agnostic record's shape (texel_shape.glsl) -- mode 0 each texel's own into TexelOwnShape and
-                     // TexelShape, mode 1 pooled over the filter's neighbours into TexelShape
+                     // the light-agnostic record's shape (texel_shape.glsl) -- mode 0 each texel's own (TexelOwnShape: its
+                     // gather's or its fine copy's, by its provenance; cleared where neither) into TexelShape, mode 1 pooled
+                     // over the filter's neighbours into TexelShape
     vec4 uSky;       // rgb the sky's scale (1: as solved)
     vec4 uSun;       // rgb the sun's irradiance (its part is stored per unit of it); w 0: no sun part yet
     vec4 uTexelGrid;  // mode 1: xyz the cells' origin, w the spacing
@@ -47,8 +48,6 @@ layout(std430, set = 0, binding = 14) readonly buffer TexelSkyVis { uint texelSk
 // fine copy's (transfer_fine.comp) -- and the frame's, pooled over its neighbours: their shapes by the filter's weight
 // and their light's likeness, exp(-|ln(L_o / L)| / 0.3) (tools/gi-model/direction_pooling.py: 128-ray directions within
 // 20 cm, the error above the truth's floor halved, no smear at creases).
-layout(std430, set = 0, binding = 15) readonly buffer TexelH4 { vec4 texelH4[]; };
-layout(std430, set = 0, binding = 16) readonly buffer TexelCopyShape { uvec2 copyShape[]; };
 layout(std430, set = 0, binding = 17) buffer TexelOwnShape { uvec2 ownShape[]; };
 layout(std430, set = 0, binding = 18) writeonly buffer TexelShape { uvec2 texelShape[]; };
 layout(std430, set = 0, binding = 19) readonly buffer TexelProvenance { uint provenance[]; };
@@ -58,25 +57,19 @@ layout(std430, set = 0, binding = 19) readonly buffer TexelProvenance { uint pro
 #define TEXEL_NORMAL(i) texels[2 * (i) + 1]
 #include "texel.glsl"
 #include "texel_filter_neighbour.glsl"
+#define TEXEL_SHAPE_NO_STORE
 #include "texel_shape.glsl"
 
-// The texel's own shape (three channels) or false: its record's when both its parts were last a gather's (provenance
-// 1-4), else the fine copy's (5) where the copy wrote one.
+// The texel's own shape (three channels) or false: what its gather wrote when both its parts were last a gather's
+// (provenance 1-4), what its fine copy wrote (5) -- one buffer, the last writer the one its provenance names.
 bool ownShapeOf(uint id, out uvec2 w0, out uvec2 w1, out uvec2 w2) {
     w0 = uvec2(0u); w1 = uvec2(0u); w2 = uvec2(0u);
     uint p = (provenance[id / 4u] >> (8u * (id % 4u))) & 255u;
     uint sunCode = p & 15u, skyCode = p >> 4;
     bool gathered = skyCode >= 1u && skyCode <= 4u && sunCode >= 1u && sunCode <= 4u;
-    vec3 s0, s1, s2;
-    if (gathered && texelShapeFromRecord(texelH4[id * 4u], texelH4[id * 4u + 1u], texelH4[id * 4u + 2u], texelH4[id * 4u + 3u], s0, s1, s2)) {
-        w0 = texelShapePack(s0); w1 = texelShapePack(s1); w2 = texelShapePack(s2);
-        return true;
-    }
-    if (skyCode == 5u || sunCode == 5u) {
-        w0 = copyShape[id * 3u]; w1 = copyShape[id * 3u + 1u]; w2 = copyShape[id * 3u + 2u];
-        return texelShapeUnpack(w0).w > 0.5;
-    }
-    return false;
+    if (!gathered && skyCode != 5u && sunCode != 5u) return false;
+    w0 = ownShape[id * 3u]; w1 = ownShape[id * 3u + 1u]; w2 = ownShape[id * 3u + 2u];
+    return texelShapeUnpack(w0).w > 0.5;
 }
 
 void shapeAdd(uint other, float w, inout vec3 a0, inout vec3 a1, inout vec3 a2, inout float aw) {
@@ -135,8 +128,10 @@ void main() {
         texelComposed[id] = uvec2(packRgb9e5(light), sky.y);
         if (u.uCompose.w > 0.5) {
             uvec2 w0, w1, w2;
-            ownShapeOf(id, w0, w1, w2);
-            ownShape[id * 3u] = w0; ownShape[id * 3u + 1u] = w1; ownShape[id * 3u + 2u] = w2;
+            if (!ownShapeOf(id, w0, w1, w2)) {
+                w0 = w1 = w2 = uvec2(0u);
+                ownShape[id * 3u] = w0; ownShape[id * 3u + 1u] = w1; ownShape[id * 3u + 2u] = w2;   // the pool reads none
+            }
             texelShape[id * 3u] = w0; texelShape[id * 3u + 1u] = w1; texelShape[id * 3u + 2u] = w2;
         }
         return;

@@ -173,6 +173,7 @@ bool detailMissing;
 // summed over the texels read (shapeSum: xyz the luminance shape -- the channels' by their light -- w the weight), and
 // shapeMissing where a texel with light had none.
 layout(std430, set = 0, binding = 52) readonly buffer TexelShape { uvec2 texelShape[]; };
+#define TEXEL_SHAPE_NO_STORE
 #include "texel_shape.glsl"
 vec4 shapeSum;
 bool shapeMissing;
