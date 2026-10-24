@@ -611,7 +611,8 @@ internal sealed partial class SponzaLoop
             var ci = c;
             // Shadows off: skip the pass (the lit shader early-outs without
             // sampling) and invalidate the cache so re-enabling forces a redraw.
-            if (!shadows.Enabled)
+            // So too with nothing to read them (CascadesRead): the traced sun answers the lit pass.
+            if (!shadows.Enabled || !CascadesRead)
             {
                 cachedCascadeViewProj[ci] = default;
                 cascadeRendered[ci] = false;

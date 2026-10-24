@@ -139,6 +139,15 @@ internal sealed partial class SponzaLoop
         }
     }
 
+    // Whether anything reads the sun cascades this frame. With the frame's shadow rays traced, the lit pass reads the
+    // traced mask instead (lit_body.glsl: the cascades only where rtShadowHeader.z is 0), and the texel gather asks them
+    // nothing while its hit sun rays are on (CascadeReceivers empty): fog and the screen probes still read them, and the
+    // A/B's off phase. Drawn for no reader they were ~0.5 ms a frame at Crytek Sponza's courtyard (2026-10-24).
+    // --cascades-always: drawn whatever reads them, as before.
+    private bool cascadesAlways;
+    private bool CascadesRead => cascadesAlways || !rtShadows || frameTracer is null || rayGpuData is null
+        || abMode == "rtshadow" && AbOffPhase || !texelSunRays || fog.Enabled || screenProbesEnabled;
+
     private void RecordRtShadows(int width, int height)
     {
         if (!rtShadows || rayGpuData is null) return;

@@ -152,6 +152,7 @@ internal sealed partial class SponzaLoop
         litFlat = args.Flag("lit-flat");
         // --no-lit-early-z: opaque groups shade with the cutout build too (late depth test), as before 2026-10-24.
         litEarlyZ = !args.Flag("no-lit-early-z");
+        cascadesAlways = args.Flag("cascades-always");
         // --ray-check: also trace a fixed batch of rays on the GPU every frame and hold them against the CPU at the shot.
         rayCheck = args.Flag("ray-check");
         if (args.String("ray-bench") is { } bench)
