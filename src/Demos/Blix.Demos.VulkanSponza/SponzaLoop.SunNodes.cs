@@ -102,6 +102,9 @@ internal sealed partial class SponzaLoop
     // --near-rounds N (2; 0 without the near texels' light): the fine round's texels gathered N times more, each on the light the last left (with
     // --near-texel-light, its near hits read the texels the last round gathered).
     private int nearRounds, nearRoundsLeft;
+    // --near-rounds-change N: a sun change's near rounds (the sky's part kept: skyKept), the boot's left as --near-rounds.
+    private int nearRoundsChange = -1;
+    private int NearRoundsNow => skyKept && nearRoundsChange >= 0 ? nearRoundsChange : nearRounds;
     private uint[] fineRoundIds = Array.Empty<uint>();
     // Per record, a bit: on a surface that lets light through (SponzaLoop.Lightmap.cs, UploadLightmapTexels).
     private uint[]? transmitRecords;
@@ -122,14 +125,14 @@ internal sealed partial class SponzaLoop
     private bool gatherSmooth;
     private bool GatherSmoothNow => gatherSmooth && !lightmapFramesBuffer.Equals(default(GpuBufferHandle));
     private GpuBufferHandle finePlaceBuffer, farPartBuffer;
-    private int NearRoundIndex => nearRounds - nearRoundsLeft;
+    private int NearRoundIndex => NearRoundsNow - nearRoundsLeft;
     // 0 off; 1 the fine round (its far part kept); 2 a near round (cut, the far part added back).
-    private int NearCutMode => nearCut && fineGathering && nearRounds > 0 && !farPartBuffer.Equals(default(GpuBufferHandle)) ? (NearRoundIndex == 0 ? 1 : 2) : 0;
+    private int NearCutMode => nearCut && fineGathering && NearRoundsNow > 0 && !farPartBuffer.Equals(default(GpuBufferHandle)) ? (NearRoundIndex == 0 ? 1 : 2) : 0;
 
     // The fine round's places (a texel's place + 1) and its far parts cleared, once at its start.
     private void BeginNearCut(uint[] fineIds)
     {
-        if (!nearCut || nearRounds == 0) return;
+        if (!nearCut || NearRoundsNow == 0) return;
         if (!finePlaceBuffer.Equals(default(GpuBufferHandle))) RetireGpuBuffer(finePlaceBuffer);
         if (!farPartBuffer.Equals(default(GpuBufferHandle))) RetireGpuBuffer(farPartBuffer);
         var place = new uint[texelCount];
@@ -225,6 +228,7 @@ internal sealed partial class SponzaLoop
         sheetLight = !args.Flag("no-sheet-light");
         interleave = !args.Flag("no-interleave") || args.Flag("interleave");
         nearRounds = Math.Max(0, args.Int("near-rounds") ?? (nearTexelLight ? 2 : 0));
+        if (args.Int("near-rounds-change") is { } nrc) nearRoundsChange = Math.Max(0, nrc);
         // The light-agnostic record (--texel-h4), on by default (2026-10-24: on Crytek Sponza's 3.3 M records against 2,048
         // rays, its per-channel shapes' colour error at a 20 deg tilt 0.41% / 2.95% median / p90, a luminance shape's 2.98% /
         // 8.38%); --no-texel-h4 the parts' tilt alone, as before.
@@ -941,7 +945,7 @@ internal sealed partial class SponzaLoop
             // walls pass light to each other across their gap, and each round takes one more step of it (the teacup's far
             // sides 0.069 excess after one round, 0.046 after two); elsewhere the second round changed no pixel (Sponza,
             // 2026-10-22) and cost 0.6 min.
-            var later = nearRounds - nearRoundsLeft > 0;
+            var later = NearRoundsNow - nearRoundsLeft > 0;
             nearRoundsLeft--;
             var nearIds = later && transmitRecords is { } tr ? Array.FindAll(fineRoundIds, id => (tr[id >> 5] & (1u << (int)(id & 31))) != 0) : fineRoundIds;
             Console.WriteLine(string.Create(Inv, $"[VulkanSponza] near round: {nearIds.Length:N0} of the {fineRoundIds.Length:N0} fine texels gathered again on the last round's light{(later ? " (the sheets that let light through)" : "")} ({nearRoundsLeft} more)."));
@@ -986,7 +990,7 @@ internal sealed partial class SponzaLoop
             if (picked is { Length: > 0 } fineIds)
             {
                 fineRoundIds = fineIds;
-                nearRoundsLeft = nearRounds;
+                nearRoundsLeft = NearRoundsNow;
                 BeginNearCut(fineIds);
                 StartFineRound(fineIds);
                 return;
@@ -1526,7 +1530,7 @@ internal sealed partial class SponzaLoop
                 // BLIX_CAPTURE_FINE_ONLY: the capture in the fine round's first pass alone (its crease texels, small); every ray
                 // the same tag, so the hit's distance in the tag's place (z -1: texel_nodes_lean.comp).
                 // BLIX_CAPTURE_DIST: every round's rays with their hits' distance (no tag), for where rays end.
-                new("uCapture", new Vector4Uniform(RayCaptureOn && !listCook && (!captureFineOnly || fineGathering && nearRounds == nearRoundsLeft)
+                new("uCapture", new Vector4Uniform(RayCaptureOn && !listCook && (!captureFineOnly || fineGathering && NearRoundsNow == nearRoundsLeft)
                     ? (captureFineOnly || captureDist ? RayCaptureUniform with { Z = -1f } : RayCaptureUniform) : Vector4.Zero)),
                 new("uCone", new Vector4Uniform(new Vector4(coneLookups ? sunNodeRays : 0f, hitCellSize, transportSpacing, sunNodeKinds.Length))),
                 new("uLevels", new Vector4Uniform(new Vector4(coneLookups && patchLevelsOn && PatchLevelsReady ? PatchLevelCount : 0, 0f, 0f, 0f))),

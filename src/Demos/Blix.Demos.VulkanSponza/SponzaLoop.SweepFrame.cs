@@ -266,7 +266,7 @@ internal sealed partial class SponzaLoop
                 if (picked.Length > 0)
                 {
                     fineRoundIds = picked;
-                    nearRoundsLeft = nearRounds;
+                    nearRoundsLeft = NearRoundsNow;
                     BeginNearCut(picked);
                     StartFineRound(picked);
                     SweepEndDone();

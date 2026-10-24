@@ -35,7 +35,7 @@ internal sealed partial class SponzaLoop
 
     // The round a ray was shot in: the stage's provenance code (1 sweep, 2 refine, 3 fine, 4 visible-changed), the refine
     // round << 4, the near round << 8.
-    private float RayCaptureTag => GatherProvenanceCode + 16f * sunNodeRefineRound + 256f * (fineGathering ? nearRounds - nearRoundsLeft : 0)
+    private float RayCaptureTag => GatherProvenanceCode + 16f * sunNodeRefineRound + 256f * (fineGathering ? NearRoundsNow - nearRoundsLeft : 0)
         + (rayCaptureSun ? 32768f : 0f);
     // --ray-capture-sun: the records' word 6 is the hit's whole sun and its texels' bit blend (half2), not cosine and weight.
     private bool rayCaptureSun;

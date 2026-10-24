@@ -540,7 +540,7 @@ internal sealed partial class SponzaLoop
                 // it keeps no far part: texel_nodes_rays.comp) and replace what a refine settled -- Sponza's curtains refined
                 // and lost it (cloth refine off changed no pixel, 2026-10-22). Kept out of them, a closed shell's walls read
                 // their gap 13% bright (the teacup's records): the near rounds settle the light its walls pass each other.
-                var regathered = nearRounds > 0 && transmitRecords is { } tr && (tr[id >> 5] & (1u << (int)(id & 31))) != 0;
+                var regathered = NearRoundsNow > 0 && transmitRecords is { } tr && (tr[id >> 5] & (1u << (int)(id & 31))) != 0;
                 if (mask is not null && score >= (fineRefineCloth ? 500f : 1000f) && !regathered) { mask[id >> 5] |= 1u << (int)(id & 31); masked++; }
             }
         }
