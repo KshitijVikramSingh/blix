@@ -883,6 +883,9 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private bool gpuCull = true;
     private bool litFlat;
     private bool litEarlyZ = true;
+    // The lit pass's per-channel shape from the nearest atlas cell alone (lit_body.glsl, lightmapShape): the default since
+    // 2026-10-24 (the user saw no steps; the lit pass 5.5 -> 3.9 ms at Crytek Sponza's courtyard). --texel-shape-bilinear: the four.
+    private bool texelShapeNearest = true;
     private PipelineHandle flatSolidPipeline;
     private PassHandle cullPassHandle;
     private PipelineHandle cullPipeline;

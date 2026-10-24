@@ -295,7 +295,11 @@ bool lightmapShape(vec2 texel, vec3 n, out vec3 s0, out vec3 s1, out vec3 s2) {
     ivec2 base = ivec2(floor(f));
     vec2 t = f - vec2(base);
     float weight = 0.0;
-    for (int i = 0; i < 4; ++i) {
+    // uTexelShape.z (the default; --texel-shape-bilinear: 0): the nearest of the four alone -- the shapes pool over 20 cm, a quarter of
+    // the reads; the lookup was 1.8 of the lit pass's 5.0 ms at Crytek Sponza's courtyard (2026-10-24).
+    int first = frame.uTexelShape.z > 0.5 ? (t.x >= 0.5 ? 1 : 0) + (t.y >= 0.5 ? 2 : 0) : 0;
+    int last = frame.uTexelShape.z > 0.5 ? first + 1 : 4;
+    for (int i = first; i < last; ++i) {
         ivec2 o = ivec2(i & 1, i >> 1);
         ivec2 at = base + o;
         if (any(lessThan(at, ivec2(0))) || any(greaterThanEqual(at, ivec2(size)))) continue;

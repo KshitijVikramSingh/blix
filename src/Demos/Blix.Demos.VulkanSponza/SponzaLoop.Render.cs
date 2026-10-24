@@ -544,7 +544,7 @@ internal sealed partial class SponzaLoop
                 AbOffPhase && abMode == "pbr"      ? 1f : 0f,
                 AbOffPhase && abMode == "ibl"      ? 1f : 0f,
                 AbOffPhase && abMode == "normal"   ? 1f : 0f))),
-            new("uTexelShape",       new Vector4Uniform(new Vector4(litShapesBound && IncidentFieldNow ? 1f : 0f, ambient.Enabled ? 1f : 0f, 0f, 0f))),
+            new("uTexelShape",       new Vector4Uniform(new Vector4(litShapesBound && IncidentFieldNow ? 1f : 0f, ambient.Enabled ? 1f : 0f, texelShapeNearest ? 1f : 0f, 0f))),
         };
         // The remaining //@tune uniforms (shadow slope scale, uVisualizeCascades) are appended by
         // name from the overlay panel — reflection lands each at its offset. The intensity and
