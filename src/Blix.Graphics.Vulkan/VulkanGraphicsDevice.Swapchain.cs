@@ -322,26 +322,28 @@ public sealed partial class VulkanGraphicsDevice
         // refresh interval: 33.3, 50.0, 66.6, 83.3. A profiling switch that quietly does nothing is
         // worse than one that is missing, because the numbers look like measurements.
         //
-        // MAILBOX is preferred where it exists (uncapped, no tearing); IMMEDIATE tears, which is an
-        // acceptable trade for the one thing this flag exists to do.
+        // IMMEDIATE is preferred: on MoltenVK only it turns the layer's display sync off -- MAILBOX is offered there but
+        // still paces to the display, and the "vsync off" frame times came out in refresh multiples (8.3, 16.7, 25 ms
+        // at 120 Hz), which hid every A/B under a vblank (2026-10-24). It tears, an acceptable trade for the one thing
+        // this flag exists to do; MAILBOX where IMMEDIATE is not offered.
         var chosenPresent = PresentModeKHR.FifoKhr;
         if (!vsyncEnabled)
         {
             foreach (var pm in presentModes)
             {
-                if (pm == PresentModeKHR.MailboxKhr) { chosenPresent = pm; break; }
+                if (pm == PresentModeKHR.ImmediateKhr) { chosenPresent = pm; break; }
             }
             if (chosenPresent == PresentModeKHR.FifoKhr)
             {
                 foreach (var pm in presentModes)
                 {
-                    if (pm == PresentModeKHR.ImmediateKhr) { chosenPresent = pm; break; }
+                    if (pm == PresentModeKHR.MailboxKhr) { chosenPresent = pm; break; }
                 }
             }
             if (chosenPresent == PresentModeKHR.FifoKhr)
             {
                 Console.WriteLine(
-                    "[blix] vsync off requested but neither MAILBOX nor IMMEDIATE is available; " +
+                    "[blix] vsync off requested but neither IMMEDIATE nor MAILBOX is available; " +
                     "staying on FIFO. Frame times will be quantised to the refresh interval.");
             }
         }
