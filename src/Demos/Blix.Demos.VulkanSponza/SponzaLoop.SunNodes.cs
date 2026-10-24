@@ -1339,6 +1339,7 @@ internal sealed partial class SponzaLoop
         }
         // The in-frame sweep: a pass a frame, and a round's end a frame after its last resolve was recorded
         // (SponzaLoop.SweepFrame.cs).
+        if (sweepInFrame && GatherInBackground) SweepBudgetStep();
         if (SweepRecordedThisFrame) return;
         if (sweepRoundEndPending) { SweepRoundEndStep(); return; }
         var clock = Stopwatch.StartNew();
@@ -1389,7 +1390,9 @@ internal sealed partial class SponzaLoop
             if (GpuResolveOn && !gpuResolving && !refining && sunNodeFirst == 0 && sunNodePass == 0) using (Prof("resolve-begin")) BeginGpuResolve();
             // In the frame (SponzaLoop.SweepFrame.cs): the slice's passes recorded, a smaller slice; needs the GPU resolve.
             var inFrame = SweepInFrameNow && gpuResolving;
-            var slice = Math.Min(inFrame ? sweepSlice : sunNodeSlice, live.Length - sunNodeFirst);
+            // In the frame a slice's size is the budget's at its first pass (its passes share its sums' slot).
+            if (inFrame && sunNodePass == 0) sweepSliceNow = Math.Min(SweepSliceBudgeted, live.Length - sunNodeFirst);
+            var slice = inFrame ? sweepSliceNow : Math.Min(sunNodeSlice, live.Length - sunNodeFirst);
             if (syncAll) device.WaitIdle();
             if (inFrame) SweepFramePass(refining ? sunNodeRefineBuffer : sunNodeTraceBuffer, sunNodeFirst, slice, sunNodePass, seedPass);
             else SunNodePassNow(refining ? sunNodeRefineBuffer : sunNodeTraceBuffer, sunNodeFirst, slice, sunNodePass, seedPass);

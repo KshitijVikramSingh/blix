@@ -20,6 +20,50 @@ internal sealed partial class SponzaLoop
     private int sweepSlice = 8192;
     // A slice begun in the frame stays there to its last pass (the slice's size and its sums' slot are the frame's).
     private bool sweepSliceInFrame;
+    private int sweepSliceNow;
+
+    // The budget: the sweep's slice passes (rays, trace, shade) a fixed slot of the frame's GPU time (--sweep-gpu-ms, 3),
+    // the slice sized by their measured cost a texel-pass over windows of SweepBudgetFrames (the host's pass totals: the
+    // compute passes are timed; the render's are not, so the slot is fixed rather than the frame's rest). A controller on
+    // the frames' pace shrank the slice to its floor: frames missed the pace for what the slice does not size (a round's
+    // end, the compose's ranges) and a sun change ran ~10x slower than the same rays at boot (2026-10-25). A fixed 8,192
+    // slice was ~6-8 ms a frame on Crytek Sponza. --sweep-slice N: a fixed slice, no budget.
+    private float sweepGpuMs = 3f;
+    private bool sweepSliceFixed;
+    private const int SweepBudgetFrames = 16;
+    private Dictionary<string, GpuPassTotal>? sweepBudgetAt;
+    private long sweepBudgetFrame = -1, sweepBudgetTexelPasses;
+    private int sweepBudgetSlice = 2048;
+    // The cook screen up, the user waits on the cook, not the frame: the full slice.
+    private int SweepSliceBudgeted => sweepSliceFixed || CookScreenNow ? sweepSlice : Math.Min(sweepBudgetSlice, sunNodeSlice);
+
+    // Once a frame while the sweep is in the frame: at a window's end the slice resized.
+    private void SweepBudgetStep()
+    {
+        if (!sweepInFrame || sweepSliceFixed || !host.Timing.GpuTimestampsSupported) return;
+        var totals = host.Timing.GpuPassTotals;
+        if (sweepBudgetAt is null) { sweepBudgetAt = new(totals); sweepBudgetFrame = framesRendered; return; }
+        if (framesRendered - sweepBudgetFrame < SweepBudgetFrames) return;
+        double sliceMs = 0;
+        foreach (var (name, total) in totals)
+            if (name.StartsWith("sun-sweep-rays", StringComparison.Ordinal) || name.StartsWith("sun-sweep-closest", StringComparison.Ordinal)
+                || name.StartsWith("sun-sweep-shade", StringComparison.Ordinal))
+                sliceMs += total.TotalMs - (sweepBudgetAt.TryGetValue(name, out var before) ? before.TotalMs : 0);
+        var texelPasses = sweepBudgetTexelPasses;
+        sweepBudgetAt = new(totals);
+        sweepBudgetFrame = framesRendered;
+        sweepBudgetTexelPasses = 0;
+        // A window the sweep had too few passes in measures nothing of its cost (and the timings lag a frame or two).
+        if (texelPasses < 4 * 1024 || sliceMs <= 0) return;
+        var target = sweepGpuMs / (sliceMs / texelPasses);
+        // Halfway there (geometrically) a window: the measures lag and are noisy.
+        var next = (int)Math.Clamp(Math.Sqrt(sweepBudgetSlice * target), 512, 32768) / 128 * 128;
+        if (Math.Abs(next - sweepBudgetSlice) >= 512 && sweepBudgetLog++ < 200)
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza] sweep budget: the slice's passes {1e3 * sliceMs / texelPasses:0.00} ms a thousand texels; slice {sweepBudgetSlice:N0} -> {next:N0} ({sweepGpuMs:0.#} ms a frame)."));
+        sweepBudgetSlice = next;
+    }
+    private int sweepBudgetLog;
     // A round's last slice resolved in the frame: its end (BeginGpuRefineRound's read-backs) waits for the next frame.
     private bool sweepRoundEndPending;
     // The hit cells' sun (hit_cells.comp mode 1) at a light change, sweepCellsChunk work items a frame (--sweep-cells-chunk).
@@ -93,7 +137,8 @@ internal sealed partial class SponzaLoop
     private void ParseSweepFrame(AppArgs args)
     {
         sweepInFrame = args.Flag("sweep-in-frame");
-        if (args.Int("sweep-slice") is { } s) sweepSlice = Math.Clamp(s, 256, 32768);
+        if (args.Int("sweep-slice") is { } s) { sweepSlice = Math.Clamp(s, 256, 32768); sweepSliceFixed = true; }
+        if (args.Float("sweep-gpu-ms") is { } gm) sweepGpuMs = Math.Max(0.5f, gm);
         if (args.Int("sweep-instant-chunk") is { } ic) sweepInstantChunk = Math.Max(65536, ic);
         if (args.Int("compose-filter-chunk") is { } cf) composeFilterChunk = Math.Max(65536, cf);
         if (args.Int("sweep-fine-chunk") is { } fc) sweepFineChunk = Math.Max(65536, fc);
@@ -107,6 +152,7 @@ internal sealed partial class SponzaLoop
     {
         sweepSliceInFrame = true;
         sweepRecordedFrame = framesRendered;
+        sweepBudgetTexelPasses += slice;
         graph.Dispatch(sweepRaysPass, SunNodeRaysCommand(ids, first, slice, seedPass));
         var cells = HitCellsShade(0);
         var hitSun = HitSunColumn;
