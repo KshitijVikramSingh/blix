@@ -459,6 +459,7 @@ internal sealed partial class SponzaLoop
         ratioRelight = !args.Flag("no-ratio-relight");
         if (args.Float("sun-change-select") is { } scs) sunChangeSelect = Math.Max(0f, scs);
         sunChangeSelectFine = args.Flag("sun-change-select-fine");
+        if (args.Float("sun-change-fine-below") is { } sfb) sunChangeFineBelow = Math.Max(0f, sfb);
         visibleChanged = !args.Flag("no-visible-changed");
         hitBlend = !args.Flag("no-hit-blend");
         fineCloth = !args.Flag("no-fine-cloth");

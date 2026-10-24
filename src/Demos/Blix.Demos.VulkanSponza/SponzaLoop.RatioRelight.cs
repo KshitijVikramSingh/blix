@@ -87,7 +87,7 @@ internal sealed partial class SponzaLoop
         var all = sunNodeTraceIds;
         var kept = all.Where(id => (mask[id >> 5] >> (int)(id & 31) & 1u) != 0).ToArray();
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[VulkanSponza] sun change select: {kept.Length:N0} of {all.Length:N0} coarse texels moved over {sunChangeSelect:0.##} of their light; the rest keep the relit instant."));
+            $"[VulkanSponza] sun change select ({sunChangeStepDeg:0.0} deg step{(SelectFineNow ? ", the fine too" : "")}): {kept.Length:N0} of {all.Length:N0} coarse texels moved over {sunChangeSelect:0.##} of their light; the rest keep the relit instant."));
         sunChangeMask = mask;
         RetireTraceBuffer();
         sunNodeTraceIds = kept;
@@ -97,10 +97,17 @@ internal sealed partial class SponzaLoop
     // The fine pick, cut the same way -- only under --sun-change-select-fine: a fine pick left out is not kept on the instant
     // layer but copied from the coarse (the copy it was flagged for getting wrong): Crytek Sponza end to end, those 0.280
     // mean error against the instant layer's 0.167 and a second full gather's 0.126; the fine set's energy 0.990.
+    // A small step cuts them too, the fine copy with them (SponzaLoop.VisibleChanged.cs FineCopyIds): Crytek Sponza's 3 deg
+    // step end to end, the fine texels kept on the relit instant 0.240 mean error against a full gather's 0.238 there,
+    // every live texel 0.084 / 3.20% bad (full: 0.082 / 3.14%), the step 17.9 -> 5.5 s under the cook screen; at a 60 deg
+    // change they were 0.167 against 0.126. --sun-change-fine-below DEG (10): the steps that small; --sun-change-select-fine:
+    // every change.
     private bool sunChangeSelectFine;
+    private float sunChangeFineBelow = 10f, sunChangeStepDeg = 180f;
+    private bool SelectFineNow => sunChangeSelectFine || sunChangeStepDeg < sunChangeFineBelow;
     private uint[] SelectFine(uint[] ids)
     {
-        if (!sunChangeSelectFine || sunChangeMask is not { } mask) return ids;
+        if (!SelectFineNow || sunChangeMask is not { } mask) return ids;
         var kept = ids.Where(id => (mask[id >> 5] >> (int)(id & 31) & 1u) != 0).ToArray();
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] sun change select: {kept.Length:N0} of {ids.Length:N0} fine picks moved over {sunChangeSelect:0.##}."));

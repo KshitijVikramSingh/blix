@@ -193,7 +193,7 @@ internal sealed partial class SponzaLoop
     // --sun-change-select-fine: nor the fine texels the relit instant did not move (they keep it, as the coarse left out do).
     private (GpuBufferHandle Ids, int Count, bool Own) FineCopyIds()
     {
-        var moved = sunChangeSelectFine ? sunChangeMask : null;
+        var moved = SelectFineNow ? sunChangeMask : null;
         if ((visibleChangedMask is null && moved is null) || texelLiveIds is not { } all || liveCoarseLevels is not { } levels)
             return (transferFineIdsBuffer, transferFineCount, false);
         var mask = visibleChangedMask;

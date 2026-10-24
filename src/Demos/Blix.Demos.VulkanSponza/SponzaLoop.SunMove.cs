@@ -5,7 +5,7 @@ using Blix.Core;
 
 namespace Blix.Demos.VulkanSponza;
 
-// A sun that keeps moving (--sun-move DEG_PER_S; M toggles it, 1 deg/s when no rate was given): the frame's sun -- its
+// A sun that keeps moving (--sun-move DEG_PER_S; M toggles it, 0.5 deg/s when no rate was given): the frame's sun -- its
 // direct light, the RT shadows -- turns every frame, while the GI chases it a light change at a time. The GI's sun
 // (GiToSun: the live patch light, the texels' sun bits, the re-aim) is held while a change is in flight and catches up
 // to the frame's when it lands; a sun turning every frame restarted the change every frame (LiveRestart) and the sun
@@ -15,6 +15,10 @@ internal sealed partial class SponzaLoop
 {
     private float sunMoveRate;
     private bool sunMoving;
+    // Along the authored sun's day (midsummer, AuthoredLatitude: SponzaLoop.LightletCensus.cs's BandNorth), from where it
+    // stands: the hour angle (degrees) and its way, back and forth between morning and evening at the band's least
+    // elevation. A turn about the zenith at its pitch, as at first, swung the sun round Crytek Sponza's whole sky.
+    private float sunMoveHour = float.NaN, sunMoveWay = 1f, sunMoveNorth;
     private Vector3 giSunTarget;
     private readonly Stopwatch sunMoveClock = new();
 
@@ -37,7 +41,7 @@ internal sealed partial class SponzaLoop
     private void ToggleSunMove()
     {
         sunMoving = !sunMoving;
-        if (sunMoveRate == 0f) sunMoveRate = 1f;
+        if (sunMoveRate == 0f) sunMoveRate = 0.5f;
         giSunTarget = -Vector3.Normalize(sunDirection);
         sunMoveClock.Restart();
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
@@ -52,13 +56,15 @@ internal sealed partial class SponzaLoop
         if (giSunTarget == Vector3.Zero) giSunTarget = -Vector3.Normalize(sunDirection);
         var dt = sunMoveClock.IsRunning ? (float)sunMoveClock.Elapsed.TotalSeconds : 0f;
         sunMoveClock.Restart();
-        // The rate is the sun's own angle a second: its yaw turns faster the higher it stands (a degree of yaw at pitch p is
-        // cos p of a degree of arc).
-        sunYaw += sunMoveRate * dt * MathF.PI / 180f / MathF.Max(MathF.Cos(sunPitch), 0.05f);
-        // Wrapped into the overlay's slider range (-180..180): Crytek Sponza's sun stands at 180, and the slider clamped
-        // every step past it back -- the sun never moved while the overlay was up.
-        if (sunYaw > MathF.PI) sunYaw -= 2f * MathF.PI;
-        else if (sunYaw < -MathF.PI) sunYaw += 2f * MathF.PI;
+        if (float.IsNaN(sunMoveHour)) sunMoveNorth = BandNorth(out sunMoveHour);
+        // The rate is the sun's own arc a second: on a day circle of declination d an hour angle's degree is cos d of one.
+        var span = DayHalfSpan(Obliquity);
+        sunMoveHour += sunMoveWay * sunMoveRate * dt / MathF.Cos(Obliquity * MathF.PI / 180f);
+        if (MathF.Abs(sunMoveHour) > span) { sunMoveHour = MathF.CopySign(span, sunMoveHour); sunMoveWay = -sunMoveWay; }
+        // Through yaw and pitch, as the Sun controls hold it (SponzaLoop.SunSweep.cs); the yaw within the slider's range.
+        var travel = -ToScene(SunLocal(AuthoredLatitude, Obliquity, sunMoveHour), sunMoveNorth);
+        sunPitch = MathF.Asin(Math.Clamp(travel.Y, -1f, 1f));
+        sunYaw = MathF.Atan2(travel.X, -travel.Z);
         UpdateSunDirection();
         if (!LightChangeInFlight) giSunTarget = -Vector3.Normalize(sunDirection);
         if (!sunMoveLogClock.IsRunning || sunMoveLogClock.Elapsed.TotalSeconds >= 5)
@@ -66,7 +72,7 @@ internal sealed partial class SponzaLoop
             sunMoveLogClock.Restart();
             var lag = MathF.Acos(Math.Clamp(Vector3.Dot(giSunTarget, -Vector3.Normalize(sunDirection)), -1f, 1f)) * 180f / MathF.PI;
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                $"[VulkanSponza] sun move: yaw {sunYaw * 180f / MathF.PI:0.0}, pitch {sunPitch * 180f / MathF.PI:0.0}; the GI's sun {lag:0.00} deg behind (a change in flight {LightChangeInFlight}, stage {sunNodeStage})."));
+                $"[VulkanSponza] sun move: hour angle {sunMoveHour:0.0}, elevation {-sunPitch * 180f / MathF.PI:0.0}; the GI's sun {lag:0.00} deg behind (a change in flight {LightChangeInFlight}, stage {sunNodeStage})."));
         }
     }
 }

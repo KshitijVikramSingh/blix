@@ -130,6 +130,10 @@ internal sealed partial class SponzaLoop
     // Recompute the sun travel direction from the overlay-driven yaw/pitch.
     private void UpdateSunDirection()
     {
+        // The yaw within the overlay slider's range (-180..180), whatever set it: the slider clamps what it is handed, and
+        // a sun turned past 180 (--sun-change 1500 190 -72, the moving sun from Crytek Sponza's 180) went back to 180.
+        if (sunYaw > MathF.PI) sunYaw -= 2f * MathF.PI;
+        else if (sunYaw < -MathF.PI) sunYaw += 2f * MathF.PI;
         var cp = MathF.Cos(sunPitch);
         sunDirection = Vector3.Normalize(new Vector3(
             cp * MathF.Sin(sunYaw),
