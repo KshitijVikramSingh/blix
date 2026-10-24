@@ -573,7 +573,8 @@ internal sealed partial class SponzaLoop
         if (!texelBudgetGiven && FrameRaysOnHardware) texelBudget = 32768;
         var queueWords = 8 + 4 * Math.Max(texelBudget, LightBakeBudget);
         texelHashBuffer = Own(device.CreateGpuBuffer(bake.Table.Length * 4, MemoryMarshal.AsBytes(bake.Table.AsSpan()), "sponza.texels.hash"));
-        texelBuffer = Own(device.CreateGpuBuffer(bake.Texels.Length * 16, MemoryMarshal.AsBytes(bake.Texels.AsSpan()), "sponza.texels"));
+        var packedRecords = PackTexelRecords(bake.Texels, texelCount, firstAtlas);   // 16 B a record (SponzaLoop.TexelRecords.cs)
+        texelBuffer = Own(device.CreateGpuBuffer(packedRecords.Length * 4, MemoryMarshal.AsBytes(packedRecords.AsSpan()), "sponza.texels"));
         // The gather's buffers (zeroed by CreateGpuBuffer where nothing is given); with a resolved cache, placeholders
         // until a light change wakes them (SponzaLoop.TexelRest.cs).
         var atRest = resolved is not null;
@@ -770,7 +771,7 @@ internal sealed partial class SponzaLoop
     {
         if (!texelHashBuffer.Equals(default(GpuBufferHandle))) return;
         texelHashBuffer = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.texels.hash.none"));
-        texelBuffer = Own(device.CreateGpuBuffer(32, new byte[32], "sponza.texels.none"));
+        texelBuffer = Own(device.CreateGpuBuffer(TexelRecordHeaderBytes + 16, new byte[TexelRecordHeaderBytes + 16], "sponza.texels.none"));
         texelLightBuffer = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.texels.light.none"));
         texelPriorBuffer = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.texels.prior.none"));
         texelFilteredBuffer = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.texels.filtered.none"));

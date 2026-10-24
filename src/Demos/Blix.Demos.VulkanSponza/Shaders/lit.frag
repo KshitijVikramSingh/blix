@@ -229,7 +229,7 @@ layout(location = 10) in vec2 vLightmapTexel; // --lightmap: the lightmap atlas 
 // whether double-sided or not (SponzaLoop.Scene.cs, GiTwoSided): a closed thin shell -- Khronos' teacup, single-sided,
 // T 1 -- reflects almost nothing and showed black where its far side was the sky cube's guess and the GI kept none
 // (tools/gi-model/thin_shell.py: the gap's light settles in the fine round and two near rounds, within 2-4%).
-layout(std430, set = 1, binding = 22) readonly buffer LitTexels { vec4 litTexels[]; };          // 2 a record: pos (w < 0 a pair), normal
+layout(std430, set = 1, binding = 22) readonly buffer LitTexels { uvec4 litTexels[]; };          // 2 a record: pos (w < 0 a pair), normal
 #define TEXEL_ARRAY litTexels
 #include "texel_record.glsl"
 layout(std430, set = 1, binding = 23) readonly buffer LitTexelResolved { uvec2 litResolved[]; };

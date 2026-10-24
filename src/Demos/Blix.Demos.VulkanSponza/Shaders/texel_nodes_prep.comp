@@ -13,7 +13,7 @@ layout(set = 0, binding = 0) uniform SunNodesPrep {
     vec4 uTexelGrid;  // xyz the cells' origin, w the finest spacing
 } u;
 
-layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 1) readonly buffer Texels { uvec4 texels[]; };
 layout(std430, set = 0, binding = 2) readonly buffer SunNodesLive { uint liveIds[]; };
 layout(std430, set = 0, binding = 3) buffer SunNodeHash { uint cookHash[]; };
 

@@ -188,7 +188,7 @@ internal sealed partial class SponzaLoop
     {
         if (skyVisDump is null) return;
         device.WaitIdle();
-        if (stage == "raw") File.WriteAllBytes(skyVisDump + ".texels", device.ReadGpuBuffer(texelBuffer, 0, texelCount * 32));
+        if (stage == "raw") File.WriteAllBytes(skyVisDump + ".texels", MemoryMarshal.AsBytes(ReadTexelRecords(0, texelCount).AsSpan()).ToArray());
         File.WriteAllBytes($"{skyVisDump}.{stage}", device.ReadGpuBuffer(texelSkyVisBuffer, 0, ContactBytes));
         Console.WriteLine($"[VulkanSponza] sky visibility dumped: {skyVisDump}.{stage}");
     }
@@ -687,7 +687,7 @@ internal sealed partial class SponzaLoop
         device.WaitIdle();
         var gSky = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(EnsureLivePart(false), 0, texelCount * 8).AsSpan()).ToArray();
         var gSun = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(EnsureLivePart(true), 0, texelCount * 8).AsSpan()).ToArray();
-        var texels = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(texelBuffer, 0, texelCount * 32).AsSpan()).ToArray();
+        var texels = ReadTexelRecords(0, texelCount);
         static float L(Vector3 c) => 0.2126f * c.X + 0.7152f * c.Y + 0.0722f * c.Z;
         var irr = L(EffectiveSunIrradiance);
         double sumT = 0, sumG = 0, sumTsky = 0, sumGsky = 0, sumTsun = 0, sumGsun = 0;

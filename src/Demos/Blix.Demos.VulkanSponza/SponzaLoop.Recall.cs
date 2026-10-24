@@ -141,7 +141,7 @@ internal sealed partial class SponzaLoop
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] recall, the misses by their reference light (x the floor {recallFloor:G3}): under 1 {missesByLight[0]:N0}, 1-4 {missesByLight[1]:N0}, 4-16 {missesByLight[2]:N0}, more {missesByLight[3]:N0}; by level {string.Join(" / ", missLevels.Take(3).Select(c => c.ToString("N0", CultureInfo.InvariantCulture)))}."));
         // A sample of the worst misses: where, and their light against the reference's.
-        var texels = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(texelBuffer, 0, texelCount * 32).AsSpan()).ToArray();
+        var texels = ReadTexelRecords(0, texelCount);
         foreach (var (e, id) in misses.OrderByDescending(m => m.E).Take(12))
         {
             var p = texels[2 * id]; var nw = texels[2 * id + 1];
@@ -226,7 +226,7 @@ internal sealed partial class SponzaLoop
         restDumpFrame = -1;
         DumpParts("rest");
         // The texels' records (two vec4 each: position, normal with the atlas coordinate in w), for where each one is.
-        if (dumpParts is not null) File.WriteAllBytes($"{dumpParts}.texels", device.ReadGpuBuffer(texelBuffer, 0, texelCount * 32));
+        if (dumpParts is not null) File.WriteAllBytes($"{dumpParts}.texels", MemoryMarshal.AsBytes(ReadTexelRecords(0, texelCount).AsSpan()).ToArray());
     }
 
     // At the shot: what the pixels read -- the resolved light, the details -- to <prefix>.shot.

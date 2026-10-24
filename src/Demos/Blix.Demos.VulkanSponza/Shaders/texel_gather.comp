@@ -38,7 +38,7 @@ layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
 layout(set = 0, binding = 2) uniform sampler2D uCascadeShadowMaps[3];
 #include "shadow.glsl"
 #include "cascade_receivers.glsl"
-layout(std430, set = 0, binding = 3) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 3) readonly buffer Texels { uvec4 texels[]; };
 #include "texel_record.glsl"
 layout(std430, set = 0, binding = 4) buffer TexelLight { vec4 texelLight[]; };
 layout(std430, set = 0, binding = 5) buffer TexelQueue { uint texelQueue[]; };

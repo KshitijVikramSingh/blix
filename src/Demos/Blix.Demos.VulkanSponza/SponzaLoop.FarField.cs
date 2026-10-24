@@ -240,7 +240,7 @@ internal sealed partial class SponzaLoop
         for (var first = 0; first < texelCount && !keyRead; first += chunk)
         {
             var count = Math.Min(chunk, texelCount - first);
-            var records = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(texelBuffer, checked(first * 32), count * 32).AsSpan()).ToArray();
+            var records = ReadTexelRecords(first, count);
             Parallel.For(0, count, i =>
             {
                 var p = records[2 * i];

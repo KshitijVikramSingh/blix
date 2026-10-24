@@ -30,7 +30,7 @@ layout(std430, set = 0, binding = 3) readonly buffer TexelSun { uvec2 texelSun[]
 layout(std430, set = 0, binding = 4) writeonly buffer TexelResolved { uvec2 texelResolved[]; };
 layout(std430, set = 0, binding = 5) buffer TexelComposed { uvec2 texelComposed[]; };
 layout(std430, set = 0, binding = 6) readonly buffer TexelHash { uvec4 texelHash[]; };
-layout(std430, set = 0, binding = 7) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 7) readonly buffer Texels { uvec4 texels[]; };
 #include "texel_record.glsl"
 // The atlas's map from texel to record, as an R32UI texture (SponzaLoop.LightmapGather.cs).
 layout(set = 0, binding = 8) uniform usampler2D uLightmapIndexTex;

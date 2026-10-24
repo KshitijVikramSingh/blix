@@ -48,7 +48,7 @@ internal sealed partial class SponzaLoop
             device.WaitIdle();
             var count = (int)Math.Min(BitConverter.ToUInt32(device.ReadGpuBuffer(rayCaptureBuffer, 0, 4)), (uint)rayCaptureRoom);
             var words = count > 0 ? MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(rayCaptureBuffer, 16, count * 32).AsSpan()).ToArray() : Array.Empty<uint>();
-            var tex = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(texelBuffer, checked((int)gatherRaysTexel * 32), 32).AsSpan()).ToArray();
+            var tex = ReadTexelRecords((int)gatherRaysTexel, 1);
             var n0 = Vector3.Normalize(new Vector3(tex[1].X, tex[1].Y, tex[1].Z));
             var origin = new Vector3(tex[0].X, tex[0].Y, tex[0].Z) + n0 * 0.01f;
             gatherRays.Clear();
@@ -70,7 +70,7 @@ internal sealed partial class SponzaLoop
                 Vector3? near = null;
                 if (kind == 2 && w[7] != 0xFFFFFFFFu && w[7] < (uint)texelCount)
                 {
-                    var t = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(texelBuffer, checked((int)w[7] * 32), 16).AsSpan())[0];
+                    var t = ReadTexelRecords((int)w[7], 1)[0];
                     near = new Vector3(t.X, t.Y, t.Z);
                 }
                 // The cone a ray stands for (--cone-lookups): its share of the hemisphere's solid angle, its radius at the hit.

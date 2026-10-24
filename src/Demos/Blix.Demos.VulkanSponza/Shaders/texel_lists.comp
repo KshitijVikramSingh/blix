@@ -28,7 +28,7 @@ layout(std430, set = 0, binding = 2) readonly buffer ListTexels { uint listTexel
 layout(std430, set = 0, binding = 3) readonly buffer ListStart { uint listStart[]; };      // its first word
 layout(std430, set = 0, binding = 4) readonly buffer ListWords { uint words[]; };
 layout(std430, set = 0, binding = 5) readonly buffer ListNorm { vec2 listNorm[]; };       // 1 / its rays, its scale
-layout(std430, set = 0, binding = 6) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 6) readonly buffer Texels { uvec4 texels[]; };
 #include "texel_record.glsl"
 layout(std430, set = 0, binding = 7) readonly buffer SunNodeBits { uint sunBits[]; };
 layout(std430, set = 0, binding = 8) readonly buffer CellLight { uint cellLight[]; };

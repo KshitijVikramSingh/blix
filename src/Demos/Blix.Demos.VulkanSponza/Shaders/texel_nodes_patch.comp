@@ -18,7 +18,7 @@ layout(set = 0, binding = 0) uniform NodesPatch {
     vec4 uClear;      // x 1: each end's lift half its room at most (TexelClear, PatchClear: texel_clear.comp); y the first lightmap record
 } u;
 
-layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 1) readonly buffer Texels { uvec4 texels[]; };
 #include "texel_record.glsl"
 layout(std430, set = 0, binding = 2) readonly buffer SunNodesLive { uint liveIds[]; };
 layout(std430, set = 0, binding = 3) buffer NodeRays { vec4 nodeRays[]; };          // 2 a ray: origin, tMin; dir, tMax

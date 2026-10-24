@@ -44,7 +44,7 @@ layout(set = 0, binding = 0) uniform Lean {
 } u;
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
-layout(std430, set = 0, binding = 2) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Texels { uvec4 texels[]; };
 #include "texel_record.glsl"
 layout(std430, set = 0, binding = 3) readonly buffer NodeRays { vec4 nodeRays[]; };
 layout(std430, set = 0, binding = 4) readonly buffer NodeHits { uvec4 nodeHits[]; };

@@ -27,7 +27,7 @@ layout(set = 0, binding = 0) uniform SunNodesRays {
                    // w a near round's reach (--near-cut, texel_nodes_shade.glsl FarPart; 0 none)
 } u;
 
-layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 1) readonly buffer Texels { uvec4 texels[]; };
 #include "texel_record.glsl"
 layout(std430, set = 0, binding = 2) readonly buffer SunNodesLive { uint liveIds[]; };
 layout(std430, set = 0, binding = 3) writeonly buffer NodeRays { vec4 nodeRays[]; };   // 2 a ray: origin, tMin; dir, tMax

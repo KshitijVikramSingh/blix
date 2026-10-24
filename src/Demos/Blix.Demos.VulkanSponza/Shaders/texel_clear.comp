@@ -14,7 +14,7 @@ layout(set = 0, binding = 0) uniform TexelClearParams {
     vec4 uClear;   // x the chunk's first live texel, y its texels, z the reach, w the mode
 } u;
 
-layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 1) readonly buffer Texels { uvec4 texels[]; };
 #include "texel_record.glsl"
 layout(std430, set = 0, binding = 2) readonly buffer SunNodesLive { uint liveIds[]; };
 layout(std430, set = 0, binding = 3) buffer NodeRays { vec4 nodeRays[]; };          // 2 a ray: origin, tMin; dir, tMax

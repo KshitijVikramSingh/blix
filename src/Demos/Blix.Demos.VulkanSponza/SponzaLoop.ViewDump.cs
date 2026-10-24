@@ -72,7 +72,13 @@ internal sealed partial class SponzaLoop
         Texture("normal.rgba16f", graph.GetColorTexture(SampleablePrepassNormal));
         if (lightmapEnabled) Texture("lightmap_texel.r32u", graph.GetColorTexture(lightmapTexelHandle));
         if (!lightmapIndexTexture.Equals(default(TextureHandle))) Texture("lightmap_index.r32u", lightmapIndexTexture);
-        Buffer("texels.f32x8", texelBuffer, (long)texelCount * 32);
+        // Decoded to two vec4s a texel, as the tools read them (the GPU's are packed: SponzaLoop.TexelRecords.cs).
+        if (!texelBuffer.Equals(default(GpuBufferHandle)) && texelCount > 0)
+        {
+            var records = MemoryMarshal.AsBytes(ReadTexelRecords(0, texelCount).AsSpan()).ToArray();
+            File.WriteAllBytes(Path.Combine(dir, "texels.f32x8"), records);
+            files["texels.f32x8"] = new { bytes = records.Length };
+        }
         Buffer("sky.u32x2", splitSkyBuffer, (long)texelCount * 8);
         Buffer("sun.u32x2", splitSunBuffer, (long)texelCount * 8);
         Buffer("resolved.u32x2", texelResolvedBuffer, (long)texelCount * 8);

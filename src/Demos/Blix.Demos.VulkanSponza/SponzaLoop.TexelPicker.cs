@@ -397,7 +397,8 @@ internal sealed partial class SponzaLoop
         uint[] Words(GpuBufferHandle b, int offset, int count) => Read(b, offset, count * 4) is { } r ? MemoryMarshal.Cast<byte, uint>(r.AsSpan()).ToArray() : new uint[count];
         int Byte(GpuBufferHandle b) => Read(b, (int)(id / 4 * 4), 4) is { } r ? (int)((BitConverter.ToUInt32(r, 0) >> (8 * (int)(id % 4))) & 255u) : -1;
         static float Lum(uint w) { var c = UnpackRgb9e5(w); return 0.2126f * c.X + 0.7152f * c.Y + 0.0722f * c.Z; }
-        var rec = Floats(texelBuffer, (int)id * 32, 8);
+        var two = id < texelCount ? ReadTexelRecords((int)id, 1) : new Vector4[2];
+        var rec = new[] { two[0].X, two[0].Y, two[0].Z, two[0].W, two[1].X, two[1].Y, two[1].Z, two[1].W };
         var pos = new Vector3(rec[0], rec[1], rec[2]);
         var nrm = new Vector3(rec[4], rec[5], rec[6]);
         var atlas = lightmapTexels && id >= lightmapFirstRecord;

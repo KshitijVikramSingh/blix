@@ -1083,7 +1083,7 @@ internal sealed partial class SponzaLoop
         var count = texelsToo ? texelCount : 0;
         var words = (toSuns.Length + 31) / 32;
         device.WaitIdle();
-        var texels = texelsToo ? MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(texelBuffer, 0, count * 32).AsSpan()).ToArray() : Array.Empty<Vector4>();
+        var texels = texelsToo ? ReadTexelRecords(0, count) : Array.Empty<Vector4>();
         var reach = rayReach;
         var directions = toSuns.Select(d => new Vector4(d, 0f)).ToArray();
         sunNodeBitDirections = directions;

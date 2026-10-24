@@ -31,7 +31,7 @@ layout(set = 0, binding = 2) uniform sampler2D uPrepassNormal;
 layout(set = 0, binding = 12) uniform sampler2D uTexelCascadeMaps[3];
 #include "shadow.glsl"
 layout(std430, set = 0, binding = 3) readonly buffer TexelHash { uvec4 texelHash[]; };
-layout(std430, set = 0, binding = 4) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 4) readonly buffer Texels { uvec4 texels[]; };
 #include "texel_record.glsl"
 layout(std430, set = 0, binding = 5) readonly buffer TexelLight { vec4 texelLight[]; };
 layout(std430, set = 0, binding = 6) buffer TexelStamp { uint texelStamp[]; };

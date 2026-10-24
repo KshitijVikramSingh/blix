@@ -15,7 +15,7 @@ layout(set = 0, binding = 0) uniform SkyVisFilter {
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer TexelHash { uvec4 texelHash[]; };
-layout(std430, set = 0, binding = 2) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Texels { uvec4 texels[]; };
 #include "texel_record.glsl"
 layout(set = 0, binding = 3) uniform usampler2D uLightmapIndexTex;
 layout(std430, set = 0, binding = 4) readonly buffer SkyIn { uint skyIn[]; };    // [texel id / 4]: the cook's, 1..255, 0 none

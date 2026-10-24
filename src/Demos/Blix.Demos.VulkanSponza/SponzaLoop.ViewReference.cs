@@ -65,7 +65,7 @@ internal sealed partial class SponzaLoop
             {
                 var first = lightmapFirstRecord;
                 var count = texelCount - first;
-                var recs = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(texelBuffer, checked(first * 32), checked(count * 32)).AsSpan()).ToArray();
+                var recs = ReadTexelRecords(first, count);
                 var through = new List<int>();
                 var opaque = new List<int>();
                 for (var i = 0; i < count; i++) (MathF.Abs(recs[2 * i].W) > 4.5f ? through : opaque).Add(i);

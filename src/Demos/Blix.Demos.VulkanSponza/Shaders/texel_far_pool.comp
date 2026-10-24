@@ -39,7 +39,7 @@ layout(set = 0, binding = 0) uniform FarPool {
                       // sun's column + 1 when the sky's part is kept: the light judged and the moment the sun's alone
 } u;
 
-layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 1) readonly buffer Texels { uvec4 texels[]; };
 #include "texel_record.glsl"
 layout(std430, set = 0, binding = 2) readonly buffer NodeIds { uint nodeIds[]; };
 layout(std430, set = 0, binding = 3) readonly buffer SunNodeHash { uint cookHash[]; };

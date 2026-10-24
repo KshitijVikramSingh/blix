@@ -152,7 +152,7 @@ layout(std430, set = 0, binding = 9) readonly buffer SurfaceIndex { uint surface
 #define BLIX_SURFACE_INDEX(i) surfaceIndex[i]
 #include "probe_surface.glsl"
 layout(std430, set = 0, binding = 10) readonly buffer TexelHash { uvec4 texelHash[]; };
-layout(std430, set = 0, binding = 11) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 11) readonly buffer Texels { uvec4 texels[]; };
 #include "texel_record.glsl"
 layout(std430, set = 0, binding = 12) readonly buffer TexelLight { vec4 texelLight[]; };
 // A texel's old light while its gather for a new sun is young (texel_gather.comp): blended out over 256 rays.

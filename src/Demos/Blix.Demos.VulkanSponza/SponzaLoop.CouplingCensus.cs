@@ -107,7 +107,7 @@ internal sealed partial class SponzaLoop
         }
 
         // The texels' records, read back once (position + samples, normal + level).
-        var records = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(texelBuffer, 0, texelCount * 32).AsSpan()).ToArray();
+        var records = ReadTexelRecords(0, texelCount);
         var n = Math.Min(couplingCensus, live.Length);
         var stride = live.Length / (double)n;
         var R = sunNodeRays;

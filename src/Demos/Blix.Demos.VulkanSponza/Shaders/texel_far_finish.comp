@@ -30,7 +30,7 @@ layout(set = 0, binding = 0) uniform FarFinish {
                     // sun's column + 1 when the sky's part is kept (the moment the sun's alone: texel_nodes_shade.glsl)
 } u;
 
-layout(std430, set = 0, binding = 1) readonly buffer Texels { vec4 texels[]; };
+layout(std430, set = 0, binding = 1) readonly buffer Texels { uvec4 texels[]; };
 #include "texel_record.glsl"
 layout(std430, set = 0, binding = 2) readonly buffer NodeIds { uint nodeIds[]; };
 layout(std430, set = 0, binding = 3) readonly buffer TexelPatch { int texelPatch[]; };

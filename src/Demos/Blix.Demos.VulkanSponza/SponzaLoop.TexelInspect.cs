@@ -98,12 +98,12 @@ internal sealed partial class SponzaLoop
                 if (ax < 0 || ay < 0 || ax >= lightmapAtlasWidth || ay >= lightmapAtlasHeight) { Console.WriteLine($"    [{i}] off the atlas"); continue; }
                 var id = lightmapIndexMapCpu is { } cpuMap ? cpuMap[ay * lightmapAtlasWidth + ax] : 0xFFFFFFFFu;
                 if (id == 0xFFFFFFFFu) { Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    [{i}] cell ({ax},{ay}) w {weight:0.00}: EMPTY")); continue; }
-                var rec = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(texelBuffer, (int)id * 32, 32).AsSpan()).ToArray();
+                var rec = ReadTexelRecords((int)id, 1);
                 // The side the pixel shows, as texel.glsl picks it.
                 if (rec[0].W < 0f && Vector3.Dot(new Vector3(rec[1].X, rec[1].Y, rec[1].Z), pixelN) < 0f)
                 {
                     id += 1;
-                    rec = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(texelBuffer, (int)id * 32, 32).AsSpan()).ToArray();
+                    rec = ReadTexelRecords((int)id, 1);
                 }
                 var pos = new Vector3(rec[0].X, rec[0].Y, rec[0].Z);
                 var nrm = new Vector3(rec[1].X, rec[1].Y, rec[1].Z);
