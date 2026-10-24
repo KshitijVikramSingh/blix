@@ -68,7 +68,12 @@ public sealed record DispatchCommand(
     byte[]? PushConstants = null,
     // GPU buffers bound to the program's storage blocks by name. A dispatch that binds any is fenced on both
     // sides: after every earlier read of a GPU buffer, before every later one.
-    IReadOnlyList<ShaderBufferBinding>? Buffers = null) : RenderCommand
+    IReadOnlyList<ShaderBufferBinding>? Buffers = null,
+    // Indirect: the group counts read on the GPU from this buffer at IndirectOffset (three uints, x y z, as
+    // VkDispatchIndirectCommand), GroupsX/Y/Z ignored -- a dispatch sized by an earlier one's result without the CPU
+    // reading it back. The buffer is fenced like a bound one: an earlier dispatch's write is visible to the fetch.
+    GpuBufferHandle? IndirectArgs = null,
+    long IndirectOffset = 0) : RenderCommand
 {
     private readonly byte[]? pushConstants = PushConstants is null ? null : PushConstants.AsSpan().ToArray();
 

@@ -272,6 +272,7 @@ internal sealed partial class SponzaLoop
         {
             foreach (var g in opaqueGroups)
             {
+                if (g.IsMask && SkipMaskDraws) continue;
                 DrawSceneGroup(scope, SceneListCameraLate, g, g.IsMask ? prepassMaskPipeline : prepassOpaquePipeline,
                     perFrame, Array.Empty<ShaderTextureBinding>(), material: g.IsMask ? g.Material : null);
             }
@@ -810,6 +811,7 @@ internal sealed partial class SponzaLoop
             if (skipPrepass) return;
             foreach (var g in opaqueGroups)
             {
+                if (g.IsMask && SkipMaskDraws) continue;
                 DrawSceneGroup(scope, SceneListCamera, g, g.IsMask ? prepassMaskPipeline : prepassOpaquePipeline,
                     perFrame, Array.Empty<ShaderTextureBinding>(), material: g.IsMask ? g.Material : null);
             }
@@ -955,6 +957,7 @@ internal sealed partial class SponzaLoop
             var leanNow = LitLeanNow;
             foreach (var g in opaqueGroups)
             {
+                if (g.IsMask && SkipMaskDraws) continue;
                 var pipeline = g.Pipeline;
                 if (skipPrepass)
                 {
@@ -1778,6 +1781,10 @@ internal sealed partial class SponzaLoop
     private bool LitLeanNow => litLean && vizChannel <= 0f && !fog.Enabled
         && tunePanel.Value("uVisualizeAmbient") <= 0.5f && tunePanel.Value("uVisualizeCascades") <= 0.5f
         && (!rtShadowBound.Equals(default(GpuBufferHandle)) || !shadows.Enabled || abMode == "shadow" && AbOffPhase);
+
+    // BLIX_SKIP_MASK=1: the alpha-masked groups (foliage) left out of the pre-passes and the lit pass -- a cost probe, the
+    // GI untouched (its scene is cooked); the picture is missing them.
+    private static readonly bool SkipMaskDraws = Environment.GetEnvironmentVariable("BLIX_SKIP_MASK") == "1";
 
     // BLIX_LIT_STOP=1..4: lit_body.glsl out after the albedo and normal map / the direct sun / the cloth / the ambient -- a
     // cost probe (frame.uTexelShape.w), its picture garbage.

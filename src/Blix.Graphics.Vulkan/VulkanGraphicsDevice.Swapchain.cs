@@ -1199,6 +1199,7 @@ public sealed partial class VulkanGraphicsDevice
                 Vk.CmdWriteTimestamp(cmd, PipelineStageFlags.ColorAttachmentOutputBit, gpuTimingPool, endIndex);
             }
             Vk.CmdEndRenderPass(cmd);
+            if (pass.Description.WritesGpuBuffers) FenceGraphicsBufferWrites(cmd);
             EndGpuLabel(cmd);
 
             if (canTimePass)
@@ -1756,8 +1757,8 @@ public sealed partial class VulkanGraphicsDevice
                 PipelineStageFlags.ComputeShaderBit, AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit);
         }
 
-        var bindsGpuBuffers = d.Buffers is { Count: > 0 };
-        if (bindsGpuBuffers) FenceGpuBuffers(cmd, beforeDispatch: true);
+        var bindsGpuBuffers = d.Buffers is { Count: > 0 } || d.IndirectArgs is not null;
+        if (bindsGpuBuffers) FenceGpuBuffers(cmd, beforeDispatch: true, indirect: d.IndirectArgs is not null);
 
         if (d.Uniforms.Count > 0) WriteUniformsAcrossSets(prog, frameSlot, d.Uniforms);
         Vk.CmdBindPipeline(cmd, PipelineBindPoint.Compute, pipe.Pipeline);
@@ -1766,7 +1767,15 @@ public sealed partial class VulkanGraphicsDevice
         {
             PushConstantsToCommandBuffer(cmd, pipe.Layout, prog.Interface.PushConstants, pc);
         }
-        Vk.CmdDispatch(cmd, (uint)d.GroupsX, (uint)d.GroupsY, (uint)d.GroupsZ);
+        if (d.IndirectArgs is { } args)
+        {
+            var entry = GetGpuBuffer(args);
+            if (d.IndirectOffset < 0 || (ulong)d.IndirectOffset + 12 > entry.Size)
+                throw new ArgumentOutOfRangeException(nameof(d.IndirectOffset),
+                    $"Indirect dispatch in '{passName}': 12 bytes at {d.IndirectOffset} are outside GPU buffer '{entry.Name}' ({entry.Size} bytes).");
+            Vk.CmdDispatchIndirect(cmd, entry.Buffer, (ulong)d.IndirectOffset);
+        }
+        else Vk.CmdDispatch(cmd, (uint)d.GroupsX, (uint)d.GroupsY, (uint)d.GroupsZ);
         if (bindsGpuBuffers) FenceGpuBuffers(cmd, beforeDispatch: false);
 
         for (var i = 0; i < d.Textures.Count; i++)

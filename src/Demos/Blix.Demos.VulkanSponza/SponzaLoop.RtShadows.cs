@@ -223,9 +223,9 @@ internal sealed partial class SponzaLoop
             rtShadowSky = Enumerable.Range(0, RtSkyRays ? slots : 0)
                 .Select(s => Own(device.CreateGpuBuffer(width * height * 32, name: $"sponza.rt-shadow.sky{s}"))).ToArray();
             // The packed rays and their pixels live from this frame's rays pass to its trace (joined inside the frame), and
-            // the frames are chained on the GPU (VulkanGraphicsDevice.ChainFrames): one copy, not one a frame in flight --
+            // the frames are chained on the GPU (IGraphicsDevice.ChainFrames): one copy, not one a frame in flight --
             // 36 B a pixel twice over, ~340 MB at 2880x1620 (2026-10-24). --no-frame-chain: one a slot again.
-            var rayCopies = device is Blix.Graphics.Vulkan.VulkanGraphicsDevice { ChainFrames: false } ? slots : 1;
+            var rayCopies = device.ChainFrames ? 1 : slots;
             rtShadowPacked = Enumerable.Range(0, RtPack ? rayCopies : 0)
                 .Select(s => Own(device.CreateGpuBuffer(width * height * 32, name: $"sponza.rt-shadow.packed{s}"))).ToArray();
             rtShadowPixelOf = Enumerable.Range(0, RtPack ? rayCopies : 0)

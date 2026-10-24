@@ -127,6 +127,16 @@ public sealed class GraphicsPassBuilder
         return this;
     }
 
+    // Its draws write GPU buffers (a fragment shader appending to a list, an atomic count): the backend fences them
+    // after the render pass ends, visible to every later dispatch, indirect fetch, vertex or fragment read. Only
+    // dispatches fence GPU buffers otherwise -- a graphics pass's buffer writes were never ordered against anything.
+    public GraphicsPassBuilder WritesGpuBuffers()
+    {
+        EnsureMutable();
+        entry.WritesGpuBuffers = true;
+        return this;
+    }
+
     // Closed set of shaders this pass supports. Drawing with one not in
     // the list is rejected at draw time.
     public GraphicsPassBuilder Shader(params ShaderInterface[] shaders)

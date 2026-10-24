@@ -208,9 +208,9 @@ internal sealed partial class SponzaLoop
         metalDeviceQueue = args.Flag("metal-device-queue");
         tracerBatchesApart = args.Flag("tracer-batches-apart");
         clipmapWaveInFrame = args.Flag("clipmap-wave-inframe");
-        // --no-frame-chain: frames may overlap on the GPU again (the A/B for VulkanGraphicsDevice.ChainFrames).
-        if (args.Flag("no-frame-chain") && device is Blix.Graphics.Vulkan.VulkanGraphicsDevice vulkan) vulkan.ChainFrames = false;
-        if (args.Flag("no-pass-barriers") && device is Blix.Graphics.Vulkan.VulkanGraphicsDevice vk2) vk2.ExplicitPassBarriers = false;
+        // --no-frame-chain: frames may overlap on the GPU again (the A/B for IGraphicsDevice.ChainFrames).
+        if (args.Flag("no-frame-chain")) device.ChainFrames = false;
+        if (args.Flag("no-pass-barriers")) device.ExplicitPassBarriers = false;
         // --rt-no-overlap: no join, so the frame waits for the trace right after it (the overlap's control).
         rtNoOverlap = args.Flag("rt-no-overlap");
         rtNoPack = args.Flag("no-rt-pack");

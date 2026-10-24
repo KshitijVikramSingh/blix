@@ -239,17 +239,36 @@ public sealed partial class VulkanGraphicsDevice
         | PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.ComputeShaderBit;
     private const AccessFlags GpuBufferAccess = AccessFlags.IndirectCommandReadBit | AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit;
 
-    private unsafe void FenceGpuBuffers(CommandBuffer cmd, bool beforeDispatch)
+    // After a graphics pass whose draws wrote GPU buffers (RenderPassDescription.WritesGpuBuffers): those writes,
+    // from the vertex or fragment stage, visible to every later reader -- an indirect fetch, a vertex, fragment or
+    // compute shader.
+    private unsafe void FenceGraphicsBufferWrites(CommandBuffer cmd)
+    {
+        var barrier = new MemoryBarrier
+        {
+            SType = StructureType.MemoryBarrier,
+            SrcAccessMask = AccessFlags.ShaderWriteBit,
+            DstAccessMask = GpuBufferAccess,
+        };
+        Vk.CmdPipelineBarrier(cmd, PipelineStageFlags.VertexShaderBit | PipelineStageFlags.FragmentShaderBit, GpuBufferReaders,
+            0, 1, &barrier, 0, null, 0, null);
+    }
+
+    // indirect: the dispatch also fetches its group counts from a GPU buffer (DispatchCommand.IndirectArgs), at the
+    // draw-indirect stage, so that fetch is in the second scope too.
+    private unsafe void FenceGpuBuffers(CommandBuffer cmd, bool beforeDispatch, bool indirect = false)
     {
         var barrier = new MemoryBarrier
         {
             SType = StructureType.MemoryBarrier,
             SrcAccessMask = beforeDispatch ? GpuBufferAccess : AccessFlags.ShaderWriteBit,
-            DstAccessMask = beforeDispatch ? AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit : GpuBufferAccess,
+            DstAccessMask = beforeDispatch
+                ? AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit | (indirect ? AccessFlags.IndirectCommandReadBit : 0)
+                : GpuBufferAccess,
         };
         Vk.CmdPipelineBarrier(cmd,
             beforeDispatch ? GpuBufferReaders : PipelineStageFlags.ComputeShaderBit,
-            beforeDispatch ? PipelineStageFlags.ComputeShaderBit : GpuBufferReaders,
+            beforeDispatch ? PipelineStageFlags.ComputeShaderBit | (indirect ? PipelineStageFlags.DrawIndirectBit : 0) : GpuBufferReaders,
             0, 1, &barrier, 0, null, 0, null);
     }
 }

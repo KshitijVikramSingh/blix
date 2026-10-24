@@ -482,7 +482,8 @@ public sealed partial class RenderGraph : IDisposable
             var desc = new Blix.Graphics.RenderPassDescription(
                 Target: surface,
                 ClearColors: clearColors,
-                ClearDepth: clearDepth);
+                ClearDepth: clearDepth,
+                WritesGpuBuffers: gpass.WritesGpuBuffers);
             commandList.Pass(gpass.Name, desc, recorded.Scope);
         }
 
@@ -529,6 +530,8 @@ internal sealed class GraphicsPassEntry
     public List<ColorAttachmentBinding> ColorTargets { get; } = new();
     public DepthAttachmentBinding? Depth { get; set; }
     public List<TextureView> Reads { get; } = new();
+    // GraphicsPassBuilder.WritesGpuBuffers: its draws write GPU buffers, fenced after the pass.
+    public bool WritesGpuBuffers;
 
     // <b>Reads that are satisfied by the PREVIOUS frame, not this one.</b> A read edge normally has
     // to follow the write that produces it, which is the check that catches a resource bound but

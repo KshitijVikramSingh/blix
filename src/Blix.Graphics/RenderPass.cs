@@ -39,4 +39,9 @@ public sealed record RenderPassDescription(
     bool ExternalJoinLater = false,
 
     // A join (RenderGraph.ExternalJoin): the name of the external pass whose work everything after this waits for.
-    string? ExternalJoin = null);
+    string? ExternalJoin = null,
+
+    // Graphics pass: its draws write GPU buffers (a fragment shader appending to a list, say), fenced after the
+    // render pass ends so a later dispatch, an indirect fetch or a draw sees them (GraphicsPassBuilder.WritesGpuBuffers).
+    // Without it only dispatches fence GPU buffers.
+    bool WritesGpuBuffers = false);

@@ -327,4 +327,12 @@ public interface IGraphicsDevice : IDisposable
 
     // The most samples a colour and depth target may have on this device (1 when MSAA is unavailable).
     int MaxMsaaSamples { get; }
+
+    // Each frame's GPU work starts after the previous frame's has ended. A device whose frames never overlap says true
+    // and ignores the set; one that chains them may let an A/B turn it off. A program sizes per-frame copies by it
+    // (one copy, not one a frame in flight, when chained).
+    bool ChainFrames { get => true; set { } }
+
+    // A memory barrier before every graphics pass, where the device inserts one; an A/B may turn it off.
+    bool ExplicitPassBarriers { get => true; set { } }
 }
