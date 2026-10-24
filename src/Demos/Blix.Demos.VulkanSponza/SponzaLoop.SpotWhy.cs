@@ -71,7 +71,7 @@ internal sealed partial class SponzaLoop
         device.WaitIdle();
         spotSky = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(EnsureLivePart(false), 0, texelCount * 8).AsSpan()).ToArray();
         spotSun = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(EnsureLivePart(true), 0, texelCount * 8).AsSpan()).ToArray();
-        spotSkyDetail = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(splitSkyDetailBuffer, 0, texelCount * 4).AsSpan()).ToArray();
+        spotSkyDetail = PartDetailsDropped ? new uint[texelCount] : MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(splitSkyDetailBuffer, 0, texelCount * 4).AsSpan()).ToArray();
     }
 
     private void SpotWhyCompare(bool fine)
@@ -82,7 +82,7 @@ internal sealed partial class SponzaLoop
         device.WaitIdle();
         var gSky = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(EnsureLivePart(false), 0, texelCount * 8).AsSpan()).ToArray();
         var gSun = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(EnsureLivePart(true), 0, texelCount * 8).AsSpan()).ToArray();
-        var gDetail = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(splitSkyDetailBuffer, 0, texelCount * 4).AsSpan()).ToArray();
+        var gDetail = PartDetailsDropped ? new uint[texelCount] : MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(splitSkyDetailBuffer, 0, texelCount * 4).AsSpan()).ToArray();
         var texels = ReadTexelRecords(0, texelCount);
         static float L(Vector3 c) => 0.2126f * c.X + 0.7152f * c.Y + 0.0722f * c.Z;
         var irr = L(EffectiveSunIrradiance);

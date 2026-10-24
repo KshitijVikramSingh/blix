@@ -34,6 +34,9 @@ layout(std430, set = 0, binding = 6) buffer SplitSky { uvec2 skyPart[]; };
 layout(std430, set = 0, binding = 7) buffer SplitSun { uvec2 sunPart[]; };
 layout(std430, set = 0, binding = 20) buffer TexelProvenance { uint provenance[]; };
 #include "provenance.glsl"
+// The parts' detail words (8 B a texel) only without the light-agnostic record: with it, its shapes carry the direction
+// and the cooked sky visibility the sky (SponzaLoop.SplitDetail.cs, PartDetailsDropped) -- a 16 B placeholder is bound,
+// and writes past it are left out (2026-10-24).
 layout(std430, set = 0, binding = 8) buffer SkyDetail { uint skyDetail[]; };
 layout(std430, set = 0, binding = 9) buffer SunDetail { uint sunDetail[]; };
 layout(std430, set = 0, binding = 15) readonly buffer DirOpen { uint dirOpen[]; };            // [texel id]: 8 nibbles
@@ -175,6 +178,7 @@ void main() {
         float ratio = mine >= 0.0 && open > 1e-3 ? clamp(mine / open, 0.0, 1.0) : 1.0;
         vis = clamp(patchSky * ratio, 0.0, 1.0);
     }
+    if (id >= uint(skyDetail.length())) return;   // the record's: no detail words
     if (u.uColumns.w < 0.5) skyDetail[id] = detailPack(skyTilt, vis);
     sunDetail[id] = detailPack(sunTilt, vis);
 }

@@ -29,6 +29,9 @@ layout(std430, set = 0, binding = 11) buffer TexelProvenance { uint provenance[]
 // texel's own: its provenance (5, the copy's) tells texel_compose.comp whose it is.
 layout(std430, set = 0, binding = 13) buffer TexelOwnShape { uint ownShape[]; };
 #include "provenance.glsl"
+// The parts' detail words (8 B a texel) only without the light-agnostic record: with it, its shapes carry the direction
+// and the cooked sky visibility the sky (SponzaLoop.SplitDetail.cs, PartDetailsDropped) -- a 16 B placeholder is bound,
+// and writes past it are left out (2026-10-24).
 layout(std430, set = 0, binding = 6) buffer SkyDetail { uint skyDetail[]; };
 layout(std430, set = 0, binding = 7) buffer SunDetail { uint sunDetail[]; };
 layout(std430, set = 0, binding = 8) readonly buffer AoBytes { uint aoBytes[]; };
@@ -136,8 +139,9 @@ void main() {
             vec3 cnn = normalize(cn);
             vec3 c1 = normalize(cross(abs(cnn.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0), cnn));
             vec3 c2 = cross(cnn, c1);
-            vec3 cSky = texelDetailUnpack(skyDetail[cid]);
-            vec3 cSun = texelDetailUnpack(sunDetail[cid]);
+            bool details = cid < uint(skyDetail.length());
+            vec3 cSky = details ? texelDetailUnpack(skyDetail[cid]) : vec3(0.0);
+            vec3 cSun = details ? texelDetailUnpack(sunDetail[cid]) : vec3(0.0);
             vec3 gSky = c1 * cSky.x + c2 * cSky.y;
             vec3 gSun = c1 * cSun.x + c2 * cSun.y;
             skyD += w * vec3(dot(gSky, f1), dot(gSky, f2), cSky.z);
@@ -208,6 +212,7 @@ void main() {
         ownShape[id * 3u + 1u] = has ? texelShapePack(shapeSum1 / shapeW) : 0u;
         ownShape[id * 3u + 2u] = has ? texelShapePack(shapeSum2 / shapeW) : 0u;
     }
+    if (id >= uint(skyDetail.length())) return;   // the record's: no detail words
     if (u.uKeep.x < 0.5) skyDetail[id] = texelDetailPack(skyD.xy, min(skyD.z, texelDetailUnpack(skyDetail[id]).z));
     sunDetail[id] = texelDetailPack(sunD.xy, min(sunD.z, texelDetailUnpack(sunDetail[id]).z));
 }

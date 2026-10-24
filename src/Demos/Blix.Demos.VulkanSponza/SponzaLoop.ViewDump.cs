@@ -83,8 +83,11 @@ internal sealed partial class SponzaLoop
         Buffer("sun.u32x2", splitSunBuffer, (long)texelCount * 8);
         Buffer("resolved.u32x2", texelResolvedBuffer, (long)texelCount * 8);
         // The detail (texel.glsl's pack: the tilt, the sky visibility): each part's, and the composed one the incident reads.
-        Buffer("sky_detail.u32", splitSkyDetailBuffer, (long)texelCount * 4);
-        Buffer("sun_detail.u32", splitSunDetailBuffer, (long)texelCount * 4);
+        if (!PartDetailsDropped)
+        {
+            Buffer("sky_detail.u32", splitSkyDetailBuffer, (long)texelCount * 4);
+            Buffer("sun_detail.u32", splitSunDetailBuffer, (long)texelCount * 4);
+        }
         Buffer("detail.u32", texelDetailBuffer, (long)texelCount * 4);
         Buffer("provenance.u8", texelProvenanceBuffer, Math.Min(texelProvenanceBytes, (texelCount + 3) / 4 * 4));
         Buffer("rays.u16", texelRaysBuffer, Math.Min(texelRaysBytes, (texelCount + 1) / 2 * 4));

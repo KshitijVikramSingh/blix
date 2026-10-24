@@ -33,6 +33,9 @@ layout(std430, set = 0, binding = 4) readonly buffer TransferEntries { uvec2 ent
 layout(std430, set = 0, binding = 5) readonly buffer CellLight { uint cellLight[]; };
 layout(std430, set = 0, binding = 6) buffer SplitSky { uvec2 skyPart[]; };
 layout(std430, set = 0, binding = 7) buffer SplitSun { uvec2 sunPart[]; };
+// The parts' detail words (8 B a texel) only without the light-agnostic record: with it, its shapes carry the direction
+// and the cooked sky visibility the sky (SponzaLoop.SplitDetail.cs, PartDetailsDropped) -- a 16 B placeholder is bound,
+// and writes past it are left out (2026-10-24).
 layout(std430, set = 0, binding = 8) buffer SkyDetail { uint skyDetail[]; };
 layout(std430, set = 0, binding = 9) buffer SunDetail { uint sunDetail[]; };
 // A tail entry's patch (transfer_finalize.comp): its albedo (PatchTerms: 3 a patch, albedo first), its light per column,
@@ -182,6 +185,7 @@ void main() {
     float skyLum = dot(sky, lumW), sunLum = dot(sun, lumW);
     skyPart[id] = uvec2(packRgb9e5(sky), 0xFFFFu | 0x10000u);
     sunPart[id] = uvec2(packRgb9e5(sun * u.uInvIrr.rgb), 0xFFFFu | 0x10000u);
+    if (id >= uint(skyDetail.length())) return;   // the record's: no detail words
     skyDetail[id] = texelDetailPack(skyLum > 1e-9 ? skyTilt / skyLum : vec2(0.0), escaped);
     sunDetail[id] = texelDetailPack(sunLum > 1e-9 ? sunTilt / sunLum : vec2(0.0), escaped);
 }

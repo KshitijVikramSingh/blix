@@ -40,6 +40,9 @@ layout(std430, set = 0, binding = 16) buffer TexelProvenance { uint provenance[]
 // view dump): where neighbours stopped at different counts.
 layout(std430, set = 0, binding = 17) buffer TexelRays { uint texelRays[]; };
 #include "provenance.glsl"
+// The parts' detail words (8 B a texel) only without the light-agnostic record: with it, its shapes carry the direction
+// and the cooked sky visibility the sky (SponzaLoop.SplitDetail.cs, PartDetailsDropped) -- a 16 B placeholder is bound,
+// and writes past it are left out (2026-10-24).
 layout(std430, set = 0, binding = 9) buffer SkyDetail { uint skyDetail[]; };
 layout(std430, set = 0, binding = 10) buffer SunDetail { uint sunDetail[]; };
 layout(std430, set = 0, binding = 11) buffer Next { uint nextIds[]; };
@@ -188,7 +191,7 @@ void main() {
             float l = lum(accum[t * suns + k].rgb);
             vec2 tilt = l > 1e-9 ? d.xy / l : vec2(0.0);
             uint w = packDetail(tilt, detailAccum[t * suns].z / u.uSun.w);
-            if (sunColumn) sunDetail[id] = w; else skyDetail[id] = w;
+            if (id < uint(skyDetail.length())) { if (sunColumn) sunDetail[id] = w; else skyDetail[id] = w; }
         }
     }
     statePasses[place] = passes;

@@ -81,13 +81,8 @@ internal sealed partial class SponzaLoop
         var clock = Stopwatch.StartNew();
         var sky = EnsureLivePart(false);
         var sun = EnsureLivePart(true);
-        GpuBufferHandle Detail(ref GpuBufferHandle b, string name)
-        {
-            if (b.Equals(default(GpuBufferHandle))) b = Own(device.CreateGpuBuffer(Math.Max(texelCount, 1) * 4, new byte[Math.Max(texelCount, 1) * 4], name));
-            return b;
-        }
-        var skyDetail = Detail(ref splitSkyDetailBuffer, "sponza.split.sky-detail");
-        var sunDetail = Detail(ref splitSunDetailBuffer, "sponza.split.sun-detail");
+        var skyDetail = PartDetail(ref splitSkyDetailBuffer, sunPart: false);
+        var sunDetail = PartDetail(ref splitSunDetailBuffer, sunPart: true);
         var irr = EffectiveSunIrradiance;
         var inv = new Vector3(irr.X > 0 ? 1f / irr.X : 0f, irr.Y > 0 ? 1f / irr.Y : 0f, irr.Z > 0 ? 1f / irr.Z : 0f);
         // The patches' light by where it comes from (patch_dir.comp), for this light.
@@ -634,8 +629,8 @@ internal sealed partial class SponzaLoop
         }
         var sky = EnsureLivePart(false);
         var sun = EnsureLivePart(true);
-        var skyDetail = splitSkyDetailBuffer;
-        var sunDetail = splitSunDetailBuffer;
+        var skyDetail = PartDetail(ref splitSkyDetailBuffer, sunPart: false);
+        var sunDetail = PartDetail(ref splitSunDetailBuffer, sunPart: true);
         if (skyDetail.Equals(default(GpuBufferHandle)) || sunDetail.Equals(default(GpuBufferHandle))) return;
         var declared = transferFineInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
         const int perDispatch = 65535 * 64;
@@ -1028,13 +1023,8 @@ internal sealed partial class SponzaLoop
         var clock = Stopwatch.StartNew();
         var sky = EnsureLivePart(false);
         var sun = EnsureLivePart(true);
-        GpuBufferHandle Detail(ref GpuBufferHandle b, string name)
-        {
-            if (b.Equals(default(GpuBufferHandle))) b = Own(device.CreateGpuBuffer(Math.Max(texelCount, 1) * 4, new byte[Math.Max(texelCount, 1) * 4], name));
-            return b;
-        }
-        var skyDetail = Detail(ref splitSkyDetailBuffer, "sponza.split.sky-detail");
-        var sunDetail = Detail(ref splitSunDetailBuffer, "sponza.split.sun-detail");
+        var skyDetail = PartDetail(ref splitSkyDetailBuffer, sunPart: false);
+        var sunDetail = PartDetail(ref splitSunDetailBuffer, sunPart: true);
         var irr = EffectiveSunIrradiance;
         var inv = new Vector3(irr.X > 0 ? 1f / irr.X : 0f, irr.Y > 0 ? 1f / irr.Y : 0f, irr.Z > 0 ? 1f / irr.Z : 0f);
         var declared = transferApplyInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();

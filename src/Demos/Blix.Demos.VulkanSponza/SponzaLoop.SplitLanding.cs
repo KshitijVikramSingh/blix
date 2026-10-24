@@ -197,10 +197,8 @@ internal sealed partial class SponzaLoop
                 var from = sunNodeDetailWords[k];
                 var detail = new uint[count];
                 Parallel.For(0, count, t => detail[t] = from[(int)ids[first + t]]);
-                ref var detailBuffer = ref (sunPart ? ref splitSunDetailBuffer : ref splitSkyDetailBuffer);
-                if (detailBuffer.Equals(default(GpuBufferHandle)))
-                    detailBuffer = Own(device.CreateGpuBuffer(Math.Max(texelCount, 1) * 4, new byte[Math.Max(texelCount, 1) * 4], sunPart ? "sponza.split.sun-detail" : "sponza.split.sky-detail"));
-                Scatter(detailBuffer, idsBuffer, detail, count, 1);
+                var detailBuffer = PartDetail(ref sunPart ? ref splitSunDetailBuffer : ref splitSkyDetailBuffer, sunPart);
+                if (!PartDetailsDropped) Scatter(detailBuffer, idsBuffer, detail, count, 1);
             }
         }
         RetireGpuBuffer(idsBuffer);

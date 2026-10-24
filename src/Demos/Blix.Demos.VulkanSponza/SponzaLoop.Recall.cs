@@ -60,6 +60,7 @@ internal sealed partial class SponzaLoop
         if (recallFiles is null || texelLiveIds is not { } live) return;
         var skyPath = recallFiles.Split(',')[0];
         if (ReadDetailFile(DetailPathFor(skyPath), texelCount) is not { } reference) { Console.WriteLine("[VulkanSponza] recall, sky: no reference detail."); return; }
+        if (PartDetailsDropped) { Console.WriteLine("[VulkanSponza] recall, sky: no detail words under the record (--no-texel-h4 for them)."); return; }
         device.WaitIdle();
         var mine = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(splitSkyDetailBuffer, 0, texelCount * 4).AsSpan()).ToArray();
         var coarseSet = new HashSet<uint>(transferGatherIds);
@@ -238,7 +239,8 @@ internal sealed partial class SponzaLoop
         w.Write(texelCount);
         foreach (var b in new[] { texelResolvedBuffer, splitSkyDetailBuffer, splitSunDetailBuffer })
         {
-            var bytes = b.Equals(default(GpuBufferHandle)) ? new byte[0] : device.ReadGpuBuffer(b, 0, b.Equals(texelResolvedBuffer) ? texelCount * 8 : texelCount * 4);
+            var bytes = b.Equals(default(GpuBufferHandle)) || (PartDetailsDropped && !b.Equals(texelResolvedBuffer)) ? new byte[0]
+                : device.ReadGpuBuffer(b, 0, b.Equals(texelResolvedBuffer) ? texelCount * 8 : texelCount * 4);
             w.Write(bytes.Length); w.Write(bytes);
         }
         Console.WriteLine($"[VulkanSponza] shot state dumped: {dumpParts}.shot");

@@ -126,10 +126,7 @@ internal sealed partial class SponzaLoop
 
     private GpuBufferHandle EnsureDetailBuffer(bool sunPart)
     {
-        ref var buffer = ref (sunPart ? ref splitSunDetailBuffer : ref splitSkyDetailBuffer);
-        if (buffer.Equals(default(GpuBufferHandle)))
-            buffer = Own(device.CreateGpuBuffer(Math.Max(texelCount, 1) * 4, new byte[Math.Max(texelCount, 1) * 4], sunPart ? "sponza.split.sun-detail" : "sponza.split.sky-detail"));
-        return buffer;
+        return PartDetail(ref sunPart ? ref splitSunDetailBuffer : ref splitSkyDetailBuffer, sunPart);
     }
 
     // A slice's passes done: resolved where it lies, and on. False when the sweep or a round ended here.

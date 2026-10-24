@@ -92,6 +92,7 @@ internal sealed partial class SponzaLoop
     {
         if (!splitDetailLanded) return;
         splitDetailLanded = false;
+        if (PartDetailsDropped) { splitComposeDirty = true; return; }
         if (splitSkyDetail is { } sky) splitSkyDetailBuffer = WriteDetail(splitSkyDetailBuffer, sky, "sponza.split.sky-detail");
         if (splitSunDetail is { } sun) splitSunDetailBuffer = WriteDetail(splitSunDetailBuffer, sun, "sponza.split.sun-detail");
         splitComposeDirty = true;
@@ -157,13 +158,29 @@ internal sealed partial class SponzaLoop
         catch (IOException e) { Console.WriteLine($"[VulkanSponza] texels: the cells' detail not cached ({e.Message})."); }
     }
 
+    // The parts' detail words (a tilt and a sky visibility each, 4 B a texel a part) are kept only without the light-agnostic
+    // record: with it (--texel-h4, the default) its shapes carry the direction and the cooked sky visibility the sky, and
+    // the detail buffers are one 16 B placeholder the shaders write nothing past (2026-10-24: 8 B a texel, Sponza's 140 MB).
+    private bool PartDetailsDropped => texelH4 && cookedSkyVis;
+    private GpuBufferHandle partDetailNone;
+    private GpuBufferHandle PartDetailNone =>
+        partDetailNone.Equals(default(GpuBufferHandle)) ? partDetailNone = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.split.detail.none")) : partDetailNone;
+    // A part's detail buffer, made at its first use (the placeholder when the record carries the direction).
+    private GpuBufferHandle PartDetail(ref GpuBufferHandle buffer, bool sunPart)
+    {
+        if (buffer.Equals(default(GpuBufferHandle)))
+            buffer = PartDetailsDropped ? PartDetailNone
+                : Own(device.CreateGpuBuffer(Math.Max(texelCount, 1) * 4, new byte[Math.Max(texelCount, 1) * 4], sunPart ? "sponza.split.sun-detail" : "sponza.split.sky-detail"));
+        return buffer;
+    }
+
     // The compose's detail buffers: the parts' (placeholders until any lands) and the composed one the incident pass reads.
     private IEnumerable<ShaderBufferBinding> DetailBindings()
     {
         var none = default(GpuBufferHandle);
         if (texelDetailBuffer.Equals(none)) texelDetailBuffer = Own(device.CreateGpuBuffer(Math.Max(texelCount, 1) * 4, name: "sponza.texels.detail"));
-        if (splitSkyDetailBuffer.Equals(none)) splitSkyDetailBuffer = Own(device.CreateGpuBuffer(Math.Max(texelCount, 1) * 4, name: "sponza.split.sky-detail"));
-        if (splitSunDetailBuffer.Equals(none)) splitSunDetailBuffer = Own(device.CreateGpuBuffer(Math.Max(texelCount, 1) * 4, name: "sponza.split.sun-detail"));
+        PartDetail(ref splitSkyDetailBuffer, sunPart: false);
+        PartDetail(ref splitSunDetailBuffer, sunPart: true);
         yield return new ShaderBufferBinding("TexelSkyDetail", splitSkyDetailBuffer);
         yield return new ShaderBufferBinding("TexelSunDetail", splitSunDetailBuffer);
         yield return new ShaderBufferBinding("TexelDetail", texelDetailBuffer);
