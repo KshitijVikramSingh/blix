@@ -21,8 +21,9 @@ internal sealed partial class SponzaLoop
     private const float RatioMax = 16f;
     // --sun-change-select T: a sun change gathers again only the texels the relit instant moved by over T (texel_ratio.comp,
     // mode 2); the rest keep it. Crytek Sponza's model (tools/gi-model/sun_change_select.py): over 10-20%, 42-48% of the
-    // texels, the rest as near the full gather as a second full gather is. 0: off (every texel, as before).
-    private float sunChangeSelect;
+    // texels, the rest as near the full gather as a second full gather is. 0: off (every texel, as before). 0.1 by default
+    // since 2026-10-25 (the coarse sweep alone: end to end every live texel 0.061 mean error against a full gather's 0.059).
+    private float sunChangeSelect = 0.1f;
     private GpuBufferHandle sunLandedBuffer, changedBitsBuffer;
     // The frame mode 2 marked the texels in (-1: not this change): read once past the frames in flight.
     private long changedMarkedFrame = -1;
