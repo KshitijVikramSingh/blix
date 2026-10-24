@@ -343,7 +343,7 @@ internal sealed partial class SponzaLoop
             sunNodeExactBatches[c] = DeclareShadowBatch("sun-nodes-exact" + tag);
             sunNodeShadePasses[c] = graph.ComputePass("sun-nodes-shade" + tag).Shader(sunNodeShadeInterface).Handle;
         }
-        DeclareSweepFrame();
+        DeclareSweepFrame(reflect);
     }
 
     private void CreateSunNodePipelines(string shaderDir)

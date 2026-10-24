@@ -22,6 +22,19 @@ internal sealed partial class SponzaLoop
     private bool sweepSliceInFrame;
     // A round's last slice resolved in the frame: its end (BeginGpuRefineRound's read-backs) waits for the next frame.
     private bool sweepRoundEndPending;
+    // The hit cells' sun (hit_cells.comp mode 1) at a light change, sweepCellsChunk work items a frame (--sweep-cells-chunk).
+    private PassHandle sweepCellsPass;
+    // The instant layer at a light change (ApplyPatchTexelsNow: patch_dir.comp, texel_patch_light.comp, texel_ratio.comp).
+    private PassHandle sweepPatchDirPass, sweepPatchTexelsPass, sweepRatioPass;
+    // A light change under --sweep-in-frame: its setup's dispatches recorded in the frame (SetupDispatch), not run at once.
+    private bool SetupInFrame => sweepInFrame && liveSkyGathered;
+
+    private void SetupDispatch(PassHandle pass, DispatchCommand command, string name)
+    {
+        if (SetupInFrame) graph.Dispatch(pass, command);
+        else device.DispatchNow(new[] { command }, name);
+    }
+    private int sweepCellsChunk = 65536;
     private PassHandle sweepRaysPass, sweepShadePass, sweepFarFinishPass, sweepFarPoolPass, sweepCensusPass, sweepResolvePass;
     private RayBatchPasses sweepClosestBatch;
 
@@ -33,8 +46,14 @@ internal sealed partial class SponzaLoop
     private bool SweepRecordedThisFrame => sweepRecordedFrame == framesRendered;
 
     // In this order: the frame runs its passes as declared.
-    private void DeclareSweepFrame()
+    private void DeclareSweepFrame(Func<string[], ShaderInterface> reflect)
     {
+        // Reflected where its pipeline is made (CreateTexelRatioPipeline), which can come after the graph's declaration.
+        texelRatioInterface ??= reflect(new[] { "texel_ratio.comp" });
+        sweepCellsPass = graph.ComputePass("sun-sweep-cells").Shader(hitCellsInterface).Handle;
+        sweepPatchDirPass = graph.ComputePass("sun-sweep-patch-dir").Shader(patchDirInterface).Handle;
+        sweepPatchTexelsPass = graph.ComputePass("sun-sweep-patch-texels").Shader(texelPatchLightInterface).Handle;
+        sweepRatioPass = graph.ComputePass("sun-sweep-ratio").Shader(texelRatioInterface).Handle;
         sweepRaysPass = graph.ComputePass("sun-sweep-rays").Shader(sunNodeRaysInterface).Handle;
         sweepClosestBatch = DeclareClosestBatch("sun-sweep-closest");
         sweepShadePass = graph.ComputePass("sun-sweep-shade").Shader(sunNodeShadeSplitInterface).Handle;
@@ -48,6 +67,7 @@ internal sealed partial class SponzaLoop
     {
         sweepInFrame = args.Flag("sweep-in-frame");
         if (args.Int("sweep-slice") is { } s) sweepSlice = Math.Clamp(s, 256, 32768);
+        if (args.Int("sweep-cells-chunk") is { } cc) sweepCellsChunk = Math.Clamp(cc, 1024, 4096 * 64);
         // Behind the frame is where the in-frame sweep runs (GatherInBackground).
         if (sweepInFrame) backgroundGather = true;
     }

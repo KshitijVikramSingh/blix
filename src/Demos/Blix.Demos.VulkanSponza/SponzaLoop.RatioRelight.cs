@@ -21,7 +21,7 @@ internal sealed partial class SponzaLoop
 
     private void CreateTexelRatioPipeline(Func<string[], ShaderInterface> reflect, string shaderDir)
     {
-        texelRatioInterface = reflect(new[] { "texel_ratio.comp" });
+        texelRatioInterface ??= reflect(new[] { "texel_ratio.comp" });
         texelRatioPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "texel_ratio.comp.spv")), texelRatioInterface, "texel_ratio")), "texel_ratio"));
     }
@@ -33,7 +33,7 @@ internal sealed partial class SponzaLoop
             sunRatioBuffer = Own(device.CreateGpuBuffer(texelCount * 4, new byte[texelCount * 4], "sponza.split.sun-ratio"));
         const int perDispatch = 65535 * 64;
         for (var first = 0; first < live.Length; first += perDispatch)
-            device.DispatchNow(new[] { new DispatchCommand(texelRatioPipeline, (Math.Min(perDispatch, live.Length - first) + 63) / 64, 1, 1,
+            SetupDispatch(sweepRatioPass, new DispatchCommand(texelRatioPipeline, (Math.Min(perDispatch, live.Length - first) + 63) / 64, 1, 1,
                 new ShaderUniform[] { new("uRatio", new Vector4Uniform(new Vector4(live.Length, mode, RatioMax, first))) },
                 Array.Empty<ShaderTextureBinding>(),
                 Buffers: new[]
@@ -42,7 +42,7 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("TexelSun", EnsureLivePart(true)),
                     new ShaderBufferBinding("SunRatio", sunRatioBuffer),
                     ProvenanceBinding(),
-                }) }, "texel-ratio");
+                }), "texel-ratio");
     }
 
     // The instant layer is in the sun part (ApplyPatchTexelsNow): relit by the held ratio if there is one, kept either way.

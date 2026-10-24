@@ -88,7 +88,7 @@ internal sealed partial class SponzaLoop
         // The patches' light by where it comes from (patch_dir.comp), for this light.
         var d = transportSolve!;
         var declaredDir = patchDirInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
-        device.DispatchNow(new[] { new DispatchCommand(patchDirPipeline, (d.Patches + 63) / 64, 1, 1,
+        SetupDispatch(sweepPatchDirPass, new DispatchCommand(patchDirPipeline, (d.Patches + 63) / 64, 1, 1,
             new ShaderUniform[] { new("uDir", new Vector4Uniform(new Vector4(d.Patches, LiveComponents, liveSkyEscapeBuffer.Equals(default(GpuBufferHandle)) ? 99f : LiveSky, 0f))) },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
@@ -100,7 +100,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("PatchSkyEscape", liveSkyEscapeBuffer.Equals(default(GpuBufferHandle)) ? patchDirSharesBuffer : liveSkyEscapeBuffer),
                 new ShaderBufferBinding("SkyGuideLum", liveSkyLumBuffer.Equals(default(GpuBufferHandle)) ? patchDirSharesBuffer : liveSkyLumBuffer),
                 new ShaderBufferBinding("PatchDirShares", patchDirSharesBuffer),
-            }.Where(b => declaredDir.Contains(b.Name)).ToArray()) }, "patch-dir");
+            }.Where(b => declaredDir.Contains(b.Name)).ToArray()), "patch-dir");
         PatchTexelsPass(1, sky, sun, skyDetail, sunDetail);
         RatioAtInstant();
         splitDetailLanded = true;
@@ -114,6 +114,13 @@ internal sealed partial class SponzaLoop
         DumpParts("instant", sunBits: true);   // BLIX_DUMP_PARTS: the instant layer, before any gather (ratio-relight study)
     }
 
+    // Mode 1 (the instant layer) is a light change's setup (SetupDispatch); mode 0 (the cook's openness) runs at once.
+    private void PatchTexelsDispatch(int mode, DispatchCommand command)
+    {
+        if (mode == 1) SetupDispatch(sweepPatchTexelsPass, command, "texel-patch-light");
+        else device.DispatchNow(new[] { command }, "texel-patch-light");
+    }
+
     private void PatchTexelsPass(int mode, GpuBufferHandle sky = default, GpuBufferHandle sun = default, GpuBufferHandle skyDetail = default, GpuBufferHandle sunDetail = default)
     {
         if (texelLiveIds is not { } live) return;
@@ -123,7 +130,7 @@ internal sealed partial class SponzaLoop
         var declared = texelPatchLightInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
         const int perDispatch = 65535 * 64;
         for (var first = 0; first < live.Length; first += perDispatch)
-            device.DispatchNow(new[] { new DispatchCommand(texelPatchLightPipeline, (Math.Min(perDispatch, live.Length - first) + 63) / 64, 1, 1,
+            PatchTexelsDispatch(mode, new DispatchCommand(texelPatchLightPipeline, (Math.Min(perDispatch, live.Length - first) + 63) / 64, 1, 1,
                 new ShaderUniform[]
                 {
                     new("uPass", new Vector4Uniform(new Vector4(live.Length, first, sunNodeKinds.Length, mode))),
@@ -153,7 +160,7 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("AoShort", texelAoShortBuffer),
                     new ShaderBufferBinding("PatchSkyEscape", liveSkyEscapeBuffer.Equals(default(GpuBufferHandle)) ? texelAoShortBuffer : liveSkyEscapeBuffer),
                     ProvenanceBinding(),
-                }.Concat(CookedBuffers()).Where(b => declared.Contains(b.Name)).ToArray()) }, "texel-patch-light");
+                }.Concat(CookedBuffers()).Where(b => declared.Contains(b.Name)).ToArray()));
     }
 
     // A': the transfer's texels (the coarse levels), the fine ones, their contact visibility (a byte a texel id).

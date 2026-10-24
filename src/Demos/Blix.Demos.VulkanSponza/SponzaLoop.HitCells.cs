@@ -52,6 +52,7 @@ internal sealed partial class SponzaLoop
     private (Vector3, int) hitCellsSunFor = (new Vector3(float.NaN), -1);
     private int hitCellsSunFirst;
     private readonly Stopwatch hitCellsSunClock = new();
+    private long hitCellsSunRecordedFrame = -1;
 
     // The cells' sun for the cook's (mode 1), before its trace: the texels' sun bits up for it (liveSunDone).
     // True when it ran this call. Spread over frames, ~100 ms each: Sponza's whole pass is ~0.8 s (2026-10-20).
@@ -64,6 +65,17 @@ internal sealed partial class SponzaLoop
             hitCellsSunFor = (liveSunToward, liveSunColumn);
             hitCellsSunFirst = 0;
             hitCellsSunClock.Restart();
+        }
+        // --sweep-in-frame, a light change: a chunk a frame recorded in the frame (SponzaLoop.SweepFrame.cs) -- on the host
+        // the pass held a frame ~190 ms after a Crytek Sponza sun change (2026-10-25).
+        if (sweepInFrame && liveSkyGathered)
+        {
+            if (hitCellsSunRecordedFrame == framesRendered) return true;
+            hitCellsSunRecordedFrame = framesRendered;
+            var n = Math.Min(sweepCellsChunk, hitCellItems - hitCellsSunFirst);
+            graph.Dispatch(sweepCellsPass, HitCellsCommand(n, hitCellsSunFirst, 1));
+            hitCellsSunFirst += n;
+            if (hitCellsSunFirst < hitCellItems) return true;
         }
         var clock = Stopwatch.StartNew();
         // A dispatch a quarter-million work items (of up to 256 cells each): Sponza's whole build in one ran past the GPU's
