@@ -31,7 +31,7 @@ the instant layer kept everywhere is 0.201 mean error, 8.9% bad (a second full g
 is a metre or two from some flip). The instant layer's change is: over 10% gathers 48%, the left-out 0.035 / 1.4%
 (the second seed there 0.042 / 1.4%); over 20% 42%, 0.053 / 2.3% (0.056 / 2.2%); over 40% 31%, 0.078 / 3.6%
 (0.074 / 3.0%); energy 0.997-0.998. A texel the instant layer barely moved is as near the full gather as a second full
-gather is. Not modelled: the fine copy reads the coarse, so a coarse texel left out moves the fine copied from it.""")
+gather is. Not modelled: the fine copy reads the coarse, so a coarse texel left out moves the fine copied from it."""
 import json
 import sys
 from pathlib import Path

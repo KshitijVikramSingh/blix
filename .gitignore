@@ -75,3 +75,4 @@ third_party/gltf-corpus/
 # `blix publish` output. Derived, per-target, and large — the same rule every other
 # build product here follows.
 dist/
+.gstack/
