@@ -29,7 +29,8 @@ FIRST, SECOND = "lets light through, a pair's first", "lets light through, a pai
 # (scene, measure, class, statistic, target, ratchet). Statistics: "ratio" the ratio of sums (bars on |x - 1|), "excess"
 # the records' light over the trace's over all of it (bars on x).
 # 2026-10-24, the reference stepping 1 mm off a hit (was 1 cm) and the patches' sheets by their own triangle: the
-# teacup's records excess 0.037 / 0.035 (0.046 / 0.062 before), ratios 1.003 / 0.998.
+# teacup's records excess 0.037 / 0.035 (0.046 / 0.062 before), ratios 1.003 / 0.998. Then the teacup resting on the floor
+# (blix khronos --rest; it stood 1 cm into it) and the pixels' sun rays lifted within their room: excess 0.030 / 0.030.
 # Today's (2026-10-22): drapes -1.5% / -0.7%; the plant -0.9% / +1.3% (its leaves textured: the reference's per-row means,
 # view_reference.py); the teacup -1.3% / -1.9% (records +0.5% / -0.9%, excess 0.04); the test -1.5% / -4.1% / +2.2%.
 BARS = [
@@ -44,8 +45,8 @@ BARS = [
     ("khronos-teacup", "records", "opaque", "ratio", 0.01, 0.02),
     ("khronos-teacup", "records", FIRST, "ratio", 0.03, 0.04),
     ("khronos-teacup", "records", SECOND, "ratio", 0.03, 0.04),
-    ("khronos-teacup", "records", FIRST, "excess", 0.02, 0.045),
-    ("khronos-teacup", "records", SECOND, "excess", 0.02, 0.045),
+    ("khronos-teacup", "records", FIRST, "excess", 0.02, 0.04),
+    ("khronos-teacup", "records", SECOND, "excess", 0.02, 0.04),
     ("khronos-teacup", "records", "opaque", "excess", 0.015, 0.02),
     ("khronos-test", "view", "opaque", "ratio", 0.02, 0.03),
     ("khronos-test", "view", "two-sided", "ratio", 0.03, 0.05),

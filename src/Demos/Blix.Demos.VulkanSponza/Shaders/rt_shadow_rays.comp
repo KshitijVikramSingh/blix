@@ -35,6 +35,7 @@ layout(set = 0, binding = 0) uniform RtShadowRays {
                          // per-pixel origins and directions written too (unpacked, or a census reads them); w > 0:
                          // interleaved (ShadowsSettings.Interleave), only the pixels of each 2x2 at w - 1 (x + 2y)
                          // trace, the rest left to rt_shadow_fill.comp
+    vec4 uClear;         // x 1: the lift half the pixel's record's room along its side's normal at most (TexelClear)
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -62,6 +63,8 @@ layout(std430, set = 0, binding = 12) writeonly buffer RtShadowPacked { vec4 pac
 layout(std430, set = 0, binding = 13) writeonly buffer RtShadowPixelOf { uint pixelOf[]; };
 layout(std430, set = 0, binding = 14) buffer RtShadowCounters { uint counters[]; };
 layout(std430, set = 0, binding = 15) writeonly buffer RtShadowMaskWords { uvec4 maskHeader; uint maskWords[]; };
+// Each texel's room along its normal (texel_clear.comp): a record's, the pixel's nearest atlas texel's.
+layout(std430, set = 0, binding = 16) readonly buffer TexelClear { float texelClear[]; };
 #define TEXEL_INDEX_MAP(i) texelFetch(uLightmapIndexTex, ivec2(int(i) % textureSize(uLightmapIndexTex, 0).x, int(i) / textureSize(uLightmapIndexTex, 0).x), 0).r
 #define TEXEL_HASH(i) uvec4(0u)
 #define TEXEL_POSITION(i) texels[2 * (i)]
@@ -107,6 +110,24 @@ uint bakedSun(ivec2 q, vec3 n) {
     return uint(agreed);
 }
 
+// The room along the side the ray leaves by: the pixel's nearest atlas texel's record (the side shown, or facing away
+// the pair's other, its far side), from TexelClear; -1 none (no atlas texel, no pair to leave by).
+float pixelRoom(ivec2 q, vec3 n, bool away) {
+    if (u.uClear.x < 0.5 || u.uLightmap.x < 0.5) return -1.0;
+    vec2 atlas;
+    if (!texelLightmapUnpack(texelFetch(uLightmapTexel, q, 0).r, atlas)) return -1.0;
+    ivec2 at = clamp(ivec2(floor(atlas)), ivec2(0), ivec2(u.uLightmap.yz) - 1);
+    uint front = TEXEL_INDEX_MAP(at.y * int(u.uLightmap.y) + at.x);
+    if (front == 0xFFFFFFFFu) return -1.0;
+    bool pair = TEXEL_POSITION(front).w < 0.0;
+    uint shown = pair && dot(TEXEL_NORMAL(front).xyz, n) < 0.0 ? front + 1u : front;
+    if (away) {
+        if (!pair) return -1.0;
+        shown = shown == front ? front + 1u : front;
+    }
+    return texelClear[shown];
+}
+
 uint hash32(uint x) {
     x ^= x >> 16; x *= 0x7feb352du;
     x ^= x >> 15; x *= 0x846ca68bu;
@@ -148,7 +169,13 @@ void main() {
     vec3 n = normalize(nSample.xyz);
     // The lift grows with distance, as depth precision shrinks: 1 cm plus 0.1% of the distance.
     float lift = 0.01 + 0.001 * length(position - u.uCamera.xyz);
-    vec3 origin = position + n * (dot(n, u.uSun.xyz) > 0.0 ? lift : -lift);
+    // Half the room the ray leaves into at most, the depth's precision (its 0.1%) and a quarter millimetre at least: 1 cm
+    // and more put a pixel's sun ray past walls thinner than that -- the teacup's 4 mm saucer well, the 1.5-2.5 cm walls
+    // of its cup, whose far sides a facing-away pixel's ray answers for (2026-10-24).
+    bool away = dot(n, u.uSun.xyz) <= 0.0;
+    float room = pixelRoom(q, n, away);
+    float sunLift = room > 0.0 ? min(lift, max(0.5 * room, 0.001 * length(position - u.uCamera.xyz) + 2.5e-4)) : lift;
+    vec3 origin = position + n * (away ? -sunLift : sunLift);
     uint answer = bakedSun(q, n);
     if (u.uSky.z > 0.5) baked[index] = answer;
     // Answered: no ray, and the answer rides the reach (blix_shadow: 0 answered lit, < 0 answered shadowed), so the mask

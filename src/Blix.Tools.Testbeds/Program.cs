@@ -109,6 +109,15 @@ public static class Program
         var at = args.String("at") is { } a ? ParseVector(a) : Vector3.Zero;
         var room = args.String("room") ?? "cornell";
         var source = SharpGLTF.Schema2.ModelRoot.Load(model);
+        // --rest: lifted so its lowest point sits at --at's height, not its origin -- the teacup's saucer stood with its
+        // foot ring sunk into the floor (2026-10-24).
+        if (args.Flag("rest"))
+        {
+            var lowest = float.PositiveInfinity;
+            foreach (var (a0, b0, c0, _) in SharpGLTF.Schema2.Toolkit.EvaluateTriangles(source.DefaultScene))
+                lowest = MathF.Min(lowest, MathF.Min(a0.GetGeometry().GetPosition().Y, MathF.Min(b0.GetGeometry().GetPosition().Y, c0.GetGeometry().GetPosition().Y)));
+            if (float.IsFinite(lowest)) at.Y -= lowest * scale;
+        }
         var sample = SceneBuilder.CreateFrom(source.DefaultScene);
         var scene = new SceneBuilder();
         scene.AddScene(sample, Matrix4x4.CreateScale(scale) * Matrix4x4.CreateTranslation(at));

@@ -238,6 +238,7 @@ internal sealed partial class SponzaLoop
                 new("uLightlet", new Vector4Uniform(LightletUniform(towardSun))),
                 new("uLightmap", new Vector4Uniform(LightmapUniform)),
                 new("uCompact", new Vector4Uniform(new Vector4(pack ? 1f : 0f, counter, rtShadowOrigins.Length > 0 ? 1f : 0f, historyGood ? 1f + phase : 0f))),
+                new("uClear", new Vector4Uniform(new Vector4(GatherClearOn && texelsUploaded ? 1f : 0f, 0f, 0f, 0f))),
             },
             new[]
             {
@@ -259,6 +260,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtShadowPixelOf", pack ? rtShadowPixelOf[slot] : RtShadowPlaceholder),
                 new ShaderBufferBinding("RtShadowCounters", pack ? rtShadowCounters[slot] : RtShadowPlaceholder),
                 new ShaderBufferBinding("RtShadowMaskWords", mask),
+                new ShaderBufferBinding("TexelClear", GatherClearOn && texelsUploaded ? texelClearBuffer : RtShadowPlaceholder),
             }));
 
         // A new coin per frame for the partly covered (foliage), so TAA averages their shadows instead of freezing one draw.
