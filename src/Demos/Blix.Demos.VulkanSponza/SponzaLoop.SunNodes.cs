@@ -1603,6 +1603,7 @@ internal sealed partial class SponzaLoop
                 new("uHitBlend", new Vector4Uniform(new Vector4(HitBlendNow ? 1f : 0f, transportSpacing, NearTexelLightNow ? 1f : 0f, SunColumn()))),
                 new("uCapture", new Vector4Uniform(discover == 0 && exactMode is < 0.5f or > 2.5f ? RayCaptureUniform : Vector4.Zero)),
                 new("uNear", new Vector4Uniform(discover == 0 && few ? new Vector4(NearCutMode, hitCellNear, nearUnknownLocal ? 1f : 0f, sheetGlowSplit ? 1f : NearGlowSplitNow ? 2f : 0f) : new Vector4(0f, 1e30f, 0f, 0f))),
+                new("uSunW", new Vector4Uniform(discover == 0 && few ? SunLinearUniform : Vector4.Zero)),
             },
             new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
             Buffers: new[]
@@ -1648,6 +1649,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("TexelOwnShape", shadeH4.On ? texelOwnShapeBuffer : sunNodeAccum),
                 new ShaderBufferBinding("FinePlace", finePlaceBuffer.Equals(default(GpuBufferHandle)) ? sunNodeAccum : finePlaceBuffer),
                 new ShaderBufferBinding("FarPart", farPartBuffer.Equals(default(GpuBufferHandle)) ? sunNodeAccum : farPartBuffer),
+                new ShaderBufferBinding("TexelSunW", discover == 0 && few ? SunLinearBuffer(sunNodeAccum) : sunNodeAccum),
             }.Concat(CookedBuffers()).Where(b => declared.Contains(b.Name)).ToArray());
     }
 

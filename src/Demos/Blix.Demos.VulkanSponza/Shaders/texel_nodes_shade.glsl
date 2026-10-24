@@ -53,6 +53,9 @@ layout(set = 0, binding = 0) uniform SunNodesShade {
                           // a near round, its rays cut at y and the far part added back; y the reach (the near texels'
                           // light's, --cell-near); z 1: a near hit among no texel the pass's near hits' light
                           // (--near-unknown-local, sNearKnown)
+    vec4 uSunW;           // the sun-linear record (SponzaLoop.SunLinear.cs): x 1 on -- each texel's lit hits' sun over its
+                          // cosine times the hit's normal (luminance, per unit of irradiance), into TexelSunW by id: the sun
+                          // part its lit hits bring at any sun s is W.s (tools/gi-model/sun_flip_push.py: linear to 0.00%)
 } u;
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
@@ -179,6 +182,7 @@ layout(std430, set = 0, binding = 44) buffer TexelH4 { vec4 texelH4[]; };
 // Its sums a slice's (uFarTransport.y 1, by the texel's place in the slice) or every texel's (2, BLIX_TEXEL_H4_FULL), and
 // the shape they make into TexelOwnShape (texel_shape.glsl), as the lean shade's.
 layout(std430, set = 0, binding = 45) writeonly buffer TexelOwnShape { uint ownShape[]; };
+layout(std430, set = 0, binding = 46) buffer TexelSunW { vec4 texelSunW[]; };   // by id: xyz the passes' W sums, w the passes
 shared vec4 sRecord[4];
 #include "h4_kernel.glsl"
 #include "texel_record_h4.glsl"
@@ -237,6 +241,7 @@ shared vec3 sRayNearGlow[RAYS]; // --near-glow-split: the ray's sun glow from a 
 // found texels; it takes their mean light this pass, per column (w: how many).
 shared vec4 sNearKnown[2];
 shared vec4 sH4[RAYS * 3];      // --texel-h4: per ray per channel, its world-space H4 terms
+shared vec3 sSunW[RAYS];        // the sun-linear record: per ray, its lit hit's sun over its cosine times the hit's normal
 #define HOW(r, v) sHow[r] = v
 #else
 #define HOW(r, v)
@@ -666,6 +671,9 @@ void main() {
             vec4 h = sHit[r];
             vec3 w = sDir[r];
             float tiltDen = max(dot(dn, w), 0.1);
+#if MAX_WORDS == 1
+            sSunW[r] = vec3(0.0);
+#endif
             float captureBounce = 0.0;
             float captureLight = -1.0;   // the ray capture: the light the hit took, its sun column's (a hit among no texel)
             // --ray-capture-sun (the tag's bit 15): the hit's sun at full visibility and n.l 1 (luminance, weight and albedo in),
@@ -720,13 +728,18 @@ void main() {
                         captureSunBits = ndotl * vb;
                     }
                     if (ndotl > 0.0) {
-                        if (k == exactColumn && sExact[r] >= 0.0) { light += u.uSunIrradiance.rgb * ndotl * sExact[r] * baseLobe; tilts = false; }
+                        float sunVis;
+                        if (k == exactColumn && sExact[r] >= 0.0) { sunVis = sExact[r] * baseLobe; light += u.uSunIrradiance.rgb * ndotl * sunVis; tilts = false; }
                         else {
                             float visible = sUnknown[r] * u.uSunIrradiance.w;
                             for (int c = 0; c < NODE_CANDIDATES; ++c)
                                 if ((sBits[(uint(r) * NODE_CANDIDATES + uint(c)) * MAX_WORDS + word] & bit) != 0u) visible += sWeight[r * NODE_CANDIDATES + c];
+                            sunVis = visible;
                             light += u.uSunIrradiance.rgb * ndotl * visible;
                         }
+#if MAX_WORDS == 1
+                        if (u.uSunW.x > 0.5 && k == exactColumn) sSunW[r] = dot(h.rgb, lumW) * sunVis * sNormal[r];
+#endif
                     }
                     add = h.rgb * light + glow;
                     // The capture's alternative takes the sheet's glow as it is (the twin's sun, which a list carries alike).
@@ -836,6 +849,14 @@ void main() {
         barrier();
         if (u.uFarTransport.y > 0.5 && u.uNear.x < 1.5 && lid == 0u)
             texelShapeStore(nodeIds[uint(u.uDetail.x) + group], sRecord[0], sRecord[1], sRecord[2], sRecord[3]);
+        // The sun-linear record, by id: a slice's first pass starts it (as the sums), a near round leaves it (its rays are cut).
+        if (u.uSunW.x > 0.5 && u.uNear.x < 1.5 && lid == 0u) {
+            uint hid = nodeIds[uint(u.uDetail.x) + group];
+            vec3 sum = vec3(0.0);
+            for (int r = 0; r < RAYS; ++r) sum += sSunW[r];
+            vec4 before = u.uShade.w > 0.5 ? texelSunW[hid] : vec4(0.0);
+            texelSunW[hid] = before + vec4(sum / float(RAYS), 1.0);
+        }
 #endif
         if (lid < uint(suns)) {
             int k = int(lid);
