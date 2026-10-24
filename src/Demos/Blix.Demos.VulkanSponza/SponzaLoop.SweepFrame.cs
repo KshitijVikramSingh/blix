@@ -30,6 +30,14 @@ internal sealed partial class SponzaLoop
     // A light change under --sweep-in-frame: its setup's dispatches recorded in the frame (SetupDispatch), not run at once.
     private bool SetupInFrame => sweepInFrame && liveSkyGathered;
 
+    // The gather's counters (a light change's stats): readable under --sweep-in-frame, read where they lie at its end.
+    private GpuBufferHandle NewSunNodeStats() => Own(sweepInFrame ? device.CreateReadableGpuBuffer(64, "sponza.sun-nodes.stats")
+        : device.CreateGpuBuffer(64, new byte[64], "sponza.sun-nodes.stats"));
+
+    // The coarse sweep's end (FinishSunNodes): the coarse filter and the fine copy recorded, then the fine round started
+    // a step later (SweepRoundEndStep, stage 10) once they are done -- on the host the hand-off held a frame ~190 ms.
+    private PassHandle sweepCoarseFilterPass, sweepFinePass;
+
     private void SetupDispatch(PassHandle pass, DispatchCommand command, string name)
     {
         if (SetupInFrame) graph.Dispatch(pass, command);
@@ -52,6 +60,8 @@ internal sealed partial class SponzaLoop
         // Reflected where its pipeline is made (CreateTexelRatioPipeline), which can come after the graph's declaration.
         texelRatioInterface ??= reflect(new[] { "texel_ratio.comp" });
         sweepCellsPass = graph.ComputePass("sun-sweep-cells").Shader(hitCellsInterface).Handle;
+        sweepCoarseFilterPass = graph.ComputePass("sun-sweep-coarse-filter").Shader(coarseFilterInterface).Handle;
+        sweepFinePass = graph.ComputePass("sun-sweep-fine").Shader(transferFineInterface).Handle;
         sweepPatchDirPass = graph.ComputePass("sun-sweep-patch-dir").Shader(patchDirInterface).Handle;
         sweepPatchTexelsPass = graph.ComputePass("sun-sweep-patch-texels").Shader(texelPatchLightInterface).Handle;
         sweepRatioPass = graph.ComputePass("sun-sweep-ratio").Shader(texelRatioInterface).Handle;
@@ -140,11 +150,41 @@ internal sealed partial class SponzaLoop
         return BitConverter.ToUInt32(b);
     }
 
+    private uint[] ReadMappedWords(GpuBufferHandle buffer, int offset, int count)
+    {
+        var words = new uint[count];
+        device.ReadMappedGpuBuffer(buffer, offset, System.Runtime.InteropServices.MemoryMarshal.AsBytes(words.AsSpan()));
+        return words;
+    }
+
     private void SweepRoundEndStep()
     {
         using var profScope = Prof("gather.round-end");
         switch (sweepEndStage)
         {
+            case 10:
+            {
+                // The coarse sweep's end (FinishSunNodes): the coarse filter and the fine copy done; the fine round next.
+                if (!SweepWorkDone) return;
+                SweepFineCounts();
+                DumpParts("copy");
+                uint[] picked;
+                using (Prof("fine-pick")) picked = FineGatherIds();
+                RecallCopy(picked);
+                if (picked.Length > 0)
+                {
+                    fineRoundIds = picked;
+                    nearRoundsLeft = nearRounds;
+                    BeginNearCut(picked);
+                    StartFineRound(picked);
+                    SweepEndDone();
+                    return;
+                }
+                SweepEndDone();
+                sunNodeStage = SunNodeStage.Done;
+                FinishSunNodesTail();
+                return;
+            }
             case 0:
             {
                 if (!SweepWorkDone) return;

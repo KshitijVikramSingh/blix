@@ -149,7 +149,7 @@ internal sealed partial class SponzaLoop
         sunNodeRays = fineGatherRays;
         texelMaxRays = Math.Max(fineGatherRays, fineGatherMaxRays);
         RetireGpuBuffer(sunNodeStats);
-        sunNodeStats = Own(device.CreateGpuBuffer(64, new byte[64], "sponza.sun-nodes.stats"));
+        sunNodeStats = NewSunNodeStats();
         sunNodeFirst = 0;
         sunNodePass = 0;
         sunNodeClock.Restart();
@@ -575,7 +575,7 @@ internal sealed partial class SponzaLoop
             sunNodeAccum = sunNodeAccums[0];
             liveReadbacks.Clear();
         }
-        sunNodeStats = Own(device.CreateGpuBuffer(64, new byte[64], "sponza.sun-nodes.stats"));
+        sunNodeStats = NewSunNodeStats();
         var keep = Math.Min(sunNodeKeep, suns);
         if (splitCooking) BeginSplitDetail(suns, keep);
         BeginFarField(suns);
@@ -910,7 +910,9 @@ internal sealed partial class SponzaLoop
         sunNodeStage = SunNodeStage.Done;
         var suns = sunNodeSuns!;
         var trace = sunNodeClock.Elapsed.TotalMinutes;
-        var words = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(sunNodeStats, 0, 64).AsSpan()).ToArray();
+        var words = new uint[16];
+        if (sweepInFrame) device.ReadMappedGpuBuffer(sunNodeStats, 0, MemoryMarshal.AsBytes(words.AsSpan()));
+        else words = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(sunNodeStats, 0, 64).AsSpan()).ToArray();
         ReportFarPool("over the refining rounds");
         var stats = Enumerable.Range(0, 7).Select(k => (ulong)words[2 * k] | ((ulong)words[2 * k + 1] << 32)).ToArray();
         var hits = Math.Max(stats[0], 1ul);
@@ -967,6 +969,15 @@ internal sealed partial class SponzaLoop
             DumpParts("coarse");
             FilterCoarseNow();
             ApplyFineNow();
+            if (SetupInFrame)
+            {
+                // Recorded: the fine round starts once they are done (SweepRoundEndStep, stage 10).
+                sunNodeStage = SunNodeStage.Tracing;
+                sweepRoundEndPending = true;
+                sweepEndStage = 10;
+                sweepEndFrame = framesRendered;
+                return;
+            }
             DumpParts("copy");
             if (spotWhy) SpotWhyCompare(fine: true);
             // The fine refine: the flagged texels traced as the coarse were, a round of their own, the cook screen up.
@@ -981,6 +992,13 @@ internal sealed partial class SponzaLoop
                 return;
             }
         }
+        FinishSunNodesTail();
+    }
+
+    // FinishSunNodes past the fine hand-off (and the in-frame hand-off's end when no fine round follows).
+    private void FinishSunNodesTail()
+    {
+        var suns = sunNodeSuns!;
         if (transferChecked) TransferCheckCompare();
         if (splitCooking)
         {
@@ -1298,7 +1316,7 @@ internal sealed partial class SponzaLoop
             transferSetupFor = new Vector3(float.NaN);
             if (!livePatchTexels) ApplyTransferNow();
             if (spotWhy) SpotWhySnapshot();
-            RecallInstant();
+            using (Prof("recall-instant")) RecallInstant();
             transferAppliedFor = liveSunToward;
             if (sunNodeTraceIds.Length == 0 && transferGatherIds.Length > 0)
             {
@@ -1308,7 +1326,7 @@ internal sealed partial class SponzaLoop
                 sunNodeTraceBuffer = Own(device.CreateGpuBuffer(Math.Max(16, sunNodeTraceIds.Length * 4), MemoryMarshal.AsBytes(sunNodeTraceIds.AsSpan()), "sponza.sun-nodes.traced"));
             }
             if (sunNodeTraceIds.Length == 0) { FinishSunNodes(); return; }
-            BeginVisibleChanged();
+            using (Prof("visible-begin")) BeginVisibleChanged();
         }
         if (TransferOn && transferCheck && transferReady && sunNodeRefineRound == 0 && sunNodeFirst == 0 && sunNodePass == 0 && transferCheckSky is null && !transferChecked)
         {
@@ -1368,7 +1386,7 @@ internal sealed partial class SponzaLoop
             var sweepPasses = sunNodeRays / 32;
             var passes = refining ? RefinePasses : sweepPasses;
             var seedPass = refining ? sweepPasses + (sunNodeRefineRound - 1) * RefinePasses + sunNodePass : sunNodePass;
-            if (GpuResolveOn && !gpuResolving && !refining && sunNodeFirst == 0 && sunNodePass == 0) BeginGpuResolve();
+            if (GpuResolveOn && !gpuResolving && !refining && sunNodeFirst == 0 && sunNodePass == 0) using (Prof("resolve-begin")) BeginGpuResolve();
             // In the frame (SponzaLoop.SweepFrame.cs): the slice's passes recorded, a smaller slice; needs the GPU resolve.
             var inFrame = SweepInFrameNow && gpuResolving;
             var slice = Math.Min(inFrame ? sweepSlice : sunNodeSlice, live.Length - sunNodeFirst);
@@ -1757,7 +1775,7 @@ internal sealed partial class SponzaLoop
             $"[VulkanSponza] sun nodes: the merge -- sun points and bits {mergeUploadMs:0} ms (one frame), hit cells {mergeCellsMs:0} ms of frames, transfer {mergeTransferMs:0} ms (one frame); then the patch texels over {mergeContactClock!.Elapsed.TotalSeconds:0.0} s of frames."));
         // The trace proper counts afresh.
         RetireGpuBuffer(sunNodeStats);
-        sunNodeStats = Own(device.CreateGpuBuffer(64, new byte[64], "sponza.sun-nodes.stats"));
+        sunNodeStats = NewSunNodeStats();
         sunNodeClock.Restart();
         sunNodeStage = SunNodeStage.Tracing;
         if (liveTexels) liveCookWarm = true;

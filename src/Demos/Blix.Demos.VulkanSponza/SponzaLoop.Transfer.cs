@@ -483,7 +483,8 @@ internal sealed partial class SponzaLoop
         var count = (int)Math.Min(fineFlagCounts[0], (uint)transferFineCount);
         if (count == 0 || fineGatherBudget <= 0) return Array.Empty<uint>();
         var clock = Stopwatch.StartNew();
-        var words = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(fineFlagsBuffer, 64, count * 8).AsSpan());
+        var words = sweepInFrame ? ReadMappedWords(fineFlagsBuffer, 64, count * 2)
+            : MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(fineFlagsBuffer, 64, count * 8).AsSpan()).ToArray();
         // The worst first by a histogram of the spread (log2, 1/8 steps), not a sort: the cut is the bin the budget ends
         // in, those above it all taken (a sort of 5 M took 6 s, 2026-10-19).
         const int Bins = 256;
@@ -534,8 +535,10 @@ internal sealed partial class SponzaLoop
         refineMasked = mask is not null;
         if (mask is not null)
         {
-            if (refineMaskBuffer.Equals(default(GpuBufferHandle))) refineMaskBuffer = Own(device.CreateGpuBuffer(mask.Length * 4, name: "sponza.transfer.refine-mask"));
-            device.WriteGpuBuffer(refineMaskBuffer, 0, MemoryMarshal.AsBytes(mask.AsSpan()));
+            if (refineMaskBuffer.Equals(default(GpuBufferHandle)))
+                refineMaskBuffer = Own(sweepInFrame ? device.CreateReadableGpuBuffer(mask.Length * 4, "sponza.transfer.refine-mask")
+                    : device.CreateGpuBuffer(mask.Length * 4, name: "sponza.transfer.refine-mask"));
+            device.WriteMappedGpuBuffer(refineMaskBuffer, 0, MemoryMarshal.AsBytes(mask.AsSpan()));
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] fine refine: {masked:N0} contact-flagged {(fineRefineCloth ? "and sheet " : "")}texels may refine; the rest settle at the sweep."));
         }
         if (n < take) ids = ids[..n];
@@ -604,10 +607,10 @@ internal sealed partial class SponzaLoop
             }.Where(b => declared.Contains(b.Name)).ToArray());
         for (var pass = 0; pass < coarseFilterPasses; pass++)
         {
-            device.DispatchNow(new[] { Pass(0) }, "coarse-filter");
-            device.DispatchNow(new[] { Pass(1) }, "coarse-filter-back");
+            SetupDispatch(sweepCoarseFilterPass, Pass(0), "coarse-filter");
+            SetupDispatch(sweepCoarseFilterPass, Pass(1), "coarse-filter-back");
         }
-        device.WaitIdle();
+        if (!SetupInFrame) device.WaitIdle();
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] coarse filter: {n:N0} coarse cells' {(skyKept ? "sun part" : "parts")} filtered {coarseFilterPasses}x before the fine copy, in {clock.Elapsed.TotalMilliseconds:0} ms."));
     }
@@ -617,17 +620,38 @@ internal sealed partial class SponzaLoop
         using var profScope = Prof("fine-copy");
         if (transferFineCount == 0 || !transferReady) return;
         if (fineFlagsBuffer.Equals(default(GpuBufferHandle)))
-            fineFlagsBuffer = Own(device.CreateGpuBuffer((16 + 2 * transferFineCount) * 4, name: "sponza.transfer.fine-flags"));
-        device.WriteGpuBuffer(fineFlagsBuffer, 0, new byte[64]);
+            fineFlagsBuffer = Own(sweepInFrame ? device.CreateReadableGpuBuffer((16 + 2 * transferFineCount) * 4, "sponza.transfer.fine-flags")
+                : device.CreateGpuBuffer((16 + 2 * transferFineCount) * 4, name: "sponza.transfer.fine-flags"));
+        device.WriteMappedGpuBuffer(fineFlagsBuffer, 0, new byte[64]);
         var clock = Stopwatch.StartNew();
         // Not over the texels the light change's first gather took (SponzaLoop.VisibleChanged.cs).
         var (copyIds, copyCount, copyOwn) = FineCopyIds();
         FineDispatch(copyIds, copyCount, default);
+        // In the frame: recorded; its counts read where they lie once done (SweepFineCounts).
+        if (SetupInFrame)
+        {
+            if (copyOwn) RetireGpuBuffer(copyIds);
+            return;
+        }
         device.WaitIdle();
         if (copyOwn) device.DestroyGpuBuffer(copyIds);
         fineFlagCounts = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(fineFlagsBuffer, 0, 64).AsSpan()).ToArray();
+        LogFinePass(clock);
+    }
+
+    // The in-frame fine copy done: its counts.
+    private void SweepFineCounts()
+    {
+        var bytes = new byte[64];
+        device.ReadMappedGpuBuffer(fineFlagsBuffer, 0, bytes);
+        fineFlagCounts = MemoryMarshal.Cast<byte, uint>(bytes.AsSpan()).ToArray();
+        LogFinePass(null);
+    }
+
+    private void LogFinePass(Stopwatch? clock)
+    {
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[VulkanSponza] fine pass: {transferFineCount:N0} texels from the coarse in {clock.Elapsed.TotalMilliseconds:0} ms; flagged for their own gather {fineFlagCounts[0]:N0} ({100.0 * fineFlagCounts[0] / transferFineCount:0.0}%; two-sided sheets {fineFlagCounts[11]:N0}), by the larger: none turned their way {fineFlagCounts[1]:N0}, the ones turned their way disagree {fineFlagCounts[2]:N0}, those and the cut ones {fineFlagCounts[10]:N0}, the copy and the instant layer {fineFlagCounts[3]:N0}; over 1.5/2/3/4/8/16x {string.Join(" / ", fineFlagCounts[4..10].Select(c => c.ToString("N0", CultureInfo.InvariantCulture)))}."));
+            $"[VulkanSponza] fine pass: {transferFineCount:N0} texels from the coarse{(clock is null ? " in the frame" : $" in {clock.Elapsed.TotalMilliseconds:0} ms")}; flagged for their own gather {fineFlagCounts[0]:N0} ({100.0 * fineFlagCounts[0] / transferFineCount:0.0}%; two-sided sheets {fineFlagCounts[11]:N0}), by the larger: none turned their way {fineFlagCounts[1]:N0}, the ones turned their way disagree {fineFlagCounts[2]:N0}, those and the cut ones {fineFlagCounts[10]:N0}, the copy and the instant layer {fineFlagCounts[3]:N0}; over 1.5/2/3/4/8/16x {string.Join(" / ", fineFlagCounts[4..10].Select(c => c.ToString("N0", CultureInfo.InvariantCulture)))}."));
     }
 
     // BLIX_SPOT_WHY: the fine pass again over these texels (their light unchanged: the coarse texels it reads are as
@@ -661,7 +685,7 @@ internal sealed partial class SponzaLoop
         var declared = transferFineInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
         const int perDispatch = 65535 * 64;
         for (var first = 0; first < count; first += perDispatch)
-            device.DispatchNow(new[] { new DispatchCommand(transferFinePipeline, (Math.Min(perDispatch, count - first) + 63) / 64, 1, 1,
+            FineDispatchOne(debugOn, new DispatchCommand(transferFinePipeline, (Math.Min(perDispatch, count - first) + 63) / 64, 1, 1,
                 new ShaderUniform[]
                 {
                     new("uFine", new Vector4Uniform(new Vector4(count, first, transferMinLevel, texelLevels - 1))),
@@ -685,7 +709,14 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("FineDebug", debug),
                     new ShaderBufferBinding("FineFlags", fineFlagsBuffer.Equals(default(GpuBufferHandle)) ? debug : fineFlagsBuffer),
                     ProvenanceBinding(),
-                }.Where(b => declared.Contains(b.Name)).ToArray()) }, "transfer-fine");
+                }.Where(b => declared.Contains(b.Name)).ToArray()), "transfer-fine");
+    }
+
+    // The spot debug's (FineCandidates) at once; the copy recorded in the frame under --sweep-in-frame.
+    private void FineDispatchOne(bool debugOn, DispatchCommand command, string name)
+    {
+        if (debugOn) device.DispatchNow(new[] { command }, name);
+        else SetupDispatch(sweepFinePass, command, name);
     }
 
     // BLIX_TRANSFER_CHECK=1 (a measurement): the transfer applied and kept, then the gather run over every texel as
