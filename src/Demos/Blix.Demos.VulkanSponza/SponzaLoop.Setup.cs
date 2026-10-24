@@ -150,6 +150,8 @@ internal sealed partial class SponzaLoop
         // --lit-flat: the lit pass shades opaque geometry with flat.frag, everything else unchanged (same lit.vert,
         // culling, pre-pass and LOD). What a cost does under it is the part that is not material shading.
         litFlat = args.Flag("lit-flat");
+        // --no-lit-early-z: opaque groups shade with the cutout build too (late depth test), as before 2026-10-24.
+        litEarlyZ = !args.Flag("no-lit-early-z");
         // --ray-check: also trace a fixed batch of rays on the GPU every frame and hold them against the CPU at the shot.
         rayCheck = args.Flag("ray-check");
         if (args.String("ray-bench") is { } bench)
@@ -324,6 +326,7 @@ internal sealed partial class SponzaLoop
         // --orbit: drive the camera on a fixed path so a measurement is of the renderer rather than
         // of one photograph of it. Ignores --cam, which is the still counterpart.
         if (args.Flag("orbit")) orbit = true;
+        if (args.Int("shot-hold") is { } hold) ShotReadyMargin = Math.Max(1, hold);
         // --no-probe-updates: the probe clipmap solved once, then frozen, its marking and screen probes off (SponzaLoop.Render.cs).
         if (args.Flag("no-probe-updates")) { probeUpdatesOff = true; clipmapFreeze = 1; }
         if (args.Values("orbit-at", 4) is [var ox, var oy, var oz, var orad])
@@ -1049,6 +1052,16 @@ internal sealed partial class SponzaLoop
         opaqueDoubleSidedPipeline = Pipeline(litProgram, VertexPosition3NormalTangentTexture.Layout,
             DepthState.LessEqualNoWrite, RasterizerState.NoCulling,
             new[] { BlendState.Disabled }, litPassHandle, "lit.opaque.doubleSided", alphaToCoverage: MsaaSamples > 1);
+        // Opaque (no cutout) groups draw with these: the early depth test against the pre-pass's depth, so a covered
+        // surface is not shaded. The pipelines above stay for cutout groups and the no-pre-pass and flat variants.
+        litOpaqueProgram = Own(device.CreateShaderProgramFromSpv(litVertSpv,
+            File.ReadAllBytes(Path.Combine(shaderDir, "lit_opaque.frag.spv")), litInterface, "lit.opaque.early"));
+        opaqueSolidPipelineEarly = Pipeline(litOpaqueProgram, VertexPosition3NormalTangentTexture.Layout,
+            DepthState.LessEqualNoWrite, RasterizerState.BackFaceCulling,
+            new[] { BlendState.Disabled }, litPassHandle, "lit.opaque.early");
+        opaqueDoubleSidedPipelineEarly = Pipeline(litOpaqueProgram, VertexPosition3NormalTangentTexture.Layout,
+            DepthState.LessEqualNoWrite, RasterizerState.NoCulling,
+            new[] { BlendState.Disabled }, litPassHandle, "lit.opaque.doubleSided.early");
 
         // Blend: depth-test (so windows don't draw behind walls) but no
         // depth-write (so successive translucent fragments don't z-fight),

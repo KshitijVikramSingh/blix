@@ -467,7 +467,7 @@ internal sealed partial class SponzaLoop
 
     private void WriteRtShadows(string basePath)
     {
-        if (frameTracer is null || !rtShadows) return;
+        if (frameTracer is null || !rtShadows || rtShadowMasks.Length == 0) return;   // --no-shadow: never traced
         var rays = (long)rtShadowSize.Width * rtShadowSize.Height;
         // And what the lit pass was told: how much of the frame the sun reaches.
         var mask = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(rtShadowMasks[device.CurrentFrameSlot], 16, (int)rays * 4).AsSpan());
@@ -493,6 +493,13 @@ internal sealed partial class SponzaLoop
             double Pc(long v) => 100.0 * v / rays;
             Console.WriteLine(string.Create(Inv,
                 $"[VulkanSponza] lightlets, last frame: baked lit {Pc(by[0]):0.0}%, baked shadowed {Pc(by[1]):0.0}%; traced {Pc(by[2] + by[3] + by[4]):0.0}% -- uncertain {Pc(by[2]):0.0}%, no atlas texel {Pc(by[3]):0.0}%, texel missing or buried {Pc(by[4]):0.0}% -- of {rays:N0} pixels (sun records {(render.LightletSun && lightlets is not null ? "on" : "off")})."));
+        }
+        if (rtShadowCounters.Length > 0)
+        {
+            var c = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(rtShadowCounters[device.CurrentFrameSlot], 0, 16).AsSpan()).ToArray();
+            var packed = Math.Max(c[0], c[1]);
+            Console.WriteLine(string.Create(Inv,
+                $"[VulkanSponza] rt shadows, last frame: {packed:N0} rays packed ({100.0 * packed / rays:0.0}% of {rays:N0} pixels); of them facing away from the sun (sheets, foliage) {c[3]:N0}."));
         }
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] rt shadows, last frame's mask: sun blocked at {100.0 * blocked / rays:0.0}% of pixels, reaching {100.0 * (rays - blocked) / rays:0.0}%{(RtSkyRays ? string.Create(Inv, $"; sky rays blocked at {100.0 * skyBlocked / rays:0.0}%") : "")}."));

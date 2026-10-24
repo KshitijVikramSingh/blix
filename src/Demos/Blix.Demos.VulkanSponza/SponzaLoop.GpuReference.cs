@@ -161,7 +161,8 @@ internal sealed partial class SponzaLoop
     // counting back from the shot frame) -- and ShotReadyMargin frames more for the image to catch up; --shot-frames
     // stays the latest it may be. The gate ran each scene a fixed 3,000-4,500 frames, long after both.
     private bool shotWhenReady;
-    private const int ShotReadyMargin = 120;
+    // --shot-hold N: frames at rest before the shot (default 120) -- a timing run's still/moving windows want seconds of it.
+    private int ShotReadyMargin = 120;
     private int shotReadyFrame = -1;
 
     private bool ShotReady()

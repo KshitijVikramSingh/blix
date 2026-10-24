@@ -112,13 +112,8 @@ uint bakedSun(ivec2 q, vec3 n) {
 
 // The room along the side the ray leaves by: the pixel's nearest atlas texel's record (the side shown, or facing away
 // the pair's other, its far side), from TexelClear; -1 none (no atlas texel, no pair to leave by).
-float pixelRoom(ivec2 q, vec3 n, bool away) {
-    if (u.uClear.x < 0.5 || u.uLightmap.x < 0.5) return -1.0;
-    vec2 atlas;
-    if (!texelLightmapUnpack(texelFetch(uLightmapTexel, q, 0).r, atlas)) return -1.0;
-    ivec2 at = clamp(ivec2(floor(atlas)), ivec2(0), ivec2(u.uLightmap.yz) - 1);
-    uint front = TEXEL_INDEX_MAP(at.y * int(u.uLightmap.y) + at.x);
-    if (front == 0xFFFFFFFFu) return -1.0;
+float pixelRoom(uint front, vec3 n, bool away) {
+    if (u.uClear.x < 0.5 || front == 0xFFFFFFFFu) return -1.0;
     bool pair = TEXEL_POSITION(front).w < 0.0;
     uint shown = pair && dot(TEXEL_NORMAL(front).xyz, n) < 0.0 ? front + 1u : front;
     if (away) {
@@ -126,6 +121,15 @@ float pixelRoom(ivec2 q, vec3 n, bool away) {
         shown = shown == front ? front + 1u : front;
     }
     return texelClear[shown];
+}
+
+// The record a lightmapped pixel shows (its front's for a pair; 0xFFFFFFFF none): whether it lets light through.
+uint pixelRecord(ivec2 q) {
+    if (u.uLightmap.x < 0.5) return 0xFFFFFFFFu;
+    vec2 atlas;
+    if (!texelLightmapUnpack(texelFetch(uLightmapTexel, q, 0).r, atlas)) return 0xFFFFFFFFu;
+    ivec2 at = clamp(ivec2(floor(atlas)), ivec2(0), ivec2(u.uLightmap.yz) - 1);
+    return TEXEL_INDEX_MAP(at.y * int(u.uLightmap.y) + at.x);
 }
 
 uint hash32(uint x) {
@@ -143,7 +147,7 @@ void main() {
     bool perPixel = u.uCompact.z > 0.5;
     // The header's z back to 1 (traced; rt_shadow_filter.comp sets 2 when it filters this frame's mask).
     if (index == 0u) maskHeader.z = 1u;
-    if (packing && index == 0u) counters[1u - uint(u.uCompact.y)] = 0u;
+    if (packing && index == 0u) { counters[1u - uint(u.uCompact.y)] = 0u; counters[3] = 0u; }
     // The full-res pixel this ray starts from.
     ivec2 fullSize = textureSize(uSceneDepth, 0);
     ivec2 q = u.uHalf.x > 0.5 ? min(ivec2(p) * 2 + ivec2(u.uHalf.yz), fullSize - 1) : ivec2(p);
@@ -173,7 +177,20 @@ void main() {
     // and more put a pixel's sun ray past walls thinner than that -- the teacup's 4 mm saucer well, the 1.5-2.5 cm walls
     // of its cup, whose far sides a facing-away pixel's ray answers for (2026-10-24).
     bool away = dot(n, u.uSun.xyz) <= 0.0;
-    float room = pixelRoom(q, n, away);
+    // An opaque surface facing away (its record's |w| 4: no light through it): no ray. The sun is nothing on it -- the lit
+    // pass reads no mask where n.l and the light through are both nought -- and its ray, from behind the surface, came
+    // back blocked anyway: 54% of the rays at Crytek Sponza's courtyard (2026-10-24). Sheets that transmit (|w| 5) and
+    // pixels with no record (foliage) keep theirs.
+    uint rec = pixelRecord(q);   // the pixel's atlas record, once (the lift's room and the test below)
+    if (away && packing) {
+        if (rec != 0xFFFFFFFFu && abs(TEXEL_POSITION(rec).w) < 4.5 && abs(TEXEL_POSITION(rec).w) >= 2.0) {
+            maskWords[index] = 1u;
+            if (u.uSky.z > 0.5) baked[index] = 1u;
+            if (perPixel) origins[index] = vec4(position, -1.0);
+            return;
+        }
+    }
+    float room = pixelRoom(rec, n, away);
     float sunLift = room > 0.0 ? min(lift, max(0.5 * room, 0.001 * length(position - u.uCamera.xyz) + 2.5e-4)) : lift;
     vec3 origin = position + n * (away ? -sunLift : sunLift);
     uint answer = bakedSun(q, n);
@@ -199,6 +216,8 @@ void main() {
     }
     if (packing) {
         if (answer >= 2u) {
+            // The census (SponzaLoop.RtShadows.cs, the shot's stats): word 3 the rays from pixels facing away.
+            if (away) atomicAdd(counters[3], 1u);
             uint slot = atomicAdd(counters[uint(u.uCompact.y)], 1u);
             packedRays[slot * 2u] = vec4(origin, u.uSun.w);
             packedRays[slot * 2u + 1u] = vec4(rayDir, 0.0);

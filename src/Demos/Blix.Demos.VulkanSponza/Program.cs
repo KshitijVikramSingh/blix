@@ -335,6 +335,9 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // the opaque pipeline with the alpha-discard branch active in the
     // fragment shader (its `alphaCutoff > 0` guard skips when it's zero).
     private ShaderProgramHandle litProgram;
+    // lit_opaque.frag: opaque materials' build, without the cutout, keeping the early depth test (lit_body.glsl).
+    private ShaderProgramHandle litOpaqueProgram;
+    private PipelineHandle opaqueSolidPipelineEarly, opaqueDoubleSidedPipelineEarly;
     private PipelineHandle opaqueSolidPipeline;
     private PipelineHandle opaqueDoubleSidedPipeline;
     // Depth-WRITING twins of the opaque lit pipelines, for --ab prepass. The normal pair tests
@@ -879,6 +882,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // is then these buffers by name (sceneBuffers) rather than the sceneInstances material.
     private bool gpuCull = true;
     private bool litFlat;
+    private bool litEarlyZ = true;
     private PipelineHandle flatSolidPipeline;
     private PassHandle cullPassHandle;
     private PipelineHandle cullPipeline;

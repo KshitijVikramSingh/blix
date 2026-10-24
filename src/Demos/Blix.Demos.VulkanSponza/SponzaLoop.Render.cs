@@ -957,6 +957,11 @@ internal sealed partial class SponzaLoop
                     if (pipeline == opaqueSolidPipeline) pipeline = opaqueSolidPipelineWrites;
                     else if (pipeline == opaqueDoubleSidedPipeline) pipeline = opaqueDoubleSidedPipelineWrites;
                 }
+                else if (!g.IsMask && litEarlyZ)
+                {
+                    if (pipeline == opaqueSolidPipeline) pipeline = opaqueSolidPipelineEarly;
+                    else if (pipeline == opaqueDoubleSidedPipeline) pipeline = opaqueDoubleSidedPipelineEarly;
+                }
                 if (litFlat) pipeline = g.Pipeline == opaqueDoubleSidedPipeline ? flatPipeline : flatSolidPipeline;
                 DrawSceneGroup(scope, occlusionNow ? SceneListCameraFinal : SceneListCamera, g, pipeline, perFrame, passBindings, g.Material);
             }
