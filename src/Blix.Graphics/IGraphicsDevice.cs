@@ -70,6 +70,13 @@ public interface IGraphicsDevice : IDisposable
     void ReadMappedGpuBuffer(GpuBufferHandle handle, int offset, Span<byte> destination) =>
         ReadGpuBuffer(handle, offset, destination.Length).CopyTo(destination);
 
+    /// <summary>Copies <paramref name="data"/> into a <see cref="CreateReadableGpuBuffer"/> buffer at
+    /// <paramref name="offset"/>, where it lies: no copy submitted and no wait. As the read, the writer knows the GPU is
+    /// done with it (past the frames in flight) and that what reads it is recorded after. A device that cannot map its
+    /// buffers writes as <see cref="WriteGpuBuffer"/> does.</summary>
+    void WriteMappedGpuBuffer(GpuBufferHandle handle, int offset, ReadOnlySpan<byte> data) =>
+        WriteGpuBuffer(handle, offset, data);
+
     /// <summary>Runs compute dispatches now, outside the frame graph, in order, each seeing the last one's writes; returns
     /// when they are done.</summary>
     /// <remarks>

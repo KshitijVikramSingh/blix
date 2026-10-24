@@ -53,17 +53,19 @@ internal sealed partial class SponzaLoop
             if (!resolveGlowState.Equals(default(GpuBufferHandle))) RetireGpuBuffer(resolveGlowState);
             resolveGlowState = Own(device.CreateGpuBuffer(checked(n * 16), name: "sponza.resolve.glow-state"));
             resolvePasses = Own(device.CreateGpuBuffer(n * 4, name: "sponza.resolve.passes"));
+            // Readable where they lie (ReadMappedGpuBuffer): the in-frame sweep's round end sorts them without a wait
+            // (SponzaLoop.SweepFrame.cs).
             for (var i = 0; i < 2; i++)
             {
-                resolveIds[i] = Own(device.CreateGpuBuffer(n * 4, name: "sponza.resolve.ids"));
-                resolvePlaces[i] = Own(device.CreateGpuBuffer(n * 4, name: "sponza.resolve.places"));
+                resolveIds[i] = Own(device.CreateReadableGpuBuffer(n * 4, "sponza.resolve.ids"));
+                resolvePlaces[i] = Own(device.CreateReadableGpuBuffer(n * 4, "sponza.resolve.places"));
             }
             resolveCapacity = n;
         }
-        if (resolveCount.Equals(default(GpuBufferHandle))) resolveCount = Own(device.CreateGpuBuffer(16, name: "sponza.resolve.count"));
-        if (resolveHistogram.Equals(default(GpuBufferHandle))) resolveHistogram = Own(device.CreateGpuBuffer(512, name: "sponza.resolve.histogram"));
-        device.WriteGpuBuffer(resolveCount, 0, new byte[16]);
-        device.WriteGpuBuffer(resolveHistogram, 0, new byte[512]);
+        if (resolveCount.Equals(default(GpuBufferHandle))) resolveCount = Own(device.CreateReadableGpuBuffer(16, "sponza.resolve.count"));
+        if (resolveHistogram.Equals(default(GpuBufferHandle))) resolveHistogram = Own(device.CreateReadableGpuBuffer(512, "sponza.resolve.histogram"));
+        device.WriteMappedGpuBuffer(resolveCount, 0, new byte[16]);
+        device.WriteMappedGpuBuffer(resolveHistogram, 0, new byte[512]);
         if (SettlePoolNow)
         {
             var bytes = Math.Max(32, cookedPacked!.Length / 3 * 32);   // 8 words a patch (slice_resolve.comp, poolAdd)
@@ -182,7 +184,7 @@ internal sealed partial class SponzaLoop
             // The sweep's unsettled (list resolveNext) judged against the bar, into the other.
             var judged = resolveNext;
             resolveNext = 1 - resolveNext;
-            device.WriteGpuBuffer(resolveCount, 0, new byte[16]);
+            device.WriteMappedGpuBuffer(resolveCount, 0, new byte[16]);
             if (pooled) ResolveDispatch(1, 0, of, 0, false, sunNodeTraceBuffer, sunNodeTraceBuffer, sunNodeDarkBar);
             else ResolveDispatch(1, 0, left, 0, false, resolveIds[judged], resolvePlaces[judged], sunNodeDarkBar);
             var after = ReadResolveCount();
@@ -207,7 +209,7 @@ internal sealed partial class SponzaLoop
         sunNodeRefineIds = SortResolveList(resolveNext, left);
         sunNodeRefineBuffer = resolveIds[resolveNext];
         resolveNext = 1 - resolveNext;
-        device.WriteGpuBuffer(resolveCount, 0, new byte[16]);
+        device.WriteMappedGpuBuffer(resolveCount, 0, new byte[16]);
         sunNodeRefineRound++;
         sunNodeRefineRays += (long)left * RefinePasses * 32;
         sunNodeFirst = 0;

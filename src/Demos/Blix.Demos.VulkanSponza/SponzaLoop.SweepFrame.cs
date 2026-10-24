@@ -95,22 +95,137 @@ internal sealed partial class SponzaLoop
         var length = refining ? sunNodeRefineIds.Length : sunNodeTraceIds.Length;
         if (sunNodeFirst < length) return true;
         sweepRoundEndPending = true;
+        sweepEndStage = 0;
+        sweepEndFrame = framesRendered;
         return false;
     }
 
-    // A frame after a round's last resolve was recorded (that frame's work submitted, ahead of the read-backs on the
-    // queue): the round's end, as ResolveSliceNow's -- the next round, or the sweep finished. The compose follows.
-    // False when the gather stops here this frame.
-    private bool SweepRoundEnd()
+    // A round's end in the frame, a step a frame (BeginGpuRefineRound's, without its waits): the round's last resolve
+    // past the frames in flight, its count and the sweep's histogram read where they lie; the sweep judged again (recorded),
+    // its count read the same way; the next round's list sorted on a worker (read and written where it lies). Each wait
+    // was a WaitIdle and a submitted copy: ~45 ms a round's end on Crytek Sponza (2026-10-25).
+    private int sweepEndStage;
+    private long sweepEndFrame;
+    private int sweepEndLeft, sweepEndOf;
+    private Task<(uint[] Ids, uint[] Places)>? sweepSortTask;
+
+    private bool SweepWorkDone => framesRendered >= sweepEndFrame + Math.Max(1, device.MaxFramesInFlightCount) + 1;
+
+    private uint ReadMappedWord(GpuBufferHandle buffer)
     {
+        Span<byte> b = stackalloc byte[4];
+        device.ReadMappedGpuBuffer(buffer, 0, b);
+        return BitConverter.ToUInt32(b);
+    }
+
+    private void SweepRoundEndStep()
+    {
+        using var profScope = Prof("gather.round-end");
+        switch (sweepEndStage)
+        {
+            case 0:
+            {
+                if (!SweepWorkDone) return;
+                sweepEndLeft = (int)ReadMappedWord(resolveCount);
+                sweepEndOf = sunNodeRefineRound == 0 ? sunNodeTraceIds.Length : sunNodeRefineIds.Length;
+                var pooled = SettlePoolNow;
+                if (sunNodeRefineRound == 0 && (sweepEndLeft > 0 || pooled))
+                {
+                    var bytes = new byte[512];
+                    device.ReadMappedGpuBuffer(resolveHistogram, 0, bytes);
+                    var histogram = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(bytes);
+                    long total = 0, seen = 0;
+                    foreach (var c in histogram) total += c;
+                    for (var b = 0; b < histogram.Length && texelDarkFloor > 0f; b++)
+                    {
+                        seen += histogram[b];
+                        if (seen * 2 < total) continue;
+                        sunNodeDarkBar = texelDarkFloor * MathF.Pow(2f, (b + 0.5f) / 4f - 24f);
+                        break;
+                    }
+                    var judged = resolveNext;
+                    resolveNext = 1 - resolveNext;
+                    device.WriteMappedGpuBuffer(resolveCount, 0, new byte[16]);
+                    if (pooled) ResolveDispatch(1, 0, sweepEndOf, 0, false, sunNodeTraceBuffer, sunNodeTraceBuffer, sunNodeDarkBar, inFrame: sweepResolvePass);
+                    else ResolveDispatch(1, 0, sweepEndLeft, 0, false, resolveIds[judged], resolvePlaces[judged], sunNodeDarkBar, inFrame: sweepResolvePass);
+                    sweepEndFrame = framesRendered;
+                    sweepEndStage = 1;
+                    return;
+                }
+                sweepEndStage = 2;
+                goto case 2;
+            }
+            case 1:
+            {
+                if (!SweepWorkDone) return;
+                var after = (int)ReadMappedWord(resolveCount);
+                Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                    $"[VulkanSponza] sun nodes: the dark bar {sunNodeDarkBar:G3} ({texelDarkFloor:G2} of the median texel light); judged again in the frame: {after:N0} refine (its slices alone: {sweepEndLeft:N0})."));
+                sweepEndLeft = after;
+                sweepEndStage = 2;
+                goto case 2;
+            }
+            case 2:
+            {
+                var left = sweepEndLeft;
+                var of = sweepEndOf;
+                Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                    $"[VulkanSponza] sun nodes: {of - left:N0} of {of:N0} texels settled after {(sunNodeRefineRound == 0 ? "the sweep" : $"round {sunNodeRefineRound}")} in the frame ({sunNodeClock.Elapsed.TotalMinutes:0.0} min, {sweepFrameSlices:N0} slices, {sweepFramePasses:N0} passes); {left:N0} refine."));
+                var stops = left == 0 || sunNodeRefineRound > 0 && of - left < splitRefineMinShare * of;
+                if (stops)
+                {
+                    SweepEndFinish();
+                    return;
+                }
+                // The round's list in id order (as SortResolveList's), on a worker: the appends land as the threads meet.
+                var ids = new byte[left * 4];
+                var places = new byte[left * 4];
+                device.ReadMappedGpuBuffer(resolveIds[resolveNext], 0, ids);
+                device.ReadMappedGpuBuffer(resolvePlaces[resolveNext], 0, places);
+                sweepSortTask = Task.Run(() =>
+                {
+                    var i = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(ids).ToArray();
+                    var p = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(places).ToArray();
+                    Array.Sort(i, p);
+                    return (i, p);
+                });
+                sweepEndStage = 3;
+                return;
+            }
+            case 3:
+            {
+                if (sweepSortTask is not { IsCompleted: true } task) return;
+                var (ids, places) = task.Result;
+                sweepSortTask = null;
+                device.WriteMappedGpuBuffer(resolveIds[resolveNext], 0, System.Runtime.InteropServices.MemoryMarshal.AsBytes(ids.AsSpan()));
+                device.WriteMappedGpuBuffer(resolvePlaces[resolveNext], 0, System.Runtime.InteropServices.MemoryMarshal.AsBytes(places.AsSpan()));
+                sunNodeRefineIds = ids;
+                sunNodeRefineBuffer = resolveIds[resolveNext];
+                resolveNext = 1 - resolveNext;
+                device.WriteMappedGpuBuffer(resolveCount, 0, new byte[16]);
+                sunNodeRefineRound++;
+                sunNodeRefineRays += (long)ids.Length * RefinePasses * 32;
+                sunNodeFirst = 0;
+                sunNodePass = 0;
+                SweepEndDone();
+                return;
+            }
+        }
+    }
+
+    // The round's end done: the compose follows (it ran after every slice on the host path), once -- the round's resolves
+    // are past the frames in flight by now, so not again the next frame (splitComposeAgainFrame) as after a live write.
+    private void SweepEndDone()
+    {
+        sweepEndStage = 0;
         sweepRoundEndPending = false;
         splitComposeDirty = true;
-        splitComposeAgainFrame = framesRendered + 1;
-        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[VulkanSponza] sweep in the frame: round {sunNodeRefineRound} in, {sweepFrameSlices:N0} slices and {sweepFramePasses:N0} passes so far."));
-        if (BeginGpuRefineRound()) return true;
+    }
+
+    private void SweepEndFinish()
+    {
+        SweepEndDone();
         gpuResolving = false;
         FinishSunNodes();
-        return false;
     }
 }

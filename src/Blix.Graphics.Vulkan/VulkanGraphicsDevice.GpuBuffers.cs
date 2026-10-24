@@ -113,6 +113,20 @@ public sealed partial class VulkanGraphicsDevice
         return new GpuBufferHandle(id);
     }
 
+    public unsafe void WriteMappedGpuBuffer(GpuBufferHandle handle, int offset, ReadOnlySpan<byte> data)
+    {
+        ThrowIfDisposed();
+        var entry = GetGpuBuffer(handle);
+        if (entry.Mapped == 0)
+        {
+            WriteGpuBuffer(handle, offset, data);
+            return;
+        }
+        if (offset < 0 || (ulong)offset + (ulong)data.Length > entry.Size)
+            throw new ArgumentOutOfRangeException(nameof(offset), $"{data.Length} bytes from {offset} is outside GPU buffer '{entry.Name}' ({entry.Size} bytes).");
+        data.CopyTo(new Span<byte>((byte*)entry.Mapped + offset, data.Length));
+    }
+
     public unsafe void ReadMappedGpuBuffer(GpuBufferHandle handle, int offset, Span<byte> destination)
     {
         ThrowIfDisposed();

@@ -1320,7 +1320,7 @@ internal sealed partial class SponzaLoop
         // The in-frame sweep: a pass a frame, and a round's end a frame after its last resolve was recorded
         // (SponzaLoop.SweepFrame.cs).
         if (SweepRecordedThisFrame) return;
-        if (sweepRoundEndPending && !SweepRoundEnd()) return;
+        if (sweepRoundEndPending) { SweepRoundEndStep(); return; }
         var clock = Stopwatch.StartNew();
         var budget = CookScreenNow ? SunNodeCookScreenMs : GatherInBackground ? backgroundGatherMs : SunNodeLiveMs;
         sunNodeQueueWaitMs = 0;
