@@ -27,6 +27,11 @@ internal sealed partial class SponzaLoop
     // The instant layer at a light change (ApplyPatchTexelsNow: patch_dir.comp, texel_patch_light.comp, texel_ratio.comp).
     private PassHandle sweepPatchDirPass, sweepPatchTexelsPass, sweepRatioPass;
     private int sweepInstantChunk = 1 << 20;
+    // The fine copy's texels a frame under --sweep-in-frame (--sweep-fine-chunk): all 4.5 M of Crytek Sponza's in one
+    // frame held it ~110 ms of the GPU.
+    private int sweepFineChunk = 1 << 19;
+    private (GpuBufferHandle Ids, int Count, bool Own) sweepFineCopy;
+    private int sweepFineCopyFirst;
     // A light change under --sweep-in-frame: its setup's dispatches recorded in the frame (SetupDispatch), not run at once.
     private bool SetupInFrame => sweepInFrame && liveSkyGathered;
 
@@ -54,7 +59,7 @@ internal sealed partial class SponzaLoop
         if (SetupInFrame) graph.Dispatch(pass, command);
         else device.DispatchNow(new[] { command }, name);
     }
-    private int sweepCellsChunk = 65536;
+    private int sweepCellsChunk = 8192;   // ~5 ms of the GPU a frame on Crytek Sponza (65536: ~40 ms)
     private PassHandle sweepRaysPass, sweepShadePass, sweepFarFinishPass, sweepFarPoolPass, sweepCensusPass, sweepResolvePass;
     private RayBatchPasses sweepClosestBatch;
 
@@ -90,6 +95,8 @@ internal sealed partial class SponzaLoop
         sweepInFrame = args.Flag("sweep-in-frame");
         if (args.Int("sweep-slice") is { } s) sweepSlice = Math.Clamp(s, 256, 32768);
         if (args.Int("sweep-instant-chunk") is { } ic) sweepInstantChunk = Math.Max(65536, ic);
+        if (args.Int("compose-filter-chunk") is { } cf) composeFilterChunk = Math.Max(65536, cf);
+        if (args.Int("sweep-fine-chunk") is { } fc) sweepFineChunk = Math.Max(65536, fc);
         if (args.Int("sweep-cells-chunk") is { } cc) sweepCellsChunk = Math.Clamp(cc, 1024, 4096 * 64);
         // Behind the frame is where the in-frame sweep runs (GatherInBackground).
         if (sweepInFrame) backgroundGather = true;
@@ -174,6 +181,23 @@ internal sealed partial class SponzaLoop
         using var profScope = Prof("gather.round-end");
         switch (sweepEndStage)
         {
+            case 9:
+            {
+                // The fine copy, a chunk a frame (ApplyFineNow left it here); the coarse filter went with the first frame.
+                var (ids, count, own) = sweepFineCopy;
+                if (sweepFineCopyFirst < count)
+                {
+                    FineDispatch(ids, count, default, sweepFineCopyFirst, sweepFineChunk);
+                    sweepFineCopyFirst += sweepFineChunk;
+                    sweepRecordedFrame = framesRendered;
+                    sweepEndFrame = framesRendered;
+                    return;
+                }
+                if (own) RetireGpuBuffer(ids);
+                sweepFineCopy = default;
+                sweepEndStage = 10;
+                return;
+            }
             case 10:
             {
                 // The coarse sweep's end (FinishSunNodes): the coarse filter and the fine copy done; the fine round next.

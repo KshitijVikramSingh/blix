@@ -18,6 +18,11 @@ internal sealed partial class SponzaLoop
     private const double ProfileWindowSeconds = 5.0;
     private const double SpikeMs = 50.0, SpikeOverMedian = 2.5;
     // BLIX_PROFILE_SPIKES=N: the slow frames a window prints (6 by default) -- every one of a light change's, say.
+    // With BLIX_PROFILE_SPIKES set, a slow frame's GPU passes too, a few frames later (timings resolve late): the host's
+    // pass totals over its frame and the two before, differenced.
+    private static readonly bool profSpikesGpu = Environment.GetEnvironmentVariable("BLIX_PROFILE_SPIKES") is not null;
+    private readonly Queue<Dictionary<string, GpuPassTotal>> profGpuRecent = new();
+    private readonly List<(long Frame, Dictionary<string, GpuPassTotal> Before)> profGpuPending = new();
     private static readonly int ProfileSpikesAWindow = int.TryParse(Environment.GetEnvironmentVariable("BLIX_PROFILE_SPIKES"), out var spikes) ? spikes : 6;
 
     private readonly struct ProfFrame
@@ -114,11 +119,28 @@ internal sealed partial class SponzaLoop
         profWindow.Add(frame);
         profSession.Add(frame);
         if (profSession.Count > 200_000) profSession.RemoveRange(0, 100_000);
+        if (profSpikesGpu)
+        {
+            var now = new Dictionary<string, GpuPassTotal>(host.Timing.GpuPassTotals);
+            for (var i = profGpuPending.Count - 1; i >= 0; i--)
+            {
+                var (at, before) = profGpuPending[i];
+                if (profFrames < at + 4) continue;
+                profGpuPending.RemoveAt(i);
+                var passes = now.Select(p => (p.Key, Ms: p.Value.TotalMs - (before.TryGetValue(p.Key, out var b) ? b.TotalMs : 0)))
+                    .Where(p => p.Ms > 0.5).OrderByDescending(p => p.Ms).Take(8);
+                Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                    $"[profile] slow frame {at}'s GPU (its frame, the two before, three after): {string.Join(", ", passes.Select(p => $"{p.Key} {p.Ms:0.0}"))}"));
+            }
+            profGpuRecent.Enqueue(now);
+            if (profGpuRecent.Count > 3) profGpuRecent.Dequeue();
+        }
         // A slow frame, at once: against a fixed bar and the window's median so far.
         var median = profWindow.Count >= 10 ? Percentile(profWindow.Select(f => f.Interval), 0.5) : 16.7;
         if ((interval > SpikeMs || interval > SpikeOverMedian * median) && interval > 20.0 && profSpikesThisWindow < ProfileSpikesAWindow)
         {
             profSpikesThisWindow++;
+            if (profSpikesGpu && profGpuRecent.TryPeek(out var oldest)) profGpuPending.Add((profFrames, oldest));
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[profile] slow frame {profFrames}: {interval:0.0} ms (median {median:0.0}){(moving ? " moving" : "")}, {state}; host wait {frame.Wait:0.0} encode {frame.Encode:0.0} submit/present {frame.Present:0.0}; gc pause {frame.GcPause:0.0}{(frame.Gen2 > 0 ? " (a full collection)" : "")}; {Sections(frame.Sections, 6)}"));
         }

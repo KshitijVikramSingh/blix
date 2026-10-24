@@ -644,13 +644,15 @@ internal sealed partial class SponzaLoop
         var clock = Stopwatch.StartNew();
         // Not over the texels the light change's first gather took (SponzaLoop.VisibleChanged.cs).
         var (copyIds, copyCount, copyOwn) = FineCopyIds();
-        FineDispatch(copyIds, copyCount, default);
-        // In the frame: recorded; its counts read where they lie once done (SweepFineCounts).
+        // In the frame: a chunk a frame from the round end's stage 9 (SweepFineCopyStep); its counts read where they lie
+        // once done (SweepFineCounts).
         if (SetupInFrame)
         {
-            if (copyOwn) RetireGpuBuffer(copyIds);
+            sweepFineCopy = (copyIds, copyCount, copyOwn);
+            sweepFineCopyFirst = 0;
             return;
         }
+        FineDispatch(copyIds, copyCount, default);
         device.WaitIdle();
         if (copyOwn) device.DestroyGpuBuffer(copyIds);
         fineFlagCounts = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(fineFlagsBuffer, 0, 64).AsSpan()).ToArray();
@@ -686,7 +688,7 @@ internal sealed partial class SponzaLoop
         return words;
     }
 
-    private void FineDispatch(GpuBufferHandle idsBuffer, int count, GpuBufferHandle debug)
+    private void FineDispatch(GpuBufferHandle idsBuffer, int count, GpuBufferHandle debug, int rangeFirst = 0, int rangeCount = -1)
     {
         if (count == 0 || !transferReady) return;
         var debugOn = !debug.Equals(default(GpuBufferHandle));
@@ -702,8 +704,9 @@ internal sealed partial class SponzaLoop
         if (skyDetail.Equals(default(GpuBufferHandle)) || sunDetail.Equals(default(GpuBufferHandle))) return;
         var declared = transferFineInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
         const int perDispatch = 65535 * 64;
-        for (var first = 0; first < count; first += perDispatch)
-            FineDispatchOne(debugOn, new DispatchCommand(transferFinePipeline, (Math.Min(perDispatch, count - first) + 63) / 64, 1, 1,
+        var end = rangeCount < 0 ? count : Math.Min(count, rangeFirst + rangeCount);
+        for (var first = rangeFirst; first < end; first += perDispatch)
+            FineDispatchOne(debugOn, new DispatchCommand(transferFinePipeline, (Math.Min(perDispatch, end - first) + 63) / 64, 1, 1,
                 new ShaderUniform[]
                 {
                     new("uFine", new Vector4Uniform(new Vector4(count, first, transferMinLevel, texelLevels - 1))),

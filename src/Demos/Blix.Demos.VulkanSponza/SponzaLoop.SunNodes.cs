@@ -971,10 +971,10 @@ internal sealed partial class SponzaLoop
             ApplyFineNow();
             if (SetupInFrame)
             {
-                // Recorded: the fine round starts once they are done (SweepRoundEndStep, stage 10).
+                // Recorded: the fine copy a chunk a frame (SweepRoundEndStep, stage 9), the fine round once it is done (10).
                 sunNodeStage = SunNodeStage.Tracing;
                 sweepRoundEndPending = true;
-                sweepEndStage = 10;
+                sweepEndStage = 9;
                 sweepEndFrame = framesRendered;
                 return;
             }

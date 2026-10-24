@@ -218,6 +218,13 @@ internal sealed partial class SponzaLoop
         Console.WriteLine("[VulkanSponza] split light: the new sun's part to cook (the sky's kept); the old sun's shows until it lands.");
     }
 
+    // The filter (mode 1) a range of texels a frame while a light change gathers behind the frame (--sweep-in-frame): over
+    // all of Crytek Sponza's 5.7 M at once it was ~27 ms of the GPU, a dozen times a sun change. Its input (TexelComposed,
+    // mode 0's) is whole by its first range; a new compose begins the ranges again. -1: none under way.
+    private int composeFilterFirst = -1;
+    private int composeFilterChunk = 1 << 20;
+    private bool ComposeFilterChunked => sweepInFrame && texelFilter && !CookScreenNow;
+
     // RecordTexels, each frame: the resting light composed again when a part landed or a scale changed.
     private void RecordSplitCompose()
     {
@@ -227,7 +234,11 @@ internal sealed partial class SponzaLoop
         // A live write (a scatter, an in-place provisional) is a pass of this frame that may run after the compose: composed
         // again the next frame too.
         if (!splitComposeDirty && sky == splitComposedSky && sun == splitComposedSun && splitComposeAgainFrame < framesRendered
-            && composedCookedSkyVis == CookedSkyVisNow) return;
+            && composedCookedSkyVis == CookedSkyVisNow)
+        {
+            if (composeFilterFirst >= 0) RecordComposeFilterRange(sky, sun);
+            return;
+        }
         composedCookedSkyVis = CookedSkyVisNow;
         splitComposeDirty = false;
         MarkIncidentDirty();   // the texels' light changes: the incident pass recomputes every pixel (SponzaLoop.IncidentReuse.cs)
@@ -236,8 +247,34 @@ internal sealed partial class SponzaLoop
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] split light: composed at frame {framesRendered} (post-load {postLoadFrames}): sky {sky.X:G4}, sun {sun.X:G4},{sun.Y:G4},{sun.Z:G4}{(splitSunUp ? "" : " (no sun part yet)")}."));
         var live = texelLiveIds!.Length;
-        foreach (var mode in texelFilter ? new[] { 0, 1 } : new[] { 0 })
-            graph.Dispatch(mode == 0 ? texelComposePass : texelComposeFilterPass, new DispatchCommand(texelComposePipeline, (live + 63) / 64, 1, 1,
+        graph.Dispatch(texelComposePass, ComposeCommand(0, sky, sun, 0, live));
+        if (ComposeFilterChunked)
+        {
+            composeFilterFirst = 0;
+            RecordComposeFilterRange(sky, sun);
+            return;
+        }
+        composeFilterFirst = -1;
+        if (texelFilter) graph.Dispatch(texelComposeFilterPass, ComposeCommand(1, sky, sun, 0, live));
+        ComposeLanded();
+    }
+
+    private void RecordComposeFilterRange(Vector3 sky, Vector3 sun)
+    {
+        var live = texelLiveIds!.Length;
+        var n = Math.Min(composeFilterChunk, live - composeFilterFirst);
+        graph.Dispatch(texelComposeFilterPass, ComposeCommand(1, sky, sun, composeFilterFirst, n));
+        MarkIncidentDirty();
+        composeFilterFirst += n;
+        if (composeFilterFirst < live) return;
+        composeFilterFirst = -1;
+        ComposeLanded();
+    }
+
+    private DispatchCommand ComposeCommand(int mode, Vector3 sky, Vector3 sun, int first, int count)
+    {
+        var live = texelLiveIds!.Length;
+        return new DispatchCommand(texelComposePipeline, (count + 63) / 64, 1, 1,
                 new ShaderUniform[]
                 {
                     new("uCompose", new Vector4Uniform(new Vector4(live, mode, CookedSkyVisNow ? 1f : 0f, TexelShapeOn ? 1f : 0f))),
@@ -246,7 +283,7 @@ internal sealed partial class SponzaLoop
                     new("uTexelGrid", new Vector4Uniform(texelGrid)),
                     new("uTexelParams", new Vector4Uniform(new Vector4(texelCapacity, 0f, 0f, 0f))),
                     new("uLightmap", new Vector4Uniform(LightmapUniform)),
-                    new("uEdge", new Vector4Uniform(new Vector4(texelFilterSymmetric ? 1f : 0f, texelFilterArea ? 1f : 0f, texelShapePool, 0f))),
+                    new("uEdge", new Vector4Uniform(new Vector4(texelFilterSymmetric ? 1f : 0f, texelFilterArea ? 1f : 0f, texelShapePool, first))),
                 },
                 Array.Empty<ShaderTextureBinding>(),
                 Buffers: new[]
@@ -262,7 +299,12 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("TexelOwnShape", ShapeOr(texelOwnShapeBuffer)),
                     new ShaderBufferBinding("TexelShape", ShapeOr(texelShapeBuffer)),
                     ProvenanceBinding(),
-                }.Concat(SeamBindings()).Concat(DetailBindings()).ToArray()));
+                }.Concat(SeamBindings()).Concat(DetailBindings()).ToArray());
+    }
+
+    // The composed light whole (its filter's last range recorded): the atlas's cells, and the texels at rest.
+    private void ComposeLanded()
+    {
         RecordLightmapCells();   // the atlas resolve: the cells from this light (SponzaLoop.LightmapCells.cs)
         texelResting = true;
         texelResolveCurrent = true;

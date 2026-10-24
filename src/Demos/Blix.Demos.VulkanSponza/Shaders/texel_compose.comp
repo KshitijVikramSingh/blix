@@ -21,7 +21,8 @@ layout(set = 0, binding = 0) uniform TexelCompose {
     vec4 uTexelGrid;  // mode 1: xyz the cells' origin, w the spacing
     vec4 uTexelParams; // mode 1: x hash capacity
     vec4 uLightmap;   // mode 1: as texel_filter.comp's
-    vec4 uEdge;       // mode 1: x, y as texel_filter.comp's; z the shapes' pool radius (m) past the filter's neighbours (0 none)
+    vec4 uEdge;       // mode 1: x, y as texel_filter.comp's; z the shapes' pool radius (m) past the filter's neighbours (0 none);
+                      // w the first live texel (a range of them a frame: SponzaLoop.SplitLight.cs)
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer SunNodesLive { uint liveIds[]; };
@@ -98,7 +99,7 @@ vec3 unpackRgb9e5(uint p) {
 }
 
 void main() {
-    uint i = gl_GlobalInvocationID.x;
+    uint i = gl_GlobalInvocationID.x + uint(u.uEdge.w);
     if (i >= uint(u.uCompose.x)) return;
     uint id = liveIds[i];
     if (int(u.uCompose.y) == 0) {
