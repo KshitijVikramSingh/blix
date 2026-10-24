@@ -516,9 +516,53 @@ bool texelsAt(vec3 worldPos, vec3 n, float faceBin, float viewDepth, out vec3 ir
                 if ((whyFlags & 2u) != 0u) probeCount(38u);
                 if ((whyFlags & 16u) != 0u) probeCount(39u);
                 if ((whyFlags & 8u) != 0u) probeCount(40u);
-                if (!slow && bestDot < 0.9) probeCount(41u);
+                if (!slow && bestDot < 0.9) probeCount(41u);   // the groove rule's pixels (the ring from the cells)
             }
-            if (!slow && bestDot >= 0.9) {
+            // The groove rule (texelsAroundLightmap's): the best of the four turned past 25 degrees from the pixel (the
+            // records carry their face's normal, the pixel its vertex normal: a smoothed column's facets, 8% of Crytek
+            // Sponza's pixels): the ring of twelve around, the first four facing as the pixel does, by 1 / (1 + d^2) --
+            // from the cells. One not whole, with seams or a pair's back not whole: the full lookup; none: the four.
+            if (!slow && bestDot > -2.0 && bestDot < 0.9) {
+                vec3 sum = vec3(0.0);
+                float sky = 0.0, weight = 0.0;
+                int found = 0;
+                bool ringSlow = false;
+                for (int k = 0; k < 16 && found < 4; ++k) {
+                    ivec2 o = ivec2(k & 3, k >> 2) - 1;
+                    if (o.x >= 0 && o.x <= 1 && o.y >= 0 && o.y <= 1) continue;
+                    uvec2 rc = lightmapCellAt(base + o);
+                    uint fl = lightmapCellFlags(rc);
+                    if ((fl & LIGHTMAP_CELL_NONE) != 0u) continue;
+                    vec3 rn = lightmapCellNormal(rc);
+                    bool rb = (fl & LIGHTMAP_CELL_PAIR) != 0u && dot(rn, n) < 0.0;
+                    if (rb) rn = -rn;
+                    if (dot(rn, n) < 0.9) continue;
+                    if ((fl & (LIGHTMAP_CELL_SLOW | LIGHTMAP_CELL_SEAMS)) != 0u || (rb && (fl & LIGHTMAP_CELL_BACK_SLOW) != 0u)) { ringSlow = true; break; }
+                    vec2 dd = vec2(base + o) + 0.5 - atlasAt;
+                    float w = 1.0 / (1.0 + dot(dd, dd));
+                    if (rb) {
+                        uint b = lightmapCellId(base + o) + 1u;
+                        sum += w * unpackRgb9e5(texelResolved[b].x);
+                        sky += w * texelDetailUnpack(texelDetail[b]).z;
+                    } else {
+                        sum += w * unpackRgb9e5(rc.x);
+                        sky += w * lightmapCellSky(rc);
+                    }
+                    weight += w;
+                    found++;
+                }
+                if (ringSlow) slow = true;
+                else if (found > 0) {
+                    irradiance = sum / weight;
+                    confidence = 1.0;
+                    detailSum = vec4(0.0, 0.0, sky / weight, 1.0);
+                    detailMissing = false;
+                    probeCount(37u);
+                    return true;
+                }
+                // None in the ring: the four, against the best of them (below).
+            }
+            if (!slow && bestDot > -2.0) {
                 vec3 sum = vec3(0.0);
                 float sky = 0.0, weight = 0.0;
                 bool seamsWhole = true;
