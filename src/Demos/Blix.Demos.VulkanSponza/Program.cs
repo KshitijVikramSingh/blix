@@ -284,6 +284,8 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private GraphResourceHandle incidentHalfHandle, incidentGradientHalfHandle;
     private PassHandle incidentHalfPassHandle, lightingUpsamplePassHandle;
     private PipelineHandle incidentHalfPipeline, lightingUpsamplePipeline;
+    // incident_lean.frag's (no debug view, picker, probe, screen probes or reference view): SponzaLoop.Clipmap.cs picks them.
+    private PipelineHandle incidentLeanPipeline, incidentHalfLeanPipeline;
     private ShaderInterface lightingUpsampleInterface = null!;
     // Which of its 2x2 a half-res pixel stands for this frame (LightingSubpixel), all four every four frames.
     private uint lightingFrame;

@@ -154,6 +154,7 @@ internal sealed partial class SponzaLoop
         litEarlyZ = !args.Flag("no-lit-early-z");
         texelShapeNearest = !args.Flag("texel-shape-bilinear");
         litLean = !args.Flag("no-lit-lean");
+        incidentLean = !args.Flag("no-incident-lean");
         cascadesAlways = args.Flag("cascades-always");
         shadowKeep = !args.Flag("no-shadow-keep");
         // --ray-check: also trace a fixed batch of rays on the GPU every frame and hold them against the CPU at the shot.
@@ -1224,6 +1225,15 @@ internal sealed partial class SponzaLoop
                 presentVertSpv, incidentClipmapSpv, incidentClipmapInterface, "incident_clipmap_half")),
             VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
             new[] { BlendState.Disabled, BlendState.Disabled }, incidentHalfPassHandle, "incident_clipmap_half");
+        var incidentLeanSpv = File.ReadAllBytes(Path.Combine(shaderDir, "incident_lean.frag.spv"));
+        incidentLeanPipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
+                presentVertSpv, incidentLeanSpv, incidentClipmapInterface, "incident_lean")),
+            VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
+            new[] { BlendState.Disabled, BlendState.Disabled }, incidentPassHandle, "incident_lean");
+        incidentHalfLeanPipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
+                presentVertSpv, incidentLeanSpv, incidentClipmapInterface, "incident_lean_half")),
+            VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
+            new[] { BlendState.Disabled, BlendState.Disabled }, incidentHalfPassHandle, "incident_lean_half");
         lightingUpsamplePipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
                 presentVertSpv, File.ReadAllBytes(Path.Combine(shaderDir, "lighting_upsample.frag.spv")), lightingUpsampleInterface, "lighting_upsample")),
             VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,

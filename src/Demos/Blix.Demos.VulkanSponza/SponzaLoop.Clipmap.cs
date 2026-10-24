@@ -108,6 +108,7 @@ internal sealed partial class SponzaLoop
     // re-solving moves (every 512 probes a frame re-blended at 25%).
     private int clipmapFreeze = int.MaxValue;
     private ShaderInterface incidentClipmapInterface = null!;
+    private bool incidentLean = true;
     private PipelineHandle incidentClipmapPipeline;
 
     private Vector4 ClipmapOrigin(int level) => clipmap is { } c
@@ -135,8 +136,11 @@ internal sealed partial class SponzaLoop
         var texel = TexelIncidentInputs();
         var reference = ReferenceIncidentInputs();
         var pick = TexelPickInputs(frameWidth, frameHeight);
+        // The lean build where nothing it compiles out is on (incident_lean.frag); --no-incident-lean: never.
+        var lean = incidentLean && pick.Code == 0f && reference.Params.X <= 0.5f && reference.Params.W <= 0.5f
+            && screen.Screen.X <= 0.5f && IncidentStop == 0f;
         graph.Pass(half ? incidentHalfPassHandle : incidentPassHandle, scope => fullscreen.Draw(
-            scope, half ? incidentHalfPipeline : incidentClipmapPipeline,
+            scope, half ? (lean ? incidentHalfLeanPipeline : incidentHalfPipeline) : (lean ? incidentLeanPipeline : incidentClipmapPipeline),
             new[]
             {
                 new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
