@@ -228,6 +228,8 @@ internal sealed partial class SponzaLoop
         texelH4 = args.Flag("texel-h4");
         // --texel-shape-luma: the lit pass takes the incident pass's luminance gradient, not the records' shapes per channel.
         texelShapeLuma = args.Flag("texel-shape-luma");
+        // --texel-shape-pool R: the shapes pooled out to R metres (texel_compose.comp; 0.2 by default; 0: the filter's neighbours alone).
+        if (args.Float("texel-shape-pool") is { } pool) texelShapePool = Math.Clamp(pool, 0f, 0.5f);
         switch (args.String("hit-sun"))
         {
             case null or "disc": break;
@@ -1425,6 +1427,7 @@ internal sealed partial class SponzaLoop
     // leaving the shape the sums make in texelOwnShapeBuffer. BLIX_TEXEL_H4_FULL=1: the sums kept for every texel (64 B a
     // texel, dumped as texel_h4.f32x16) for tools/gi-model/h4_record_check.py.
     private bool texelH4, texelShapeLuma;
+    private float texelShapePool = 0.2f;
     private readonly bool texelH4Full = Environment.GetEnvironmentVariable("BLIX_TEXEL_H4_FULL") == "1";
     private float TexelH4Mode => texelH4Full ? 2f : 1f;
     private GpuBufferHandle texelH4Buffer;

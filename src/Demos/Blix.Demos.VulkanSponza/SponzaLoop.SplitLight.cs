@@ -246,7 +246,7 @@ internal sealed partial class SponzaLoop
                     new("uTexelGrid", new Vector4Uniform(texelGrid)),
                     new("uTexelParams", new Vector4Uniform(new Vector4(texelCapacity, 0f, 0f, 0f))),
                     new("uLightmap", new Vector4Uniform(LightmapUniform)),
-                    new("uEdge", new Vector4Uniform(new Vector4(texelFilterSymmetric ? 1f : 0f, texelFilterArea ? 1f : 0f, 0f, 0f))),
+                    new("uEdge", new Vector4Uniform(new Vector4(texelFilterSymmetric ? 1f : 0f, texelFilterArea ? 1f : 0f, texelShapePool, 0f))),
                 },
                 new[] { AtlasGatherTexture() },
                 Buffers: new[]

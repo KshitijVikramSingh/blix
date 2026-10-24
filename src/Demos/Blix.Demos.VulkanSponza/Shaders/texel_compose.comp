@@ -21,7 +21,7 @@ layout(set = 0, binding = 0) uniform TexelCompose {
     vec4 uTexelGrid;  // mode 1: xyz the cells' origin, w the spacing
     vec4 uTexelParams; // mode 1: x hash capacity
     vec4 uLightmap;   // mode 1: as texel_filter.comp's
-    vec4 uEdge;       // mode 1: as texel_filter.comp's
+    vec4 uEdge;       // mode 1: x, y as texel_filter.comp's; z the shapes' pool radius (m) past the filter's neighbours (0 none)
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer SunNodesLive { uint liveIds[]; };
@@ -175,6 +175,35 @@ void main() {
             float w = texelFilterWeight(other, position, n, tg, centre, dot(light, luma), u.uEdge);
             acc += vec4(w * light, w);
             if (shapes) shapeAdd(uint(other), w * exp(-abs(log(max(dot(light, luma), 1e-12) / lc)) / 0.3), sa0, sa1, sa2, saw);
+        }
+    }
+    // --texel-shape-pool R (uEdge.z): an atlas record's shape pooled further than the filter's 3 x 3 -- rings of 8 atlas
+    // texels 3 and 5 out (12 and 20 cm at 4 cm texels; a Gaussian of R / 2), on its plane, turned its way, by their light's
+    // likeness: tools/gi-model/direction_pooling.py, 128-ray shapes 6.5% at 20 deg, pooled 20 cm by likeness 5.1%, the
+    // truth's floor 3.7%, no smear at creases.
+    if (shapes && u.uEdge.z > 0.0 && u.uLightmap.x > 0.5 && float(id) >= u.uLightmap.w - 0.5) {
+        uint packedAt = floatBitsToUint(TEXEL_NORMAL(id).w);
+        ivec2 at0 = ivec2(int(packedAt & 0xFFFFu), int(packedAt >> 16));
+        float sigma = 0.5 * u.uEdge.z;
+        for (int ring = 3; ring <= 5; ring += 2) {
+            for (int k = 0; k < 8; ++k) {
+                ivec2 d = ivec2(k < 3 ? k - 1 : k == 3 ? -1 : k == 4 ? 1 : k - 6, k < 3 ? -1 : k < 5 ? 0 : 1) * ring;
+                ivec2 at = at0 + d;
+                if (any(lessThan(at, ivec2(0))) || any(greaterThanEqual(at, ivec2(u.uLightmap.yz)))) continue;
+                uint o = TEXEL_INDEX_MAP(at.y * int(u.uLightmap.y) + at.x);
+                if (o == 0xFFFFFFFFu) continue;
+                if (TEXEL_POSITION(o).w < 0.0 && dot(TEXEL_NORMAL(o).xyz, n) < 0.0) o += 1u;
+                if (abs(TEXEL_POSITION(o).w) < 2.0) continue;
+                uvec2 c = texelComposed[o];
+                if ((c.y & 0x10000u) == 0u) continue;
+                vec3 dp = TEXEL_POSITION(o).xyz - position;
+                vec3 on = TEXEL_NORMAL(o).xyz;
+                float f = dot(normalize(on), normalize(n));
+                if (f <= 0.0 || abs(dot(normalize(n), dp)) > 0.04) continue;   // another surface (the atlas runs on past a fold)
+                float lo = dot(unpackRgb9e5(c.x), luma);
+                float w = exp(-0.5 * dot(dp, dp) / (sigma * sigma)) * f * f * f * f * exp(-abs(log(max(lo, 1e-12) / lc)) / 0.3);
+                shapeAdd(o, w, sa0, sa1, sa2, saw);
+            }
         }
     }
     if (shapes) {
