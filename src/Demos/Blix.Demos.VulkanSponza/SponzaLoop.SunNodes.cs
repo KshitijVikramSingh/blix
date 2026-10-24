@@ -225,7 +225,10 @@ internal sealed partial class SponzaLoop
         sheetLight = !args.Flag("no-sheet-light");
         interleave = !args.Flag("no-interleave") || args.Flag("interleave");
         nearRounds = Math.Max(0, args.Int("near-rounds") ?? (nearTexelLight ? 2 : 0));
-        texelH4 = args.Flag("texel-h4");
+        // The light-agnostic record (--texel-h4), on by default (2026-10-24: on Crytek Sponza's 3.3 M records against 2,048
+        // rays, its per-channel shapes' colour error at a 20 deg tilt 0.41% / 2.95% median / p90, a luminance shape's 2.98% /
+        // 8.38%); --no-texel-h4 the parts' tilt alone, as before.
+        texelH4 = !args.Flag("no-texel-h4") || args.Flag("texel-h4");
         // --texel-shape-luma: the lit pass takes the incident pass's luminance gradient, not the records' shapes per channel.
         texelShapeLuma = args.Flag("texel-shape-luma");
         // --texel-shape-pool R: the shapes pooled out to R metres (texel_compose.comp; 0.2 by default; 0: the filter's neighbours alone).
