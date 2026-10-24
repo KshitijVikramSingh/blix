@@ -30,6 +30,17 @@ internal sealed partial class SponzaLoop
     // A light change under --sweep-in-frame: its setup's dispatches recorded in the frame (SetupDispatch), not run at once.
     private bool SetupInFrame => sweepInFrame && liveSkyGathered;
 
+    // A buffer a sun change's gather makes as it goes: under --sweep-in-frame mapped and written where it lies -- a
+    // device buffer's zeros and contents go up by a submission waited on behind the frames in flight (CreateGpuBuffer's
+    // EndSingleTimeCommands): 40-80 ms frames at each round's begin on Crytek Sponza (2026-10-25).
+    private GpuBufferHandle SweepBuffer(int bytes, ReadOnlySpan<byte> initial, string name)
+    {
+        if (!sweepInFrame) return device.CreateGpuBuffer(bytes, initial, name);
+        var buffer = device.CreateReadableGpuBuffer(bytes, name);
+        if (initial.Length > 0) device.WriteMappedGpuBuffer(buffer, 0, initial);
+        return buffer;
+    }
+
     // The gather's counters (a light change's stats): readable under --sweep-in-frame, read where they lie at its end.
     private GpuBufferHandle NewSunNodeStats() => Own(sweepInFrame ? device.CreateReadableGpuBuffer(64, "sponza.sun-nodes.stats")
         : device.CreateGpuBuffer(64, new byte[64], "sponza.sun-nodes.stats"));
@@ -140,6 +151,7 @@ internal sealed partial class SponzaLoop
     private long sweepEndFrame;
     private int sweepEndLeft, sweepEndOf;
     private Task<(uint[] Ids, uint[] Places)>? sweepSortTask;
+    private Task<(uint[] Ids, uint[]? Mask, long Masked, string Log)>? sweepFinePick;
 
     private bool SweepWorkDone => framesRendered >= sweepEndFrame + Math.Max(1, device.MaxFramesInFlightCount) + 1;
 
@@ -168,8 +180,18 @@ internal sealed partial class SponzaLoop
                 if (!SweepWorkDone) return;
                 SweepFineCounts();
                 DumpParts("copy");
-                uint[] picked;
-                using (Prof("fine-pick")) picked = FineGatherIds();
+                // The pick on a worker (125 ms on Crytek Sponza's 900 K flagged): the flags read here, the mask written after.
+                var words = FineFlagWords();
+                var clock = System.Diagnostics.Stopwatch.StartNew();
+                sweepFinePick = words.Length == 0 ? null : Task.Run(() => FinePick(words, words.Length / 2, clock));
+                sweepEndStage = 11;
+                goto case 11;
+            }
+            case 11:
+            {
+                if (sweepFinePick is { IsCompleted: false }) return;
+                var picked = sweepFinePick is { } pick ? ApplyFinePick(pick.Result) : Array.Empty<uint>();
+                sweepFinePick = null;
                 RecallCopy(picked);
                 if (picked.Length > 0)
                 {

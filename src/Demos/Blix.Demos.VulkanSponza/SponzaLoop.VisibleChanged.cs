@@ -140,7 +140,7 @@ internal sealed partial class SponzaLoop
         visibleChangedSavedIds = sunNodeTraceIds;
         visibleChangedSavedBuffer = sunNodeTraceBuffer;
         sunNodeTraceIds = picked;
-        sunNodeTraceBuffer = Own(device.CreateGpuBuffer(picked.Length * 4, MemoryMarshal.AsBytes(picked.AsSpan()), "sponza.sun-nodes.visible-changed"));
+        sunNodeTraceBuffer = Own(SweepBuffer(picked.Length * 4, MemoryMarshal.AsBytes(picked.AsSpan()), "sponza.sun-nodes.visible-changed"));
         visibleChangedSavedRays = sunNodeRays;
         visibleChangedSavedMaxRays = texelMaxRays;
         sunNodeRays = fineGatherRays;
@@ -193,6 +193,6 @@ internal sealed partial class SponzaLoop
         if (visibleChangedMask is not { } mask || texelLiveIds is not { } all || liveCoarseLevels is not { } levels)
             return (transferFineIdsBuffer, transferFineCount, false);
         var fine = all.Where(id => levels[id] < transferMinLevel && (mask[id >> 5] >> (int)(id & 31) & 1u) == 0).ToArray();
-        return (device.CreateGpuBuffer(Math.Max(16, fine.Length * 4), MemoryMarshal.AsBytes(fine.AsSpan()), "sponza.transfer.fine-ids.copy"), fine.Length, true);
+        return (SweepBuffer(Math.Max(16, fine.Length * 4), MemoryMarshal.AsBytes(fine.AsSpan()), "sponza.transfer.fine-ids.copy"), fine.Length, true);
     }
 }

@@ -134,8 +134,8 @@ internal sealed partial class SponzaLoop
         if (!farPartBuffer.Equals(default(GpuBufferHandle))) RetireGpuBuffer(farPartBuffer);
         var place = new uint[texelCount];
         for (var i = 0; i < fineIds.Length; i++) place[fineIds[i]] = (uint)i + 1;
-        finePlaceBuffer = Own(device.CreateGpuBuffer(Math.Max(16, texelCount * 4), MemoryMarshal.AsBytes(place.AsSpan()), "sponza.sun-nodes.fine-place"));
-        farPartBuffer = Own(device.CreateGpuBuffer(Math.Max(16, fineIds.Length * 2 * 16), new byte[Math.Max(16, fineIds.Length * 2 * 16)], "sponza.sun-nodes.far-part"));
+        finePlaceBuffer = Own(SweepBuffer(Math.Max(16, texelCount * 4), MemoryMarshal.AsBytes(place.AsSpan()), "sponza.sun-nodes.fine-place"));
+        farPartBuffer = Own(SweepBuffer(Math.Max(16, fineIds.Length * 2 * 16), default, "sponza.sun-nodes.far-part"));
     }
 
     // The fine refine's round over these texels: traced as the coarse were, a round of their own, the cook screen up.
@@ -143,7 +143,7 @@ internal sealed partial class SponzaLoop
     {
         RetireTraceBuffer();
         sunNodeTraceIds = fineIds;
-        sunNodeTraceBuffer = Own(device.CreateGpuBuffer(fineIds.Length * 4, MemoryMarshal.AsBytes(fineIds.AsSpan()), "sponza.sun-nodes.fine"));
+        sunNodeTraceBuffer = Own(SweepBuffer(fineIds.Length * 4, MemoryMarshal.AsBytes(fineIds.AsSpan()), "sponza.sun-nodes.fine"));
         fineGatherSavedRays = sunNodeRays;
         fineGatherSavedMaxRays = texelMaxRays;
         sunNodeRays = fineGatherRays;
@@ -1323,7 +1323,7 @@ internal sealed partial class SponzaLoop
                 // Cooked after this trace's ids were taken (at boot): the flagged now.
                 RetireTraceBuffer();
                 sunNodeTraceIds = LiveCoarseOrder();
-                sunNodeTraceBuffer = Own(device.CreateGpuBuffer(Math.Max(16, sunNodeTraceIds.Length * 4), MemoryMarshal.AsBytes(sunNodeTraceIds.AsSpan()), "sponza.sun-nodes.traced"));
+                sunNodeTraceBuffer = Own(SweepBuffer(Math.Max(16, sunNodeTraceIds.Length * 4), MemoryMarshal.AsBytes(sunNodeTraceIds.AsSpan()), "sponza.sun-nodes.traced"));
             }
             if (sunNodeTraceIds.Length == 0) { FinishSunNodes(); return; }
             using (Prof("visible-begin")) BeginVisibleChanged();

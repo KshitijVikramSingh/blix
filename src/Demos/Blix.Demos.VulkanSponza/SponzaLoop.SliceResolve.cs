@@ -49,10 +49,10 @@ internal sealed partial class SponzaLoop
         {
             foreach (var b in new[] { resolveState, resolvePasses, resolveIds[0], resolveIds[1], resolvePlaces[0], resolvePlaces[1] })
                 if (!b.Equals(default(GpuBufferHandle))) RetireGpuBuffer(b);
-            resolveState = Own(device.CreateGpuBuffer(checked(n * suns * 16), name: "sponza.resolve.state"));
+            resolveState = Own(SweepBuffer(checked(n * suns * 16), default, "sponza.resolve.state"));
             if (!resolveGlowState.Equals(default(GpuBufferHandle))) RetireGpuBuffer(resolveGlowState);
-            resolveGlowState = Own(device.CreateGpuBuffer(checked(n * 16), name: "sponza.resolve.glow-state"));
-            resolvePasses = Own(device.CreateGpuBuffer(n * 4, name: "sponza.resolve.passes"));
+            resolveGlowState = Own(SweepBuffer(checked(n * 16), default, "sponza.resolve.glow-state"));
+            resolvePasses = Own(SweepBuffer(n * 4, default, "sponza.resolve.passes"));
             // Readable where they lie (ReadMappedGpuBuffer): the in-frame sweep's round end sorts them without a wait
             // (SponzaLoop.SweepFrame.cs).
             for (var i = 0; i < 2; i++)
@@ -69,8 +69,9 @@ internal sealed partial class SponzaLoop
         if (SettlePoolNow)
         {
             var bytes = Math.Max(32, cookedPacked!.Length / 3 * 32);   // 8 words a patch (slice_resolve.comp, poolAdd)
-            if (resolvePool.Equals(default(GpuBufferHandle))) resolvePool = Own(device.CreateGpuBuffer(bytes, name: "sponza.resolve.pool"));
-            device.WriteGpuBuffer(resolvePool, 0, new byte[bytes]);
+            if (resolvePool.Equals(default(GpuBufferHandle))) resolvePool = Own(SweepBuffer(bytes, default, "sponza.resolve.pool"));
+            else if (sweepInFrame) device.WriteMappedGpuBuffer(resolvePool, 0, new byte[bytes]);
+            else device.WriteGpuBuffer(resolvePool, 0, new byte[bytes]);
         }
         resolveNext = 0;
         gpuResolving = true;

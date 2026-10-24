@@ -485,6 +485,18 @@ internal sealed partial class SponzaLoop
         var clock = Stopwatch.StartNew();
         var words = sweepInFrame ? ReadMappedWords(fineFlagsBuffer, 64, count * 2)
             : MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(fineFlagsBuffer, 64, count * 8).AsSpan()).ToArray();
+        return ApplyFinePick(FinePick(words, count, clock));
+    }
+
+    // The flags read (a texel's id and score a pair): the in-frame hand-off reads them where they lie and picks on a worker.
+    private uint[] FineFlagWords()
+    {
+        var count = (int)Math.Min(fineFlagCounts[0], (uint)transferFineCount);
+        return count == 0 || fineGatherBudget <= 0 ? Array.Empty<uint>() : ReadMappedWords(fineFlagsBuffer, 64, count * 2);
+    }
+
+    private (uint[] Ids, uint[]? Mask, long Masked, string Log) FinePick(uint[] words, int count, Stopwatch clock)
+    {
         // The worst first by a histogram of the spread (log2, 1/8 steps), not a sort: the cut is the bin the budget ends
         // in, those above it all taken (a sort of 5 M took 6 s, 2026-10-19).
         const int Bins = 256;
@@ -532,15 +544,6 @@ internal sealed partial class SponzaLoop
                 if (mask is not null && score >= (fineRefineCloth ? 500f : 1000f) && !regathered) { mask[id >> 5] |= 1u << (int)(id & 31); masked++; }
             }
         }
-        refineMasked = mask is not null;
-        if (mask is not null)
-        {
-            if (refineMaskBuffer.Equals(default(GpuBufferHandle)))
-                refineMaskBuffer = Own(sweepInFrame ? device.CreateReadableGpuBuffer(mask.Length * 4, "sponza.transfer.refine-mask")
-                    : device.CreateGpuBuffer(mask.Length * 4, name: "sponza.transfer.refine-mask"));
-            device.WriteMappedGpuBuffer(refineMaskBuffer, 0, MemoryMarshal.AsBytes(mask.AsSpan()));
-            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] fine refine: {masked:N0} contact-flagged {(fineRefineCloth ? "and sheet " : "")}texels may refine; the rest settle at the sweep."));
-        }
         if (n < take) ids = ids[..n];
         Array.Sort(ids);   // in id order, whatever order the flags were appended in (the place order below keeps ties so)
         // In place order (the far field's key): picked in the order the flags were appended, a slice's texels lay all over
@@ -551,8 +554,23 @@ internal sealed partial class SponzaLoop
             for (var i = 0; i < ids.Length; i++) keys[i] = placeKey[ids[i]];
             Array.Sort(keys, ids);
         }
-        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+        return (ids, mask, masked, string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] fine refine: {n:N0} of {count:N0} flagged gathered at {fineGatherRays} rays (the spread at the cut {MathF.Pow(2f, cut / 8f):0.0}x; picked in {clock.Elapsed.TotalMilliseconds:0} ms)."));
+    }
+
+    private uint[] ApplyFinePick((uint[] Ids, uint[]? Mask, long Masked, string Log) pick)
+    {
+        var (ids, mask, masked, log) = pick;
+        refineMasked = mask is not null;
+        if (mask is not null)
+        {
+            if (refineMaskBuffer.Equals(default(GpuBufferHandle)))
+                refineMaskBuffer = Own(sweepInFrame ? device.CreateReadableGpuBuffer(mask.Length * 4, "sponza.transfer.refine-mask")
+                    : device.CreateGpuBuffer(mask.Length * 4, name: "sponza.transfer.refine-mask"));
+            device.WriteMappedGpuBuffer(refineMaskBuffer, 0, MemoryMarshal.AsBytes(mask.AsSpan()));
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] fine refine: {masked:N0} contact-flagged {(fineRefineCloth ? "and sheet " : "")}texels may refine; the rest settle at the sweep."));
+        }
+        Console.WriteLine(log);
         return ids;
     }
 
@@ -577,9 +595,9 @@ internal sealed partial class SponzaLoop
         {
             foreach (var b in new[] { coarseFilterIds, coarseFilterSky, coarseFilterSun })
                 if (!b.Equals(default(GpuBufferHandle))) RetireGpuBuffer(b);
-            coarseFilterIds = Own(device.CreateGpuBuffer(n * 4, MemoryMarshal.AsBytes(transferGatherIds.AsSpan()), "sponza.transfer.coarse-filter.ids"));
-            coarseFilterSky = Own(device.CreateGpuBuffer(n * 4, name: "sponza.transfer.coarse-filter.sky"));
-            coarseFilterSun = Own(device.CreateGpuBuffer(n * 4, name: "sponza.transfer.coarse-filter.sun"));
+            coarseFilterIds = Own(SweepBuffer(n * 4, MemoryMarshal.AsBytes(transferGatherIds.AsSpan()), "sponza.transfer.coarse-filter.ids"));
+            coarseFilterSky = Own(SweepBuffer(n * 4, default, "sponza.transfer.coarse-filter.sky"));
+            coarseFilterSun = Own(SweepBuffer(n * 4, default, "sponza.transfer.coarse-filter.sun"));
             coarseFilterCount = n;
         }
         var clock = Stopwatch.StartNew();
