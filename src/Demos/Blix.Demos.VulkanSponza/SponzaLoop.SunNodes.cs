@@ -1426,9 +1426,10 @@ internal sealed partial class SponzaLoop
     private readonly bool texelH4Full = Environment.GetEnvironmentVariable("BLIX_TEXEL_H4_FULL") == "1";
     private float TexelH4Mode => texelH4Full ? 2f : 1f;
     private GpuBufferHandle texelH4Buffer;
-    // The record's shape (texel_shape.glsl, 24 B a texel each): each texel's own -- its gather's, or its fine copy's
-    // (transfer_fine.comp), its provenance telling which -- and the pooled one the frame reads (texel_compose.comp, the
-    // incident pass's TexelShape). 48 B a texel in all, the sums a slice's (136 B a texel before, 2026-10-24).
+    // The record's shape (texel_shape.glsl, 12 B a texel each: a snorm8 triple and a scale a channel): each texel's own --
+    // its gather's, or its fine copy's (transfer_fine.comp), its provenance telling which -- and the pooled one the frame
+    // reads (texel_compose.comp, the incident pass's TexelShape). 24 B a texel in all, the sums a slice's (136 B a texel
+    // before, 2026-10-24).
     private GpuBufferHandle texelOwnShapeBuffer, texelShapeBuffer, texelShapeNone;
     private bool TexelShapeOn => texelH4 && !texelShapeBuffer.Equals(default(GpuBufferHandle));
     private GpuBufferHandle ShapeOr(GpuBufferHandle b)
@@ -1445,8 +1446,8 @@ internal sealed partial class SponzaLoop
         {
             var sums = checked((texelH4Full ? texelCount : sunNodeSlice) * 64);
             texelH4Buffer = Own(device.CreateGpuBuffer(sums, new byte[sums], "sponza.texel-h4"));
-            texelOwnShapeBuffer = Own(device.CreateGpuBuffer(checked(texelCount * 24), new byte[checked(texelCount * 24)], "sponza.texel-shape.own"));
-            texelShapeBuffer = Own(device.CreateGpuBuffer(checked(texelCount * 24), new byte[checked(texelCount * 24)], "sponza.texel-shape"));
+            texelOwnShapeBuffer = Own(device.CreateGpuBuffer(checked(texelCount * 12), new byte[checked(texelCount * 12)], "sponza.texel-shape.own"));
+            texelShapeBuffer = Own(device.CreateGpuBuffer(checked(texelCount * 12), new byte[checked(texelCount * 12)], "sponza.texel-shape"));
         }
         var on = texelH4 && !texelH4Buffer.Equals(default(GpuBufferHandle));
         return (on, on && GatherSmoothNow && !lightmapFramesBuffer.Equals(default(GpuBufferHandle)));

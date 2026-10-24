@@ -81,7 +81,7 @@ layout(std430, set = 0, binding = 22) buffer RayCapture { uint captureCount; uin
 // they make each pass into TexelOwnShape (texel_shape.glsl) -- the slice's last pass's stands.
 layout(std430, set = 0, binding = 31) readonly buffer LightmapFrames { uvec2 lightmapFrames[]; };
 layout(std430, set = 0, binding = 32) buffer TexelH4 { vec4 texelH4[]; };
-layout(std430, set = 0, binding = 33) writeonly buffer TexelOwnShape { uvec2 ownShape[]; };
+layout(std430, set = 0, binding = 33) writeonly buffer TexelOwnShape { uint ownShape[]; };
 #include "texel_nodes.glsl"
 #include "h4_kernel.glsl"
 #include "texel_record_h4.glsl"

@@ -177,7 +177,7 @@ layout(std430, set = 0, binding = 43) readonly buffer LightmapFrames { uvec2 lig
 layout(std430, set = 0, binding = 44) buffer TexelH4 { vec4 texelH4[]; };
 // Its sums a slice's (uFarTransport.y 1, by the texel's place in the slice) or every texel's (2, BLIX_TEXEL_H4_FULL), and
 // the shape they make into TexelOwnShape (texel_shape.glsl), as the lean shade's.
-layout(std430, set = 0, binding = 45) writeonly buffer TexelOwnShape { uvec2 ownShape[]; };
+layout(std430, set = 0, binding = 45) writeonly buffer TexelOwnShape { uint ownShape[]; };
 shared vec4 sRecord[4];
 #include "h4_kernel.glsl"
 #include "texel_record_h4.glsl"

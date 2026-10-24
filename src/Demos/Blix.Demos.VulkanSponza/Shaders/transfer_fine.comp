@@ -26,7 +26,7 @@ layout(std430, set = 0, binding = 11) buffer TexelProvenance { uint provenance[]
 // --texel-h4 (uKeep.z): the light-agnostic record's shape for the copy -- its coarse texels' own (their gathers' shapes,
 // texel_shape.glsl), blended with the light's weights; world space, so no frame to turn. Into the same buffer, the fine
 // texel's own: its provenance (5, the copy's) tells texel_compose.comp whose it is.
-layout(std430, set = 0, binding = 13) buffer TexelOwnShape { uvec2 ownShape[]; };
+layout(std430, set = 0, binding = 13) buffer TexelOwnShape { uint ownShape[]; };
 #include "provenance.glsl"
 layout(std430, set = 0, binding = 6) buffer SkyDetail { uint skyDetail[]; };
 layout(std430, set = 0, binding = 7) buffer SunDetail { uint sunDetail[]; };
@@ -205,9 +205,9 @@ void main() {
     // above its sky and lit everything too bright.
     if (u.uKeep.z > 0.5) {
         bool has = shapeW > 0.0;
-        ownShape[id * 3u] = has ? texelShapePack(shapeSum0 / shapeW) : uvec2(0u);
-        ownShape[id * 3u + 1u] = has ? texelShapePack(shapeSum1 / shapeW) : uvec2(0u);
-        ownShape[id * 3u + 2u] = has ? texelShapePack(shapeSum2 / shapeW) : uvec2(0u);
+        ownShape[id * 3u] = has ? texelShapePack(shapeSum0 / shapeW) : 0u;
+        ownShape[id * 3u + 1u] = has ? texelShapePack(shapeSum1 / shapeW) : 0u;
+        ownShape[id * 3u + 2u] = has ? texelShapePack(shapeSum2 / shapeW) : 0u;
     }
     if (u.uKeep.x < 0.5) skyDetail[id] = texelDetailPack(skyD.xy, min(skyD.z, texelDetailUnpack(skyDetail[id]).z));
     sunDetail[id] = texelDetailPack(sunD.xy, min(sunD.z, texelDetailUnpack(sunDetail[id]).z));

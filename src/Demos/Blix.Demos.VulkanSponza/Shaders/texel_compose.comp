@@ -48,8 +48,8 @@ layout(std430, set = 0, binding = 14) readonly buffer TexelSkyVis { uint texelSk
 // fine copy's (transfer_fine.comp) -- and the frame's, pooled over its neighbours: their shapes by the filter's weight
 // and their light's likeness, exp(-|ln(L_o / L)| / 0.3) (tools/gi-model/direction_pooling.py: 128-ray directions within
 // 20 cm, the error above the truth's floor halved, no smear at creases).
-layout(std430, set = 0, binding = 17) buffer TexelOwnShape { uvec2 ownShape[]; };
-layout(std430, set = 0, binding = 18) writeonly buffer TexelShape { uvec2 texelShape[]; };
+layout(std430, set = 0, binding = 17) buffer TexelOwnShape { uint ownShape[]; };
+layout(std430, set = 0, binding = 18) writeonly buffer TexelShape { uint texelShape[]; };
 layout(std430, set = 0, binding = 19) readonly buffer TexelProvenance { uint provenance[]; };
 #define TEXEL_INDEX_MAP(i) texelFetch(uLightmapIndexTex, ivec2(int(i) % textureSize(uLightmapIndexTex, 0).x, int(i) / textureSize(uLightmapIndexTex, 0).x), 0).r
 #define TEXEL_HASH(i) texelHash[i]
@@ -62,8 +62,8 @@ layout(std430, set = 0, binding = 19) readonly buffer TexelProvenance { uint pro
 
 // The texel's own shape (three channels) or false: what its gather wrote when both its parts were last a gather's
 // (provenance 1-4), what its fine copy wrote (5) -- one buffer, the last writer the one its provenance names.
-bool ownShapeOf(uint id, out uvec2 w0, out uvec2 w1, out uvec2 w2) {
-    w0 = uvec2(0u); w1 = uvec2(0u); w2 = uvec2(0u);
+bool ownShapeOf(uint id, out uint w0, out uint w1, out uint w2) {
+    w0 = 0u; w1 = 0u; w2 = 0u;
     uint p = (provenance[id / 4u] >> (8u * (id % 4u))) & 255u;
     uint sunCode = p & 15u, skyCode = p >> 4;
     bool gathered = skyCode >= 1u && skyCode <= 4u && sunCode >= 1u && sunCode <= 4u;
@@ -127,9 +127,9 @@ void main() {
         // Valid where the sky's part is (every live texel the cook traced); its confidence the cook's (full).
         texelComposed[id] = uvec2(packRgb9e5(light), sky.y);
         if (u.uCompose.w > 0.5) {
-            uvec2 w0, w1, w2;
+            uint w0, w1, w2;
             if (!ownShapeOf(id, w0, w1, w2)) {
-                w0 = w1 = w2 = uvec2(0u);
+                w0 = w1 = w2 = 0u;
                 ownShape[id * 3u] = w0; ownShape[id * 3u + 1u] = w1; ownShape[id * 3u + 2u] = w2;   // the pool reads none
             }
             texelShape[id * 3u] = w0; texelShape[id * 3u + 1u] = w1; texelShape[id * 3u + 2u] = w2;
