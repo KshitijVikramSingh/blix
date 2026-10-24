@@ -87,6 +87,7 @@ internal sealed partial class SponzaLoop
         visibleChangedMask = null;
         if (!VisibleChangedOn || visibleChangedGathering || fineGathering || sunBitsBefore is not { } before || visibleAtTurn is not { } seen)
         {
+            if (!fineGathering && !visibleChangedGathering) SelectSunChangeTexels();
             StartBackgroundGather();
             return;
         }
@@ -174,6 +175,7 @@ internal sealed partial class SponzaLoop
         ResetSunNodeCounters();
         sunNodeClock.Restart();
         sunNodeStage = SunNodeStage.Tracing;
+        SelectSunChangeTexels();
         if (splitCooking) FlushSplitLanding();
         // BLIX_DUMP_PARTS: the parts as tier 1 left them, and its texels (a bit a record).
         if (dumpParts is not null && visibleChangedMask is { } mask)

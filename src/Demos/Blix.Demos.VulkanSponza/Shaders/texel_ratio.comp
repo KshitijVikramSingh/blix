@@ -7,16 +7,23 @@
 //   mode 0: keep the instant layer (the sun part now) as the texel's instant
 //   mode 1: at a landing: the ratio, the gathered sun part over the kept instant
 //   mode 2: at a re-aim, after the new instant layer: the sun part becomes instant x ratio; the instant is kept
+// --sun-change-select T (uSelect.x > 0): mode 1 also keeps the landed sun part (SunLanded), and mode 2 marks the texels
+// whose light (the sky's part and the sun's at its irradiance) the relit instant moved by over T of the landed light (or
+// of the dark bar): the sun change gathers those again, the rest keep this light (tools/gi-model/sun_change_select.py).
 layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) uniform Ratio {
     vec4 uRatio;   // x live texels, y mode, z the largest ratio kept, w the first live texel of this dispatch
+    vec4 uSelect;  // x T (0: off), y the sun's irradiance (luminance), z the dark bar (the error's floor)
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer LiveIds { uint liveIds[]; };
 layout(std430, set = 0, binding = 2) buffer TexelSun { uvec2 texelSun[]; };
 layout(std430, set = 0, binding = 3) buffer SunRatio { uint ratioWords[]; };   // by texel id: the instant, or the ratio
 layout(std430, set = 0, binding = 4) buffer TexelProvenance { uint provenance[]; };
+layout(std430, set = 0, binding = 5) readonly buffer TexelSky { uvec2 texelSky[]; };
+layout(std430, set = 0, binding = 6) buffer SunLanded { uint sunLanded[]; };   // by texel id: the landed sun part
+layout(std430, set = 0, binding = 7) buffer Changed { uint changedBits[]; };   // a bit a texel id
 #include "provenance.glsl"
 
 uint packRgb9e5(vec3 c) {
@@ -51,10 +58,18 @@ void main() {
             ? clamp(gathered / max(instant, vec3(1e-6)), vec3(0.0), vec3(u.uRatio.z))
             : vec3(1.0);
         ratioWords[id] = packRgb9e5(ratio);
+        if (u.uSelect.x > 0.0) sunLanded[id] = texelSun[id].x;
     } else {
         uint instantWord = texelSun[id].x;
         vec3 relit = unpackRgb9e5(instantWord) * unpackRgb9e5(ratioWords[id]);
         texelSun[id].x = packRgb9e5(relit);
+        if (u.uSelect.x > 0.0) {
+            const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
+            float sky = dot(unpackRgb9e5(texelSky[id].x), luma);
+            float before = sky + dot(unpackRgb9e5(sunLanded[id]), luma) * u.uSelect.y;
+            float after = sky + dot(relit, luma) * u.uSelect.y;
+            if (abs(after - before) > u.uSelect.x * max(before, u.uSelect.z)) atomicOr(changedBits[id >> 5], 1u << (id & 31u));
+        }
         provenanceMark(id, 7u, true, false);   // the ratio relight
         ratioWords[id] = instantWord;
     }

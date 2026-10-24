@@ -457,6 +457,8 @@ internal sealed partial class SponzaLoop
         incidentReuse = !args.Flag("no-incident-reuse");
         atlasGather = !args.Flag("no-atlas-gather");
         ratioRelight = !args.Flag("no-ratio-relight");
+        if (args.Float("sun-change-select") is { } scs) sunChangeSelect = Math.Max(0f, scs);
+        sunChangeSelectFine = args.Flag("sun-change-select-fine");
         visibleChanged = !args.Flag("no-visible-changed");
         hitBlend = !args.Flag("no-hit-blend");
         fineCloth = !args.Flag("no-fine-cloth");

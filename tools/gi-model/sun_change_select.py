@@ -2,7 +2,8 @@
 # requires-python = ">=3.10"
 # dependencies = ["numpy"]
 # ///
-"""Which texels a sun change must gather again (uv run tools/gi-model/sun_change_select.py PREFIX0 VIEW0 [PREFIX1 VIEW1]).
+"""Which texels a sun change must gather again (uv run tools/gi-model/sun_change_select.py PREFIX0 VIEW0 [PREFIX1 VIEW1];
+--judge PREFIX0 VIEW0 PREFIX1 VIEW1 PREFIX_SELECTED VIEW_SELECTED: the engine's --sun-change-select run end to end).
 
 A sun change today sweeps every coarse texel and every fine texel the copy flags -- about as many rays as the boot's
 gather (Crytek Sponza at 128 rays: ~0.7 G) -- though most texels see nothing whose sun changed. The candidate: gather
@@ -101,8 +102,30 @@ def error(x, ref, floor):
     return np.abs(x - ref) / np.maximum(ref, floor)
 
 
+def judge(full0, full1, picked):
+    """The engine's run with --sun-change-select (picked) against the full gather (full0), with a second seed's full
+    gather (full1) as the floor: the end to end, the fine copy reading the coarse texels left out included."""
+    live = full0['live']
+    full = full0['full']
+    floor = 0.1 * np.median(full[live & (full > 0)])
+    sun_code = full0['prov'] & 15
+    sel_code = picked['prov'] & 15
+    gathered = live & np.isin(sun_code, (1, 2, 3, 4))
+    print(f'the full gather took {gathered.sum():,} texels; the selected run {(live & np.isin(sel_code, (1, 2, 3, 4))).sum():,}')
+    e_sel = error(picked['full'], full, floor)
+    e_seed = error(full1['full'], full, floor)
+    for name, scope in (('every live texel', live), ('the full gather\'s', gathered),
+                        ('the coarse (sweep, refine)', live & np.isin(sun_code, (1, 2))), ('the fine', live & (sun_code == 3))):
+        print(f'  {name:28s} selected: mean error {e_sel[scope].mean():.3f}, bad {(e_sel[scope] > BAD).mean():.2%}, energy '
+              f'{picked["full"][scope].sum() / full[scope].sum():.4f}  | a second full gather: {e_seed[scope].mean():.3f}, '
+              f'{(e_seed[scope] > BAD).mean():.2%}, {full1["full"][scope].sum() / full[scope].sum():.4f}')
+
+
 def main():
     args = sys.argv[1:]
+    if len(args) == 7 and args[0] == '--judge':
+        judge(run(args[1], args[2]), run(args[3], args[4]), run(args[5], args[6]))
+        return
     if len(args) not in (2, 4):
         raise SystemExit(__doc__)
     r0 = run(args[0], args[1])

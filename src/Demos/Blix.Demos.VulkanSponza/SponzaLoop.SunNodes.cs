@@ -998,6 +998,7 @@ internal sealed partial class SponzaLoop
     // FinishSunNodes past the fine hand-off (and the in-frame hand-off's end when no fine round follows).
     private void FinishSunNodesTail()
     {
+        sunChangeMask = null;
         var suns = sunNodeSuns!;
         if (transferChecked) TransferCheckCompare();
         if (splitCooking)

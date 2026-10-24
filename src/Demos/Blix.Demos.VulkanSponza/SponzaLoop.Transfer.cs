@@ -561,6 +561,7 @@ internal sealed partial class SponzaLoop
     private uint[] ApplyFinePick((uint[] Ids, uint[]? Mask, long Masked, string Log) pick)
     {
         var (ids, mask, masked, log) = pick;
+        ids = SelectFine(ids);
         refineMasked = mask is not null;
         if (mask is not null)
         {
