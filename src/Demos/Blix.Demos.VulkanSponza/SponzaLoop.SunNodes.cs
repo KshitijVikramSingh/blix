@@ -348,6 +348,7 @@ internal sealed partial class SponzaLoop
             sunNodeShadePasses[c] = graph.ComputePass("sun-nodes-shade" + tag).Shader(sunNodeShadeInterface).Handle;
         }
         DeclareSweepFrame(reflect);
+        DeclareFlipPush(reflect);
     }
 
     private void CreateSunNodePipelines(string shaderDir)
@@ -369,6 +370,7 @@ internal sealed partial class SponzaLoop
         CreatePatchDirectPipeline(shaderDir);
         CreateFarRelightPipeline(shaderDir);
         CreateSunProvisionalPipeline(shaderDir);
+        CreateFlipPushPipeline(shaderDir);
         sunNodePrepPipeline = Make("texel_nodes_prep", sunNodePrepInterface);
         sunNodePatchPipeline = Make("texel_nodes_patch", sunNodePatchInterface);
         sunNodeRaysPipeline = Make("texel_nodes_rays", sunNodeRaysInterface);

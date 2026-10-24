@@ -1,0 +1,149 @@
+#version 450
+// The moving sun's relight (SponzaLoop.FlipPush.cs): a small sun step's change to the texels' sun part pushed out from
+// where it starts -- the texels whose own sun bit flipped, the surfaces a shadow edge crossed -- instead of gathered
+// again at every texel (tools/gi-model/sun_flip_push.py: ~80% of the change, from 1-3% of the texels). Each flipped
+// texel shoots cosine rays; what they meet takes, by reciprocity, the source's sun term (albedo / pi times its normal,
+// in the sun-linear record's units: texel_nodes_shade.glsl uSunW), plus where it came lit, minus where it went dark,
+// scaled by the source's area over the receiver's and the rays shot. The hits that stayed lit change with the angle
+// alone, which the record gives with no rays.
+//   mode 0  the flip list: each live texel whose sun bit (the new bits) differs from the old sun's (OldBits)
+//   mode 1  a chunk of the list's rays: M cosine rays a flipped texel, about its normal, lifted
+//   mode 2  the chunk's hits: the receivers about each (the cook's lookup, nodeSetAt: hashed and atlas texels) take the
+//           source's term into Accum (fixed point)
+//   mode 3  every live texel: its record moved by what it took, its sun part by the record's change at the new sun
+//           against the old (W'.s' - W.s, its colour kept), Accum cleared
+
+layout(local_size_x = 64) in;
+#define NODE_LOOKUP
+
+layout(set = 0, binding = 0) uniform FlipPush {
+    vec4 uPass;    // x the threads, y the mode, z the rays a flipped texel (M), w the chunk's first ray (mode 1, 2)
+    vec4 uNewSun;  // xyz toward the new sun; w the lift
+    vec4 uOldSun;  // xyz toward the old sun; w the rays' reach
+    vec4 uGrid;    // the finest texel grid (origin, spacing)
+    vec4 uLookup;  // x the plane's reach, y the sigma (nodeSetAt), z the cook hash's slots, w the seed
+    vec4 uBits;    // x the bit words a texel, y the sun's column
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer Texels { uvec4 texels[]; };
+#include "texel_record.glsl"
+layout(std430, set = 0, binding = 2) readonly buffer LiveIds { uint liveIds[]; };
+layout(std430, set = 0, binding = 3) readonly buffer OldBits { uint oldBits[]; };     // a bit a texel id: the old sun's
+layout(std430, set = 0, binding = 4) readonly buffer SunNodeBits { uint sunBits[]; };  // the live bits: the new sun's
+layout(std430, set = 0, binding = 5) buffer FlipList { uint flipCount; uint flipPad[3]; uint flips[]; };   // id | lit << 31
+layout(std430, set = 0, binding = 6) buffer FlipRays { vec4 rays[]; };                 // 2 a ray: origin, tMin; dir, tMax
+layout(std430, set = 0, binding = 7) readonly buffer FlipHits { uvec4 hits[]; };       // 3 a ray (the closest batch's)
+layout(std430, set = 0, binding = 8) readonly buffer SunNodeHash { uint cookHash[]; };
+layout(std430, set = 0, binding = 9) readonly buffer FoliagePoints { vec4 foliagePoints[]; };
+layout(std430, set = 0, binding = 10) readonly buffer FoliageHash { uint foliageHash[]; };
+layout(std430, set = 0, binding = 11) readonly buffer TexelPatch { int texelPatch[]; };
+layout(std430, set = 0, binding = 12) readonly buffer PatchTerms { vec4 patchTerms[]; };   // 3 a patch: [0].rgb albedo
+layout(std430, set = 0, binding = 13) buffer Accum { int accum[]; };                    // 4 a texel id: W's xyz, fixed point
+layout(std430, set = 0, binding = 14) buffer TexelSunW { vec4 texelSunW[]; };
+layout(std430, set = 0, binding = 15) buffer SplitSun { uvec2 sunPart[]; };
+#include "texel_nodes.glsl"
+
+const float PI = 3.14159265;
+const float FIXED = 1048576.0;   // 2^20
+
+uint packRgb9e5(vec3 c) {
+    const float maxValue = 65408.0;
+    c = clamp(c, vec3(0.0), vec3(maxValue));
+    float maxC = max(c.r, max(c.g, c.b));
+    int e = max(-16, int(floor(log2(max(maxC, 1e-30))))) + 1;
+    float scale = exp2(float(e - 9));
+    if (int(floor(maxC / scale + 0.5)) == 512) { e += 1; scale *= 2.0; }
+    uvec3 m = uvec3(floor(c / scale + 0.5));
+    return m.r | (m.g << 9) | (m.b << 18) | (uint(e + 15) << 27);
+}
+
+vec3 unpackRgb9e5(uint p) {
+    float scale = exp2(float(int(p >> 27) - 15 - 9));
+    return vec3(p & 511u, (p >> 9) & 511u, (p >> 18) & 511u) * scale;
+}
+
+uint hashU(uint x) {
+    x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16;
+    return x;
+}
+
+bool newLit(uint id) {
+    uint c = uint(u.uBits.y);
+    return ((sunBits[id * uint(u.uBits.x) + c / 32u] >> (c % 32u)) & 1u) != 0u;
+}
+
+bool oldLit(uint id) { return ((oldBits[id >> 5] >> (id & 31u)) & 1u) != 0u; }
+
+float area(uint id) { return max(abs(TEXEL_POSITION(id).w), 1.0); }
+
+void main() {
+    uint t = gl_GlobalInvocationID.x;
+    if (t >= uint(u.uPass.x)) return;
+    int mode = int(u.uPass.y);
+    uint m = uint(u.uPass.z);
+    const vec3 lumW = vec3(0.2126, 0.7152, 0.0722);
+    if (mode == 0) {
+        uint id = liveIds[t];
+        if (abs(TEXEL_POSITION(id).w) < 2.0) return;
+        bool lit = newLit(id);
+        if (lit != oldLit(id)) flips[atomicAdd(flipCount, 1u)] = id | (lit ? 0x80000000u : 0u);
+    } else if (mode == 1) {
+        uint r = uint(u.uPass.w) + t;
+        uint id = flips[r / m] & 0x7FFFFFFFu;
+        vec3 n = normalize(TEXEL_NORMAL(id).xyz);
+        vec3 p = TEXEL_POSITION(id).xyz;
+        uint h = hashU(r * 9781u + uint(u.uLookup.w));
+        float u1 = float(h & 0xFFFFu) / 65536.0, u2 = float(h >> 16) / 65536.0;
+        vec3 t1 = normalize(cross(abs(n.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0), n));
+        vec3 t2 = cross(n, t1);
+        float rr = sqrt(u1), phi = 2.0 * PI * u2;
+        vec3 dir = normalize(t1 * (rr * cos(phi)) + t2 * (rr * sin(phi)) + n * sqrt(max(1.0 - u1, 0.0)));
+        rays[2u * t] = vec4(p + n * u.uNewSun.w, 1e-4);
+        rays[2u * t + 1u] = vec4(dir, u.uOldSun.w);
+    } else if (mode == 2) {
+        uint r = uint(u.uPass.w) + t;
+        uvec4 h0 = hits[3u * t];
+        if ((h0.w & 1u) == 0u) return;
+        uint entry = flips[r / m];
+        uint src = entry & 0x7FFFFFFFu;
+        float sign = (entry & 0x80000000u) != 0u ? 1.0 : -1.0;
+        vec4 ray0 = rays[2u * t], ray1 = rays[2u * t + 1u];
+        vec3 hp = ray0.xyz + ray1.xyz * uintBitsToFloat(h0.x);
+        vec3 normal = uintBitsToFloat(hits[3u * t + 2u].xyz);
+        vec3 hn = dot(normal, ray1.xyz) > 0.0 ? -normal : normal;
+        int ids[NODE_CANDIDATES];
+        float weights[NODE_CANDIDATES];
+        float total = nodeSetAt(0, hp, hn, u.uGrid, uint(u.uLookup.z), u.uLookup.xy, ids, weights);
+        if (total <= 0.0) return;
+        int srcPatch = texelPatch[src];
+        float albedo = srcPatch >= 0 ? dot(patchTerms[3 * srcPatch].rgb, lumW) : 0.5;
+        vec3 term = sign * albedo / PI * normalize(TEXEL_NORMAL(src).xyz) * area(src) / float(m);
+        for (int c = 0; c < NODE_CANDIDATES; ++c) {
+            if (ids[c] < 0 || weights[c] <= 0.0) continue;
+            uint rid = uint(ids[c]);
+            // Over the lookup's footprint, not the receiver's area: nodeSetAt finds a texel by its finest cell (a coarse
+            // texel's centre), so each takes the landings of about one finest cell (4 a cell, the area's units) -- over its
+            // own area a 16-cell texel took a sixteenth of its share.
+            vec3 v = term * (weights[c] / total) / 4.0;
+            atomicAdd(accum[rid * 4u], int(round(v.x * FIXED)));
+            atomicAdd(accum[rid * 4u + 1u], int(round(v.y * FIXED)));
+            atomicAdd(accum[rid * 4u + 2u], int(round(v.z * FIXED)));
+        }
+    } else {
+        uint id = liveIds[t];
+        vec3 d = vec3(accum[id * 4u], accum[id * 4u + 1u], accum[id * 4u + 2u]) / FIXED;
+        vec4 rec = texelSunW[id];
+        if (rec.w <= 0.0 && dot(d, d) == 0.0) return;
+        float passes = max(rec.w, 1.0);
+        vec3 before = rec.xyz / passes, after = before + d;
+        float litBefore = max(dot(before, u.uOldSun.xyz), 0.0), litAfter = max(dot(after, u.uNewSun.xyz), 0.0);
+        vec3 part = unpackRgb9e5(sunPart[id].x);
+        float l = dot(part, lumW);
+        float target = max(l + litAfter - litBefore, 0.0);
+        vec3 moved = l > 1e-9 ? part * (target / l) : vec3(target);
+        sunPart[id].x = packRgb9e5(moved);
+        if (rec.w > 0.0) texelSunW[id] = vec4(after * passes, rec.w);
+        else texelSunW[id] = vec4(after, 1.0);
+        accum[id * 4u] = 0; accum[id * 4u + 1u] = 0; accum[id * 4u + 2u] = 0;
+    }
+}

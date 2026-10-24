@@ -264,6 +264,8 @@ internal sealed partial class SponzaLoop
     private void LiveProvisionalNow()
     {
         if (!liveTexels) return;
+        // The push's steps keep the texels' parts: the patches' provisional over every texel would undo them.
+        if (FlipPushSteering) return;
         liveProvisionalPending = !texelsUploaded || splitLiveBuffer.Equals(default(GpuBufferHandle)) || texelLiveIds is null;
         if (liveProvisionalPending) return;
         EnsureLiveTexelPatch();
@@ -526,6 +528,10 @@ internal sealed partial class SponzaLoop
                 RecordLiveSunBits();
                 return;
             }
+            // The push steering the moving sun (SponzaLoop.FlipPush.cs) needs the bits alone: the patches' light is the
+            // gather's (its hits' bounce), and re-injected every step it never rested -- its bounces ~5 ms a frame and its
+            // guides ~65 ms each time it rested on Crytek Sponza. It catches up at the next regather.
+            if (FlipPushSteering && liveInjected) return;
             if (!noSun) RecordLiveDirect(d, toSun, irr);
             else graph.Dispatch(liveSolveBPass, LiveDispatch(1, toSun, d.Patches, true, LiveSun));
             if (!liveInjected)

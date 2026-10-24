@@ -100,6 +100,7 @@
     <GlslShader Include="Shaders\texel_far_relight.comp" />
     <GlslShader Include="Shaders\texel_sun_provisional.comp" />
     <GlslShader Include="Shaders\texel_live_sun.comp" />
+    <GlslShader Include="Shaders\sun_flip_push.comp" />
     <GlslShader Include="Shaders\hit_cells.comp" />
     <GlslShader Include="Shaders\transfer_apply.comp" />
     <GlslShader Include="Shaders\transfer_finalize.comp" />

@@ -476,6 +476,7 @@ internal sealed partial class SponzaLoop
         ParseSweepFrame(args);
         ParseSunMove(args);
         ParseSunLinear(args);
+        ParseFlipPush(args);
         if (args.Float("background-gather-ms") is { } bgMs) backgroundGatherMs = Math.Max(0f, bgMs);
         gatherStepsAFrame = Math.Max(0, args.Int("gather-steps-a-frame") ?? 0);
         patchPickOld = args.Flag("patch-pick-old");

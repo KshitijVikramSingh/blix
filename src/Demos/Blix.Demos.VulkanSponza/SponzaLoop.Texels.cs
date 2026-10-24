@@ -750,6 +750,8 @@ internal sealed partial class SponzaLoop
         // recomposes, it does not re-gather.
         if (liveTexels)
         {
+            // The push steers the moving sun (SponzaLoop.FlipPush.cs): its steps are not regathered.
+            if (FlipPushSteering) { transportRelightSun = (toSun, irradiance); return; }
             if (turned >= 0.25f) LiveRestart(toSun);
             if (turned >= 0.25f || changed) transportRelightSun = (toSun, irradiance);
             return;

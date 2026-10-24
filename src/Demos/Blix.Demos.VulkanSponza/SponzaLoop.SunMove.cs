@@ -66,7 +66,9 @@ internal sealed partial class SponzaLoop
         sunPitch = MathF.Asin(Math.Clamp(travel.Y, -1f, 1f));
         sunYaw = MathF.Atan2(travel.X, -travel.Z);
         UpdateSunDirection();
-        if (!LightChangeInFlight) giSunTarget = -Vector3.Normalize(sunDirection);
+        // The push steers the GI's sun in small steps once a gather has landed (SponzaLoop.FlipPush.cs); else the GI
+        // catches up when its regather lands.
+        if (!FlipPushStep() && !LightChangeInFlight) giSunTarget = -Vector3.Normalize(sunDirection);
         if (!sunMoveLogClock.IsRunning || sunMoveLogClock.Elapsed.TotalSeconds >= 5)
         {
             sunMoveLogClock.Restart();
