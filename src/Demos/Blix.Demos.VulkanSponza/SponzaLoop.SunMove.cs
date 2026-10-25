@@ -22,8 +22,9 @@ internal sealed partial class SponzaLoop
     private Vector3 giSunTarget;
     private readonly Stopwatch sunMoveClock = new();
 
-    // The sun the GI works toward: the frame's, or while the sun moves, the one its change in flight was aimed at.
-    private Vector3 GiToSun => (sunMoving || flipPushChange) && giSunTarget != Vector3.Zero ? giSunTarget : -Vector3.Normalize(sunDirection);
+    // The sun the GI works toward: the one it holds (SponzaLoop.GiLight.cs: Relight, Live), or while the sun moves the one
+    // its change in flight was aimed at; under --gi-follow the frame's.
+    private Vector3 GiToSun => (sunMoving || flipPushChange || giHold) && giSunTarget != Vector3.Zero ? giSunTarget : -Vector3.Normalize(sunDirection);
 
     private bool LightChangeInFlight => splitCooking || liveRetargeting || sunNodeStage != SunNodeStage.Off;
 

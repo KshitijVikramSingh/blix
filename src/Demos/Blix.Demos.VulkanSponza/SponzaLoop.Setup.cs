@@ -478,6 +478,7 @@ internal sealed partial class SponzaLoop
         backgroundGather = args.Flag("background-gather");
         ParseSweepFrame(args);
         ParseSunMove(args);
+        ParseGiLight(args);
         ParseSunLinear(args);
         ParseFlipPush(args);
         if (args.Float("background-gather-ms") is { } bgMs) backgroundGatherMs = Math.Max(0f, bgMs);

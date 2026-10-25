@@ -75,6 +75,7 @@ internal sealed partial class SponzaLoop
             sunStrength = debug.Controls.Float("Strength (x measured)", sunStrength, 0f, 8f);
             UpdateSunDirection();
         }
+        GiLightControls(debug);
         // ShadowsSettings and RenderSettings are [Tune]-tagged and auto-paneled below.
         // Shader-uniform tunables (//@tune in lit.frag): sun/ambient intensity,
         // metallic/normal/slope/glass thresholds, indirect-shadow base/range,

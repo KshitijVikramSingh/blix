@@ -203,6 +203,7 @@ internal sealed partial class SponzaLoop
         Console.WriteLine("[VulkanSponza] split light: the cook landed; the texels rest on the sky's part and the sun's."
             + (lightChangeClock.IsRunning ? string.Create(CultureInfo.InvariantCulture, $" The light change took {lightChangeClock.Elapsed.TotalSeconds:0.0} s.") : ""));
         DumpParts("landed");
+        GiChangeLanded();
         lightChangeClock.Reset();
         changeDumpNext = 0;
         SunLinearReport();

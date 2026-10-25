@@ -703,6 +703,7 @@ internal sealed partial class SponzaLoop
     {
         StepSunSweep();
         StepSunMove();
+        StepGiLight();
         if (flipPushChange && !sunMoving)
         {
             if (giSunTarget == Vector3.Zero) giSunTarget = -Vector3.Normalize(sunDirection);
@@ -717,6 +718,8 @@ internal sealed partial class SponzaLoop
             sunPitch = change.Degrees.Y * MathF.PI / 180f;
             UpdateSunDirection();
             Console.WriteLine($"[VulkanSponza] sun turned by --sun-change at frame {postLoadFrames}: {sunDirection}");
+            // A scripted change relights the GI as before (the held sun to the new one).
+            if (giHold && !sunMoving && !giLive) giSunTarget = -Vector3.Normalize(sunDirection);
         }
         for (var i = retiredBuffers.Count - 1; i >= 0; i--)
         {

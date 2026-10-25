@@ -173,7 +173,7 @@ internal sealed partial class SponzaLoop
             // And no light on its way: a --sun-change still to come or relighting, the split light still cooking (a shot
             // of a sun change taken before its relight measured the old sun, 2026-10-14).
             var lightReady = (!transportTexels || texelsRestReported) && relightTask is null && !splitCooking
-                && (sunChange is null || sunChangeApplied && postLoadFrames > sunChangeAppliedAt + 1);
+                && (sunChange is null || sunChangeApplied && postLoadFrames > sunChangeAppliedAt + 1) && !GiLiveBehind;
             var referenceReady = !gpuReference || referenceMonolithic
                 ? !gpuReference || gpuReferencePaths >= GpuReferenceTarget
                 : cachedReferenceSums is not null || gateWave is { } w && w.Dispatch >= ReferenceWaveFrames(w);
