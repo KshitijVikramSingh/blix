@@ -128,6 +128,19 @@ internal sealed partial class SponzaLoop
         return true;
     }
 
+    // BLIX_DUMP_INSTANT_OCT=1 (with BLIX_DUMP_PARTS): the instant layer's sun by world octant, a float each, dumped beside
+    // the instant parts (.octants) -- the directional ratio relight's model (tools/gi-model/directional_ratio.py).
+    private static readonly bool InstantOctOn = Environment.GetEnvironmentVariable("BLIX_DUMP_INSTANT_OCT") == "1";
+    private GpuBufferHandle instantOctBuffer;
+
+    private GpuBufferHandle InstantOctBuffer()
+    {
+        if (!instantOctBuffer.Equals(default(GpuBufferHandle))) return instantOctBuffer;
+        instantOctBuffer = Own(InstantOctOn ? device.CreateReadableGpuBuffer(checked(texelCount * 32), "sponza.instant-octants")
+            : device.CreateGpuBuffer(16, new byte[16], "sponza.instant-octants.none"));
+        return instantOctBuffer;
+    }
+
     // Mode 1 (the instant layer) is a light change's setup (SetupDispatch); mode 0 (the cook's openness) runs at once.
     private void PatchTexelsDispatch(int mode, DispatchCommand command)
     {
@@ -152,7 +165,7 @@ internal sealed partial class SponzaLoop
                 {
                     new("uPass", new Vector4Uniform(new Vector4(live.Length, first, sunNodeKinds.Length, mode))),
                     new("uColumns", new Vector4Uniform(new Vector4(Math.Max(0, Array.IndexOf(sunNodeKinds, 2)), Math.Max(0, liveSunColumn), liveSkyEscapeBuffer.Equals(default(GpuBufferHandle)) ? 0f : 1f, skyKept ? 1f : 0f))),
-                    new("uInvIrr", new Vector4Uniform(new Vector4(inv, 0f))),
+                    new("uInvIrr", new Vector4Uniform(new Vector4(inv, mode == 1 && InstantOctOn ? 1f : 0f))),
                     new("uFar", new Vector4Uniform(farOn ? FarUniform(0) : Vector4.Zero)),
                     new("uCookedGrid", new Vector4Uniform(cookedGrid)),
                     new("uCookedDims", new Vector4Uniform(cookedDims)),
@@ -176,6 +189,7 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("PatchDirShares", patchDirSharesBuffer),
                     new ShaderBufferBinding("AoShort", texelAoShortBuffer),
                     new ShaderBufferBinding("PatchSkyEscape", liveSkyEscapeBuffer.Equals(default(GpuBufferHandle)) ? texelAoShortBuffer : liveSkyEscapeBuffer),
+                    new ShaderBufferBinding("InstantOctants", InstantOctBuffer()),
                     ProvenanceBinding(),
                 }.Concat(CookedBuffers()).Where(b => declared.Contains(b.Name)).ToArray()));
     }

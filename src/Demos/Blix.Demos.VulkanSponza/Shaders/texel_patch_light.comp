@@ -18,7 +18,7 @@ layout(set = 0, binding = 0) uniform TexelPatchLight {
     vec4 uPass;        // x the live texels, y the dispatch's first, z the patch light's columns, w the mode
     vec4 uColumns;     // x the sky's column, y the sun's; z 1: the patches' sky escape is bound (the sky visibility from it); w 1:
                        // the sky's part kept (a sun change: its part and detail not written)
-    vec4 uInvIrr;      // rgb 1 / the sun's irradiance
+    vec4 uInvIrr;      // rgb 1 / the sun's irradiance; w 1: the sun's light by world octant too (InstantOctants)
     vec4 uFar;         // the far field (texel_far.glsl)
     vec4 uCookedGrid;
     vec4 uCookedDims;
@@ -45,6 +45,9 @@ layout(std430, set = 0, binding = 18) readonly buffer AoShort { uint aoShort[]; 
 layout(std430, set = 0, binding = 17) readonly buffer PatchDirShares { uint shares[]; };      // [patch][2][8]: half pairs
 // Each patch's escaped share by guide bin (64): summed, the share of its rays that reach the sky -- its sky visibility.
 layout(std430, set = 0, binding = 19) readonly buffer PatchSkyEscape { float skyEscape[]; };
+// BLIX_DUMP_INSTANT_OCT (uInvIrr.w): [texel id][8] the sun part's luminance by the world octant it comes from (the
+// patches' shares, as summed below) -- the directional ratio relight's model (tools/gi-model/directional_ratio.py).
+layout(std430, set = 0, binding = 21) buffer InstantOctants { float instantOct[]; };
 
 #define COOKED_BINDING 10
 #define COOKED_GRID u.uCookedGrid
@@ -112,6 +115,9 @@ void main() {
     vec3 sky = vec3(0.0), sun = vec3(0.0);
     float open = 0.0, total = 0.0;
     vec2 skyTiltSum = vec2(0.0), sunTiltSum = vec2(0.0);
+    float octSun[8];
+    for (uint o = 0u; o < 8u; ++o) octSun[o] = 0.0;
+    const vec3 octLuma = vec3(0.2126, 0.7152, 0.0722);
     float tiltW = 0.0;
     if (ids[0] < 0 || ws[0] <= 0.0) { for (int i = 0; i < FAR_SET; ++i) { ids[i] = -1; ws[i] = 0.0; } ids[0] = fp; ws[0] = 1.0; }
     for (int i = 0; i < FAR_SET; ++i) {
@@ -131,6 +137,7 @@ void main() {
             float sKy = ((o & 1u) == 0u ? sk.x : sk.y) * r, sUn = ((o & 1u) == 0u ? sn.x : sn.y) * r;
             fSky += sKy;
             fSun += sUn;
+            octSun[o] += ws[i] * sUn * dot(column(ids[i], uint(u.uColumns.y)) * u.uInvIrr.rgb, octLuma);
             vec3 dc = normalize(vec3((o & 1u) != 0u ? 1.0 : -1.0, (o & 2u) != 0u ? 1.0 : -1.0, (o & 4u) != 0u ? 1.0 : -1.0));
             vec2 tl = vec2(dot(t1, dc), dot(t2, dc)) / max(dot(n, dc), 0.1);
             if (dot(n, dc) > -0.2) { skyTiltSum += ws[i] * sKy * tl; sunTiltSum += ws[i] * sUn * tl; tiltW += ws[i] * (sKy + sUn) * 0.5; }
@@ -153,6 +160,8 @@ void main() {
     }
     float shortRatio = vs != 0u && shortW > 0.0 && shortMean > 1e-3 ? clamp(float(vs - 1u) / 254.0 / (shortMean / shortW), 0.0, 1.5) : 1.0;
     sky *= shortRatio; sun *= shortRatio;
+    if (u.uInvIrr.w > 0.5)
+        for (uint o = 0u; o < 8u; ++o) instantOct[id * 8u + o] = octSun[o] / total * shortRatio;
     float mine = ao(id);
     if (u.uColumns.w < 0.5) skyPart[id] = uvec2(packRgb9e5(sky), 0xFFFFu | 0x10000u);
     sunPart[id] = uvec2(packRgb9e5(sun * u.uInvIrr.rgb), 0xFFFFu | 0x10000u);

@@ -37,7 +37,8 @@ internal sealed partial class SponzaLoop
     // round << 4, the near round << 8.
     private float RayCaptureTag => GatherProvenanceCode + 16f * sunNodeRefineRound + 256f * (fineGathering ? NearRoundsNow - nearRoundsLeft : 0)
         + (rayCaptureSun ? 32768f : 0f) + (captureDir ? 16384f : 0f);
-    // BLIX_CAPTURE_DIR=1: the records' word 6 the ray's direction (octahedral, snorm 2 x 16), not cosine and weight
+    // BLIX_CAPTURE_DIR=1: the records' word 6 the ray's direction (octahedral, snorm 2 x 16), not cosine and weight; word 5
+    // the sun column's luminance, not the bounce's share
     // (tools/gi-model/far_record.py: the far record per patch and bin, from the sweep's own rays).
     private static readonly bool captureDir = Environment.GetEnvironmentVariable("BLIX_CAPTURE_DIR") == "1";
     // --ray-capture-sun: the records' word 6 is the hit's whole sun and its texels' bit blend (half2), not cosine and weight.

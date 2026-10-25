@@ -822,7 +822,10 @@ void main() {
                         vec3 tn = TEXEL_NORMAL(id).xyz;
                         float cosine = dot(tn, tn) > 0.0 ? dot(normalize(tn), w) : 0.0;
                         captured[2u * at] = uvec4(id, uint(u.uCapture.z) | (uint(u.uShade.w) << 16), floatBitsToUint(sDist[r]), how | (uint(r) << 8) | (uint(int(h.w) + 1) << 13));
-                        captured[2u * at + 1u] = uvec4(floatBitsToUint(whole), floatBitsToUint(captureBounce),
+                        // BLIX_CAPTURE_DIR: word 5 the sun column's luminance alone (weight in), not the bounce's share -- a texel's
+                        // gathered sun by direction (tools/gi-model/directional_ratio.py)
+                        captured[2u * at + 1u] = uvec4(floatBitsToUint(whole), floatBitsToUint((uint(u.uCapture.z) & 0x4000u) != 0u
+                            ? dot(sRaySum[r * 2 + int(u.uHitBlend.w)], lumW) : captureBounce),
                             (uint(u.uCapture.z) & 0x8000u) != 0u ? packHalf2x16(vec2(captureSunFull, captureSunBits))
                             // BLIX_CAPTURE_DIR (tag 0x4000): the ray's direction, octahedral (snorm 2 x 16), world space
                             : (uint(u.uCapture.z) & 0x4000u) != 0u ? packSnorm2x16(captureOct(sDir[r]))

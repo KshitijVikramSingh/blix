@@ -268,6 +268,8 @@ internal sealed partial class SponzaLoop
         }
         // The resolved light the image reads (composed, filtered), and who wrote each texel's parts
         // (SponzaLoop.TexelPicker.cs), beside it.
+        if (stage == "instant" && InstantOctOn && !instantOctBuffer.Equals(default(GpuBufferHandle)))
+            File.WriteAllBytes(path + ".octants", device.ReadGpuBuffer(instantOctBuffer, 0, texelCount * 32));
         if (!texelResolvedBuffer.Equals(default(GpuBufferHandle)))
             File.WriteAllBytes(path + ".resolved", device.ReadGpuBuffer(texelResolvedBuffer, 0, texelCount * 8));
         if (!texelProvenanceBuffer.Equals(default(GpuBufferHandle)) && texelProvenanceBytes >= (texelCount + 3) / 4 * 4)
