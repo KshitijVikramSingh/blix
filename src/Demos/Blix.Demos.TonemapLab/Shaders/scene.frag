@@ -27,6 +27,9 @@ layout(push_constant) uniform Push {
     float uBlurPitch;
     float uTunnelEv;    // the tunnel interior's level relative to the world, in EV
     float uSunRadius;   // the sun disc's angular radius, radians; its radiance keeps the disc's total light (see below)
+    float uImpulseX;    // --impulse: when uImpulseV > 0 the scene is black except one pixel (x, y in framebuffer pixels) of this value, for measuring the glare PSF
+    float uImpulseY;
+    float uImpulseV;
     float uSunBoost;    // multiplies the sun's total light on top of that (1 = the lab's original sun; the real sun is ~40)
     int uSigns;
     int uUseHdri;
@@ -141,6 +144,12 @@ vec3 viewRay(float yaw, float pitch, vec2 ndc)
 
 void main()
 {
+    if (pc.uImpulseV > 0.0)
+    {
+        vec2 d = abs(gl_FragCoord.xy - vec2(pc.uImpulseX + 0.5, pc.uImpulseY + 0.5));
+        outColor = vec4(vec3(d.x < 0.5 && d.y < 0.5 ? pc.uImpulseV / 32.0 : 0.0), 0.0);   // the scene target stores light / 32
+        return;
+    }
     vec2 ndc = vUv * 2.0 - 1.0;
     int n = max(pc.uBlurSamples, 1);
     vec3 sum = vec3(0.0);

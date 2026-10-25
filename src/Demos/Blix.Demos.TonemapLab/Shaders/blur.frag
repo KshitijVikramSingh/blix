@@ -20,7 +20,10 @@ void main()
     for (int k = -radius; k <= radius; ++k)
     {
         float w = exp(-0.5 * float(k * k) / (pc.uSigma * pc.uSigma));
-        sum += w * texture(uSrc, vUv + float(k) * step).rgb;
+        vec2 uv = vUv + float(k) * step;
+        // Zero padding: light from outside the frame is absent, so a source near an edge loses the part of its halo that falls off
+        // the frame (clamping would replicate the edge and invent light). The weights still normalise over every tap.
+        if (uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0) sum += w * texture(uSrc, uv).rgb;
         norm += w;
     }
     outColor = vec4(sum / norm, 1.0);

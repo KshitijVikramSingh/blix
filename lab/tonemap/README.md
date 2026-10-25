@@ -54,8 +54,13 @@ ramp is the one with real range (max about 48, 8 to 10 stops from p1 to p99.9). 
 ## Conventions
 
 Linear light, frame-buffer units where 1.0 = 100 cd/m^2 (GT7's), colour channel last, float64.
-GT7 works in linear Rec.2020; Blix's scene target primaries are not yet confirmed, so a
-Rec.709 -> Rec.2020 step (`color.rec709_to_rec2020`) is the likely front end.
+GT7 works in linear Rec.2020. **Scene-linear primaries contract:** Blix's scene-linear values are linear Rec.709 / sRGB primaries
+at D65, by construction rather than by a declared setting: textures are `Rgba8Srgb`/`Bc7Srgb` (decoded to linear sRGB by the
+hardware), the baked ray-query albedo is stored as sRGB-encoded bytes and decoded with the sRGB EOTF (`ray_query.glsl`), and the
+default swapchain is sRGB. So the front end here is `color.rec709_to_rec2020` and the tone-mapped result goes back through
+`rec2020_to_rec709`. That is a contract the engine has not written down in one place; it should be stated where scene lights and
+materials are authored (a light's colour is only "linear sRGB" because that is what its author typed), before this graduates.
+After the tone map a colour can leave the display gamut, see "Gamut" below.
 
 ## Provenance
 
@@ -384,10 +389,74 @@ comparison sheets at x20 looked terrible because of a push-constant field-order 
 Streak spikes use one-texel steps (geometric spacing left beads on a point-like source), a 300 px reach with a fade over its last
 half, and strength x1.
 
+## Cost, validation of the glare and the storage, screen-space blur, gamut
+
+**Glare cost** (`--bench N`, isolated GPU time per pass group at 2560x1440; isolation attributes cost and sums to more than a normal
+frame). One chain per Gaussian term was 64 passes and 38.4 ms (glare 17.3, scatter 13.7, spikes 3.4, scene 2.0, present 2.0); one
+shared downsample pyramid with each term reading the level it needs is 27 passes and 19.4 ms (pyramid 3.5, diffraction 5.2, scatter
+3.2, spikes 3.0, scene 2.2, present 2.3). Term 0 of the diffraction fit (sigma 0.7 px at Airy radius 2) is drawn as the scene itself
+while it is under a pixel wide. The remaining cost is dominated by the spike streak pass (about 150 one-texel taps a side per line)
+and the fixed per-pass overhead of many small passes.
+
+**Is the mipmapped, truncated glare the glare the fit describes?** Measured, not assumed: `--impulse-x/-y/-v` makes the scene black
+but for one pixel and `--probe` presents the scene-linear composite untouched, so a capture is the impulse response, and
+`tests/test_glare_impulse.py` compares it with the python model. Diffraction: encircled energy within 0.1 to 0.8% of the Gaussian-sum
+model from 6 px out (at Airy radius 2 and 4), total energy 0.9994 of what went in at the centre; inside 3 px at the wider radius the
+half-resolution core is up to 13% off (ratio 0.87), which is the one place this is visibly not the model. Near borders the blur
+zero-pads (light from outside the frame is absent; clamping replicated the edge and invented light): in-frame energy 0.9956 at an edge
+and 0.993 in a corner against 0.9966 and 0.9941 predicted. Scatter veil: within 2 to 4% from 60 px out, 12% at 30 px (the narrowest
+term is a 1.2-texel blur at 1/16 resolution). Spikes: row sums across a spike, averaged over the two sides, follow V*A*a/d^2 within about 5% from 32 px out (one side alone is off by 10 to 15%). What
+this does not validate: the fit's own error against the Airy pattern (see the tables above), and anything about a real lens.
+
+**The `/32` storage and the dark.** Half-float is as precise as it was down to 2e-3 scene units (0.5 nit) and loses precision
+below: 1e-4 units (0.025 nit) steps by 1.9%, 1e-5 units (0.0025 nit) by 20%. A real render at world -13 EV (sky 1.3 to 2.3e-3 units)
+has 483 distinct values over 648 rows, steps of 0.11%: no banding. The loss is confined to content a deeply adapted eye still shows
+as black (the exposure window cannot raise 1e-5 units into view). A storage scale of /16 would halve the dark error and still hold
+a sun of 2.6e8 nits; /32 is what the x40 real-sun gain needs. `tests/test_scene_store.py`.
+
+**Motion blur: the demo's integration is the reference, not the method.** `motionblur.evaluate` renders a real equirect HDRI through a
+pinhole camera and scores two screen-space candidates against shutter integration of the environment (24 taps): `reproject` samples
+the centre frame where each tap's ray would appear, `linear` uses a first-order velocity buffer. On wide_street_01 (linear-light
+relative RMS): reprojection sits at its resampling floor, 0.3 to 0.9%, at every sweep from 0.5 to 20 degrees; the linear velocity
+buffer matches it up to about 2 degrees and reaches 0.6 to 0.8% at 8 degrees and 2.1 to 2.4% at 20 (the projection's nonlinearity,
+worse toward the edges); and the pixels with no data (a tap leaves the frame) are 5% of the frame at a 2 degree sweep on a 70
+degree view, 16% at 8 degrees, with 2 to 9% error there. This is a camera turning through a static world, so it says nothing yet
+about moving geometry: animated foliage is the case where shutter integration and a velocity buffer will differ most, and the
+reference exists to measure that. `tests/test_motionblur.py` (synthetic environment, the same qualitative claims).
+
+**Gamut.** The tone map can leave a colour outside the display's gamut (a negative channel after Rec.2020 -> 709). Per-channel
+clipping changes hue as well as chroma; `color.gamut_map` moves the colour toward the grey of the same luminance by the least amount
+that makes the target's smallest channel zero (luminance exactly kept). For Rec.709 inputs through GT7 SDR the excursion is small
+(20% of fully saturated samples, the worst channel -0.0006): hue shift 1.9 degrees mean / 7.3 max when clipped, 0.8 / 3.0 mapped.
+The larger point is HDR: an extended-linear surface (RGBA16F, which macOS honours on a P3 panel) can carry negative channels, so the
+target can be Display P3 instead of Rec.709: P3 colours are kept (negative channels and all) and only colours outside P3 are
+desaturated. The demo does this by default on an HDR surface (`--gamut 709` to compare, `--gamut off` for the old clip); pattern
+"gamut bars" shows Rec.709 then P3 primaries raw, and on a P3 panel the right three bars should be visibly more saturated. That the
+panel actually honours the negative channels is checked by looking, not by the code. The GLSL map is held to python by
+`tests/test_gamut.py` for the Rec.709 target (SDR); the P3 target is held to python by its function tests only. A complete gamut
+strategy (a perceptual space, a knee, wide-gamut sources) is not here.
+
+## What is demonstrated, what is observed, what is a hypothesis
+
+| piece | numerically demonstrated | observed on the display | hypothesis or choice |
+| --- | --- | --- | --- |
+| GT7 tone curve, GLSL and python | parity to half-float (`test_glsl_parity`) | HDR stills and the live window read right | that the published parameters suit Blix |
+| SDR/HDR fits | fit objectives, held-out captures | floor 0.30 chosen by eye | the objectives are the lab's own |
+| adaptation (exposure) | C# equals python (1e-7); 18 written specs met | sun/night, the tunnel (6.8 EV down) judged live | every constant is chosen to meet the specs, none fitted to data; only the 600 s dark time constant has a source |
+| auto white balance | C# equals python; 18 specs; sky-mask effect measured on ten HDRIs | looked right on captures | partial adaptation 0.7, limits, virtual light weight: chosen |
+| HDR output | values reach the surface exactly; EDR headroom read live | patches 4x and 6x look the same (headroom ~4) | the absolute UI white in nits (inferred ~400) |
+| diffraction glare | impulse response vs the fit (above) | default judged good (SDR and XDR) | an Airy envelope stands in for a real lens |
+| scatter glare | impulse response; Stiles-Holladay formula and its amount | judged live | the 1 and 30 degree knees and the age-25 observer are the lab's |
+| blade spikes | polygon PSF by FFT: count, direction, r^-2, amplitude | strength x1 at sun x20 judged live | the gain; double-counting part of the tail |
+| sun and master glare gain | storage precision measured | x20 sun, master 0.5 judged live | what "bright enough" means |
+| motion blur | spec tests; screen-space errors measured | judged live | the shutter and sample count |
+| gamut map | python properties; GLSL parity (709 target) | P3 bars: to be looked at | that the panel honours extended-linear negatives |
+
 ## Not covered yet
 
-- Blix's curves are checked against the shipped constants, not against values produced by the C#/GLSL
-  themselves; add golden values from `Tonemap.cs` if the lab starts relying on exact parity.
-- No HDR fit, no auto-exposure or colour-correction fit, and nothing generated back into `tonemap.glsl` /
-  `Tonemap.cs` yet. The fit uses numpy and scipy only; PyTorch and SlangPy come in when a lane needs gradients or
-  bulk GPU evaluation (the seven-parameter SDR fit needed neither).
+- Nothing is generated back into `tonemap.glsl` / `Tonemap.cs` yet (and the GT7 licence and `THIRD_PARTY_NOTICES` need a decision first).
+  The fits use numpy and scipy only; PyTorch and SlangPy come in when a lane needs gradients or bulk GPU evaluation.
+- Blix's curves are checked against the shipped constants, not against values produced by the C#/GLSL themselves; add golden values from
+  `Tonemap.cs` if the lab starts relying on exact parity.
+- The scene-linear primaries contract above is read from the engine, not declared by it. Not modelled: scatter and flare from a real
+  lens, dirt, colour dispersion in the spikes, rounded blades, moving geometry in the blur, wide-gamut scene sources.

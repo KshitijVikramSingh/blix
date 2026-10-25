@@ -110,6 +110,56 @@ def rec2020_to_rec709(rgb):
     return np.asarray(rgb) @ REC2020_TO_REC709.T
 
 
+LUMA709 = np.array([0.2126, 0.7152, 0.0722])
+
+
+# Display P3 (D65) primaries, relative to Rec.709. The XDR panel this lab is developed on is P3; an extended-linear sRGB surface
+# expresses P3 colours as Rec.709 values with a negative channel.
+REC709_TO_P3 = np.array([[0.8224621, 0.1775380, 0.0000000],
+                         [0.0331941, 0.9668058, 0.0000001],
+                         [0.0170827, 0.0723974, 0.9105199]])
+P3_TO_REC709 = np.linalg.inv(REC709_TO_P3)
+LUMA_P3 = LUMA709 @ P3_TO_REC709   # the same absolute luminance Y as LUMA709, for P3 components (0.2290, 0.6917, 0.0793)
+
+
+def gamut_map(rgb709, target: str = "709"):
+    """gamut_map_709, to the Rec.709 gamut ("709") or the Display P3 gamut ("p3"); returns linear Rec.709 (negative where P3 needs it).
+
+    The desaturation runs in the target gamut's own RGB: toward the grey of the same luminance, by the least amount that makes the
+    target's smallest channel zero. For "p3" a colour inside P3 but outside Rec.709 is returned unchanged (negative channels and all).
+    """
+    if target == "709":
+        return gamut_map_709(rgb709)
+    c = np.asarray(rgb709, dtype=np.float64) @ REC709_TO_P3.T
+    y = c @ LUMA_P3
+    mn = c.min(axis=-1)
+    bad = mn < 0.0
+    t = np.where(bad & (y > 0.0), y / np.where(bad, y - mn, 1.0), 1.0)
+    out = y[..., None] + t[..., None] * (c - y[..., None])
+    out = np.where((bad & (y <= 0.0))[..., None], 0.0, np.maximum(out, 0.0))
+    return out @ P3_TO_REC709.T
+
+
+def gamut_map_709(rgb):
+    """Bring linear Rec.709 values that went negative (a Rec.2020 colour outside the display's gamut) back to the gamut's edge.
+
+    Per-channel clipping to zero changes the colour's hue as well as its chroma. This instead moves a colour toward the grey of the
+    same luminance (Rec.709 luma Y) by the least amount that makes its smallest channel zero:
+        t = Y / (Y - min(rgb)),   rgb' = Y + t (rgb - Y)
+    so luminance is exactly kept, the hue direction in the plane through the grey axis is kept, and only chroma is given up. Colours
+    already in gamut (min >= 0) are untouched; a colour with Y <= 0 goes to black. Values above 1 (HDR) are not touched: only the
+    negative side is the gamut boundary of an extended-linear display. present.frag's `gamutMap709` is the same arithmetic.
+    """
+    c = np.asarray(rgb, dtype=np.float64)
+    y = c @ LUMA709
+    mn = c.min(axis=-1)
+    bad = (mn < 0.0)
+    t = np.where(bad & (y > 0.0), y / np.where(bad, y - mn, 1.0), 1.0)
+    out = y[..., None] + t[..., None] * (c - y[..., None])
+    out = np.where((bad & (y <= 0.0))[..., None], 0.0, out)
+    return np.maximum(out, 0.0)
+
+
 # --- Oklab (Ottosson), linear sRGB / Rec.709 in -------------------------------------------
 _OK_M1 = np.array([[0.4122214708, 0.5363325363, 0.0514459929],
                    [0.2119034982, 0.6806995451, 0.1073969566],

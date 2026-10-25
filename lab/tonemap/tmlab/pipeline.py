@@ -36,11 +36,15 @@ def to_gt7_input(rgb709, exposure: float = 1.0, conv: SceneConvention = SceneCon
 
 
 def gt7_sdr(rgb709, tm: GT7ToneMapping | None = None, exposure: float = 1.0,
-            conv: SceneConvention = SceneConvention()):
-    """GT7 SDR output as display-linear Rec.709 in 0..1, ready for the sRGB OETF (what a Blix curve returns)."""
+            conv: SceneConvention = SceneConvention(), gamut_map: bool = False):
+    """GT7 SDR output as display-linear Rec.709 in 0..1, ready for the sRGB OETF (what a Blix curve returns).
+
+    `gamut_map` desaturates colours that left the Rec.709 gamut (color.gamut_map_709) instead of clipping each channel. Off by
+    default: the fits and goldens in this lab were made with the clip, and the demo is where the map is on.
+    """
     tm = tm or GT7ToneMapping.sdr_display()
-    out2020 = tm(to_gt7_input(rgb709, exposure, conv))
-    return np.clip(color.rec2020_to_rec709(out2020), 0.0, 1.0)
+    out709 = color.rec2020_to_rec709(tm(to_gt7_input(rgb709, exposure, conv)))
+    return np.clip(color.gamut_map_709(out709) if gamut_map else out709, 0.0, 1.0)
 
 
 def gt7_hdr_nits(rgb709, tm: GT7ToneMapping, exposure: float = 1.0, conv: SceneConvention = SceneConvention()):
