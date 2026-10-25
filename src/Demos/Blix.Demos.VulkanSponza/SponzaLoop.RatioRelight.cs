@@ -112,7 +112,7 @@ internal sealed partial class SponzaLoop
     private bool sunChangeSelectFine;
     // --old-start-below DEG (0: off): a step under it shows the light that showed before the instant layer (the re-aim's
     // provisional, the new sun's patch light) until gathered, not the relit.
-    private float oldStartBelow;
+    private float oldStartBelow, keepOldBelow;
     private bool OldStartNow => oldStartBelow > 0f && sunChangeStepDeg < oldStartBelow;
     private float sunChangeFineBelow = 10f, sunChangeStepDeg = 180f;
     private bool SelectFineNow => sunChangeSelectFine || sunChangeStepDeg < sunChangeFineBelow;

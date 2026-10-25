@@ -7,6 +7,7 @@ RUN [RUN ...]): each RUN a sun change with BLIX_DUMP_PARTS and BLIX_DUMP_CHANGE_
 parts.landed.0), TRUTHn boots at the new sun (two seeds: the truth their mean; directional_ratio.py's B runs, their
 view the same camera); --filtered: the composed, filtered light (each dump's .resolved) the image reads. The error as patch_layers.py's: relative, the screen's pixel-weighted over the live fine texels
 (the view's texel per pixel), and the scene's over every live fine texel."""
+import json
 import re
 import sys
 from pathlib import Path
@@ -18,7 +19,14 @@ import directional_ratio as dr  # noqa: E402
 
 
 def main():
-    t0, t1 = dr.run(sys.argv[1]), dr.run(sys.argv[2])
+    def load(d):
+        d = Path(d)
+        sky, sun = dr.parts(d / 'parts.final.0')
+        views = sorted((d / 'view').glob('view-*')) if (d / 'view').exists() else []
+        view = views[-1] if views else None
+        meta = json.loads((view / 'meta.json').read_text()) if view else None
+        return dict(sky=sky, sun=sun, view=view, meta=meta)
+    t0, t1 = load(sys.argv[1]), load(sys.argv[2])
     irr = dr.irradiance(t0['meta'])
     n = len(t0['sky'])
     view = t0['view']

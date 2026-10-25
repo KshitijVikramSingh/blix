@@ -270,6 +270,10 @@ internal sealed partial class SponzaLoop
         if (!liveTexels) return;
         // The push's steps keep the texels' parts: the patches' provisional over every texel would undo them.
         if (FlipPushSteering) return;
+        // --keep-old-below DEG: a sun change's step under it keeps the old light up (the patches' provisional not written):
+        // at 5 deg on Crytek Sponza the old light read 0.052 filtered (the change landing at 0.046) and the provisional
+        // 0.130 for ~3 s -- a flash every step; at 20 deg the provisional is the better start (0.151, the old ~0.20).
+        if (liveSkyGathered && keepOldBelow > 0f && sunChangeStepDeg < keepOldBelow) return;
         liveProvisionalPending = !texelsUploaded || splitLiveBuffer.Equals(default(GpuBufferHandle)) || texelLiveIds is null;
         if (liveProvisionalPending) return;
         EnsureLiveTexelPatch();

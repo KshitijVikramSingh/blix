@@ -461,6 +461,7 @@ internal sealed partial class SponzaLoop
         sunChangeSelectFine = args.Flag("sun-change-select-fine");
         if (args.Float("sun-change-fine-below") is { } sfb) sunChangeFineBelow = Math.Max(0f, sfb);
         if (args.Float("old-start-below") is { } osb) oldStartBelow = Math.Max(0f, osb);
+        if (args.Float("keep-old-below") is { } kob) keepOldBelow = Math.Max(0f, kob);
         visibleChanged = !args.Flag("no-visible-changed");
         screenFirst = args.Flag("screen-first");
         hitBlend = !args.Flag("no-hit-blend");
