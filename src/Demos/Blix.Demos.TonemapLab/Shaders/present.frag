@@ -69,16 +69,6 @@ const vec3 HUES[7] = vec3[7](vec3(1.0, 0.08, 0.04), vec3(1.0, 0.35, 0.03), vec3(
 // Colours the tone mapper leaves outside the display's Rec.709 gamut come out of the Rec.2020 -> 709 step with a negative channel.
 // Clipping that channel to zero changes the hue as well as the chroma; this keeps the luminance and gives up only chroma: move
 // toward the grey of the same luma by the least amount that makes the smallest channel zero (tmlab/color.py gamut_map_709).
-vec3 gamutMap709(vec3 c)
-{
-    float y = dot(c, vec3(0.2126, 0.7152, 0.0722));
-    float mn = min(c.r, min(c.g, c.b));
-    if (mn >= 0.0) return c;
-    if (y <= 0.0) return vec3(0.0);
-    float t = y / (y - mn);
-    return max(vec3(y) + t * (c - vec3(y)), vec3(0.0));
-}
-
 // The same toward Display P3: the map runs in P3's own RGB and the result is returned as linear Rec.709, negative where P3 needs it
 // (an extended-linear surface shows those on a P3 panel). tmlab/color.py gamut_map(..., "p3"); matrices are GLSL column-major.
 const mat3 REC709_TO_P3 = mat3(0.8224621, 0.0331941, 0.0170827, 0.1775380, 0.9668058, 0.0723974, 0.0000000, 0.0000001, 0.9105199);
@@ -174,12 +164,12 @@ void main()
         else if (pc.uGt7Sdr != 0)
         {
             vec3 d = gt7_rec2020ToRec709(mapped);
-            result = clamp(pc.uGamutMap != 0 ? gamutMap709(d) : d, 0.0, 1.0);
+            result = clamp(pc.uGamutMap != 0 ? gt7_gamutMap709(d) : d, 0.0, 1.0);
         }
         else
         {
             vec3 d = gt7_rec2020ToRec709(mapped * 100.0 / pc.uSdrWhiteNits);
-            result = pc.uGamutMap != 0 ? (pc.uGamutTarget == 1 ? gamutMapP3(d) : gamutMap709(d)) : d;
+            result = pc.uGamutMap != 0 ? (pc.uGamutTarget == 1 ? gamutMapP3(d) : gt7_gamutMap709(d)) : d;
         }
     }
     // Negative channels are kept only for the P3 target on an extended-linear surface; everything else is clipped at zero.

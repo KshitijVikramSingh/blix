@@ -1,6 +1,6 @@
 """The demo's GT7 shader against gt7.py: the same hue ramp through both, compared per pixel.
 
-The GLSL (src/Demos/Blix.Demos.TonemapLab/Shaders/gt7.glsl) is a third copy of arithmetic that already exists in the
+The GLSL (src/Blix.Shaders/gt7.glsl, shared with the engine) is a third copy of arithmetic that already exists in the
 published C++ sample and in gt7.py, so, like Tonemap.cs against tonemap.glsl, it has to answer to something. `--selftest`
 renders the ramp to frame-buffer values in an RGBA16F target; this reads the result and recomputes it.
 

@@ -4661,10 +4661,12 @@ static ShaderInterface MinimalShader() => new(new[]
 
         // The selector's thresholds are a convention restated in both files, and restating is how
         // the two come to disagree.
-        t.Expect("BD.2 the mode thresholds still read 0.5 / 1.5 / 2.5 in the shader",
+        t.Expect("BD.2 the mode thresholds still read 0.5 / 1.5 / 2.5 / 3.5 / 4.5 in the shader",
             glsl.Contains("mode < 0.5", StringComparison.Ordinal)
             && glsl.Contains("mode < 1.5", StringComparison.Ordinal)
-            && glsl.Contains("mode < 2.5", StringComparison.Ordinal),
+            && glsl.Contains("mode < 2.5", StringComparison.Ordinal)
+            && glsl.Contains("mode < 3.5", StringComparison.Ordinal)
+            && glsl.Contains("mode < 4.5", StringComparison.Ordinal),
             "blix_tonemap's selector changed shape");
     }
 
@@ -4694,10 +4696,59 @@ static ShaderInterface MinimalShader() => new(new[]
     // one curve answering for all four, and four modes that agree with each other is exactly what
     // that looks like from the outside.
     var hdr = new Vector3(0.6f, 0.35f, 0.12f);
-    var picked = new[] { 0f, 1f, 2f, 3f }.Select(m => Tonemap.Apply(hdr, m).X).ToArray();
-    t.Expect("BD.7 the four modes give four different answers",
-        picked.Distinct().Count() == 4,
+    var picked = new[] { 0f, 1f, 2f, 3f, 4f, 5f }.Select(m => Tonemap.Apply(hdr, m).X).ToArray();
+    t.Expect("BD.7 the six modes give six different answers",
+        picked.Distinct().Count() == 6,
         string.Join(", ", picked.Select(v => v.ToString("0.0000"))));
+
+    // <b>GT7's numbers are generated, and both copies are held to the generated text and to the python's answers.</b>
+    // gt7_params.glsl and Gt7Presets.Generated.cs come from lab/tonemap/tools/generate_gt7_constants.py (nobody types a GT7
+    // parameter here); gt7_golden.json is what lab/tonemap/tmlab/gt7.py returns for a fixed set of inputs. The shader's arithmetic is
+    // compared with the python's per pixel by the lab's own tests (tests/test_glsl_parity.py, test_gamut.py); here the C# twin is.
+    var paramsPath = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "Blix.Shaders", "gt7_params.glsl");
+    var paramsGlsl = File.Exists(paramsPath) ? File.ReadAllText(paramsPath) : null;
+    t.Expect("BD.8 CONTROL gt7_params.glsl was actually read", paramsGlsl is { Length: > 200 }, paramsGlsl is null ? $"not found at {Path.GetFullPath(paramsPath)}" : "");
+    if (paramsGlsl is not null)
+    {
+        foreach (var (name, p) in new[] { ("PUBLISHED", Gt7Presets.Published), ("TUNED", Gt7Presets.Tuned) })
+        {
+            var m = Regex.Match(paramsGlsl, $@"BLIX_GT7_{name} = Gt7Params\(([^)]*)\)");
+            var parts = m.Success ? m.Groups[1].Value.Split(',').Select(x => float.Parse(x, System.Globalization.CultureInfo.InvariantCulture)).ToArray() : Array.Empty<float>();
+            var want = new[] { p.Alpha, p.GrayPoint, p.LinearSection, p.ToeStrength, p.BlendRatio, p.FadeStart, p.FadeEnd, p.ShoulderTail };
+            t.Expect($"BD.9 the {name} parameter set in gt7_params.glsl equals Gt7Presets.{name}",
+                parts.Length == 10 && want.Zip(parts).All(z => MathF.Abs(z.First - z.Second) <= 1e-7f * MathF.Max(1f, MathF.Abs(z.First))),
+                m.Success ? $"glsl: {string.Join(", ", parts)}" : "constructor not found");
+        }
+    }
+
+    var goldenPath = Path.Combine(AppContext.BaseDirectory, "fixtures", "gt7_golden.json");
+    t.Expect("BD.10 CONTROL gt7_golden.json was actually read", File.Exists(goldenPath), $"not found at {goldenPath}");
+    if (File.Exists(goldenPath))
+    {
+        using var golden = System.Text.Json.JsonDocument.Parse(File.ReadAllText(goldenPath));
+        var root = golden.RootElement;
+        var inputs = root.GetProperty("inputs").EnumerateArray().Select(r => r.EnumerateArray().Select(v => v.GetSingle()).ToArray()).ToArray();
+        var peak = root.GetProperty("hdr_peak_nits").GetSingle();
+        var white = root.GetProperty("sdr_white_nits").GetSingle();
+        foreach (var (key, f) in new (string, Func<Vector3, Vector3>)[]
+        {
+            ("sdr_published", v => Tonemap.Gt7Sdr(v, Gt7Presets.Published)),
+            ("sdr_tuned", v => Tonemap.Gt7Sdr(v, Gt7Presets.Tuned)),
+            ($"hdr{(int)peak}_published", v => Tonemap.Gt7Hdr(v, Gt7Presets.Published, peak, white)),
+            ($"hdr{(int)peak}_tuned", v => Tonemap.Gt7Hdr(v, Gt7Presets.Tuned, peak, white)),
+        })
+        {
+            var want = root.GetProperty("outputs").GetProperty(key).EnumerateArray().Select(r => r.EnumerateArray().Select(v => v.GetSingle()).ToArray()).ToArray();
+            var worst = 0f;
+            for (var i = 0; i < inputs.Length; i++)
+            {
+                var got = f(new Vector3(inputs[i][0], inputs[i][1], inputs[i][2]));
+                worst = MathF.Max(worst, MathF.Max(MathF.Abs(got.X - want[i][0]) - 1e-3f * MathF.Abs(want[i][0]),
+                    MathF.Max(MathF.Abs(got.Y - want[i][1]) - 1e-3f * MathF.Abs(want[i][1]), MathF.Abs(got.Z - want[i][2]) - 1e-3f * MathF.Abs(want[i][2]))));
+            }
+            t.Expect($"BD.11 Tonemap.{key} matches gt7.py on {inputs.Length} inputs (float32 against float64: 5e-4 absolute plus 1e-3 relative)", worst <= 5e-4f, $"worst excess over 1e-3 relative: {worst:0.000000}");
+        }
+    }
 }
 
 // ============================================================================

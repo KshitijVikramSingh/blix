@@ -20,6 +20,7 @@
        spirv-cross with the reflect flag if those shaders' interfaces change. -->
   <ItemGroup>
     <Content Include="fixtures\*.refl.json" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="fixtures\gt7_golden.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <PropertyGroup>

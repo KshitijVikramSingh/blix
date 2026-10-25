@@ -343,7 +343,7 @@ defines after `#version`, and `#line` mappings for useful compiler errors.
 | `pbr.glsl` | Cook-Torrance metallic/roughness BRDF |
 | `ibl.glsl` | Diffuse irradiance and split-sum specular ambient |
 | `shadow.glsl` | Shared soft sun-shadow sampling and cascade selection |
-| `tonemap.glsl` | ACES, AgX, Reinhard, and neutral curves |
+| `tonemap.glsl`, `gt7.glsl` | ACES, AgX, Reinhard, neutral and GT7 (published and lab-tuned) curves; GT7's parameters are generated from `lab/tonemap` (`gt7_params.glsl`) |
 | `fullscreen.glsl` | Fullscreen-triangle vertex synthesis |
 | `bloom.glsl` | Bright extraction and separable Gaussian blur |
 | `froxel.glsl` | Shared froxel addressing and integration helpers |

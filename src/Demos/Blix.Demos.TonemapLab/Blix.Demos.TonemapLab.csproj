@@ -39,7 +39,8 @@
     <!-- Shared GLSL library (src/Blix.Shaders), resolved via the -I path of the shared compile target. Listed so edits retrigger it. -->
     <GlslInclude Include="..\..\Blix.Shaders\fullscreen.glsl" />
     <GlslInclude Include="..\..\Blix.Shaders\tonemap.glsl" />
-    <GlslInclude Include="Shaders\gt7.glsl" />
+    <GlslInclude Include="..\..\Blix.Shaders\gt7.glsl" />
+    <GlslInclude Include="..\..\Blix.Shaders\gt7_params.glsl" />
   </ItemGroup>
 
 </Project>

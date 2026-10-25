@@ -67,8 +67,9 @@ After the tone map a colour can leave the display gamut, see "Gamut" below.
 The GT7 algorithm is from Polyphony Digital's SIGGRAPH 2025 talk "Driving Toward Reality: Physically
 Based Tone Mapping" (the slides' sample implementation is MIT-licensed, (c) 2025 Polyphony Digital
 Inc.). This port follows its structure and is held to its numbers by `tests/golden`; the reference code
-itself is not vendored. If any of this code is later promoted into `src/`, add a
-`THIRD_PARTY_NOTICES.md` entry.
+itself is not vendored. The GT7 arithmetic has since been promoted into `src/` (see "Promoted into the engine" below), so
+`THIRD_PARTY_NOTICES.md` carries the MIT notice. That notice's text is the standard MIT text with Polyphony's copyright line; confirm
+it against the original file at the course page before a release.
 
 ## SDR fit (first result)
 
@@ -452,9 +453,25 @@ strategy (a perceptual space, a knee, wide-gamut sources) is not here.
 | motion blur | spec tests; screen-space errors measured | judged live | the shutter and sample count |
 | gamut map | python properties; GLSL parity (709 target) | P3 bars: to be looked at | that the panel honours extended-linear negatives |
 
+## Promoted into the engine
+
+GT7 is now two of the engine's tonemap modes: `blix_tonemap` modes 4 (published parameters) and 5 (the lab-tuned set), `TonemapCurve.Gt7` and
+`Gt7Tuned`, in the viewer's dropdown and `--tonemap-mode`. The pieces:
+
+- `src/Blix.Shaders/gt7.glsl` (the arithmetic, `blix_gt7_sdr` and `blix_gt7_hdr`) and `Tonemap.cs` (`Gt7Sdr`, `Gt7Hdr`, `GamutMap709`): the engine's two
+  hand-written copies, answerable to each other as the engine already requires (Blix.Test.Graphics Section BD).
+- The NUMBERS are not typed anywhere: `tools/generate_gt7_constants.py` writes `gt7_params.glsl`, `Gt7Presets.Generated.cs` and
+  `src/Blix.Test.Graphics/fixtures/gt7_golden.json` from `tmlab/gt7.py` (published) and `results/hdr_tuned.json` (tuned, floor 0.30).
+  `tests/test_generated_constants.py` fails if the committed files are stale. Section BD reads the generated GLSL and the golden file: the C#
+  twin matches the python on 18 inputs for both sets, SDR and HDR (float32 against float64).
+- Assumptions that travel with it: scene 1.0 = 250 nits (`BLIX_GT7_SCENE_WHITE_NITS`), scene-linear Rec.709 in (the contract above), and the
+  SDR entry point matches `blix_tonemap`'s other curves ([0,1] display-linear out). `blix_gt7_hdr` is for an HDR swapchain and is not wired
+  into the engine's present path; the engine's own passes still present to an sRGB surface. The mode numbers above 3 used to mean
+  "neutral". The glare, scatter, spikes, blur, adaptation and white balance are NOT in the engine: they live in the TonemapLab demo.
+
 ## Not covered yet
 
-- Nothing is generated back into `tonemap.glsl` / `Tonemap.cs` yet (and the GT7 licence and `THIRD_PARTY_NOTICES` need a decision first).
+- Blix's HDR present path (an HDR swapchain in the engine's own passes) and everything in TonemapLab other than the tone curve are not in the engine.
   The fits use numpy and scipy only; PyTorch and SlangPy come in when a lane needs gradients or bulk GPU evaluation.
 - Blix's curves are checked against the shipped constants, not against values produced by the C#/GLSL themselves; add golden values from
   `Tonemap.cs` if the lab starts relying on exact parity.
