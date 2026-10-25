@@ -39,7 +39,7 @@ def lum(c):
     return c[..., 0] * 0.2126 + c[..., 1] * 0.7152 + c[..., 2] * 0.0722
 
 
-def points_mode(log, dumps):
+def points_mode(log, dumps, mean_of=False):
     import re
     pts = []
     for line in Path(log).read_text().splitlines():
@@ -52,15 +52,25 @@ def points_mode(log, dumps):
     mean = R.mean()
     big = R > 0.02 * mean
     print(f'truth: {Path(log).name}, {len(pts)} points, mean {mean:.4f}')
+    if mean_of:
+        # --mean: the dumps' fields averaged first (consecutive frames): what a temporal filter would converge to.
+        metas = [load(d) for d in dumps]
+        meta, _, nrm = metas[0]
+        inc = np.mean([m[1] for m in metas], axis=0)
+        dumps = [(f'mean of {len(metas)}', meta, inc, nrm)]
     for d in dumps:
-        meta, inc, nrm = load(d)
+        if isinstance(d, tuple):
+            name, meta, inc, nrm = d
+        else:
+            name = Path(d).name
+            meta, inc, nrm = load(d)
         w, h = meta['width'], meta['height']
         px, py = np.clip((xs * w).astype(int), 0, w - 1), np.clip((ys * h).astype(int), 0, h - 1)
         F = lum(inc[py, px, :3])
         ok = np.abs(nrm[py, px, :3]).sum(axis=1) > 1e-6
         f, r = F[ok], R[ok]
         b = big[ok]
-        print(f'{Path(d).name:>8} (frame {meta["frame"]}): energy {f.sum() / r.sum():.4f}, rel |error| {np.abs(f - r).mean() / r.mean():.4f}, '
+        print(f'{name:>8} (frame {meta["frame"]}): energy {f.sum() / r.sum():.4f}, rel |error| {np.abs(f - r).mean() / r.mean():.4f}, '
               f'median {np.median(f[b] / r[b]):.4f} ({ok.sum()} points)')
 
 
@@ -68,7 +78,8 @@ def main():
     if len(sys.argv) < 3:
         raise SystemExit(__doc__)
     if sys.argv[1].endswith('.log'):
-        points_mode(sys.argv[1], sys.argv[2:])
+        args = [a for a in sys.argv[2:] if a != '--mean']
+        points_mode(sys.argv[1], args, mean_of='--mean' in sys.argv)
         return
     tmeta, _, tnrm = load(sys.argv[1])
     rw, rh = tmeta['referenceWidth'], tmeta['referenceHeight']

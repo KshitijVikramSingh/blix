@@ -39,6 +39,20 @@ internal sealed partial class SponzaLoop
     private float rtgiSunCut = 32f;
     private Vector3 rtgiLastSun;
     private const int RtgiTopLevel = 10;
+    // --rtgi-screen (S3): each half-res pixel's light from the screen tiles' reservoirs (ReSTIR GI: rtgi_reservoir.comp,
+    // rtgi_screen.frag) in place of the cache read at its cell. --rtgi-screen-taps N reservoirs a pixel (8) within
+    // --rtgi-screen-radius tiles (2); --rtgi-reuse-max the count a reservoir keeps (20).
+    private bool rtgiScreen;
+    private int rtgiScreenTaps = 8, rtgiScreenRadius = 2;
+    private float rtgiReuseMax = 20f;
+    private ShaderInterface rtgiReservoirInterface = null!, rtgiScreenInterface = null!;
+    private PassHandle rtgiReservoirPassHandle, rtgiScreenPassHandle;
+    private PipelineHandle rtgiReservoirPipeline, rtgiScreenPipeline;
+    private GpuBufferHandle[] rtgiReservoirs = Array.Empty<GpuBufferHandle>();
+    // The view-projections the last two frames' points were drawn in, and the grid this frame's reservoirs are laid out in.
+    private Matrix4x4 rtgiViewProj1, rtgiViewProj2, rtgiGridViewProj;
+    private (int X, int Y) rtgiGrid;
+    private int rtgiReservoirCur = -1;
     private ShaderInterface rtgiRaysInterface = null!, rtgiTrainInterface = null!, rtgiResolveInterface = null!, rtgiReadoutInterface = null!;
     private PassHandle rtgiRaysPassHandle, rtgiTrainPassHandle, rtgiResolvePassHandle, rtgiReadoutPassHandle;
     private PipelineHandle rtgiRaysPipeline, rtgiTrainPipeline, rtgiResolvePipeline, rtgiReadoutPipeline;
@@ -68,6 +82,11 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-fast") is { } fa) rtgiFast = MathF.Max(1f, fa);
         if (args.Float("rtgi-change-floor") is { } cf) rtgiChangeFloor = MathF.Max(0f, cf);
         if (args.Float("rtgi-sun-cut") is { } sc) rtgiSunCut = MathF.Max(0f, sc);
+        rtgiScreen = args.Flag("rtgi-screen");
+        if (rtgiScreen) rtgi = true;
+        if (args.Int("rtgi-screen-taps") is { } taps) rtgiScreenTaps = Math.Clamp(taps, 1, 64);
+        if (args.Int("rtgi-screen-radius") is { } rad) rtgiScreenRadius = Math.Clamp(rad, 0, 16);
+        if (args.Float("rtgi-reuse-max") is { } rm) rtgiReuseMax = MathF.Max(0f, rm);
         if (args.String("rtgi-dump") is { } dump) rtgiDumpDir = dump;
         if (args.String("rtgi-dump-frames") is { } frames)
             rtgiDumpFrames = new SortedSet<int>(frames.Split(',').Select(f => int.Parse(f, CultureInfo.InvariantCulture)));
@@ -82,6 +101,8 @@ internal sealed partial class SponzaLoop
         rtgiTrainPassHandle = graph.ComputePass("rtgi-train").Shader(rtgiTrainInterface).Handle;
         rtgiResolveInterface = reflect("rtgi_resolve.comp");
         rtgiResolvePassHandle = graph.ComputePass("rtgi-resolve").Shader(rtgiResolveInterface).Handle;
+        rtgiReservoirInterface = reflect("rtgi_reservoir.comp");
+        rtgiReservoirPassHandle = graph.ComputePass("rtgi-reservoir").Shader(rtgiReservoirInterface).Handle;
         rtgiRaysInterface = reflect("rtgi_rays.comp");
         rtgiRaysPassHandle = graph.ComputePass("rtgi-rays").Shader(rtgiRaysInterface)
             .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
@@ -98,6 +119,14 @@ internal sealed partial class SponzaLoop
             .Read(SampleablePrepassNormal)
             .Shader(rtgiReadoutInterface)
             .Handle;
+        rtgiScreenInterface = reflect("present.vert", "rtgi_screen.frag");
+        rtgiScreenPassHandle = graph.GraphicsPass("rtgi-screen")
+            .Target(incidentHalfHandle, LoadOp.Clear, StoreOp.Store)
+            .Target(incidentGradientHalfHandle, LoadOp.Clear, StoreOp.Store)
+            .Read(SampleableSceneDepth)
+            .Read(SampleablePrepassNormal)
+            .Shader(rtgiScreenInterface)
+            .Handle;
     }
 
     private void CreateRtgiPipelines(string shaderDir, byte[] presentVertSpv)
@@ -111,6 +140,11 @@ internal sealed partial class SponzaLoop
                 presentVertSpv, File.ReadAllBytes(Path.Combine(shaderDir, "rtgi_readout.frag.spv")), rtgiReadoutInterface, "rtgi_readout")),
             VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
             new[] { BlendState.Disabled, BlendState.Disabled }, rtgiReadoutPassHandle, "rtgi_readout");
+        rtgiReservoirPipeline = Compute("rtgi_reservoir", rtgiReservoirInterface);
+        rtgiScreenPipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
+                presentVertSpv, File.ReadAllBytes(Path.Combine(shaderDir, "rtgi_screen.frag.spv")), rtgiScreenInterface, "rtgi_screen")),
+            VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
+            new[] { BlendState.Disabled, BlendState.Disabled }, rtgiScreenPassHandle, "rtgi_screen");
     }
 
     // After the traced shadows are recorded: train, resolve, this frame's rays and their batches.
@@ -131,6 +165,8 @@ internal sealed partial class SponzaLoop
             rtgiAccum = Own(device.CreateGpuBuffer(RtgiSlots * 32, new byte[RtgiSlots * 32], "sponza.rtgi.accum"));
             rtgiResolved = Own(device.CreateGpuBuffer(RtgiSlots * 32, new byte[RtgiSlots * 32], "sponza.rtgi.resolved"));
             rtgiMoments = Own(device.CreateGpuBuffer(RtgiSlots * 48, new byte[RtgiSlots * 48], "sponza.rtgi.moments"));
+            if (rtgiScreen)
+                rtgiReservoirs = Enumerable.Range(0, 2).Select(s => Own(device.CreateGpuBuffer(rtgiTiles * 64, new byte[rtgiTiles * 64], $"sponza.rtgi.reservoirs{s}"))).ToArray();
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] rtgi: {rtgiTiles:N0} visible points and {rtgiHitPoints:N0} from last frame's hits a frame; cache {RtgiSlots:N0} slots ({RtgiSlots * 68 / 1048576.0:0} MB), cells {rtgiCell:0.###} m + {rtgiCellGrow:0.###} per metre, {rtgiHistory:0} samples held, untrained cells emptied after {rtgiMaxAge:0} frames."));
         }
@@ -175,6 +211,36 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiMoments", rtgiMoments),
             }));
 
+        // S3: last frame's visible points (tile i is point i) into this frame's reservoirs, merged with the frame before's.
+        if (rtgiScreen && rtgiTraced > 0)
+        {
+            var tiles = Math.Min(rtgiTiles, rtgiGrid.X * rtgiGrid.Y);
+            graph.Dispatch(rtgiReservoirPassHandle, new DispatchCommand(rtgiReservoirPipeline, (tiles + 63) / 64, 1, 1,
+                new ShaderUniform[]
+                {
+                    new("uPrevViewProj", new Matrix4x4Uniform(rtgiViewProj2)),
+                    new("uParams", new Vector4Uniform(RtgiParams)),
+                    new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, tiles))),
+                    new("uSun", new Vector4Uniform(new Vector4(towardSun, 1f))),
+                    new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 0f))),
+                    new("uGrid", new Vector4Uniform(new Vector4(rtgiGrid.X, rtgiGrid.Y, width, height))),
+                    new("uReuse", new Vector4Uniform(new Vector4(rtgiReuseMax, sunTurned ? 1f : 0f, rtgiFrameCount % (1u << 24), rtgiTraced > 1 && rtgiReuseMax > 0f ? 1f : 0f))),
+                },
+                new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
+                Buffers: new[]
+                {
+                    new ShaderBufferBinding("RtgiPoints", rtgiPointsBuf[prev]),
+                    new ShaderBufferBinding("RtgiRayBuffer", rtgiRaysBuf[prev]),
+                    new ShaderBufferBinding("RtgiHits", rtgiHitsBuf[prev]),
+                    new ShaderBufferBinding("RtgiKeys", rtgiKeys),
+                    new ShaderBufferBinding("RtgiResolved", rtgiResolved),
+                    new ShaderBufferBinding("RtgiPrevReservoirs", rtgiReservoirs[prev]),
+                    new ShaderBufferBinding("RtgiReservoirs", rtgiReservoirs[cur]),
+                }));
+            rtgiReservoirCur = cur;
+            rtgiGridViewProj = rtgiViewProj1;
+        }
+
         var tilesX = Math.Max(1, (int)MathF.Round(MathF.Sqrt(rtgiTiles * (float)width / height)));
         var tilesY = Math.Max(1, (rtgiTiles + tilesX - 1) / tilesX);
         // The visible points are as many tiles as the grid has (a whole grid, so every row is covered).
@@ -214,6 +280,9 @@ internal sealed partial class SponzaLoop
         }
         if (!TracerGroupsOn) graph.External(rtgiProbeTracePassHandle, sync => tracer.EncodeGroup(sync, () => Encode(sync, tracer)));
         else DeferTracerBatch(Encode);
+        rtgiGrid = (tilesX, tilesY);
+        rtgiViewProj2 = rtgiViewProj1;
+        rtgiViewProj1 = viewProjJittered;
         rtgiFrameCount++;
         rtgiTraced++;
     }
@@ -222,6 +291,32 @@ internal sealed partial class SponzaLoop
     {
         Matrix4x4.Invert(viewProjJittered, out var invViewProj);
         var sub = LightingSubpixel;
+        if (rtgiScreen && rtgiReservoirCur >= 0)
+        {
+            graph.Pass(rtgiScreenPassHandle, scope => fullscreen.Draw(
+                scope, rtgiScreenPipeline,
+                new[]
+                {
+                    new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
+                    new ShaderTextureBinding("uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
+                },
+                pushConstants: null,
+                uniforms: new ShaderUniform[]
+                {
+                    new("uInvViewProj", new Matrix4x4Uniform(invViewProj)),
+                    new("uGridViewProj", new Matrix4x4Uniform(rtgiGridViewProj)),
+                    new("uParams", new Vector4Uniform(RtgiParams)),
+                    new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, rtgiFrameCount % (1u << 24)))),
+                    new("uHalf", new Vector4Uniform(new Vector4(0f, sub.X, sub.Y, 0f))),
+                    new("uGrid", new Vector4Uniform(new Vector4(rtgiGrid.X, rtgiGrid.Y, rtgiScreenTaps, rtgiScreenRadius))),
+                },
+                buffers: new[]
+                {
+                    new ShaderBufferBinding("RtgiKeys", rtgiKeys), new ShaderBufferBinding("RtgiResolved", rtgiResolved),
+                    new ShaderBufferBinding("RtgiReservoirs", rtgiReservoirs[rtgiReservoirCur]),
+                }));
+            return;
+        }
         graph.Pass(rtgiReadoutPassHandle, scope => fullscreen.Draw(
             scope, rtgiReadoutPipeline,
             new[]

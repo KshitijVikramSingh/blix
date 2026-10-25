@@ -1,0 +1,152 @@
+#version 450
+
+// --rtgi-screen (S3, SponzaLoop.Rtgi.cs): a reservoir per screen tile (ReSTIR GI), from rays already traced. A tile's
+// candidate is last frame's visible training ray from its pixel (rtgi_rays.comp: point i is tile i): the point it left
+// (origin), where it landed and that surface's albedo, the light coming back read from the cache there (its indirect
+// irradiance and sun, times albedo over PI) or the sky's where it missed. Its weight is the target -- the light's
+// luminance times the cosine at the origin -- over the cosine pdf. Merged with the tile's reservoir of the frame before
+// (found where this origin falls in that frame's view, kept when on the same surface, its count capped at uReuse.x), the
+// kept sample's light read from the cache again: a reservoir never holds light the cache no longer has (a sun turned,
+// a light switched). No visibility test for the reused sample (biased, as ReSTIR GI's cheap form).
+//
+// A reservoir, four vec4s: (origin, its normal packed), (sample point, its normal packed), (light rgb, albedo packed
+// with the sky flag in its alpha), (weight sum, count, unbiased contribution weight W, 1 when valid).
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform RtgiReservoir {
+    mat4 uPrevViewProj;  // the view-projection of the frame the previous reservoirs' origins were drawn in
+    vec4 uParams;        // rtgiParams (rtgi_cache.glsl)
+    vec4 uCamera;        // xyz position; w tiles
+    vec4 uSun;           // xyz toward the sun; w the sky cube's lod
+    vec4 uSunIrradiance; // rgb
+    vec4 uGrid;          // xy tiles across and down; zw full-res pixels
+    vec4 uReuse;         // x count kept at most; y 1 on a frame the sun turned (the previous count capped at 4); z the frame; w 1 when the previous reservoirs exist
+} u;
+
+layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
+layout(std430, set = 0, binding = 2) readonly buffer RtgiPoints { vec4 points[]; };
+layout(std430, set = 0, binding = 3) readonly buffer RtgiRayBuffer { vec4 rays[]; };
+layout(std430, set = 0, binding = 4) readonly buffer RtgiHits { uvec4 hits[]; };
+layout(std430, set = 0, binding = 5) readonly buffer RtgiKeys { uint rtgiKeys[]; };
+layout(std430, set = 0, binding = 6) readonly buffer RtgiResolved { vec4 rtgiResolved[]; };
+layout(std430, set = 0, binding = 7) readonly buffer RtgiPrevReservoirs { vec4 prevRes[]; };
+layout(std430, set = 0, binding = 8) writeonly buffer RtgiReservoirs { vec4 res[]; };
+
+#define RTGI_KEYS(i) rtgiKeys[i]
+#include "rtgi_cache.glsl"
+
+uint hash(uint x) {
+    x ^= x >> 16; x *= 0x7feb352du;
+    x ^= x >> 15; x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+vec2 octWrap(vec2 v) { return (1.0 - abs(v.yx)) * vec2(v.x >= 0.0 ? 1.0 : -1.0, v.y >= 0.0 ? 1.0 : -1.0); }
+float packNormal(vec3 n) {
+    n /= abs(n.x) + abs(n.y) + abs(n.z);
+    vec2 e = n.z >= 0.0 ? n.xy : octWrap(n.xy);
+    return uintBitsToFloat(packSnorm2x16(e));
+}
+vec3 unpackNormal(float f) {
+    vec2 e = unpackSnorm2x16(floatBitsToUint(f));
+    vec3 n = vec3(e, 1.0 - abs(e.x) - abs(e.y));
+    if (n.z < 0.0) n.xy = octWrap(n.xy);
+    return normalize(n);
+}
+
+uvec2 cellAt(vec3 p, vec3 n, uint level) {
+    return rtgiCellHash(ivec3(floor(p / rtgiSize(level, u.uParams))), level, rtgiSide(n), u.uParams);
+}
+
+// The light leaving a sample: the sky's along its direction, or its surface's from the cache (w 0: no cell holds it yet).
+vec4 lightOf(vec3 origin, vec3 xs, vec3 ns, uint packedAlbedo) {
+    vec4 a = unpackUnorm4x8(packedAlbedo);
+    if (a.a > 0.5) return vec4(textureLod(uSkyRadiance, normalize(xs - origin), u.uSun.w).rgb, 1.0);
+    uint level = rtgiLevel(xs, u.uCamera.xyz, u.uParams);
+    for (uint up = 0u; up <= 2u; up += 2u) {
+        uint l = min(level + up, uint(u.uParams.w));
+        uint s = rtgiFind(cellAt(xs, ns, l), u.uParams);
+        if (s == 0xFFFFFFFFu) continue;
+        vec4 r0 = rtgiResolved[2u * s], r1 = rtgiResolved[2u * s + 1u];
+        if (r1.y < 0.5) continue;
+        vec3 e = r0.rgb + u.uSunIrradiance.rgb * max(0.0, dot(ns, u.uSun.xyz)) * r1.x;
+        return vec4(a.rgb * e / 3.14159265359, 1.0);
+    }
+    return vec4(0.0);
+}
+
+float lum(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+
+// The target at an origin: the light's luminance times its cosine there.
+float target(vec3 x, vec3 n, vec3 xs, vec3 light) { return lum(light) * max(0.0, dot(n, normalize(xs - x))); }
+
+void invalid(uint t) {
+    res[4u * t] = vec4(0.0); res[4u * t + 1u] = vec4(0.0); res[4u * t + 2u] = vec4(0.0); res[4u * t + 3u] = vec4(0.0);
+}
+
+void main() {
+    uint t = gl_GlobalInvocationID.x;
+    if (t >= uint(u.uCamera.w)) return;
+    vec4 p = points[2u * t];
+    if (p.w < 0.5) { invalid(t); return; }
+    vec3 x = p.xyz, n = points[2u * t + 1u].xyz;
+    vec3 d = rays[2u * t + 1u].xyz;
+    uvec4 h0 = hits[3u * t];
+    // The candidate.
+    vec3 xs, ns;
+    uint albedo;
+    if ((h0.w & 1u) == 0u) {
+        xs = x + d * 1e4; ns = -d; albedo = packUnorm4x8(vec4(0.0, 0.0, 0.0, 1.0));
+    } else if ((h0.w & 2u) != 0u) {
+        uvec4 h2 = hits[3u * t + 2u];
+        xs = rays[2u * t].xyz + d * uintBitsToFloat(h0.x);
+        ns = vec3(uintBitsToFloat(h2.x), uintBitsToFloat(h2.y), uintBitsToFloat(h2.z));
+        if (!(dot(ns, ns) > 1e-12)) { invalid(t); return; }
+        ns = normalize(ns);
+        if (dot(ns, d) > 0.0) ns = -ns;
+        albedo = h2.w & 0x00FFFFFFu;
+    } else {
+        // A back face: inside something, no light; still a sample (a dark one).
+        xs = rays[2u * t].xyz + d * uintBitsToFloat(h0.x); ns = -d; albedo = 0u;
+    }
+    vec3 light = lightOf(x, xs, ns, albedo).rgb;
+    // Weight: target over the cosine pdf (cos / PI): PI x luminance.
+    float wsum = 3.14159265359 * lum(light);
+    float m = 1.0;
+    vec3 selXs = xs, selNs = ns, selLight = light;
+    uint selAlbedo = albedo;
+    float rnd = float(hash(t * 0x9E3779B9u ^ hash(uint(u.uReuse.z))) & 0xFFFFFFu) / 16777216.0;
+    // The previous reservoir where this origin fell in the frame before.
+    if (u.uReuse.w > 0.5) {
+        vec4 clip = u.uPrevViewProj * vec4(x, 1.0);
+        if (clip.w > 1e-4) {
+            vec2 uv = clip.xy / clip.w * 0.5 + 0.5;
+            ivec2 tile = ivec2(floor(uv * u.uGrid.xy));
+            if (all(greaterThanEqual(tile, ivec2(0))) && all(lessThan(tile, ivec2(u.uGrid.xy)))) {
+                uint pt = uint(tile.y) * uint(u.uGrid.x) + uint(tile.x);
+                vec4 r0 = prevRes[4u * pt], r1 = prevRes[4u * pt + 1u], r2 = prevRes[4u * pt + 2u], r3 = prevRes[4u * pt + 3u];
+                vec3 pn = unpackNormal(r0.w);
+                float tol = 0.05 + 0.01 * length(x - u.uCamera.xyz);
+                if (r3.w > 0.5 && abs(dot(r0.xyz - x, n)) < tol && dot(pn, n) > 0.9) {
+                    float pm = min(r3.y, u.uReuse.y > 0.5 ? 4.0 : u.uReuse.x);
+                    uint pAlbedo = floatBitsToUint(r2.w);
+                    vec3 pns = unpackNormal(r1.w);
+                    vec4 pl = lightOf(x, r1.xyz, pns, pAlbedo);
+                    // Its light now (the cache's), its weight at this origin: target x W x count.
+                    float w = pl.w > 0.5 ? target(x, n, r1.xyz, pl.rgb) * r3.z * pm : 0.0;
+                    wsum += w;
+                    m += pm;
+                    if (wsum > 0.0 && rnd * wsum < w) { selXs = r1.xyz; selNs = pns; selLight = pl.rgb; selAlbedo = pAlbedo; }
+                }
+            }
+        }
+    }
+    float pt = target(x, n, selXs, selLight);
+    float W = pt > 0.0 ? wsum / (m * pt) : 0.0;
+    res[4u * t] = vec4(x, packNormal(n));
+    res[4u * t + 1u] = vec4(selXs, packNormal(selNs));
+    res[4u * t + 2u] = vec4(selLight, uintBitsToFloat(selAlbedo));
+    res[4u * t + 3u] = vec4(wsum, m, W, 1.0);
+}
