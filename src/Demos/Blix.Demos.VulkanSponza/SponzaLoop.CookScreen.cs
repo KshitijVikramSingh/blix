@@ -31,7 +31,7 @@ internal sealed partial class SponzaLoop : IUiSource
     // --live-texels too: a live gather takes the screen like any cook, so its interruptions show and are timed (the
     // user, 2026-10-16: "keep it for actual loading every time so we know when we're getting interrupted and for how
     // long"). Its view is read first, from a scene frame (SplitVisiblePending); an empty read keeps the last view.
-    private bool CookScreenNow => !cookScreenOff && (transportCookTask is { IsCompleted: false } || LightletBakePending
+    private bool CookScreenNow => !cookScreenOff && (transportCookTask is { IsCompleted: false } || LightletBakePending || ReferenceCookingNow
         || (SplitCookRunning && sceneFrameDrawn && !SplitVisiblePending && instantShowFrames == 0 && !GatherInBackground && !ChangeBehindFrame));
     // A light change after the first landing, under --sweep-in-frame: behind the frame from its re-aim on -- its setup's
     // passes chunked a frame at a time (the guides, the direct, the visible bands, the cells, the instant layer), the
@@ -109,11 +109,18 @@ internal sealed partial class SponzaLoop : IUiSource
         // The last image the scene drew stays up under the cook window (the present pass reads TAA's history, or the HDR
         // target, neither touched here): the user watched streamed geometry and textures vanish for the cook, which needs
         // the GPU, not the screen. Before any scene frame, a cleared screen.
+        // The gate's reference wave, a step a frame with the GPU to itself (ReferenceCookingNow).
+        if (ReferenceCookingNow)
+        {
+            if (!referenceCookClock.IsRunning) referenceCookClock.Start();
+            RecordGpuReference();
+            FlushTracerGroup();
+        }
         if (!sceneFrameDrawn) graph.Pass(litPassHandle, _ => { }, clearColor: new GraphicsColor(0.03f, 0.04f, 0.06f, 1f));
         graph.Execute(commandList);
         RecordPresentPass(commandList);
         var budgetMs = 1000.0 / CookFrameCap;
-        if (!splitCooking && cookFrameClock.IsRunning && cookFrameClock.Elapsed.TotalMilliseconds < budgetMs)
+        if (!splitCooking && !ReferenceCookingNow && cookFrameClock.IsRunning && cookFrameClock.Elapsed.TotalMilliseconds < budgetMs)
             Thread.Sleep(TimeSpan.FromMilliseconds(budgetMs - cookFrameClock.Elapsed.TotalMilliseconds));
         cookFrameClock.Restart();
     }
@@ -150,7 +157,15 @@ internal sealed partial class SponzaLoop : IUiSource
         }
         ImGui.TextUnformatted(loading ? "Loading the scene." : streaming ? "Streaming the scene's textures; drawn flat until they are in."
             : live ? "Cooking the scene's light -- the scene stays up, its light landing as it is cooked, what is on screen first."
+            : ReferenceCookingNow ? "Tracing the reference -- the scene is not drawn meanwhile (--ref-in-frame draws it)."
             : "Cooking the scene's light -- the scene is not drawn meanwhile (--no-cook-screen draws it).");
+        // The gate's reference wave behind the screen: how far through its frames, and how long it has taken.
+        if (ReferenceCookingNow && gateWave is { } rw)
+        {
+            var frames = ReferenceWaveFrames(rw);
+            ImGui.ProgressBar(rw.Dispatch / (float)frames, new System.Numerics.Vector2(-1f, 0f),
+                string.Create(System.Globalization.CultureInfo.InvariantCulture, $"reference: {rw.Dispatch:N0} of {frames:N0} steps, {referenceCookClock.Elapsed.TotalSeconds:0.0} s"));
+        }
         ImGui.Separator();
         if (!Blix.Diagnostics.Overlay.DebugProgressUi.Draw(runningOnly: false)) ImGui.TextDisabled("  starting");
         ImGui.Separator();

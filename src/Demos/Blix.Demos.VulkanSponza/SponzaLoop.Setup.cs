@@ -325,6 +325,8 @@ internal sealed partial class SponzaLoop
         if (args.Flag("probe-reference")) probeReference = true;
         // --gpu-reference: the gate's surface reference path-traced on the GPU (SponzaLoop.GpuReference.cs).
         gpuReference = args.Flag("gpu-reference");
+        // --ref-in-frame: the gate's reference wave beside the scene's frames, as before; otherwise behind the cook screen.
+        refInFrame = args.Flag("ref-in-frame");
         ReadViewReferenceArgs(args);
         // --reference-monolithic: the GPU reference's first form (whole paths in one kernel), the wavefront's cross-check.
         referenceMonolithic = args.Flag("reference-monolithic");

@@ -65,6 +65,9 @@ void add(uint s, vec3 e, bool counted, bool sky, bool sunTraced, bool sunLit) {
         atomicAdd(rtgiAccum[8u * s + 1u], uint(f.g + 0.5));
         atomicAdd(rtgiAccum[8u * s + 2u], uint(f.b + 0.5));
         atomicAdd(rtgiAccum[8u * s + 3u], 1u);
+        // The luminance's square (fixed point 64, capped at 256): the cell's sample variance (rtgi_resolve.comp).
+        float l = min(dot(min(e, vec3(RTGI_MAX_SAMPLE)), vec3(0.2126, 0.7152, 0.0722)), 256.0);
+        atomicAdd(rtgiAccum[8u * s + 7u], uint(l * l * 64.0 + 0.5));
         if (sky) atomicAdd(rtgiAccum[8u * s + 4u], 1u);
     }
     if (sunTraced) {

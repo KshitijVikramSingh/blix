@@ -1,53 +1,102 @@
 #version 450
 
-// --rtgi (S1, SponzaLoop.Rtgi.cs): each slot's frame of samples into what it holds -- a running mean over at most
-// uResolve.x samples (older ones fade: the light can change), the samples cleared; a slot no training reached for
-// uResolve.y frames is emptied.
+// --rtgi (SponzaLoop.Rtgi.cs): each slot's frame of samples into what it holds -- a running mean whose history follows
+// the light (S2). Two means per cell: the slow one shown, up to uResolve.x samples, so a still light settles (a fixed 64
+// left it shimmering, 2026-10-26); and a fast one over uChange.y. When the fast mean strays from the slow by more than
+// uResolve.w of the fast's standard errors (the variance from the cell's luminance moments) plus uChange.z of the light, the slow takes the
+// fast's value and history -- a sun moved, a light switched, a bounce changed upstream. Judged frame by frame instead,
+// a bright frame (a rare sunlit hit) cut the history and a dark one never could: the cache read 30% bright (2026-10-26).
+// Sun visibility likewise, its variance binomial. A slot no training reached for uResolve.y frames is emptied.
 
 layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) uniform RtgiResolve {
-    vec4 uResolve;   // x samples held at most, y frames a slot lives untrained, z slots
+    vec4 uResolve;   // x samples held at most, y frames a slot lives untrained, z slots, w standard errors that cut history
+    vec4 uChange;    // y the fast mean's samples, z the share of the light a disagreement must pass besides the standard errors,
+                     // w > 0 on a frame the sun turned: every cell's light history capped to it, its sun visibility's to 4
 } u;
 
 layout(std430, set = 0, binding = 1) buffer RtgiKeys { uint rtgiKeys[]; };
 layout(std430, set = 0, binding = 2) buffer RtgiAccum { uint rtgiAccum[]; };
 layout(std430, set = 0, binding = 3) buffer RtgiResolved { vec4 rtgiResolved[]; };
+// Three per slot: (the samples' luminance mean and mean square over the fast window, history cuts: sun, light);
+// (the fast mean: indirect rgb, sky visibility); (the fast sun visibility, its samples, the fast light's samples, -).
+layout(std430, set = 0, binding = 4) buffer RtgiMoments { vec4 rtgiMoments[]; };
 
 #define RTGI_SCALE 256.0
+#define RTGI_LUM2_SCALE 64.0
+
+float lum(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 
 void main() {
     uint s = gl_GlobalInvocationID.x;
     if (s >= uint(u.uResolve.z) || rtgiKeys[s] == 0u) return;
     uint count = rtgiAccum[8u * s + 3u], sunTraced = rtgiAccum[8u * s + 6u];
     vec4 r0 = rtgiResolved[2u * s], r1 = rtgiResolved[2u * s + 1u];
+    // The sun turned: what every cell holds of it is stale, whether or not its samples have shown it yet -- a known change,
+    // not one to wait for the fast mean to find (at 64 samples, ~10 s to settle a 20 degree change, 2026-10-26).
+    if (u.uChange.w > 0.0) {
+        r1.y = min(r1.y, u.uChange.w);
+        r1.w = min(r1.w, 4.0);
+    }
     if (count == 0u && sunTraced == 0u) {
         r1.z += 1.0;
         if (r1.z > u.uResolve.y) {
             rtgiKeys[s] = 0u;
             rtgiResolved[2u * s] = vec4(0.0);
             rtgiResolved[2u * s + 1u] = vec4(0.0);
+            for (uint k = 0u; k < 3u; k++) rtgiMoments[3u * s + k] = vec4(0.0);
         } else rtgiResolved[2u * s + 1u] = r1;
         return;
     }
+    vec4 m = rtgiMoments[3u * s], fast = rtgiMoments[3u * s + 1u], fs = rtgiMoments[3u * s + 2u];
     if (count > 0u) {
-        vec3 mean = vec3(rtgiAccum[8u * s], rtgiAccum[8u * s + 1u], rtgiAccum[8u * s + 2u]) / (RTGI_SCALE * float(count));
-        float sky = float(rtgiAccum[8u * s + 4u]) / float(count);
-        float held = min(r1.y + float(count), u.uResolve.x);
-        // At most 1: a cell given more samples in a frame than it holds (the coarse fallback's, hundreds) took a weight
-        // past 1 and the mean extrapolated, grew each frame and overflowed to NaN (2026-10-25).
-        float w = min(1.0, float(count) / max(held, 1.0));
-        r0 = vec4(mix(r0.rgb, mean, w), mix(r0.a, sky, w));
+        float n = float(count);
+        vec3 mean = vec3(rtgiAccum[8u * s], rtgiAccum[8u * s + 1u], rtgiAccum[8u * s + 2u]) / (RTGI_SCALE * n);
+        float meanSq = float(rtgiAccum[8u * s + 7u]) / (RTGI_LUM2_SCALE * n);
+        float sky = float(rtgiAccum[8u * s + 4u]) / n;
+        // The fast mean and the moments over its window.
+        fs.z = min(fs.z + n, u.uChange.y);
+        float wf = min(1.0, n / max(fs.z, 1.0));
+        fast = vec4(mix(fast.rgb, mean, wf), mix(fast.a, sky, wf));
+        m.x = mix(m.x, lum(mean), wf);
+        m.y = mix(m.y, meanSq, wf);
+        // The slow mean, or the fast one when they disagree.
+        float held = min(r1.y + n, u.uResolve.x);
+        float variance = max(m.y - m.x * m.x, 0.0);
+        float bound = u.uResolve.w * sqrt(variance / max(fs.z, 1.0)) + u.uChange.z * max(lum(r0.rgb), lum(fast.rgb));
+        if (r1.y > 0.5 && fs.z >= u.uChange.y && abs(lum(fast.rgb) - lum(r0.rgb)) > bound) {
+            r0 = fast;
+            held = fs.z;
+            m.w += 1.0;
+        } else {
+            // At most 1: a cell given more samples in a frame than it holds (the coarse fallback's, hundreds) took a weight
+            // past 1 and the mean extrapolated, grew each frame and overflowed to NaN (2026-10-25).
+            float w = min(1.0, n / max(held, 1.0));
+            r0 = vec4(mix(r0.rgb, mean, w), mix(r0.a, sky, w));
+        }
         r1.y = held;
     }
     if (sunTraced > 0u) {
-        float lit = float(rtgiAccum[8u * s + 5u]) / float(sunTraced);
-        float held = min(r1.w + float(sunTraced), u.uResolve.x);
-        r1.x = mix(r1.x, lit, min(1.0, float(sunTraced) / max(held, 1.0)));
+        float n = float(sunTraced);
+        float lit = float(rtgiAccum[8u * s + 5u]) / n;
+        fs.y = min(fs.y + n, u.uChange.y);
+        fs.x = mix(fs.x, lit, min(1.0, n / max(fs.y, 1.0)));
+        float held = min(r1.w + n, u.uResolve.x);
+        float p = clamp(fs.x, 0.0, 1.0);
+        float bound = u.uResolve.w * sqrt(max(p * (1.0 - p), 0.02) / max(fs.y, 1.0)) + 0.05;
+        if (r1.w > 0.5 && fs.y >= u.uChange.y && abs(fs.x - r1.x) > bound) {
+            r1.x = fs.x;
+            held = fs.y;
+            m.z += 1.0;
+        } else r1.x = mix(r1.x, lit, min(1.0, n / max(held, 1.0)));
         r1.w = held;
     }
     r1.z = 0.0;
     rtgiResolved[2u * s] = r0;
     rtgiResolved[2u * s + 1u] = r1;
+    rtgiMoments[3u * s] = m;
+    rtgiMoments[3u * s + 1u] = fast;
+    rtgiMoments[3u * s + 2u] = fs;
     for (uint k = 0u; k < 8u; k++) rtgiAccum[8u * s + k] = 0u;
 }

@@ -163,6 +163,14 @@ internal sealed partial class SponzaLoop
     private bool shotWhenReady;
     // --shot-hold N: frames at rest before the shot (default 120) -- a timing run's still/moving windows want seconds of it.
     private int ShotReadyMargin = 120;
+    // The gate's reference wave behind the cook screen (2026-10-26, the user: a truth or a model while we build takes the
+    // GPU, the game's render not competing): from its first batch to its last the scene is not drawn and the cook screen's
+    // frame cap is lifted, each frame the wave's step and its Metal trip alone (~4-5 ms against ~20 beside Crytek
+    // Sponza's frame). The scene's frames pick its points first, and draw again after.
+    private bool refInFrame;
+    private readonly System.Diagnostics.Stopwatch referenceCookClock = new();
+    private bool ReferenceCookingNow => gpuReference && !refInFrame && !referenceMonolithic && cachedReferenceSums is null
+        && gateWave is { } w && w.Dispatch < ReferenceWaveFrames(w) && !shotWritten;
     private int shotReadyFrame = -1;
 
     private bool ShotReady()
@@ -182,7 +190,9 @@ internal sealed partial class SponzaLoop
             var recordsReady = !lightletsAsked || lightlets is not null;
             // And --ref-view's camera paths, all of them (a shot before they finished compared a part of them, 2026-10-22).
             var viewReady = refViewStride <= 0 || viewWave is { } v && v.Dispatch >= ReferenceWaveFrames(v);
-            if (!lightReady || !referenceReady || !recordsReady || !viewReady) return false;
+            // --rtgi: the cache trained --rtgi-settle-frames scene frames (its training stops behind the cook screen).
+            var cacheReady = !rtgi || rtgiTraced >= rtgiSettleFrames;
+            if (!lightReady || !referenceReady || !recordsReady || !viewReady || !cacheReady) return false;
             shotReadyFrame = postLoadFrames;
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] shot: ready at post-load frame {postLoadFrames} (light {(transportTexels ? "at rest" : "not cooked")}, reference {(gpuReference ? "complete" : "none")}{(lightletsAsked ? ", sun records up" : "")}); writing in {ShotReadyMargin} frames."));

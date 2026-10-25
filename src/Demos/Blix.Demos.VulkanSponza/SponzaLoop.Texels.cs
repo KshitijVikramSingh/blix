@@ -709,18 +709,7 @@ internal sealed partial class SponzaLoop
             if (giSunTarget == Vector3.Zero) giSunTarget = -Vector3.Normalize(sunDirection);
             FlipPushStep();
         }
-        // At or after its frame, once: FollowSun runs only once the texels are up, which can be after the frame named.
-        if (sunChange is { } change && !sunChangeApplied && postLoadFrames >= change.Frame)
-        {
-            sunChangeApplied = true;
-            sunChangeAppliedAt = postLoadFrames;
-            sunYaw = change.Degrees.X * MathF.PI / 180f;
-            sunPitch = change.Degrees.Y * MathF.PI / 180f;
-            UpdateSunDirection();
-            Console.WriteLine($"[VulkanSponza] sun turned by --sun-change at frame {postLoadFrames}: {sunDirection}");
-            // A scripted change relights the GI as before (the held sun to the new one).
-            if (giHold && !sunMoving && !giLive) giSunTarget = -Vector3.Normalize(sunDirection);
-        }
+        ApplySunChangeIfDue();
         for (var i = retiredBuffers.Count - 1; i >= 0; i--)
         {
             if (framesRendered - retiredBuffers[i].Frame < 4) continue;
@@ -1192,5 +1181,20 @@ internal sealed partial class SponzaLoop
         if (lightmapTexels)
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] texels by kind: hashed read {seen - seenAtlas:N0}, traced {everTraced - tracedAtlas:N0} of {lightmapFirstRecord:N0}; lightmap read {seenAtlas:N0}, traced {tracedAtlas:N0} of {texelCount - lightmapFirstRecord:N0}."));
+    }
+
+    // --sun-change: at or after its frame, once. FollowSun asks once the texels are up (which can be after the frame named);
+    // without texels (--rtgi) the frame asks itself (SponzaLoop.Render.cs) -- it never turned there before (2026-10-26).
+    private void ApplySunChangeIfDue()
+    {
+        if (sunChange is not { } change || sunChangeApplied || postLoadFrames < change.Frame) return;
+        sunChangeApplied = true;
+        sunChangeAppliedAt = postLoadFrames;
+        sunYaw = change.Degrees.X * MathF.PI / 180f;
+        sunPitch = change.Degrees.Y * MathF.PI / 180f;
+        UpdateSunDirection();
+        Console.WriteLine($"[VulkanSponza] sun turned by --sun-change at frame {postLoadFrames}: {sunDirection}");
+        // A scripted change relights the GI as before (the held sun to the new one).
+        if (giHold && !sunMoving && !giLive) giSunTarget = -Vector3.Normalize(sunDirection);
     }
 }

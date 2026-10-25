@@ -25,7 +25,19 @@ internal sealed partial class SponzaLoop
 {
     private bool rtgi;
     private int rtgiTiles = 73_000, rtgiHitPoints = 32_000, rtgiSlotsLog2 = 21;
-    private float rtgiCell = 0.05f, rtgiCellGrow = 0.01f, rtgiHistory = 64f, rtgiMaxAge = 600f;
+    private float rtgiCell = 0.05f, rtgiCellGrow = 0.01f, rtgiMaxAge = 600f;
+    // --rtgi-settle-frames N: frames the cache trains before --shot-when-ready may shoot (600).
+    private int rtgiSettleFrames = 600;
+    // S2: a cell's history follows its light (rtgi_resolve.comp) -- up to --rtgi-history samples while its samples agree
+    // with it (a fixed 64 shimmered, never settling: the user, 2026-10-26), the slow mean replaced by a fast one (--rtgi-fast
+    // samples) when the two disagree by more than --rtgi-change-sigma of the fast one's standard errors.
+    // The fast window: 64 (at 16 the cache reset itself on noise -- a bright frame or a dark one -- and read 0.18 rel
+    // |error| at Crytek Sponza's points settled, 3-4% dark; 64: 0.10 and 1.00, 2026-10-26).
+    private float rtgiHistory = 1024f, rtgiChangeSigma = 3f, rtgiFast = 64f, rtgiChangeFloor = 0.05f;
+    // --rtgi-sun-cut N: on a frame the sun turns (0.02 degrees or more), every cell's light history capped to N samples
+    // (and its sun visibility's to 4): a known change, not one for the fast mean to find. 0: none.
+    private float rtgiSunCut = 32f;
+    private Vector3 rtgiLastSun;
     private const int RtgiTopLevel = 10;
     private ShaderInterface rtgiRaysInterface = null!, rtgiTrainInterface = null!, rtgiResolveInterface = null!, rtgiReadoutInterface = null!;
     private PassHandle rtgiRaysPassHandle, rtgiTrainPassHandle, rtgiResolvePassHandle, rtgiReadoutPassHandle;
@@ -33,7 +45,7 @@ internal sealed partial class SponzaLoop
     // By the frame's parity: this frame's points, rays and answers; the other parity's are last frame's, trained now.
     private GpuBufferHandle[] rtgiPointsBuf = Array.Empty<GpuBufferHandle>(), rtgiRaysBuf = Array.Empty<GpuBufferHandle>(),
         rtgiHitsBuf = Array.Empty<GpuBufferHandle>(), rtgiOriginsBuf = Array.Empty<GpuBufferHandle>(), rtgiOccludedBuf = Array.Empty<GpuBufferHandle>();
-    private GpuBufferHandle rtgiKeys, rtgiAccum, rtgiResolved;
+    private GpuBufferHandle rtgiKeys, rtgiAccum, rtgiResolved, rtgiMoments;
     private uint rtgiFrameCount;
     private long rtgiTraced;
 
@@ -51,6 +63,14 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-cell-grow") is { } g) rtgiCellGrow = MathF.Max(0f, g);
         if (args.Float("rtgi-history") is { } hi) rtgiHistory = MathF.Max(1f, hi);
         if (args.Float("rtgi-max-age") is { } a) rtgiMaxAge = MathF.Max(1f, a);
+        if (args.Int("rtgi-settle-frames") is { } sf) rtgiSettleFrames = Math.Max(0, sf);
+        if (args.Float("rtgi-change-sigma") is { } cs) rtgiChangeSigma = MathF.Max(0.5f, cs);
+        if (args.Float("rtgi-fast") is { } fa) rtgiFast = MathF.Max(1f, fa);
+        if (args.Float("rtgi-change-floor") is { } cf) rtgiChangeFloor = MathF.Max(0f, cf);
+        if (args.Float("rtgi-sun-cut") is { } sc) rtgiSunCut = MathF.Max(0f, sc);
+        if (args.String("rtgi-dump") is { } dump) rtgiDumpDir = dump;
+        if (args.String("rtgi-dump-frames") is { } frames)
+            rtgiDumpFrames = new SortedSet<int>(frames.Split(',').Select(f => int.Parse(f, CultureInfo.InvariantCulture)));
         // The cache traces its own occlusion, and the Metal tracer answers its rays: the traced shadows build it.
         if (rtgi) rtShadows = true;
     }
@@ -110,6 +130,7 @@ internal sealed partial class SponzaLoop
             rtgiKeys = Own(device.CreateGpuBuffer(RtgiSlots * 4, new byte[RtgiSlots * 4], "sponza.rtgi.keys"));
             rtgiAccum = Own(device.CreateGpuBuffer(RtgiSlots * 32, new byte[RtgiSlots * 32], "sponza.rtgi.accum"));
             rtgiResolved = Own(device.CreateGpuBuffer(RtgiSlots * 32, new byte[RtgiSlots * 32], "sponza.rtgi.resolved"));
+            rtgiMoments = Own(device.CreateGpuBuffer(RtgiSlots * 48, new byte[RtgiSlots * 48], "sponza.rtgi.moments"));
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] rtgi: {rtgiTiles:N0} visible points and {rtgiHitPoints:N0} from last frame's hits a frame; cache {RtgiSlots:N0} slots ({RtgiSlots * 68 / 1048576.0:0} MB), cells {rtgiCell:0.###} m + {rtgiCellGrow:0.###} per metre, {rtgiHistory:0} samples held, untrained cells emptied after {rtgiMaxAge:0} frames."));
         }
@@ -117,6 +138,8 @@ internal sealed partial class SponzaLoop
         var prev = 1 - cur;
         var towardSun = -Vector3.Normalize(sunDirection);
         var groups = (n + 63) / 64;
+        var sunTurned = rtgiTraced > 0 && Vector3.Dot(towardSun, rtgiLastSun) < MathF.Cos(0.02f * MathF.PI / 180f);
+        rtgiLastSun = towardSun;
         if (rtgiTraced > 0)
             graph.Dispatch(rtgiTrainPassHandle, new DispatchCommand(rtgiTrainPipeline, groups, 1, 1,
                 new ShaderUniform[]
@@ -138,13 +161,18 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("RtgiResolved", rtgiResolved),
                 }));
         graph.Dispatch(rtgiResolvePassHandle, new DispatchCommand(rtgiResolvePipeline, (RtgiSlots + 63) / 64, 1, 1,
-            new ShaderUniform[] { new("uResolve", new Vector4Uniform(new Vector4(rtgiHistory, rtgiMaxAge, RtgiSlots, 0f))) },
+            new ShaderUniform[]
+            {
+                new("uResolve", new Vector4Uniform(new Vector4(rtgiHistory, rtgiMaxAge, RtgiSlots, rtgiChangeSigma))),
+                new("uChange", new Vector4Uniform(new Vector4(0f, rtgiFast, rtgiChangeFloor, sunTurned ? rtgiSunCut : 0f))),
+            },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
             {
                 new ShaderBufferBinding("RtgiKeys", rtgiKeys),
                 new ShaderBufferBinding("RtgiAccum", rtgiAccum),
                 new ShaderBufferBinding("RtgiResolved", rtgiResolved),
+                new ShaderBufferBinding("RtgiMoments", rtgiMoments),
             }));
 
         var tilesX = Math.Max(1, (int)MathF.Round(MathF.Sqrt(rtgiTiles * (float)width / height)));
@@ -212,6 +240,37 @@ internal sealed partial class SponzaLoop
             buffers: new[] { new ShaderBufferBinding("RtgiKeys", rtgiKeys), new ShaderBufferBinding("RtgiResolved", rtgiResolved) }));
     }
 
+    // --rtgi-dump DIR --rtgi-dump-frames F1,F2,...: at those post-load frames the incident field the lit pass read
+    // (full res), the pre-pass normal and the per-pixel path trace if it runs (--gi-reference), for
+    // tools/gi-model/rtgi_timeline.py to hold against a truth boot's trace.
+    private string? rtgiDumpDir;
+    private SortedSet<int> rtgiDumpFrames = new();
+
+    private void RtgiDumpIfDue()
+    {
+        if (rtgiDumpDir is null || rtgiDumpFrames.Count == 0 || postLoadFrames < rtgiDumpFrames.Min) return;
+        var frame = rtgiDumpFrames.Min;
+        rtgiDumpFrames.Remove(frame);
+        var dir = Path.Combine(rtgiDumpDir, string.Create(CultureInfo.InvariantCulture, $"f{frame}"));
+        Directory.CreateDirectory(dir);
+        device.WaitIdle();
+        void Texture(string name, TextureHandle handle) => File.WriteAllBytes(Path.Combine(dir, name), device.ReadTexture(handle, out _, out _, out _));
+        Texture("incident.rgba16f", graph.GetColorTexture(incidentHandle));
+        Texture("normal.rgba16f", graph.GetColorTexture(SampleablePrepassNormal));
+        if (referenceSamples > 0)
+        {
+            File.WriteAllBytes(Path.Combine(dir, "reference.f32x4"), device.ReadGpuBuffer(referenceAccum, 0, referenceSize.X * referenceSize.Y * 16));
+            File.WriteAllBytes(Path.Combine(dir, "reference_moments.f32"), device.ReadGpuBuffer(referenceMoments, 0, referenceSize.X * referenceSize.Y * 4));
+        }
+        var (w, h) = profFrameSize;
+        File.WriteAllText(Path.Combine(dir, "meta.json"), System.Text.Json.JsonSerializer.Serialize(new
+        {
+            frame = postLoadFrames, width = w, height = h, referenceWidth = referenceSize.X, referenceHeight = referenceSize.Y,
+            referenceSamples, sunToward = new[] { -sunDirection.X, -sunDirection.Y, -sunDirection.Z }, camera = new[] { cameraPosition.X, cameraPosition.Y, cameraPosition.Z },
+        }));
+        Console.WriteLine($"[VulkanSponza] rtgi dump at frame {postLoadFrames}: {dir}");
+    }
+
     private bool RtgiReadoutReady => rtgi && !rtgiKeys.Equals(default(GpuBufferHandle));
 
     // At the profile window: how full the cache is and how much its cells hold.
@@ -221,6 +280,8 @@ internal sealed partial class SponzaLoop
         device.WaitIdle();
         var keys = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(rtgiKeys, 0, RtgiSlots * 4).AsSpan());
         var resolved = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(rtgiResolved, 0, RtgiSlots * 32).AsSpan());
+        var moments = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(rtgiMoments, 0, RtgiSlots * 48).AsSpan());
+        double cutsLight = 0, cutsSun = 0;
         int used = 0, trained = 0, bad = 0;
         double samples = 0, energy = 0;
         string firstBad = "";
@@ -238,10 +299,12 @@ internal sealed partial class SponzaLoop
             if (r1.Y < 0.5f) continue;
             trained++;
             samples += r1.Y;
+            cutsLight += moments[3 * s].W;
+            cutsSun += moments[3 * s].Z;
             var e = resolved[2 * s];
             energy += 0.2126 * e.X + 0.7152 * e.Y + 0.0722 * e.Z;
         }
         return string.Create(CultureInfo.InvariantCulture,
-            $"rtgi: {used:N0} of {RtgiSlots:N0} slots held ({100.0 * used / RtgiSlots:0.0}%), {trained:N0} trained, {samples / Math.Max(1, trained):0.0} samples a cell, mean indirect {energy / Math.Max(1, trained):0.000}; {bad:N0} not finite{firstBad}; {rtgiTraced:N0} frames traced");
+            $"rtgi: {used:N0} of {RtgiSlots:N0} slots held ({100.0 * used / RtgiSlots:0.0}%), {trained:N0} trained, {samples / Math.Max(1, trained):0.0} samples a cell, history cut {cutsLight / Math.Max(1, trained):0.00} (light) / {cutsSun / Math.Max(1, trained):0.00} (sun) times a cell, mean indirect {energy / Math.Max(1, trained):0.000}; {bad:N0} not finite{firstBad}; {rtgiTraced:N0} frames traced");
     }
 }
