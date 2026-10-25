@@ -193,6 +193,10 @@ void nodeCount(uint k) {
 }
 
 shared vec3 sDir[RAYS];      // each ray's direction (the cells' detail)
+vec2 captureOct(vec3 d) {
+    d /= abs(d.x) + abs(d.y) + abs(d.z);
+    return d.z >= 0.0 ? d.xy : (1.0 - abs(d.yx)) * vec2(d.x >= 0.0 ? 1.0 : -1.0, d.y >= 0.0 ? 1.0 : -1.0);
+}
 shared float sDist[RAYS];    // each ray's hit distance (a miss: 1e30), for the census
 shared float sMiss[RAYS];    // a miss: its weight / pi (the sky visibility's sample); a hit: 0
 shared vec4 sHit[RAYS];      // albedo x weight / pi (a hit) or the sky x weight (a miss); w its patch (-1 none), or -2 a miss
@@ -819,7 +823,10 @@ void main() {
                         float cosine = dot(tn, tn) > 0.0 ? dot(normalize(tn), w) : 0.0;
                         captured[2u * at] = uvec4(id, uint(u.uCapture.z) | (uint(u.uShade.w) << 16), floatBitsToUint(sDist[r]), how | (uint(r) << 8) | (uint(int(h.w) + 1) << 13));
                         captured[2u * at + 1u] = uvec4(floatBitsToUint(whole), floatBitsToUint(captureBounce),
-                            (uint(u.uCapture.z) & 0x8000u) != 0u ? packHalf2x16(vec2(captureSunFull, captureSunBits)) : packHalf2x16(vec2(cosine, sRayWeight[r])),
+                            (uint(u.uCapture.z) & 0x8000u) != 0u ? packHalf2x16(vec2(captureSunFull, captureSunBits))
+                            // BLIX_CAPTURE_DIR (tag 0x4000): the ray's direction, octahedral (snorm 2 x 16), world space
+                            : (uint(u.uCapture.z) & 0x4000u) != 0u ? packSnorm2x16(captureOct(sDir[r]))
+                            : packHalf2x16(vec2(cosine, sRayWeight[r])),
                             sNearTexel[r] >= 0 ? uint(sNearTexel[r]) : floatBitsToUint(-max(captureLight, 1e-30)));
                     }
                 }
