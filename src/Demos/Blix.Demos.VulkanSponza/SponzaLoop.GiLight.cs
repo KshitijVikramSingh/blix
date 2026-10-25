@@ -44,6 +44,8 @@ internal sealed partial class SponzaLoop
     private (float GpuMs, bool CookScreen, int Stop, bool ScreenFirst, float OldStart, float KeepOld, float ScreenRefine, float Boost, float Select)? giSaved;
     // Live's boost (GPU ms a frame, 0 off): a live step's sweep slot and its re-aim's bounces a frame (SponzaLoop.ChangeBoost).
     private float giBoostMs = 10f;
+    // The converge's boost (GPU ms a frame, 8): behind the frame at the 3 ms slot it took 142 s at ~90 fps (Crytek Sponza).
+    private float giConvergeBoostMs = 8f;
 
     private void ParseGiLight(AppArgs args)
     {
@@ -53,6 +55,7 @@ internal sealed partial class SponzaLoop
         if (args.Float("gi-live-max-lead") is { } ml) giMaxLead = Math.Clamp(ml, 0.5f, 90f);
         if (args.Float("gi-live-settle") is { } ls) giLiveSettle = Math.Clamp(ls, 0f, 30f);
         if (args.Float("gi-live-boost-ms") is { } bm) giBoostMs = Math.Clamp(bm, 0f, 100f);
+        if (args.Float("gi-converge-boost-ms") is { } cb) giConvergeBoostMs = Math.Clamp(cb, 0f, 100f);
         // --gi-relight-at F (a measurement): pause Live and press Relight at post-load frame F (when no change is in flight).
         if (args.Int("gi-relight-at") is { } ra) giRelightAt = ra;
         // --gi-cook-to-completion-at F: the debug cook at post-load frame F.
@@ -196,7 +199,7 @@ internal sealed partial class SponzaLoop
         changeStop = 0;
         changeCookScreen = false;
         screenFirst = false;
-        changeBoostMs = 0f;
+        changeBoostMs = giConvergeBoostMs;
         sweepGpuMs = giSaved.Value.GpuMs;
         keepOldBelow = MathF.Max(giKeepOldBelow, 1f);   // the same sun: the shown light stays up until gathered
         oldStartBelow = MathF.Max(giSaved.Value.OldStart, 30f);
@@ -253,6 +256,7 @@ internal sealed partial class SponzaLoop
             giLiveMinStep = debug.Controls.Float("Live min step (deg)", giLiveMinStep, 0.1f, 5f);
             giMaxLead = debug.Controls.Float("Live max lead (deg)", giMaxLead, 0.5f, 30f);
             giBoostMs = debug.Controls.Float("Live boost GPU ms a frame (0 off)", giBoostMs, 0f, 30f);
+            giConvergeBoostMs = debug.Controls.Float("Relight / converge boost GPU ms a frame (0 off)", giConvergeBoostMs, 0f, 30f);
             giLiveSettle = debug.Controls.Float("Live settle (s)", giLiveSettle, 0f, 5f);
             if (giLive) sunMoveSettle = giLiveSettle;
             giLiveStop = debug.Controls.Enum("Live stops at", giLiveStop, GiStopNames);
