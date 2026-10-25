@@ -55,7 +55,10 @@ internal sealed partial class SponzaLoop : IDebugLogsSection
             {
                 var live = refining ? sunNodeRefineIds.Length : sunNodeTraceIds.Length;
                 var passes = refining ? RefinePasses : sunNodeRays / 32;
-                var slice = Math.Min(sunNodeSlice, Math.Max(0, live - sunNodeFirst));
+                // The slice as traced: in the frame the budget's (sweepSliceNow), a few thousand texels -- at the cook screen's
+                // 32,768 the count ran ahead within each slice and fell back at the next, as if each texel went two or three
+                // times (2026-10-25).
+                var slice = Math.Min(sweepSliceInFrame ? sweepSliceNow : sunNodeSlice, Math.Max(0, live - sunNodeFirst));
                 DebugProgress.Set(name, sunNodeFirst + (long)((double)sunNodePass / passes * slice), live);
             }
             else DebugProgress.Set(name, 0, 0);
