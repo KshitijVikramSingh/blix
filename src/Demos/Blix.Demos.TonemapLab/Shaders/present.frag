@@ -15,6 +15,14 @@
 // GT7 under HDR emits nits; divided by uSdrWhiteNits that is the EDR value (1.0 = SDR white, headroom above it).
 
 layout(set = 0, binding = 0) uniform sampler2D uScene;
+// The six glare terms, each the scene blurred by one Gaussian of the fit in lab/tonemap/results/glare_fit.json (see tmlab/glare.py).
+layout(set = 0, binding = 1) uniform sampler2D uGlare0;
+layout(set = 0, binding = 2) uniform sampler2D uGlare1;
+layout(set = 0, binding = 3) uniform sampler2D uGlare2;
+layout(set = 0, binding = 4) uniform sampler2D uGlare3;
+layout(set = 0, binding = 5) uniform sampler2D uGlare4;
+layout(set = 0, binding = 6) uniform sampler2D uGlare5;
+const float GLARE_W[6] = float[6](0.808603086, 0.134753827, 0.0397676642, 0.0120275726, 0.00364401528, 0.00120383468);
 
 layout(push_constant) uniform Push {
     float uExposure;
@@ -32,6 +40,7 @@ layout(push_constant) uniform Push {
     float uFadeStart;
     float uFadeEnd;
     float uShoulderTail;
+    float uGlare;       // 0 off .. 1 the full diffraction PSF
     int uOperator;
     int uOutput;
     int uPattern;
@@ -68,6 +77,13 @@ void main()
     else
     {
         scene = texture(uScene, vUv).rgb;
+        if (pc.uGlare > 0.0)
+        {
+            vec3 g = GLARE_W[0] * texture(uGlare0, vUv).rgb + GLARE_W[1] * texture(uGlare1, vUv).rgb
+                   + GLARE_W[2] * texture(uGlare2, vUv).rgb + GLARE_W[3] * texture(uGlare3, vUv).rgb
+                   + GLARE_W[4] * texture(uGlare4, vUv).rgb + GLARE_W[5] * texture(uGlare5, vUv).rgb;
+            scene = mix(scene, g, pc.uGlare);
+        }
     }
 
     vec3 c = scene * pc.uExposure * vec3(pc.uWbR, pc.uWbG, pc.uWbB);

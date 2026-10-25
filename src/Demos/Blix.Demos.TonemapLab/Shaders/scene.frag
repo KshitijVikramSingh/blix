@@ -23,9 +23,12 @@ layout(push_constant) uniform Push {
     float uWorldEv;
     float uLampNits;
     float uSignNits;
+    float uBlurYaw;     // radians the view sweeps during the shutter (0 = no motion blur)
+    float uBlurPitch;
     int uSigns;
     int uUseHdri;
     int uDress;
+    int uBlurSamples;
 } pc;
 
 layout(location = 0) in vec2 vUv;
@@ -108,13 +111,28 @@ vec3 world(vec3 d)
     return nits / SCENE_UNIT_NITS;
 }
 
+// Motion blur is the mean of the world over the shutter, in scene-linear light BEFORE any tone map: a lamp 1000 times brighter
+// than its surroundings is still brighter than them when smeared across a tenth of the frame, which averaging display
+// values would not give (lab/tonemap/tmlab/motionblur.py has the arithmetic and its spec).
+vec3 viewRay(float yaw, float pitch, vec2 ndc)
+{
+    vec3 f = vec3(cos(pitch) * sin(yaw), sin(pitch), cos(pitch) * cos(yaw));
+    vec3 r = normalize(cross(vec3(0.0, 1.0, 0.0), f));
+    vec3 u = cross(f, r);
+    return normalize(f + r * (ndc.x * pc.uAspect * pc.uTanHalfFov) + u * (-ndc.y * pc.uTanHalfFov));
+}
+
 void main()
 {
     vec2 ndc = vUv * 2.0 - 1.0;
-    vec3 f = vec3(cos(pc.uPitch) * sin(pc.uYaw), sin(pc.uPitch), cos(pc.uPitch) * cos(pc.uYaw));
-    vec3 r = normalize(cross(vec3(0.0, 1.0, 0.0), f));
-    vec3 u = cross(f, r);
-    vec3 d = normalize(f + r * (ndc.x * pc.uAspect * pc.uTanHalfFov) + u * (-ndc.y * pc.uTanHalfFov));
-    vec3 c = min(world(d), vec3(60000.0));
-    outColor = vec4(c, gSky);   // RGBA16F tops out at 65504
+    int n = max(pc.uBlurSamples, 1);
+    vec3 sum = vec3(0.0);
+    float sky = 0.0;
+    for (int i = 0; i < n; ++i)
+    {
+        float t = n == 1 ? 0.0 : (float(i) + 0.5) / float(n) - 0.5;
+        sum += min(world(viewRay(pc.uYaw + t * pc.uBlurYaw, pc.uPitch + t * pc.uBlurPitch, ndc)), vec3(60000.0));   // RGBA16F tops out at 65504
+        sky += gSky;
+    }
+    outColor = vec4(sum / float(n), sky / float(n));
 }

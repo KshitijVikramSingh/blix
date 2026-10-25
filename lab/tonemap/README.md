@@ -333,6 +333,34 @@ What the work found, because it is not obvious:
 
 The demo: `--awb off` starts it disabled; "auto white balance" has the sliders; the manual K / tint sliders apply on top.
 
+## Glare and motion blur
+
+**Glare** (`tmlab/glare.py`, `results/glare_fit.json`, `tests/test_glare.py`). The diffraction PSF of a circular aperture is the Airy
+pattern, whose whole shape lives in r / a (a = 1.22 lambda N / pixel pitch, the first dark ring). So one fit serves every F-number
+and only the scale changes; GT7's slides describe 24 hand-calibrated parameters per F-number for ten F-numbers, which this
+scaling law makes unnecessary for the diffraction part (it says nothing about scatter in a real lens, which this does not model).
+The ring-averaged envelope falls as r^-3 over decades; a Gaussian sum follows it, fitted in log space over 0.05 to 400 Airy radii:
+
+| terms | max log10 error | factor | encircled-energy error |
+| --- | --- | --- | --- |
+| 3 | 1.02 | x10.6 | 0.055 |
+| 4 | 0.57 | x3.7 | 0.014 |
+| 5 | 0.33 | x2.1 | 0.007 |
+| **6 (used)** | **0.19** | **x1.56** | **0.003** |
+| 8 | 0.10 | x1.25 | 0.008 |
+
+Six is the demo's cost/accuracy choice (eight is better but adds a term of passes). In the demo each term is the scene blurred
+at the mip its width needs (`Glare.cs`, one `PostChain` per term; at most a 33-tap separable blur), composited in `present.frag`
+in scene-linear light before exposure: mix 0 is off, 1 the full PSF; the Airy radius in pixels is the scale slider. The fit
+exists in three files and `tests/test_glare_constants.py` holds them equal.
+
+**Motion blur** (`tmlab/motionblur.py`, `tests/test_motionblur.py`). The mean of the world over the shutter, in scene-linear
+light, done per pixel in `scene.frag` (the camera only rotates, so each sample is the same world at a nearby view angle). The
+specs: the smear conserves the lamp's light, and averaging radiance keeps a 5000x lamp's streak bright where averaging
+tone-mapped values would not. `--pan deg/s` and `--shutter` drive it unattended; `out/16_glare_blur.png` is the sheet.
+The blur sweep is the frame-to-frame turn times the shutter, so it is small at 60 Hz (a 90 deg/s pan at a 180 degree shutter
+sweeps 0.75 degrees): it needs a fast mouse flick or the pan slider to show.
+
 ## Not covered yet
 
 - Blix's curves are checked against the shipped constants, not against values produced by the C#/GLSL

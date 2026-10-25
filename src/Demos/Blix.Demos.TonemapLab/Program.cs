@@ -25,6 +25,8 @@ namespace Blix.Demos.TonemapLab;
 //   --adaptation-selftest out.json      run the adaptation model through two scripted scenes and write S and A (no window).
 //   --meter-selftest in.pfm --meter-out out.txt    the trimmed meter of a captured frame (no window).
 //   --hdri name           start in an environment map (lab/tonemap/data/hdri, fetched by tools/fetch_hdris.py); --hdri-dir to point elsewhere.
+//   --glare 0..1          glare mix (default 1), --airy px the PSF's Airy radius (default 2).
+//   --pan deg/s           pan the camera automatically; --shutter 0..1 sets the motion-blur shutter (0 = off).
 //   --awb off             start with auto white balance off.
 //   --awb-selftest in.pfm --awb-out out.txt      the auto white balance's measure, cast and settled state of a captured frame (no window).
 //   --hdri-selftest in.hdr --hdri-out out.txt    the loader's weighted meter and a few raw pixels (no window).
@@ -246,6 +248,18 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
     private float timeScale = 1f;
     private bool meterPending;
 
+    // Glare and motion blur (lab/tonemap/tmlab/glare.py, motionblur.py). Both act on scene-linear light, before exposure.
+    private GlareChains glare = null!;
+    private ShaderProgramHandle downProgram, blurProgram;
+    private float glareMix = 1f;          // 0 off .. 1 the full diffraction PSF
+    private float airyRadiusPx = 2f;      // the PSF's scale: 1.22 lambda N / pitch, in full-resolution pixels
+    private bool motionBlur = true;
+    private float shutter = 0.5f;         // fraction of the frame the shutter is open (0.5 = a 180 degree shutter)
+    private int blurSamples = 16;
+    private float panDegPerSecond;        // an automatic camera pan, for watching the blur without a hand on the mouse
+    private float blurYaw, blurPitch;     // how far the view swept during the last frame's shutter
+    private float prevYaw, prevPitch;
+
     // Auto white balance (lab/tonemap/tmlab/awb.py): measured from the same meter readback, stepped every frame like the exposure.
     private readonly AwbParams awbParams = new();
     private readonly AutoWhiteBalance awb = new();
@@ -286,6 +300,10 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
         if (args.Float("exposure") is { } startEv) { exposureEv = startEv; autoExposure = false; }
         if (args.Float("world-ev") is { } startWorld) worldEv = startWorld;
         if (args.Flag("manual")) autoExposure = false;
+        if (args.Float("glare") is { } startGlare) glareMix = startGlare;
+        if (args.Float("airy") is { } startAiry) airyRadiusPx = startAiry;
+        if (args.Float("shutter") is { } startShutter) shutter = startShutter;
+        if (args.Float("pan") is { } startPan) panDegPerSecond = startPan;
         if (args.String("awb") == "off") autoWhiteBalance = false;
         if (capturePath is not null || selfTestPath is not null) autoExposure = false;   // a capture is a fixed number
         if (args.String("gt7") is { } startPreset && selfTestPath is null)
@@ -321,17 +339,25 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
         var shaderDir = AppFiles.Shaders;
         var sceneInterface = ShaderReflection.ForProgram(shaderDir, "quad.vert", "scene.frag");
         var presentInterface = ShaderReflection.ForProgram(shaderDir, "quad.vert", "present.frag");
+        var downInterface = ShaderReflection.ForProgram(shaderDir, "quad.vert", "down.frag");
+        var blurInterface = ShaderReflection.ForProgram(shaderDir, "quad.vert", "blur.frag");
 
         scenePass = graph.GraphicsPass("scene").Target(sceneHandle, LoadOp.Clear, StoreOp.Store).Shader(sceneInterface).Handle;
         // The world again at 1/8 resolution, for the meter: the same shader, so what is metered is what is seen.
         meterPass = graph.GraphicsPass("meter").Target(meterHandle, LoadOp.Clear, StoreOp.Store).Shader(sceneInterface).Handle;
         // The present shader into an offscreen target: what a capture reads back, in the numbers the window gets.
-        tonePass = graph.GraphicsPass("tone").Target(toneHandle, LoadOp.Clear, StoreOp.Store).Read(sceneHandle).Shader(presentInterface).Handle;
+        glare = new GlareChains(device, graph, sceneHandle, downInterface, blurInterface);
+        var toneBuilder = graph.GraphicsPass("tone").Target(toneHandle, LoadOp.Clear, StoreOp.Store).Read(sceneHandle);
+        foreach (var output in glare.Outputs) toneBuilder = toneBuilder.Read(output);
+        tonePass = toneBuilder.Shader(presentInterface).Handle;
         graph.Compile();
 
         var vert = File.ReadAllBytes(Path.Combine(shaderDir, "quad.vert.spv"));
         sceneProgram = device.CreateShaderProgramFromSpv(vert, File.ReadAllBytes(Path.Combine(shaderDir, "scene.frag.spv")), sceneInterface, "scene");
         presentProgram = device.CreateShaderProgramFromSpv(vert, File.ReadAllBytes(Path.Combine(shaderDir, "present.frag.spv")), presentInterface, "present");
+        downProgram = device.CreateShaderProgramFromSpv(vert, File.ReadAllBytes(Path.Combine(shaderDir, "down.frag.spv")), downInterface, "glare-down");
+        blurProgram = device.CreateShaderProgramFromSpv(vert, File.ReadAllBytes(Path.Combine(shaderDir, "blur.frag.spv")), blurInterface, "glare-blur");
+        glare.BuildPipelines(device, downProgram, blurProgram);
 
         PipelineDescription Offscreen(ShaderProgramHandle program, PassHandle pass) => new(
             program, FullscreenPass.Layout, PrimitiveTopology.Triangles, DepthState.Disabled, RasterizerState.NoCulling,
@@ -373,6 +399,8 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
             pitch = Math.Clamp(pitch + input.MouseDelta.Y * 0.0045f * look, -1.4f, 1.4f);
         }
         if (input.MouseWheel.Y != 0f) fovDegrees = Math.Clamp(fovDegrees - input.MouseWheel.Y * 3f, 15f, 110f);
+
+        if (panDegPerSecond != 0f) yaw += panDegPerSecond * MathF.PI / 180f * (float)dt;
 
         if (cutAtSeconds >= 0f && !cutDone && time.Total >= cutAtSeconds)
         {
@@ -429,6 +457,12 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
     public void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)
     {
         frameCount++;
+        // How far the view turned since the last frame, scaled by the shutter: the sweep the blur averages over.
+        var dyaw = MathF.IEEERemainder(yaw - prevYaw, 2f * MathF.PI);
+        var dpitch = pitch - prevPitch;
+        (prevYaw, prevPitch) = (yaw, pitch);
+        var blurring = motionBlur && shutter > 0f && frameCount > 1;
+        (blurYaw, blurPitch) = blurring ? (dyaw * shutter, dpitch * shutter) : (0f, 0f);
         var scenePush = new ScenePush
         {
             Yaw = yaw,
@@ -444,6 +478,9 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
             Signs = signs ? 1 : 0,
             UseHdri = loadedEnvironment > 0 ? 1 : 0,
             Dress = dress ? 1 : 0,
+            BlurYaw = blurYaw,
+            BlurPitch = blurPitch,
+            BlurSamples = blurYaw != 0f || blurPitch != 0f ? blurSamples : 1,
         }.ToBytes();
 
         var worldBinding = new[] { new ShaderTextureBinding("uHdri", activeCube) };
@@ -456,8 +493,16 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
             meterPending = true;
         }
 
+        var glareOn = glareMix > 0f && pattern == 0;
+        if (glareOn) glare.Record(airyRadiusPx);
+
         var sceneTexture = graph.GetColorTexture(sceneHandle);
-        var sceneBinding = new[] { new ShaderTextureBinding("uScene", sceneTexture) };
+        // The glare terms are bound only when this frame drew them (an undrawn target has no defined contents); otherwise the
+        // scene stands in and the shader's glare mix is 0.
+        var sceneBinding = new ShaderTextureBinding[7];
+        sceneBinding[0] = new ShaderTextureBinding("uScene", sceneTexture);
+        for (var i = 0; i < 6; i++)
+            sceneBinding[i + 1] = new ShaderTextureBinding($"uGlare{i}", glareOn ? graph.GetColorTexture(glare.Outputs[i]) : sceneTexture);
         if ((capturePath is not null || selfTestPath is not null) && frameCount == captureFrame)
         {
             var push = MakePresentPush(selfTest: selfTestPath is not null).ToBytes();
@@ -511,6 +556,7 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
             Operator = op,
             Output = selfTest ? 2 : 0,
             Pattern = pattern,
+            GlareMix = glareMix > 0f && pattern == 0 ? glareMix : 0f,
             Gt7Sdr = gt7Sdr ? 1 : 0,
         };
     }
@@ -625,6 +671,17 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
             if (debug.Controls.Button("Reset to D65")) awb.Reset(AutoWhiteBalance.D65Mired, 0.0);
         }
 
+        using (debug.Scope("glare and motion blur (lab/tonemap/tmlab/glare.py, motionblur.py)"))
+        {
+            glareMix = debug.Controls.Float("glare mix (0 off, 1 diffraction PSF)", glareMix, 0f, 1f);
+            airyRadiusPx = debug.Controls.Float("Airy radius px (PSF scale)", airyRadiusPx, 0.5f, 4f);
+            motionBlur = debug.Controls.Toggle("Motion blur", motionBlur);
+            shutter = debug.Controls.Float("shutter (fraction of the frame open)", shutter, 0f, 1f);
+            blurSamples = (int)debug.Controls.Float("blur samples", blurSamples, 4f, 48f);
+            panDegPerSecond = debug.Controls.Float("auto pan deg/s", panDegPerSecond, -240f, 240f);
+            debug.Values.Value("blur sweep", $"{blurYaw * 180f / MathF.PI:F2} deg yaw, {blurPitch * 180f / MathF.PI:F2} deg pitch this frame");
+        }
+
         using (debug.Scope("white balance (manual, on top of the above)"))
         {
             kelvin = debug.Controls.Float("Illuminant K (6504 = neutral)", kelvin, 2000f, 12000f);
@@ -691,6 +748,7 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
     public void Dispose()
     {
         fullscreen?.Dispose();
+        glare?.Dispose();
         hdris?.Dispose();
         if (device is not null)
         {
@@ -701,6 +759,8 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
             }
             device.DestroyPipeline(tonePipeline);
             device.DestroyPipeline(meterPipeline);
+            device.DestroyShaderProgram(downProgram);
+            device.DestroyShaderProgram(blurProgram);
         }
         graph?.Dispose();
     }
@@ -714,8 +774,8 @@ internal readonly record struct Gt7Set(
 [StructLayout(LayoutKind.Sequential)]
 internal struct ScenePush
 {
-    public float Yaw, Pitch, TanHalfFov, Aspect, Time, SunElevation, SunAzimuth, WorldEv, LampNits, SignNits;
-    public int Signs, UseHdri, Dress;
+    public float Yaw, Pitch, TanHalfFov, Aspect, Time, SunElevation, SunAzimuth, WorldEv, LampNits, SignNits, BlurYaw, BlurPitch;
+    public int Signs, UseHdri, Dress, BlurSamples;
 
     public readonly byte[] ToBytes()
     {
@@ -728,7 +788,7 @@ internal struct ScenePush
 internal struct PresentPush
 {
     public float Exposure, AnchorNits, SdrWhiteNits, PeakNits, WbR, WbG, WbB;
-    public float Alpha, GrayPoint, LinearSection, ToeStrength, BlendRatio, FadeStart, FadeEnd, ShoulderTail;
+    public float Alpha, GrayPoint, LinearSection, ToeStrength, BlendRatio, FadeStart, FadeEnd, ShoulderTail, GlareMix;
     public int Operator, Output, Pattern, Gt7Sdr;
 
     public readonly byte[] ToBytes()

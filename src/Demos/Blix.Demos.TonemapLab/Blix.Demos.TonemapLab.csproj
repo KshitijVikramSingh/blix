@@ -30,6 +30,8 @@
     <GlslShader Include="Shaders\quad.vert" />
     <GlslShader Include="Shaders\scene.frag" />
     <GlslShader Include="Shaders\present.frag" />
+    <GlslShader Include="Shaders\down.frag" />
+    <GlslShader Include="Shaders\blur.frag" />
   </ItemGroup>
 
   <ItemGroup>
