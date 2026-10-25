@@ -23,6 +23,7 @@ layout(set = 0, binding = 0) uniform RtgiRays {
     vec4 uParams;        // rtgiParams (rtgi_cache.glsl)
     vec4 uNearField;     // x the near field's radius (RTGI_NEAR)
     vec4 uGuide;         // x the share of rays guided where a cell has learnt its light's way (0: none); y samples it must hold
+    vec4 uAdapt;         // x the share of visible points placed by uncertainty (0: every tile its own); y tiles weighed for each
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -39,6 +40,7 @@ layout(std430, set = 0, binding = 9) buffer RtgiNextRequests { uint nextRequestC
 layout(std430, set = 0, binding = 10) readonly buffer RtgiKeys { uint rtgiKeys[]; };
 layout(std430, set = 0, binding = 11) readonly buffer RtgiResolved { vec4 rtgiResolved[]; };
 layout(std430, set = 0, binding = 12) readonly buffer RtgiDirection { vec4 rtgiDirection[]; };
+layout(std430, set = 0, binding = 13) readonly buffer RtgiMoments { vec4 rtgiMoments[]; };
 
 #define RTGI_KEYS(i) rtgiKeys[i]
 #define RTGI_NEAR u.uNearField.x
@@ -70,15 +72,43 @@ void main() {
     if (i < visible) {
         uint tilesX = uint(u.uSize.z);
         vec2 tileSize = u.uSize.xy / u.uSize.zw;
-        vec2 jitter = vec2(h & 0xFFFFu, h >> 16) / 65536.0;
-        ivec2 q = min(ivec2((vec2(i % tilesX, i / tilesX) + jitter) * tileSize), ivec2(u.uSize.xy) - 1);
-        float raw = texelFetch(uSceneDepth, q, 0).r;
-        vec4 ns = texelFetch(uPrepassNormal, q, 0);
-        if (raw >= 1.0 - 1e-6 || dot(ns.xyz, ns.xyz) < 1e-6) { none(i); return; }
-        vec2 ndc = (vec2(q) + 0.5) / u.uSize.xy * 2.0 - 1.0;
-        vec4 world = u.uInvViewProj * vec4(ndc, raw, 1.0);
-        p = world.xyz / world.w;
-        n = normalize(ns.xyz);
+        // Adaptive (uAdapt.x of the points): this point goes where the cache is least sure -- of uAdapt.y tiles (its own
+        // and others drawn at random), one in proportion to its cell's uncertainty: the samples' spread over their count's
+        // root, relative to the light (1 where it holds under 4). Rays spread evenly kept feeding cells settled long ago
+        // while the unsettled waited their turn -- the long tail (the user, Cornell, 2026-10-26). The rest stay a tile
+        // each: every place refreshed, a change seen. Which cell a sample goes to never changes what it measures.
+        bool adaptive = float(rtgiHash(i ^ 0x7F4A7C15u ^ uint(u.uCounts.z) * 0x9E3779B9u) & 0xFFFFu) / 65536.0 < u.uAdapt.x;
+        uint candidates = adaptive ? uint(u.uAdapt.y) : 1u;
+        float wsum = 0.0;
+        bool found = false;
+        uint hc = h;
+        for (uint c = 0u; c < candidates; c++) {
+            uint tile = c == 0u ? i : (rtgiHash(hc) % visible);
+            hc = rtgiHash(hc ^ 0x2545F491u);
+            vec2 jitter = vec2(hc & 0xFFFFu, hc >> 16) / 65536.0;
+            ivec2 qc = min(ivec2((vec2(tile % tilesX, tile / tilesX) + jitter) * tileSize), ivec2(u.uSize.xy) - 1);
+            float rawc = texelFetch(uSceneDepth, qc, 0).r;
+            vec4 nsc = texelFetch(uPrepassNormal, qc, 0);
+            if (rawc >= 1.0 - 1e-6 || dot(nsc.xyz, nsc.xyz) < 1e-6) continue;
+            vec2 ndcc = (vec2(qc) + 0.5) / u.uSize.xy * 2.0 - 1.0;
+            vec4 wc = u.uInvViewProj * vec4(ndcc, rawc, 1.0);
+            vec3 pc = wc.xyz / wc.w, nc = normalize(nsc.xyz);
+            float unsure = 1.0;
+            if (adaptive) {
+                uint lc = rtgiLevel(pc, u.uCamera.xyz, u.uParams);
+                uint sc = rtgiFind(rtgiCellHash(ivec3(floor(pc / rtgiSize(lc, u.uParams))), lc, rtgiSide(nc), u.uParams), u.uParams);
+                if (sc != 0xFFFFFFFFu) {
+                    float held = rtgiResolved[2u * sc + 1u].y;
+                    vec4 m = rtgiMoments[3u * sc];
+                    float mean = max(dot(rtgiResolved[2u * sc].rgb, vec3(0.2126, 0.7152, 0.0722)), 1e-4);
+                    unsure = held < 4.0 ? 1.0 : clamp(sqrt(max(m.y - m.x * m.x, 0.0) / held) / mean, 1e-3, 1.0);
+                }
+            }
+            wsum += unsure;
+            hc = rtgiHash(hc ^ 0x68E31DA4u);
+            if (float(hc & 0xFFFFFFu) / 16777216.0 * wsum < unsure) { p = pc; n = nc; found = true; }
+        }
+        if (!found) { none(i); return; }
     } else {
         if (u.uSun.w < 0.5) { none(i); return; }
         uint j = i - visible;

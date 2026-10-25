@@ -29,8 +29,9 @@ internal sealed partial class SponzaLoop
 
     private void ParseRtgiTemporal(Blix.Core.AppArgs args)
     {
+        rtgiTemporal = args.Flag("rtgi-denoise");   // with the rest of the smoothing (SponzaLoop.Rtgi.cs)
         if (args.Flag("rtgi-no-temporal")) rtgiTemporal = false;
-        args.Flag("rtgi-temporal");   // the old opt-in, now the default
+        if (args.Flag("rtgi-temporal")) rtgiTemporal = true;
         if (args.Float("rtgi-temporal-frames") is { } f) rtgiTemporalFrames = MathF.Max(1f, f);
         if (args.Float("rtgi-temporal-fast") is { } ff) rtgiTemporalFast = MathF.Max(1f, ff);
         if (args.Float("rtgi-temporal-clamp") is { } tc) rtgiTemporalClamp = MathF.Max(0f, tc);

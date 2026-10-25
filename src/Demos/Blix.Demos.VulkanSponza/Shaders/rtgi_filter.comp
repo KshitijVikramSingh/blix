@@ -24,7 +24,7 @@ layout(set = 0, binding = 0) uniform RtgiFilter {
     vec4 uParams;   // rtgiParams (rtgi_cache.glsl)
     vec4 uFilter;   // x samples at which the neighbours' share starts to fall; y at which it is gone; z luminance sigmas;
                     // w the dirty list's room
-    vec4 uParent;   // x the samples the parent stands for (0: no parent); y the top level
+    vec4 uParent;   // x the samples the parent stands for (0: no parent); y the top level; z the neighbours' share at least
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer RtgiKeys { uint rtgiKeys[]; };
@@ -52,7 +52,10 @@ void main() {
     vec4 m = rtgiMoments[3u * s];
     float sigma = sqrt(max(m.y - m.x * m.x, 0.0) / max(held, 1.0));
     float l0 = lum(r0.rgb);
-    float share = 1.0 - clamp((held - u.uFilter.x) / max(u.uFilter.y - u.uFilter.x, 1.0), 0.0, 1.0);
+    // At least uParent.z however many it holds: cells each converged on their own read a few percent apart, cloudy
+    // blotches on a smooth wall (Cornell, the user, 2026-10-26); the luminance stop keeps real edges.
+    float share = max(1.0 - clamp((held - u.uFilter.x) / max(u.uFilter.y - u.uFilter.x, 1.0), 0.0, 1.0), u.uParent.z);
+    // The cell itself weighs as its samples up to 64, its neighbours likewise (a cell of thousands no longer drowns them).
     float wSelf = min(held, 64.0);
     vec4 sum = r0 * wSelf;
     float wSum = wSelf;

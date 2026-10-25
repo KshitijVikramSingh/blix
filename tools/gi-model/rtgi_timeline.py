@@ -63,7 +63,7 @@ def spots(inc, nrm, k=9):
     return rel[flat].mean(), np.percentile(rel[flat], 90), flat.sum()
 
 
-def points_mode(log, dumps, mean_of=False, flicker=False):
+def points_mode(log, dumps, mean_of=False, flicker=False, settle=False):
     import re
     pts = []
     for line in Path(log).read_text().splitlines():
@@ -76,6 +76,22 @@ def points_mode(log, dumps, mean_of=False, flicker=False):
     mean = R.mean()
     big = R > 0.02 * mean
     print(f'truth: {Path(log).name}, {len(pts)} points, mean {mean:.4f}')
+    if settle:
+        # --settle: dumps over time, the last the settled state -- each one's distance from it at the points (mean and p90
+        # of |F - F_final| / F_final): the long tail, whatever the bias; beside it the error against the truth.
+        metas = [load(d) for d in dumps]
+        meta, inc, nrm = metas[-1]
+        w, h = meta['width'], meta['height']
+        px, py = np.clip((xs * w).astype(int), 0, w - 1), np.clip((ys * h).astype(int), 0, h - 1)
+        ok = np.abs(nrm[py, px, :3]).sum(axis=1) > 1e-6
+        final = lum(inc[py, px, :3])[ok]
+        r = R[ok]
+        for d, (m, i, _) in zip(dumps, metas):
+            f = lum(i[py, px, :3])[ok]
+            dist = np.abs(f - final) / np.maximum(final, 0.02 * final.mean())
+            print(f'{Path(d).name:>8} (frame {m["frame"]}): from settled mean {dist.mean():.4f}, p90 {np.percentile(dist, 90):.4f}; '
+                  f'against the truth {np.abs(f - r).mean() / r.mean():.4f}')
+        return
     if flicker:
         # --flicker: consecutive frames' fields at the points -- how much each point's light moves frame to frame (its
         # standard deviation over its mean, the points' mean), the error of their mean beside it.
@@ -88,9 +104,10 @@ def points_mode(log, dumps, mean_of=False, flicker=False):
         f, r = F.mean(axis=0), R[ok]
         rel = F.std(axis=0) / np.maximum(f, 0.02 * f.mean())
         sm, sp, sn = spots(metas[-1][1], metas[-1][2])
+        bm, bp, bn = spots(metas[-1][1], metas[-1][2], k=33)
         print(f'flicker over {len(metas)} frames: mean {rel.mean():.4f}, p90 {np.percentile(rel, 90):.4f}; '
               f'their mean: energy {f.sum() / r.sum():.4f}, rel |error| {np.abs(f - r).mean() / r.mean():.4f}; '
-              f'spotting (last frame, 9x9, flat): mean {sm:.4f}, p90 {sp:.4f} ({sn:,} px)')
+              f'spotting (last frame, flat) 9x9: mean {sm:.4f}, p90 {sp:.4f}; 33x33 (blotches): mean {bm:.4f}, p90 {bp:.4f} ({bn:,} px)')
         return
     if mean_of:
         # --mean: the dumps' fields averaged first (consecutive frames): what a temporal filter would converge to.
@@ -118,8 +135,8 @@ def main():
     if len(sys.argv) < 3:
         raise SystemExit(__doc__)
     if sys.argv[1].endswith('.log'):
-        args = [a for a in sys.argv[2:] if a not in ('--mean', '--flicker')]
-        points_mode(sys.argv[1], args, mean_of='--mean' in sys.argv, flicker='--flicker' in sys.argv)
+        args = [a for a in sys.argv[2:] if a not in ('--mean', '--flicker', '--settle')]
+        points_mode(sys.argv[1], args, mean_of='--mean' in sys.argv, flicker='--flicker' in sys.argv, settle='--settle' in sys.argv)
         return
     tmeta, _, tnrm = load(sys.argv[1])
     rw, rh = tmeta['referenceWidth'], tmeta['referenceHeight']

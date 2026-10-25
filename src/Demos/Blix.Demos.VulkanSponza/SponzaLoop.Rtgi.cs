@@ -92,12 +92,17 @@ internal sealed partial class SponzaLoop
     // drawn toward it where the cell holds --rtgi-guide-min samples (0.5, 16; 0: cosine alone, rtgi_rays.comp), and its part
     // along the surface written as the gradient the lit pass carries onto normal maps (--rtgi-no-gradient: not).
     private float rtgiGuide = 0.5f, rtgiGuideMin = 16f;
+    // --rtgi-adaptive S: that share of the visible points placed by the cache's uncertainty, each the likeliest of
+    // --rtgi-adaptive-k tiles (0.5, 4; 0: a tile each, rtgi_rays.comp).
+    private float rtgiAdaptive = 0.5f, rtgiAdaptiveK = 4f;
     private bool rtgiNoGradient;
     // The neighbour blend (rtgi_filter.comp): the neighbours' share falls from 1 at --rtgi-filter-from samples to 0 at
     // --rtgi-filter-to (32, 256), stopped beyond --rtgi-filter-sigma (2) of the cell's spread; --rtgi-no-filter: none.
     private float rtgiFilterFrom = 32f, rtgiFilterTo = 256f, rtgiFilterSigma = 2f;
     // --rtgi-parent N: the parent cell (a level up) weighed as N samples beside the blend's own (32; 0: none).
     private float rtgiParentWeight = 32f;
+    // --rtgi-filter-floor F: the neighbours' share never below F, however many samples a cell holds (0: it fades to none).
+    private float rtgiFilterFloor;
     private bool rtgiNoFilter;
     private ShaderInterface rtgiFilterInterface = null!;
     private PassHandle rtgiFilterPassHandle;
@@ -159,16 +164,22 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-filter-from") is { } ffr) rtgiFilterFrom = MathF.Max(0f, ffr);
         if (args.Float("rtgi-filter-to") is { } fto) rtgiFilterTo = MathF.Max(1f, fto);
         if (args.Float("rtgi-filter-sigma") is { } fsg) rtgiFilterSigma = MathF.Max(0.1f, fsg);
-        rtgiNoFilter = args.Flag("rtgi-no-filter");
+        // --rtgi-denoise: the smoothing -- the neighbour blend and parent lean (rtgi_filter.comp), the temporal accumulation
+        // (SponzaLoop.RtgiTemporal.cs). Off by default (2026-10-26): what read as blotches was the cache's long tail, not
+        // noise (the user) -- the convergence is judged without it, the smoothing on its own.
+        rtgiNoFilter = !args.Flag("rtgi-denoise") || args.Flag("rtgi-no-filter");
         if (args.Float("rtgi-guide") is { } gd) rtgiGuide = Math.Clamp(gd, 0f, 0.95f);
         if (args.Float("rtgi-guide-min") is { } gm) rtgiGuideMin = MathF.Max(1f, gm);
         rtgiNoGradient = args.Flag("rtgi-no-gradient");
+        if (args.Float("rtgi-adaptive") is { } ad) rtgiAdaptive = Math.Clamp(ad, 0f, 1f);
+        if (args.Float("rtgi-adaptive-k") is { } ak) rtgiAdaptiveK = Math.Clamp(ak, 1f, 16f);
         if (args.Flag("rtgi-contact")) rtgiContact = true;
         if (args.Flag("rtgi-no-contact")) rtgiContact = false;
         if (args.Int("rtgi-contact-rays") is { } cr) rtgiContactRays = Math.Max(1, cr);
         if (args.Int("rtgi-contact-every") is { } ce) rtgiContactEvery = Math.Max(1, ce);
         if (args.Float("rtgi-contact-radius") is { } crad) rtgiContactRadius = MathF.Max(0.01f, crad);
         if (args.Float("rtgi-parent") is { } pw) rtgiParentWeight = MathF.Max(0f, pw);
+        if (args.Float("rtgi-filter-floor") is { } ffl) rtgiFilterFloor = Math.Clamp(ffl, 0f, 1f);
         rtgiScreen = args.Flag("rtgi-screen");
         if (rtgiScreen) rtgi = true;
         if (args.Int("rtgi-screen-taps") is { } taps) rtgiScreenTaps = Math.Clamp(taps, 1, 64);
@@ -381,7 +392,7 @@ internal sealed partial class SponzaLoop
             {
                 new("uParams", new Vector4Uniform(RtgiParams)),
                 new("uFilter", new Vector4Uniform(rtgiNoFilter ? new Vector4(0f, 0f, rtgiFilterSigma, RtgiDirtyRoom) : new Vector4(rtgiFilterFrom, rtgiFilterTo, rtgiFilterSigma, RtgiDirtyRoom))),
-                new("uParent", new Vector4Uniform(new Vector4(rtgiNoFilter ? 0f : rtgiParentWeight, RtgiTopLevel, 0f, 0f))),
+                new("uParent", new Vector4Uniform(new Vector4(rtgiNoFilter ? 0f : rtgiParentWeight, RtgiTopLevel, rtgiNoFilter ? 0f : rtgiFilterFloor, 0f))),
             },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
@@ -472,6 +483,7 @@ internal sealed partial class SponzaLoop
                 new("uParams", new Vector4Uniform(RtgiParams)),
                 new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, 0f, 0f, 0f))),
                 new("uGuide", new Vector4Uniform(new Vector4(rtgiGuide, rtgiGuideMin, 0f, 0f))),
+                new("uAdapt", new Vector4Uniform(new Vector4(rtgiAdaptive, rtgiAdaptiveK, 0f, 0f))),
             },
             new[]
             {
@@ -490,6 +502,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiKeys", rtgiKeys),
                 new ShaderBufferBinding("RtgiResolved", rtgiResolved),
                 new ShaderBufferBinding("RtgiDirection", rtgiDirection),
+                new ShaderBufferBinding("RtgiMoments", rtgiMoments),
             }));
 
         // This frame's contact rays (S4), into the same Metal group.
