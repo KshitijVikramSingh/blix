@@ -27,6 +27,8 @@ layout(set = 0, binding = 7) uniform sampler2D uScatter0;
 layout(set = 0, binding = 8) uniform sampler2D uScatter1;
 layout(set = 0, binding = 9) uniform sampler2D uScatter2;
 layout(set = 0, binding = 10) uniform sampler2D uScatter3;
+// Aperture-blade spikes: already weighted (tmlab/spikes.py), added as they are.
+layout(set = 0, binding = 11) uniform sampler2D uSpike;
 const float SCATTER_W[4] = float[4](0.184599424, 0.330670765, 0.342027359, 0.142702453);
 const float GLARE_W[6] = float[6](0.808603086, 0.134753827, 0.0397676642, 0.0120275726, 0.00364401528, 0.00120383468);
 
@@ -47,6 +49,7 @@ layout(push_constant) uniform Push {
     float uFadeEnd;
     float uShoulderTail;
     float uGlare;       // 0 off .. 1 the full diffraction PSF
+    float uSpikes;      // 1 when the spike pass drew this frame, else 0
     float uScatter;     // fraction of the light moved into the veil (0.066 = the standard's, age 25)
     int uOperator;
     int uOutput;
@@ -97,6 +100,7 @@ void main()
                    + SCATTER_W[2] * texture(uScatter2, vUv).rgb + SCATTER_W[3] * texture(uScatter3, vUv).rgb;
             scene = mix(scene, v, pc.uScatter);
         }
+        if (pc.uSpikes > 0.0) scene += texture(uSpike, vUv).rgb;
     }
 
     vec3 c = scene * pc.uExposure * vec3(pc.uWbR, pc.uWbG, pc.uWbB);

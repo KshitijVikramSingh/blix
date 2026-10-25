@@ -26,6 +26,7 @@ namespace Blix.Demos.TonemapLab;
 //   --meter-selftest in.pfm --meter-out out.txt    the trimmed meter of a captured frame (no window).
 //   --hdri name           start in an environment map (lab/tonemap/data/hdri, fetched by tools/fetch_hdris.py); --hdri-dir to point elsewhere.
 //   --glare 0..1          glare mix (default 1), --airy px the PSF's Airy radius (default 2).
+//   --spikes x --blades n aperture-blade spike strength (x the fitted amplitude, default 10) and blade count (default 6).
 //   --scatter x           scatter glare amount (1 = the standard's, default); --tunnel-ev EV sets how far below the world the tunnel is.
 //   --pan deg/s           pan the camera automatically; --shutter 0..1 sets the motion-blur shutter (0 = off).
 //   --awb off             start with auto white balance off.
@@ -251,6 +252,12 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
 
     // Glare and motion blur (lab/tonemap/tmlab/glare.py, motionblur.py). Both act on scene-linear light, before exposure.
     private GaussianChains glare = null!;
+    private SpikeChain spikes = null!;
+    private ShaderProgramHandle streakProgram;
+    private float spikeStrength = 10f;      // x the fitted polygon-aperture amplitude: 8 to 12 read right by eye (this scene's sun is ~285x the sky, a real one ~1e5x)
+    private int blades = 6;                  // aperture blades: N spikes for even N, 2N for odd
+    private float bladeRotationDeg;
+    private float spikeReachPx = 600f;
     private GaussianChains scatter = null!;   // veiling glare: Stiles-Holladay 10/theta^2, lab/tonemap/results/scatter_fit.json
     private float scatterAmount = 1f;          // 1 = the standard's amount for an age-25 observer (6.6% of the light)
     private const float ScatterFraction = 0.0662f;   // scatter_fit.json fraction_age25
@@ -308,6 +315,8 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
         if (args.Float("glare") is { } startGlare) glareMix = startGlare;
         if (args.Float("airy") is { } startAiry) airyRadiusPx = startAiry;
         if (args.Float("scatter") is { } startScatter) scatterAmount = startScatter;
+        if (args.Float("spikes") is { } startSpikes) spikeStrength = startSpikes;
+        if (args.Int("blades") is { } startBlades) blades = Math.Clamp(startBlades, 3, 12);
         if (args.Float("tunnel-ev") is { } startTunnel) tunnelEv = startTunnel;
         if (args.Float("shutter") is { } startShutter) shutter = startShutter;
         if (args.Float("pan") is { } startPan) panDegPerSecond = startPan;
@@ -348,6 +357,7 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
         var presentInterface = ShaderReflection.ForProgram(shaderDir, "quad.vert", "present.frag");
         var downInterface = ShaderReflection.ForProgram(shaderDir, "quad.vert", "down.frag");
         var blurInterface = ShaderReflection.ForProgram(shaderDir, "quad.vert", "blur.frag");
+        var streakInterface = ShaderReflection.ForProgram(shaderDir, "quad.vert", "streak.frag");
 
         scenePass = graph.GraphicsPass("scene").Target(sceneHandle, LoadOp.Clear, StoreOp.Store).Shader(sceneInterface).Handle;
         // The world again at 1/8 resolution, for the meter: the same shader, so what is metered is what is seen.
@@ -355,9 +365,11 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
         // The present shader into an offscreen target: what a capture reads back, in the numbers the window gets.
         glare = new GaussianChains(device, graph, sceneHandle, downInterface, blurInterface, "glare", GlareFit.Sigmas, GlareFit.Levels);
         scatter = new GaussianChains(device, graph, sceneHandle, downInterface, blurInterface, "scatter", GlareFit.ScatterSigmasDeg, GlareFit.ScatterLevels);
+        spikes = new SpikeChain(device, graph, sceneHandle, downInterface, streakInterface);
         var toneBuilder = graph.GraphicsPass("tone").Target(toneHandle, LoadOp.Clear, StoreOp.Store).Read(sceneHandle);
         foreach (var output in glare.Outputs) toneBuilder = toneBuilder.Read(output);
         foreach (var output in scatter.Outputs) toneBuilder = toneBuilder.Read(output);
+        toneBuilder = toneBuilder.Read(spikes.Output);
         tonePass = toneBuilder.Shader(presentInterface).Handle;
         graph.Compile();
 
@@ -368,6 +380,8 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
         blurProgram = device.CreateShaderProgramFromSpv(vert, File.ReadAllBytes(Path.Combine(shaderDir, "blur.frag.spv")), blurInterface, "glare-blur");
         glare.BuildPipelines(device, downProgram, blurProgram);
         scatter.BuildPipelines(device, downProgram, blurProgram);
+        streakProgram = device.CreateShaderProgramFromSpv(vert, File.ReadAllBytes(Path.Combine(shaderDir, "streak.frag.spv")), streakInterface, "spike-streak");
+        spikes.BuildPipelines(device, downProgram, streakProgram);
 
         PipelineDescription Offscreen(ShaderProgramHandle program, PassHandle pass) => new(
             program, FullscreenPass.Layout, PrimitiveTopology.Triangles, DepthState.Disabled, RasterizerState.NoCulling,
@@ -507,17 +521,20 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
         var glareOn = glareMix > 0f && pattern == 0;
         var scatterOn = scatterAmount > 0f && pattern == 0;
         if (glareOn) glare.Record(airyRadiusPx);
+        var spikesOn = spikeStrength > 0f && pattern == 0;
+        if (spikesOn) spikes.Record(blades, bladeRotationDeg * MathF.PI / 180f, airyRadiusPx, spikeStrength, spikeReachPx);
         if (scatterOn) scatter.Record(frame.Height / fovDegrees);   // sigmas are in degrees: pixels per degree of vertical field of view
 
         var sceneTexture = graph.GetColorTexture(sceneHandle);
         // The glare terms are bound only when this frame drew them (an undrawn target has no defined contents); otherwise the
         // scene stands in and the shader's glare mix is 0.
-        var sceneBinding = new ShaderTextureBinding[11];
+        var sceneBinding = new ShaderTextureBinding[12];
         sceneBinding[0] = new ShaderTextureBinding("uScene", sceneTexture);
         for (var i = 0; i < 6; i++)
             sceneBinding[i + 1] = new ShaderTextureBinding($"uGlare{i}", glareOn ? graph.GetColorTexture(glare.Outputs[i]) : sceneTexture);
         for (var i = 0; i < 4; i++)
             sceneBinding[i + 7] = new ShaderTextureBinding($"uScatter{i}", scatterOn ? graph.GetColorTexture(scatter.Outputs[i]) : sceneTexture);
+        sceneBinding[11] = new ShaderTextureBinding("uSpike", spikesOn ? graph.GetColorTexture(spikes.Output) : sceneTexture);
         if ((capturePath is not null || selfTestPath is not null) && frameCount == captureFrame)
         {
             var push = MakePresentPush(selfTest: selfTestPath is not null).ToBytes();
@@ -572,6 +589,7 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
             Output = selfTest ? 2 : 0,
             Pattern = pattern,
             GlareMix = glareMix > 0f && pattern == 0 ? glareMix : 0f,
+            SpikesOn = spikeStrength > 0f && pattern == 0 ? 1f : 0f,
             ScatterAmount = scatterAmount > 0f && pattern == 0 ? Math.Min(scatterAmount * ScatterFraction, 1f) : 0f,
             Gt7Sdr = gt7Sdr ? 1 : 0,
         };
@@ -692,6 +710,10 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
             glareMix = debug.Controls.Float("glare mix (0 off, 1 diffraction PSF)", glareMix, 0f, 1f);
             airyRadiusPx = debug.Controls.Float("Airy radius px (PSF scale)", airyRadiusPx, 0.5f, 4f);
             scatterAmount = debug.Controls.Float("scatter (1 = Stiles-Holladay, age 25)", scatterAmount, 0f, 4f);
+            spikeStrength = debug.Controls.Float("blade spikes (1 = fitted polygon PSF)", spikeStrength, 0f, 4f);
+            blades = (int)debug.Controls.Float("aperture blades (N spikes if even, 2N if odd)", blades, 3f, 12f);
+            bladeRotationDeg = debug.Controls.Float("blade rotation deg", bladeRotationDeg, 0f, 180f);
+            spikeReachPx = debug.Controls.Float("spike reach px", spikeReachPx, 100f, 1200f);
             motionBlur = debug.Controls.Toggle("Motion blur", motionBlur);
             shutter = debug.Controls.Float("shutter (fraction of the frame open)", shutter, 0f, 1f);
             blurSamples = (int)debug.Controls.Float("blur samples", blurSamples, 4f, 48f);
@@ -768,6 +790,7 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
         fullscreen?.Dispose();
         glare?.Dispose();
         scatter?.Dispose();
+        spikes?.Dispose();
         hdris?.Dispose();
         if (device is not null)
         {
@@ -780,6 +803,7 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
             device.DestroyPipeline(meterPipeline);
             device.DestroyShaderProgram(downProgram);
             device.DestroyShaderProgram(blurProgram);
+            device.DestroyShaderProgram(streakProgram);
         }
         graph?.Dispose();
     }
@@ -807,7 +831,7 @@ internal struct ScenePush
 internal struct PresentPush
 {
     public float Exposure, AnchorNits, SdrWhiteNits, PeakNits, WbR, WbG, WbB;
-    public float Alpha, GrayPoint, LinearSection, ToeStrength, BlendRatio, FadeStart, FadeEnd, ShoulderTail, GlareMix, ScatterAmount;
+    public float Alpha, GrayPoint, LinearSection, ToeStrength, BlendRatio, FadeStart, FadeEnd, ShoulderTail, GlareMix, SpikesOn, ScatterAmount;
     public int Operator, Output, Pattern, Gt7Sdr;
 
     public readonly byte[] ToBytes()

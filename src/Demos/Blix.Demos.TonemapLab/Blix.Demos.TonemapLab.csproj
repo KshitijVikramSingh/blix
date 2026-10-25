@@ -32,6 +32,7 @@
     <GlslShader Include="Shaders\present.frag" />
     <GlslShader Include="Shaders\down.frag" />
     <GlslShader Include="Shaders\blur.frag" />
+    <GlslShader Include="Shaders\streak.frag" />
   </ItemGroup>
 
   <ItemGroup>

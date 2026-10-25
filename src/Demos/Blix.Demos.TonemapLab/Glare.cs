@@ -17,6 +17,55 @@ internal static class GlareFit
     /// <summary>Scatter (Stiles-Holladay, results/scatter_fit.json): widths in degrees on the screen; levels chosen for up to ~30 px per degree.</summary>
     public static readonly float[] ScatterSigmasDeg = { 0.909161469f, 2.96041278f, 9.6337886f, 19.7788583f };
     public static readonly int[] ScatterLevels = { 4, 5, 7, 8 };
+
+    /// <summary>Aperture-blade spikes (results/spike_fit.json): total line-density amplitude over all spikes, and where the kernel starts (Airy radii).</summary>
+    public const float SpikeAmplitudeTotal = 0.1724f;
+    public const float SpikeKnee = 1.5f;
+}
+
+/// <summary>The aperture-blade spike pass: the scene to 1/4 resolution, then one streak pass over every spike line.</summary>
+internal sealed class SpikeChain : IDisposable
+{
+    private readonly PostChain chain;
+    public GraphResourceHandle Output => chain.Output;
+
+    public SpikeChain(IGraphicsDevice device, RenderGraph graph, GraphResourceHandle input, ShaderInterface down, ShaderInterface streak)
+    {
+        var stages = new[]
+        {
+            new PostStage("spikes.down1", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(0.5f), down, "uSrc"),
+            new PostStage("spikes.down2", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(0.25f), down, "uSrc"),
+            new PostStage("spikes.streak", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(0.25f), streak, "uSrc"),
+        };
+        chain = new PostChain(device, graph, input, stages, "spikes");
+    }
+
+    public void BuildPipelines(IGraphicsDevice device, ShaderProgramHandle downProgram, ShaderProgramHandle streakProgram)
+    {
+        chain.BuildPipelines((stage, surface) => device.CreatePipeline(new PipelineDescription(
+            stage.Name.EndsWith(".streak", StringComparison.Ordinal) ? streakProgram : downProgram, FullscreenPass.Layout,
+            PrimitiveTopology.Triangles, DepthState.Disabled, RasterizerState.NoCulling, new[] { BlendState.Disabled },
+            RenderTarget: surface), stage.Name));
+    }
+
+    /// <summary>Record the passes. Blades >= 3; rotation in radians; airyRadiusPx in full-resolution pixels; strength scales the amplitude.</summary>
+    public void Record(int blades, float rotation, float airyRadiusPx, float strength, float reachPx)
+    {
+        // Even N: N spikes on N/2 lines; odd N: 2N spikes on N lines. Spacing between lines is pi / lines either way.
+        var lines = blades % 2 == 0 ? blades / 2 : blades;
+        var spikes = 2 * lines;
+        var push = new byte[28];
+        BitConverter.TryWriteBytes(push.AsSpan(0), rotation + MathF.PI / blades);
+        BitConverter.TryWriteBytes(push.AsSpan(4), GlareFit.SpikeAmplitudeTotal / spikes * strength);
+        BitConverter.TryWriteBytes(push.AsSpan(8), airyRadiusPx / 4f);
+        BitConverter.TryWriteBytes(push.AsSpan(12), GlareFit.SpikeKnee);
+        BitConverter.TryWriteBytes(push.AsSpan(16), reachPx / 4f);
+        BitConverter.TryWriteBytes(push.AsSpan(20), lines);
+        BitConverter.TryWriteBytes(push.AsSpan(24), 64);
+        chain.Record((index, stage) => stage.Name.EndsWith(".streak", StringComparison.Ordinal) ? push : null);
+    }
+
+    public void Dispose() => chain.Dispose();
 }
 
 internal sealed class GaussianChains : IDisposable

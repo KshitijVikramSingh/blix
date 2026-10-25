@@ -1,0 +1,81 @@
+{
+ "rows": [
+  {
+   "blades": 5,
+   "spikes": 10,
+   "angles_deg": [
+    0.0,
+    36.0,
+    72.0,
+    108.0,
+    144.0,
+    180.0,
+    216.0,
+    252.0,
+    288.0,
+    324.0
+   ],
+   "slope": -1.9961156628523413,
+   "amplitude_per_spike": 0.017543066270440312,
+   "amplitude_total": 0.1754306627044031
+  },
+  {
+   "blades": 6,
+   "spikes": 6,
+   "angles_deg": [
+    29.999999999999996,
+    90.0,
+    150.0,
+    210.00000000000003,
+    270.0,
+    330.0
+   ],
+   "slope": -1.9711419444738105,
+   "amplitude_per_spike": 0.0281969823898362,
+   "amplitude_total": 0.1691818943390172
+  },
+  {
+   "blades": 7,
+   "spikes": 14,
+   "angles_deg": [
+    0.0,
+    25.749999999999996,
+    50.99999999999999,
+    77.25,
+    102.75000000000001,
+    129.0,
+    154.25,
+    180.0,
+    205.75,
+    231.00000000000003,
+    257.25,
+    282.74999999999994,
+    309.0,
+    334.25
+   ],
+   "slope": -2.17987983997455,
+   "amplitude_per_spike": 0.013401791942630196,
+   "amplitude_total": 0.18762508719682275
+  },
+  {
+   "blades": 8,
+   "spikes": 8,
+   "angles_deg": [
+    22.250000000000004,
+    67.75,
+    112.25,
+    157.75,
+    202.25,
+    247.75,
+    292.25,
+    337.75
+   ],
+   "slope": -2.0343311725851745,
+   "amplitude_per_spike": 0.019652689729652163,
+   "amplitude_total": 0.1572215178372173
+  }
+ ],
+ "amplitude_total_mean": 0.17236479051936507,
+ "knee_airy_radii": 1.5,
+ "note": "line density per spike = amplitude_total / spikes / r^2, r in Airy radii of the equal-area circle, from r = knee outward; measured on the FFT of a regular polygon aperture, 5 to 8 blades"
+}

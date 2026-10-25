@@ -362,6 +362,16 @@ tone-mapped values would not. `--pan deg/s` and `--shutter` drive it unattended;
 The blur sweep is the frame-to-frame turn times the shutter, so it is small at 60 Hz (a 90 deg/s pan at a 180 degree shutter
 sweeps 0.75 degrees): it needs a fast mouse flick or the pan slider to show.
 
+**Aperture-blade spikes** (`tmlab/spikes.py`, `results/spike_fit.json`, `tests/test_spikes.py`). The far-field PSF of a polygon
+aperture is the squared FFT of the polygon. Computed for 5 to 8 blades it has N spikes for even N and 2N for odd N, pointing
+along the edge normals, each falling as r^-2 (fitted slopes -1.97 to -2.18; the circle's smoothed profile falls as r^-3) with a
+total amplitude of about 0.17 split across the spikes whatever the blade count. `streak.frag` applies that: the scene at 1/4
+resolution sampled along each spike line (both sides, 64 geometric taps from 1.5 Airy radii out), weighted by the line density
+A / r^2, composited by adding. Two honest notes: the spikes are added on top of the circular diffraction tail, which double-counts
+part of the tail's energy (the slider absorbs it); and at the fitted amplitude they are invisible in the demo, because its sun is
+about 285x the sky where a real one is about 1e5x, so the default is x10 (8 to 12 read right by eye; `--spikes`, `--blades`). Rounded
+blades, aperture dirt and colour dispersion are not modelled.
+
 ## Not covered yet
 
 - Blix's curves are checked against the shipped constants, not against values produced by the C#/GLSL
