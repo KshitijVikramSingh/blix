@@ -16,6 +16,12 @@ namespace Blix.Demos.VulkanSponza;
 internal sealed partial class SponzaLoop
 {
     private bool visibleChanged = true;
+    // --screen-first: the first gather takes every texel on screen whose light the relit instant moved (the select's marks,
+    // texel_ratio.comp mode 2), not those whose own sun flipped alone -- the screen read the relit light (worse than the
+    // old sun's at a 20 deg change on Crytek Sponza) until the coarse sweep's copy ~40 s in (2026-10-25).
+    private bool screenFirst;
+    private bool ScreenFirstWaits => screenFirst && SetupInFrame && changedMarkedFrame >= 0
+        && framesRendered < changedMarkedFrame + Math.Max(1, device.MaxFramesInFlightCount) + 1;
     // The last sun's bit a texel, and the texels the image read as the sun turned (a bit a record each).
     private uint[]? sunBitsBefore, visibleAtTurn;
     // The texels the first gather took (a bit a record): the fine copy leaves them.
@@ -97,13 +103,19 @@ internal sealed partial class SponzaLoop
         var after = SunColumnBits();
         var mask = new uint[after.Length];
         long flipped = 0, visible = 0;
+        uint[]? moved = null;
+        if (screenFirst && changedMarkedFrame >= 0 && !changedBitsBuffer.Equals(default(GpuBufferHandle)))
+        {
+            moved = new uint[after.Length];
+            device.ReadMappedGpuBuffer(changedBitsBuffer, 0, MemoryMarshal.AsBytes(moved.AsSpan()));
+        }
         var ids = new List<uint>();
         for (var w = 0; w < mask.Length; w++)
         {
             var changed = before[w] ^ after[w];
             flipped += BitOperations.PopCount(changed);
             visible += BitOperations.PopCount(seen[w]);
-            var m = changed & seen[w];
+            var m = (changed | (moved is null ? 0u : moved[w])) & seen[w];
             mask[w] = m;
             while (m != 0)
             {
@@ -127,7 +139,7 @@ internal sealed partial class SponzaLoop
                     Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] visible and changed, level {l}: visible {byLevel[l, 0]:N0}, flipped {byLevel[l, 1]:N0}, lit before {byLevel[l, 2]:N0}"));
         }
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[VulkanSponza] visible and changed: {ids.Count:N0} texels on screen turned in or out of the sun (of {visible:N0} on screen, {flipped:N0} turned in all; picked in {clock.Elapsed.TotalMilliseconds:0} ms)."));
+            $"[VulkanSponza] visible and changed: {ids.Count:N0} texels on screen turned in or out of the sun{(moved is null ? "" : " or moved (--screen-first)")} (of {visible:N0} on screen, {flipped:N0} turned in all; picked in {clock.Elapsed.TotalMilliseconds:0} ms)."));
         if (ids.Count == 0) { StartBackgroundGather(); return; }
         var picked = ids.ToArray();
         // In place order (the far field's key), as the fine round's: the slices' lookups stay in the caches.

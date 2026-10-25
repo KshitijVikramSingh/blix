@@ -60,6 +60,7 @@ internal sealed partial class SponzaLoop
                 {
                     new("uRatio", new Vector4Uniform(new Vector4(live.Length, mode, RatioMax, first))),
                     new("uSelect", new Vector4Uniform(new Vector4(select ? sunChangeSelect : 0f, Luminance(EffectiveSunIrradiance), lastDarkBar, select && mode == 2 && PatchRankNow ? 1f : 0f))),
+                    new("uStart", new Vector4Uniform(new Vector4(OldStartNow ? 1f : 0f, 0f, 0f, 0f))),
                 },
                 Array.Empty<ShaderTextureBinding>(),
                 Buffers: new[]
@@ -108,6 +109,9 @@ internal sealed partial class SponzaLoop
     // change they were 0.167 against 0.126. --sun-change-fine-below DEG (10): the steps that small; --sun-change-select-fine:
     // every change.
     private bool sunChangeSelectFine;
+    // --old-start-below DEG (0: off): a step under it shows the old sun's landed light until gathered, not the relit.
+    private float oldStartBelow;
+    private bool OldStartNow => oldStartBelow > 0f && sunChangeStepDeg < oldStartBelow;
     private float sunChangeFineBelow = 10f, sunChangeStepDeg = 180f;
     private bool SelectFineNow => sunChangeSelectFine || sunChangeStepDeg < sunChangeFineBelow;
     private uint[] SelectFine(uint[] ids)

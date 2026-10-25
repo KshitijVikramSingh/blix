@@ -271,6 +271,10 @@ internal sealed partial class SponzaLoop
     {
         ChangeTimeDumps();
         StepPatchLayers();
+        // The in-frame instant layer writes the shown parts a chunk a frame before the ratio pass relights them: composed in
+        // between, the screen read the raw patch light ~1 s after each sun change (Crytek Sponza, filtered 0.15 -> 0.19,
+        // 2026-10-25). Held until the ratio pass (the step's end); a filter's ranges under way go on (they read the composed).
+        if (SetupInFrame && transferSetupStep == 2 && instantFirst > 0 && !ComposeUnderWay) return;
         if (!splitLight || !splitSkyUp) return;
         var sky = new Vector3(render.SkyStrength);
         var sun = EffectiveSunIrradiance;

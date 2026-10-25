@@ -15,6 +15,7 @@ layout(local_size_x = 64) in;
 layout(set = 0, binding = 0) uniform Ratio {
     vec4 uRatio;   // x live texels, y mode, z the largest ratio kept, w the first live texel of this dispatch
     vec4 uSelect;  // x T (0: off), y the sun's irradiance (luminance), z the dark bar (the error's floor); w 1: SunMoved too
+    vec4 uStart;   // x 1: mode 2 shows the landed light (the old sun's), the relit judged for the marks alone
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer LiveIds { uint liveIds[]; };
@@ -75,7 +76,10 @@ void main() {
             if (rel > u.uSelect.x) atomicOr(changedBits[id >> 5], 1u << (id & 31u));
             if (u.uSelect.w > 0.5) atomicOr(movedBytes[id >> 2], min(uint(rel * 64.0 + 0.5), 255u) << (8u * (id & 3u)));
         }
-        provenanceMark(id, 7u, true, false);   // the ratio relight
+        // --old-start-below DEG: a small step keeps the landed light as what shows until the gather -- at a 20 deg change on
+        // Crytek Sponza the screen read the relit light worse than the old (filtered 0.17-0.19 against 0.15, 2026-10-25).
+        if (u.uStart.x > 0.5 && u.uSelect.x > 0.0) texelSun[id].x = sunLanded[id];
+        else provenanceMark(id, 7u, true, false);   // the ratio relight
         ratioWords[id] = instantWord;
     }
 }

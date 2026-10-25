@@ -1319,7 +1319,9 @@ internal sealed partial class SponzaLoop
                 return;
             }
             // The in-frame instant layer: a chunk a frame, this step again until its last (ApplyPatchTexelsNow).
-            if (livePatchTexels && !ApplyPatchTexelsNow()) return;
+            if (transferSetupStep == 2) { if (livePatchTexels && !ApplyPatchTexelsNow()) return; transferSetupStep = 3; }
+            // --screen-first: the select's marks readable before the first gather takes the screen's moved texels.
+            if (ScreenFirstWaits) return;
             transferSetupStep = 0;
             transferSetupFor = new Vector3(float.NaN);
             if (!livePatchTexels) ApplyTransferNow();
