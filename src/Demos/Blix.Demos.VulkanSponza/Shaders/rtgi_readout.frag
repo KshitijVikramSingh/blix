@@ -18,6 +18,7 @@ layout(set = 0, binding = 0) uniform RtgiReadout {
     vec4 uCamera;        // xyz position
     vec4 uHalf;          // yz the full-res pixel of its 2x2
     vec4 uNearField;     // x the near field's radius (rtgi_cache.glsl's RTGI_NEAR); y 1: the gradient written
+    vec4 uContact;       // x 1: contact detail on; yz the ratio's clamp
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -28,13 +29,15 @@ layout(std430, set = 0, binding = 4) readonly buffer RtgiResolved { vec4 rtgiRes
 layout(std430, set = 0, binding = 5) readonly buffer RtgiFiltered { vec4 rtgiFiltered[]; };
 // The irradiance vector (rtgi_resolve.comp): its part along the surface is how the irradiance turns with the normal.
 layout(std430, set = 0, binding = 6) readonly buffer RtgiDirection { vec4 rtgiDirection[]; };
+// The far light's share of a cell's light (the third moment vec4's w, rtgi_resolve.comp).
+layout(std430, set = 0, binding = 7) readonly buffer RtgiMoments { vec4 rtgiMoments[]; };
 
 #define RTGI_KEYS(i) rtgiKeys[i]
 #define RTGI_NEAR u.uNearField.x
 #include "rtgi_cache.glsl"
 
 // Trilinear over the level's cells around p (their centres), w the weight found.
-vec4 readLevel(vec3 p, uint side, uint level, out float sky, out vec3 bvec) {
+vec4 readLevel(vec3 p, uint side, uint level, out float sky, out vec3 bvec, out float near, out float far) {
     float size = rtgiSize(level, u.uParams);
     vec3 f = p / size - 0.5;
     ivec3 c0 = ivec3(floor(f));
@@ -43,6 +46,8 @@ vec4 readLevel(vec3 p, uint side, uint level, out float sky, out vec3 bvec) {
     float w = 0.0;
     sky = 0.0;
     bvec = vec3(0.0);
+    near = 0.0;
+    far = 0.0;
     for (int k = 0; k < 8; k++) {
         ivec3 o = ivec3(k & 1, (k >> 1) & 1, k >> 2);
         uint s = rtgiFind(rtgiCellHash(c0 + o, level, side, u.uParams), u.uParams);
@@ -57,10 +62,34 @@ vec4 readLevel(vec3 p, uint side, uint level, out float sky, out vec3 bvec) {
         e += r0.rgb * wk;
         sky += r0.a * wk;
         bvec += rtgiDirection[s].xyz * wk;
+        near += rtgiDirection[s].w * wk;
+        far += rtgiMoments[3u * s + 2u].w * wk;
         w += wk;
     }
-    if (w > 0.0) { e /= w; sky /= w; bvec /= w; }
+    if (w > 0.0) { e /= w; sky /= w; bvec /= w; near /= w; far /= w; }
     return vec4(e, w);
+}
+
+// The contact cells around p (rtgi_contact_train.comp: a quarter of the level's size, its level 16 up), trilinear by what
+// each holds (full at 16): their near visibility, w the weight found.
+vec2 readContact(vec3 p, uint side, uint level) {
+    float size = 0.25 * rtgiSize(level, u.uParams);
+    vec3 f = p / size - 0.5;
+    ivec3 c0 = ivec3(floor(f));
+    vec3 t = f - vec3(c0);
+    float v = 0.0, w = 0.0;
+    for (int k = 0; k < 8; k++) {
+        ivec3 o = ivec3(k & 1, (k >> 1) & 1, k >> 2);
+        uint s = rtgiFind(rtgiCellHash(c0 + o, level + 16u, side, u.uParams), u.uParams);
+        if (s == 0xFFFFFFFFu) continue;
+        float held = rtgiResolved[2u * s + 1u].y;
+        if (held < 0.5) continue;
+        vec3 b = mix(1.0 - t, t, vec3(o));
+        float wk = b.x * b.y * b.z * clamp(held / 16.0, 1.0 / 16.0, 1.0);
+        v += rtgiDirection[s].w * wk;
+        w += wk;
+    }
+    return vec2(w > 0.0 ? v / w : 0.0, w);
 }
 
 void main() {
@@ -83,15 +112,29 @@ void main() {
     float t = lf - float(level);
     float sky0, sky1;
     vec3 b0, b1;
-    vec4 e0 = readLevel(p, side, level, sky0, b0);
-    vec4 e1 = level < top ? readLevel(p, side, level + 1u, sky1, b1) : vec4(0.0);
+    float near0, near1, far0, far1;
+    vec4 e0 = readLevel(p, side, level, sky0, b0, near0, far0);
+    vec4 e1 = level < top ? readLevel(p, side, level + 1u, sky1, b1, near1, far1) : vec4(0.0);
     vec4 e;
-    float sky;
+    float sky, nearCell, farShare;
     vec3 bv;
-    if (e0.w >= 0.05 && e1.w >= 0.05) { e = vec4(mix(e0.rgb, e1.rgb, t), 1.0); sky = mix(sky0, sky1, t); bv = mix(b0, b1, t); }
-    else if (e0.w >= 0.05) { e = e0; sky = sky0; bv = b0; }
-    else if (e1.w >= 0.05) { e = e1; sky = sky1; bv = b1; }
-    else e = readLevel(p, side, min(level + 2u, top), sky, bv);
+    if (e0.w >= 0.05 && e1.w >= 0.05) { e = vec4(mix(e0.rgb, e1.rgb, t), 1.0); sky = mix(sky0, sky1, t); bv = mix(b0, b1, t); nearCell = mix(near0, near1, t); farShare = mix(far0, far1, t); }
+    else if (e0.w >= 0.05) { e = e0; sky = sky0; bv = b0; nearCell = near0; farShare = far0; }
+    else if (e1.w >= 0.05) { e = e1; sky = sky1; bv = b1; nearCell = near1; farShare = far1; }
+    else e = readLevel(p, side, min(level + 2u, top), sky, bv, nearCell, farShare);
+    // Contact detail: the cell's light split into what came from past the contact radius (its far share) and what from
+    // nearer, each scaled by its own visibility at the pixel against the cell's -- the contact cells' near visibility over
+    // the light cells' (both the share of rays past the radius, cosine-weighted, by rays: rtgi_train.comp,
+    // rtgi_contact_train.comp). A pixel more enclosed than its cell loses far light and gains the near surfaces' bounce.
+    // Scaled whole by the visibility ratio, the creases read 6% dark (a crease's occluder lights it too); GTAO in either
+    // place measured something else (18% bright), 2026-10-26.
+    if (e.w > 0.0 && u.uContact.x > 0.5) {
+        vec2 vc = readContact(p, side, level);
+        if (vc.y >= 0.05) {
+            float r = farShare * (vc.x + 0.02) / (nearCell + 0.02) + (1.0 - farShare) * (1.02 - vc.x) / (1.02 - nearCell);
+            e.rgb *= clamp(r, u.uContact.y, u.uContact.z);
+        }
+    }
     outIncident = e.w > 0.0 ? vec4(e.rgb, sky) : vec4(0.0, 0.0, 0.0, 1.0);
     // How the irradiance turns with the normal, for the lit pass to carry it onto the normal-mapped one (its gradient,
     // luminance per unit of normal along the surface). Radiance taken as linear in direction, L = a + b.w, the irradiance

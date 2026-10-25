@@ -12,9 +12,12 @@ namespace Blix.Demos.VulkanSponza;
 // over the held frames. A sun turn starts it over, as it cuts the cache's history (SponzaLoop.Rtgi.cs).
 internal sealed partial class SponzaLoop
 {
-    private bool rtgiTemporal;
-    private float rtgiTemporalFrames = 16f;
-    private GraphResourceHandle rtgiRawIncidentHandle, rtgiRawGradientHandle, rtgiStateHandle, rtgiHistoryHandle, rtgiHistoryStateHandle;
+    // On by default (--rtgi-no-temporal: off). Its slow history clamped into a fast one's box (NRD's anti-lag):
+    // --rtgi-temporal-fast frames (6), --rtgi-temporal-clamp standard deviations (2; 0: none).
+    private bool rtgiTemporal = true;
+    private float rtgiTemporalFrames = 16f, rtgiTemporalFast = 6f, rtgiTemporalClamp = 2f;
+    private GraphResourceHandle rtgiRawIncidentHandle, rtgiRawGradientHandle, rtgiStateHandle, rtgiHistoryHandle, rtgiHistoryStateHandle,
+        rtgiFastHandle, rtgiFastHistoryHandle;
     private ShaderInterface rtgiTemporalInterface = null!, rtgiHistoryInterface = null!;
     private PassHandle lightingUpsampleRawPassHandle, rtgiTemporalPassHandle, rtgiHistoryPassHandle;
     private PipelineHandle lightingUpsampleRawPipeline, rtgiTemporalPipeline, rtgiHistoryPipeline;
@@ -26,8 +29,11 @@ internal sealed partial class SponzaLoop
 
     private void ParseRtgiTemporal(Blix.Core.AppArgs args)
     {
-        rtgiTemporal = args.Flag("rtgi-temporal");
+        if (args.Flag("rtgi-no-temporal")) rtgiTemporal = false;
+        args.Flag("rtgi-temporal");   // the old opt-in, now the default
         if (args.Float("rtgi-temporal-frames") is { } f) rtgiTemporalFrames = MathF.Max(1f, f);
+        if (args.Float("rtgi-temporal-fast") is { } ff) rtgiTemporalFast = MathF.Max(1f, ff);
+        if (args.Float("rtgi-temporal-clamp") is { } tc) rtgiTemporalClamp = MathF.Max(0f, tc);
     }
 
     // Setup, after lighting-upsample: the raw upsample, the accumulation and the copy.
@@ -38,6 +44,8 @@ internal sealed partial class SponzaLoop
         rtgiStateHandle = graph.ColorTarget("rtgi-temporal-state", TextureFormat.Rgba16F, fullSize);
         rtgiHistoryHandle = graph.ColorTarget("rtgi-history", TextureFormat.Rgba16F, fullSize);
         rtgiHistoryStateHandle = graph.ColorTarget("rtgi-history-state", TextureFormat.Rgba16F, fullSize);
+        rtgiFastHandle = graph.ColorTarget("rtgi-fast", TextureFormat.Rgba16F, fullSize);
+        rtgiFastHistoryHandle = graph.ColorTarget("rtgi-fast-history", TextureFormat.Rgba16F, fullSize);
         lightingUpsampleRawPassHandle = graph.GraphicsPass("lighting-upsample-raw")
             .Target(rtgiRawIncidentHandle, LoadOp.Clear, StoreOp.Store)
             .Target(rtgiRawGradientHandle, LoadOp.Clear, StoreOp.Store)
@@ -48,14 +56,16 @@ internal sealed partial class SponzaLoop
             .Target(incidentHandle, LoadOp.Clear, StoreOp.Store)
             .Target(incidentGradientHandle, LoadOp.Clear, StoreOp.Store)
             .Target(rtgiStateHandle, LoadOp.Clear, StoreOp.Store)
+            .Target(rtgiFastHandle, LoadOp.Clear, StoreOp.Store)
             .Read(rtgiRawIncidentHandle).Read(rtgiRawGradientHandle).Read(SampleableSceneDepth)
-            .ReadHistory(rtgiHistoryHandle).ReadHistory(rtgiHistoryStateHandle)
+            .ReadHistory(rtgiHistoryHandle).ReadHistory(rtgiHistoryStateHandle).ReadHistory(rtgiFastHistoryHandle)
             .Shader(rtgiTemporalInterface).Handle;
         rtgiHistoryInterface = reflect("present.vert", "rtgi_history.frag");
         rtgiHistoryPassHandle = graph.GraphicsPass("rtgi-history")
             .Target(rtgiHistoryHandle, LoadOp.Clear, StoreOp.Store)
             .Target(rtgiHistoryStateHandle, LoadOp.Clear, StoreOp.Store)
-            .Read(incidentHandle).Read(rtgiStateHandle)
+            .Target(rtgiFastHistoryHandle, LoadOp.Clear, StoreOp.Store)
+            .Read(incidentHandle).Read(rtgiStateHandle).Read(rtgiFastHandle)
             .Shader(rtgiHistoryInterface).Handle;
     }
 
@@ -68,11 +78,11 @@ internal sealed partial class SponzaLoop
         rtgiTemporalPipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
                 presentVertSpv, File.ReadAllBytes(Path.Combine(shaderDir, "rtgi_temporal.frag.spv")), rtgiTemporalInterface, "rtgi_temporal")),
             VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
-            new[] { BlendState.Disabled, BlendState.Disabled, BlendState.Disabled }, rtgiTemporalPassHandle, "rtgi_temporal");
+            new[] { BlendState.Disabled, BlendState.Disabled, BlendState.Disabled, BlendState.Disabled }, rtgiTemporalPassHandle, "rtgi_temporal");
         rtgiHistoryPipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
                 presentVertSpv, File.ReadAllBytes(Path.Combine(shaderDir, "rtgi_history.frag.spv")), rtgiHistoryInterface, "rtgi_history")),
             VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
-            new[] { BlendState.Disabled, BlendState.Disabled }, rtgiHistoryPassHandle, "rtgi_history");
+            new[] { BlendState.Disabled, BlendState.Disabled, BlendState.Disabled }, rtgiHistoryPassHandle, "rtgi_history");
     }
 
     // After the raw upsample: accumulate into the lit pass's targets, then copy for the next frame.
@@ -93,6 +103,7 @@ internal sealed partial class SponzaLoop
                 new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
                 new ShaderTextureBinding("uHistory", graph.GetColorTexture(rtgiHistoryHandle)),
                 new ShaderTextureBinding("uHistoryState", graph.GetColorTexture(rtgiHistoryStateHandle)),
+                new ShaderTextureBinding("uFastHistory", graph.GetColorTexture(rtgiFastHistoryHandle)),
             },
             pushConstants: null,
             uniforms: new ShaderUniform[]
@@ -101,7 +112,7 @@ internal sealed partial class SponzaLoop
                 new("uPrevViewProj", new Matrix4x4Uniform(prevViewProj)),
                 new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, 0f))),
                 new("uPrevCamera", new Vector4Uniform(new Vector4(prevCamera, 0f))),
-                new("uParams", new Vector4Uniform(new Vector4(rtgiTemporalFrames, historyOk ? 1f : 0f, 0f, 0f))),
+                new("uParams", new Vector4Uniform(new Vector4(rtgiTemporalFrames, historyOk ? 1f : 0f, rtgiTemporalFast, rtgiTemporalClamp))),
             }));
         graph.Pass(rtgiHistoryPassHandle, scope => fullscreen.Draw(
             scope, rtgiHistoryPipeline,
@@ -109,6 +120,7 @@ internal sealed partial class SponzaLoop
             {
                 new ShaderTextureBinding("uIncident", graph.GetColorTexture(incidentHandle)),
                 new ShaderTextureBinding("uState", graph.GetColorTexture(rtgiStateHandle)),
+                new ShaderTextureBinding("uFast", graph.GetColorTexture(rtgiFastHandle)),
             },
             pushConstants: null,
             uniforms: new ShaderUniform[] { new("uUnused", new Vector4Uniform(Vector4.Zero)) }));

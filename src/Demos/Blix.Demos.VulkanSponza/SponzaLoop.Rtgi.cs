@@ -65,7 +65,13 @@ internal sealed partial class SponzaLoop
     // rtgi_screen.frag) in place of the cache read at its cell. --rtgi-screen-taps N reservoirs a pixel (8) within
     // --rtgi-screen-radius tiles (2); --rtgi-reuse-max the count a reservoir keeps (20).
     private bool rtgiScreen;
-    private int rtgiScreenTaps = 8, rtgiScreenRadius = 2;
+    // With the reuse tested by rays (rtgi_spatial.comp) the screen gather keeps to its tile and the nearest: 4 within 1.
+    private int rtgiScreenTaps = 4, rtgiScreenRadius = 1;
+    private ShaderInterface rtgiSpatialInterface = null!;
+    private PassHandle rtgiSpatialPassHandle;
+    private PipelineHandle rtgiSpatialPipeline;
+    private GpuBufferHandle[] rtgiProposals = Array.Empty<GpuBufferHandle>(), rtgiSpatialOrigins = Array.Empty<GpuBufferHandle>(),
+        rtgiSpatialDirs = Array.Empty<GpuBufferHandle>(), rtgiSpatialOccluded = Array.Empty<GpuBufferHandle>();
     private float rtgiReuseMax = 20f;
     private ShaderInterface rtgiReservoirInterface = null!, rtgiScreenInterface = null!;
     private PassHandle rtgiReservoirPassHandle, rtgiScreenPassHandle;
@@ -74,7 +80,7 @@ internal sealed partial class SponzaLoop
     // The view-projections the last two frames' points were drawn in, and the grid this frame's reservoirs are laid out in.
     private Matrix4x4 rtgiViewProj1, rtgiViewProj2, rtgiGridViewProj;
     private (int X, int Y) rtgiGrid;
-    private int rtgiReservoirCur = -1;
+    private int rtgiReservoirCur = -1, rtgiSpatialTiles;
     private ShaderInterface rtgiRaysInterface = null!, rtgiTrainInterface = null!, rtgiResolveInterface = null!, rtgiReadoutInterface = null!;
     private PassHandle rtgiRaysPassHandle, rtgiTrainPassHandle, rtgiResolvePassHandle, rtgiReadoutPassHandle;
     private PipelineHandle rtgiRaysPipeline, rtgiTrainPipeline, rtgiResolvePipeline, rtgiReadoutPipeline;
@@ -100,7 +106,21 @@ internal sealed partial class SponzaLoop
     // cell taking the cut for a turn when next trained (rtgi_resolve.comp). A point touches at most three cells.
     private GpuBufferHandle[] rtgiDirtyBufs = Array.Empty<GpuBufferHandle>();
     private uint rtgiSunEpoch;
-    private int RtgiDirtyRoom => RtgiPoints * 3;
+    private int RtgiDirtyRoom => RtgiPoints * 3 + (rtgiContact ? rtgiContactRays : 0);
+    // S4 contact detail (rtgi_contact_rays.comp, rtgi_contact_train.comp, rtgi_readout.frag): one half-res pixel in
+    // --rtgi-contact-every (8) a frame, where its cell's near visibility is under 0.97, casts a short ray of
+    // --rtgi-contact-radius (0.25 m), at most --rtgi-contact-rays (65,536) a frame, into contact cells a quarter the size;
+    // the readout splits the light into far and near and scales each by its visibility against the cell's, clamped to
+    // [0.3, 1.25]. Off by default (--rtgi-contact): measured slightly worse than without -- the gate's seams 0.063 / 0.975
+    // against 0.043 / 1.018, Cornell's spotting 0.99% against 0.90% (2026-10-26).
+    private bool rtgiContact;
+    private int rtgiContactRays = 65_536, rtgiContactEvery = 8;
+    private float rtgiContactRadius = 0.25f;
+    private ShaderInterface rtgiContactRaysInterface = null!, rtgiContactTrainInterface = null!;
+    private PassHandle rtgiContactRaysPassHandle, rtgiContactTrainPassHandle;
+    private PipelineHandle rtgiContactRaysPipeline, rtgiContactTrainPipeline;
+    private GpuBufferHandle[] rtgiContactCount = Array.Empty<GpuBufferHandle>(), rtgiContactOrigins = Array.Empty<GpuBufferHandle>(),
+        rtgiContactDirs = Array.Empty<GpuBufferHandle>(), rtgiContactPoints = Array.Empty<GpuBufferHandle>(), rtgiContactOccluded = Array.Empty<GpuBufferHandle>();
     private ShaderInterface rtgiEvictInterface = null!;
     private PassHandle rtgiEvictPassHandle;
     private PipelineHandle rtgiEvictPipeline;
@@ -143,6 +163,11 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-guide") is { } gd) rtgiGuide = Math.Clamp(gd, 0f, 0.95f);
         if (args.Float("rtgi-guide-min") is { } gm) rtgiGuideMin = MathF.Max(1f, gm);
         rtgiNoGradient = args.Flag("rtgi-no-gradient");
+        if (args.Flag("rtgi-contact")) rtgiContact = true;
+        if (args.Flag("rtgi-no-contact")) rtgiContact = false;
+        if (args.Int("rtgi-contact-rays") is { } cr) rtgiContactRays = Math.Max(1, cr);
+        if (args.Int("rtgi-contact-every") is { } ce) rtgiContactEvery = Math.Max(1, ce);
+        if (args.Float("rtgi-contact-radius") is { } crad) rtgiContactRadius = MathF.Max(0.01f, crad);
         if (args.Float("rtgi-parent") is { } pw) rtgiParentWeight = MathF.Max(0f, pw);
         rtgiScreen = args.Flag("rtgi-screen");
         if (rtgiScreen) rtgi = true;
@@ -161,6 +186,8 @@ internal sealed partial class SponzaLoop
     {
         rtgiTrainInterface = reflect("rtgi_train.comp");
         rtgiTrainPassHandle = graph.ComputePass("rtgi-train").Shader(rtgiTrainInterface).Handle;
+        rtgiContactTrainInterface = reflect("rtgi_contact_train.comp");
+        rtgiContactTrainPassHandle = graph.ComputePass("rtgi-contact-train").Shader(rtgiContactTrainInterface).Handle;
         rtgiResolveInterface = reflect("rtgi_resolve.comp");
         rtgiResolvePassHandle = graph.ComputePass("rtgi-resolve").Shader(rtgiResolveInterface).Handle;
         rtgiFilterInterface = reflect("rtgi_filter.comp");
@@ -169,8 +196,13 @@ internal sealed partial class SponzaLoop
         rtgiEvictPassHandle = graph.ComputePass("rtgi-evict").Shader(rtgiEvictInterface).Handle;
         rtgiReservoirInterface = reflect("rtgi_reservoir.comp");
         rtgiReservoirPassHandle = graph.ComputePass("rtgi-reservoir").Shader(rtgiReservoirInterface).Handle;
+        rtgiSpatialInterface = reflect("rtgi_spatial.comp");
+        rtgiSpatialPassHandle = graph.ComputePass("rtgi-spatial").Shader(rtgiSpatialInterface).Handle;
         rtgiRaysInterface = reflect("rtgi_rays.comp");
         rtgiRaysPassHandle = graph.ComputePass("rtgi-rays").Shader(rtgiRaysInterface)
+            .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
+        rtgiContactRaysInterface = reflect("rtgi_contact_rays.comp");
+        rtgiContactRaysPassHandle = graph.ComputePass("rtgi-contact-rays").Shader(rtgiContactRaysInterface)
             .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
     }
 
@@ -203,12 +235,15 @@ internal sealed partial class SponzaLoop
         rtgiResolvePipeline = Compute("rtgi_resolve", rtgiResolveInterface);
         rtgiEvictPipeline = Compute("rtgi_evict", rtgiEvictInterface);
         rtgiFilterPipeline = Compute("rtgi_filter", rtgiFilterInterface);
+        rtgiContactRaysPipeline = Compute("rtgi_contact_rays", rtgiContactRaysInterface);
+        rtgiContactTrainPipeline = Compute("rtgi_contact_train", rtgiContactTrainInterface);
         rtgiRaysPipeline = Compute("rtgi_rays", rtgiRaysInterface);
         rtgiReadoutPipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
                 presentVertSpv, File.ReadAllBytes(Path.Combine(shaderDir, "rtgi_readout.frag.spv")), rtgiReadoutInterface, "rtgi_readout")),
             VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
             new[] { BlendState.Disabled, BlendState.Disabled }, rtgiReadoutPassHandle, "rtgi_readout");
         rtgiReservoirPipeline = Compute("rtgi_reservoir", rtgiReservoirInterface);
+        rtgiSpatialPipeline = Compute("rtgi_spatial", rtgiSpatialInterface);
         rtgiScreenPipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
                 presentVertSpv, File.ReadAllBytes(Path.Combine(shaderDir, "rtgi_screen.frag.spv")), rtgiScreenInterface, "rtgi_screen")),
             VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
@@ -231,16 +266,31 @@ internal sealed partial class SponzaLoop
             rtgiOccludedBuf = Two(n * 4, "occluded");
             rtgiRequestBufs = Enumerable.Range(0, 2).Select(s => Own(device.CreateGpuBuffer(16 + Math.Max(1, rtgiHitPoints) * 32, new byte[16 + Math.Max(1, rtgiHitPoints) * 32], $"sponza.rtgi.requests{s}"))).ToArray();
             rtgiKeys = Own(device.CreateGpuBuffer(RtgiSlots * 4, new byte[RtgiSlots * 4], "sponza.rtgi.keys"));
-            rtgiAccum = Own(device.CreateGpuBuffer(RtgiSlots * 48, new byte[RtgiSlots * 48], "sponza.rtgi.accum"));
+            rtgiAccum = Own(device.CreateGpuBuffer(RtgiSlots * 52, new byte[RtgiSlots * 52], "sponza.rtgi.accum"));
             rtgiDirection = Own(device.CreateGpuBuffer(RtgiSlots * 16, new byte[RtgiSlots * 16], "sponza.rtgi.direction"));
             rtgiResolved = Own(device.CreateGpuBuffer(RtgiSlots * 32, new byte[RtgiSlots * 32], "sponza.rtgi.resolved"));
             rtgiMoments = Own(device.CreateGpuBuffer(RtgiSlots * 48, new byte[RtgiSlots * 48], "sponza.rtgi.moments"));
             rtgiStamps = Own(device.CreateGpuBuffer(RtgiSlots * 8, new byte[RtgiSlots * 8], "sponza.rtgi.stamps"));
             rtgiCells = Own(device.CreateGpuBuffer(RtgiSlots * 16, new byte[RtgiSlots * 16], "sponza.rtgi.cells"));
+            GpuBufferHandle[] Pair(int bytes, string name) =>
+                Enumerable.Range(0, 2).Select(s => Own(device.CreateGpuBuffer(bytes, new byte[bytes], $"sponza.rtgi.contact-{name}{s}"))).ToArray();
+            rtgiContactCount = Pair(16, "count");
+            rtgiContactOrigins = Pair(rtgiContactRays * 16, "origins");
+            rtgiContactDirs = Pair(rtgiContactRays * 16, "dirs");
+            rtgiContactPoints = Pair(rtgiContactRays * 32, "points");
+            rtgiContactOccluded = Pair(rtgiContactRays * 4, "occluded");
             rtgiFiltered = Own(device.CreateGpuBuffer(RtgiSlots * 16, new byte[RtgiSlots * 16], "sponza.rtgi.filtered"));
             rtgiDirtyBufs = Enumerable.Range(0, 2).Select(s => Own(device.CreateGpuBuffer(16 + RtgiDirtyRoom * 4, new byte[16 + RtgiDirtyRoom * 4], $"sponza.rtgi.dirty{s}"))).ToArray();
             if (rtgiScreen)
-                rtgiReservoirs = Enumerable.Range(0, 2).Select(s => Own(device.CreateGpuBuffer(rtgiTiles * 64, new byte[rtgiTiles * 64], $"sponza.rtgi.reservoirs{s}"))).ToArray();
+            {
+                GpuBufferHandle[] Twin(int bytes, string name) =>
+                    Enumerable.Range(0, 2).Select(s => Own(device.CreateGpuBuffer(bytes, new byte[bytes], $"sponza.rtgi.{name}{s}"))).ToArray();
+                rtgiReservoirs = Twin(rtgiTiles * 64, "reservoirs");
+                rtgiProposals = Twin(rtgiTiles * 48, "proposals");
+                rtgiSpatialOrigins = Twin(rtgiTiles * 16, "spatial-origins");
+                rtgiSpatialDirs = Twin(rtgiTiles * 16, "spatial-dirs");
+                rtgiSpatialOccluded = Twin(rtgiTiles * 4, "spatial-occluded");
+            }
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] rtgi: {rtgiTiles:N0} visible points and {rtgiHitPoints:N0} from last frame's hits a frame; cache {RtgiSlots:N0} slots ({RtgiSlots * 68 / 1048576.0:0} MB), cells {rtgiCell:0.###} m + {rtgiCellGrow:0.###} per metre, {rtgiHistory:0} samples held, untrained cells emptied after {rtgiMaxAge:0} frames."));
         }
@@ -260,7 +310,7 @@ internal sealed partial class SponzaLoop
                     new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, n))),
                     new("uSun", new Vector4Uniform(new Vector4(towardSun, 1f))),
                     new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 0f))),
-                    new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, 0f, 0f, 0f))),
+                    new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, rtgiContactRadius, 0f, 0f))),
                     new("uClamp", new Vector4Uniform(new Vector4(rtgiClampSigma, frameNumber, RtgiDirtyRoom, 0f))),
                     new("uTrain", new Vector4Uniform(new Vector4(rtgiCountUnknown ? 1f : 0f, rtgiNoCoarse ? 1f : 0f, rtgiBackfaceLit ? 1f : 0f, rtgiRequests ? rtgiHitPoints : 0f))),
                 },
@@ -280,6 +330,29 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("RtgiDirty", rtgiDirtyBufs[cur]),
                     new ShaderBufferBinding("RtgiCells", rtgiCells),
                     new ShaderBufferBinding("RtgiFiltered", rtgiFiltered),
+                }));
+        // Last frame's contact rays into the contact cells (S4), listed for the resolve too.
+        if (rtgiContact)
+            graph.Dispatch(rtgiContactTrainPassHandle, new DispatchCommand(rtgiContactTrainPipeline, (rtgiContactRays + 63) / 64, 1, 1,
+                new ShaderUniform[]
+                {
+                    new("uParams", new Vector4Uniform(RtgiParams)),
+                    new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, 0f))),
+                    new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, 0f, 0f, 0f))),
+                    new("uList", new Vector4Uniform(new Vector4(frameNumber, RtgiDirtyRoom, rtgiContactRays, 0f))),
+                },
+                Array.Empty<ShaderTextureBinding>(),
+                Buffers: new[]
+                {
+                    new ShaderBufferBinding("RtgiKeys", rtgiKeys),
+                    new ShaderBufferBinding("RtgiAccum", rtgiAccum),
+                    new ShaderBufferBinding("RtgiStamps", rtgiStamps),
+                    new ShaderBufferBinding("RtgiDirty", rtgiDirtyBufs[cur]),
+                    new ShaderBufferBinding("RtgiCells", rtgiCells),
+                    new ShaderBufferBinding("RtgiContactCount", rtgiContactCount[prev]),
+                    new ShaderBufferBinding("RtgiContactPoints", rtgiContactPoints[prev]),
+                    new ShaderBufferBinding("RtgiContactOccluded", rtgiContactOccluded[prev]),
+                    new ShaderBufferBinding("RtgiNextContactCount", rtgiContactCount[cur]),
                 }));
         // The cells trained this frame (the list's room dispatched; past its count each thread returns).
         graph.Dispatch(rtgiResolvePassHandle, new DispatchCommand(rtgiResolvePipeline, (RtgiDirtyRoom + 63) / 64, 1, 1,
@@ -348,6 +421,7 @@ internal sealed partial class SponzaLoop
                     new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 0f))),
                     new("uGrid", new Vector4Uniform(new Vector4(rtgiGrid.X, rtgiGrid.Y, width, height))),
                     new("uReuse", new Vector4Uniform(new Vector4(rtgiReuseMax, sunTurned ? 1f : 0f, rtgiFrameCount % (1u << 24), rtgiTraced > 1 && rtgiReuseMax > 0f ? 1f : 0f))),
+                    new("uSpatialMerge", new Vector4Uniform(new Vector4(rtgiTraced > 2 ? 1f : 0f, sunTurned ? 1f : 0f, 0f, 0f))),
                 },
                 new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
                 Buffers: new[]
@@ -359,7 +433,26 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("RtgiResolved", rtgiResolved),
                     new ShaderBufferBinding("RtgiPrevReservoirs", rtgiReservoirs[prev]),
                     new ShaderBufferBinding("RtgiReservoirs", rtgiReservoirs[cur]),
+                    new ShaderBufferBinding("RtgiProposals", rtgiProposals[prev]),
+                    new ShaderBufferBinding("RtgiSpatialOccluded", rtgiSpatialOccluded[prev]),
                 }));
+            // Each tile's proposal from a neighbour, its ray cast in this frame's group, merged next frame where it arrived.
+            graph.Dispatch(rtgiSpatialPassHandle, new DispatchCommand(rtgiSpatialPipeline, (tiles + 63) / 64, 1, 1,
+                new ShaderUniform[]
+                {
+                    new("uGrid", new Vector4Uniform(new Vector4(rtgiGrid.X, rtgiGrid.Y, tiles, rtgiFrameCount % (1u << 24)))),
+                    new("uSpatial", new Vector4Uniform(new Vector4(3f, rayReach, rtgiReuseMax, 0f))),
+                    new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, 0f))),
+                },
+                Array.Empty<ShaderTextureBinding>(),
+                Buffers: new[]
+                {
+                    new ShaderBufferBinding("RtgiReservoirs", rtgiReservoirs[cur]),
+                    new ShaderBufferBinding("RtgiProposals", rtgiProposals[cur]),
+                    new ShaderBufferBinding("RtgiSpatialOrigins", rtgiSpatialOrigins[cur]),
+                    new ShaderBufferBinding("RtgiSpatialDirs", rtgiSpatialDirs[cur]),
+                }));
+            rtgiSpatialTiles = tiles;
             rtgiReservoirCur = cur;
             rtgiGridViewProj = rtgiViewProj1;
         }
@@ -399,6 +492,45 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiDirection", rtgiDirection),
             }));
 
+        // This frame's contact rays (S4), into the same Metal group.
+        var (halfW, halfH) = HalfLightingSize(width, height);
+        if (rtgiContact)
+            graph.Dispatch(rtgiContactRaysPassHandle, new DispatchCommand(rtgiContactRaysPipeline, (halfW + 7) / 8, (halfH + 7) / 8, 1,
+                new ShaderUniform[]
+                {
+                    new("uInvViewProj", new Matrix4x4Uniform(invViewProj)),
+                    new("uSize", new Vector4Uniform(new Vector4(width, height, halfW, halfH))),
+                    new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, 0f))),
+                    new("uParams", new Vector4Uniform(RtgiParams)),
+                    new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, rtgiContactRadius, 0f, 0f))),
+                    new("uContact", new Vector4Uniform(new Vector4(rtgiContactEvery, rtgiContactRays, rtgiFrameCount % (1u << 24), 0.97f))),
+                },
+                new[]
+                {
+                    new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
+                    new ShaderTextureBinding("uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
+                },
+                Buffers: new[]
+                {
+                    new ShaderBufferBinding("RtgiKeys", rtgiKeys),
+                    new ShaderBufferBinding("RtgiResolved", rtgiResolved),
+                    new ShaderBufferBinding("RtgiDirection", rtgiDirection),
+                    new ShaderBufferBinding("RtgiContactCount", rtgiContactCount[cur]),
+                    new ShaderBufferBinding("RtgiContactOrigins", rtgiContactOrigins[cur]),
+                    new ShaderBufferBinding("RtgiContactDirs", rtgiContactDirs[cur]),
+                    new ShaderBufferBinding("RtgiContactPoints", rtgiContactPoints[cur]),
+                }));
+        var contactCount = rtgiContactCount[cur];
+        var contactOrigins = rtgiContactOrigins[cur];
+        var contactDirs = rtgiContactDirs[cur];
+        var contactOccluded = rtgiContactOccluded[cur];
+        var contact = rtgiContact;
+        var spatial = rtgiScreen && rtgiSpatialTiles > 0;
+        var spatialTiles = rtgiSpatialTiles;
+        var spatialOrigins = spatial ? rtgiSpatialOrigins[cur] : default;
+        var spatialDirs = spatial ? rtgiSpatialDirs[cur] : default;
+        var spatialOccluded = spatial ? rtgiSpatialOccluded[cur] : default;
+        var contactRoom = rtgiContactRays;
         var rays = rtgiRaysBuf[cur];
         var hits = rtgiHitsBuf[cur];
         var origins = rtgiOriginsBuf[cur];
@@ -408,6 +540,10 @@ internal sealed partial class SponzaLoop
         {
             t.EncodeTrace(sync, rays, 0, hits, 0, n, seed);
             t.EncodeShadow(sync, origins, occluded, 0, n, towardSun, seed, statSlot: 3);
+            if (contact) t.EncodeShadow(sync, contactOrigins, contactOccluded, 0, contactRoom, towardSun, seed ^ 0x51ED270Bu, statSlot: 3,
+                limit: contactCount, directions: contactDirs);
+            if (spatial) t.EncodeShadow(sync, spatialOrigins, spatialOccluded, 0, spatialTiles, towardSun, seed ^ 0x2C1B3C6Du, statSlot: 3,
+                directions: spatialDirs);
         }
         if (!TracerGroupsOn) graph.External(rtgiProbeTracePassHandle, sync => tracer.EncodeGroup(sync, () => Encode(sync, tracer)));
         else DeferTracerBatch(Encode);
@@ -463,11 +599,13 @@ internal sealed partial class SponzaLoop
                 new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, 0f))),
                 new("uHalf", new Vector4Uniform(new Vector4(0f, sub.X, sub.Y, 0f))),
                 new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, rtgiNoGradient ? 0f : 1f, 0f, 0f))),
+                new("uContact", new Vector4Uniform(new Vector4(rtgiContact ? 1f : 0f, 0.3f, 1.25f, 0f))),
             },
             buffers: new[]
             {
                 new ShaderBufferBinding("RtgiKeys", rtgiKeys), new ShaderBufferBinding("RtgiResolved", rtgiResolved),
                 new ShaderBufferBinding("RtgiFiltered", rtgiFiltered), new ShaderBufferBinding("RtgiDirection", rtgiDirection),
+                new ShaderBufferBinding("RtgiMoments", rtgiMoments),
             }));
     }
 

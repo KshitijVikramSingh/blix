@@ -15,7 +15,7 @@ layout(set = 0, binding = 0) uniform RtgiTrain {
     vec4 uCamera;        // xyz position; w points
     vec4 uSun;           // xyz toward the sun; w the sky cube's lod
     vec4 uSunIrradiance; // rgb
-    vec4 uNearField;     // x the near field's radius (rtgi_cache.glsl's RTGI_NEAR)
+    vec4 uNearField;     // x the near field's radius (rtgi_cache.glsl's RTGI_NEAR); y the contact radius (m)
     vec4 uClamp;         // x > 0: a sample's luminance capped at its cell's mean + x standard deviations (once it holds 32);
                          // y the frame's number (from 1); z the dirty list's room
     vec4 uTrain;         // x 1: a landing cell holding nothing counts as dark (else no sample); y 1: no coarser cell for it;
@@ -90,6 +90,7 @@ vec4 irradianceAt(vec3 q, vec3 nq, out bool fine) {
 
 vec4 dither;
 vec3 sampleDir;
+float nearWord;   // this sample's near visibility, weighted (256ths): it left past the contact radius
 
 void add(uint s, vec3 e, bool counted, bool sky, bool sunTraced, bool sunLit) {
     if (s == 0xFFFFFFFFu) return;
@@ -124,6 +125,13 @@ void add(uint s, vec3 e, bool counted, bool sky, bool sunTraced, bool sunLit) {
         atomicAdd(rtgiAccum[RTGI_ACC * s + 8u], uint(int(floor(b.x + dither.x))));
         atomicAdd(rtgiAccum[RTGI_ACC * s + 9u], uint(int(floor(b.y + dither.y))));
         atomicAdd(rtgiAccum[RTGI_ACC * s + 10u], uint(int(floor(b.z + dither.z))));
+        // Near visibility (S4 contact detail, rtgi_readout.frag): its weight where the ray left past the contact radius --
+        // the cell's cosine-weighted unoccluded share within it, which the contact cells' own rays are held against.
+        atomicAdd(rtgiAccum[RTGI_ACC * s + 11u], uint(nearWord + dither.w));
+        // The far light: this sample's luminance where it left past the contact radius (the readout splits a cell's light
+        // into what came from past it and what from nearer, and scales each by its own visibility, rtgi_readout.frag).
+        if (nearWord > 0.0)
+            atomicAdd(rtgiAccum[RTGI_ACC * s + 12u], uint(dot(min(e, vec3(RTGI_MAX_SAMPLE)), vec3(0.2126, 0.7152, 0.0722)) * RTGI_SCALE + dither.x));
     }
     if (sunTraced) {
         atomicAdd(rtgiAccum[RTGI_ACC * s + 6u], 1u);
@@ -145,6 +153,7 @@ void main() {
     // one that left below the surface (rtgi_rays.comp). Its sample is PI x L_in x it.
     float weight = points[2u * i + 1u].w;
     uvec4 h0 = hits[3u * i];
+    nearWord = ((h0.w & 1u) == 0u || uintBitsToFloat(h0.x) > u.uNearField.y) ? weight * 256.0 : 0.0;
     vec3 e = vec3(0.0);
     bool counted = true, sky = false;
     if ((h0.w & 1u) == 0u) {

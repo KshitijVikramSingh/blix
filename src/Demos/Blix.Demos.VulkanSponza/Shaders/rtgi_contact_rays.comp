@@ -1,0 +1,66 @@
+#version 450
+
+// --rtgi (S4 contact detail, SponzaLoop.Rtgi.cs): short rays from the pixels at contacts. A cell's light is its average,
+// and a pixel in a crease or where a box meets the floor is more enclosed than that average; the cells' near visibility
+// (the share of their training rays past the contact radius, rtgi_train.comp) says where something is near. One half-res
+// pixel in uContact.x a frame, where its cell's near visibility is under uContact.w, casts a cosine ray of the contact
+// radius's length (a shadow-style any-hit ray, its own direction), compacted into a list (count first, at most
+// uContact.y) for the Metal batch; the next frame records what it met into the contact cells (rtgi_contact_train.comp).
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform RtgiContactRays {
+    mat4 uInvViewProj;   // inverse of the view-projection the pre-pass drew with
+    vec4 uSize;          // xy full-res pixels; zw half-res pixels
+    vec4 uCamera;        // xyz position
+    vec4 uParams;        // rtgiParams (rtgi_cache.glsl)
+    vec4 uNearField;     // x the near field's radius (RTGI_NEAR); y the contact radius
+    vec4 uContact;       // x one pixel in this many; y the list's room; z the frame; w the near visibility under which a pixel's cell is at a contact
+} u;
+
+layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
+layout(set = 0, binding = 2) uniform sampler2D uPrepassNormal;
+layout(std430, set = 0, binding = 3) readonly buffer RtgiKeys { uint rtgiKeys[]; };
+layout(std430, set = 0, binding = 4) readonly buffer RtgiResolved { vec4 rtgiResolved[]; };
+layout(std430, set = 0, binding = 5) readonly buffer RtgiDirection { vec4 rtgiDirection[]; };
+layout(std430, set = 0, binding = 6) buffer RtgiContactCount { uint contactCount; uint contactPad[3]; };
+layout(std430, set = 0, binding = 7) writeonly buffer RtgiContactOrigins { vec4 contactOrigins[]; };   // origin, reach
+layout(std430, set = 0, binding = 8) writeonly buffer RtgiContactDirs { vec4 contactDirs[]; };
+layout(std430, set = 0, binding = 9) writeonly buffer RtgiContactPoints { vec4 contactPoints[]; };     // 2 each: point; normal
+
+#define RTGI_KEYS(i) rtgiKeys[i]
+#define RTGI_NEAR u.uNearField.x
+#include "rtgi_cache.glsl"
+
+void main() {
+    uvec2 h = gl_GlobalInvocationID.xy;
+    if (any(greaterThanEqual(h, uvec2(u.uSize.zw)))) return;
+    uint hp = rtgiHash(h.x * 0x9E3779B9u ^ h.y * 0x85EBCA77u ^ rtgiHash(uint(u.uContact.z)));
+    if (hp % uint(u.uContact.x) != 0u) return;
+    ivec2 q = min(ivec2(h) * 2 + ivec2(hp >> 8 & 1u, hp >> 9 & 1u), ivec2(u.uSize.xy) - 1);
+    float raw = texelFetch(uSceneDepth, q, 0).r;
+    vec4 ns = texelFetch(uPrepassNormal, q, 0);
+    if (raw >= 1.0 - 1e-6 || dot(ns.xyz, ns.xyz) < 1e-6) return;
+    vec2 ndc = (vec2(q) + 0.5) / u.uSize.xy * 2.0 - 1.0;
+    vec4 w = u.uInvViewProj * vec4(ndc, raw, 1.0);
+    vec3 p = w.xyz / w.w;
+    vec3 n = normalize(ns.xyz);
+    uint level = rtgiLevel(p, u.uCamera.xyz, u.uParams);
+    uint s = rtgiFind(rtgiCellHash(ivec3(floor(p / rtgiSize(level, u.uParams))), level, rtgiSide(n), u.uParams), u.uParams);
+    if (s == 0xFFFFFFFFu || rtgiResolved[2u * s + 1u].y < 8.0 || rtgiDirection[s].w >= u.uContact.w) return;
+    uint k = atomicAdd(contactCount, 1u);
+    if (k >= uint(u.uContact.y)) return;
+    // Lifted as the training rays are (rtgi_rays.comp): the two near visibilities are held against each other, and from
+    // 2 mm these met near geometry more often than the cells' from 1 cm -- the creases 6% dark (2026-10-26).
+    float lift = 0.01 + 0.001 * length(p - u.uCamera.xyz);
+    uint h2 = rtgiHash(hp);
+    float r1 = float(h2 & 0xFFFFu) / 65536.0, r2 = float(h2 >> 16) / 65536.0;
+    float phi = 6.28318530718 * r1, sr = sqrt(r2);
+    vec3 t = normalize(abs(n.y) < 0.99 ? cross(n, vec3(0.0, 1.0, 0.0)) : cross(n, vec3(1.0, 0.0, 0.0)));
+    vec3 b = cross(n, t);
+    vec3 d = normalize(t * (cos(phi) * sr) + b * (sin(phi) * sr) + n * sqrt(max(0.0, 1.0 - r2)));
+    contactOrigins[k] = vec4(p + n * lift, u.uNearField.y);
+    contactDirs[k] = vec4(d, 0.0);
+    contactPoints[2u * k] = vec4(p, 1.0);
+    contactPoints[2u * k + 1u] = vec4(n, 0.0);
+}

@@ -22,6 +22,7 @@ layout(set = 0, binding = 0) uniform RtgiReservoir {
     vec4 uSunIrradiance; // rgb
     vec4 uGrid;          // xy tiles across and down; zw full-res pixels
     vec4 uReuse;         // x count kept at most; y 1 on a frame the sun turned (the previous count capped at 4); z the frame; w 1 when the previous reservoirs exist
+    vec4 uSpatialMerge;  // x 1: merge last frame's proposals where their rays arrived
 } u;
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
@@ -32,6 +33,9 @@ layout(std430, set = 0, binding = 5) readonly buffer RtgiKeys { uint rtgiKeys[];
 layout(std430, set = 0, binding = 6) readonly buffer RtgiResolved { vec4 rtgiResolved[]; };
 layout(std430, set = 0, binding = 7) readonly buffer RtgiPrevReservoirs { vec4 prevRes[]; };
 layout(std430, set = 0, binding = 8) writeonly buffer RtgiReservoirs { vec4 res[]; };
+// Last frame's proposals (rtgi_spatial.comp) and whether their rays arrived: merged where they did.
+layout(std430, set = 0, binding = 9) readonly buffer RtgiProposals { vec4 proposals[]; };
+layout(std430, set = 0, binding = 10) readonly buffer RtgiSpatialOccluded { uint spatialOccluded[]; };
 
 #define RTGI_KEYS(i) rtgiKeys[i]
 #include "rtgi_cache.glsl"
@@ -141,6 +145,22 @@ void main() {
                     if (wsum > 0.0 && rnd * wsum < w) { selXs = r1.xyz; selNs = pns; selLight = pl.rgb; selAlbedo = pAlbedo; }
                 }
             }
+        }
+    }
+    // Last frame's proposal for this tile, its ray arrived: its light now, its weight at this origin.
+    if (u.uSpatialMerge.x > 0.5) {
+        vec4 p2 = proposals[3u * t + 2u];
+        if (p2.z > 0.5 && (spatialOccluded[t] & 1u) == 0u) {
+            vec4 p0 = proposals[3u * t], p1 = proposals[3u * t + 1u];
+            uint pAlbedo = floatBitsToUint(p1.w);
+            vec3 pns = unpackNormal(p0.w);
+            vec4 pl = lightOf(x, p0.xyz, pns, pAlbedo);
+            float pm = min(p2.y, u.uSpatialMerge.y > 0.5 ? 4.0 : u.uReuse.x);
+            float w = pl.w > 0.5 ? target(x, n, p0.xyz, pl.rgb) * p2.x * pm : 0.0;
+            wsum += w;
+            m += pm;
+            float rnd2 = float(hash(t * 0x632BE5ABu ^ hash(uint(u.uReuse.z) + 77u)) & 0xFFFFFFu) / 16777216.0;
+            if (wsum > 0.0 && rnd2 * wsum < w) { selXs = p0.xyz; selNs = pns; selLight = pl.rgb; selAlbedo = pAlbedo; }
         }
     }
     float pt = target(x, n, selXs, selLight);
