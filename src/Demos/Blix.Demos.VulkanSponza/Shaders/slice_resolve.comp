@@ -47,6 +47,10 @@ layout(std430, set = 0, binding = 9) buffer SkyDetail { uint skyDetail[]; };
 layout(std430, set = 0, binding = 10) buffer SunDetail { uint sunDetail[]; };
 layout(std430, set = 0, binding = 11) buffer Next { uint nextIds[]; };
 layout(std430, set = 0, binding = 12) buffer NextPlaces { uint nextPlaces[]; };
+// --refine-worst (uGlow.y > 0: the passes a round): beside each unsettled, what a round of uGlow.y passes would take off
+// its relative standard error (SponzaLoop.RefineWorst.cs ranks the rounds' texels by it).
+layout(std430, set = 0, binding = 23) buffer NextScores { float nextScores[]; };
+float gScore = 0.0;
 layout(std430, set = 0, binding = 13) buffer Histogram { uint histogram[]; };          // 128 quarter stops from 2^-24
 layout(std430, set = 0, binding = 14) buffer NextCount { uint nextCount[]; };
 // The texels the round may refine (a bit a texel; uKeep.y on): the fine round's contact-flagged alone.
@@ -138,6 +142,11 @@ bool settled(uint place, uint id, uint suns, uint passes, float bar, out float m
         }
     }
     float light = mean;
+    if (u.uGlow.y > 0.5) {
+        float n = float(passes);
+        float rel = sqrt(variance / max(n, 1.0)) / max(light, max(u.uSettle.z, bar));
+        gScore = rel * (1.0 - sqrt(n / (n + u.uGlow.y)));
+    }
     // The dark bar's histogram reads the texel's whole light too (mean: the judged light): the sun's alone put the median,
     // and the bar, far down and Sponza's sun change refined 4.3 G rays where the boot refined 1.7 (2026-10-19).
     return sqrt(variance / float(passes)) <= u.uSettle.y * max(light, max(u.uSettle.z, bar));
@@ -148,6 +157,7 @@ void append(uint id, uint place) {
     uint j = atomicAdd(nextCount[0], 1u);
     nextIds[j] = id;
     nextPlaces[j] = place;
+    if (u.uGlow.y > 0.5) nextScores[j] = gScore;
 }
 
 void main() {

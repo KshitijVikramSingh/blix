@@ -54,7 +54,7 @@ internal sealed partial class SponzaLoop
     private bool refineNeed;
     private float refineBudget = 2f;
     private int refineMax = 16;
-    private const int RefineNeedRounds = 24;
+    private int RefineNeedRounds => refineWorst ? 64 : 24;
 
     // A gather's rounds stop here (the three resolves': host, GPU, in the frame); left > 0.
     private bool RefineStops(int of, int left)
@@ -75,6 +75,7 @@ internal sealed partial class SponzaLoop
         refineNeed = args.Flag("refine-need");
         if (args.Float("refine-budget") is { } rb) refineBudget = Math.Max(0f, rb);
         if (args.Int("refine-max") is { } rm) refineMax = Math.Clamp(rm, 1, 256);
+        ParseRefineWorst(args);
     }
 
     private Func<string[], ShaderInterface>? splitReflect;

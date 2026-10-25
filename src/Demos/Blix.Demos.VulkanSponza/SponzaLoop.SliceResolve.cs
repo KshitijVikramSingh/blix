@@ -61,6 +61,7 @@ internal sealed partial class SponzaLoop
                 resolvePlaces[i] = Own(device.CreateReadableGpuBuffer(n * 4, "sponza.resolve.places"));
             }
             resolveCapacity = n;
+            EnsureResolveScores(n);
         }
         if (resolveCount.Equals(default(GpuBufferHandle))) resolveCount = Own(device.CreateReadableGpuBuffer(16, "sponza.resolve.count"));
         if (resolveHistogram.Equals(default(GpuBufferHandle))) resolveHistogram = Own(device.CreateReadableGpuBuffer(512, "sponza.resolve.histogram"));
@@ -99,7 +100,7 @@ internal sealed partial class SponzaLoop
                 new("uSun", new Vector4Uniform(new Vector4(inverse, sunNodeRays / 32))),
                 new("uMode", new Vector4Uniform(new Vector4(mode, suns, SunColumn(), detail ? 1f : 0f))),
                 new("uKeep", new Vector4Uniform(new Vector4(skyKept ? 1f : 0f, refineMasked && fineGathering ? 1f : 0f, GatherProvenanceCode, SettlePoolNow ? 1f : 0f))),
-                new("uGlow", new Vector4Uniform(new Vector4(NearGlowSplitNow ? 1f : 0f, 0f, 0f, 0f))),
+                new("uGlow", new Vector4Uniform(new Vector4(NearGlowSplitNow ? 1f : 0f, RefineWorstUniform, 0f, 0f))),
             },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
@@ -116,6 +117,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("SunDetail", sunDetail),
                 new ShaderBufferBinding("Next", resolveIds[resolveNext]),
                 new ShaderBufferBinding("NextPlaces", resolvePlaces[resolveNext]),
+                new ShaderBufferBinding("NextScores", ScoresBinding(resolveCount)),
                 new ShaderBufferBinding("Histogram", resolveHistogram),
                 new ShaderBufferBinding("NextCount", resolveCount),
                 new ShaderBufferBinding("RefineMask", refineMaskBuffer.Equals(default(GpuBufferHandle)) ? resolveCount : refineMaskBuffer),
@@ -197,7 +199,8 @@ internal sealed partial class SponzaLoop
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] sun nodes: {of - left:N0} of {of:N0} texels settled after {(sunNodeRefineRound == 0 ? "the sweep" : $"round {sunNodeRefineRound}")} ({sunNodeClock.Elapsed.TotalMinutes:0.0} min); {left:N0} refine (resolved on the GPU)."));
         DumpRefineAudit(of, left);
-        if (left == 0) return false;
+        // --refine-worst: a round that settled all it traced goes on while the pool holds candidates.
+        if (left == 0 && !(refineWorst && sunNodeRefineRound > 0 && worstPoolIds.Length > 0)) return false;
         if (RefineStops(of, left))
         {
             Console.WriteLine(string.Create(Inv,
@@ -208,7 +211,8 @@ internal sealed partial class SponzaLoop
         // the threads meet (slice_resolve.comp, append), and a round of more than one slice reads the texels its earlier
         // slices resolved -- which slice a texel fell in moved its light run to run (464 texels apart at 1,024-texel slices,
         // 2026-10-22; Sponza's rounds span hundreds of slices).
-        sunNodeRefineIds = SortResolveList(resolveNext, left);
+        if (refineWorst) left = (sunNodeRefineIds = SelectWorstRound(resolveNext, left)).Length;
+        else sunNodeRefineIds = SortResolveList(resolveNext, left);
         sunNodeRefineBuffer = resolveIds[resolveNext];
         resolveNext = 1 - resolveNext;
         device.WriteMappedGpuBuffer(resolveCount, 0, new byte[16]);
