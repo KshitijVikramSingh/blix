@@ -26,8 +26,10 @@ The formulas and constants are the paper's; the reference reproduces its claims:
 everywhere: radiance out is `E / pi * albedo(mu_o)`, which is Lambert's `E / pi * rho` at r = 0). The RTGI demo's lit shader
 (`Blix.Demos.VulkanSponza/Shaders/lit_body.glsl`) uses it for the sun, the sheet glow, the sky's irradiance and the incident field's bounce.
 
-- **Default on.** The diffuse roughness is the material's roughness times `--diffuse-roughness-scale` (default 1); glTF has no diffuse roughness.
-  `--diffuse lambert` is the old lobe; `--ab diffuse` alternates the two in one process.
+- **Opt-in for now (`--diffuse eon`).** `tools/testbeds/materials.sh` holds the GI to a camera-path reference that still shades with Lambert; with EON on it fails
+  one ratchet (the Khronos plant's thin sheets read 8% bright, ratchet 5%) while every ratchet holds with `--diffuse lambert`. The default returns to EON when the
+  reference evaluates EON too. The diffuse roughness is the material's roughness times `--diffuse-roughness-scale` (default 1); glTF has no diffuse roughness.
+  `--diffuse lambert` is the default lobe; `--ab diffuse` alternates the two in one process (with `--diffuse eon` as the on phase).
 - **The transport conserves what the roughness loses.** A patch-to-patch bounce (the patch solve, a gather's hits, the probes, both references) has no
   direction to evaluate a lobe against, so the rays' surface bake (`ray_surface_bake.comp`) stores EON's **hemispherical albedo** at the material's
   diffuse roughness in place of the base colour: `rho <E> + rho_ms (1 - <E>)`, the fraction of the light that arrives from anywhere and leaves

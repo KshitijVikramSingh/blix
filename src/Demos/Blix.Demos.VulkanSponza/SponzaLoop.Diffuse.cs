@@ -4,8 +4,10 @@ using Blix.Graphics;
 
 namespace Blix.Demos.VulkanSponza;
 
-// The diffuse lobe of the lit shader: EON (the energy-preserving Oren-Nayar, Blix.Shaders/diffuse_eon.glsl) by default, in place of the fixed Lambert
-// lobe (albedo / pi) it used to have. The lit shader applies it to the sun (a known light direction: the full f_EON), and to every irradiance it
+// The diffuse lobe of the lit shader: EON (the energy-preserving Oren-Nayar, Blix.Shaders/diffuse_eon.glsl), OPT-IN for now (--diffuse eon), in place of
+// the fixed Lambert lobe (albedo / pi) it has by default. It is opt-in because the camera-path reference (reference_wave.comp) still shades with Lambert and
+// tools/testbeds/materials.sh holds the GI to it: with EON on, the Khronos plant's thin sheets read 8% bright against it (ratchet 5%), so the default stays
+// the lobe the reference models until the reference evaluates EON too. The lit shader applies it to the sun (a known light direction: the full f_EON), and to every irradiance it
 // receives (the incident field's bounce, the sky's irradiance cube): there it multiplies E / pi by EON's albedo toward the eye, which is the exact
 // answer for a cosine-distributed field and the only one an irradiance (a quantity with no direction) can ask for.
 //
@@ -21,12 +23,13 @@ namespace Blix.Demos.VulkanSponza;
 // glTF has one roughness and no diffuse roughness, so the diffuse roughness r is the material's roughness times --diffuse-roughness-scale
 // (default 1). Per-material overrides belong to the cook (a material patch), not to this loop.
 //
-//   --diffuse lambert              the old fixed Lambert lobe, for comparison
+//   --diffuse eon                  the EON lobe (default: the fixed Lambert lobe)
+//   --diffuse lambert              the old fixed Lambert lobe
 //   --diffuse-roughness-scale x    r = roughness * x, clamped to 0..1 (default 1; 0 is Lambert whatever the model)
 //   --ab diffuse                   alternate EON (on phase) and Lambert (off phase) in-process, like the other --ab modes
 internal sealed partial class SponzaLoop
 {
-    private bool diffuseEon = true;
+    private bool diffuseEon;
     private float diffuseRoughnessScale = 1f;
 
     // ray_surface_bake.comp's inputs: x 1 stores EON's hemispherical albedo (0: the base colour), y the roughness scale, z the material's roughness factor,
