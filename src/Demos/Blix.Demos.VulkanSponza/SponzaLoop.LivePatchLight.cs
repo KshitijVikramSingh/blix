@@ -28,6 +28,10 @@ internal sealed partial class SponzaLoop
     // --live-bounces N (48): the bounces the live solve takes to rest.
     private int LiveBouncesToRest = 48;
     private const int LiveCoarseBounces = 16;
+    // --live-bounce-split N (3): a bounce's gather over the couplings (mode 4, ~4 ms of the GPU on Crytek Sponza) in N
+    // ranges, a frame each, while the scene shows -- a re-aim's 48 bounces were 48 frames over the 120 fps frame
+    // (2026-10-25). Under the cook screen one frame a bounce, as before. The ranges read the last bounce's out alone.
+    private int liveBounceSplit = 3, liveBounceParts = 1, liveBouncePart;
     // The components, as the split light's columns: the sky alone, then the sun alone.
     private const int LiveComponents = 2, LiveSky = 0, LiveSun = 1;
     private PassHandle liveSolveAPass, liveSolveBPass;
@@ -566,6 +570,7 @@ internal sealed partial class SponzaLoop
             liveIrr = irr;
             liveInjected = true;
             liveBounces = 0;
+            liveBouncePart = 0;
             liveGuidesDone = false;
             liveFramesActive = 0;
             liveClock.Restart();
@@ -588,6 +593,7 @@ internal sealed partial class SponzaLoop
             liveIrr = irr;
             liveInjected = true;
             liveBounces = 0;
+            liveBouncePart = 0;
             liveGuidesDone = false;
             liveFramesActive = 0;
             liveClock.Restart();
@@ -602,12 +608,19 @@ internal sealed partial class SponzaLoop
             if (liveGuidesFirst >= 0 && liveTexels) RecordLiveGuidesChunk(d);
             return;
         }
-        for (var b = 0; b < LiveBouncesPerFrame; b++)
+        var nodes = d.Patches * LiveComponents;
+        if (liveBouncePart == 0)
         {
-            graph.Dispatch(liveSolveBPass, LiveDispatch(3, toSun, d.Patches * LiveComponents, noSun));
-            graph.Dispatch(liveSolveBPass, LiveDispatch(4, toSun, d.Patches * LiveComponents, noSun));
+            liveBounceParts = CookScreenNow ? 1 : liveBounceSplit;
+            graph.Dispatch(liveSolveBPass, LiveDispatch(3, toSun, nodes, noSun));
         }
-        graph.Dispatch(liveSolveBPass, LiveDispatch(5, toSun, d.Patches * LiveComponents, noSun));
+        var range = (nodes + liveBounceParts - 1) / liveBounceParts;
+        var rangeFirst = liveBouncePart * range;
+        var rangeCount = Math.Min(range, nodes - rangeFirst);
+        graph.Dispatch(liveSolveBPass, LiveDispatch(4, toSun, rangeCount, noSun, first: rangeFirst, end: rangeFirst + rangeCount));
+        if (++liveBouncePart < liveBounceParts) return;
+        liveBouncePart = 0;
+        graph.Dispatch(liveSolveBPass, LiveDispatch(5, toSun, nodes, noSun));
         liveBounces += LiveBouncesPerFrame;
         liveFramesActive++;
         // The coarse light at LiveCoarseBounces (the bounces past it add a few percent), and again at rest.
@@ -791,7 +804,7 @@ internal sealed partial class SponzaLoop
         return true;
     }
 
-    private DispatchCommand LiveDispatch(int mode, Vector3 toSun, int threads, bool noSun, int component = 0)
+    private DispatchCommand LiveDispatch(int mode, Vector3 toSun, int threads, bool noSun, int component = 0, int first = 0, int end = 0)
     {
         var groups = (threads + 63) / 64;
         var x = Math.Min(groups, 65535);
@@ -803,7 +816,7 @@ internal sealed partial class SponzaLoop
                 new("uSun", new Vector4Uniform(new Vector4(toSun, noSun ? 1f : 0f))),
                 new("uIrr", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 0f))),
                 new("uCount", new Vector4Uniform(new Vector4(solveSunlets, 0f, LiveComponents, 1f / LiveComponents))),
-                new("uLive", new Vector4Uniform(new Vector4(1f, 0f, 0f, 0f))),
+                new("uLive", new Vector4Uniform(new Vector4(1f, first, end, 0f))),
             },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]

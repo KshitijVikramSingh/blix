@@ -252,10 +252,12 @@ internal sealed partial class SponzaLoop
     }
 
     // The filter (mode 1) a range of texels a frame while a light change gathers behind the frame (--sweep-in-frame): over
-    // all of Crytek Sponza's 5.7 M at once it was ~27 ms of the GPU, a dozen times a sun change. Its input (TexelComposed,
-    // mode 0's) is whole by its first range; a new compose begins the ranges again. -1: none under way.
-    private int composeFilterFirst = -1;
-    private int composeFilterChunk = 1 << 20;
+    // all of Crytek Sponza's 5.7 M at once it was ~27 ms of the GPU, a dozen times a sun change; 1 M a frame still ~4.5 ms,
+    // on top of the sweep's slot: 25 ms frames (2026-10-25). Its input (TexelComposed, mode 0's) goes the same way first, a
+    // range a frame (~1 ms a million), whole before the filter's first range; a new compose begins both again. -1: none.
+    private int composeFilterFirst = -1, composeBaseFirst = -1;
+    private int composeFilterChunk = 1 << 18, composeBaseChunk = 1 << 20;
+    private bool ComposeUnderWay => composeFilterFirst >= 0 || composeBaseFirst >= 0;
     private bool ComposeFilterChunked => sweepInFrame && texelFilter && !CookScreenNow;
 
     // RecordTexels, each frame: the resting light composed again when a part landed or a scale changed.
@@ -269,7 +271,8 @@ internal sealed partial class SponzaLoop
         if (!splitComposeDirty && sky == splitComposedSky && sun == splitComposedSun && splitComposeAgainFrame < framesRendered
             && composedCookedSkyVis == CookedSkyVisNow)
         {
-            if (composeFilterFirst >= 0) RecordComposeFilterRange(sky, sun);
+            if (composeBaseFirst >= 0) RecordComposeBaseRange(sky, sun);
+            else if (composeFilterFirst >= 0) RecordComposeFilterRange(sky, sun);
             return;
         }
         composedCookedSkyVis = CookedSkyVisNow;
@@ -280,16 +283,28 @@ internal sealed partial class SponzaLoop
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] split light: composed at frame {framesRendered} (post-load {postLoadFrames}): sky {sky.X:G4}, sun {sun.X:G4},{sun.Y:G4},{sun.Z:G4}{(splitSunUp ? "" : " (no sun part yet)")}."));
         var live = texelLiveIds!.Length;
-        graph.Dispatch(texelComposePass, ComposeCommand(0, sky, sun, 0, live));
         if (ComposeFilterChunked)
         {
-            composeFilterFirst = 0;
-            RecordComposeFilterRange(sky, sun);
+            composeFilterFirst = -1;
+            composeBaseFirst = 0;
+            RecordComposeBaseRange(sky, sun);
             return;
         }
-        composeFilterFirst = -1;
+        composeFilterFirst = composeBaseFirst = -1;
+        graph.Dispatch(texelComposePass, ComposeCommand(0, sky, sun, 0, live));
         if (texelFilter) graph.Dispatch(texelComposeFilterPass, ComposeCommand(1, sky, sun, 0, live));
         ComposeLanded();
+    }
+
+    private void RecordComposeBaseRange(Vector3 sky, Vector3 sun)
+    {
+        var live = texelLiveIds!.Length;
+        var n = Math.Min(composeBaseChunk, live - composeBaseFirst);
+        graph.Dispatch(texelComposePass, ComposeCommand(0, sky, sun, composeBaseFirst, n));
+        composeBaseFirst += n;
+        if (composeBaseFirst < live) return;
+        composeBaseFirst = -1;
+        composeFilterFirst = 0;   // the filter's ranges from the next frame
     }
 
     private void RecordComposeFilterRange(Vector3 sky, Vector3 sun)

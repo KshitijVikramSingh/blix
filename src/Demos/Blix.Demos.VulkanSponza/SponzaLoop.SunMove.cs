@@ -57,7 +57,7 @@ internal sealed partial class SponzaLoop
     {
         get
         {
-            if (LightChangeInFlight || composeFilterFirst >= 0 || splitComposeDirty) { sunMoveSettled.Reset(); return false; }
+            if (LightChangeInFlight || ComposeUnderWay || splitComposeDirty) { sunMoveSettled.Reset(); return false; }
             if (!sunMoveSettled.IsRunning) sunMoveSettled.Start();
             return sunMoveSettled.Elapsed.TotalSeconds >= sunMoveSettle;
         }

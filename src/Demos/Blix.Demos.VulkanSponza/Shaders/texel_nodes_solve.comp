@@ -30,7 +30,8 @@ layout(set = 0, binding = 0) uniform NodesSolve {
     vec4 uSun;     // xyz toward that sun; w 1: the component has no sun (mode 1 writes none)
     vec4 uIrr;     // rgb the sun's irradiance; w 1: the bounces start from the boot answer (mode 2), 0 from nothing
     vec4 uCount;   // x sunlets, y the group's first sun among all, z all the suns (the node table's stride), w 1 / all
-    vec4 uLive;    // x 1: the live solve (SponzaLoop.LivePatchLight.cs) -- one component, the sun and the sky together
+    vec4 uLive;    // x 1: the live solve (SponzaLoop.LivePatchLight.cs) -- one component, the sun and the sky together;
+                   // y, z: mode 4's range of nodes (z 0: all) -- a bounce's gather over several frames
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer SunletPos { vec4 sunletPos[]; };
@@ -106,6 +107,7 @@ void main() {
         patchAverage[i] += vec4(patchTerms[3u * i].rgb / PI * s * u.uCount.w, 0.0);
         return;
     }
+    if (mode == 4) { i += uint(u.uLive.y); if (u.uLive.z > 0.0 && i >= uint(u.uLive.z)) return; }
     if (i >= patches * G) return;
     uint p = i / G, k = i % G;
     if (mode == 2) {

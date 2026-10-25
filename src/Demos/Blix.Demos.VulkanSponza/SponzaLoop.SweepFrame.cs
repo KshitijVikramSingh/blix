@@ -103,7 +103,35 @@ internal sealed partial class SponzaLoop
         if (SetupInFrame) graph.Dispatch(pass, command);
         else device.DispatchNow(new[] { command }, name);
     }
-    private int sweepCellsChunk = 8192;   // ~5 ms of the GPU a frame on Crytek Sponza (65536: ~40 ms)
+    private int sweepCellsChunk = 2048;   // the first frames'; then the sweep's slot (CellsBudgetStep)
+    private bool sweepCellsFixed;
+    // The cells' chunk to the sweep's GPU slot (--sweep-gpu-ms), measured as the slice's is (SweepBudgetStep): a fixed 8,192
+    // items were ~15 ms of the GPU a frame on Crytek Sponza by 2026-10-25, ~40 frames of 25-33 ms at each sun change's start.
+    private Dictionary<string, GpuPassTotal>? cellsBudgetAt;
+    private long cellsBudgetFrame;
+    private int cellsBudgetItems;
+
+    private void CellsBudgetStep()
+    {
+        if (sweepCellsFixed || !host.Timing.GpuTimestampsSupported) return;
+        var totals = host.Timing.GpuPassTotals;
+        if (cellsBudgetAt is null || framesRendered - cellsBudgetFrame > 4 * SweepBudgetFrames)
+        {
+            cellsBudgetAt = new(totals); cellsBudgetFrame = framesRendered; cellsBudgetItems = 0; return;
+        }
+        if (framesRendered - cellsBudgetFrame < SweepBudgetFrames) return;
+        double ms = 0;
+        foreach (var (name, total) in totals)
+            if (name.StartsWith("sun-sweep-cells", StringComparison.Ordinal))
+                ms += total.TotalMs - (cellsBudgetAt.TryGetValue(name, out var before) ? before.TotalMs : 0);
+        var items = cellsBudgetItems;
+        cellsBudgetAt = new(totals);
+        cellsBudgetFrame = framesRendered;
+        cellsBudgetItems = 0;
+        if (items < 1024 || ms <= 0) return;
+        var target = sweepGpuMs / (ms / items);
+        sweepCellsChunk = (int)Math.Clamp(Math.Sqrt(sweepCellsChunk * target), 512, 65536) / 128 * 128;
+    }
     private PassHandle sweepRaysPass, sweepShadePass, sweepFarFinishPass, sweepFarPoolPass, sweepCensusPass, sweepResolvePass;
     private RayBatchPasses sweepClosestBatch;
 
@@ -144,8 +172,10 @@ internal sealed partial class SponzaLoop
         if (args.Float("sweep-gpu-ms") is { } gm) sweepGpuMs = Math.Max(0.5f, gm);
         if (args.Int("sweep-instant-chunk") is { } ic) sweepInstantChunk = Math.Max(65536, ic);
         if (args.Int("compose-filter-chunk") is { } cf) composeFilterChunk = Math.Max(65536, cf);
+        if (args.Int("compose-base-chunk") is { } cb) composeBaseChunk = Math.Max(65536, cb);
+        if (args.Int("live-bounce-split") is { } ls) liveBounceSplit = Math.Clamp(ls, 1, 16);
         if (args.Int("sweep-fine-chunk") is { } fc) sweepFineChunk = Math.Max(65536, fc);
-        if (args.Int("sweep-cells-chunk") is { } cc) sweepCellsChunk = Math.Clamp(cc, 1024, 4096 * 64);
+        if (args.Int("sweep-cells-chunk") is { } cc) { sweepCellsChunk = Math.Clamp(cc, 1024, 4096 * 64); sweepCellsFixed = true; }
         // Behind the frame is where the in-frame sweep runs (GatherInBackground).
         if (sweepInFrame) backgroundGather = true;
     }

@@ -72,9 +72,11 @@ internal sealed partial class SponzaLoop
         {
             if (hitCellsSunRecordedFrame == framesRendered) return true;
             hitCellsSunRecordedFrame = framesRendered;
+            CellsBudgetStep();
             var n = Math.Min(sweepCellsChunk, hitCellItems - hitCellsSunFirst);
-            graph.Dispatch(sweepCellsPass, HitCellsCommand(n, hitCellsSunFirst, 1));
+            graph.Dispatch(sweepCellsPass, HitCellsCommand(n, hitCellsSunFirst, 1, CellsSplit));
             hitCellsSunFirst += n;
+            cellsBudgetItems += n;
             if (hitCellsSunFirst < hitCellItems) return true;
         }
         var clock = Stopwatch.StartNew();
@@ -87,7 +89,7 @@ internal sealed partial class SponzaLoop
         hitCellsSun = (liveSunToward, liveSunColumn);
         hitCellsSunFor = (new Vector3(float.NaN), -1);
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[VulkanSponza] hit cells: the sun of {hitCellCount:N0} cells from the texels' bits in {hitCellsSunClock.Elapsed.TotalSeconds:0.00} s{CellMarks()}."));
+            $"[VulkanSponza] hit cells: the sun of {hitCellCount:N0} cells from the texels' bits in {hitCellsSunClock.Elapsed.TotalSeconds:0.00} s{(sweepInFrame && liveSkyGathered ? $" (in the frame, {sweepCellsChunk:N0} items a frame at the end)" : "")}{CellMarks()}."));
         return true;
     }
     // BLIX_CELL_MARKS=1: the cells marked for the search (hit_cells.comp: bit 31 a contact, bit 30 a sun edge), counted.
@@ -302,19 +304,22 @@ internal sealed partial class SponzaLoop
     }
 
     // rows, firstRow: the work items (hit_cells.comp: a row's cells, 256 an item).
-    private DispatchCommand HitCellsCommand(int rows, int firstRow, int mode = 0)
+    // In the frame an item's 256 cells over 16 threads (hit_cells.comp, uSunBits.w): the pass's time its longest thread's.
+    private const int CellsSplit = 16;
+
+    private DispatchCommand HitCellsCommand(int rows, int firstRow, int mode = 0, int split = 1)
     {
         var blocks = rayBlockBuffers;
         GpuBufferHandle Block(string name) => blocks.First(b => b.Name == name).Buffer;
         var declared = hitCellsInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
-        return new DispatchCommand(hitCellsPipeline, (rows + 63) / 64, 1, 1,
+        return new DispatchCommand(hitCellsPipeline, (rows * split + 63) / 64, 1, 1,
             new ShaderUniform[]
             {
                 new("uRows", new Vector4Uniform(new Vector4(rows, firstRow, mode, cellLightBuffer.Equals(default(GpuBufferHandle)) ? 0f : ListCellLight ? 2f : 1f))),
                 new("uColumns", new Vector4Uniform(new Vector4(sunNodeKinds.Length, Math.Max(0, Array.IndexOf(sunNodeKinds, 2)), Math.Max(0, liveSunColumn), ListCellLight && HitBlendNow ? transportSpacing : 0f))),
                 new("uIrr", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 0f))),
                 new("uToSun", new Vector4Uniform(new Vector4(liveSunToward, liveSunColumn))),
-                new("uSunBits", new Vector4Uniform(new Vector4(liveSunWords, sunNodeUnknownSun, ListCellLight ? ListCellPoints : 0, 0f))),
+                new("uSunBits", new Vector4Uniform(new Vector4(liveSunWords, sunNodeUnknownSun, ListCellLight ? ListCellPoints : 0, split))),
                 new("uTexelGrid", new Vector4Uniform(texelGrid)),
                 new("uShade", new Vector4Uniform(new Vector4(0f, 0f, sunNodeHashSlots, sunNodeFoliageSlots))),
                 new("uLookup", new Vector4Uniform(new Vector4(sunNodePlane, sunNodeSigma, cellMarks ? 1 : 0, 0f))),

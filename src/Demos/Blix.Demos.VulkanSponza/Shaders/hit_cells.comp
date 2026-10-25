@@ -174,7 +174,10 @@ float cellSun(vec3 p, vec3 n) {
 }
 
 void main() {
-    uint t = gl_GlobalInvocationID.x;
+    // uSunBits.w (> 1): an item's cells split over that many threads -- in the frame, a chunk's few full items (256
+    // cells, each a sun blend and the transfer's patch blends) held the pass ~15 ms however few items it took (2026-10-25).
+    uint split = max(uint(u.uSunBits.w), 1u);
+    uint t = gl_GlobalInvocationID.x / split, part = gl_GlobalInvocationID.x % split;
     if (t >= uint(u.uRows.x)) return;
     // A work item: a row and its first cell of up to ITEM_CELLS (a large triangle's cells span many items: a thread a
     // row looped over half a million for one, 2026-10-16).
@@ -184,7 +187,9 @@ void main() {
     uint first = hitCells[1u + 2u * row];
     uint r = hitCells[2u + 2u * row];
     uint total = r * (r + 1u) / 2u;
-    uint start = item.y, end = min(start + uint(ITEM_CELLS), total);
+    uint per = (uint(ITEM_CELLS) + split - 1u) / split;
+    uint start = item.y + part * per, end = min(min(start + per, item.y + uint(ITEM_CELLS)), total);
+    if (start >= end) return;
     uvec4 tri = triangles[row];
     vec3 p0 = positions[tri.x].xyz, p1 = positions[tri.y].xyz, p2 = positions[tri.z].xyz;
     vec3 face = cross(p1 - p0, p2 - p0);
