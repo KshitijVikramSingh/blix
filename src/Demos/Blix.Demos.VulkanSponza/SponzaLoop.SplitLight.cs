@@ -264,6 +264,7 @@ internal sealed partial class SponzaLoop
     private int composeFilterFirst = -1, composeBaseFirst = -1;
     private int composeFilterChunk = 1 << 18, composeBaseChunk = 1 << 20;
     private bool ComposeUnderWay => composeFilterFirst >= 0 || composeBaseFirst >= 0;
+    private long composedAtSlices = -1;
     private bool ComposeFilterChunked => sweepInFrame && texelFilter && !CookScreenNow;
 
     // RecordTexels, each frame: the resting light composed again when a part landed or a scale changed.
@@ -280,7 +281,20 @@ internal sealed partial class SponzaLoop
         var sun = EffectiveSunIrradiance;
         // A live write (a scatter, an in-place provisional) is a pass of this frame that may run after the compose: composed
         // again the next frame too.
-        if (!splitComposeDirty && sky == splitComposedSky && sun == splitComposedSun && splitComposeAgainFrame < framesRendered
+        // A compose under way finishes before the next begins (the asks wait, dirty): restarted at each ask, it never finished
+        // while a gather's slices landed every frame -- the screen read a half-composed, half-filtered mix (the screen-first
+        // gather's texels 0.31-0.34 off at 4-5 s against their parts' 0.08, Crytek Sponza, 2026-10-25).
+        var underWay = ComposeUnderWay;
+        // The screen's gather in the frame: composed again as soon as the last compose is done and a slice has landed since -- its slices
+        // reached the screen only at round ends (~2 s apart; the screen-first gather's first round ~3-4 s), 2026-10-25.
+        // The first gather alone (it writes what the screen reads; the coarse sweep's reach it by the copy): composed
+        // throughout a change, the composes and the incident pass each recomputed took it 112 -> 167 s.
+        if (!underWay && sweepInFrame && visibleChangedGathering && sunNodeStage == SunNodeStage.Tracing && sweepFrameSlices != composedAtSlices)
+        {
+            composedAtSlices = sweepFrameSlices;
+            splitComposeDirty = true;
+        }
+        if (underWay || !splitComposeDirty && sky == splitComposedSky && sun == splitComposedSun && splitComposeAgainFrame < framesRendered
             && composedCookedSkyVis == CookedSkyVisNow)
         {
             if (composeBaseFirst >= 0) RecordComposeBaseRange(sky, sun);
