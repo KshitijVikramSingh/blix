@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\Blix\Blix.csproj" />
+    <ProjectReference Include="..\..\Blix.Core\Blix.Core.csproj" />
+    <ProjectReference Include="..\..\Blix.Diagnostics\Blix.Diagnostics.csproj" />
+    <ProjectReference Include="..\..\Blix.Graphics\Blix.Graphics.csproj" />
+    <ProjectReference Include="..\..\Blix.Graphics.Images\Blix.Graphics.Images.csproj" />
+    <ProjectReference Include="..\..\Blix.Render\Blix.Render.csproj" />
+    <ProjectReference Include="..\..\Blix.Runtime.Silk\Blix.Runtime.Silk.csproj" />
+    <ProjectReference Include="..\..\Blix.Tools.Shader\Blix.Tools.Shader.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" Private="false" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <BlixShaderReflect>true</BlixShaderReflect>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Blix.Demos.TonemapLab</RootNamespace>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <Glslc Condition="'$(Glslc)' == '' AND Exists('/opt/homebrew/bin/glslc')">/opt/homebrew/bin/glslc</Glslc>
+    <Glslc Condition="'$(Glslc)' == '' AND Exists('/usr/local/bin/glslc')">/usr/local/bin/glslc</Glslc>
+    <Glslc Condition="'$(Glslc)' == ''">glslc</Glslc>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <GlslShader Include="Shaders\quad.vert" />
+    <GlslShader Include="Shaders\scene.frag" />
+    <GlslShader Include="Shaders\present.frag" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Shared GLSL library (src/Blix.Shaders), resolved via the -I path of the shared compile target. Listed so edits retrigger it. -->
+    <GlslInclude Include="..\..\Blix.Shaders\fullscreen.glsl" />
+    <GlslInclude Include="..\..\Blix.Shaders\tonemap.glsl" />
+    <GlslInclude Include="Shaders\gt7.glsl" />
+  </ItemGroup>
+
+</Project>
