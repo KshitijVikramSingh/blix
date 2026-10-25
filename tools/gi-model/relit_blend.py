@@ -9,7 +9,11 @@ patch_layers.py: a texel's one gather is noisier than its relit light where the 
 that replaces plateaus. Blend by inverse variance: est = (r / vr + g / vg) / (1 / vr + 1 / vg), r the relit light
 (scalar ratio), g the gather (B seed 0), judged on B seed 1. The runtime knows g's noise from its own rays (here its
 patch's mean |B0 - B1| / sqrt(2), relative) and has a sign of r's error: how far the relit instant moved the texel's
-light (texel_ratio.comp's move m). Its error modelled sd_r = (c x m + d) x the light; c, d searched."""
+light (texel_ratio.comp's move m). Its error modelled sd_r = (c x m + d) x the light; c, d searched.
+
+Crytek Sponza, 5 / 20 / 60 deg (2026-10-25), the selected (moved > 0.1) after one gather: the gather 0.211 / 0.183 /
+0.180, blended at each step's best c, d 0.196 / 0.177 / 0.164 -- the best c, d differ per step, and one c, d (1, 0.2)
+leaves 20 deg worse (0.185). Under 10% at one gather, less as the refine cuts the gather's noise: not built."""
 import sys
 from pathlib import Path
 
