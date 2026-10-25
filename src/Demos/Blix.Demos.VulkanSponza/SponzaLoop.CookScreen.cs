@@ -129,7 +129,9 @@ internal sealed partial class SponzaLoop : IUiSource
         var cooking = CookScreenNow;
         // A live cook (the split light's, at boot or after a sun move): the same window over the scene, collapsible, opened
         // again each time a cook starts and otherwise left as the user leaves it.
-        var live = !loading && !streaming && !cooking && SplitCookRunning;
+        // Not a light change behind the frame (ChangeBehindFrame): its progress is the log's alone -- the window over the
+        // scene at every step of a moving sun was in the way (the user, 2026-10-25).
+        var live = !loading && !streaming && !cooking && SplitCookRunning && !ChangeBehindFrame;
         var shown = loading || streaming || cooking || live;
         var opened = shown && !progressWindowShown;
         progressWindowShown = shown;
