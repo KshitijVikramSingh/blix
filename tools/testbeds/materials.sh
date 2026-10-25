@@ -19,7 +19,7 @@ if [[ -z "${BLIX_TESTBED_ASSETS:-}" ]]; then
     echo "materials: BLIX_TESTBED_ASSETS is not set; it names the cooked scenes." >&2
     exit 1
 fi
-for scene in drapes khronos-plant khronos-teacup khronos-test; do
+for scene in drapes khronos-plant khronos-teacup khronos-test khronos-alpha; do
     if [[ ! -f "$BLIX_TESTBED_ASSETS/$scene/$scene.blixmesh" ]]; then
         echo "materials: $scene is not cooked; run BLIX_TESTBED_KHRONOS=1 tools/testbeds/setup.sh" >&2
         exit 1
@@ -48,6 +48,9 @@ run drapes --scene=drapes --cam -0.68,2.46,3.28,10,-5 --ray-lod-error 0 "$@"
 run khronos-plant --scene=khronos-plant "$@"
 run khronos-teacup --scene=khronos-teacup --cam 0.291,1.958,-0.454,-13.78,-33.62 "$@"
 run khronos-test --scene=khronos-test "$@"
+# Alpha: Khronos' AlphaBlendModeTest (OPAQUE, MASK at three cutoffs, BLEND): the traced camera view against the raster's depth
+# (--ray-view), which alpha-tests exactly; materials.py reads the log's "ray view against the raster" line.
+run khronos-alpha --scene=khronos-alpha --ray-view "$@"
 rm -f "$OUT"/*.png
 # EON (--diffuse eon) has its own ratchets (materials.py EON_RATCHETS): the reference models EON exactly and the frame approximates it.
 case " $* " in *" --diffuse eon "*) export BLIX_MATERIALS_DIFFUSE=eon ;; esac

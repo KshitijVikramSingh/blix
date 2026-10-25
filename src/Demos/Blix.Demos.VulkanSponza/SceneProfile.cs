@@ -235,6 +235,18 @@ internal sealed record SceneProfile(
         DefaultSunDegrees = new Vector2(180f, -20f),
     };
 
+    /// <summary>Khronos' AlphaBlendModeTest x0.5 standing on open ground, the sun in front of it: OPAQUE, MASK at cutoffs 0.25, 0.5 (the default)
+    /// and 0.75, and BLEND, side by side (tools/testbeds/materials.sh holds the traced view against the raster's alpha test on it).</summary>
+    public static readonly SceneProfile KhronosAlpha = Cornell with
+    {
+        Name = "khronos-alpha",
+        Title = "Vulkan Khronos alpha modes",
+        Packs = new ScenePack[] { new("khronos-alpha", Required: true) },
+        StartPosition = new Vector3(0f, 0.7f, 2.3f),
+        StartPitch = 0f,
+        DefaultSunDegrees = new Vector2(0f, -45f),
+    };
+
     /// <summary>Two rooms sharing a 0.1 m wall, one open to the sky, one sealed (<c>blix thinwall</c>): a leak scene.</summary>
     /// <remarks>
     /// The truth inside the sealed room (x &gt; 0) is exactly no light, so every bit of indirect light the GI puts
@@ -315,7 +327,7 @@ internal sealed record SceneProfile(
         StartPitch = 5f,
     };
 
-    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, CornellPanel, Drapes, SheetSlab, SheetShell, SheetShellThin, ThinWall, Crevices, CrevicesDark, CrevicesHashed, KhronosPlant, KhronosTeacup, KhronosTest, CrytekSponza };
+    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, CornellPanel, Drapes, SheetSlab, SheetShell, SheetShellThin, ThinWall, Crevices, CrevicesDark, CrevicesHashed, KhronosPlant, KhronosTeacup, KhronosTest, KhronosAlpha, CrytekSponza };
 
     /// <summary>The profile <c>--scene</c> names, Sponza when it names none.</summary>
     public static SceneProfile Named(string? name)

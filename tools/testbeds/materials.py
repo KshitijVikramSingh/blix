@@ -72,6 +72,29 @@ EON_RATCHETS = {
     ("khronos-test", "view", THROUGH, "ratio"): 0.08,
 }
 
+# The alpha scene (khronos-alpha: Khronos' AlphaBlendModeTest, --ray-view): the traced camera view against the raster's depth, which
+# alpha-tests exactly. Shares of all pixels that disagree, from the log's "ray view against the raster" line: where a ray's alpha
+# test (a per-triangle coin, or a per-hit texel test) lands the pixel somewhere the raster's does not. (statistic, target, ratchet.)
+ALPHA_BARS = [
+    ("foliage", 0.3, 3.5),      # 3.21 with the per-triangle coverage coin (2026-10-25)
+    ("elsewhere", 0.3, 3.2),    # 2.86: the coin's speckle, and the 0.75-cutoff panel's discarded half that rays still meet
+]
+
+
+def alpha_view(out):
+    """The ray view's disagreement shares for the alpha scene, or None if its log has no line."""
+    import re
+    log = out / "khronos-alpha.log"
+    if not log.exists(): return None
+    hit = None
+    for line in log.read_text(errors="replace").splitlines():
+        if "ray view against the raster" in line: hit = line
+    if hit is None: return None
+    m = re.search(r"agree within 1% on ([\d.]+)%.*?disagree at alpha-tested foliage ([\d.]+)%, glass ([\d.]+)%, depth edges ([\d.]+)%, elsewhere ([\d.]+)%", hit)
+    if m is None: return None
+    agree, foliage, glass, edge, other = map(float, m.groups())
+    return {"agree": agree, "foliage": foliage, "glass": glass, "edges": edge, "elsewhere": other}
+
 
 def main():
     import os
@@ -107,6 +130,17 @@ def main():
         failed |= not ok
         label = f"{scene} {measure} {cls} {stat}"
         print(f"  {'ok  ' if ok else 'FAIL'} {label:62s} {x:7.3f}  target {target:.2f} {'MET    ' if dev <= target else 'not met'}  ratchet {ratchet:.2f}  ({row[0]} points)")
+    alpha = alpha_view(out)
+    if alpha is None:
+        print("  FAIL khronos-alpha ray view: no 'ray view against the raster' line in its log")
+        failed = True
+    else:
+        print(f"  khronos-alpha ray view: agree {alpha['agree']:.2f}%, foliage {alpha['foliage']:.2f}%, glass {alpha['glass']:.2f}%, edges {alpha['edges']:.2f}%, elsewhere {alpha['elsewhere']:.2f}%")
+        for stat, target, ratchet in ALPHA_BARS:
+            x = alpha[stat]
+            ok = x <= ratchet
+            failed |= not ok
+            print(f"  {'ok  ' if ok else 'FAIL'} {'khronos-alpha ray view ' + stat + ' (% of pixels)':62s} {x:7.2f}  target {target:.2f} {'MET    ' if x <= target else 'not met'}  ratchet {ratchet:.2f}")
     print("materials: every ratchet holds." if not failed else "materials: FAILED.")
     sys.exit(1 if failed else 0)
 

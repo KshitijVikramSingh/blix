@@ -38,7 +38,7 @@ dotnet "$REPO/src/Blix.Tools.Cook/bin/Debug/net8.0/Blix.Tools.Cook.dll" asset "$
 # khronos-teacup in the Cornell room's sunlit shaft, khronos-test on open ground (tools/testbeds/materials.sh judges them).
 if [[ "${BLIX_TESTBED_KHRONOS:-0}" == 1 ]]; then
     K="$SRC/khronos"
-    for m in DiffuseTransmissionPlant DiffuseTransmissionTeacup DiffuseTransmissionTest; do
+    for m in DiffuseTransmissionPlant DiffuseTransmissionTeacup DiffuseTransmissionTest AlphaBlendModeTest; do
         if [[ ! -f "$K/$m/$m.glb" ]]; then
             mkdir -p "$K/$m"
             base="https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/$m"
@@ -56,6 +56,7 @@ if [[ "${BLIX_TESTBED_KHRONOS:-0}" == 1 ]]; then
     khronos khronos-plant --model "$K/DiffuseTransmissionPlant/DiffuseTransmissionPlant.glb" --scale 1.5 --at -0.7,0,-1.68 --room cornell
     khronos khronos-teacup --model "$K/DiffuseTransmissionTeacup/DiffuseTransmissionTeacup.glb" --scale 8 --at -0.7,0,-1.68 --rest --room cornell
     khronos khronos-test --model "$K/DiffuseTransmissionTest/DiffuseTransmissionTest.glb" --scale 0.5 --at 0,2.13,0 --room ground
+    khronos khronos-alpha --model "$K/AlphaBlendModeTest/AlphaBlendModeTest.glb" --scale 0.5 --at 0,0,0 --rest --room ground
     # crytek-sponza: Khronos' Sponza (Crytek's; the CRYENGINE Limited License -- downloaded here, never committed), cooked as
     # it is: the atrium at ~262 k triangles, Sponza's layout for quick runs (SceneProfile.CrytekSponza).
     if [[ ! -f "$K/Sponza/Sponza.gltf" ]]; then
