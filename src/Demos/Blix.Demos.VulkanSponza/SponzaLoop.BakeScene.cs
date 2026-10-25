@@ -23,6 +23,9 @@ internal sealed partial class SponzaLoop
     private GpuBufferHandle[] bakeSceneBlocks = Array.Empty<GpuBufferHandle>();
     private readonly List<(RayMaterial Material, int First, int Count)> bakeSceneSurfaceRuns = new();
     private ShaderBufferBinding[] bakeSceneSurfaceBuffers = Array.Empty<ShaderBufferBinding>();
+    // The bake scene's own alpha atlas (its coordinates are at full detail, so it is planned from its data, not the frame's).
+    private RayAlphaAtlas.Plan? bakeSceneAlphaPlan;
+    private List<RayMaterial> bakeSceneAlphaMaterials = new();
     private long bakeSceneSurfacesFrame = -1;
     private MetalRayTracer? bakeTracer;
     private bool bakeTracerFailed;
@@ -130,6 +133,7 @@ internal sealed partial class SponzaLoop
                         new ShaderTextureBinding("uTransmissionColor", material.TransmissionColor.Equals(default(TextureHandle)) ? material.Albedo : material.TransmissionColor),
                         BakeMetallicRoughness(material) },
                     Buffers: bakeSceneSurfaceBuffers));
+            RecordRayAlphaBake(bakeSceneAlphaPlan, bakeSceneAlphaMaterials, bakeSceneData!, bakeSceneSurfaceBuffers);
             bakeSceneSurfacesFrame = postLoadFrames;
             return;
         }
@@ -149,6 +153,7 @@ internal sealed partial class SponzaLoop
         var build = tracer.Build(data, bakeSceneBlocks, surfaceWords);
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] bake scene tracer: {build.SolidTriangles + build.PartialTriangles:N0} triangles ({build.PartialTriangles:N0} partly covered) in {build.Hierarchies} bottom-level structures, built in {build.CpuPrepareMs + build.BlasGpuMs + build.CompactTlasGpuMs:0} ms; {build.CompactedBytes / 1048576.0:0} MB."));
+        if (bakeSceneAlphaPlan is not null) tracer.SetAlphaAtlas(data.RowPlacements.Length);   // per-hit alpha, as the frame's tracer (SponzaLoop.RayAlpha.cs)
         WriteGpuMemory("after the bake scene tracer");
         if (bakeSceneAlbedoCheck) WriteBakeSceneAlbedoCheck(data);
         bakeSceneRowMap = (data.RowMap, data.RowPlacements.Length);   // the contact table's rows (GpuContacts) outlive the rest
@@ -206,6 +211,7 @@ internal sealed partial class SponzaLoop
         bakeSceneBlocks = Array.Empty<GpuBufferHandle>();
         bakeSceneSurfaceBuffers = Array.Empty<ShaderBufferBinding>();
         bakeSceneData = null;
+        bakeSceneAlphaPlan = null;
         bakeSceneReleased = true;
         Console.WriteLine($"[VulkanSponza] bake scene: released ({(tracer is null ? "never traced: its work read from the caches" : lightBakeOff ? "the buried test done; no light bake (--no-light-bake)" : "the buried test and the light bake done")}); later gathers take the frame's tracer.");
         WriteGpuMemory("after releasing the bake scene");
@@ -217,6 +223,7 @@ internal sealed partial class SponzaLoop
     {
         bakeSceneData = data;
         var blocks = data.Blocks();
+        (bakeSceneAlphaPlan, bakeSceneAlphaMaterials) = PlanRayAlpha(data, ref blocks[6]);
         bakeSceneBlocks = new GpuBufferHandle[blocks.Length];
         long bytes = 0;
         for (var b = 0; b < blocks.Length; b++)
