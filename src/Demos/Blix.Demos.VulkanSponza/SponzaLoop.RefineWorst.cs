@@ -64,6 +64,16 @@ internal sealed partial class SponzaLoop
     private (uint[] Ids, uint[] Places) RankWorst(uint[] ids, uint[] places, float[] scores, int count)
     {
         if (sunNodeRefineRound == 0) { worstPoolIds = Array.Empty<uint>(); worstPoolPlaces = Array.Empty<uint>(); worstPoolScores = Array.Empty<float>(); }
+        // An id past the texels (seen once in the frame's list under --patch-layers, 2026-10-25): dropped, counted.
+        var bad = 0;
+        for (var i = 0; i < ids.Length; i++) if (ids[i] >= (uint)texelCount) bad++;
+        if (bad > 0)
+        {
+            var keep = Enumerable.Range(0, ids.Length).Where(i => ids[i] < (uint)texelCount).ToArray();
+            ids = keep.Select(i => ids[i]).ToArray(); places = keep.Select(i => places[i]).ToArray(); scores = keep.Select(i => scores[i]).ToArray();
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] refine worst: {bad:N0} of the round's {count:N0} ids past the texels, dropped."));
+            count = ids.Length;
+        }
         if (patchWeight is not null)
             for (var i = 0; i < scores.Length; i++) scores[i] *= PatchWeightOf(ids[i]);
         var allIds = worstPoolIds.Concat(ids).ToArray();

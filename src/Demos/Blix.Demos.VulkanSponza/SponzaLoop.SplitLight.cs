@@ -79,6 +79,7 @@ internal sealed partial class SponzaLoop
         if (args.Float("refine-budget") is { } rb) refineBudget = Math.Max(0f, rb);
         if (args.Int("refine-max") is { } rm) refineMax = Math.Clamp(rm, 1, 256);
         ParseRefineWorst(args);
+        ParsePatchLayers(args);
         ParsePatchRank(args);
     }
 
@@ -267,6 +268,7 @@ internal sealed partial class SponzaLoop
     private void RecordSplitCompose()
     {
         ChangeTimeDumps();
+        StepPatchLayers();
         if (!splitLight || !splitSkyUp) return;
         var sky = new Vector3(render.SkyStrength);
         var sun = EffectiveSunIrradiance;

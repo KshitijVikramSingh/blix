@@ -90,6 +90,7 @@ internal sealed partial class SponzaLoop
         var kept = all.Where(id => (mask[id >> 5] >> (int)(id & 31) & 1u) != 0).ToArray();
         BuildPatchRank();
         kept = OrderByPatch(kept, "the coarse sweep");
+        BuildPatchLayers(kept);
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] sun change select ({sunChangeStepDeg:0.0} deg step{(SelectFineNow ? ", the fine too" : "")}): {kept.Length:N0} of {all.Length:N0} coarse texels moved over {sunChangeSelect:0.##} of their light; the rest keep the relit instant."));
         sunChangeMask = mask;

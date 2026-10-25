@@ -27,7 +27,7 @@ internal sealed partial class SponzaLoop
 
     private void ParsePatchRank(AppArgs args)
     {
-        patchRank = args.Flag("patch-rank");
+        patchRank = patchRank || args.Flag("patch-rank");
         if (args.Float("patch-rank-share") is { } s) patchRankShare = Math.Max(0f, s);
     }
 
