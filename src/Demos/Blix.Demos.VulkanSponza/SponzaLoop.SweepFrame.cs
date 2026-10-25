@@ -328,7 +328,7 @@ internal sealed partial class SponzaLoop
                 var of = sweepEndOf;
                 Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                     $"[VulkanSponza] sun nodes: {of - left:N0} of {of:N0} texels settled after {(sunNodeRefineRound == 0 ? "the sweep" : $"round {sunNodeRefineRound}")} in the frame ({sunNodeClock.Elapsed.TotalMinutes:0.0} min, {sweepFrameSlices:N0} slices, {sweepFramePasses:N0} passes); {left:N0} refine."));
-                var stops = left == 0 || sunNodeRefineRound > 0 && of - left < splitRefineMinShare * of;
+                var stops = left == 0 || RefineStops(of, left);
                 if (stops)
                 {
                     SweepEndFinish();

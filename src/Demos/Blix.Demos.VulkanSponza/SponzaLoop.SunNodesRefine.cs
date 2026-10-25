@@ -134,10 +134,10 @@ internal sealed partial class SponzaLoop
         // A round that settled under splitRefineMinShare of what it traced: stop -- what is left is bias more rays do not
         // move, not noise. Sponza's rounds 3 and 4 each settled ~3% of ~7M texels for a minute (2026-10-13). The texels
         // left keep the light they have.
-        if (sunNodeRefineRound > 0 && of - left < splitRefineMinShare * of)
+        if (RefineStops(of, left))
         {
             Console.WriteLine(string.Create(Inv,
-                $"[VulkanSponza] sun nodes: round {sunNodeRefineRound} settled {of - left:N0} of {of:N0} ({(of - left) * 100.0 / Math.Max(1, of):0.0}%, under {splitRefineMinShare * 100:0}%): refining stops; {left:N0} keep their light as it is."));
+                $"[VulkanSponza] sun nodes: round {sunNodeRefineRound} settled {of - left:N0} of {of:N0} ({RefineStopsWhy(of, left)}): refining stops; {left:N0} keep their light as it is."));
             return false;
         }
         sunNodeRefineIds = sunNodeNextIds.ToArray();

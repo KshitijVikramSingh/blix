@@ -44,11 +44,37 @@ internal sealed partial class SponzaLoop
     // --split-refine-min-share S (0.1): the refining rounds stop after one that settles under this share of what it
     // traced (SponzaLoop.SunNodesRefine.cs).
     private float splitRefineMinShare = 0.1f;
+    // --refine-need: the rounds go on while a gather's refine rays are under --refine-budget x its sweep's (2) -- not
+    // stopped when one settles under splitRefineMinShare -- and a texel's ceiling is --refine-max x its rays (16; 4 before),
+    // the near rounds' too (their cut texels settled at once, at their own rays). The audit (Crytek Sponza's boot against a
+    // 1,024-ray one, 2026-10-25): the rule's noise estimate tracks the error (by decile 0.012 -> 0.244), but its unsettled
+    // sat at 11.6% against the 3.5% bar, a fixed round of 4 passes bought sqrt 2, round 1 settled 7% and the share rule
+    // stopped: 43% of the coarse texels left at 0.134 mean error (the settled 0.010); the fine contacts 0.30 after their
+    // near round.
+    private bool refineNeed;
+    private float refineBudget = 2f;
+    private int refineMax = 16;
+    private const int RefineNeedRounds = 24;
+
+    // A gather's rounds stop here (the three resolves': host, GPU, in the frame); left > 0.
+    private bool RefineStops(int of, int left)
+    {
+        if (!refineNeed) return sunNodeRefineRound > 0 && of - left < splitRefineMinShare * of;
+        var sweepRays = (long)sunNodeTraceIds.Length * sunNodeRays;
+        return sunNodeRefineRound >= RefineNeedRounds || sunNodeRefineRays >= refineBudget * sweepRays;
+    }
+
+    private string RefineStopsWhy(int of, int left) => refineNeed
+        ? string.Create(System.Globalization.CultureInfo.InvariantCulture, $"its refine rays {sunNodeRefineRays / 1e6:0.0} M (the budget {refineBudget:0.#} x the sweep's {(long)sunNodeTraceIds.Length * sunNodeRays / 1e6:0.0} M) or round {sunNodeRefineRound}")
+        : string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{(of - left) * 100.0 / Math.Max(1, of):0.0}%, under {splitRefineMinShare * 100:0}%");
 
     private void ReadSplitLightArgs(AppArgs args)
     {
         splitLight = args.Flag("split-light");
         if (args.Float("split-refine-min-share") is { } share) splitRefineMinShare = Math.Clamp(share, 0f, 1f);
+        refineNeed = args.Flag("refine-need");
+        if (args.Float("refine-budget") is { } rb) refineBudget = Math.Max(0f, rb);
+        if (args.Int("refine-max") is { } rm) refineMax = Math.Clamp(rm, 1, 256);
     }
 
     private Func<string[], ShaderInterface>? splitReflect;

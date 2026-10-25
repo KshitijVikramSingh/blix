@@ -150,7 +150,7 @@ internal sealed partial class SponzaLoop
         fineGatherSavedRays = sunNodeRays;
         fineGatherSavedMaxRays = texelMaxRays;
         sunNodeRays = fineGatherRays;
-        texelMaxRays = Math.Max(fineGatherRays, fineGatherMaxRays);
+        texelMaxRays = refineNeed ? refineMax * fineGatherRays : Math.Max(fineGatherRays, fineGatherMaxRays);
         RetireGpuBuffer(sunNodeStats);
         sunNodeStats = NewSunNodeStats();
         sunNodeFirst = 0;
@@ -956,7 +956,8 @@ internal sealed partial class SponzaLoop
             if (nearIds.Length > 0)
             {
                 StartFineRound(nearIds);
-                if (NearCutMode == 2) texelMaxRays = sunNodeRays;
+                // The near round's cut texels: settled at their own rays (at once), or refined to need (--refine-need).
+                if (NearCutMode == 2) texelMaxRays = refineNeed ? refineMax * sunNodeRays : sunNodeRays;
                 return;
             }
             nearRoundsLeft = 0;   // no sheet to take another step: the round ends below

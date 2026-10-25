@@ -196,11 +196,12 @@ internal sealed partial class SponzaLoop
         }
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] sun nodes: {of - left:N0} of {of:N0} texels settled after {(sunNodeRefineRound == 0 ? "the sweep" : $"round {sunNodeRefineRound}")} ({sunNodeClock.Elapsed.TotalMinutes:0.0} min); {left:N0} refine (resolved on the GPU)."));
+        DumpRefineAudit(of, left);
         if (left == 0) return false;
-        if (sunNodeRefineRound > 0 && of - left < splitRefineMinShare * of)
+        if (RefineStops(of, left))
         {
             Console.WriteLine(string.Create(Inv,
-                $"[VulkanSponza] sun nodes: round {sunNodeRefineRound} settled {of - left:N0} of {of:N0} ({(of - left) * 100.0 / Math.Max(1, of):0.0}%, under {splitRefineMinShare * 100:0}%): refining stops; {left:N0} keep their light as it is."));
+                $"[VulkanSponza] sun nodes: round {sunNodeRefineRound} settled {of - left:N0} of {of:N0} ({RefineStopsWhy(of, left)}): refining stops; {left:N0} keep their light as it is."));
             return false;
         }
         // The list just appended is the round's; the next round appends into the other. In id order: the appends land as
@@ -216,6 +217,45 @@ internal sealed partial class SponzaLoop
         sunNodeFirst = 0;
         sunNodePass = 0;
         return true;
+    }
+
+    // BLIX_REFINE_AUDIT=<prefix> (a measurement): at each round's end the round's texels and what the resolve judged them
+    // by -- ids, places, the state's sums and moments, passes, the list it appended (the unsettled), the settle uniforms;
+    // the patches' pools, the texels' patches and the sky part once a gather (tools: the refine audit).
+    private static readonly string? refineAudit = Environment.GetEnvironmentVariable("BLIX_REFINE_AUDIT");
+    private int refineAuditGather = -1;
+
+    private void DumpRefineAudit(int of, int left)
+    {
+        if (refineAudit is null) return;
+        device.WaitIdle();
+        var suns = sunNodeSuns!.Length;
+        var refining = sunNodeRefineRound > 0;
+        if (!refining) refineAuditGather++;   // a gather's sweep: the coarse, the fine round, a near round, a sun change's
+        var ids = refining ? sunNodeRefineIds : sunNodeTraceIds;
+        var path = string.Create(Inv, $"{refineAudit}.g{refineAuditGather}.r{sunNodeRefineRound}");
+        using (var w = new BinaryWriter(File.Create(path)))
+        {
+            w.Write(sunNodeRefineRound); w.Write(of); w.Write(left); w.Write(suns); w.Write(SunColumn());
+            w.Write((float)texelMaxRays); w.Write(texelNoise); w.Write(TexelNoiseFloor); w.Write(sunNodeDarkBar);
+            w.Write(skyKept ? 1 : 0); w.Write(SettlePoolNow ? 1 : 0); w.Write(RefinePasses); w.Write(sunNodeRays / 32);
+            w.Write(fineGathering ? 1 : 0); w.Write(texelCount);
+            w.Write(MemoryMarshal.AsBytes(ids.AsSpan(0, of)).ToArray());
+            var places = refining ? device.ReadGpuBuffer(resolvePlaces[1 - resolveNext], 0, of * 4) : MemoryMarshal.AsBytes(Enumerable.Range(0, of).Select(i => (uint)i).ToArray().AsSpan()).ToArray();
+            w.Write(places);
+            w.Write(device.ReadGpuBuffer(resolveState, 0, checked(resolveCapacity * suns * 16)));
+            w.Write(device.ReadGpuBuffer(resolvePasses, 0, resolveCapacity * 4));
+            w.Write(left > 0 ? device.ReadGpuBuffer(resolveIds[resolveNext], 0, left * 4) : Array.Empty<byte>());
+        }
+        if (sunNodeRefineRound == 0)
+        {
+            File.WriteAllBytes($"{refineAudit}.g{refineAuditGather}.sky", device.ReadGpuBuffer(EnsureLivePart(false), 0, texelCount * 8));
+            if (!resolvePool.Equals(default(GpuBufferHandle)) && SettlePoolNow)
+                File.WriteAllBytes($"{refineAudit}.g{refineAuditGather}.pool", device.ReadGpuBuffer(resolvePool, 0, Math.Max(32, cookedPacked!.Length / 3 * 32)));
+            if (!liveTexelPatch.Equals(default(GpuBufferHandle)) && !File.Exists($"{refineAudit}.patch"))
+                File.WriteAllBytes($"{refineAudit}.patch", device.ReadGpuBuffer(liveTexelPatch, 0, texelCount * 4));
+        }
+        Console.WriteLine($"[VulkanSponza] refine audit: {path} ({of:N0} texels, {left:N0} unsettled)");
     }
 
     // The GPU's memory at a gather's ends: Metal's allocation against its recommended working set, and ours by kind.

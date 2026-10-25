@@ -498,7 +498,7 @@ internal sealed partial class SponzaLoop
         if (args.Int("live-bounces") is { } lb) LiveBouncesToRest = Math.Max(1, lb);
         // --live-max-rays N (4 x --live-rays): the refine's ceiling a texel in live mode -- the budget's other half. At
         // --texel-max-rays' 2,048 a 128-ray sweep of the coarse levels refined a million texels for 15 rounds (~3 min).
-        if (liveTexels && args.Int("texel-max-rays") is null) texelMaxRays = args.Int("live-max-rays") ?? 4 * liveRays;
+        if (liveTexels && args.Int("texel-max-rays") is null) texelMaxRays = args.Int("live-max-rays") ?? (args.Flag("refine-need") ? (args.Int("refine-max") ?? 16) : 4) * liveRays;
         // Live: no light lists, a 3.5% noise share (2026-10-22). The lists' 16 patches could not cover the sun a contact sees
         // (466 patches, 90% from 158): a quarter of its rays at slivers, under 1% of its light; their rays the cosine's and
         // the guide's. The 5% share let the smoother passes settle before a rare doorway's light was counted (the corridor
