@@ -47,6 +47,7 @@ layout(early_fragment_tests) in;
 
 #include "shadow.glsl"
 #include "sheen.glsl"
+#include "diffuse_eon.glsl"
 #include "noise.glsl"
 #include "coverage.glsl"
 #include "froxel.glsl"
@@ -78,6 +79,19 @@ layout(early_fragment_tests) in;
 // Roughness/metallic are sampled from the MR texture × per-material factors.
 
 #include "frame.glsl"
+
+// The diffuse lobe, in one place: EON, or Lambert for the A/B (--diffuse lambert, --ab diffuse). A lobe for a light from a KNOWN direction (the
+// sun), and an albedo for light arriving from everywhere (an irradiance cache, the sky): radiance out is E / PI * albedo, which EON makes depend on
+// the view angle and Lambert does not.
+vec3 blixDiffuseLobe(vec3 rho, float r, float NdotL, float NdotV, float LdotV)
+{
+    return frame.uDiffuseModel.x > 0.5 ? blix_eonBrdf(rho, r, NdotL, NdotV, LdotV) : rho / BLIX_PI;
+}
+
+vec3 blixDiffuseAlbedo(vec3 rho, float r, float NdotV)
+{
+    return frame.uDiffuseModel.x > 0.5 ? blix_eonAlbedo(rho, r, NdotV) : rho;
+}
 
 layout(set = 1, binding = 0) uniform textureCube uIrradiance;
 layout(set = 1, binding = 1) uniform textureCube uPrefilteredEnv;
@@ -573,6 +587,11 @@ void main() {
 
     // --- Direct sun: Cook-Torrance (diffuse + analytic specular) --------
     vec3 L = -normalize(frame.uSunDirection);
+    // The diffuse lobe is EON, not Lambert: its roughness follows the material's (glTF has one roughness), and its albedo toward the eye is what the
+    // indirect terms below multiply the irradiance by. At diffuse roughness 0 both are exactly Lambert's.
+    float diffuseRoughness = clamp(roughness * frame.uDiffuseModel.y, 0.0, 1.0);
+    vec3 diffuseAlbedoEye = blixDiffuseAlbedo(albedo, diffuseRoughness, NdotV);
+    vec3 diffuseSun = blixDiffuseLobe(albedo, diffuseRoughness, max(dot(N, L), 0.0), NdotV, dot(L, V));
     vec3 H = normalize(V + L);
     float NdotL = max(dot(N, L), 0.0);
     // The triangle's own plane (the world position's screen derivatives, turned to the shading side), for the terminator.
@@ -717,8 +736,8 @@ void main() {
     // with sheen.glsl, which says in as many words that the factor is what the BASE layer is
     // multiplied by. On the curtains it read as a rim slightly too dim under direct sun and a
     // fabric slightly too bright, which is the size of mistake that survives being looked at.
-    vec3 direct = ((kDsun * albedo / PI * transScale + sunSpecular) * NdotL * frame.uSunIrradiance * sunShadow * terminatorFront
-                   + kDsun * albedo / PI * transScale * sheetGlow * max(dot(Nsmooth, L), 0.0) * frame.uSunIrradiance
+    vec3 direct = ((kDsun * diffuseSun * transScale + sunSpecular) * NdotL * frame.uSunIrradiance * sunShadow * terminatorFront
+                   + kDsun * diffuseSun * transScale * sheetGlow * max(dot(Nsmooth, L), 0.0) * frame.uSunIrradiance
                    + sunTransmission) * sheenScale
                 + sunSheen;
 
@@ -768,7 +787,7 @@ void main() {
     // Lambert: radiance out is albedo/PI times the irradiance in, as the direct sun has it. Every cache and the
     // irradiance cube hold irradiance E (PbrIblBaker integrates cos-weighted to E), so the /PI belongs here; shading
     // them as albedo * E made all indirect light PI times too bright against the sun (fixed 2026-10-21).
-    vec3 diffuseIBL = incidentOn ? vec3(0.0) : irradiance * albedo / PI * skyVisibility;
+    vec3 diffuseIBL = incidentOn ? vec3(0.0) : irradiance * diffuseAlbedoEye / PI * skyVisibility;
 
     // Specular: prefiltered env at LOD = roughness × (mipCount - 1), times
     // the BRDF LUT integration (split-sum approximation of the specular term).
@@ -823,7 +842,7 @@ void main() {
         // (2026-10-22). uIncident.y 2: --material-ao-on-gi, the map as before.
         bool fieldOccludes = frame.uIncident.y > 0.5;
         float giAo = fieldOccludes && frame.uIncident.y < 1.5 ? 1.0 : ao;
-        bounce = incident * albedo / PI * (1.0 - metallic) * giAo * (fieldOccludes ? 1.0 : visibility);
+        bounce = incident * diffuseAlbedoEye / PI * (1.0 - metallic) * giAo * (fieldOccludes ? 1.0 : visibility);
     }
 
     // Sheen's own prefiltered environment, at the sheen roughness rather than the base one, times

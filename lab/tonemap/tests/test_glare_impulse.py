@@ -91,7 +91,7 @@ def test_scatter_veil_matches_the_model(images):
     img = images["sc"]
     x0, y0, r = peak_and_radii(img)
     f = 4 * 0.0662     # the amount the demo applies at its slider limit
-    sig = S_S * PX_PER_DEG
+    sig = S_S * (img.shape[0] / 70.0)      # pixels per degree from the frame actually rendered (70 degrees vertical), not an assumed 1440 rows
     assert img.sum() / V == pytest.approx(1.0, abs=0.005)
     for R in (60, 120, 240, 480, 900):
         measured = (img[r <= R].sum() / V - (1 - f)) / f

@@ -6973,6 +6973,90 @@ static ShaderInterface MinimalShader() => new(new[]
     t.ExpectThrows("BY.6 or a Metal buffer", () => plain.ExportMetalBuffer(default), mustMention: "MetalObjects");
 }
 
+// ============================================================================
+// Section BZ — the diffuse lobe is EON, and the shader's EON answers to the lab's.
+// ============================================================================
+//
+// <b>The fixed Lambert lobe (albedo / pi) is gone from the lit path; the lobe is EON</b> (Portsmouth, Kutz, Hill 2025, the energy-preserving
+// Oren-Nayar), in Blix.Shaders/diffuse_eon.glsl. The reference is lab/bsdf/bsdflab/eon.py, held to the paper's claims by the lab's own tests
+// (Lambert at r = 0, reciprocity, a white surface conserves energy at every roughness) and to the shader per pixel by lab/bsdf/tests/test_eon_gpu.py
+// (the TonemapLab demo renders the GLSL's answers). This section is the engine's side, in the same arrangement as Section BE: a TEST-LOCAL C# twin
+// (EonTwin; shipping a second evaluator is what the shader-vocabulary rule forbids) held to golden values the python generates
+// (fixtures/eon_golden.json) and to the shader's text, so a constant that drifts in one file is a failure and not a picture.
+{
+    var eonPath = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "Blix.Shaders", "diffuse_eon.glsl");
+    var eonGlsl = File.Exists(eonPath) ? File.ReadAllText(eonPath) : null;
+    t.Expect("BZ.0 CONTROL diffuse_eon.glsl was actually read", eonGlsl is { Length: > 500 } && eonGlsl.Contains("blix_eonBrdf", StringComparison.Ordinal),
+        eonGlsl is null ? $"not found at {Path.GetFullPath(eonPath)}" : $"{eonGlsl.Length} chars");
+
+    if (eonGlsl is not null)
+    {
+        foreach (var literal in new[] { "0.5 - 2.0 / (3.0 * BLIX_PI)", "2.0 / 3.0 - 28.0 / (15.0 * BLIX_PI)",
+                     "0.0571085289", "0.491881867", "-0.332181442", "0.0714429953" })
+            t.Expect($"BZ.1 the paper's constant {literal} still appears in diffuse_eon.glsl", eonGlsl.Contains(literal, StringComparison.Ordinal),
+                "the shader's EON no longer matches the paper's constants (and so the twin)");
+    }
+
+    var goldenPath = Path.Combine(AppContext.BaseDirectory, "fixtures", "eon_golden.json");
+    t.Expect("BZ.2 CONTROL eon_golden.json was actually read", File.Exists(goldenPath), $"not found at {goldenPath}");
+    if (File.Exists(goldenPath))
+    {
+        using var golden = System.Text.Json.JsonDocument.Parse(File.ReadAllText(goldenPath));
+        float[] Rgb(System.Text.Json.JsonElement e) => e.EnumerateArray().Select(v => v.GetSingle()).ToArray();
+        var worstF = 0f;
+        var nF = 0;
+        foreach (var c in golden.RootElement.GetProperty("f_eon_times_pi").EnumerateArray())
+        {
+            var rho = Rgb(c.GetProperty("rho"));
+            var want = Rgb(c.GetProperty("pi_f"));
+            var got = EonTwin.Brdf(new Vector3(rho[0], rho[1], rho[2]), c.GetProperty("r").GetSingle(), c.GetProperty("n_dot_l").GetSingle(),
+                c.GetProperty("n_dot_v").GetSingle(), c.GetProperty("l_dot_v").GetSingle()) * MathF.PI;
+            worstF = MathF.Max(worstF, MathF.Max(MathF.Abs(got.X - want[0]) / MathF.Max(want[0], 0.05f),
+                MathF.Max(MathF.Abs(got.Y - want[1]) / MathF.Max(want[1], 0.05f), MathF.Abs(got.Z - want[2]) / MathF.Max(want[2], 0.05f))));
+            nF++;
+        }
+        t.Expect($"BZ.3 the C# twin's f_EON matches the python's on {nF} (rho, r, angles) cases", nF > 100 && worstF < 2e-4f, $"worst relative error {worstF:0.000000}");
+
+        var worstA = 0f;
+        var nA = 0;
+        foreach (var c in golden.RootElement.GetProperty("albedo").EnumerateArray())
+        {
+            var rho = Rgb(c.GetProperty("rho"));
+            var want = Rgb(c.GetProperty("albedo"));
+            var got = EonTwin.Albedo(new Vector3(rho[0], rho[1], rho[2]), c.GetProperty("r").GetSingle(), c.GetProperty("n_dot_v").GetSingle());
+            worstA = MathF.Max(worstA, MathF.Max(MathF.Abs(got.X - want[0]), MathF.Max(MathF.Abs(got.Y - want[1]), MathF.Abs(got.Z - want[2]))));
+            nA++;
+        }
+        t.Expect($"BZ.4 and its directional albedo (Eq. 20) on {nA} cases", nA > 50 && worstA < 2e-5f, $"worst absolute error {worstA:0.000000}");
+    }
+
+    // The properties the paper claims, on the twin: Lambert at r = 0, and nothing lost on a white surface at any roughness.
+    var lambertWorst = 0f;
+    foreach (var (mi, mo, ld) in new[] { (0.9f, 0.9f, 0.81f), (0.3f, 0.8f, 0.2f), (0.05f, 0.5f, -0.1f) })
+        lambertWorst = MathF.Max(lambertWorst, MathF.Abs(EonTwin.Brdf(new Vector3(0.6f), 0f, mi, mo, ld).X - 0.6f / MathF.PI));
+    t.Expect("BZ.5 at r = 0 the lobe is Lambert exactly", lambertWorst < 1e-6f, $"worst {lambertWorst}");
+
+    var energyWorst = 0f;
+    foreach (var r in new[] { 0.3f, 0.7f, 1.0f })
+        foreach (var muO in new[] { 0.1f, 0.5f, 0.9f })
+            energyWorst = MathF.Max(energyWorst, MathF.Abs(EonTwin.NumericAlbedo(1f, r, muO) - 1f));
+    t.Expect("BZ.6 a white surface reflects all of the light at every roughness (quadrature, 8e-3: the paper's quartic fit)", energyWorst < 8e-3f, $"worst deviation {energyWorst:0.0000}");
+
+    // The wiring: the lit shader asks EON for the sun, the irradiance cache and the sky, and no Lambert expression is left beside them.
+    var litPath = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "Demos", "Blix.Demos.VulkanSponza", "Shaders", "lit_body.glsl");
+    var lit = File.Exists(litPath) ? File.ReadAllText(litPath) : null;
+    t.Expect("BZ.7 CONTROL lit_body.glsl was actually read", lit is { Length: > 5000 }, lit is null ? $"not found at {Path.GetFullPath(litPath)}" : $"{lit.Length} chars");
+    if (lit is not null)
+    {
+        t.Expect("BZ.8 the lit shader includes diffuse_eon.glsl and calls both of its entry points",
+            lit.Contains("diffuse_eon.glsl", StringComparison.Ordinal) && lit.Contains("blix_eonBrdf", StringComparison.Ordinal)
+            && lit.Contains("blix_eonAlbedo", StringComparison.Ordinal), "the lit path no longer evaluates EON");
+        t.Expect("BZ.9 and no fixed Lambert expression is left in the diffuse terms (sun, sheet glow, sky, bounce)",
+            !lit.Contains("kDsun * albedo / PI", StringComparison.Ordinal) && !lit.Contains("incident * albedo / PI", StringComparison.Ordinal)
+            && !lit.Contains("irradiance * albedo / PI", StringComparison.Ordinal), "a fixed albedo / PI diffuse term is back");
+    }
+}
+
 t.PrintSummary();
 return t.Failed;
 
@@ -7175,6 +7259,68 @@ sealed class RecordingDevice : IGraphicsDevice
     public void DestroyRenderSurface(RenderSurfaceHandle handle) => throw No();
     public ResourceRegistrySnapshot SnapshotResources() => throw No();
     public void Dispose() { }
+}
+
+/// <summary>
+/// A TEST-LOCAL C# twin of Blix.Shaders/diffuse_eon.glsl (EON, Portsmouth, Kutz, Hill 2025), for Section BZ. Test-local on purpose: the
+/// shader is the one evaluator, and this exists so the paper's claims and the python's values are assertable without a GPU.
+/// </summary>
+static class EonTwin
+{
+    private const float Pi = 3.14159265359f;
+    private static readonly float C1 = 0.5f - 2.0f / (3.0f * Pi);
+    private static readonly float C2 = 2.0f / 3.0f - 28.0f / (15.0f * Pi);
+
+    public static float E(float mu, float r)
+    {
+        var m = 1.0f - Math.Clamp(mu, 0f, 1f);
+        var gOverPi = m * (0.0571085289f + m * (0.491881867f + m * (-0.332181442f + m * 0.0714429953f)));
+        return (1.0f + r * gOverPi) / (1.0f + C1 * r);
+    }
+
+    public static float AvgE(float r) => (1.0f + C2 * r) / (1.0f + C1 * r);
+
+    public static Vector3 Brdf(Vector3 rho, float r, float nDotL, float nDotV, float lDotV)
+    {
+        var muI = Math.Clamp(nDotL, 0f, 1f);
+        var muO = Math.Clamp(nDotV, 1e-4f, 1f);
+        var s = lDotV - muI * muO;
+        var sOverT = s > 0f ? s / MathF.Max(MathF.Max(muI, muO), 1e-7f) : s;
+        var a = 1.0f / (1.0f + C1 * r);
+        var fSs = rho / Pi * a * (1.0f + r * sOverT);
+        var avgE = AvgE(r);
+        var rhoMs = rho * rho * avgE / (Vector3.One - rho * (1.0f - avgE));
+        var shape = MathF.Max(1e-7f, 1.0f - E(muI, r)) * MathF.Max(1e-7f, 1.0f - E(muO, r)) / MathF.Max(1e-7f, 1.0f - avgE);
+        return fSs + rhoMs / Pi * shape;
+    }
+
+    public static Vector3 Albedo(Vector3 rho, float r, float nDotV)
+    {
+        var muO = Math.Clamp(nDotV, 1e-4f, 1f);
+        var e = E(muO, r);
+        var avgE = AvgE(r);
+        var rhoMs = rho * rho * avgE / (Vector3.One - rho * (1.0f - avgE));
+        return rho * e + rhoMs * (1.0f - e);
+    }
+
+    /// <summary>The integral of f cos over the hemisphere by the midpoint rule in (mu, phi): the albedo as the BRDF itself gives it.</summary>
+    public static float NumericAlbedo(float rho, float r, float muO, int n = 256)
+    {
+        var sinO = MathF.Sqrt(1f - muO * muO);
+        var sum = 0.0;
+        for (var i = 0; i < n; i++)
+        {
+            var muI = (i + 0.5f) / n;
+            var sinI = MathF.Sqrt(1f - muI * muI);
+            for (var j = 0; j < n; j++)
+            {
+                var phi = (j + 0.5f) * 2f * Pi / n;
+                var lDotV = sinI * sinO * MathF.Cos(phi) + muI * muO;
+                sum += Brdf(new Vector3(rho), r, muI, muO, lDotV).X * muI;
+            }
+        }
+        return (float)(sum * (1.0 / n) * (2.0 * Math.PI / n));
+    }
 }
 
 /// <summary>Reflection handed to the generator in memory, as the compiler hands it an AdditionalFile.</summary>

@@ -1,6 +1,7 @@
 #version 450
 
 #include "tonemap.glsl"
+#include "diffuse_eon.glsl"
 #include "gt7.glsl"
 
 // Exposure, white balance, tone map, and the output encode, in one pass over the scene target.
@@ -95,6 +96,23 @@ void main()
         vec3 prim = vec3(bar % 3 == 0 ? 1.0 : 0.0, bar % 3 == 1 ? 1.0 : 0.0, bar % 3 == 2 ? 1.0 : 0.0);
         vec3 v = bar < 3 ? prim : P3_TO_REC709 * prim;
         outColor = vec4(v * (vUv.y < 0.5 ? 0.5 : 1.0), 1.0);
+        return;
+    }
+
+    // 4: the EON diffuse table, raw: pi * f_EON(wi, wo) per channel for rho = (0.2, 0.5, 0.9), so lab/bsdf can compare this GLSL with its python
+    // per pixel (tests/test_eon_gpu.py). Columns sweep NdotL from 0.02 to 1; rows are 5 roughnesses x 3 view cosines x 3 azimuth differences.
+    if (pc.uPattern == 4)
+    {
+        const float R[5] = float[5](0.0, 0.25, 0.5, 0.75, 1.0);
+        const float MUO[3] = float[3](0.1, 0.5, 0.9);
+        const float PHI[3] = float[3](0.0, 1.5707963, 3.1415927);
+        int row = int(clamp(vUv.y * 45.0, 0.0, 44.999));
+        int ri = row / 9, rest = row % 9, mi = rest / 3, pi = rest % 3;
+        float muI = 0.02 + 0.98 * floor(clamp(vUv.x, 0.0, 0.99999) * 256.0) / 255.0;   // 256 columns: 0.02 + 0.98 k / 255, k = 0..255
+        float muO = MUO[mi];
+        float sinI = sqrt(max(1.0 - muI * muI, 0.0)), sinO = sqrt(1.0 - muO * muO);
+        float ldotv = sinI * sinO * cos(PHI[pi]) + muI * muO;
+        outColor = vec4(BLIX_PI * blix_eonBrdf(vec3(0.2, 0.5, 0.9), R[ri], muI, muO, ldotv), 1.0);
         return;
     }
 

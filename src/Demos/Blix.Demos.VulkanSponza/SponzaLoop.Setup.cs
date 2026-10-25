@@ -346,6 +346,7 @@ internal sealed partial class SponzaLoop
         ReadWatchArgs(args);
         ReadSurfaceArgs(args);
         ReadTransportArgs(args);
+        ReadDiffuseArgs(args);
         // --cam x,y,z,yaw,pitch — a reproducible viewpoint. Without it every capture and every
         // census speaks only for wherever the camera happens to start, which for a question like
         // "how much of this scene is occluded" is the difference between a measurement and an

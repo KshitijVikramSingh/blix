@@ -545,6 +545,8 @@ internal sealed partial class SponzaLoop
                 AbOffPhase && abMode == "pbr"      ? 1f : 0f,
                 AbOffPhase && abMode == "ibl"      ? 1f : 0f,
                 AbOffPhase && abMode == "normal"   ? 1f : 0f))),
+            // The diffuse lobe: EON (x 1) or the old fixed Lambert (x 0), and the scale from the material's roughness to the diffuse roughness.
+            new("uDiffuseModel",     new Vector4Uniform(new Vector4(DiffuseEonNow ? 1f : 0f, diffuseRoughnessScale, 0f, 0f))),
             new("uTexelShape",       new Vector4Uniform(new Vector4(litShapesBound && IncidentFieldNow ? 1f : 0f, ambient.Enabled ? 1f : 0f, texelShapeNearest ? 1f : 0f, LitStop))),
         };
         // The remaining //@tune uniforms (shadow slope scale, uVisualizeCascades) are appended by
