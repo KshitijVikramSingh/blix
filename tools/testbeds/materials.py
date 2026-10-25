@@ -76,8 +76,8 @@ EON_RATCHETS = {
 # alpha-tests exactly. Shares of all pixels that disagree, from the log's "ray view against the raster" line: where a ray's alpha
 # test (a per-triangle coin, or a per-hit texel test) lands the pixel somewhere the raster's does not. (statistic, target, ratchet.)
 ALPHA_BARS = [
-    ("foliage", 0.3, 3.5),      # 3.21 with the per-triangle coverage coin (2026-10-25)
-    ("elsewhere", 0.3, 3.2),    # 2.86: the coin's speckle, and the 0.75-cutoff panel's discarded half that rays still meet
+    ("foliage", 0.05, 0.1),      # 3.21 with the per-triangle coverage coin; 0.03 with the per-hit alpha test (2026-10-25)
+    ("elsewhere", 0.01, 0.05),   # 2.86 with the coin (its speckle, and a whole panel read as cut out); 0.000
 ]
 
 

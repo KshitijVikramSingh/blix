@@ -71,12 +71,39 @@ uint blix_pcg(uint v) {
 // The coin is keyed on the triangle's identity in the scene (its placement and its index in that placement's mesh),
 // so a triangle referenced twice flips one coin: an instance's is its placement and the triangle's own index (the
 // triangle record's w); a region's comes from the owner row (w), mirror bit masked. Solid rows never ask.
-bool blix_covered(uint row, uint seed, uint entryIndex, uint record) {
+// The per-hit alpha test (Blix.Geometry's RayAlphaAtlas): a partly covered triangle of a cut-out material is met where the material's
+// alpha, read at the point hit, passes its cutoff -- as the raster's alpha test decides it. The data is a trailer on the surface words
+// (from word `rows`, the triangle block's length): the alpha bytes of every such material at a capped resolution, and the coordinates.
+// Without a trailer, or for a material without an entry, the coin below decides.
+const uint BLIX_ALPHA_MAGIC = 0xA17A0001u;
+const uint BLIX_ALPHA_NONE = 0xFFFFFFFFu;
+
+// The material's alpha at uv: bilinear over its bytes, the texture wrapping (RayAlphaAtlas.Alpha).
+float blix_alphaAt(uint trailer, uint material, vec2 uv) {
+    uint at = trailer + blix_surfaces[trailer + 5u] + material * 4u;
+    uint offset = trailer + blix_surfaces[at];
+    uint size = blix_surfaces[at + 1u];
+    int w = int(size & 0xFFFFu), h = int(size >> 16u);
+    vec2 p = (uv - floor(uv)) * vec2(float(w), float(h)) - 0.5;
+    ivec2 i0 = ivec2(floor(p));
+    vec2 t = p - vec2(i0);
+    float texel[4];
+    for (int k = 0; k < 4; ++k) {
+        int x = ((i0.x + (k & 1)) % w + w) % w;
+        int y = ((i0.y + (k >> 1)) % h + h) % h;
+        uint index = uint(y * w + x);
+        texel[k] = float((blix_surfaces[offset + (index >> 2u)] >> ((index & 3u) * 8u)) & 255u) * (1.0 / 255.0);
+    }
+    return mix(mix(texel[0], texel[1], t.x), mix(texel[2], texel[3], t.x), t.y);
+}
+
+// A triangle's coverage, met or not. `tri` are its vertex indices and `bc` the hit's barycentrics of v1 and v2 (what the alpha test reads).
+bool blix_covered(uint row, uint seed, uint entryIndex, uvec4 tri, vec2 bc) {
     // The coverage in sixteenths (the top byte's low five bits), as the byte the coin is compared with: sixteenths * 16 (solid: 255).
     uint sixteenths = (blix_surfaces[row] >> 24u) & 31u;
     if (sixteenths >= 16u) return true;
     if (sixteenths == 0u) return false;
-    uint coverage = sixteenths * 16u;
+    uint record = tri.w;
     uint placement = blix_instances[entryIndex].info.y;
     uint triangle = record;
     if (placement == 0xFFFFFFFFu) {
@@ -84,6 +111,20 @@ bool blix_covered(uint row, uint seed, uint entryIndex, uint record) {
         placement = owner.x;
         triangle = owner.y & 0x7FFFFFFFu;
     }
+    uint trailer = uint(blix_triangles.length());
+    if (uint(blix_surfaces.length()) > trailer + 8u && blix_surfaces[trailer] == BLIX_ALPHA_MAGIC && placement < blix_surfaces[trailer + 1u]) {
+        uint material = blix_surfaces[trailer + blix_surfaces[trailer + 4u] + placement];
+        if (material != BLIX_ALPHA_NONE) {
+            uint uvTable = trailer + blix_surfaces[trailer + 6u];
+            vec2 uv0 = uintBitsToFloat(uvec2(blix_surfaces[uvTable + tri.x * 2u], blix_surfaces[uvTable + tri.x * 2u + 1u]));
+            vec2 uv1 = uintBitsToFloat(uvec2(blix_surfaces[uvTable + tri.y * 2u], blix_surfaces[uvTable + tri.y * 2u + 1u]));
+            vec2 uv2 = uintBitsToFloat(uvec2(blix_surfaces[uvTable + tri.z * 2u], blix_surfaces[uvTable + tri.z * 2u + 1u]));
+            vec2 uv = uv0 * (1.0 - bc.x - bc.y) + uv1 * bc.x + uv2 * bc.y;
+            float cutoff = uintBitsToFloat(blix_surfaces[trailer + blix_surfaces[trailer + 5u] + material * 4u + 2u]);
+            return blix_alphaAt(trailer, material, uv) >= cutoff;
+        }
+    }
+    uint coverage = sixteenths * 16u;
     return (blix_pcg(seed + blix_pcg(placement * 0x9E3779B9u + triangle)) >> 24u) < coverage;
 }
 
@@ -190,7 +231,7 @@ bool blix_traceMesh(BlixShearedRay r, uint root, float tMin, inout float tMax, u
                 float th; vec2 bc; bool front;
                 if (blix_rayTriangle(r, blix_positions[tri.x].xyz, blix_positions[tri.y].xyz, blix_positions[tri.z].xyz,
                                      tMin, tMax, th, bc, front)
-                    && blix_covered(node.index + k, seed, entryIndex, tri.w)) {
+                    && blix_covered(node.index + k, seed, entryIndex, tri, bc)) {
                     tMax = th;
                     triangle = tri.w;
                     barycentrics = bc;
@@ -234,7 +275,7 @@ bool blix_anyInMesh(BlixShearedRay r, uint root, float tMin, float tMax, uint se
             float th; vec2 bc; bool front;
             if (blix_rayTriangle(r, blix_positions[tri.x].xyz, blix_positions[tri.y].xyz, blix_positions[tri.z].xyz,
                                  tMin, tMax, th, bc, front)
-                && blix_covered(node.index + k, seed, entryIndex, tri.w)) return true;
+                && blix_covered(node.index + k, seed, entryIndex, tri, bc)) return true;
         }
     }
     return false;

@@ -240,6 +240,7 @@ internal sealed partial class SponzaLoop
     {
         rayGpuData = data;
         var blocks = data.Blocks();
+        (rayAlphaPlan, rayAlphaMaterials) = PlanRayAlpha(data, ref blocks[6]);
         var buffers = new List<ShaderBufferBinding>();
         rayTraversalDropped = !SoftwareTraversalNeeded;
         for (var b = 0; b < blocks.Length; b++)
@@ -440,7 +441,13 @@ internal sealed partial class SponzaLoop
             foreach (var w in words) levels[w >> 29]++;
             Console.WriteLine(string.Create(Inv, $"[VulkanSponza] ray surfaces: baked at diffuse roughness levels {string.Join(", ", Enumerable.Range(0, 8).Where(i => levels[i] > 0).Select(i => $"{RayQueryGpuData.SurfaceRoughness[i]:0.##} x{levels[i]:N0}"))}."));
             if (white == words.Length && raySurfaceBakeTries < 3) raySurfacesBaked = false;   // record it again
-            else raySurfacesChecked = true;
+            else
+            {
+                raySurfacesChecked = true;
+                // The alpha atlas read back, for the CPU's traversals (the cooks, the oracle): its per-hit test, as the GPU's.
+                if (rayAlphaPlan is { } plan && rayQueries is { } cpuScene)
+                    cpuScene.AlphaTrailer = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(raySurfaces, data.RowPlacements.Length * 4, plan.Words.Length * 4).AsSpan()).ToArray();
+            }
         }
         if (raySurfaceBakes.Count == 0 && rayGpuData is not null) raySurfacesChecked = true;   // nothing to bake
         // Frames in flight past the last mip's upload (ResourceUploader queues it with a frame's commands, no wait): baked on
@@ -457,7 +464,7 @@ internal sealed partial class SponzaLoop
                     new("uBaseColor", new Vector4Uniform(material.BaseColor)),
                     new("uParams", new Vector4Uniform(new Vector4(first, count, material.AlphaCutoff, material.Clear ? 1f : 0f))),
                     new("uParams2", new Vector4Uniform(new Vector4(material.Transmission.Equals(default(TextureHandle)) ? 0f : 1f,
-                        material.TransmissionColor.Equals(default(TextureHandle)) ? 0f : 1f, 0f, 0f))),
+                        material.TransmissionColor.Equals(default(TextureHandle)) ? 0f : 1f, RayAlphaMip(material), 0f))),
                     new("uDiffuse", new Vector4Uniform(BakeDiffuse(material))),
                 },
                 new[] { new ShaderTextureBinding("uAlbedo", material.Albedo),
@@ -466,6 +473,7 @@ internal sealed partial class SponzaLoop
                         BakeMetallicRoughness(material) },
                 Buffers: raySurfaceBakeBuffers));
         }
+        RecordRayAlphaBake(rayAlphaPlan, rayAlphaMaterials, rayGpuData!, raySurfaceBakeBuffers);
         raySurfacesBaked = true;
         Console.WriteLine(string.Create(Inv, $"[VulkanSponza] ray surfaces: baked {rayGpuData!.RowPlacements.Length:N0} triangles' albedo and coverage in {raySurfaceBakes.Count} material dispatches."));
     }

@@ -347,6 +347,7 @@ internal sealed partial class SponzaLoop
         ReadSurfaceArgs(args);
         ReadTransportArgs(args);
         ReadDiffuseArgs(args);
+        ReadRayAlphaArgs(args);
         // --cam x,y,z,yaw,pitch — a reproducible viewpoint. Without it every capture and every
         // census speaks only for wherever the camera happens to start, which for a question like
         // "how much of this scene is occluded" is the difference between a measurement and an
@@ -634,6 +635,8 @@ internal sealed partial class SponzaLoop
         cullPassHandle = graph.ComputePass("scene-cull").Shader(cullInterface).Handle;
         raySurfaceBakeInterface = Reflect("ray_surface_bake.comp");
         raySurfaceBakePassHandle = graph.ComputePass("ray-surface-bake").Shader(raySurfaceBakeInterface).Handle;
+        rayAlphaBakeInterface = Reflect("ray_alpha_bake.comp");
+        rayAlphaBakePassHandle = graph.ComputePass("ray-alpha-bake").Shader(rayAlphaBakeInterface).Handle;
         rayCheckInterface = Reflect("ray_check.comp");
         rayCheckPassHandle = graph.ComputePass("ray-check").Shader(rayCheckInterface).Handle;
 
@@ -1344,6 +1347,9 @@ internal sealed partial class SponzaLoop
         var bakeSpv = File.ReadAllBytes(Path.Combine(shaderDir, "ray_surface_bake.comp.spv"));
         raySurfaceBakePipeline = Own(device.CreateComputePipeline(
             Own(device.CreateComputeShaderProgramFromSpv(bakeSpv, raySurfaceBakeInterface, "ray_surface_bake")), "ray_surface_bake"));
+        var alphaBakeSpv = File.ReadAllBytes(Path.Combine(shaderDir, "ray_alpha_bake.comp.spv"));
+        rayAlphaBakePipeline = Own(device.CreateComputePipeline(
+            Own(device.CreateComputeShaderProgramFromSpv(alphaBakeSpv, rayAlphaBakeInterface, "ray_alpha_bake")), "ray_alpha_bake"));
         var rayCheckSpv = File.ReadAllBytes(Path.Combine(shaderDir, "ray_check.comp.spv"));
         rayCheckPipeline = Own(device.CreateComputePipeline(
             Own(device.CreateComputeShaderProgramFromSpv(rayCheckSpv, rayCheckInterface, "ray_check")), "ray_check"));

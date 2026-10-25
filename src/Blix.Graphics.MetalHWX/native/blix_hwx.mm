@@ -86,7 +86,7 @@ static bool blix_cover(uint row, uint instance, float2 bary, uint seed,
                        device const BlixAlphaParams& alpha, device const uint* rowMaterial,
                        device const BlixAlphaMaterial* materials, device const float2* uvs)
 {
-    if (alpha.enabled != 0u) {
+    if (alpha.enabled == 1u) {
         uint m = rowMaterial[row];
         if (m != 0xFFFFFFFFu) {
             uint4 tri = triangles[row];
@@ -107,6 +107,38 @@ static bool blix_cover(uint row, uint instance, float2 bary, uint seed,
         uint2 owner = owners[triangle];
         placement = owner.x;
         triangle = owner.y & 0x7FFFFFFFu;
+    }
+    // The per-hit alpha test (hwx_set_alpha_atlas: enabled 2, pad1 the trailer's first word = the triangle count): ray_query.glsl's
+    // blix_covered, read from the trailer on the surface words -- the material's alpha bytes bilinear at the point hit against its cutoff.
+    if (alpha.enabled == 2u) {
+        uint trailer = alpha.pad1;
+        if (surfaces[trailer] == 0xA17A0001u && placement < surfaces[trailer + 1u]) {
+            uint material = surfaces[trailer + surfaces[trailer + 4u] + placement];
+            if (material != 0xFFFFFFFFu) {
+                uint4 tri = triangles[row];
+                uint uvTable = trailer + surfaces[trailer + 6u];
+                float2 uv0 = float2(as_type<float>(surfaces[uvTable + tri.x * 2u]), as_type<float>(surfaces[uvTable + tri.x * 2u + 1u]));
+                float2 uv1 = float2(as_type<float>(surfaces[uvTable + tri.y * 2u]), as_type<float>(surfaces[uvTable + tri.y * 2u + 1u]));
+                float2 uv2 = float2(as_type<float>(surfaces[uvTable + tri.z * 2u]), as_type<float>(surfaces[uvTable + tri.z * 2u + 1u]));
+                float2 uv = uv0 * (1.0f - bary.x - bary.y) + uv1 * bary.x + uv2 * bary.y;
+                uint at = trailer + surfaces[trailer + 5u] + material * 4u;
+                uint offset = trailer + surfaces[at];
+                uint size = surfaces[at + 1u];
+                int w = int(size & 0xFFFFu), h = int(size >> 16u);
+                float2 p = (uv - floor(uv)) * float2(float(w), float(h)) - 0.5f;
+                int2 i0 = int2(floor(p));
+                float2 t = p - float2(i0);
+                float texel[4];
+                for (int k = 0; k < 4; ++k) {
+                    int x = ((i0.x + (k & 1)) % w + w) % w;
+                    int y = ((i0.y + (k >> 1)) % h + h) % h;
+                    uint index = uint(y * w + x);
+                    texel[k] = float((surfaces[offset + (index >> 2u)] >> ((index & 3u) * 8u)) & 255u) * (1.0f / 255.0f);
+                }
+                float a = mix(mix(texel[0], texel[1], t.x), mix(texel[2], texel[3], t.x), t.y);
+                return a >= as_type<float>(surfaces[at + 2u]);
+            }
+        }
     }
     return (blix_pcg(seed + blix_pcg(placement * 0x9E3779B9u + triangle)) >> 24u) < coverage;
 }
@@ -1436,6 +1468,17 @@ HWX_EXPORT int hwx_set_alpha(HwxContext* ctx, void* const* textures, const float
             [table setBuffer:ctx->materials offset:0 atIndex:8];
             [table setBuffer:ctx->uvs offset:0 atIndex:9];
         }
+        return 0;
+    }
+}
+
+// The per-hit alpha test for every trace that is not the shadow pass's own (its tables take alphaOff): the trailer of RayAlphaAtlas on the
+// surface words, from word `rows`. Written into the shared alphaOff buffer the tables already name, so nothing is re-bound.
+HWX_EXPORT int hwx_set_alpha_atlas(HwxContext* ctx, uint32_t rows) {
+    @autoreleasepool {
+        if (!ctx->alphaOff) return Fail(ctx, "the alpha atlas before build");
+        uint32_t on[4] = {2, 0, rows, 0};
+        memcpy([ctx->alphaOff contents], on, sizeof(on));
         return 0;
     }
 }

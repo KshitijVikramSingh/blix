@@ -432,6 +432,7 @@ internal sealed partial class SponzaLoop
         rtBuild = tracer.Build(rayGpuData, blocks, surfaceWords, alphaTested);
         if (!rtCoverageCoin) tracer.SetAlpha(alphaMaterials, rowMaterial, raySurfaceBakeBuffers.First(b => b.Name == "BlixRayUvs").Buffer, rtAlphaMip);
         if (rtSheetRows > 0) tracer.SetTransmit(rowTransmit);
+        if (rayAlphaPlan is not null) tracer.SetAlphaAtlas(rayGpuData.RowPlacements.Length);   // the other traces' per-hit alpha (SponzaLoop.RayAlpha.cs)
         frameTracer = tracer;
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] metal tracer: {rtBuild.Value.SolidTriangles + rtBuild.Value.PartialTriangles:N0} triangles ({rtBuild.Value.PartialTriangles:N0} partly covered, {(rtCoverageCoin ? "by the coverage coin" : string.Create(Inv, $"alpha-tested by {alphaMaterials.Count} materials' textures"))}) in {rtBuild.Value.Hierarchies} bottom-level structures, built in {rtBuild.Value.CpuPrepareMs + rtBuild.Value.BlasGpuMs + rtBuild.Value.CompactTlasGpuMs:0} ms; {rtBuild.Value.CompactedBytes / 1048576.0:0} MB."));

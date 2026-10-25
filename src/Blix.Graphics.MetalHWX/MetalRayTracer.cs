@@ -480,6 +480,18 @@ public sealed class MetalRayTracer : IDisposable
     }
 
     /// <summary>
+    /// From now on every trace but the shadow pass's own (its tables take the coin until <see cref="SetAlpha"/>) meets a partly covered triangle
+    /// where its material's alpha passes at the point hit, read from the trailer of <see cref="Blix.Geometry.RayAlphaAtlas"/> on the surface
+    /// words (<paramref name="rows"/> words in: the triangle count) -- the software traversal's per-hit test, test for test.
+    /// </summary>
+    public void SetAlphaAtlas(int rows)
+    {
+        ObjectDisposedException.ThrowIf(ctx == 0, this);
+        if (HwxNative.hwx_set_alpha_atlas(ctx, (uint)rows) != 0)
+            throw new InvalidOperationException($"Metal alpha atlas: {Error}");
+    }
+
+    /// <summary>
     /// Which triangle rows the sun's shadow rays go through (<see cref="EncodeShadow"/>'s <c>throughSheets</c>): per row,
     /// the sheet's transmittance as rgb8 (r in the low byte; the top byte 1 for a double-sided sheet, every crossing
     /// counted), 0 for none. The ray goes on through such a row (<see cref="EncodeShadow"/>'s throughAt). The rows must have

@@ -7103,6 +7103,55 @@ static ShaderInterface MinimalShader() => new(new[]
             source.Contains("BakeDiffuse(material)", StringComparison.Ordinal) && source.Contains("BakeMetallicRoughness(material)", StringComparison.Ordinal),
             "a surface-bake dispatch omits uDiffuse or uMetallicRoughness (the shader would read an unbound uniform and texture)");
     }
+
+    // The rays' per-hit alpha test (RayAlphaAtlas): the trailer's layout, its bilinear lookup, and the three twins that read it.
+    {
+        var uvs = new[] { new Vector2(0f, 0f), new Vector2(1f, 0f), new Vector2(0f, 1f) };
+        var plan = RayAlphaAtlas.Build(new uint[] { 0u, RayAlphaAtlas.None }, new[] { new RayAlphaAtlas.Material(4, 2, 0.5f) }, uvs);
+        var words = plan.Words;
+        t.Expect("CA.1 the trailer's header names its tables", RayAlphaAtlas.IsTrailer(words) && words[1] == 2 && words[2] == 1 && words[3] == 3
+            && words[(int)words[4]] == 0u && words[(int)words[4] + 1] == RayAlphaAtlas.None && words[7] == (uint)plan.AtlasStart(0),
+            string.Join(" ", words.Take(8)));
+        // An 4x2 alpha: the left half 0, the right half 255 (bytes row by row, four to a word, low byte first).
+        words[plan.AtlasStart(0)] = 0xFF_FF_00_00u;
+        words[plan.AtlasStart(0) + 1] = 0xFF_FF_00_00u;
+        t.Expect("CA.2 texel centres read their own byte, the edge between them the mean",
+            MathF.Abs(RayAlphaAtlas.Alpha(words, 0, new Vector2(0.125f, 0.25f))) < 1e-6f
+            && MathF.Abs(RayAlphaAtlas.Alpha(words, 0, new Vector2(0.875f, 0.25f)) - 1f) < 1e-6f
+            && MathF.Abs(RayAlphaAtlas.Alpha(words, 0, new Vector2(0.5f, 0.25f)) - 0.5f) < 1e-6f,
+            $"{RayAlphaAtlas.Alpha(words, 0, new Vector2(0.125f, 0.25f))} {RayAlphaAtlas.Alpha(words, 0, new Vector2(0.875f, 0.25f))} {RayAlphaAtlas.Alpha(words, 0, new Vector2(0.5f, 0.25f))}");
+        t.Expect("CA.3 the texture wraps, as glTF's default sampler does",
+            MathF.Abs(RayAlphaAtlas.Alpha(words, 0, new Vector2(1.875f, 0.25f)) - 1f) < 1e-6f && MathF.Abs(RayAlphaAtlas.Alpha(words, 0, new Vector2(-0.125f, 0.25f)) - 1f) < 1e-6f
+            && RayAlphaAtlas.Passes(words, 0, new Vector2(0.875f, 0.25f)) && !RayAlphaAtlas.Passes(words, 0, new Vector2(0.125f, 0.25f)),
+            "a coordinate outside 0..1 read the wrong texel");
+        t.Expect("CA.4 the vertex coordinates interpolate as the shaders do",
+            RayAlphaAtlas.UvAt(words, 0, 1, 2, new Vector2(0.25f, 0.5f)) == new Vector2(0.25f, 0.5f), RayAlphaAtlas.UvAt(words, 0, 1, 2, new Vector2(0.25f, 0.5f)).ToString());
+        var geometry = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..");
+        foreach (var (file, path, texts) in new[]
+        {
+            ("ray_query.glsl", Path.Combine(geometry, "Blix.Shaders", "ray_query.glsl"), new[] { "0xA17A0001u", "trailer + blix_surfaces[trailer + 5u] + material * 4u", "uv0 * (1.0 - bc.x - bc.y) + uv1 * bc.x + uv2 * bc.y", "blix_triangles.length()" }),
+            ("blix_hwx.mm", Path.Combine(geometry, "Blix.Graphics.MetalHWX", "native", "blix_hwx.mm"), new[] { "0xA17A0001u", "trailer + surfaces[trailer + 5u] + material * 4u", "uv0 * (1.0f - bary.x - bary.y) + uv1 * bary.x + uv2 * bary.y", "alpha.enabled == 2u", "alpha.enabled == 1u" }),
+        })
+        {
+            var source = File.Exists(path) ? File.ReadAllText(path) : "";
+            t.Expect($"CA.5 {file} reads the trailer as RayAlphaAtlas lays it out", RayAlphaAtlas.Magic == 0xA17A0001u && texts.All(x => source.Contains(x, StringComparison.Ordinal)),
+                $"missing: {string.Join(" | ", texts.Where(x => !source.Contains(x, StringComparison.Ordinal)))}");
+        }
+        // The CPU's traversal meets a partly covered triangle by the same alpha: a quad of two triangles, half cut, on one placement.
+        {
+            var bvh = TriangleBvh.Build(new[] { new Vector3(0, 0, 0), new Vector3(1, 0, 0), new Vector3(0, 1, 0) }, new uint[] { 0, 1, 2 });
+            bvh.Coverage = new byte[] { 128 };
+            var ray = new ShearedRay(new Vector3(0.1f, 0.1f, 1f), new Vector3(0, 0, -1));
+            var keyCoin = new RayCoverageKey(1, 0);
+            var keyAlpha = new RayCoverageKey(1, 0, null, null, words, uvs);
+            // The triangle's uv at the hit (0.1, 0.1) is (0.1, 0.1): the cut-out half of the alpha. At (0.9, 0.05) it is the kept half.
+            var cut = bvh.Closest(ray, 0f, 10f, keyAlpha, out _, out _, out _, out _);
+            var kept = bvh.Closest(new ShearedRay(new Vector3(0.9f, 0.05f, 1f), new Vector3(0, 0, -1)), 0f, 10f, keyAlpha, out _, out _, out _, out _);
+            t.Expect("CA.6 the CPU traversal meets a partly covered triangle by the alpha at the hit, not by the coin", !cut && kept,
+                $"cut-out side hit {cut}, kept side hit {kept}");
+            _ = keyCoin;
+        }
+    }
 }
 
 t.PrintSummary();
