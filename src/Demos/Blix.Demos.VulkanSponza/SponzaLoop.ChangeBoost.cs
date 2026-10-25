@@ -10,21 +10,25 @@ namespace Blix.Demos.VulkanSponza;
 internal sealed partial class SponzaLoop
 {
     private float changeBoostMs;
-    private (float GpuMs, int BounceSplit)? boostSaved;
+    private (float GpuMs, int BounceSplit, int BouncesAFrame)? boostSaved;
+    // --change-boost-bounces N (3): the re-aim's bounces a frame under the boost (48 of them: 0.8 s at one a frame).
+    private int changeBoostBounces = 3;
 
     private void ParseChangeBoost(AppArgs args)
     {
         if (args.Float("change-boost-ms") is { } b) changeBoostMs = Math.Max(0f, b);
+        if (args.Int("change-boost-bounces") is { } n) changeBoostBounces = Math.Clamp(n, 1, 16);
     }
 
     // LiveRetarget: the change begins.
     private void BeginChangeBoost()
     {
         if (changeBoostMs <= 0f || !liveSkyGathered || boostSaved is not null) return;
-        boostSaved = (sweepGpuMs, liveBounceSplit);
+        boostSaved = (sweepGpuMs, liveBounceSplit, liveBouncesAFrame);
         sweepGpuMs = MathF.Max(sweepGpuMs, changeBoostMs);
         liveBounceSplit = 1;
-        Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] change boost: {sweepGpuMs:0.#} ms a frame, a bounce a frame, until the landing."));
+        liveBouncesAFrame = changeBoostBounces;
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] change boost: {sweepGpuMs:0.#} ms a frame, {changeBoostBounces} bounces a frame, until the landing."));
     }
 
     // FinishSplitCook.
@@ -33,6 +37,7 @@ internal sealed partial class SponzaLoop
         if (boostSaved is not { } saved) return;
         sweepGpuMs = saved.GpuMs;
         liveBounceSplit = saved.BounceSplit;
+        liveBouncesAFrame = saved.BouncesAFrame;
         boostSaved = null;
     }
 }

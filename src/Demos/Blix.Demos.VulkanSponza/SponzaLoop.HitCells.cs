@@ -64,6 +64,7 @@ internal sealed partial class SponzaLoop
         {
             hitCellsSunFor = (liveSunToward, liveSunColumn);
             hitCellsSunFirst = 0;
+            BeginCellsBudget();
             hitCellsSunClock.Restart();
         }
         // --sweep-in-frame, a light change: a chunk a frame recorded in the frame (SponzaLoop.SweepFrame.cs) -- on the host

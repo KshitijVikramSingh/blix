@@ -31,7 +31,7 @@ internal sealed partial class SponzaLoop
     // --live-bounce-split N (3): a bounce's gather over the couplings (mode 4, ~4 ms of the GPU on Crytek Sponza) in N
     // ranges, a frame each, while the scene shows -- a re-aim's 48 bounces were 48 frames over the 120 fps frame
     // (2026-10-25). Under the cook screen one frame a bounce, as before. The ranges read the last bounce's out alone.
-    private int liveBounceSplit = 3, liveBounceParts = 1, liveBouncePart;
+    private int liveBounceSplit = 3, liveBounceParts = 1, liveBouncePart, liveBouncesAFrame = 1;
     // The components, as the split light's columns: the sky alone, then the sun alone.
     private const int LiveComponents = 2, LiveSky = 0, LiveSun = 1;
     private PassHandle liveSolveAPass, liveSolveBPass;
@@ -639,11 +639,19 @@ internal sealed partial class SponzaLoop
         graph.Dispatch(liveSolveBPass, LiveDispatch(4, toSun, rangeCount, noSun, first: rangeFirst, end: rangeFirst + rangeCount));
         if (++liveBouncePart < liveBounceParts) return;
         liveBouncePart = 0;
+        // Whole bounces, more than one a frame under the change boost (liveBouncesAFrame; SponzaLoop.ChangeBoost.cs).
+        var bounces = liveBounceParts == 1 ? Math.Clamp(liveBouncesAFrame, 1, LiveBouncesToRest - liveBounces) : 1;
+        for (var b = 1; b < bounces; b++)
+        {
+            graph.Dispatch(liveSolveBPass, LiveDispatch(3, toSun, nodes, noSun));
+            graph.Dispatch(liveSolveBPass, LiveDispatch(4, toSun, nodes, noSun, first: 0, end: nodes));
+        }
         graph.Dispatch(liveSolveBPass, LiveDispatch(5, toSun, nodes, noSun));
-        liveBounces += LiveBouncesPerFrame;
+        var before = liveBounces;
+        liveBounces += bounces * LiveBouncesPerFrame;
         liveFramesActive++;
         // The coarse light at LiveCoarseBounces (the bounces past it add a few percent), and again at rest.
-        if (liveBounces == LiveCoarseBounces || liveBounces >= LiveBouncesToRest) LiveProvisionalNow();
+        if (before < LiveCoarseBounces && liveBounces >= LiveCoarseBounces || liveBounces >= LiveBouncesToRest) LiveProvisionalNow();
         if (liveBounces >= LiveBouncesToRest && liveTexels) { liveGuidesFirst = 0; liveGuidesDone = false; RecordLiveGuidesChunk(d); }
         if (liveBounces >= LiveBouncesToRest)
         {

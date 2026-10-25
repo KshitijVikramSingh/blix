@@ -110,6 +110,16 @@ internal sealed partial class SponzaLoop
     private Dictionary<string, GpuPassTotal>? cellsBudgetAt;
     private long cellsBudgetFrame;
     private int cellsBudgetItems;
+    // The last measured cost an item (ms): a change's cells begin at the slot's worth of it, not where the last change's
+    // ended -- under the change boost the chunk ramped from the 3 ms slot's over most of the pass (0.53 s at 10 ms, 0.45 s
+    // at 20, 2026-10-25).
+    private double cellsMsPerItem;
+
+    private void BeginCellsBudget()
+    {
+        cellsBudgetAt = null;
+        if (!sweepCellsFixed && cellsMsPerItem > 0) sweepCellsChunk = (int)Math.Clamp(sweepGpuMs / cellsMsPerItem, 512, 65536) / 128 * 128;
+    }
 
     private void CellsBudgetStep()
     {
@@ -129,7 +139,8 @@ internal sealed partial class SponzaLoop
         cellsBudgetFrame = framesRendered;
         cellsBudgetItems = 0;
         if (items < 1024 || ms <= 0) return;
-        var target = sweepGpuMs / (ms / items);
+        cellsMsPerItem = ms / items;
+        var target = sweepGpuMs / cellsMsPerItem;
         sweepCellsChunk = (int)Math.Clamp(Math.Sqrt(sweepCellsChunk * target), 512, 65536) / 128 * 128;
     }
     private PassHandle sweepRaysPass, sweepShadePass, sweepFarFinishPass, sweepFarPoolPass, sweepCensusPass, sweepResolvePass;
