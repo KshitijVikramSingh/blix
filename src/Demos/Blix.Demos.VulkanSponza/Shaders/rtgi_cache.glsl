@@ -13,6 +13,9 @@
 //   x the finest cell (m), y its growth per metre of distance, z slots - 1 (a power of two), w the top level.
 
 #define RTGI_PROBES 8u
+// A slot's accumulator words: indirect rgb, count, sky misses, sun reached, sun traced, luminance squared, and the
+// irradiance vector's three components (signed, two's complement in the uints: rtgi_train.comp).
+#define RTGI_ACC 12u
 // Fixed point 4096, a sample capped at 512, rounded stochastically (rtgi_train.comp): at 256 and rounded to nearest, the
 // gate's dark corridor (irradiance ~0.001, a sample ~0.26 of a unit) rounded most samples to 0 -- its dead end read 0.77,
 // the dimmest quarter of its points 0.70 (2026-10-26). A frame's sum holds ~2,000 capped samples a cell.
@@ -40,13 +43,18 @@ uint rtgiSide(vec3 n) {
 // (rtgi_train.comp). Picked whole, a surface near a level's edge jumped to the other level's cells as the camera moved --
 // another set of cells, held differently -- and re-settled: patterns that moved with the camera (the user, San Miguel,
 // 2026-10-26).
+// RTGI_NEAR: the near field's radius (m) -- cells the finest out to it, growing past it (rtgi_cache.glsl's includers
+// define it from their uniforms; 0 when they do not).
+#ifndef RTGI_NEAR
+#define RTGI_NEAR 0.0
+#endif
 float rtgiLevelF(vec3 p, vec3 camera, vec4 params) {
-    float cell = params.x + params.y * length(p - camera);
+    float cell = params.x + params.y * max(length(p - camera) - RTGI_NEAR, 0.0);
     return clamp(log2(cell / params.x), 0.0, params.w);
 }
 
 uint rtgiLevel(vec3 p, vec3 camera, vec4 params) {
-    float cell = params.x + params.y * length(p - camera);
+    float cell = params.x + params.y * max(length(p - camera) - RTGI_NEAR, 0.0);
     return uint(clamp(floor(log2(cell / params.x)), 0.0, params.w));
 }
 

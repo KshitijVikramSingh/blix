@@ -13,6 +13,7 @@ layout(std430, set = 0, binding = 1) buffer RtgiKeys { uint rtgiKeys[]; };
 layout(std430, set = 0, binding = 2) buffer RtgiResolved { vec4 rtgiResolved[]; };
 layout(std430, set = 0, binding = 3) buffer RtgiMoments { vec4 rtgiMoments[]; };
 layout(std430, set = 0, binding = 4) buffer RtgiStamps { uvec2 rtgiStamps[]; };
+layout(std430, set = 0, binding = 5) buffer RtgiDirection { vec4 rtgiDirection[]; };
 
 void main() {
     uint i = gl_GlobalInvocationID.x;
@@ -26,4 +27,5 @@ void main() {
     rtgiResolved[2u * s + 1u] = vec4(0.0);
     for (uint k = 0u; k < 3u; k++) rtgiMoments[3u * s + k] = vec4(0.0);
     rtgiStamps[s] = uvec2(0u);
+    rtgiDirection[s] = vec4(0.0);
 }

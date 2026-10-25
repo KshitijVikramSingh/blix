@@ -4,7 +4,13 @@
 // tile of a grid over the screen, at a pixel of its tile (a new one each frame), from the pre-pass's depth and normal.
 // The rest are where last frame's training rays landed (a different share each frame), so the cells one bounce from
 // the screen -- and, through those, the next -- are trained too: a path grows a vertex a frame through the cache.
-// Each point gets a cosine ray (CLOSEST: what it sees) and a sun shadow ray (none where it faces away from the sun).
+// Each point gets a ray (CLOSEST: what it sees) and a sun shadow ray (none where it faces away from the sun).
+//
+// Guided: the ray is cosine-distributed, or -- with probability uGuide.x where the point's cell has learnt which way its
+// light comes from (its irradiance vector, rtgi_resolve.comp: one-sided enough, uGuide.y samples held) -- drawn from a
+// von Mises-Fisher lobe around that way, tighter the more one-sided. Its weight against cosine sampling (cos / (PI x the
+// mixture's pdf), 0 below the surface) goes with the point for the training to scale its sample by: unbiased. In a room
+// lit through an arch most cosine rays find the walls; the guided ones the arch (San Miguel settled over a long time).
 
 layout(local_size_x = 64) in;
 
@@ -14,6 +20,9 @@ layout(set = 0, binding = 0) uniform RtgiRays {
     vec4 uCamera;        // xyz position
     vec4 uCounts;        // x visible points, y points from last frame's hits, z the frame's number, w how far a ray goes
     vec4 uSun;           // xyz toward the sun; w 1 when last frame's rays and hits are there to read
+    vec4 uParams;        // rtgiParams (rtgi_cache.glsl)
+    vec4 uNearField;     // x the near field's radius (RTGI_NEAR)
+    vec4 uGuide;         // x the share of rays guided where a cell has learnt its light's way (0: none); y samples it must hold
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -27,6 +36,13 @@ layout(std430, set = 0, binding = 7) writeonly buffer RtgiShadowOrigins { vec4 o
 layout(std430, set = 0, binding = 8) readonly buffer RtgiRequests { uint requestCount; uint requestPad[3]; vec4 requests[]; };
 // The other parity's requests: its count zeroed here for the next frame's train.
 layout(std430, set = 0, binding = 9) buffer RtgiNextRequests { uint nextRequestCount; uint nextPad[3]; vec4 nextRequests[]; };
+layout(std430, set = 0, binding = 10) readonly buffer RtgiKeys { uint rtgiKeys[]; };
+layout(std430, set = 0, binding = 11) readonly buffer RtgiResolved { vec4 rtgiResolved[]; };
+layout(std430, set = 0, binding = 12) readonly buffer RtgiDirection { vec4 rtgiDirection[]; };
+
+#define RTGI_KEYS(i) rtgiKeys[i]
+#define RTGI_NEAR u.uNearField.x
+#include "rtgi_cache.glsl"
 
 uint hash(uint x) {
     x ^= x >> 16; x *= 0x7feb352du;
@@ -93,8 +109,44 @@ void main() {
     vec3 t = normalize(abs(n.y) < 0.99 ? cross(n, vec3(0.0, 1.0, 0.0)) : cross(n, vec3(1.0, 0.0, 0.0)));
     vec3 b = cross(n, t);
     vec3 d = normalize(t * (cos(phi) * s) + b * (sin(phi) * s) + n * sqrt(max(0.0, 1.0 - r2)));
+    // The guide: the point's cell's irradiance vector, where it holds enough and is one-sided enough.
+    float pg = 0.0, kappa = 0.0;
+    vec3 gw = n;
+    if (u.uGuide.x > 0.0) {
+        uint cell = rtgiFind(rtgiCellHash(ivec3(floor(p / rtgiSize(rtgiLevel(p, u.uCamera.xyz, u.uParams), u.uParams))),
+            rtgiLevel(p, u.uCamera.xyz, u.uParams), rtgiSide(n), u.uParams), u.uParams);
+        if (cell != 0xFFFFFFFFu && rtgiResolved[2u * cell + 1u].y >= u.uGuide.y) {
+            vec3 bv = rtgiDirection[cell].xyz;
+            float el = dot(rtgiResolved[2u * cell].rgb, vec3(0.2126, 0.7152, 0.0722));
+            float len = length(bv);
+            float rr = el > 1e-6 ? clamp(len / el, 0.0, 0.95) : 0.0;
+            if (rr > 0.1 && dot(bv, n) > 0.0) {
+                gw = bv / len;
+                kappa = min(rr * (3.0 - rr * rr) / (1.0 - rr * rr), 40.0);
+                pg = u.uGuide.x;
+            }
+        }
+    }
+    uint h3 = hash(h2 ^ 0xA511E9B3u);
+    if (pg > 0.0 && float(h3 & 0xFFFFu) / 65536.0 < pg) {
+        // A von Mises-Fisher draw around gw.
+        float x1 = float(hash(h3) & 0xFFFFFFu) / 16777216.0, x2 = float(h3 >> 16) / 65536.0;
+        float wz = 1.0 + log(x1 + (1.0 - x1) * exp(-2.0 * kappa)) / kappa;
+        float sw = sqrt(max(0.0, 1.0 - wz * wz)), ph = 6.28318530718 * x2;
+        vec3 gt = normalize(abs(gw.y) < 0.99 ? cross(gw, vec3(0.0, 1.0, 0.0)) : cross(gw, vec3(1.0, 0.0, 0.0)));
+        vec3 gb = cross(gw, gt);
+        d = normalize(gt * (cos(ph) * sw) + gb * (sin(ph) * sw) + gw * wz);
+    }
+    float cosd = dot(d, n);
+    float weight = 1.0;
+    if (pg > 0.0) {
+        float pdfCos = max(cosd, 0.0) / 3.14159265359;
+        float pdfVmf = kappa * exp(kappa * (dot(d, gw) - 1.0)) / (6.28318530718 * (1.0 - exp(-2.0 * kappa)));
+        float pdf = (1.0 - pg) * pdfCos + pg * pdfVmf;
+        weight = cosd > 0.0 && pdf > 0.0 ? pdfCos / pdf : 0.0;
+    }
     points[2u * i] = vec4(p, 1.0);
-    points[2u * i + 1u] = vec4(n, 0.0);
+    points[2u * i + 1u] = vec4(n, weight);
     rays[2u * i] = vec4(o, 0.0);
     rays[2u * i + 1u] = vec4(d, u.uCounts.w);
     origins[i] = vec4(o, dot(n, u.uSun.xyz) > 0.0 ? u.uCounts.w : 0.0);

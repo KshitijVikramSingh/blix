@@ -15,6 +15,7 @@ layout(set = 0, binding = 0) uniform RtgiTrain {
     vec4 uCamera;        // xyz position; w points
     vec4 uSun;           // xyz toward the sun; w the sky cube's lod
     vec4 uSunIrradiance; // rgb
+    vec4 uNearField;     // x the near field's radius (rtgi_cache.glsl's RTGI_NEAR)
     vec4 uClamp;         // x > 0: a sample's luminance capped at its cell's mean + x standard deviations (once it holds 32);
                          // y the frame's number (from 1); z the dirty list's room
     vec4 uTrain;         // x 1: a landing cell holding nothing counts as dark (else no sample); y 1: no coarser cell for it;
@@ -39,15 +40,25 @@ layout(std430, set = 0, binding = 10) readonly buffer RtgiMoments { vec4 rtgiMom
 layout(std430, set = 0, binding = 11) buffer RtgiStamps { uvec2 rtgiStamps[]; };
 layout(std430, set = 0, binding = 12) buffer RtgiDirty { uint dirtyCount; uint dirtyPad[3]; uint dirty[]; };
 layout(std430, set = 0, binding = 9) buffer RtgiRequests { uint requestCount; uint requestPad[3]; vec4 requests[]; };
+// Per slot: its cell (coordinates, level x 6 + side), written when made -- the neighbour blend finds its neighbours by it
+// (rtgi_filter.comp); and the blended light the lookups read (indirect rgb, sky visibility).
+layout(std430, set = 0, binding = 13) buffer RtgiCells { ivec4 rtgiCells[]; };
+layout(std430, set = 0, binding = 14) readonly buffer RtgiFiltered { vec4 rtgiFiltered[]; };
 
 #define RTGI_KEYS(i) rtgiKeys[i]
+#define RTGI_NEAR u.uNearField.x
 #include "rtgi_cache.glsl"
 
-// The slot for the cell, made if it is not held; 0xFFFFFFFF when its probes are all taken.
-uint rtgiInsert(uvec2 h) {
+// The slot for the cell at p (its level, the side n faces), made if it is not held -- its cell written then; 0xFFFFFFFF
+// when its probes are all taken.
+uint rtgiInsertAt(vec3 p, vec3 n, uint level) {
+    ivec3 c = ivec3(floor(p / rtgiSize(level, u.uParams)));
+    uint side = rtgiSide(n);
+    uvec2 h = rtgiCellHash(c, level, side, u.uParams);
     for (uint k = 0u; k < RTGI_PROBES; k++) {
         uint s = (h.x + k) & uint(u.uParams.z);
         uint prev = atomicCompSwap(rtgiKeys[s], 0u, h.y);
+        if (prev == 0u) rtgiCells[s] = ivec4(c, int(level * 6u + side));
         if (prev == 0u || prev == h.y) return s;
     }
     return 0xFFFFFFFFu;
@@ -66,18 +77,19 @@ vec4 irradianceAt(vec3 q, vec3 nq, out bool fine) {
     fine = false;
     uint own = rtgiFind(cellAt(q, nq, level), u.uParams);
     vec4 o0 = vec4(0.0), o1 = vec4(0.0);
-    if (own != 0xFFFFFFFFu) { o0 = rtgiResolved[2u * own]; o1 = rtgiResolved[2u * own + 1u]; }
+    if (own != 0xFFFFFFFFu) { o0 = rtgiFiltered[own]; o1 = rtgiResolved[2u * own + 1u]; }
     vec4 r0 = o0, r1 = o1;
     if (o1.y >= 8.0) fine = true;
     else if (u.uTrain.y < 0.5) {
         uint s = rtgiFind(cellAt(q, nq, min(level + 2u, uint(u.uParams.w))), u.uParams);
-        if (s != 0xFFFFFFFFu && rtgiResolved[2u * s + 1u].y >= 0.5) { r0 = rtgiResolved[2u * s]; r1 = rtgiResolved[2u * s + 1u]; }
+        if (s != 0xFFFFFFFFu && rtgiResolved[2u * s + 1u].y >= 0.5) { r0 = rtgiFiltered[s]; r1 = rtgiResolved[2u * s + 1u]; }
     }
     if (r1.y < 0.5) return vec4(0.0);
     return vec4(r0.rgb + u.uSunIrradiance.rgb * max(0.0, dot(nq, u.uSun.xyz)) * r1.x, 1.0);
 }
 
 vec4 dither;
+vec3 sampleDir;
 
 void add(uint s, vec3 e, bool counted, bool sky, bool sunTraced, bool sunLit) {
     if (s == 0xFFFFFFFFu) return;
@@ -98,18 +110,24 @@ void add(uint s, vec3 e, bool counted, bool sky, bool sunTraced, bool sunLit) {
     if (counted) {
         vec3 f = min(e, vec3(RTGI_MAX_SAMPLE)) * RTGI_SCALE;
         // Rounded stochastically: unbiased however dim (the fraction kept as a chance of one more unit).
-        atomicAdd(rtgiAccum[8u * s], uint(f.r + dither.x));
-        atomicAdd(rtgiAccum[8u * s + 1u], uint(f.g + dither.y));
-        atomicAdd(rtgiAccum[8u * s + 2u], uint(f.b + dither.z));
-        atomicAdd(rtgiAccum[8u * s + 3u], 1u);
+        atomicAdd(rtgiAccum[RTGI_ACC * s], uint(f.r + dither.x));
+        atomicAdd(rtgiAccum[RTGI_ACC * s + 1u], uint(f.g + dither.y));
+        atomicAdd(rtgiAccum[RTGI_ACC * s + 2u], uint(f.b + dither.z));
+        atomicAdd(rtgiAccum[RTGI_ACC * s + 3u], 1u);
         // The luminance's square: the cell's sample variance (rtgi_resolve.comp).
         float l = min(dot(min(e, vec3(RTGI_MAX_SAMPLE)), vec3(0.2126, 0.7152, 0.0722)), RTGI_LUM2_MAX);
-        atomicAdd(rtgiAccum[8u * s + 7u], uint(l * l * RTGI_LUM2_SCALE + dither.w));
-        if (sky) atomicAdd(rtgiAccum[8u * s + 4u], 1u);
+        atomicAdd(rtgiAccum[RTGI_ACC * s + 7u], uint(l * l * RTGI_LUM2_SCALE + dither.w));
+        if (sky) atomicAdd(rtgiAccum[RTGI_ACC * s + 4u], 1u);
+        // The irradiance vector: the sample's luminance along its direction, fixed point, signed (its two's complement
+        // added as uints sums as ints), rounded stochastically -- where the cell's light comes from (rtgi_resolve.comp).
+        vec3 b = dot(min(e, vec3(RTGI_MAX_SAMPLE)), vec3(0.2126, 0.7152, 0.0722)) * sampleDir * RTGI_SCALE;
+        atomicAdd(rtgiAccum[RTGI_ACC * s + 8u], uint(int(floor(b.x + dither.x))));
+        atomicAdd(rtgiAccum[RTGI_ACC * s + 9u], uint(int(floor(b.y + dither.y))));
+        atomicAdd(rtgiAccum[RTGI_ACC * s + 10u], uint(int(floor(b.z + dither.z))));
     }
     if (sunTraced) {
-        atomicAdd(rtgiAccum[8u * s + 6u], 1u);
-        if (sunLit) atomicAdd(rtgiAccum[8u * s + 5u], 1u);
+        atomicAdd(rtgiAccum[RTGI_ACC * s + 6u], 1u);
+        if (sunLit) atomicAdd(rtgiAccum[RTGI_ACC * s + 5u], 1u);
     }
 }
 
@@ -122,6 +140,10 @@ void main() {
     if (p.w < 0.5) return;
     vec3 n = points[2u * i + 1u].xyz;
     vec3 d = rays[2u * i + 1u].xyz;
+    sampleDir = d;
+    // The ray's weight against cosine sampling: cos / (PI x its pdf) -- 1 for a cosine ray, other for a guided one, 0 for
+    // one that left below the surface (rtgi_rays.comp). Its sample is PI x L_in x it.
+    float weight = points[2u * i + 1u].w;
     uvec4 h0 = hits[3u * i];
     vec3 e = vec3(0.0);
     bool counted = true, sky = false;
@@ -144,6 +166,7 @@ void main() {
         counted = eq.w > 0.5 || u.uTrain.x > 0.5;
         e = unpackUnorm4x8(h2.w).rgb * eq.rgb;
     }
+    e *= weight;
     // Nothing not finite reaches a cell: one NaN there spreads to every cell whose rays land in it.
     if (any(isnan(e)) || any(isinf(e))) counted = false;
     bool sunTraced = dot(n, u.uSun.xyz) > 0.0;
@@ -151,7 +174,7 @@ void main() {
     uint level = rtgiLevel(p.xyz, u.uCamera.xyz, u.uParams);
     // Its level, the next (the readout blends the two) and two up (the fallback).
     uint top = uint(u.uParams.w);
-    add(rtgiInsert(cellAt(p.xyz, n, level)), e, counted, sky, sunTraced, sunLit);
-    if (level + 1u <= top) add(rtgiInsert(cellAt(p.xyz, n, level + 1u)), e, counted, sky, sunTraced, sunLit);
-    if (level + 2u <= top) add(rtgiInsert(cellAt(p.xyz, n, level + 2u)), e, counted, sky, sunTraced, sunLit);
+    add(rtgiInsertAt(p.xyz, n, level), e, counted, sky, sunTraced, sunLit);
+    if (level + 1u <= top) add(rtgiInsertAt(p.xyz, n, level + 1u), e, counted, sky, sunTraced, sunLit);
+    if (level + 2u <= top) add(rtgiInsertAt(p.xyz, n, level + 2u), e, counted, sky, sunTraced, sunLit);
 }

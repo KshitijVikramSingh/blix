@@ -1,0 +1,93 @@
+#version 450
+
+// --rtgi (SponzaLoop.Rtgi.cs): each cell trained this frame (the dirty list) blended with its neighbours in its plane --
+// the same level and side, offset along the surface only (never along its normal: a parallel surface a cell away is
+// another surface) -- into what the readout and the lookups read. A cell's light is a mean of few samples where little
+// training reaches (the shadowed, the bounce-lit): neighbours that hold more lend it theirs, mud that settled nowhere
+// (the user, San Miguel, 2026-10-26). NRD's rules for the weights:
+//   - by what each holds (its samples, to 64);
+//   - the blend narrowing as the cell itself gathers: its neighbours' share falls from 1 at uFilter.x samples to 0 at
+//     uFilter.y;
+//   - stopped by luminance: a neighbour further from the cell than the two's spreads allow (uFilter.z standard deviations
+//     of their means' difference, plus 10% of the brighter) weighs little -- a shadow's edge between cells stays. Judged
+//     by the pair, both ways alike: judged by the cell's own spread, a bright cell (wide) took its dark neighbours and a
+//     dark one (narrow) refused its bright ones, light only ever flowing down, compounding along the bounce -- the gate's
+//     dead end 0.89 against 1.00 without the blend (2026-10-26).
+// Then leaned on its parent (the cell a level up holding it: twice its size, several times its samples, smoother): the
+// blend weighted by the samples it stands for, the parent by uParent.x -- a cell of few samples shows mostly its parent,
+// one of thousands its own. The 3 x 3 blend alone left blotches the size of a patch of cells all short of samples
+// together (San Miguel, 2026-10-26).
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform RtgiFilter {
+    vec4 uParams;   // rtgiParams (rtgi_cache.glsl)
+    vec4 uFilter;   // x samples at which the neighbours' share starts to fall; y at which it is gone; z luminance sigmas;
+                    // w the dirty list's room
+    vec4 uParent;   // x the samples the parent stands for (0: no parent); y the top level
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer RtgiKeys { uint rtgiKeys[]; };
+layout(std430, set = 0, binding = 2) readonly buffer RtgiResolved { vec4 rtgiResolved[]; };
+layout(std430, set = 0, binding = 3) readonly buffer RtgiMoments { vec4 rtgiMoments[]; };
+layout(std430, set = 0, binding = 4) readonly buffer RtgiCells { ivec4 rtgiCells[]; };
+layout(std430, set = 0, binding = 5) readonly buffer RtgiDirty { uint dirtyCount; uint dirtyPad[3]; uint dirty[]; };
+layout(std430, set = 0, binding = 6) buffer RtgiFiltered { vec4 rtgiFiltered[]; };
+
+#define RTGI_KEYS(i) rtgiKeys[i]
+#include "rtgi_cache.glsl"
+
+float lum(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= min(dirtyCount, uint(u.uFilter.w))) return;
+    uint s = dirty[i];
+    if (rtgiKeys[s] == 0u) return;
+    vec4 r0 = rtgiResolved[2u * s];
+    float held = rtgiResolved[2u * s + 1u].y;
+    ivec4 cell = rtgiCells[s];
+    uint level = uint(cell.w) / 6u, side = uint(cell.w) % 6u;
+    // The cell's own spread: its samples' variance (the moments, over the fast window) over what it holds.
+    vec4 m = rtgiMoments[3u * s];
+    float sigma = sqrt(max(m.y - m.x * m.x, 0.0) / max(held, 1.0));
+    float l0 = lum(r0.rgb);
+    float share = 1.0 - clamp((held - u.uFilter.x) / max(u.uFilter.y - u.uFilter.x, 1.0), 0.0, 1.0);
+    float wSelf = min(held, 64.0);
+    vec4 sum = r0 * wSelf;
+    float wSum = wSelf;
+    if (share > 0.0) {
+        // The two axes in the side's plane.
+        uint axis = side / 2u;
+        ivec3 ua = axis == 0u ? ivec3(0, 1, 0) : ivec3(1, 0, 0);
+        ivec3 va = axis == 2u ? ivec3(0, 1, 0) : ivec3(0, 0, 1);
+        for (int a = -1; a <= 1; a++) {
+            for (int b = -1; b <= 1; b++) {
+                if (a == 0 && b == 0) continue;
+                uint t = rtgiFind(rtgiCellHash(cell.xyz + ua * a + va * b, level, side, u.uParams), u.uParams);
+                if (t == 0xFFFFFFFFu) continue;
+                vec4 r1 = rtgiResolved[2u * t + 1u];
+                if (r1.y < 0.5) continue;
+                vec4 rn = rtgiResolved[2u * t];
+                vec4 mn = rtgiMoments[3u * t];
+                float ln = lum(rn.rgb);
+                float sigmaN2 = max(mn.y - mn.x * mn.x, 0.0) / max(r1.y, 1.0);
+                float d = (ln - l0) / (u.uFilter.z * sqrt(sigma * sigma + sigmaN2) + 0.1 * max(l0, ln) + 1e-5);
+                float w = share * min(r1.y, 64.0) * ((a == 0 || b == 0) ? 1.0 : 0.7) * exp(-0.5 * d * d);
+                sum += rn * w;
+                wSum += w;
+            }
+        }
+    }
+    vec4 blended = wSum > 0.0 ? sum / wSum : r0;
+    // The samples the blend stands for: the cell's own, all of them, and its neighbours' share.
+    float stands = held + (wSum - wSelf);
+    if (u.uParent.x > 0.0 && level < uint(u.uParent.y)) {
+        uint t = rtgiFind(rtgiCellHash(cell.xyz >> 1, level + 1u, side, u.uParams), u.uParams);
+        if (t != 0xFFFFFFFFu && rtgiResolved[2u * t + 1u].y >= 0.5) {
+            vec4 parent = rtgiResolved[2u * t];
+            blended = (blended * stands + parent * u.uParent.x) / (stands + u.uParent.x);
+        }
+    }
+    rtgiFiltered[s] = blended;
+}
