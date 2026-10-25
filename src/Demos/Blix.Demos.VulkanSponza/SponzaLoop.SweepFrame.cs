@@ -77,7 +77,12 @@ internal sealed partial class SponzaLoop
     private (GpuBufferHandle Ids, int Count, bool Own) sweepFineCopy;
     private int sweepFineCopyFirst;
     // A light change under --sweep-in-frame: its setup's dispatches recorded in the frame (SetupDispatch), not run at once.
-    private bool SetupInFrame => sweepInFrame && liveSkyGathered;
+    // The first cook too behind the frame (the default since 2026-10-25, the user's): the scene up on the patches'
+    // provisional light while it gathers -- Crytek Sponza at a 20 deg sun landed filtered 0.048 / 0.025 (screen / scene; a
+    // truth seed against two 0.036) in ~2 min at ~100 fps. --boot-cook-screen: behind the cook screen, as before.
+    private bool bootInFrame = true;
+    private bool GiBehindFrame => liveSkyGathered || bootInFrame && liveTexels;
+    private bool SetupInFrame => sweepInFrame && GiBehindFrame;
 
     // A buffer a sun change's gather makes as it goes: under --sweep-in-frame mapped and written where it lies -- a
     // device buffer's zeros and contents go up by a submission waited on behind the frames in flight (CreateGpuBuffer's
@@ -186,6 +191,7 @@ internal sealed partial class SponzaLoop
         // ~4 fps); --no-sweep-in-frame: the host's passes under the cook screen, as before (the parts dumps read at once).
         sweepInFrame = !args.Flag("no-sweep-in-frame");
         changeCookScreen = args.Flag("change-cook-screen");
+        bootInFrame = !args.Flag("boot-cook-screen");
         if (args.Int("sweep-slice") is { } s) { sweepSlice = Math.Clamp(s, 256, 32768); sweepSliceFixed = true; }
         if (args.Float("sweep-gpu-ms") is { } gm) sweepGpuMs = Math.Max(0.5f, gm);
         if (args.Int("sweep-instant-chunk") is { } ic) sweepInstantChunk = Math.Max(65536, ic);

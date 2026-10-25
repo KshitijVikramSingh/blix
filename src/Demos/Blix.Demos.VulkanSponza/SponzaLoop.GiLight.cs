@@ -8,8 +8,10 @@ namespace Blix.Demos.VulkanSponza;
 
 // The GI's sun and the sliders' (2026-10-25, the user's): the Sun sliders turn the direct sun -- its light, the RT
 // shadows -- and the GI holds the sun it was last lit for (GiToSun: giSunTarget). Two ways to move it:
-//   Relight  a button: the GI's sun to the sliders', its full change behind the cook screen, the sweep's GPU slot raised
-//            (Relight GPU ms) -- the boot's quality, as fast as the GPU goes.
+//   Relight  a button: the GI's sun to the sliders', every texel gathered again behind the frame (the converge: the scene
+//            back to the boot's quality, 0.025 in ~45 s on Crytek Sponza, the screen 0.070, 2026-10-25), nothing blocked.
+//   Cook to completion  a button: the same behind the cook screen, the sweep's GPU slot raised (Relight GPU ms) and its
+//            full refine -- the screen 0.046, ~130 s blocked.
 //   Live     play / pause: the sun moves along its day (SponzaLoop.SunMove.cs) at Speed deg/s (at most Live max), morning
 //            to evening or back, from where the sliders put it; the GI follows a change at a time once the last has
 //            landed and composed (Live settle s), each at least Live min step, with the light-change tiers' fast settings
@@ -53,6 +55,8 @@ internal sealed partial class SponzaLoop
         if (args.Float("gi-live-boost-ms") is { } bm) giBoostMs = Math.Clamp(bm, 0f, 100f);
         // --gi-relight-at F (a measurement): pause Live and press Relight at post-load frame F (when no change is in flight).
         if (args.Int("gi-relight-at") is { } ra) giRelightAt = ra;
+        // --gi-cook-to-completion-at F: the debug cook at post-load frame F.
+        if (args.Int("gi-cook-to-completion-at") is { } ca) { giRelightAt = ca; giStopRelight = true; }
         giConverge = !args.Flag("gi-no-converge");
         // --gi-stop-hour H [relight] (a measurement): Live stops at the day's hour angle H exactly, then waits for its
         // converge -- or, with 'relight', presses Relight -- so every variant ends at the same sun.
@@ -86,7 +90,7 @@ internal sealed partial class SponzaLoop
         {
             giRelightAt = -1;
             if (giLive) PlayLive(false);
-            Relight();
+            if (giStopRelight) CookToCompletion(); else Relight();
         }
     }
 
@@ -142,8 +146,15 @@ internal sealed partial class SponzaLoop
         return Vector3.Normalize(MathF.Sin((1f - t) * angle) / s * from + MathF.Sin(t * angle) / s * to);
     }
 
-    // The button: the GI's sun to the sliders', the change behind the cook screen at the raised slot.
+    // Relight: the converge at the sliders' sun, behind the frame.
     private void Relight()
+    {
+        if (!liveSkyGathered) return;
+        BeginGiConverge();
+    }
+
+    // Cook to completion: the full change behind the cook screen at the raised slot.
+    private void CookToCompletion()
     {
         if (!liveSkyGathered) return;
         BeginGiChange(SliderToSun, relight: true);
@@ -191,9 +202,12 @@ internal sealed partial class SponzaLoop
         oldStartBelow = MathF.Max(giSaved.Value.OldStart, 30f);
         giConverging = true;
         giNeedsConverge = false;
-        Console.WriteLine("[VulkanSponza] GI light: live converge -- every texel gathered again at the GI's sun, behind the frame.");
+        var angle = giSunTarget == Vector3.Zero ? 0f : MathF.Acos(Math.Clamp(Vector3.Dot(giSunTarget, SliderToSun), -1f, 1f)) * 180f / MathF.PI;
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[VulkanSponza] GI light: converge -- every texel gathered again behind the frame, at the sliders' sun ({angle:0.00} deg from the GI's)."));
         giSunTarget = SliderToSun;
-        LiveRestart(giSunTarget);
+        // A turn starts its own restart (FollowSun's test); at the same sun it is forced.
+        if (angle < 0.25f) LiveRestart(giSunTarget);
     }
 
     // FinishSplitCook: a mode's change landed -- the settings it ran under back.
@@ -224,8 +238,8 @@ internal sealed partial class SponzaLoop
         {
             var lag = giSunTarget == Vector3.Zero ? 0f : MathF.Acos(Math.Clamp(Vector3.Dot(giSunTarget, SliderToSun), -1f, 1f)) * 180f / MathF.PI;
             debug.Values.Value("gi-sun", string.Create(CultureInfo.InvariantCulture,
-                $"{lag:0.0} deg from the sliders' sun; {(giRelighting ? "relighting" : LightChangeInFlight ? (giLive ? "live step in flight" : "changing") : giLive ? "live" : giHold ? "held" : "following the sliders")}"));
-            if (debug.Controls.Button("Relight (cook)") && !LightChangeInFlight && !giLive) Relight();
+                $"{lag:0.0} deg from the sliders' sun; {(giRelighting ? "cooking to completion" : giConverging ? "converging behind the frame" : LightChangeInFlight ? (giLive ? "live step in flight" : "changing") : giLive ? "live" : giHold ? "held" : "following the sliders")}"));
+            if (debug.Controls.Button("Relight (behind the frame)") && !LightChangeInFlight && !giLive) Relight();
             if (debug.Controls.Button(giLive ? "Live: pause" : "Live: play")) PlayLive(!giLive);
             giPlaySpeed = debug.Controls.Float("Live speed (deg/s)", giPlaySpeed, 0.05f, giLiveRate);
             if (giLive) sunMoveRate = MathF.Min(giPlaySpeed, giLiveRate);
@@ -239,8 +253,13 @@ internal sealed partial class SponzaLoop
             if (giLive) sunMoveSettle = giLiveSettle;
             giLiveStop = debug.Controls.Enum("Live stops at", giLiveStop, GiStopNames);
             giKeepOldBelow = debug.Controls.Float("Live keeps the old light below (deg)", giKeepOldBelow, 0f, 30f);
-            giRelightStop = debug.Controls.Enum("Relight stops at", giRelightStop, GiStopNames);
-            giRelightGpuMs = debug.Controls.Float("Relight GPU ms a frame", giRelightGpuMs, 3f, 100f);
+        }
+        // Debugging: the full change behind the cook screen (the boot's quality at the most rays; ~130 s blocked).
+        using (debug.Scope("GI light: debug"))
+        {
+            if (debug.Controls.Button("Cook to completion (blocking)") && !LightChangeInFlight && !giLive) CookToCompletion();
+            giRelightStop = debug.Controls.Enum("Cook stops at", giRelightStop, GiStopNames);
+            giRelightGpuMs = debug.Controls.Float("Cook GPU ms a frame", giRelightGpuMs, 3f, 100f);
         }
     }
 }

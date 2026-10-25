@@ -45,7 +45,7 @@ internal sealed partial class SponzaLoop
 
     private void StartBackgroundGather()
     {
-        if (!backgroundGather || !liveSkyGathered || gatherBehind) return;
+        if (!backgroundGather || !GiBehindFrame || gatherBehind) return;
         gatherBehind = true;
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] light change: the rest of the gather behind the frame, {backgroundGatherMs:0} ms a frame (at least a pass)."));

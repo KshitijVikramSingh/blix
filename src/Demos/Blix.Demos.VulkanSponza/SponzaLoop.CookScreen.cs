@@ -37,7 +37,7 @@ internal sealed partial class SponzaLoop : IUiSource
     // passes chunked a frame at a time (the guides, the direct, the visible bands, the cells, the instant layer), the
     // cook screen a few seconds at every step of a moving sun before (2026-10-25). --change-cook-screen: as before.
     private bool changeCookScreen;
-    private bool ChangeBehindFrame => sweepInFrame && liveSkyGathered && liveCookWarm && !changeCookScreen;
+    private bool ChangeBehindFrame => sweepInFrame && (liveSkyGathered && liveCookWarm || bootInFrame && liveTexels) && !changeCookScreen;
     // Scene frames let through after the instant layer is written (ApplyPatchTexelsNow): the cook screen keeps the last
     // image drawn, and before these it was the provisional's -- every texel its patch's light, too bright -- for the whole
     // gather, the instant layer never shown (2026-10-19).
