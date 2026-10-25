@@ -22,6 +22,12 @@ layout(set = 0, binding = 3) uniform sampler2D uGlare2;
 layout(set = 0, binding = 4) uniform sampler2D uGlare3;
 layout(set = 0, binding = 5) uniform sampler2D uGlare4;
 layout(set = 0, binding = 6) uniform sampler2D uGlare5;
+// Veiling glare: four Gaussians fitted to the Stiles-Holladay 10/theta^2 profile (results/scatter_fit.json), widths in degrees.
+layout(set = 0, binding = 7) uniform sampler2D uScatter0;
+layout(set = 0, binding = 8) uniform sampler2D uScatter1;
+layout(set = 0, binding = 9) uniform sampler2D uScatter2;
+layout(set = 0, binding = 10) uniform sampler2D uScatter3;
+const float SCATTER_W[4] = float[4](0.184599424, 0.330670765, 0.342027359, 0.142702453);
 const float GLARE_W[6] = float[6](0.808603086, 0.134753827, 0.0397676642, 0.0120275726, 0.00364401528, 0.00120383468);
 
 layout(push_constant) uniform Push {
@@ -41,6 +47,7 @@ layout(push_constant) uniform Push {
     float uFadeEnd;
     float uShoulderTail;
     float uGlare;       // 0 off .. 1 the full diffraction PSF
+    float uScatter;     // fraction of the light moved into the veil (0.066 = the standard's, age 25)
     int uOperator;
     int uOutput;
     int uPattern;
@@ -83,6 +90,12 @@ void main()
                    + GLARE_W[2] * texture(uGlare2, vUv).rgb + GLARE_W[3] * texture(uGlare3, vUv).rgb
                    + GLARE_W[4] * texture(uGlare4, vUv).rgb + GLARE_W[5] * texture(uGlare5, vUv).rgb;
             scene = mix(scene, g, pc.uGlare);
+        }
+        if (pc.uScatter > 0.0)
+        {
+            vec3 v = SCATTER_W[0] * texture(uScatter0, vUv).rgb + SCATTER_W[1] * texture(uScatter1, vUv).rgb
+                   + SCATTER_W[2] * texture(uScatter2, vUv).rgb + SCATTER_W[3] * texture(uScatter3, vUv).rgb;
+            scene = mix(scene, v, pc.uScatter);
         }
     }
 

@@ -25,3 +25,18 @@ def test_shader_weights_match_the_fit():
     src = (DEMO / "Shaders/present.frag").read_text()
     body = re.search(r"GLARE_W\[6\] = float\[6\]\(([^)]*)\)", src).group(1)
     assert floats(body) == pytest.approx(FIT["weights"], rel=1e-7)
+
+
+SCATTER = json.loads((glare.RESULTS / "scatter_fit.json").read_text())
+
+
+def test_csharp_scatter_sigmas_match_the_fit():
+    src = (DEMO / "Glare.cs").read_text()
+    body = re.search(r"ScatterSigmasDeg = \{([^}]*)\}", src).group(1)
+    assert floats(body) == pytest.approx(SCATTER["sigmas_deg"], rel=1e-7)
+
+
+def test_shader_scatter_weights_match_the_fit():
+    src = (DEMO / "Shaders/present.frag").read_text()
+    body = re.search(r"SCATTER_W\[4\] = float\[4\]\(([^)]*)\)", src).group(1)
+    assert floats(body) == pytest.approx(SCATTER["weights"], rel=1e-7)

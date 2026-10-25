@@ -45,3 +45,31 @@ def test_more_terms_fit_no_worse():
 def test_gaussian_sum_has_unit_energy():
     r = np.geomspace(1e-3, 3000.0, 20000)
     assert np.trapezoid(2 * np.pi * r * glare.gaussian_sum(r, W, S), r) == pytest.approx(1.0, abs=1e-3)
+
+
+# ---- scatter (Stiles-Holladay) ----------------------------------------------------------------------------------------------
+
+SCATTER = json.loads((glare.RESULTS / "scatter_fit.json").read_text())
+SW, SS = np.array(SCATTER["weights"]), np.array(SCATTER["sigmas_deg"])
+
+
+def test_stiles_holladay_fraction_matches_the_closed_form():
+    theta = np.radians(np.geomspace(1.0, 30.0, 200001))
+    numeric = np.trapezoid(2 * np.pi * theta * 10.0 / np.degrees(theta) ** 2, theta)
+    assert glare.stiles_holladay_fraction(0.0) == pytest.approx(numeric * (1 + 0.0), rel=1e-4)
+    assert glare.stiles_holladay_fraction(25.0) == pytest.approx(0.0662, abs=2e-4)   # about 6.6% of the light, age 25
+    assert glare.stiles_holladay_fraction(70.0) == pytest.approx(2 * glare.stiles_holladay_fraction(0.0), rel=1e-9)   # (1 + 1)
+
+
+def test_scatter_profile_is_inverse_square_between_the_knees():
+    a, b = 3.0, 12.0
+    slope = np.log10(glare.scatter_profile(b) / glare.scatter_profile(a)) / np.log10(b / a)
+    assert slope == pytest.approx(-2.0, abs=0.15)
+
+
+def test_scatter_fit_is_normalised_and_accurate():
+    assert SW.sum() == pytest.approx(1.0, abs=1e-9)
+    assert np.all(np.diff(SS) > 0)
+    assert SCATTER["max_abs_log10_error"] < 0.15      # within x1.4 from 0.2 to 60 degrees
+    t = np.geomspace(1e-3, 3000.0, 20000)
+    assert np.trapezoid(2 * np.pi * t * glare.gaussian_sum(t, SW, SS), t) == pytest.approx(1.0, abs=2e-3)

@@ -26,6 +26,7 @@ namespace Blix.Demos.TonemapLab;
 //   --meter-selftest in.pfm --meter-out out.txt    the trimmed meter of a captured frame (no window).
 //   --hdri name           start in an environment map (lab/tonemap/data/hdri, fetched by tools/fetch_hdris.py); --hdri-dir to point elsewhere.
 //   --glare 0..1          glare mix (default 1), --airy px the PSF's Airy radius (default 2).
+//   --scatter x           scatter glare amount (1 = the standard's, default); --tunnel-ev EV sets how far below the world the tunnel is.
 //   --pan deg/s           pan the camera automatically; --shutter 0..1 sets the motion-blur shutter (0 = off).
 //   --awb off             start with auto white balance off.
 //   --awb-selftest in.pfm --awb-out out.txt      the auto white balance's measure, cast and settled state of a captured frame (no window).
@@ -249,10 +250,14 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
     private bool meterPending;
 
     // Glare and motion blur (lab/tonemap/tmlab/glare.py, motionblur.py). Both act on scene-linear light, before exposure.
-    private GlareChains glare = null!;
+    private GaussianChains glare = null!;
+    private GaussianChains scatter = null!;   // veiling glare: Stiles-Holladay 10/theta^2, lab/tonemap/results/scatter_fit.json
+    private float scatterAmount = 1f;          // 1 = the standard's amount for an age-25 observer (6.6% of the light)
+    private const float ScatterFraction = 0.0662f;   // scatter_fit.json fraction_age25
     private ShaderProgramHandle downProgram, blurProgram;
     private float glareMix = 1f;          // 0 off .. 1 the full diffraction PSF
     private float airyRadiusPx = 2f;      // the PSF's scale: 1.22 lambda N / pitch, in full-resolution pixels
+    private float tunnelEv = -6.6f;      // how far below the world the tunnel interior is (was -8; lifted 1.4 EV: -5.1 and -5.6 read too bright live)
     private bool motionBlur = true;
     private float shutter = 0.5f;         // fraction of the frame the shutter is open (0.5 = a 180 degree shutter)
     private int blurSamples = 16;
@@ -302,6 +307,8 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
         if (args.Flag("manual")) autoExposure = false;
         if (args.Float("glare") is { } startGlare) glareMix = startGlare;
         if (args.Float("airy") is { } startAiry) airyRadiusPx = startAiry;
+        if (args.Float("scatter") is { } startScatter) scatterAmount = startScatter;
+        if (args.Float("tunnel-ev") is { } startTunnel) tunnelEv = startTunnel;
         if (args.Float("shutter") is { } startShutter) shutter = startShutter;
         if (args.Float("pan") is { } startPan) panDegPerSecond = startPan;
         if (args.String("awb") == "off") autoWhiteBalance = false;
@@ -346,9 +353,11 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
         // The world again at 1/8 resolution, for the meter: the same shader, so what is metered is what is seen.
         meterPass = graph.GraphicsPass("meter").Target(meterHandle, LoadOp.Clear, StoreOp.Store).Shader(sceneInterface).Handle;
         // The present shader into an offscreen target: what a capture reads back, in the numbers the window gets.
-        glare = new GlareChains(device, graph, sceneHandle, downInterface, blurInterface);
+        glare = new GaussianChains(device, graph, sceneHandle, downInterface, blurInterface, "glare", GlareFit.Sigmas, GlareFit.Levels);
+        scatter = new GaussianChains(device, graph, sceneHandle, downInterface, blurInterface, "scatter", GlareFit.ScatterSigmasDeg, GlareFit.ScatterLevels);
         var toneBuilder = graph.GraphicsPass("tone").Target(toneHandle, LoadOp.Clear, StoreOp.Store).Read(sceneHandle);
         foreach (var output in glare.Outputs) toneBuilder = toneBuilder.Read(output);
+        foreach (var output in scatter.Outputs) toneBuilder = toneBuilder.Read(output);
         tonePass = toneBuilder.Shader(presentInterface).Handle;
         graph.Compile();
 
@@ -358,6 +367,7 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
         downProgram = device.CreateShaderProgramFromSpv(vert, File.ReadAllBytes(Path.Combine(shaderDir, "down.frag.spv")), downInterface, "glare-down");
         blurProgram = device.CreateShaderProgramFromSpv(vert, File.ReadAllBytes(Path.Combine(shaderDir, "blur.frag.spv")), blurInterface, "glare-blur");
         glare.BuildPipelines(device, downProgram, blurProgram);
+        scatter.BuildPipelines(device, downProgram, blurProgram);
 
         PipelineDescription Offscreen(ShaderProgramHandle program, PassHandle pass) => new(
             program, FullscreenPass.Layout, PrimitiveTopology.Triangles, DepthState.Disabled, RasterizerState.NoCulling,
@@ -479,6 +489,7 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
             UseHdri = loadedEnvironment > 0 ? 1 : 0,
             Dress = dress ? 1 : 0,
             BlurYaw = blurYaw,
+            TunnelEv = tunnelEv,
             BlurPitch = blurPitch,
             BlurSamples = blurYaw != 0f || blurPitch != 0f ? blurSamples : 1,
         }.ToBytes();
@@ -494,15 +505,19 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
         }
 
         var glareOn = glareMix > 0f && pattern == 0;
+        var scatterOn = scatterAmount > 0f && pattern == 0;
         if (glareOn) glare.Record(airyRadiusPx);
+        if (scatterOn) scatter.Record(frame.Height / fovDegrees);   // sigmas are in degrees: pixels per degree of vertical field of view
 
         var sceneTexture = graph.GetColorTexture(sceneHandle);
         // The glare terms are bound only when this frame drew them (an undrawn target has no defined contents); otherwise the
         // scene stands in and the shader's glare mix is 0.
-        var sceneBinding = new ShaderTextureBinding[7];
+        var sceneBinding = new ShaderTextureBinding[11];
         sceneBinding[0] = new ShaderTextureBinding("uScene", sceneTexture);
         for (var i = 0; i < 6; i++)
             sceneBinding[i + 1] = new ShaderTextureBinding($"uGlare{i}", glareOn ? graph.GetColorTexture(glare.Outputs[i]) : sceneTexture);
+        for (var i = 0; i < 4; i++)
+            sceneBinding[i + 7] = new ShaderTextureBinding($"uScatter{i}", scatterOn ? graph.GetColorTexture(scatter.Outputs[i]) : sceneTexture);
         if ((capturePath is not null || selfTestPath is not null) && frameCount == captureFrame)
         {
             var push = MakePresentPush(selfTest: selfTestPath is not null).ToBytes();
@@ -557,6 +572,7 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
             Output = selfTest ? 2 : 0,
             Pattern = pattern,
             GlareMix = glareMix > 0f && pattern == 0 ? glareMix : 0f,
+            ScatterAmount = scatterAmount > 0f && pattern == 0 ? Math.Min(scatterAmount * ScatterFraction, 1f) : 0f,
             Gt7Sdr = gt7Sdr ? 1 : 0,
         };
     }
@@ -675,6 +691,7 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
         {
             glareMix = debug.Controls.Float("glare mix (0 off, 1 diffraction PSF)", glareMix, 0f, 1f);
             airyRadiusPx = debug.Controls.Float("Airy radius px (PSF scale)", airyRadiusPx, 0.5f, 4f);
+            scatterAmount = debug.Controls.Float("scatter (1 = Stiles-Holladay, age 25)", scatterAmount, 0f, 4f);
             motionBlur = debug.Controls.Toggle("Motion blur", motionBlur);
             shutter = debug.Controls.Float("shutter (fraction of the frame open)", shutter, 0f, 1f);
             blurSamples = (int)debug.Controls.Float("blur samples", blurSamples, 4f, 48f);
@@ -735,6 +752,7 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
             lampNits = debug.Controls.Float("Lamp nits", lampNits, 100f, 20000f);
             signNits = debug.Controls.Float("Sign nits", signNits, 1000f, 1.0e6f);
             signs = debug.Controls.Toggle("Flashing signs", signs);
+            tunnelEv = debug.Controls.Float("Tunnel EV below the world", tunnelEv, -10f, -4f);
             fovDegrees = debug.Controls.Float("Field of view deg", fovDegrees, 15f, 110f);
             if (debug.Controls.Button("Look at the tunnel")) { yaw = MathF.PI; pitch = 0.04f; }
             if (debug.Controls.Button("Look at the sun"))
@@ -749,6 +767,7 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
     {
         fullscreen?.Dispose();
         glare?.Dispose();
+        scatter?.Dispose();
         hdris?.Dispose();
         if (device is not null)
         {
@@ -774,7 +793,7 @@ internal readonly record struct Gt7Set(
 [StructLayout(LayoutKind.Sequential)]
 internal struct ScenePush
 {
-    public float Yaw, Pitch, TanHalfFov, Aspect, Time, SunElevation, SunAzimuth, WorldEv, LampNits, SignNits, BlurYaw, BlurPitch;
+    public float Yaw, Pitch, TanHalfFov, Aspect, Time, SunElevation, SunAzimuth, WorldEv, LampNits, SignNits, BlurYaw, BlurPitch, TunnelEv;
     public int Signs, UseHdri, Dress, BlurSamples;
 
     public readonly byte[] ToBytes()
@@ -788,7 +807,7 @@ internal struct ScenePush
 internal struct PresentPush
 {
     public float Exposure, AnchorNits, SdrWhiteNits, PeakNits, WbR, WbG, WbB;
-    public float Alpha, GrayPoint, LinearSection, ToeStrength, BlendRatio, FadeStart, FadeEnd, ShoulderTail, GlareMix;
+    public float Alpha, GrayPoint, LinearSection, ToeStrength, BlendRatio, FadeStart, FadeEnd, ShoulderTail, GlareMix, ScatterAmount;
     public int Operator, Output, Pattern, Gt7Sdr;
 
     public readonly byte[] ToBytes()

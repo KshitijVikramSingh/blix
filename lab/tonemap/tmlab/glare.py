@@ -19,6 +19,19 @@ radii out). A Gaussian has no tail, so the PSF is approximated by a sum of Gauss
 
 fitted in log space (so the tail counts as much as the core) over r / a in [0.05, 400]. On a GPU each term is a separable
 blur at a resolution matched to its width, which is how the demo applies it.
+
+SCATTER (second half of this module). Diffraction is only the aperture's part. The eye and a real lens also scatter light at
+large angles, and the standard description of it is the Stiles-Holladay equivalent veiling luminance (CIE 146:2002 and its
+predecessor CIE 135/1999, J.J. Vos):
+
+    L_veil = E * 10 / theta^2        theta in degrees, valid about 1 to 30 degrees; E the illuminance the source makes at the eye
+    age-adjusted:  x (1 + (age / 70)^4)
+
+as a point-spread function that is 10 / theta^2 per steradian. Its energy between 1 and 30 degrees is
+20 pi (pi/180)^2 ln(30) = 6.5% of the light (x1.016 at age 25), the right order for a healthy eye's straylight. Sources: CIE 146:2002
+(summary in the TNO paper "On the cause of disability glare...", repository.tno.nl docId 8955). The formula is only given for
+1-30 degrees; below 1 degree the diffraction part above takes over (a flat knee at 1 degree here), and above 30 degrees it
+is rolled off, both choices of this lab, not of the standard. Scale: degrees on the screen, so it follows the field of view.
 """
 from __future__ import annotations
 
@@ -115,8 +128,69 @@ def report(w, s) -> dict:
             "max_encircled_energy_error": float(ee.max()), "fit_range_airy_radii": [R_LO, R_HI]}
 
 
+# ---- scatter -------------------------------------------------------------------------------------------------------------
+
+THETA_LO, THETA_HI = 1.0, 30.0           # degrees: the Stiles-Holladay range
+SCATTER_GRID = np.geomspace(0.2, 60.0, 300)
+
+
+def stiles_holladay_fraction(age: float = 25.0) -> float:
+    """Fraction of a source's light the Stiles-Holladay veil carries between 1 and 30 degrees, age adjusted."""
+    return 20.0 * np.pi * (np.pi / 180.0) ** 2 * np.log(THETA_HI / THETA_LO) * (1.0 + (age / 70.0) ** 4)
+
+
+def scatter_profile(theta):
+    """The scatter envelope, unnormalised: 10/theta^2 inside 1..30 degrees, flat below 1 and rolled off above 30 (this lab's knees)."""
+    t = np.asarray(theta, dtype=np.float64)
+    return 1.0 / (t ** 2 + THETA_LO ** 2) / (1.0 + (t / THETA_HI) ** 4)
+
+
+def _scatter_norm() -> float:
+    t = np.geomspace(1e-3, 2000.0, 200000)
+    return float(np.trapezoid(2 * np.pi * t * scatter_profile(t), t))
+
+
+def fit_scatter(terms: int = 5, starts: int = 24, seed: int = 0):
+    """Gaussian-sum (weights sum 1, sigmas in degrees) approximating the unit-energy scatter profile, log-space, multi-start."""
+    target = np.log10(scatter_profile(SCATTER_GRID) / _scatter_norm())
+    rng = np.random.default_rng(seed)
+    best = None
+    for _ in range(starts):
+        sig0 = np.sort(np.exp(rng.uniform(np.log(0.3), np.log(40.0), terms)))
+        v0 = np.concatenate([rng.normal(-np.log(terms), 0.8, terms), np.log(sig0)])
+        def residual(v):
+            w, sg = _unpack(v)
+            return np.log10(np.maximum(gaussian_sum(SCATTER_GRID, w, sg), 1e-30)) - target
+        sol = least_squares(residual, v0, method="lm", max_nfev=4000)
+        if best is None or sol.cost < best.cost:
+            best = sol
+    w, sg = _unpack(best.x)
+    order = np.argsort(sg)
+    return w[order], sg[order]
+
+
+def scatter_report(w, sg, age: float = 25.0) -> dict:
+    err = np.log10(gaussian_sum(SCATTER_GRID, w, sg)) - np.log10(scatter_profile(SCATTER_GRID) / _scatter_norm())
+    return {"terms": int(len(w)), "weights": w.tolist(), "sigmas_deg": sg.tolist(), "max_abs_log10_error": float(np.abs(err).max()),
+            "rms_log10_error": float(np.sqrt((err ** 2).mean())), "fit_range_deg": [float(SCATTER_GRID[0]), float(SCATTER_GRID[-1])],
+            "fraction_age25": float(stiles_holladay_fraction(age)),
+            "source": "Stiles-Holladay veiling luminance 10/theta^2 (deg), CIE 146:2002; knees at 1 and 30 degrees are this lab's"}
+
+
+def main_scatter():
+    RESULTS.mkdir(exist_ok=True)
+    for n in (4, 5, 6):
+        w, sg = fit_scatter(n)
+        r = scatter_report(w, sg)
+        print(f"scatter {n} terms: max |log10 error| {r['max_abs_log10_error']:.3f} (x{10 ** r['max_abs_log10_error']:.2f}); sigmas deg {np.round(sg, 2)} weights {np.round(w, 4)}")
+        if n == 4:   # four terms: x1.31 everywhere, four more chains in the demo instead of five
+            (RESULTS / "scatter_fit.json").write_text(json.dumps(r, indent=1))
+    print(f"fraction of light scattered into 1-30 degrees, age 25: {stiles_holladay_fraction(25.0):.4f}")
+
+
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--scatter", action="store_true", help="fit the Stiles-Holladay scatter instead (writes results/scatter_fit.json)")
     ap.add_argument("--terms", type=int, nargs="*", default=[3, 4, 5, 6, 8])
     ap.add_argument("--save", type=int, default=6, help="which term count to write to results/glare_fit.json")
     args = ap.parse_args()
@@ -132,4 +206,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    main_scatter() if "--scatter" in sys.argv else main()

@@ -248,8 +248,9 @@ the trimmed histogram meter, and steps every frame. Every constant is a slider, 
 half a minute (`Run dusk` at x60), and "Look at the tunnel" is an instant camera cut. The port is held to the python by
 `tests/test_csharp_parity.py` (no window needed: `--adaptation-selftest`, `--meter-selftest`): the adaptation steps agree
 to 1e-7 and the meter to 1e-15. `--trace --cut-at S --frames N` prints the adaptation per reading for an unattended run: a
-cut into the tunnel moves the metered level 8.07 EV, and S falls to its window floor (the long-term level minus 2 EV) in about
-a second and stays 6 EV dark, as the specs say. (An earlier tunnel was a small dark rectangle, and cutting to it moved the
+cut into the tunnel (8 EV down when it was first built; the demo's default is now 6.6 EV down, lifted 1.4 EV by the author's
+call after trying 5.1 and 5.6 (too bright live: a live session settles brighter than a 7 s capture), `--tunnel-ev`) moves the metered level by that much, and S falls to its window
+floor (the long-term level minus 2 EV) in about a second and stays (tunnel depth - 2) EV dark, as the specs say: 6 EV at 8 down, about 3 now. (An earlier tunnel was a small dark rectangle, and cutting to it moved the
 meter by only 0.57 EV, because the bright world around it filled 93% of the frame; the interior is now a sector wide enough
 that looking into it fills the screen.)
 

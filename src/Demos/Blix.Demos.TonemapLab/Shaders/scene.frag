@@ -3,7 +3,7 @@
 // A procedural panoramic world, in scene-linear Rec.709 where 1.0 = 250 nits (the lab's anchor). It exists to give the
 // tone mapper and the exposure model the things they have to survive, at real luminance ratios:
 //   - a sky from ~3500 nits overhead to ~9000 at the haze, and a sun disc at 1e6 nits (4000 scene units: inside RGBA16F)
-//   - a ground at ~2500 nits, a tunnel mouth (8 EV darker than what is around it) behind the starting view
+//   - a ground at ~2500 nits, a tunnel mouth (about 6.6 EV darker than what is around it; the --tunnel-ev slider) behind the starting view
 //   - street lamps (small, 4000 nits), flashing retroreflective signs (small, 1e5 nits)
 // The sky, sun and ground follow the world level (EV) so the same scene can be noon or night; the lamps and signs do not,
 // which is what makes them dominate at night and what a meter has to learn to ignore.
@@ -25,6 +25,7 @@ layout(push_constant) uniform Push {
     float uSignNits;
     float uBlurYaw;     // radians the view sweeps during the shutter (0 = no motion blur)
     float uBlurPitch;
+    float uTunnelEv;    // the tunnel interior's level relative to the world, in EV
     int uSigns;
     int uUseHdri;
     int uDress;
@@ -40,6 +41,15 @@ const float PI = 3.14159265;
 float angDiff(float a, float b) { return abs(mod(a - b + PI, 2.0 * PI) - PI); }
 
 float gSky;   // 1 where the ray hit sky: written to alpha for the white balance meter, which discounts it
+
+// A lamp is a bright core with a soft shoulder and a faint wide skirt, not a flat disc: the rays a real bulb sends into the lens
+// fall off smoothly, and a flat clipped disc gives the glare nothing to work with and reads as a sticker. `rad` is the core's
+// radius in radians; the profile is 1 at the centre.
+float lampProfile(float r, float rad)
+{
+    if (r > rad * 24.0) return 0.0;
+    return exp(-2.0 * r * r / (rad * rad)) + 0.03 * exp(-r / (rad * 3.0));
+}
 
 vec3 world(vec3 d)
 {
@@ -83,15 +93,15 @@ vec3 world(vec3 d)
 
     // The tunnel, behind the starting view: a sector wide enough that looking into it fills the screen (an interior fills
     // your view; a small dark rectangle left the meter reading the bright world around it and moved it by half a stop).
-    // 8 EV below whatever is around it, with a row of lamps along it.
+    // uTunnelEv (about 6.6) EV below whatever is around it, with a row of lamps along it.
     if (angDiff(az, PI) < 1.25 && elv > -0.9 && elv < 1.1)
     {
-        nits *= 1.0 / 256.0;
+        nits *= exp2(pc.uTunnelEv);
         gSky = 0.0;
         for (int i = 0; i < 5; ++i)
         {
             vec2 c = vec2(PI + (float(i) - 2.0) * 0.35, 0.25);
-            if (length(vec2(angDiff(az, c.x), elv - c.y)) < 0.012) nits += vec3(1.0, 0.82, 0.55) * 800.0;
+            nits += vec3(1.0, 0.82, 0.55) * 800.0 * lampProfile(length(vec2(angDiff(az, c.x), elv - c.y)), 0.012);
         }
     }
 
@@ -99,7 +109,7 @@ vec3 world(vec3 d)
     for (int i = 0; i < 5; ++i)
     {
         vec2 c = vec2(0.5 + float(i) * 0.55, 0.04 + 0.015 * float(i % 2));
-        if (length(vec2(angDiff(az, c.x), elv - c.y)) < 0.014) nits += vec3(1.0, 0.82, 0.55) * pc.uLampNits;
+        nits += vec3(1.0, 0.82, 0.55) * pc.uLampNits * lampProfile(length(vec2(angDiff(az, c.x), elv - c.y)), 0.014);
     }
 
     // Retroreflective signs: two small rectangles that flash for 1.5 s in every 3.

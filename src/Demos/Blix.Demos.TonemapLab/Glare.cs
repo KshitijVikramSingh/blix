@@ -8,31 +8,45 @@ namespace Blix.Demos.TonemapLab;
 // tests/test_glare_constants.py). Each term is the scene blurred by one Gaussian, taken from the resolution its width needs: a
 // separable blur is at most 33 taps, so a term hundreds of pixels wide is a small blur of a heavily downsampled copy. One
 // PostChain per term: some half-resolution steps, then a horizontal and a vertical blur.
-internal sealed class GlareChains : IDisposable
+internal static class GlareFit
 {
-    /// <summary>Gaussian widths in Airy radii (the fit's; the weights are in present.frag). Each term is blurred at the mip level in Levels (0 = full resolution).</summary>
+    /// <summary>Diffraction: Gaussian widths in Airy radii (the fit's; the weights are in present.frag), and each term's mip level.</summary>
     public static readonly float[] Sigmas = { 0.350345143f, 1.21842113f, 4.03871211f, 13.3788193f, 44.239211f, 152.640498f };
-    private static readonly int[] Levels = { 0, 0, 2, 3, 5, 7 };
+    public static readonly int[] Levels = { 0, 0, 2, 3, 5, 7 };
 
-    private readonly PostChain[] chains = new PostChain[6];
+    /// <summary>Scatter (Stiles-Holladay, results/scatter_fit.json): widths in degrees on the screen; levels chosen for up to ~30 px per degree.</summary>
+    public static readonly float[] ScatterSigmasDeg = { 0.909161469f, 2.96041278f, 9.6337886f, 19.7788583f };
+    public static readonly int[] ScatterLevels = { 4, 5, 7, 8 };
+}
+
+internal sealed class GaussianChains : IDisposable
+{
+    private readonly PostChain[] chains;
+    private readonly float[] sigmas;
+    private readonly int[] levels;
     private readonly ShaderInterface downInterface;
     private readonly ShaderInterface blurInterface;
 
-    public GraphResourceHandle[] Outputs { get; } = new GraphResourceHandle[6];
+    public GraphResourceHandle[] Outputs { get; }
 
-    public GlareChains(IGraphicsDevice device, RenderGraph graph, GraphResourceHandle input, ShaderInterface down, ShaderInterface blur)
+    public GaussianChains(IGraphicsDevice device, RenderGraph graph, GraphResourceHandle input, ShaderInterface down, ShaderInterface blur,
+        string name, float[] sigmas, int[] levels)
     {
         downInterface = down;
         blurInterface = blur;
-        for (var i = 0; i < 6; i++)
+        this.sigmas = sigmas;
+        this.levels = levels;
+        chains = new PostChain[sigmas.Length];
+        Outputs = new GraphResourceHandle[sigmas.Length];
+        for (var i = 0; i < sigmas.Length; i++)
         {
             var stages = new List<PostStage>();
-            for (var k = 1; k <= Levels[i]; k++)
-                stages.Add(new PostStage($"glare{i}.down{k}", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(1f / (1 << k)), down, "uSrc"));
-            var size = new MatchSwapchainGraphSize(1f / (1 << Levels[i]));
-            stages.Add(new PostStage($"glare{i}.blurH", TextureFormat.Rgba16F, size, blur, "uSrc"));
-            stages.Add(new PostStage($"glare{i}.blurV", TextureFormat.Rgba16F, size, blur, "uSrc"));
-            chains[i] = new PostChain(device, graph, input, stages, $"glare{i}");
+            for (var k = 1; k <= levels[i]; k++)
+                stages.Add(new PostStage($"{name}{i}.down{k}", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(1f / (1 << k)), down, "uSrc"));
+            var size = new MatchSwapchainGraphSize(1f / (1 << levels[i]));
+            stages.Add(new PostStage($"{name}{i}.blurH", TextureFormat.Rgba16F, size, blur, "uSrc"));
+            stages.Add(new PostStage($"{name}{i}.blurV", TextureFormat.Rgba16F, size, blur, "uSrc"));
+            chains[i] = new PostChain(device, graph, input, stages, $"{name}{i}");
             Outputs[i] = chains[i].Output;
         }
     }
@@ -49,13 +63,12 @@ internal sealed class GlareChains : IDisposable
         }
     }
 
-    /// <summary>Record every term's passes. <paramref name="airyRadiusPx"/> is the Airy radius in full-resolution pixels.</summary>
-    public void Record(float airyRadiusPx)
+    /// <summary>Record every term's passes. <paramref name="pixelsPerUnit"/> converts a sigma's unit (Airy radii, or degrees) to full-resolution pixels.</summary>
+    public void Record(float pixelsPerUnit)
     {
-        for (var i = 0; i < 6; i++)
+        for (var i = 0; i < sigmas.Length; i++)
         {
-            var sigma = Math.Max(0.3f, Sigmas[i] * airyRadiusPx / (1 << Levels[i]));
-            var term = i;
+            var sigma = Math.Max(0.3f, sigmas[i] * pixelsPerUnit / (1 << levels[i]));
             chains[i].Record((index, stage) =>
             {
                 if (stage.Name.EndsWith(".blurH", StringComparison.Ordinal)) return Push(1f, 0f, sigma);

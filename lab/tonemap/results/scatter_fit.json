@@ -1,0 +1,23 @@
+{
+ "terms": 4,
+ "weights": [
+  0.18459942354226277,
+  0.3306707650938583,
+  0.34202735870629314,
+  0.1427024526575857
+ ],
+ "sigmas_deg": [
+  0.9091614687879651,
+  2.9604127842503134,
+  9.633788602529672,
+  19.778858268654684
+ ],
+ "max_abs_log10_error": 0.11762562813601996,
+ "rms_log10_error": 0.0368519596275081,
+ "fit_range_deg": [
+  0.2,
+  60.0
+ ],
+ "fraction_age25": 0.066156912701216,
+ "source": "Stiles-Holladay veiling luminance 10/theta^2 (deg), CIE 146:2002; knees at 1 and 30 degrees are this lab's"
+}
