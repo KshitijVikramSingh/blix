@@ -59,6 +59,8 @@ internal sealed partial class SponzaLoop
     // A gather's rounds stop here (the three resolves': host, GPU, in the frame); left > 0.
     private bool RefineStops(int of, int left)
     {
+        // --patch-layers, a sun change's coarse sweep: its refine rounds (PatchLayersCoarseRounds) before the fine round.
+        if (PatchLayersCoarseNow && sunNodeRefineRound >= patchLayersCoarseRounds) return true;
         if (!refineNeed) return sunNodeRefineRound > 0 && of - left < splitRefineMinShare * of;
         var sweepRays = (long)sunNodeTraceIds.Length * sunNodeRays;
         return sunNodeRefineRound >= RefineNeedRounds || sunNodeRefineRays >= refineBudget * sweepRays;

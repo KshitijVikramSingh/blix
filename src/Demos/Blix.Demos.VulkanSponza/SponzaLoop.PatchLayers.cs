@@ -26,9 +26,17 @@ internal sealed partial class SponzaLoop
     private int patchLayerIdsCount;
     private readonly System.Diagnostics.Stopwatch patchLayerClock = new();
 
+    // --patch-layers-coarse-rounds N (2): a sun change's coarse refine rounds before its fine round -- the fine picks (the
+    // contacts, the edges: their own gather) waited ~30 s behind them, the screen with them. A 20 deg change on Crytek
+    // Sponza, the screen at 20 / 40 s and landed: all rounds 0.121 / 0.093, 0.080 (110 s); 0 rounds 0.103 / 0.093, 0.090
+    // (91 s); 2 rounds 0.098 / 0.087, 0.083 (95 s); today without layers 0.200 / 0.092, 0.086 (88 s), 2026-10-25.
+    private int patchLayersCoarseRounds = 2;
+    private bool PatchLayersCoarseNow => patchLayers && sunChangeMask is not null && !fineGathering && !visibleChangedGathering;
+
     private void ParsePatchLayers(AppArgs args)
     {
         patchLayers = args.Flag("patch-layers");
+        if (args.Int("patch-layers-coarse-rounds") is { } cr) patchLayersCoarseRounds = Math.Max(0, cr);
         if (patchLayers) patchRank = true;
     }
 
