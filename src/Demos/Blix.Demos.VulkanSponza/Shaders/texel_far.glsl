@@ -140,8 +140,11 @@ int farSet(vec3 x, vec3 nx, int primary, vec4 far, out int ids[FAR_SET], out flo
 }
 
 // The reach for the set: past it the texel and every blended patch see a direction alike to within half a bin.
+// far.x 3 (the record relit from the complete lists, live): at least the lists' reach, 3 spacings -- the lists hold only
+// what lies past it from the patch's centre, and a ray handed over nearer took the light of what lies beyond: a contact
+// read the hall for the wall beside it (2026-10-25).
 float farSetReach(vec3 x, int ids[FAR_SET], vec4 far) {
-    float r = far.y;
+    float r = far.x > 2.5 ? 3.0 * far.y : far.y;
     for (int i = 0; i < FAR_SET; ++i)
         if (ids[i] >= 0) r = max(r, length(x - cookedPatch[3 * ids[i]].xyz) / FAR_HALF_BIN_TAN);
     return r;

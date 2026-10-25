@@ -109,7 +109,9 @@ internal sealed partial class SponzaLoop
         // --live-texels: only with the complete far lists (the GI bundle's): relit for each light in milliseconds, no record
         // pass. Without them the record is a pass over every texel before the sweep (minutes), per light -- off.
         farOn = farField && splitCooking && sunNodeGuided && !sunNodeExact && sunNodeStride == 1 && suns <= 3 && cookedPacked is not null
-            && frameTracer is not null && (!liveTexels || (farTransportMode && transportBuildFarLists is not null));
+            // Live only with --live-far-lists: the lists once built stay in the GI bundle, and their being there had turned the
+            // live far field on for every later boot (2026-10-25).
+            && frameTracer is not null && (!liveTexels || (farTransportMode && !farListsOff && transportBuildFarLists is not null));
         farRecording = farOn;
         farRecordPass = 0;
         farRecordRound = 0;
@@ -330,7 +332,7 @@ internal sealed partial class SponzaLoop
 
     // The uniform the rays and the shade take: 0 off (and while discovering), 1 recording, 2 reading.
     private Vector4 FarUniform(int discover) => new(
-        !farOn || discover > 0 ? 0f : farRecording ? 1f : 2f,
+        !farOn || discover > 0 ? 0f : farRecording ? 1f : liveTexels && farTransportMode ? 3f : 2f,
         transportSpacing,
         FarKnownWeight * FarFixed,
         sunNodeSuns?.Length ?? 0);
