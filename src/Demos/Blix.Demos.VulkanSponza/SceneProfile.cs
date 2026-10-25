@@ -315,7 +315,33 @@ internal sealed record SceneProfile(
         StartPitch = 5f,
     };
 
-    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, CornellPanel, Drapes, SheetSlab, SheetShell, SheetShellThin, ThinWall, Crevices, CrevicesDark, CrevicesHashed, KhronosPlant, KhronosTeacup, KhronosTest, CrytekSponza };
+    /// <summary>Intel's Jungle Ruins (Blender scene, 2024; downloaded to ~/Downloads/JungleRuins, never committed): exported
+    /// from its .blend to an untextured GLB (geometry nodes applied, ~12.5 M triangles over ~8 x 3 km), cooked to
+    /// $BLIX_TESTBED_ASSETS/jungle -- an open world's scale and foliage, the survey's stress case (2026-10-25).</summary>
+    public static readonly SceneProfile Jungle = CrytekSponza with
+    {
+        Name = "jungle",
+        Title = "Vulkan Jungle Ruins (survey)",
+        SetupHint = "export ~/Downloads/JungleRuins' .blend to a GLB (Blender, untextured) and cook it with Blix.Tools.Cook asset to $BLIX_TESTBED_ASSETS/jungle",
+        Packs = new ScenePack[] { new("jungle", Required: true) },
+        StartPosition = new Vector3(572.5f, 1.7f, -766.5f),
+        StartPitch = 0f,
+    };
+
+    /// <summary>San Miguel 2 (Guillermo M. Leal Llaguno; the McGuire Computer Graphics Archive, downloaded, never committed):
+    /// its OBJ through Blender to glTF, cooked to $BLIX_TESTBED_ASSETS/san-miguel -- ~10 M triangles over ~70 x 27 x 15 m,
+    /// a dense courtyard of foliage and furniture, the survey's (2026-10-25).</summary>
+    public static readonly SceneProfile SanMiguel = CrytekSponza with
+    {
+        Name = "san-miguel",
+        Title = "Vulkan San Miguel 2 (survey)",
+        SetupHint = "import ~/blix-assets/sanmiguel-src/san-miguel.obj in Blender, export glTF, cook with Blix.Tools.Cook asset + lightmap to $BLIX_TESTBED_ASSETS/san-miguel",
+        Packs = new ScenePack[] { new("san-miguel", Required: true) },
+        StartPosition = new Vector3(12f, 1.7f, -7f),
+        StartPitch = 0f,
+    };
+
+    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, CornellPanel, Drapes, SheetSlab, SheetShell, SheetShellThin, ThinWall, Crevices, CrevicesDark, CrevicesHashed, KhronosPlant, KhronosTeacup, KhronosTest, CrytekSponza, Jungle, SanMiguel };
 
     /// <summary>The profile <c>--scene</c> names, Sponza when it names none.</summary>
     public static SceneProfile Named(string? name)

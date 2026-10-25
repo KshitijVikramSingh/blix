@@ -77,10 +77,11 @@ internal sealed partial class SponzaLoop
     private (GpuBufferHandle Ids, int Count, bool Own) sweepFineCopy;
     private int sweepFineCopyFirst;
     // A light change under --sweep-in-frame: its setup's dispatches recorded in the frame (SetupDispatch), not run at once.
-    // The first cook too behind the frame (the default since 2026-10-25, the user's): the scene up on the patches'
-    // provisional light while it gathers -- Crytek Sponza at a 20 deg sun landed filtered 0.048 / 0.025 (screen / scene; a
-    // truth seed against two 0.036) in ~2 min at ~100 fps. --boot-cook-screen: behind the cook screen, as before.
-    private bool bootInFrame = true;
+    // --boot-in-frame: the first cook too behind the frame: the scene up on the patches' provisional light while it gathers
+    // -- Crytek Sponza at a 20 deg sun landed filtered 0.048 / 0.025 (screen / scene; a truth seed against two 0.036) in
+    // ~2 min at ~100 fps; Intel Sponza (17.4 M texels) still in its setup after 3 min at 9-12 fps (steps not chunked for
+    // the frame, the gather at the slot's pace): off by default, the boot behind the cook screen at the GPU's pace.
+    private bool bootInFrame;
     private bool GiBehindFrame => liveSkyGathered || bootInFrame && liveTexels;
     private bool SetupInFrame => sweepInFrame && GiBehindFrame;
 
@@ -191,7 +192,7 @@ internal sealed partial class SponzaLoop
         // ~4 fps); --no-sweep-in-frame: the host's passes under the cook screen, as before (the parts dumps read at once).
         sweepInFrame = !args.Flag("no-sweep-in-frame");
         changeCookScreen = args.Flag("change-cook-screen");
-        bootInFrame = !args.Flag("boot-cook-screen");
+        bootInFrame = args.Flag("boot-in-frame");
         if (args.Int("sweep-slice") is { } s) { sweepSlice = Math.Clamp(s, 256, 32768); sweepSliceFixed = true; }
         if (args.Float("sweep-gpu-ms") is { } gm) sweepGpuMs = Math.Max(0.5f, gm);
         if (args.Int("sweep-instant-chunk") is { } ic) sweepInstantChunk = Math.Max(65536, ic);
