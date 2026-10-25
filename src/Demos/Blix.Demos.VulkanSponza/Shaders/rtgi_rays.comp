@@ -23,6 +23,10 @@ layout(std430, set = 0, binding = 4) readonly buffer RtgiPrevHits { uvec4 prevHi
 layout(std430, set = 0, binding = 5) writeonly buffer RtgiPoints { vec4 points[]; };   // 2 a point: position and 1 (0: none); normal
 layout(std430, set = 0, binding = 6) writeonly buffer RtgiRayBuffer { vec4 rays[]; };
 layout(std430, set = 0, binding = 7) writeonly buffer RtgiShadowOrigins { vec4 origins[]; };
+// Last frame's landings in untrained cells (rtgi_train.comp, this frame's train): the first points from hits take them.
+layout(std430, set = 0, binding = 8) readonly buffer RtgiRequests { uint requestCount; uint requestPad[3]; vec4 requests[]; };
+// The other parity's requests: its count zeroed here for the next frame's train.
+layout(std430, set = 0, binding = 9) buffer RtgiNextRequests { uint nextRequestCount; uint nextPad[3]; vec4 nextRequests[]; };
 
 uint hash(uint x) {
     x ^= x >> 16; x *= 0x7feb352du;
@@ -41,6 +45,7 @@ void none(uint i) {
 
 void main() {
     uint i = gl_GlobalInvocationID.x;
+    if (i == 0u) nextRequestCount = 0u;
     uint visible = uint(u.uCounts.x), total = visible + uint(u.uCounts.y);
     if (i >= total) return;
     uint frame = uint(u.uCounts.z);
@@ -60,19 +65,25 @@ void main() {
         n = normalize(ns.xyz);
     } else {
         if (u.uSun.w < 0.5) { none(i); return; }
-        // A share of last frame's training rays, spread over all of them and turning each frame.
-        uint k = (hash(i ^ frame * 0x632BE5ABu)) % total;
-        uvec4 h0 = prevHits[3u * k];
-        // A hit on a surface's front (bit 2): a back face is inside something, nothing to train.
-        if ((h0.w & 3u) != 3u) { none(i); return; }
-        uvec4 h2 = prevHits[3u * k + 2u];
-        vec4 o = prevRays[2u * k], d = prevRays[2u * k + 1u];
-        p = o.xyz + d.xyz * uintBitsToFloat(h0.x);
-        n = vec3(uintBitsToFloat(h2.x), uintBitsToFloat(h2.y), uintBitsToFloat(h2.z));
-        // A degenerate triangle's normal is zero: normalized, a NaN that spread through every cell reading it (2026-10-25).
-        if (!(dot(n, n) > 1e-12) || any(isnan(p))) { none(i); return; }
-        n = normalize(n);
-        if (dot(n, d.xyz) > 0.0) n = -n;
+        uint j = i - visible;
+        if (j < min(requestCount, uint(u.uCounts.y))) {
+            p = requests[2u * j].xyz;
+            n = requests[2u * j + 1u].xyz;
+        } else {
+            // A share of last frame's training rays, spread over all of them and turning each frame.
+            uint k = (hash(i ^ frame * 0x632BE5ABu)) % total;
+            uvec4 h0 = prevHits[3u * k];
+            // A hit on a surface's front (bit 2): a back face is inside something, nothing to train.
+            if ((h0.w & 3u) != 3u) { none(i); return; }
+            uvec4 h2 = prevHits[3u * k + 2u];
+            vec4 o = prevRays[2u * k], d = prevRays[2u * k + 1u];
+            p = o.xyz + d.xyz * uintBitsToFloat(h0.x);
+            n = vec3(uintBitsToFloat(h2.x), uintBitsToFloat(h2.y), uintBitsToFloat(h2.z));
+            // A degenerate triangle's normal is zero: normalized, a NaN that spread through every cell reading it (2026-10-25).
+            if (!(dot(n, n) > 1e-12) || any(isnan(p))) { none(i); return; }
+            n = normalize(n);
+            if (dot(n, d.xyz) > 0.0) n = -n;
+        }
     }
     float lift = 0.01 + 0.001 * length(p - u.uCamera.xyz);
     vec3 o = p + n * lift;

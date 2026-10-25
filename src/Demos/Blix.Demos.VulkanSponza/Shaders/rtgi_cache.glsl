@@ -13,8 +13,14 @@
 //   x the finest cell (m), y its growth per metre of distance, z slots - 1 (a power of two), w the top level.
 
 #define RTGI_PROBES 8u
-#define RTGI_SCALE 256.0
-#define RTGI_MAX_SAMPLE 2048.0
+// Fixed point 4096, a sample capped at 512, rounded stochastically (rtgi_train.comp): at 256 and rounded to nearest, the
+// gate's dark corridor (irradiance ~0.001, a sample ~0.26 of a unit) rounded most samples to 0 -- its dead end read 0.77,
+// the dimmest quarter of its points 0.70 (2026-10-26). A frame's sum holds ~2,000 capped samples a cell.
+#define RTGI_SCALE 4096.0
+#define RTGI_MAX_SAMPLE 512.0
+// The luminance's square: fixed point 4096, capped at 32^2.
+#define RTGI_LUM2_SCALE 4096.0
+#define RTGI_LUM2_MAX 32.0
 
 uint rtgiHash(uint x) {
     x ^= x >> 16; x *= 0x7feb352du;

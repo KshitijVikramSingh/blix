@@ -23,8 +23,8 @@ layout(std430, set = 0, binding = 3) buffer RtgiResolved { vec4 rtgiResolved[]; 
 // (the fast mean: indirect rgb, sky visibility); (the fast sun visibility, its samples, the fast light's samples, -).
 layout(std430, set = 0, binding = 4) buffer RtgiMoments { vec4 rtgiMoments[]; };
 
-#define RTGI_SCALE 256.0
-#define RTGI_LUM2_SCALE 64.0
+#define RTGI_SCALE 4096.0
+#define RTGI_LUM2_SCALE 4096.0
 
 float lum(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 

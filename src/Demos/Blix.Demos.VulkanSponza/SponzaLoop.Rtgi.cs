@@ -38,6 +38,12 @@ internal sealed partial class SponzaLoop
     // (and its sun visibility's to 4): a known change, not one for the fast mean to find. 0: none.
     private float rtgiSunCut = 32f;
     private Vector3 rtgiLastSun;
+    // Diagnostics for the cache's bounce (the dead end 23% dark, 2026-10-26): --rtgi-count-unknown counts a landing cell
+    // that holds nothing as dark; --rtgi-no-coarse gives the training no coarser cell to read in its place.
+    private bool rtgiCountUnknown, rtgiNoCoarse, rtgiBackfaceLit;
+    // Landings in untrained cells, trained the next frame (rtgi_train.comp's requests): by parity. --rtgi-no-requests: off.
+    private bool rtgiRequests = true;
+    private GpuBufferHandle[] rtgiRequestBufs = Array.Empty<GpuBufferHandle>();
     private const int RtgiTopLevel = 10;
     // --rtgi-screen (S3): each half-res pixel's light from the screen tiles' reservoirs (ReSTIR GI: rtgi_reservoir.comp,
     // rtgi_screen.frag) in place of the cache read at its cell. --rtgi-screen-taps N reservoirs a pixel (8) within
@@ -82,6 +88,10 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-fast") is { } fa) rtgiFast = MathF.Max(1f, fa);
         if (args.Float("rtgi-change-floor") is { } cf) rtgiChangeFloor = MathF.Max(0f, cf);
         if (args.Float("rtgi-sun-cut") is { } sc) rtgiSunCut = MathF.Max(0f, sc);
+        rtgiCountUnknown = args.Flag("rtgi-count-unknown");
+        rtgiNoCoarse = args.Flag("rtgi-no-coarse");
+        rtgiBackfaceLit = args.Flag("rtgi-backface-lit");
+        if (args.Flag("rtgi-no-requests")) rtgiRequests = false;
         rtgiScreen = args.Flag("rtgi-screen");
         if (rtgiScreen) rtgi = true;
         if (args.Int("rtgi-screen-taps") is { } taps) rtgiScreenTaps = Math.Clamp(taps, 1, 64);
@@ -161,6 +171,7 @@ internal sealed partial class SponzaLoop
             rtgiHitsBuf = Two(n * 48, "hits");
             rtgiOriginsBuf = Two(n * 16, "origins");
             rtgiOccludedBuf = Two(n * 4, "occluded");
+            rtgiRequestBufs = Enumerable.Range(0, 2).Select(s => Own(device.CreateGpuBuffer(16 + Math.Max(1, rtgiHitPoints) * 32, new byte[16 + Math.Max(1, rtgiHitPoints) * 32], $"sponza.rtgi.requests{s}"))).ToArray();
             rtgiKeys = Own(device.CreateGpuBuffer(RtgiSlots * 4, new byte[RtgiSlots * 4], "sponza.rtgi.keys"));
             rtgiAccum = Own(device.CreateGpuBuffer(RtgiSlots * 32, new byte[RtgiSlots * 32], "sponza.rtgi.accum"));
             rtgiResolved = Own(device.CreateGpuBuffer(RtgiSlots * 32, new byte[RtgiSlots * 32], "sponza.rtgi.resolved"));
@@ -184,6 +195,7 @@ internal sealed partial class SponzaLoop
                     new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, n))),
                     new("uSun", new Vector4Uniform(new Vector4(towardSun, 1f))),
                     new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 0f))),
+                    new("uTrain", new Vector4Uniform(new Vector4(rtgiCountUnknown ? 1f : 0f, rtgiNoCoarse ? 1f : 0f, rtgiBackfaceLit ? 1f : 0f, rtgiRequests ? rtgiHitPoints : 0f))),
                 },
                 new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
                 Buffers: new[]
@@ -195,6 +207,7 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("RtgiKeys", rtgiKeys),
                     new ShaderBufferBinding("RtgiAccum", rtgiAccum),
                     new ShaderBufferBinding("RtgiResolved", rtgiResolved),
+                    new ShaderBufferBinding("RtgiRequests", rtgiRequestBufs[cur]),
                 }));
         graph.Dispatch(rtgiResolvePassHandle, new DispatchCommand(rtgiResolvePipeline, (RtgiSlots + 63) / 64, 1, 1,
             new ShaderUniform[]
@@ -266,6 +279,8 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiPoints", rtgiPointsBuf[cur]),
                 new ShaderBufferBinding("RtgiRayBuffer", rtgiRaysBuf[cur]),
                 new ShaderBufferBinding("RtgiShadowOrigins", rtgiOriginsBuf[cur]),
+                new ShaderBufferBinding("RtgiRequests", rtgiRequestBufs[cur]),
+                new ShaderBufferBinding("RtgiNextRequests", rtgiRequestBufs[prev]),
             }));
 
         var rays = rtgiRaysBuf[cur];
