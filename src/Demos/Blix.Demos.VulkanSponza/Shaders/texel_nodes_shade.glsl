@@ -827,7 +827,9 @@ void main() {
                             // BLIX_CAPTURE_DIR (tag 0x4000): the ray's direction, octahedral (snorm 2 x 16), world space
                             : (uint(u.uCapture.z) & 0x4000u) != 0u ? packSnorm2x16(captureOct(sDir[r]))
                             : packHalf2x16(vec2(cosine, sRayWeight[r])),
-                            sNearTexel[r] >= 0 ? uint(sNearTexel[r]) : floatBitsToUint(-max(captureLight, 1e-30)));
+                            // BLIX_CAPTURE_DIR: word 7 the ray's weight (cos / its mixture's pdf), the near texel's place
+                            (uint(u.uCapture.z) & 0x4000u) != 0u ? floatBitsToUint(sRayWeight[r])
+                            : sNearTexel[r] >= 0 ? uint(sNearTexel[r]) : floatBitsToUint(-max(captureLight, 1e-30)));
                     }
                 }
             }
