@@ -56,7 +56,9 @@ def main():
           f'screen {err(Path(sys.argv[1]) / ("parts.shot" if filtered else "parts.final.0"))[0]:.4f}')
     for run in [r for r in sys.argv[3:] if not r.startswith('--')]:
         d = Path(run)
-        stages = sorted((p for p in d.glob('parts.t*.0') if re.fullmatch(r'parts\.t[\d.]+\.0', p.name)), key=lambda p: float(p.name[7:-2]))
+        # A dump's parts, or (--filtered, the runs keeping only it) its .resolved alone.
+        found = {p.name[:-9] if p.name.endswith('.resolved') else p.name for p in d.glob('parts.t*.0*')}
+        stages = sorted((d / f for f in found if re.fullmatch(r'parts\.t[\d.]+\.0', f)), key=lambda p: float(p.name[7:-2]))
         line = []
         for p in stages:
             s, sc = err(p)

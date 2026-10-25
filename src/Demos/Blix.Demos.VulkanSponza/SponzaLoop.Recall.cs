@@ -283,6 +283,9 @@ internal sealed partial class SponzaLoop
         }
         // The resolved light the image reads (composed, filtered), and who wrote each texel's parts
         // (SponzaLoop.TexelPicker.cs), beside it.
+        // The sun part a change starts from and judges its move against (SunLanded), beside the time dumps.
+        if (stage.StartsWith('t') && !sunLandedBuffer.Equals(default(GpuBufferHandle)))
+            File.WriteAllBytes(path + ".sun-landed", device.ReadGpuBuffer(sunLandedBuffer, 0, texelCount * 4));
         if (stage == "instant" && InstantOctOn && !instantOctBuffer.Equals(default(GpuBufferHandle)))
             File.WriteAllBytes(path + ".octants", device.ReadGpuBuffer(instantOctBuffer, 0, texelCount * 32));
         if (!texelResolvedBuffer.Equals(default(GpuBufferHandle)))

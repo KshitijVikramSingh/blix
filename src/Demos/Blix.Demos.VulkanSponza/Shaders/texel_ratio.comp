@@ -28,6 +28,9 @@ layout(std430, set = 0, binding = 7) buffer Changed { uint changedBits[]; };   /
 // --patch-rank (SponzaLoop.PatchRank.cs): how far the relit instant moved each texel's light, a byte a texel id (64 = all of
 // it, 255 four times) -- the patches' expected error, a sun change's order.
 layout(std430, set = 0, binding = 8) buffer SunMoved { uint movedBytes[]; };
+// --old-start-below: the sun part as it showed just before the instant layer (the re-aim's provisional, the new sun's
+// patch light) -- mode 4 keeps it, mode 2 shows it again after judging the relit for the marks.
+layout(std430, set = 0, binding = 9) buffer StartSun { uint startSun[]; };
 #include "provenance.glsl"
 
 uint packRgb9e5(vec3 c) {
@@ -51,6 +54,15 @@ void main() {
     if (i >= uint(u.uRatio.x)) return;
     uint id = liveIds[i];
     int mode = int(u.uRatio.y);
+    if (mode == 4) {
+        startSun[id] = texelSun[id].x;
+        return;
+    }
+    if (mode == 3) {
+        // The re-aim's start: the sun part as it shows now -- what a sun change starts from and judges its move against.
+        sunLanded[id] = texelSun[id].x;
+        return;
+    }
     if (mode == 0) {
         ratioWords[id] = texelSun[id].x;
     } else if (mode == 1) {
@@ -67,6 +79,7 @@ void main() {
         uint instantWord = texelSun[id].x;
         vec3 relit = unpackRgb9e5(instantWord) * unpackRgb9e5(ratioWords[id]);
         texelSun[id].x = packRgb9e5(relit);
+        bool moved = true;
         if (u.uSelect.x > 0.0) {
             const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
             float sky = dot(unpackRgb9e5(texelSky[id].x), luma);
@@ -74,11 +87,15 @@ void main() {
             float after = sky + dot(relit, luma) * u.uSelect.y;
             float rel = abs(after - before) / max(before, u.uSelect.z);
             if (rel > u.uSelect.x) atomicOr(changedBits[id >> 5], 1u << (id & 31u));
+            moved = rel > u.uSelect.x;
             if (u.uSelect.w > 0.5) atomicOr(movedBytes[id >> 2], min(uint(rel * 64.0 + 0.5), 255u) << (8u * (id & 3u)));
         }
-        // --old-start-below DEG: a small step keeps the landed light as what shows until the gather -- at a 20 deg change on
-        // Crytek Sponza the screen read the relit light worse than the old (filtered 0.17-0.19 against 0.15, 2026-10-25).
-        if (u.uStart.x > 0.5 && u.uSelect.x > 0.0) texelSun[id].x = sunLanded[id];
+        // --old-start-below DEG: a step under it shows what showed before the instant layer (the re-aim's provisional) until
+        // the gather -- at a 20 deg change on Crytek Sponza the relit read 0.16-0.19 filtered, the provisional 0.151, the
+        // old sun's own light ~0.20 (2026-10-25).
+        // The texels the gather takes again (moved) start from it; those it leaves keep the relit, their light from here on
+        // (kept on the provisional, the scene's error 0.028 -> 0.043 at the landing).
+        if (u.uStart.x > 0.5 && moved) texelSun[id].x = startSun[id];
         else provenanceMark(id, 7u, true, false);   // the ratio relight
         ratioWords[id] = instantWord;
     }

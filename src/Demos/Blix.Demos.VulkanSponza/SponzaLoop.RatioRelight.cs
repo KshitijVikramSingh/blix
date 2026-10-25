@@ -73,6 +73,7 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("SunLanded", select ? sunLandedBuffer : sunRatioBuffer),
                     new ShaderBufferBinding("Changed", select ? changedBitsBuffer : sunRatioBuffer),
                     new ShaderBufferBinding("SunMoved", SunMovedBinding(false)),
+                    new ShaderBufferBinding("StartSun", StartSunBinding()),
                 }), "texel-ratio");
     }
 
@@ -109,7 +110,8 @@ internal sealed partial class SponzaLoop
     // change they were 0.167 against 0.126. --sun-change-fine-below DEG (10): the steps that small; --sun-change-select-fine:
     // every change.
     private bool sunChangeSelectFine;
-    // --old-start-below DEG (0: off): a step under it shows the old sun's landed light until gathered, not the relit.
+    // --old-start-below DEG (0: off): a step under it shows the light that showed before the instant layer (the re-aim's
+    // provisional, the new sun's patch light) until gathered, not the relit.
     private float oldStartBelow;
     private bool OldStartNow => oldStartBelow > 0f && sunChangeStepDeg < oldStartBelow;
     private float sunChangeFineBelow = 10f, sunChangeStepDeg = 180f;
@@ -133,6 +135,29 @@ internal sealed partial class SponzaLoop
         if (relit)
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] ratio relight: the instant layer times the last landing's gathered/instant ratio (cap {RatioMax:0})."));
+    }
+
+    // LiveRetarget: the sun part as it shows when the sun turns, kept (SunLanded) -- the landing's copy did not show what
+    // the screen read (--old-start-below restored it 0.207 off at 3.5 s into a 20 deg change against the old light's
+    // 0.151, Crytek Sponza, 2026-10-25).
+    // --old-start-below: the sun part kept a frame before the instant layer writes it (TransferSetup's far relight step).
+    private GpuBufferHandle startSunBuffer;
+    private GpuBufferHandle StartSunBinding()
+    {
+        if (oldStartBelow <= 0f) return sunRatioBuffer;
+        if (startSunBuffer.Equals(default(GpuBufferHandle))) startSunBuffer = Own(device.CreateGpuBuffer(texelCount * 4, name: "sponza.split.start-sun"));
+        return startSunBuffer;
+    }
+
+    private void KeepStartSun()
+    {
+        if (OldStartNow && ratioRelight && liveTexels && !sunRatioBuffer.Equals(default(GpuBufferHandle))) RatioPass(4);
+    }
+
+    private void SnapshotShownSun()
+    {
+        if (!ratioRelight || !liveTexels || sunChangeSelect <= 0f || sunLandedBuffer.Equals(default(GpuBufferHandle))) return;
+        RatioPass(3);
     }
 
     // The cook landed: the gathered sun part over the instant kept for it.

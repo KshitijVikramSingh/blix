@@ -1314,6 +1314,7 @@ internal sealed partial class SponzaLoop
             }
             if (transferSetupStep == 1)
             {
+                KeepStartSun();
                 FarRelightNow();
                 transferSetupStep = 2;
                 return;
