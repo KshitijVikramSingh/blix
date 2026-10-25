@@ -633,6 +633,16 @@ internal sealed partial class SponzaLoop
         transportBuildLights = null;
         // The far lists from the GI bundle alone (no CPU scope behind them): the far field relights from them per light.
         var couplingsKey = transportCouplingsKey;
+        // Built once while the scope still is (and kept in the bundle): they were built only when a split cook turned the
+        // far field on, and live it turns on only with them -- never built, the far field never on, the contacts' far
+        // sunlit hits each texel's own (their noise's ~87%: the ray capture, 2026-10-25).
+        if (liveTexels && farField && farTransportMode && !farListsOff && couplingsKey is not null && transportBuildFarLists is { } build
+            && !File.Exists(TransportStagePath(couplingsKey, "far-lists")))
+        {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            build(FarListReach);
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] far lists: built for the live far field in {clock.Elapsed.TotalSeconds:0.0} s (kept in the GI bundle)."));
+        }
         transportBuildFarLists = couplingsKey is not null && File.Exists(TransportStagePath(couplingsKey, "far-lists"))
             ? reach => LoadStage(couplingsKey, "far-lists", r => r.ReadSingle() != reach ? null
                     : new FarLists(ReadArray<uint>(r), ReadArray<uint>(r), ReadArray<float>(r))) is { } l

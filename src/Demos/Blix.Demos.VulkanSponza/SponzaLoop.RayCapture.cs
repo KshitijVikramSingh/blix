@@ -43,7 +43,9 @@ internal sealed partial class SponzaLoop
     private static readonly bool captureFineOnly = Environment.GetEnvironmentVariable("BLIX_CAPTURE_FINE_ONLY") == "1";
     private static readonly bool captureDist = Environment.GetEnvironmentVariable("BLIX_CAPTURE_DIST") == "1";
     private Vector4 RayCaptureUniform => listCook ? (ListRecording ? new Vector4(2f, 0f, RayCaptureTag, rayCaptureRoom) : Vector4.Zero)
-        : RayCaptureOn
+        // BLIX_CAPTURE_FINE_ONLY: the fine round's first pass alone, in either shade (the full shade took the sweep's too and
+        // its room filled before the fine round, 2026-10-25).
+        : RayCaptureOn && (!captureFineOnly || fineGathering && NearRoundsNow == nearRoundsLeft)
         ? new Vector4(1f, rayCaptureTexel >= 0 ? -(rayCaptureTexel + 1f) : rayCaptureBits, RayCaptureTag, rayCaptureRoom) : Vector4.Zero;
 
     private ShaderBufferBinding RayCaptureBinding(GpuBufferHandle stand)

@@ -15,6 +15,10 @@ namespace Blix.Demos.VulkanSponza;
 internal sealed partial class SponzaLoop
 {
     private bool farTransportMode;
+    // --live-far-lists: the lists built for a live cook, its far field on (SponzaLoop.LivePatchLight.cs ReleaseCpuTransport).
+    // Opt-in: on Crytek Sponza its filtered light came 0.094 mean error off two 1,024-ray boots against the default's 0.038,
+    // the contacts 0.353 against 0.103 -- the energy kept (0.997), the texels scattered (2026-10-25).
+    private bool farListsOff = true;
     private GpuBufferHandle farTransportRecord, farPatchAlbedo;
     private int farTransportPatches;
     private bool farTransportRecorded, farRelit, farRecordWasKept;
@@ -36,6 +40,7 @@ internal sealed partial class SponzaLoop
     private void ReadFarTransportArgs(AppArgs args)
     {
         farTransportMode = args.Flag("far-transport");
+        farListsOff = !args.Flag("live-far-lists");
     }
 
     private void DeclareFarRelight(Func<string[], ShaderInterface> reflect) =>
