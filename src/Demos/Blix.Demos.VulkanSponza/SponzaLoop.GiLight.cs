@@ -206,6 +206,10 @@ internal sealed partial class SponzaLoop
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] GI light: converge -- every texel gathered again behind the frame, at the sliders' sun ({angle:0.00} deg from the GI's)."));
         giSunTarget = SliderToSun;
+        // Its setup again though the sun is the same (it runs once a sun, transferAppliedFor): it is what sends the gather
+        // behind the frame (BeginVisibleChanged, StartBackgroundGather) -- skipped, the converge ran on the host's passes at
+        // ~8 fps for its 45 s (the user's 'stuck, fps tanks', 2026-10-25).
+        transferAppliedFor = new Vector3(float.NaN);
         // A turn starts its own restart (FollowSun's test); at the same sun it is forced.
         if (angle < 0.25f) LiveRestart(giSunTarget);
     }
