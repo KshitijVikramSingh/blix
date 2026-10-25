@@ -335,7 +335,8 @@ internal sealed partial class SponzaLoop
                 ClothTransmission(pm) is not null,
                 pm?.Ext.Unlit ?? false,
                 pm?.MetallicRoughnessTexture is not null ? textureLoader.Load(pm).MetallicRoughness : default,
-                pm?.RoughnessFactor ?? 0.8f));
+                pm?.RoughnessFactor ?? 0.8f,
+                !isBlend && pm?.AlphaMode == AlphaMode.Blend));
         }
     }
 
@@ -422,7 +423,7 @@ internal sealed partial class SponzaLoop
                 sceneTransformInstances.Add(s.Instances[w]);
                 rayInstances.Add(new RayQueryScene.Instance(rayMeshes[i], world));
                 rayPlacementMaterials.Add(new RayMaterial(s.Albedo, s.BaseColor, s.AlphaCutoff, s.IsBlend, s.TransmissionTexture, s.TransmissionColorTexture,
-                    s.MetallicRoughness, s.RoughnessFactor));
+                    s.MetallicRoughness, s.RoughnessFactor, s.AlphaBlended));
                 rayPlacementLightmapped.Add(s.LightmapTexels is not null);
                 rayPlacementDoubleSided.Add(s.Pipeline == opaqueDoubleSidedPipeline || s.Pipeline == blendDoubleSidedPipeline);
                 rayPlacementGiTwoSided.Add(GiTwoSided(s));

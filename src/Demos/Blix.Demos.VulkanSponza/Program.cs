@@ -819,7 +819,10 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
         // The material's metallic-roughness texture and roughness factor: the diffuse roughness a ray's surface bake stores EON's albedo at
         // (ray_surface_bake.comp). Default: no texture, the factor alone.
         TextureHandle MetallicRoughness = default,
-        float RoughnessFactor = 0.8f);
+        float RoughnessFactor = 0.8f,
+        // Authored BLEND without transmission: drawn cut out at 0.5 (BuildMaterial), but a ray is stopped by it with the probability of its alpha
+        // (RayAlphaAtlas.FlagStochastic), so a translucent leaf or decal casts the shadow and bounces the light it should, on average.
+        bool AlphaBlended = false);
 
     /// <summary>One placement of a unique primitive: which drawable, its row in the transform table, and its world AABB.</summary>
     /// <remarks>

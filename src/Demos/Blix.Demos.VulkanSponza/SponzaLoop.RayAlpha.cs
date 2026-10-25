@@ -15,6 +15,7 @@ internal sealed partial class SponzaLoop
     private PassHandle rayAlphaBakePassHandle;
     private PipelineHandle rayAlphaBakePipeline;
     private bool rayAlphaCoin;
+    private bool rayBlendCutoff;
     private int rayAlphaSide = RayAlphaAtlas.MaxSide;
 
     // The frame scene's plan (null: none), and the materials each entry reads, for the dispatches that fill it.
@@ -24,11 +25,15 @@ internal sealed partial class SponzaLoop
     private void ReadRayAlphaArgs(AppArgs args)
     {
         rayAlphaCoin = args.Flag("ray-alpha-coin");
+        rayBlendCutoff = args.Flag("ray-blend-cutoff");
         if (args.Int("ray-alpha-side") is { } side) rayAlphaSide = Math.Clamp(side, 16, 4096);
     }
 
     // Whether a material's rays test its alpha: a cutout (a cutoff, authored MASK or BLEND folded to one) and not a clear pane.
     private static bool AlphaTested(RayMaterial m) => m.AlphaCutoff > 0f && !m.Clear;
+
+    // Whether a ray is stopped with the probability of the alpha (authored BLEND) rather than by a cutoff. --ray-blend-cutoff: the 0.5 fold, as the raster draws it.
+    private bool RayStochastic(RayMaterial m) => !rayAlphaCoin && !rayBlendCutoff && m.Blended && AlphaTested(m);
 
     // The mip of the material's albedo that the atlas entry is read at (ray_alpha_bake.comp's, and the bake's fine coverage pass): the texture over the entry's side.
     private float RayAlphaMip(RayMaterial material)
@@ -58,7 +63,7 @@ internal sealed partial class SponzaLoop
         {
             if (!device.TryGetTextureSize(material.Albedo, out var w, out var h)) (w, h) = (1, 1);
             var scale = Math.Min(1f, rayAlphaSide / (float)Math.Max(w, h));
-            entries.Add(new RayAlphaAtlas.Material(Math.Max(1, (int)MathF.Round(w * scale)), Math.Max(1, (int)MathF.Round(h * scale)), material.AlphaCutoff));
+            entries.Add(new RayAlphaAtlas.Material(Math.Max(1, (int)MathF.Round(w * scale)), Math.Max(1, (int)MathF.Round(h * scale)), material.AlphaCutoff, RayStochastic(material)));
         }
         var plan = RayAlphaAtlas.Build(perPlacement, entries, data.Uvs);
         var rows = data.RowPlacements.Length;

@@ -7129,8 +7129,8 @@ static ShaderInterface MinimalShader() => new(new[]
         var geometry = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..");
         foreach (var (file, path, texts) in new[]
         {
-            ("ray_query.glsl", Path.Combine(geometry, "Blix.Shaders", "ray_query.glsl"), new[] { "0xA17A0001u", "trailer + blix_surfaces[trailer + 5u] + material * 4u", "uv0 * (1.0 - bc.x - bc.y) + uv1 * bc.x + uv2 * bc.y", "blix_triangles.length()" }),
-            ("blix_hwx.mm", Path.Combine(geometry, "Blix.Graphics.MetalHWX", "native", "blix_hwx.mm"), new[] { "0xA17A0001u", "trailer + surfaces[trailer + 5u] + material * 4u", "uv0 * (1.0f - bary.x - bary.y) + uv1 * bary.x + uv2 * bary.y", "alpha.enabled == 2u", "alpha.enabled == 1u" }),
+            ("ray_query.glsl", Path.Combine(geometry, "Blix.Shaders", "ray_query.glsl"), new[] { "0xA17A0001u", "trailer + blix_surfaces[trailer + 5u] + material * 4u", "uv0 * (1.0 - bc.x - bc.y) + uv1 * bc.x + uv2 * bc.y", "blix_triangles.length()", "(blix_surfaces[at + 3u] & 1u) != 0u", "blix_pcg(seed + blix_pcg(placement * 0x9E3779B9u + triangle)) >> 8u" }),
+            ("blix_hwx.mm", Path.Combine(geometry, "Blix.Graphics.MetalHWX", "native", "blix_hwx.mm"), new[] { "0xA17A0001u", "trailer + surfaces[trailer + 5u] + material * 4u", "uv0 * (1.0f - bary.x - bary.y) + uv1 * bary.x + uv2 * bary.y", "alpha.enabled == 2u", "alpha.enabled == 1u", "(surfaces[at + 3u] & 1u) != 0u", "blix_pcg(seed + blix_pcg(placement * 0x9E3779B9u + triangle)) >> 8u" }),
         })
         {
             var source = File.Exists(path) ? File.ReadAllText(path) : "";
@@ -7150,6 +7150,19 @@ static ShaderInterface MinimalShader() => new(new[]
             t.Expect("CA.6 the CPU traversal meets a partly covered triangle by the alpha at the hit, not by the coin", !cut && kept,
                 $"cut-out side hit {cut}, kept side hit {kept}");
             _ = keyCoin;
+        }
+        // Authored BLEND: a ray is stopped with the probability of the alpha, against its own number for the triangle (the number the shaders hash alike).
+        {
+            var blend = RayAlphaAtlas.Build(new uint[] { 0u }, new[] { new RayAlphaAtlas.Material(1, 1, 0.5f, Stochastic: true) }, uvs);
+            blend.Words[blend.AtlasStart(0)] = 0x80u;   // alpha 128/255
+            var passed = 0;
+            for (uint seed = 0; seed < 8192; seed++)
+                if (RayAlphaAtlas.Passes(blend.Words, 0, new Vector2(0.3f, 0.3f), RayAlphaAtlas.Random(seed, 0, 7))) passed++;
+            var share = passed / 8192f;
+            blend.Words[blend.AtlasStart(0)] = 0u;
+            var none = RayAlphaAtlas.Passes(blend.Words, 0, new Vector2(0.3f, 0.3f), RayAlphaAtlas.Random(1, 0, 7));
+            t.Expect("CA.7 a stochastic material passes in proportion to its alpha, and never where it is 0", MathF.Abs(share - 128f / 255f) < 0.03f && !none,
+                $"passed {share:0.000} of rays at alpha {128f / 255f:0.000}; alpha 0 passed {none}");
         }
     }
 }

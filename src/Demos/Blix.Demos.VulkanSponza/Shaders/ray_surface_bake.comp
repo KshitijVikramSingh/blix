@@ -28,7 +28,7 @@ layout(local_size_x = 64) in;
 layout(set = 0, binding = 0) uniform Bake {
     vec4 uBaseColor;   // the material's base colour factor, linear rgb and alpha
     vec4 uParams;      // x first entry in BakeRows, y how many, z alpha cutoff (0: opaque), w 1: clear (coverage 0)
-    vec4 uParams2;     // x 1: uTransmission is the material's factor texture; y 1: uTransmissionColor its colour texture; z the alpha atlas's mip of uAlbedo
+    vec4 uParams2;     // x 1: uTransmission is the material's factor texture; y 1: uTransmissionColor its colour texture; z the alpha atlas's mip of uAlbedo, w 1: authored BLEND (rays stop with the probability of the alpha: always asked at the hit)
     vec4 uDiffuse;     // x 1: store EON's hemispherical albedo (0: the base colour, Lambert); y the diffuse-roughness scale; z the material's roughness factor; w 1: uMetallicRoughness is its texture
 } u;
 
@@ -107,6 +107,8 @@ void main() {
         }
         sixteenths = fine < 0.5 ? 0u : fine > 255.5 ? 16u : uint(clamp(floor(fine / 16.0 + 0.5), 1.0, 15.0));
     }
+    // Authored BLEND is never none or all: even a texel of alpha 0.9 stops one ray in ten, so the row is always asked at the hit (RayAlphaAtlas.FlagStochastic).
+    if (u.uParams.w < 0.5 && u.uParams.z > 0.0 && u.uParams2.w > 0.5) sixteenths = 8u;
     surfaces[row] = (packUnorm4x8(vec4(encodeSrgb(albedo), 0.0)) & 0xFFFFFFu) | (((level << 5u) | sixteenths) << 24u);
     uint share = u.uParams2.x > 0.5 ? uint(round(clamp(through / 16.0, 0.0, 1.0) * 255.0)) : 255u;
     uint tint = u.uParams2.y > 0.5 ? packUnorm4x8(vec4(encodeSrgb(colour / 16.0), 0.0)) : 0xFFFFFFu;

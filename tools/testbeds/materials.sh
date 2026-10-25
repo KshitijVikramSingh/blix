@@ -49,8 +49,8 @@ run khronos-plant --scene=khronos-plant "$@"
 run khronos-teacup --scene=khronos-teacup --cam 0.291,1.958,-0.454,-13.78,-33.62 "$@"
 run khronos-test --scene=khronos-test "$@"
 # Alpha: Khronos' AlphaBlendModeTest (OPAQUE, MASK at three cutoffs, BLEND): the traced camera view against the raster's depth
-# (--ray-view), which alpha-tests exactly; materials.py reads the log's "ray view against the raster" line.
-run khronos-alpha --scene=khronos-alpha --ray-view "$@"
+# (--ray-view), which alpha-tests exactly (--ray-blend-cutoff: the raster draws BLEND cut out at 0.5, rays stop at its alpha otherwise); materials.py reads the log's "ray view against the raster" line.
+run khronos-alpha --scene=khronos-alpha --ray-view --ray-blend-cutoff "$@"
 rm -f "$OUT"/*.png
 # EON (--diffuse eon) has its own ratchets (materials.py EON_RATCHETS): the reference models EON exactly and the frame approximates it.
 case " $* " in *" --diffuse eon "*) export BLIX_MATERIALS_DIFFUSE=eon ;; esac

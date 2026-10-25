@@ -540,7 +540,7 @@ public sealed class TriangleBvh
             {
                 var uv = uvs[Indices[triangle * 3]] * (1f - barycentrics.X - barycentrics.Y)
                     + uvs[Indices[triangle * 3 + 1]] * barycentrics.X + uvs[Indices[triangle * 3 + 2]] * barycentrics.Y;
-                return RayAlphaAtlas.Passes(trailer, material, uv);
+                return RayAlphaAtlas.Passes(trailer, material, uv, RayAlphaAtlas.Random(key.Seed, placement, identity));
             }
         }
         return RayTests.Covered(byteCoverage, key.Seed, placement, identity);

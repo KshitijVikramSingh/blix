@@ -120,8 +120,12 @@ bool blix_covered(uint row, uint seed, uint entryIndex, uvec4 tri, vec2 bc) {
             vec2 uv1 = uintBitsToFloat(uvec2(blix_surfaces[uvTable + tri.y * 2u], blix_surfaces[uvTable + tri.y * 2u + 1u]));
             vec2 uv2 = uintBitsToFloat(uvec2(blix_surfaces[uvTable + tri.z * 2u], blix_surfaces[uvTable + tri.z * 2u + 1u]));
             vec2 uv = uv0 * (1.0 - bc.x - bc.y) + uv1 * bc.x + uv2 * bc.y;
-            float cutoff = uintBitsToFloat(blix_surfaces[trailer + blix_surfaces[trailer + 5u] + material * 4u + 2u]);
-            return blix_alphaAt(trailer, material, uv) >= cutoff;
+            uint at = trailer + blix_surfaces[trailer + 5u] + material * 4u;
+            float alpha = blix_alphaAt(trailer, material, uv);
+            // Authored BLEND (flags bit 0): the alpha is the odds the ray is stopped, against this ray's number for the triangle.
+            if ((blix_surfaces[at + 3u] & 1u) != 0u)
+                return alpha > float(blix_pcg(seed + blix_pcg(placement * 0x9E3779B9u + triangle)) >> 8u) * (1.0 / 16777216.0);
+            return alpha >= uintBitsToFloat(blix_surfaces[at + 2u]);
         }
     }
     uint coverage = sixteenths * 16u;

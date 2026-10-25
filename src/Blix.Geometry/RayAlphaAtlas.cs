@@ -18,7 +18,7 @@ namespace Blix.Geometry;
 /// <c>[0]</c> <see cref="Magic"/>, <c>[1]</c> placements P, <c>[2]</c> materials M, <c>[3]</c> vertices V, <c>[4]</c> the placement table's
 /// offset, <c>[5]</c> the material table's, <c>[6]</c> the coordinates', <c>[7]</c> the atlas's (all in words from the trailer's start).
 /// The placement table is P words: the placement's alpha material, or 0xFFFFFFFF for none. A material is four words: its atlas offset,
-/// width | height &lt;&lt; 16, the cutoff (float bits), flags (0). The coordinates are V float2s, one per ray position (RayQueryGpuData.Uvs).
+/// width | height &lt;&lt; 16, the cutoff (float bits), flags (bit 0 <see cref="FlagStochastic"/>: authored BLEND, the alpha a probability). The coordinates are V float2s, one per ray position (RayQueryGpuData.Uvs).
 /// The atlas holds each material's width x height bytes row by row, four to a word, low byte first: its alpha times the base colour's.
 /// </para>
 /// <para>
@@ -36,8 +36,11 @@ public static class RayAlphaAtlas
     /// <summary>The longest side an alpha atlas entry takes: a texture larger than this is read at the mip that fits.</summary>
     public const int MaxSide = 512;
 
+    /// <summary>A material's flags bit: its alpha is a probability, not a cutoff (authored BLEND). A ray passes where its alpha beats the ray's own random number.</summary>
+    public const uint FlagStochastic = 1u;
+
     /// <summary>One cut-out material's entry.</summary>
-    public readonly record struct Material(int Width, int Height, float Cutoff);
+    public readonly record struct Material(int Width, int Height, float Cutoff, bool Stochastic = false);
 
     /// <summary>The trailer, its atlas still zero, and where each material's alpha goes.</summary>
     public sealed record Plan(uint[] Words, int[] AtlasWord)
@@ -76,7 +79,7 @@ public static class RayAlphaAtlas
             words[at] = (uint)atlasWord[m];
             words[at + 1] = (uint)materials[m].Width | ((uint)materials[m].Height << 16);
             words[at + 2] = BitConverter.SingleToUInt32Bits(materials[m].Cutoff);
-            words[at + 3] = 0u;
+            words[at + 3] = materials[m].Stochastic ? FlagStochastic : 0u;
         }
         for (var v = 0; v < uvs.Length; v++)
         {
@@ -119,12 +122,20 @@ public static class RayAlphaAtlas
         return ((trailer[offset + (index >> 2)] >> ((index & 3) * 8)) & 255u) / 255f;
     }
 
-    /// <summary>Whether the material's alpha at <paramref name="uv"/> passes its cutoff: the raster's alpha test.</summary>
-    public static bool Passes(ReadOnlySpan<uint> trailer, uint material, Vector2 uv)
+    /// <summary>
+    /// Whether the material's alpha at <paramref name="uv"/> passes: its cutoff (the raster's alpha test), or for a stochastic material (authored BLEND)
+    /// whether it beats <paramref name="random"/>, the ray's number for this triangle in [0, 1) (<see cref="Random"/>): a ray is stopped by the
+    /// surface with the probability of its alpha, which averaged over rays is the blend.
+    /// </summary>
+    public static bool Passes(ReadOnlySpan<uint> trailer, uint material, Vector2 uv, float random = 0f)
     {
         var at = (int)trailer[5] + (int)material * MaterialWords;
-        return Alpha(trailer, material, uv) >= BitConverter.UInt32BitsToSingle(trailer[at + 2]);
+        var alpha = Alpha(trailer, material, uv);
+        return (trailer[at + 3] & FlagStochastic) != 0u ? alpha > random : alpha >= BitConverter.UInt32BitsToSingle(trailer[at + 2]);
     }
+
+    /// <summary>The ray's number for a triangle: the coin's hash (RayTests.Covered), its top 24 bits over 2^24. ray_query.glsl and blix_hwx.mm spell it the same.</summary>
+    public static float Random(uint seed, uint placement, uint triangle) => (RayTests.Pcg(seed + RayTests.Pcg(placement * 0x9E3779B9u + triangle)) >> 8) / 16777216f;
 
     /// <summary>The coordinates of vertex <paramref name="index"/>.</summary>
     public static Vector2 Uv(ReadOnlySpan<uint> trailer, uint index)

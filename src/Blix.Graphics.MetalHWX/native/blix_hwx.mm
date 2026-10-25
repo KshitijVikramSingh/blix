@@ -136,6 +136,8 @@ static bool blix_cover(uint row, uint instance, float2 bary, uint seed,
                     texel[k] = float((surfaces[offset + (index >> 2u)] >> ((index & 3u) * 8u)) & 255u) * (1.0f / 255.0f);
                 }
                 float a = mix(mix(texel[0], texel[1], t.x), mix(texel[2], texel[3], t.x), t.y);
+                if ((surfaces[at + 3u] & 1u) != 0u)   // authored BLEND: the alpha is the odds the ray is stopped, against its number for the triangle
+                    return a > float(blix_pcg(seed + blix_pcg(placement * 0x9E3779B9u + triangle)) >> 8u) * (1.0f / 16777216.0f);
                 return a >= as_type<float>(surfaces[at + 2u]);
             }
         }
