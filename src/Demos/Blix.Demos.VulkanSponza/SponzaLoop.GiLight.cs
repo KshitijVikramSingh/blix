@@ -31,7 +31,15 @@ internal sealed partial class SponzaLoop
     private int giLiveStop = 3, giRelightStop;
     private static readonly string[] GiStopNames = { "full", "no near round", "coarse + copy", "screen" };
     private bool giRelighting;
-    private (float GpuMs, bool CookScreen, int Stop, bool ScreenFirst, float OldStart, float KeepOld, float ScreenRefine, float Boost)? giSaved;
+    // Live's converge: its steps stop at the screen's gather, so the texels off it (the corridors lit by bounce) were never
+    // gathered again and drifted (the user, 2026-10-25). Once Live is paused and settled after a step, every texel is
+    // gathered again at the same sun behind the frame (the select off, the full change, the normal slot); Play re-aims over
+    // it. --gi-no-converge: off.
+    private bool giConverge = true, giNeedsConverge, giConverging;
+    private int giRelightAt = -1;
+    private float giStopHour = float.NaN;
+    private bool giStopRelight;
+    private (float GpuMs, bool CookScreen, int Stop, bool ScreenFirst, float OldStart, float KeepOld, float ScreenRefine, float Boost, float Select)? giSaved;
     // Live's boost (GPU ms a frame, 0 off): a live step's sweep slot and its re-aim's bounces a frame (SponzaLoop.ChangeBoost).
     private float giBoostMs = 10f;
 
@@ -41,7 +49,15 @@ internal sealed partial class SponzaLoop
         giLive = args.Flag("gi-live");
         if (args.Float("gi-live-speed") is { } sp) giPlaySpeed = Math.Clamp(sp, 0.05f, 30f);
         if (args.Float("gi-live-max-lead") is { } ml) giMaxLead = Math.Clamp(ml, 0.5f, 90f);
+        if (args.Float("gi-live-settle") is { } ls) giLiveSettle = Math.Clamp(ls, 0f, 30f);
         if (args.Float("gi-live-boost-ms") is { } bm) giBoostMs = Math.Clamp(bm, 0f, 100f);
+        // --gi-relight-at F (a measurement): pause Live and press Relight at post-load frame F (when no change is in flight).
+        if (args.Int("gi-relight-at") is { } ra) giRelightAt = ra;
+        giConverge = !args.Flag("gi-no-converge");
+        // --gi-stop-hour H [relight] (a measurement): Live stops at the day's hour angle H exactly, then waits for its
+        // converge -- or, with 'relight', presses Relight -- so every variant ends at the same sun.
+        if (args.Values("gi-stop-hour", 1) is [var h]) giStopHour = float.Parse(h, CultureInfo.InvariantCulture);
+        giStopRelight = args.Flag("gi-stop-relight");
         if (args.Float("gi-live-rate") is { } r) giLiveRate = Math.Clamp(r, 0.05f, 30f);
         if (args.Float("gi-live-min-step") is { } m) giLiveMinStep = Math.Clamp(m, 0.05f, 10f);
         if (args.Float("gi-relight-gpu-ms") is { } g) giRelightGpuMs = Math.Clamp(g, 1f, 200f);
@@ -49,6 +65,7 @@ internal sealed partial class SponzaLoop
     }
 
     private Vector3 SliderToSun => -Vector3.Normalize(sunDirection);
+    private bool GiBehindSliders => giSunTarget != Vector3.Zero && MathF.Acos(Math.Clamp(Vector3.Dot(giSunTarget, SliderToSun), -1f, 1f)) * 180f / MathF.PI >= 0.05f;
 
     // FollowSun, each frame: the held sun set once the scene's is; Live's steps.
     private void StepGiLight()
@@ -57,6 +74,20 @@ internal sealed partial class SponzaLoop
         // --gi-live: play from the start (once the light has landed).
         if (giLive && !sunMoving && liveSkyGathered) PlayLive(true);
         if (!sunMoving && giSunTarget == Vector3.Zero) giSunTarget = SliderToSun;
+        // Paused (or stopped) behind the sliders' sun: one last step to it, then the converge there -- pausing left the GI on
+        // its last step's sun, up to a step behind the one shown (a walk to noon read 18-26% dark, 2026-10-25).
+        var settled = !sunMoving && liveSkyGathered && !LightChangeInFlight && !ComposeUnderWay && !splitComposeDirty && giRelightAt < 0 && !giRelighting;
+        if (settled && giNeedsConverge && giSunTarget != Vector3.Zero
+            && MathF.Acos(Math.Clamp(Vector3.Dot(giSunTarget, SliderToSun), -1f, 1f)) * 180f / MathF.PI >= 0.05f)
+            BeginGiChange(SliderToSun, relight: false);
+        else if (giConverge && giNeedsConverge && !giConverging && settled)
+            BeginGiConverge();
+        if (giRelightAt >= 0 && postLoadFrames >= giRelightAt && !LightChangeInFlight && liveSkyGathered)
+        {
+            giRelightAt = -1;
+            if (giLive) PlayLive(false);
+            Relight();
+        }
     }
 
     // Live's play / pause: the moving sun from where the sliders put it -- the day's hour at their elevation, on the side
@@ -80,12 +111,25 @@ internal sealed partial class SponzaLoop
             $"[VulkanSponza] GI light: live, the sun at {sunMoveRate:0.##} deg/s {(sunMoveWay > 0 ? "toward evening" : "toward morning")} from hour angle {sunMoveHour:0.0}."));
     }
 
+    // StepSunMove, the hour just advanced: --gi-stop-hour reached -- the sun put there exactly and Live paused.
+    private bool GiStopsAt(ref float hour, float before)
+    {
+        if (float.IsNaN(giStopHour) || !giLive) return false;
+        if ((before - giStopHour) * (hour - giStopHour) > 0f && hour != giStopHour) return false;
+        hour = giStopHour;
+        giStopHour = float.NaN;
+        PlayLive(false);
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] GI light: live stopped at hour angle {hour:0.###} (--gi-stop-hour){(giStopRelight ? "; relight" : "; its converge next")}."));
+        if (giStopRelight) giRelightAt = 0;
+        return true;
+    }
+
     // StepSunMove, the moving sun's GI settled and a step's worth behind: Live's step, with its settings.
     private bool LiveStepNow()
     {
         if (!giLive) return false;
         var angle = MathF.Acos(Math.Clamp(Vector3.Dot(giSunTarget, SliderToSun), -1f, 1f)) * 180f / MathF.PI;
-        if (angle >= giLiveMinStep) BeginGiChange(SliderToSun, relight: false);
+        if (angle >= giLiveMinStep) { giConverging = false; BeginGiChange(SliderToSun, relight: false); }
         return true;
     }
 
@@ -107,7 +151,11 @@ internal sealed partial class SponzaLoop
 
     private void BeginGiChange(Vector3 toSun, bool relight)
     {
-        giSaved ??= (sweepGpuMs, changeCookScreen, changeStop, screenFirst, oldStartBelow, keepOldBelow, screenRefineBudget, changeBoostMs);
+        giSaved ??= (sweepGpuMs, changeCookScreen, changeStop, screenFirst, oldStartBelow, keepOldBelow, screenRefineBudget, changeBoostMs, sunChangeSelect);
+        // Relight gathers every texel as the boot does: the sun change select off (it took again only the texels whose relit
+        // light moved from what they showed -- after Live's steps, stopped at the screen, the stale ones it skipped stayed
+        // wrong, the user's 'after live a relight still looks wrong', 2026-10-25).
+        sunChangeSelect = relight ? 0f : giSaved.Value.Select;
         giRelighting = relight;
         sweepGpuMs = relight ? giRelightGpuMs : giSaved.Value.GpuMs;
         changeCookScreen = relight;
@@ -129,9 +177,32 @@ internal sealed partial class SponzaLoop
             $"[VulkanSponza] GI light: {(relight ? "relight" : "live step")} of {angle:0.00} deg (stop at {GiStopNames[changeStop]}{(relight ? $", {giRelightGpuMs:0} ms a frame, the cook screen" : "")})."));
     }
 
+    // Every texel gathered again at the GI's own sun, behind the frame (the restart the sun's turn would start, forced).
+    private void BeginGiConverge()
+    {
+        giSaved ??= (sweepGpuMs, changeCookScreen, changeStop, screenFirst, oldStartBelow, keepOldBelow, screenRefineBudget, changeBoostMs, sunChangeSelect);
+        sunChangeSelect = 0f;
+        changeStop = 0;
+        changeCookScreen = false;
+        screenFirst = false;
+        changeBoostMs = 0f;
+        sweepGpuMs = giSaved.Value.GpuMs;
+        keepOldBelow = MathF.Max(giKeepOldBelow, 1f);   // the same sun: the shown light stays up until gathered
+        oldStartBelow = MathF.Max(giSaved.Value.OldStart, 30f);
+        giConverging = true;
+        giNeedsConverge = false;
+        Console.WriteLine("[VulkanSponza] GI light: live converge -- every texel gathered again at the GI's sun, behind the frame.");
+        giSunTarget = SliderToSun;
+        LiveRestart(giSunTarget);
+    }
+
     // FinishSplitCook: a mode's change landed -- the settings it ran under back.
     private void GiChangeLanded()
     {
+        // A live step leaves the texels off the screen as they were: a converge follows once paused; a relight or a
+        // converge gathered them all.
+        if (giSaved is not null) giNeedsConverge = !giRelighting && !giConverging;
+        giConverging = false;
         if (giSaved is not { } saved) return;
         sweepGpuMs = saved.GpuMs;
         changeCookScreen = saved.CookScreen;
@@ -141,6 +212,7 @@ internal sealed partial class SponzaLoop
         keepOldBelow = saved.KeepOld;
         screenRefineBudget = saved.ScreenRefine;
         changeBoostMs = saved.Boost;
+        sunChangeSelect = saved.Select;
         giSaved = null;
         giRelighting = false;
     }

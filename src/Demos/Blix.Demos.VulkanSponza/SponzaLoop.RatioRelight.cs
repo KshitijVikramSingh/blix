@@ -60,7 +60,7 @@ internal sealed partial class SponzaLoop
                 {
                     new("uRatio", new Vector4Uniform(new Vector4(live.Length, mode, RatioMax, first))),
                     new("uSelect", new Vector4Uniform(new Vector4(select ? sunChangeSelect : 0f, Luminance(EffectiveSunIrradiance), lastDarkBar, select && mode == 2 && PatchRankNow ? 1f : 0f))),
-                    new("uStart", new Vector4Uniform(new Vector4(OldStartNow ? 1f : 0f, 0f, 0f, 0f))),
+                    new("uStart", new Vector4Uniform(new Vector4(OldStartNow ? 1f : 0f, StartMaskOn ? 1f : 0f, 0f, 0f))),
                 },
                 Array.Empty<ShaderTextureBinding>(),
                 Buffers: new[]
@@ -74,6 +74,7 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("Changed", select ? changedBitsBuffer : sunRatioBuffer),
                     new ShaderBufferBinding("SunMoved", SunMovedBinding(false)),
                     new ShaderBufferBinding("StartSun", StartSunBinding()),
+                    new ShaderBufferBinding("StartMask", StartMaskBinding()),
                 }), "texel-ratio");
     }
 
@@ -149,9 +150,22 @@ internal sealed partial class SponzaLoop
         return startSunBuffer;
     }
 
+    // The screen's texels as the sun turned (the visible pass's bits, visibleAtTurn), for a change stopping at the screen.
+    private GpuBufferHandle startMaskBuffer;
+    private bool StartMaskOn => OldStartNow && ChangeStopsAt(3) && !startMaskBuffer.Equals(default(GpuBufferHandle));
+    private GpuBufferHandle StartMaskBinding() => startMaskBuffer.Equals(default(GpuBufferHandle)) ? sunRatioBuffer : startMaskBuffer;
+
+    private void UploadStartMask()
+    {
+        if (!OldStartNow || !ChangeStopsAt(3) || visibleAtTurn is not { } seen) return;
+        if (!startMaskBuffer.Equals(default(GpuBufferHandle))) RetireGpuBuffer(startMaskBuffer);
+        startMaskBuffer = Own(SweepBuffer(seen.Length * 4, System.Runtime.InteropServices.MemoryMarshal.AsBytes(seen.AsSpan()), "sponza.split.start-mask"));
+    }
+
     private void KeepStartSun()
     {
         if (OldStartNow && ratioRelight && liveTexels && !sunRatioBuffer.Equals(default(GpuBufferHandle))) RatioPass(4);
+        UploadStartMask();
     }
 
     private void SnapshotShownSun()

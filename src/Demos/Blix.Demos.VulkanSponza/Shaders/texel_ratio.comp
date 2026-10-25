@@ -15,7 +15,7 @@ layout(local_size_x = 64) in;
 layout(set = 0, binding = 0) uniform Ratio {
     vec4 uRatio;   // x live texels, y mode, z the largest ratio kept, w the first live texel of this dispatch
     vec4 uSelect;  // x T (0: off), y the sun's irradiance (luminance), z the dark bar (the error's floor); w 1: SunMoved too
-    vec4 uStart;   // x 1: mode 2 shows the landed light (the old sun's), the relit judged for the marks alone
+    vec4 uStart;   // x 1: mode 2 shows the start light on the moved texels; y 1: only on those StartMask holds (the screen's)
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer LiveIds { uint liveIds[]; };
@@ -31,6 +31,10 @@ layout(std430, set = 0, binding = 8) buffer SunMoved { uint movedBytes[]; };
 // --old-start-below: the sun part as it showed just before the instant layer (the re-aim's provisional, the new sun's
 // patch light) -- mode 4 keeps it, mode 2 shows it again after judging the relit for the marks.
 layout(std430, set = 0, binding = 9) buffer StartSun { uint startSun[]; };
+// --change-stop screen: the texels the change will gather (the screen's, a bit a texel id) -- the moved ones off it keep
+// the relit, which follows the sun; started on the old light and never gathered they froze there, and the screen's
+// gathers read them at their near hits: Live's walk to noon left the screen 18% dark (2026-10-25).
+layout(std430, set = 0, binding = 10) readonly buffer StartMask { uint startMask[]; };
 #include "provenance.glsl"
 
 uint packRgb9e5(vec3 c) {
@@ -95,7 +99,8 @@ void main() {
         // old sun's own light ~0.20 (2026-10-25).
         // The texels the gather takes again (moved) start from it; those it leaves keep the relit, their light from here on
         // (kept on the provisional, the scene's error 0.028 -> 0.043 at the landing).
-        if (u.uStart.x > 0.5 && moved) texelSun[id].x = startSun[id];
+        bool gathered = u.uStart.y < 0.5 || (startMask[id >> 5] & (1u << (id & 31u))) != 0u;
+        if (u.uStart.x > 0.5 && moved && gathered) texelSun[id].x = startSun[id];
         else provenanceMark(id, 7u, true, false);   // the ratio relight
         ratioWords[id] = instantWord;
     }
