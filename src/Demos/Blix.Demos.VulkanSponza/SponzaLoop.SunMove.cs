@@ -85,7 +85,8 @@ internal sealed partial class SponzaLoop
         if (float.IsNaN(sunMoveHour)) sunMoveNorth = BandNorth(out sunMoveHour);
         // The rate is the sun's own arc a second: on a day circle of declination d an hour angle's degree is cos d of one.
         var span = MathF.Min(DayHalfSpan(Obliquity), HourAtElevation(sunMoveMinElevation));
-        sunMoveHour += sunMoveWay * sunMoveRate * dt / MathF.Cos(Obliquity * MathF.PI / 180f);
+        // Live: the sun waits while it leads the GI's by Live max lead (SponzaLoop.GiLight.cs).
+        if (!LiveSunWaits) sunMoveHour += sunMoveWay * sunMoveRate * dt / MathF.Cos(Obliquity * MathF.PI / 180f);
         if (MathF.Abs(sunMoveHour) > span) { sunMoveHour = MathF.CopySign(span, sunMoveHour); sunMoveWay = -sunMoveWay; }
         // Through yaw and pitch, as the Sun controls hold it (SponzaLoop.SunSweep.cs); the yaw within the slider's range.
         var travel = -ToScene(SunLocal(AuthoredLatitude, Obliquity, sunMoveHour), sunMoveNorth);
@@ -94,7 +95,7 @@ internal sealed partial class SponzaLoop
         UpdateSunDirection();
         // The push steers the GI's sun in small steps once a gather has landed (SponzaLoop.FlipPush.cs); else the GI
         // catches up when its regather lands.
-        if (!FlipPushStep() && SunMoveSettled) giSunTarget = -Vector3.Normalize(sunDirection);
+        if (!FlipPushStep() && SunMoveSettled && !LiveStepNow()) giSunTarget = -Vector3.Normalize(sunDirection);
         if (!sunMoveLogClock.IsRunning || sunMoveLogClock.Elapsed.TotalSeconds >= 5)
         {
             sunMoveLogClock.Restart();
