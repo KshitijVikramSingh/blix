@@ -931,13 +931,15 @@ void main() {
             // (white 0 at 0.5 m, green 1, blue 2, magenta 3; dimmed while the clipmap has not solved).
             frame.uVizChannel > 22.5 && frame.uVizChannel < 24.5 ? vizClipmap(vWorldPos, vizGeometricN, frame.uVizChannel < 23.5) :
             frame.uVizChannel > 24.5 && frame.uVizChannel < 25.5 ? vizLightmap(vLightmapTexel) :
-            // 26: the diffuse response as the reference's camera paths model it (--ref-view: Lambert's base lobe, 1 - T,
-            // and the sheet's transmission, T c; no specular, no sheen, no Fresnel weight) -- the direct sun on either side
-            // and the indirect light, front and back: what the material and the light make of the pixel, judged against
-            // the path trace pixel for pixel.
+            // 26: the diffuse response as the reference's camera paths model it (--ref-view: the diffuse lobe, EON or Lambert as the
+            // frame has it, 1 - T, and the sheet's transmission, T c; no specular, no sheen, no Fresnel weight) -- the direct sun
+            // on either side and the indirect light, front and back: what the material and the light make of the pixel, judged
+            // against the path trace pixel for pixel. The sun's lobe is diffuseSun (EON's f toward this eye and this sun, or
+            // albedo / PI), as the reference's camera hit shades it; a hardcoded albedo / PI here judged an EON frame against an
+            // EON reference with a Lambert sun term (the plant's thin sheets read 8% bright, 2026-10-25).
             frame.uVizChannel > 25.5 && frame.uVizChannel < 26.5 && unlit ? albedo :
             frame.uVizChannel > 25.5 && frame.uVizChannel < 26.5
-                ? albedo / PI * transScale * (NdotL * frame.uSunIrradiance * sunShadow * terminatorFront
+                ? diffuseSun * transScale * (NdotL * frame.uSunIrradiance * sunShadow * terminatorFront
                       + sheetGlow * max(dot(Nsmooth, L), 0.0) * frame.uSunIrradiance)
                   + sunTransmission + bounce * transScale + diffuseIBL * transScale * visibility * ao + transmittedIBL :
             // 21 is unused (the retired volume's leak metric); black.

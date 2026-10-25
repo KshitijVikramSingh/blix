@@ -36,7 +36,7 @@ void main() {
     hits[i * 3u] = uvec4(floatBitsToUint(hit.t), floatBitsToUint(hit.barycentrics.x), floatBitsToUint(hit.barycentrics.y), flags);
     hits[i * 3u + 1u] = uvec4(hit.instance, hit.triangle, work.x, work.z);
     hits[i * 3u + 2u] = uvec4(floatBitsToUint(hit.normal.x), floatBitsToUint(hit.normal.y), floatBitsToUint(hit.normal.z),
-                              packUnorm4x8(vec4(hit.albedo, 0.0)));
+                              packUnorm4x8(vec4(hit.albedo, hit.roughness)));
 
     // The probe: this ray against one named triangle directly, no traversal, so a disagreement can be placed in
     // the triangle test or in the hierarchy. Written after every ray's answer: hit flag, t, and the barycentrics.

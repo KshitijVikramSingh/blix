@@ -435,6 +435,10 @@ internal sealed partial class SponzaLoop
             foreach (var w in words) if (w == RayQueryGpuData.SolidWhite) white++;
             Console.WriteLine(string.Create(Inv,
                 $"[VulkanSponza] ray surfaces: read back after bake {raySurfaceBakeTries} (recorded at post-load frame {raySurfaceBakeFrame}): {white:N0} of {words.Length:N0} words still the unbaked white."));
+            // Which diffuse roughness levels the rows were baked at (RayQueryGpuData.SurfaceRoughness): all level 0 is a Lambert bake, or materials without roughness.
+            var levels = new int[8];
+            foreach (var w in words) levels[w >> 29]++;
+            Console.WriteLine(string.Create(Inv, $"[VulkanSponza] ray surfaces: baked at diffuse roughness levels {string.Join(", ", Enumerable.Range(0, 8).Where(i => levels[i] > 0).Select(i => $"{RayQueryGpuData.SurfaceRoughness[i]:0.##} x{levels[i]:N0}"))}."));
             if (white == words.Length && raySurfaceBakeTries < 3) raySurfacesBaked = false;   // record it again
             else raySurfacesChecked = true;
         }
@@ -490,8 +494,8 @@ internal sealed partial class SponzaLoop
         {
             surfaceWords = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(raySurfaces, 0, gpuData.RowPlacements.Length * 4).AsSpan()).ToArray();
             gpuData.ApplyCoverage(surfaceWords);
-            var partly = surfaceWords.Count(w => (w >> 24) is > 0 and < 255);
-            var none = surfaceWords.Count(w => w >> 24 == 0);
+            var partly = surfaceWords.Count(w => RayQueryGpuData.CoverageSixteenths(w) is > 0 and < 16);
+            var none = surfaceWords.Count(w => RayQueryGpuData.CoverageSixteenths(w) == 0);
             Console.WriteLine(string.Create(Inv, $"[VulkanSponza] ray surfaces: {partly:N0} triangles partly covered, {none:N0} not at all, of {surfaceWords.Length:N0}."));
         }
         if (rayBackend == "hw")

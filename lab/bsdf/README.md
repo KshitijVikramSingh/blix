@@ -26,18 +26,30 @@ The formulas and constants are the paper's; the reference reproduces its claims:
 everywhere: radiance out is `E / pi * albedo(mu_o)`, which is Lambert's `E / pi * rho` at r = 0). The RTGI demo's lit shader
 (`Blix.Demos.VulkanSponza/Shaders/lit_body.glsl`) uses it for the sun, the sheet glow, the sky's irradiance and the incident field's bounce.
 
-- **Opt-in for now (`--diffuse eon`).** `tools/testbeds/materials.sh` holds the GI to a camera-path reference that still shades with Lambert; with EON on it fails
-  one ratchet (the Khronos plant's thin sheets read 8% bright, ratchet 5%) while every ratchet holds with `--diffuse lambert`. The default returns to EON when the
-  reference evaluates EON too. The diffuse roughness is the material's roughness times `--diffuse-roughness-scale` (default 1); glTF has no diffuse roughness.
-  `--diffuse lambert` is the default lobe; `--ab diffuse` alternates the two in one process (with `--diffuse eon` as the on phase).
-- **The transport conserves what the roughness loses.** A patch-to-patch bounce (the patch solve, a gather's hits, the probes, both references) has no
-  direction to evaluate a lobe against, so the rays' surface bake (`ray_surface_bake.comp`) stores EON's **hemispherical albedo** at the material's
-  diffuse roughness in place of the base colour: `rho <E> + rho_ms (1 - <E>)`, the fraction of the light that arrives from anywhere and leaves
-  whichever way (`eon.hemispherical_albedo`: the cosine average of the directional albedo, tested against quadrature; below rho for a rough grey,
-  rho itself for white). Every consumer reads that word, and the transport cache's key includes it, so nothing else changed and the two modes keep
-  separate caches. Roughness is the material's factor times its metallic-roughness texture's mean green over the bake's sixteen points. The view-dependent
-  albedo toward the eye is applied at the final shading. Not modelled: the lobe's shape at a hit (a sun-lit hit reflects its sun with Lambert's cosine).
-  The bake runs once at load, so `--diffuse` is read at start and `--ab diffuse` toggles only the lit shader.
+- **Opt-in for now (`--diffuse eon`).** The default stays Lambert because the frame still approximates EON in two ways the reference does not (below), so
+  with EON on the GI sits 2-8% off the reference where Lambert sits within 1-3%; `tools/testbeds/materials.sh` holds EON to its own, wider ratchets
+  (`materials.py` `EON_RATCHETS`, selected by `--diffuse eon`) and the Lambert default to the original ones: both hold. The diffuse roughness is the
+  material's roughness times `--diffuse-roughness-scale` (default 1); glTF has no diffuse roughness. `--diffuse lambert` is the default lobe; `--ab diffuse`
+  alternates the two in one process (with `--diffuse eon` as the on phase).
+- **The transport conserves what the roughness loses, and the references evaluate EON.** A patch-to-patch bounce has no direction to evaluate a lobe against,
+  so the rays' surface bake (`ray_surface_bake.comp`) stores EON's **hemispherical albedo** `rho <E> + rho_ms (1 - <E>)` = `A rho / (1 - (1 - A) rho)`
+  (`A = <E>`) at the material's diffuse roughness in the word's low three bytes: every transport consumer reads it unchanged, and the transport cache's
+  key includes it. The top byte now carries the coverage in sixteenths (bits 4..0) and the roughness level the albedo was baked at (bits 7..5, eight levels
+  spaced where materials sit: 0, .2, .4, .55, .7, .8, .9, 1). Because the series sums in closed form it **inverts exactly**
+  (`rho = hh / (A + (1 - A) hh)`, `eon.base_from_hemispherical`), so the references recover the material's own albedo from the word and the level, which
+  the hit record's alpha byte carries. Both GPU references (`reference_wave.comp`, `reference_path.glsl`) shade every hit, the camera's included, with
+  EON itself: the sun with `f_EON(sun, toPrevious) cos`, and the next direction drawn at the hit, cosine-sampled about the normal, so the bounce carries
+  `pi f_EON(next, toPrevious)` for the direction actually taken (not an expectation over directions, which would treat the incoming light as isotropic).
+  At roughness 0 all of it is Lambert exactly: `--diffuse eon --diffuse-roughness-scale 0` reproduces the Lambert verdicts line for line.
+  Four decoders of the top byte changed in step (`ray_query.glsl`, the Metal tracer's source, `RayQueryGpuData`, the transport's cutout tests); a fifth
+  reader of it (the patch placement's "cutout" test) had been missed and, with every triangle suddenly under 255, placed no patches: Section BZ now pins
+  the packing and the decoders, and the demo logs the roughness levels a bake wrote.
+- **What the EON frame still approximates** (and the ratchets record, 2026-10-25): the lit shader multiplies an irradiance by EON's albedo toward the eye
+  (exact for a cosine-distributed field; a room seen from inside has its light on the camera's side, where EON retroreflects, so the opaque views read
+  2-8% under: drapes 0.921, plant 0.952), and the transport bounces with the hemispherical albedo (the GI's irradiance records read 1.6-1.9% over the
+  reference's). Using the view-independent hemispherical albedo instead of the eye-dependent one in the lit shader moved neither (0.923, 0.953), so the
+  view-dependence is not the cause. `--viz 26`, which `materials.sh` compares, had a hardcoded Lambert sun term: it now uses the frame's own lobe. One
+  discrepancy is NOT explained: khronos-test's two-sided view ratio is 0.808 in EON (0.954 in Lambert).
 - **Measured** (scene renders, same camera, EON against Lambert), lit shader only: cornell -1.4% and the Khronos plant -4.8% mean luminance; 4.8% and
   1.3% of pixels move by more than 8/255, the largest moves (57 and 64 of 255) at grazing rims. With the transport as well, in the cornell room: the
   transport alone takes the room's mean x0.9605 (the indirect-lit pixels x0.932), and the room is 7.8% below Lambert in all (0.2449 to 0.2258). A rough mid-grey face-on reflects about 12% less than Lambert
@@ -45,5 +57,6 @@ everywhere: radiance out is `E / pi * albedo(mu_o)`, which is Lambert's `E / pi 
 
 ### Not done
 
-Per-material diffuse roughness (a cook-time override, `MaterialPatch`); the lobe's shape at a hit; the Studio and other older shaders (`pbr.glsl`'s
+Per-material diffuse roughness (a cook-time override, `MaterialPatch`); the CPU reference (`--probe-reference`) still bounces with Lambert; the two-sided
+discrepancy above; a directional (not isotropic) lit-shader indirect; the Studio and other older shaders (`pbr.glsl`'s
 `blix_cookTorranceBrdf` and the Studio lit shader still use Lambert).

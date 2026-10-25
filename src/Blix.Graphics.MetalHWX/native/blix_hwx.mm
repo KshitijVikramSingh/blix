@@ -96,9 +96,11 @@ static bool blix_cover(uint row, uint instance, float2 bary, uint seed,
             return a >= materials[m].cutoff;
         }
     }
-    uint coverage = surfaces[row] >> 24u;
-    if (coverage == 255u) return true;
-    if (coverage == 0u) return false;
+    // The coverage in sixteenths (the top byte's low five bits; bits 7..5 are the diffuse roughness level): ray_query.glsl's blix_covered.
+    uint sixteenths = (surfaces[row] >> 24u) & 31u;
+    if (sixteenths >= 16u) return true;
+    if (sixteenths == 0u) return false;
+    uint coverage = sixteenths * 16u;
     uint placement = instances[instance].info.y;
     uint triangle = triangles[row].w;
     if (placement == 0xFFFFFFFFu) {
@@ -328,7 +330,9 @@ kernel void blix_trace(device const float4* rays [[buffer(0)]],
         n = normalize(transpose(float3x3(m[0].xyz, m[1].xyz, m[2].xyz)) * nn);
         float3 srgb = unpack_unorm4x8_to_float(surfaces[row]).rgb;
         float3 lin = select(pow((srgb + 0.055f) / 1.055f, float3(2.4f)), srgb / 12.92f, srgb < float3(0.04045f));
-        albedo = pack_float_to_unorm4x8(float4(lin, 0.0f));
+        // The hit record's alpha byte is the diffuse roughness the word was baked at (ray_query.glsl's BLIX_SURFACE_ROUGHNESS), as the software path writes it.
+        const float kRoughness[8] = {0.0f, 0.2f, 0.4f, 0.55f, 0.7f, 0.8f, 0.9f, 1.0f};
+        albedo = pack_float_to_unorm4x8(float4(lin, kRoughness[surfaces[row] >> 29u]));
         placement = instances[res.instance_id].info.y;
         triangle = tri.w;
         if (placement == 0xFFFFFFFFu) {

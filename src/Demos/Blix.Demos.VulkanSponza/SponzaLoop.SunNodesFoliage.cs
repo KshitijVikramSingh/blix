@@ -37,7 +37,7 @@ internal sealed partial class SponzaLoop
             Vector3 P(uint v) => Vector3.Transform(new Vector3(data.Positions[v].X, data.Positions[v].Y, data.Positions[v].Z), toWorld);
             for (var row = first; row < end; row++)
             {
-                var coverage = surfaces[row] >> 24;
+                var coverage = RayQueryGpuData.CoverageByte(surfaces[row]);
                 if (coverage == 0 || coverage == 255) continue;
                 Vector3 a = P(data.Triangles[row * 4]), b = P(data.Triangles[row * 4 + 1]), c = P(data.Triangles[row * 4 + 2]);
                 var cross = Vector3.Cross(b - a, c - a);

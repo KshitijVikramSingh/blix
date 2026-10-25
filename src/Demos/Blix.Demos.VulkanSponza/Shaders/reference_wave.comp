@@ -97,7 +97,9 @@ void main() {
             r = vec4(0.0);
             if (seed == 0u) seed = blix_pcg(l * 9781u + uint(u.uCount.y) * 2654435761u + 1u);
         }
-        vec3 dir = camera && a.w < 0.5 ? b.xyz : referenceCosineAround(b.xyz, referenceRand(seed), referenceRand(seed));
+        // The first ray of a path: the camera's own, or a cosine ray about the point's normal; after a hit, the direction the shade step already chose
+        // (b.xyz): it is drawn there, where the BRDF at the hit can be weighed against it (reference_path.glsl).
+        vec3 dir = a.w >= 0.5 ? b.xyz : camera ? b.xyz : referenceCosineAround(b.xyz, referenceRand(seed), referenceRand(seed));
         batchRays[2u * l] = vec4(a.xyz, 0.0);
         batchRays[2u * l + 1u] = vec4(dir, uintBitsToFloat(0x7F800000u));
         lanes[4u * l] = a;
@@ -124,11 +126,15 @@ void main() {
         } else if (a.w < 0.5 && points[2u * (l / uint(u.uParams.w)) + 1u].w > 0.5
                    && batchHits[3u * l + 1u].z != 0xFFFFFFFFu
                    && (unlitRows[(batchHits[3u * l + 1u].z & 0x7FFFFFFFu) >> 5u] & (1u << (batchHits[3u * l + 1u].z & 31u))) != 0u) {
-            r.rgb += c.rgb * unpackUnorm4x8(h2.w).rgb;   // unlit: the base colour, as radiance
+            vec4 unlitWord = unpackUnorm4x8(h2.w);
+            r.rgb += c.rgb * blix_eonBaseFromHemispherical(unlitWord.rgb, unlitWord.a);   // unlit: the base colour (the albedo the word was made from), as radiance
             ended = true;
         } else {
             vec3 normal = vec3(uintBitsToFloat(h2.x), uintBitsToFloat(h2.y), uintBitsToFloat(h2.z));
-            vec3 albedo = unpackUnorm4x8(h2.w).rgb;
+            vec4 albedoWord = unpackUnorm4x8(h2.w);
+            float rough = albedoWord.a;                                       // the diffuse roughness the word's albedo was baked at
+            vec3 base = blix_eonBaseFromHemispherical(albedoWord.rgb, rough);   // the material's own albedo: the BRDF needs it, a bounce's albedo is the hemispherical one
+            vec3 wo = -dir;                                                   // toward where the path came from (the camera, for a camera path's first hit)
             vec3 hn = dot(normal, dir) > 0.0 ? -normal : normal;
             uint sheet = 0u;
             if (mod(u.uCount.w, 2.0) > 0.5) {
@@ -155,7 +161,7 @@ void main() {
                 batchOrigins[l] = vec4(hp + hn * u.uLift.x, uintBitsToFloat(0x7F800000u));
                 batchSunRays[2u * l] = vec4(hp + hn * u.uLift.x, 0.0);
                 batchSunRays[2u * l + 1u] = vec4(toSun, uintBitsToFloat(0x7F800000u));
-                sums[2u * l] = vec4(c.rgb * albedo * (1.0 - share) * u.uSunIrradiance.rgb * ndl / PI, 0.0);
+                sums[2u * l] = vec4(c.rgb * blix_eonBrdf(base, rough, ndl, dot(hn, wo), dot(toSun, wo)) * (1.0 - share) * u.uSunIrradiance.rgb * ndl, 0.0);
             } else if (sheet != 0u && ndl < 0.0) {
                 // The sun on the sheet's far side: its glow on this one, the shadow ray from there.
                 batchOrigins[l] = vec4(hp - hn * u.uLift.x, uintBitsToFloat(0x7F800000u));
@@ -166,15 +172,20 @@ void main() {
             // On: reflected (the base lobe, 1 - T of the light, albedo) or through (T, tinted c), chosen by T.
             uint seedNow = floatBitsToUint(c.w) ^ 0xB5297A4Du ^ (l * 0x68E31DA4u);
             bool through = sheet != 0u && referenceRand(seedNow) < share;
+            // The next direction is drawn here, about the side the path leaves by: through (Lambertian transmission) or back out (the base lobe, whose
+            // weight pi f_EON(next, wo) takes the drawn direction), so the next step only reads it.
+            uint nextSeed = blix_pcg(seedNow ^ 0x27D4EB2Fu);
             if (through) {
                 c.rgb *= passed / max(share, 1e-4);
                 a = vec4(hp - hn * u.uLift.x, a.w + 1.0);
-                b.xyz = -hn;
+                b.xyz = referenceCosineAround(-hn, referenceRand(nextSeed), referenceRand(nextSeed));
             } else {
-                c.rgb *= albedo;
+                vec3 next = referenceCosineAround(hn, referenceRand(nextSeed), referenceRand(nextSeed));
+                c.rgb *= PI * blix_eonBrdf(base, rough, dot(hn, next), dot(hn, wo), dot(next, wo));
                 a = vec4(hp + hn * u.uLift.x, a.w + 1.0);
-                b.xyz = hn;
+                b.xyz = next;
             }
+            c.w = uintBitsToFloat(nextSeed);
         }
         if (ended) {
             vec4 s = sums[2u * l + 1u];

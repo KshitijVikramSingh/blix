@@ -49,6 +49,8 @@ run khronos-plant --scene=khronos-plant "$@"
 run khronos-teacup --scene=khronos-teacup --cam 0.291,1.958,-0.454,-13.78,-33.62 "$@"
 run khronos-test --scene=khronos-test "$@"
 rm -f "$OUT"/*.png
+# EON (--diffuse eon) has its own ratchets (materials.py EON_RATCHETS): the reference models EON exactly and the frame approximates it.
+case " $* " in *" --diffuse eon "*) export BLIX_MATERIALS_DIFFUSE=eon ;; esac
 uv run -q --with numpy python3 "$REPO/tools/testbeds/materials.py" "$OUT"
 status=$?
 echo "materials: dumps in $OUT"

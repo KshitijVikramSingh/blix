@@ -24,8 +24,33 @@ public sealed class RayQueryGpuData
     public static readonly string[] BlockNames =
         { "BlixRayTopNodes", "BlixRayInstances", "BlixRayNodes", "BlixRayTriangles", "BlixRayPositions", "BlixRayOwners", "BlixRaySurfaces" };
 
-    /// <summary>A surface word before any bake: white, fully covered (albedo sRGB in the low three bytes, coverage on top).</summary>
+    /// <summary>A surface word before any bake: white, fully covered, rough (albedo sRGB in the low three bytes, the top byte's bits as <see cref="Pack"/> has them).</summary>
     public const uint SolidWhite = 0xFFFFFFFFu;
+
+    /// <summary>The eight diffuse roughness levels a surface word's top byte indexes (bits 7..5). ray_query.glsl's BLIX_SURFACE_ROUGHNESS and the Metal tracer's table are the same numbers.</summary>
+    public static readonly float[] SurfaceRoughness = { 0.0f, 0.2f, 0.4f, 0.55f, 0.7f, 0.8f, 0.9f, 1.0f };
+
+    /// <summary>The coverage in sixteenths, 16 meaning solid: the top byte's low five bits (more than 16, as the unbaked word's 31, is solid too).</summary>
+    public static int CoverageSixteenths(uint word) => (int)((word >> 24) & 31u);
+
+    /// <summary>The coverage as the byte a ray's coin is compared with (<see cref="RayTests.Covered"/>): 255 solid, else sixteenths * 16. The shader's blix_covered computes the same.</summary>
+    public static byte CoverageByte(uint word) => CoverageSixteenths(word) is var s && s >= 16 ? (byte)255 : (byte)(s * 16);
+
+    /// <summary>The diffuse roughness the word's albedo was baked at: a level of <see cref="SurfaceRoughness"/>.</summary>
+    public static float Roughness(uint word) => SurfaceRoughness[word >> 29];
+
+    /// <summary>The level whose roughness is nearest <paramref name="roughness"/>: what a bake stores.</summary>
+    public static int RoughnessLevel(float roughness)
+    {
+        var best = 0;
+        for (var i = 1; i < SurfaceRoughness.Length; i++)
+            if (MathF.Abs(SurfaceRoughness[i] - roughness) < MathF.Abs(SurfaceRoughness[best] - roughness)) best = i;
+        return best;
+    }
+
+    /// <summary>A surface word: sRGB albedo bytes (r, g, b), coverage in sixteenths (0..16), and a roughness level (0..7).</summary>
+    public static uint Pack(byte r, byte g, byte b, int coverageSixteenths, int roughnessLevel) =>
+        r | (uint)g << 8 | (uint)b << 16 | ((uint)(roughnessLevel & 7) << 5 | (uint)Math.Clamp(coverageSixteenths, 0, 16)) << 24;
 
     /// <summary>Marks a region in <see cref="GpuInstance.Placement"/>.</summary>
     public const uint RegionPlacement = 0xFFFFFFFFu;
@@ -105,7 +130,7 @@ public sealed class RayQueryGpuData
             var solid = true;
             for (var k = 0; k < coverage.Length; k++)
             {
-                coverage[k] = (byte)(surfaces[(int)triangleBase + k] >> 24);
+                coverage[k] = CoverageByte(surfaces[(int)triangleBase + k]);
                 solid &= coverage[k] == 255;
             }
             bvh.Coverage = solid ? null : coverage;

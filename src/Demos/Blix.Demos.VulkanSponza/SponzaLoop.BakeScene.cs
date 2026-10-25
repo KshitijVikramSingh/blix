@@ -174,7 +174,7 @@ internal sealed partial class SponzaLoop
                 var w = words[row];
                 var p = data.RowPlacements[row];
                 sums.TryGetValue(p, out var s);
-                sums[p] = (s.Item1 + new Vector3(w & 255u, (w >> 8) & 255u, (w >> 16) & 255u) / 255f, s.Item2 + (w >> 24) / 255f, s.Item3 + 1);
+                sums[p] = (s.Item1 + new Vector3(w & 255u, (w >> 8) & 255u, (w >> 16) & 255u) / 255f, s.Item2 + RayQueryGpuData.CoverageByte(w) / 255f, s.Item3 + 1);
             }
             return sums.ToDictionary(kv => kv.Key, kv => (kv.Value.Item1 / kv.Value.Item3, kv.Value.Item2 / kv.Value.Item3, kv.Value.Item3));
         }

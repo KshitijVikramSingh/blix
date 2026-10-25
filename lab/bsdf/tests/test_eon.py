@@ -103,3 +103,13 @@ def test_hemispherical_albedo_is_lambert_at_r_zero_and_lossy_for_a_rough_grey():
     assert eon.hemispherical_albedo(1.0, 0.9) == pytest.approx(1.0, abs=1e-12)        # nothing lost for a white surface
     assert eon.hemispherical_albedo(0.5, 1.0) < 0.5 - 0.03                            # but a mid grey that rough reflects less than Lambert
     assert np.all(eon.hemispherical_albedo(np.linspace(0.01, 0.99, 50), 0.8) <= np.linspace(0.01, 0.99, 50) + 1e-12)
+
+
+@pytest.mark.parametrize("r", [0.0, 0.2, 0.55, 1.0])
+def test_the_hemispherical_albedo_inverts_exactly_and_has_a_closed_form(r):
+    rho = np.linspace(0.0, 1.0, 101)
+    hh = eon.hemispherical_albedo(rho, r)
+    assert eon.base_from_hemispherical(hh, r) == pytest.approx(rho, abs=1e-12)
+    avg = eon.avg_e_f(r)
+    assert hh == pytest.approx(avg * rho / (1.0 - (1.0 - avg) * rho), abs=1e-12)     # the series, summed
+    assert np.all(np.diff(hh) > 0)                                                   # monotonic: so the inverse is unique

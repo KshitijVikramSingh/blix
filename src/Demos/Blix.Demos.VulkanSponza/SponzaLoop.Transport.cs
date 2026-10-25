@@ -401,7 +401,7 @@ internal sealed partial class SponzaLoop
                 // 255) gets none. Leaves are far finer than a patch, and lighting them with patches is what made the
                 // tree's dark inner leaves borrow its sunlit outer ones (the orbit's points, 2.7x bright in the darkest
                 // quarter). They stay occluders in the cook (the coverage coin); lighting them is another representation's.
-                if ((surfaces[data.RowOf(i, t)] >> 24) < 255u) continue;
+                if (RayQueryGpuData.CoverageByte(surfaces[data.RowOf(i, t)]) < 255) continue;
                 var expected = area / patchArea;
                 var count = (int)expected + (rng.NextDouble() < expected - (int)expected ? 1 : 0);
                 var front = Vector3.Normalize(cross);
@@ -630,7 +630,7 @@ internal sealed partial class SponzaLoop
                 {
                     var d = CosineHemisphereCpu(nrm[i], r);
                     if (scene.Closest(new Ray(origin, d), 0f, float.PositiveInfinity, (uint)r.Next()) is not { FrontFace: true } h) continue;
-                    if ((surfaces[data.RowOf(h.Instance, h.Triangle)] >> 24) < 255u) continue;
+                    if (RayQueryGpuData.CoverageByte(surfaces[data.RowOf(h.Instance, h.Triangle)]) < 255) continue;
                     var hp = origin + d * h.T;
                     var hn = HitNormal(h, d);
                     if (NearestVisibleOr(hp, hn, (uint)r.Next(), anyFacing: false, out _) >= 0) continue;
@@ -819,7 +819,7 @@ internal sealed partial class SponzaLoop
         }
         // The couplings and the sun visibility trace the frame's scene -- the one the patches sit on and RowOf and Tri
         // read: the bake scene's hits are indices into another (they threw at RowOf, 2026-10-14).
-        bool Cutout(RayHit h) => (surfaces[data.RowOf(h.Instance, h.Triangle)] >> 24) < 255u;
+        bool Cutout(RayHit h) => RayQueryGpuData.CoverageByte(surfaces[data.RowOf(h.Instance, h.Triangle)]) < 255;
         Mark("sunvis");
         if (sunVisStage is not null) sunVis = sunVisStage;
         var sunVisWithCouplings = false;   // the CPU couplings' loop made them, patch by patch
@@ -1014,7 +1014,7 @@ internal sealed partial class SponzaLoop
                     if ((hits[at * 12 + 3] & 1u) == 0) { state[at] = Sky; return; }
                     var placement = (int)hits[at * 12 + 4];
                     var triangle = (int)hits[at * 12 + 5];
-                    if ((surfaces[data.RowOf(placement, triangle)] >> 24) < 255u) { state[at] = Leaf; return; }
+                    if (RayQueryGpuData.CoverageByte(surfaces[data.RowOf(placement, triangle)]) < 255) { state[at] = Leaf; return; }
                     var t = BitConverter.UInt32BitsToSingle(hits[at * 12]);
                     var i = first + at / R;
                     var d = dirs[at];
@@ -2145,7 +2145,7 @@ internal sealed partial class SponzaLoop
         // --texel-foliage (on): the partly covered triangles -- leaves, ivy -- get hashed texels too, so their light is
         // gathered as every other surface's; off, they had none and the incident pass lit them from the clipmap's 0.5 m
         // probes (the tree's leaf litter one flat bright green, no shade under the canopy, 2026-10-14).
-        else texelBake = CookTexels(scene, Tri, (i, t) => !texelFoliage && (surfaces[data.RowOf(i, t)] >> 24) < 255u,
+        else texelBake = CookTexels(scene, Tri, (i, t) => !texelFoliage && RayQueryGpuData.CoverageByte(surfaces[data.RowOf(i, t)]) < 255,
             (i, t) => lightmapBake is not null && rayPlacementLightmapped[(int)data.RowPlacements[data.RowOf(i, t)]] ? 1 : 0);
         if (transportGpu && texelStage is null && transportTexels && texelBake is not null) SaveTexels(stageKeys.Texels, texelBake);
         if (texelLift && texelBake is { } lifted) LiftTexels(scene, lifted);

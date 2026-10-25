@@ -6710,7 +6710,7 @@ static ShaderInterface MinimalShader() => new(new[]
         var scene = RayQueryScene.Build(placements, regionTriangles: 12000);
         var packed = RayQueryGpuData.Pack(scene);
         var surfaces = new uint[packed.RowPlacements.Length];
-        for (var r = 0; r < surfaces.Length; r++) surfaces[r] = (uint)(r % 3 == 0 ? 255 : rng.Next(256)) << 24 | 0xFFFFFFu;
+        for (var r = 0; r < surfaces.Length; r++) surfaces[r] = RayQueryGpuData.Pack(255, 255, 255, r % 3 == 0 ? 16 : rng.Next(17), rng.Next(8));
         packed.ApplyCoverage(surfaces);
 
         (float T, int Inst, int Tri)? Walk(Ray ray, uint seed)
@@ -6741,7 +6741,7 @@ static ShaderInterface MinimalShader() => new(new[]
                         var at = (int)row * 4;
                         var p0 = packed.Positions[packed.Triangles[at]]; var p1 = packed.Positions[packed.Triangles[at + 1]]; var p2 = packed.Positions[packed.Triangles[at + 2]];
                         if (RayTests.Triangle(local, new Vector3(p0.X, p0.Y, p0.Z), new Vector3(p1.X, p1.Y, p1.Z), new Vector3(p2.X, p2.Y, p2.Z), 0f, t, out var th, out _, out _)
-                            && RayTests.Covered((byte)(surfaces[row] >> 24), seed,
+                            && RayTests.Covered(RayQueryGpuData.CoverageByte(surfaces[row]), seed,
                                 inst.Placement != RayQueryGpuData.RegionPlacement ? inst.Placement : packed.Owners[packed.Triangles[at + 3] * 2],
                                 inst.Placement != RayQueryGpuData.RegionPlacement ? packed.Triangles[at + 3] : packed.Owners[packed.Triangles[at + 3] * 2 + 1] & 0x7FFFFFFFu))
                         {
@@ -7066,6 +7066,25 @@ static ShaderInterface MinimalShader() => new(new[]
         t.Expect("BZ.9 and no fixed Lambert expression is left in the diffuse terms (sun, sheet glow, sky, bounce)",
             !lit.Contains("kDsun * albedo / PI", StringComparison.Ordinal) && !lit.Contains("incident * albedo / PI", StringComparison.Ordinal)
             && !lit.Contains("irradiance * albedo / PI", StringComparison.Ordinal), "a fixed albedo / PI diffuse term is back");
+    }
+
+    // The surface word's top byte carries the coverage (sixteenths, bits 4..0) and the diffuse roughness level (bits 7..5); the decoders agree.
+    t.Expect("BZ.13 the unbaked word is solid and the packer round-trips coverage, roughness level and albedo bytes",
+        RayQueryGpuData.CoverageByte(RayQueryGpuData.SolidWhite) == 255
+        && Enumerable.Range(0, 17).All(c => Enumerable.Range(0, 8).All(l =>
+            RayQueryGpuData.Pack(10, 20, 30, c, l) is var w && RayQueryGpuData.CoverageSixteenths(w) == c && RayQueryGpuData.Roughness(w) == RayQueryGpuData.SurfaceRoughness[l]
+            && (w & 0xFF) == 10 && ((w >> 8) & 0xFF) == 20 && ((w >> 16) & 0xFF) == 30
+            && RayQueryGpuData.CoverageByte(w) == (c >= 16 ? 255 : c * 16))),
+        "the surface word's packing and decoding disagree");
+    t.Expect("BZ.14 the roughness table matches the shader's and the Metal tracer's, and the nearest level is the one stored",
+        RayQueryGpuData.SurfaceRoughness.Length == 8
+        && RayQueryGpuData.RoughnessLevel(0.0f) == 0 && RayQueryGpuData.RoughnessLevel(1.0f) == 7 && RayQueryGpuData.RoughnessLevel(0.62f) == 3 && RayQueryGpuData.RoughnessLevel(0.66f) == 4,
+        string.Join(", ", RayQueryGpuData.SurfaceRoughness));
+    foreach (var (file, text) in new[] { ("ray_query.glsl", "0.0, 0.2, 0.4, 0.55, 0.7, 0.8, 0.9, 1.0"), ("blix_hwx.mm", "0.0f, 0.2f, 0.4f, 0.55f, 0.7f, 0.8f, 0.9f, 1.0f") })
+    {
+        var path = file == "ray_query.glsl" ? Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "Blix.Shaders", file)
+                                            : Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "Blix.Graphics.MetalHWX", "native", file);
+        t.Expect($"BZ.15 {file} carries the same eight roughness levels", File.Exists(path) && File.ReadAllText(path).Contains(text, StringComparison.Ordinal), $"not found or different: {path}");
     }
 
     // The transport: the rays' surface bake stores EON's hemispherical albedo (the fraction of arriving light a patch sends back, whichever way), so every

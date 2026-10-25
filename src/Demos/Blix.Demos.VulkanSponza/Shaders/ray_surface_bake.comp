@@ -3,7 +3,7 @@
 // What a ray meets at a triangle, baked once per material from its texture: the triangle's mean albedo and how much
 // of it the material's alpha keeps. One dispatch per material, one thread per triangle row of it (BakeRows names
 // them), writing that row's word in BlixRaySurfaces (ray_query.glsl): albedo sRGB-encoded in the low three bytes,
-// coverage in the top one.
+// coverage (in sixteenths, bits 4..0) and the diffuse roughness level it was baked at (bits 7..5) in the top one.
 //
 // Sixteen points spread evenly over the triangle by area (a 4x4 stratified grid through the square-root warp),
 // each sampled at the mip whose texels are its share of the triangle's texture footprint, so the mean is the
@@ -19,6 +19,9 @@
 // conserves the energy the roughness loses. The surface the camera sees is shaded from the textures, never from this word.
 
 #include "diffuse_eon.glsl"
+
+// The eight diffuse roughness levels (ray_query.glsl's BLIX_SURFACE_ROUGHNESS; this shader does not include ray_query.glsl).
+const float BLIX_SURFACE_ROUGHNESS[8] = float[8](0.0, 0.2, 0.4, 0.55, 0.7, 0.8, 0.9, 1.0);
 
 layout(local_size_x = 64) in;
 
@@ -80,9 +83,17 @@ void main() {
         kept += (u.uParams.z <= 0.0 || texel.a * u.uBaseColor.a >= u.uParams.z) ? 1.0 : 0.0;
     }
     vec3 albedo = sum / 16.0 * u.uBaseColor.rgb;
-    if (u.uDiffuse.x > 0.5) albedo = blix_eonHemisphericalAlbedo(albedo, clamp(u.uDiffuse.z * rough / 16.0 * u.uDiffuse.y, 0.0, 1.0));
-    float coverage = u.uParams.w > 0.5 ? 0.0 : u.uParams.z <= 0.0 ? 1.0 : kept / 16.0;
-    surfaces[row] = packUnorm4x8(vec4(encodeSrgb(albedo), coverage));
+    // The roughness is quantised to the nearest of the eight levels (ray_query.glsl) and the albedo baked at THAT level, so the word's inverse
+    // (diffuse_eon.glsl, blix_eonBaseFromHemispherical at the level the word names) recovers the material's albedo exactly. A Lambert bake is level 0.
+    uint level = 0u;
+    if (u.uDiffuse.x > 0.5) {
+        float r = clamp(u.uDiffuse.z * rough / 16.0 * u.uDiffuse.y, 0.0, 1.0);
+        for (uint i = 1u; i < 8u; ++i)
+            if (abs(BLIX_SURFACE_ROUGHNESS[i] - r) < abs(BLIX_SURFACE_ROUGHNESS[level] - r)) level = i;
+        albedo = blix_eonHemisphericalAlbedo(albedo, BLIX_SURFACE_ROUGHNESS[level]);
+    }
+    uint sixteenths = u.uParams.w > 0.5 ? 0u : u.uParams.z <= 0.0 ? 16u : uint(kept + 0.5);
+    surfaces[row] = (packUnorm4x8(vec4(encodeSrgb(albedo), 0.0)) & 0xFFFFFFu) | (((level << 5u) | sixteenths) << 24u);
     uint share = u.uParams2.x > 0.5 ? uint(round(clamp(through / 16.0, 0.0, 1.0) * 255.0)) : 255u;
     uint tint = u.uParams2.y > 0.5 ? packUnorm4x8(vec4(encodeSrgb(colour / 16.0), 0.0)) : 0xFFFFFFu;
     transmission[row] = share | (tint << 8);

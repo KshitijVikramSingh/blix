@@ -120,6 +120,18 @@ def hemispherical_albedo(rho, r):
     return rho * avg + rho_ms * (1.0 - avg)
 
 
+def base_from_hemispherical(rho_hh, r):
+    """The albedo rho whose hemispherical albedo is rho_hh: the exact inverse of `hemispherical_albedo`.
+
+    The multiple-scatter series sums in closed form: rho_hh = A rho / (1 - (1 - A) rho) with A = <E>, so rho = rho_hh / (A + (1 - A) rho_hh).
+    This is what lets a baked word hold the hemispherical albedo (every transport consumer reads it unchanged) while the reference recovers the
+    base albedo its BRDF needs.
+    """
+    y = np.asarray(rho_hh, dtype=np.float64)
+    avg = avg_e_f(r)
+    return y / (avg + (1.0 - avg) * y)
+
+
 def hemisphere(n_mu: int = 96, n_phi: int = 96):
     """Quadrature over the upper hemisphere in (mu, phi): Gauss-Legendre in mu, uniform in phi. Returns (wi (n,3), weight (n,)) with the
     weights integrating dOmega (they sum to 2 pi)."""

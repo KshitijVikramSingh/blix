@@ -20,6 +20,9 @@
 //                                                (a radiosity solve, a gather's hits) conserves THIS, not rho: baked into the rays' surface word
 //                                                (ray_surface_bake.comp), so every bounce loses what the roughness loses.
 //
+//   blix_eonBaseFromHemispherical(hh, r)        the exact inverse of that: rho = hh / (<E> + (1 - <E>) hh). A baked word holds the hemispherical albedo; a
+//                                                renderer that wants the BRDF (a reference) recovers the albedo it was made from.
+//
 //   rho     albedo, per channel.        r       the diffuse roughness, 0..1. r = 0 IS Lambert, exactly (rho / pi, rho).
 //   NdotL, NdotV  cosines to the shading normal; LdotV the cosine between light and eye. The frame needs no tangent: the model is
 //                 isotropic, and s = wi.wo - mu_i mu_o is the dot of the two directions projected into the surface's plane.
@@ -88,4 +91,11 @@ vec3 blix_eonHemisphericalAlbedo(vec3 rho, float r)
     float avgE = blix_eonAvgE(r);
     vec3 rhoMs = (rho * rho) * avgE / (vec3(1.0) - rho * (1.0 - avgE));
     return rho * avgE + rhoMs * (1.0 - avgE);
+}
+
+// The inverse of blix_eonHemisphericalAlbedo at the same r: its series is rho_hh = <E> rho / (1 - (1 - <E>) rho).
+vec3 blix_eonBaseFromHemispherical(vec3 rhoHh, float r)
+{
+    float avgE = blix_eonAvgE(r);
+    return rhoHh / (avgE + (1.0 - avgE) * rhoHh);
 }

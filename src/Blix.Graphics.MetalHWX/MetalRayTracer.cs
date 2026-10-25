@@ -109,7 +109,7 @@ public sealed class MetalRayTracer : IDisposable
                 var w = triangles[row * 4 + 3];
                 var key = region ? ((ulong)owners[w * 2] << 32) | (owners[w * 2 + 1] & 0x7FFFFFFFu) : w;
                 if (!seen.Add(key)) { duplicates[h]++; continue; }
-                var coverage = surfaceWords[row] >> 24;
+                var coverage = RayQueryGpuData.CoverageByte(surfaceWords[row]);   // 0, 16..240 (sixteenths), 255 solid: the word's top byte also carries the roughness level
                 if (coverage == 0) uncovered[h]++;
                 else (coverage == 255 && (tested.Length == 0 || !tested[row]) ? s : p).Add((uint)row);
             }
