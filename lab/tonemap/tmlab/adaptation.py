@@ -13,11 +13,20 @@ The model, in log2 luminance (EV). All times in seconds.
     m(t)   metered scene level, from the frame (trimmed log-average) blended with an optional world reference
     S      short-term level   follows m, tau_s_light when m > S (brightening), tau_s_dark when m < S
     A      long-term level    follows m, tau_a_light / tau_a_dark
-    S is clamped to [A - range_dark, A + range_light]       (the pupil saturates; it recovers the moment m is back inside)
+    S is clamped to [A - range_dark, A + range_light]   the short-term range: 3-5 EV IN TOTAL (the pupil saturates, and
+                                                        recovers the moment m is back inside)
+    A is clamped to [light_limit - 12, light_limit]     the long-term range: 12 EV (GT7's figure); light_limit is where
+                                                        the eye's light limit sits, in the same EV frame as m
     exposure  e = key - S           eps = m - S is the exposure error: negative = darker than proper, positive = brighter
 
-Dusk is slow because A lags and the window holds S above m; the snow field blinds because S cannot rise past A +
-range_light. No override, no context volume.
+Dusk is slow because A lags and the window holds S above m, and the night then STAYS dark because A cannot follow past
+its 12 EV span; the snow field blinds because A cannot rise past the light limit. No override, no context volume.
+
+TWO INTERPRETATIONS, because the slides give diagrams (197-209, 213-219) and no formulas, and they are the lab's, not
+GT7's: (1) "short-term range 3-5 EV" is the TOTAL width of S's window around A (the pupil's range is about 4 EV), not
+per side: a first version here used +-4 EV, twice the width the slides support; (2) "long-term range 12 EV" caps how far
+A itself can move, as one 12 EV span positioned by `light_limit`. GT7's "dark adaptation limit / light adaptation
+limit" drawn against sun altitude are the two ends of that span.
 
 WHAT IS AND IS NOT FITTED. GT7 publishes only the ranges and orders of magnitude, not the constants, and there is no
 measured data here, so nothing is "fitted to data". The parameters are TUNED to the SPECS below, which are this lab's
@@ -44,23 +53,24 @@ KEY = float(np.log2(0.18))  # where the metered level lands; ev below are relati
 @dataclass(frozen=True)
 class Adaptation:
     tau_s_light: float = 0.4     # s, short-term, scene brighter than S: light adaptation is the fast one
-    tau_s_dark: float = 1.5      # s, short-term, scene darker than S
-    range_dark: float = 4.0      # EV: how far BELOW the long-term level S may sit
-    range_light: float = 4.0     # EV: how far ABOVE
+    tau_s_dark: float = 1.2      # s, short-term, scene darker than S
+    range_dark: float = 2.0      # EV: how far BELOW the long-term level S may sit (dark + light = 3..5 EV in total)
+    range_light: float = 2.0     # EV: how far ABOVE
     tau_a_light: float = 90.0    # s, long-term, brightening
-    tau_a_dark: float = 900.0    # s, long-term, darkening ("tens of minutes")
-    trim_hi: float = 0.03        # fraction of the brightest pixels the meter ignores (signs, speculars, the sun)
-    w_world: float = 0.3         # weight of the position-independent reference against the frame, for camera cuts
+    tau_a_dark: float = 600.0    # s, long-term, darkening ("tens of minutes")
+    light_limit: float = 2.0     # EV above the scenarios' day level: the top of the long-term span
+    long_range: float = 12.0     # EV: GT7's figure for the long-term range. Fixed, not tuned.
+    trim_hi: float = 0.09        # fraction of the brightest pixels the meter ignores (signs, speculars, the sun)
+    w_world: float = 0.64        # weight of the position-independent reference against the frame, for camera cuts
 
 
 # The result of tuning, rounded, as a constant to use. Each value is inside the feasible interval `main` prints (the
 # trim and world weight in the middle of their joint region, not on its edge). Held by tests/test_adaptation.py.
-TUNED = Adaptation(tau_s_light=0.4, tau_s_dark=1.6, range_dark=4.0, range_light=4.0, tau_a_light=90.0, tau_a_dark=900.0,
-                   trim_hi=0.09, w_world=0.64)
+TUNED = Adaptation()
 
 
-NAMES = ("tau_s_light", "tau_s_dark", "range_dark", "range_light", "tau_a_light", "tau_a_dark", "trim_hi", "w_world")
-BOUNDS = ((0.1, 2.0), (0.3, 6.0), (3.0, 5.0), (3.0, 5.0), (20.0, 600.0), (100.0, 3000.0), (0.0, 0.15), (0.0, 1.0))
+NAMES = ("tau_s_light", "tau_s_dark", "range_dark", "range_light", "tau_a_light", "tau_a_dark", "light_limit", "trim_hi", "w_world")
+BOUNDS = ((0.1, 2.0), (0.3, 6.0), (1.0, 3.0), (1.0, 3.0), (20.0, 600.0), (60.0, 3000.0), (0.0, 6.0), (0.0, 0.15), (0.0, 1.0))
 LOG_SCALE = {"tau_s_light", "tau_s_dark", "tau_a_light", "tau_a_dark"}  # searched in log space
 
 
@@ -96,12 +106,15 @@ def simulate(m, dt: float, p: Adaptation, start: float | None = None):
     m = np.asarray(m, dtype=np.float64)
     S = np.empty_like(m)
     A = np.empty_like(m)
-    s = a = float(m[0] if start is None else start)
+    a_lo, a_hi = p.light_limit - p.long_range, p.light_limit   # the 12 EV the long-term level can occupy
+    a = min(max(float(m[0] if start is None else start), a_lo), a_hi)
+    s = min(max(float(m[0] if start is None else start), a - p.range_dark), a + p.range_light)
     ks = (1.0 - np.exp(-dt / p.tau_s_light), 1.0 - np.exp(-dt / p.tau_s_dark))
     ka = (1.0 - np.exp(-dt / p.tau_a_light), 1.0 - np.exp(-dt / p.tau_a_dark))
     for i, v in enumerate(m):
-        s += (v - s) * (ks[0] if v > s else ks[1])
         a += (v - a) * (ka[0] if v > a else ka[1])
+        a = min(max(a, a_lo), a_hi)
+        s += (v - s) * (ks[0] if v > s else ks[1])
         s = min(max(s, a - p.range_dark), a + p.range_light)
         S[i], A[i] = s, a
     return S, A
@@ -149,7 +162,7 @@ def run(p: Adaptation, bases: dict) -> dict:
     t, m, S, A = step_scenario("tunnel", 0.05, [(10.0, -8.0), (18.0, 0.0)], 40.0)
     eps = m - S
     at = lambda x: float(eps[int(round(x / 0.05))])
-    out["tunnel.recovers_3s"] = at(13.0)
+    out["tunnel.window_used_3s"] = float(-S[int(round(13.0 / 0.05))] / p.range_dark)
     out["tunnel.still_dark_at_exit"] = at(17.95)
     out["tunnel.exit_flash"] = at(18.05)
     out["tunnel.exit_recovery_s"] = first_time(t, np.abs(eps) < 1.0, 18.05)
@@ -157,7 +170,7 @@ def run(p: Adaptation, bases: dict) -> dict:
     # cloud: the sun goes behind a cloud for 6 s (5 EV).
     t, m, S, A = step_scenario("cloud", 0.05, [(10.0, -5.0), (16.0, 0.0)], 40.0)
     eps = m - S
-    out["cloud.recovers_4s"] = float(eps[int(round(14.0 / 0.05))])
+    out["cloud.window_used_4s"] = float(-S[int(round(14.0 / 0.05))] / p.range_dark)
     out["cloud.exit_recovery_s"] = first_time(t, np.abs(eps) < 0.5, 16.05)
 
     # dusk and dawn: 14 EV over 30 minutes, then 30 minutes more at the end level.
@@ -166,25 +179,28 @@ def run(p: Adaptation, bases: dict) -> dict:
         m = np.where(t < 1800.0, a + (b - a) * t / 1800.0, b)
         S, A = simulate(m, 2.0, p)
         traces[name] = (t, m, S, A)
-        eps = m - S
-        return t, eps
+        return t, m - S
 
     t, eps = ramp("dusk", 0.0, -14.0)
     out["dusk.lag_at_dark"] = float(eps[900])
-    out["dusk.settled_1h"] = float(abs(eps[-1]))
+    out["dusk.night_stays_dark"] = float(eps[-1])
     lag_dusk = abs(float(eps[900]))
     t, eps = ramp("dawn", -14.0, 0.0)
     # The slides claim an asymmetry, not a size: dawn is not dusk run backwards, because light adaptation is faster.
     out["dawn.asymmetry"] = abs(float(eps[900])) / max(lag_dusk, 1e-6)
 
-    # snow: a field 6 EV brighter than what the eye is adapted to, for five minutes.
-    t = np.arange(0.0, 320.0, 0.5)
-    m = np.where(t < 10.0, 0.0, 6.0)
-    S, A = simulate(m, 0.5, p)
-    traces["snow"] = (t, m, S, A)
-    eps = m - S
-    out["snow.blinding_5s"] = float(eps[int(round(15.0 / 0.5))])
-    out["snow.adapted_5min"] = float(abs(eps[-1]))
+    # a step to a brighter or darker level that is held for an hour, from a day-adapted eye (level 0).
+    def held(name, level, dt, t_end):
+        t = np.arange(0.0, t_end, dt)
+        m = np.where(t < 10.0, 0.0, level)
+        S, A = simulate(m, dt, p)
+        traces[name] = (t, m, S, A)
+        return float((m - S)[-1])
+
+    out["bright_day.adapted_5min"] = abs(held("bright_day", 3.0, 0.5, 320.0))   # +3 EV: inside the long-term span
+    out["snow.stays_blinding"] = held("snow", 6.0, 0.5, 320.0)                  # +6 EV: beyond the light limit
+    out["deep_night.stays_dark"] = held("deep_night", -20.0, 2.0, 3600.0)       # -20 EV: beyond the 12 EV span
+    out["range.short_total"] = p.range_dark + p.range_light
 
     # retroreflective signs: a 0.5% patch, 12 EV above the frame's median, flashing in the headlights.
     night = bases["night"]
@@ -226,17 +242,19 @@ def run(p: Adaptation, bases: dict) -> dict:
 
 
 SPECS = (
-    Spec("tunnel", "tunnel.recovers_3s", "3 s after entering an 8 EV tunnel the error has come back from -8 to above -5", -5.0, np.inf, 0.3),
-    Spec("tunnel", "tunnel.still_dark_at_exit", "but it has not fully adapted by the end of the 8 s tunnel: still at least 2.5 EV dark", -np.inf, -2.5, 0.3),
-    Spec("tunnel", "tunnel.exit_flash", "leaving it, the view blows out by at least 2 EV", 2.0, np.inf, 0.3),
+    Spec("tunnel", "tunnel.window_used_3s", "within 3 s of entering an 8 EV tunnel the short-term stage has used at least 90% of its range", 0.9, np.inf, 0.1),
+    Spec("tunnel", "tunnel.still_dark_at_exit", "but 8 EV is more than it covers: at the end of the tunnel the view is still at least 4 EV dark", -np.inf, -4.0, 0.3),
+    Spec("tunnel", "tunnel.exit_flash", "leaving it, the view blows out by at least 1.5 EV", 1.5, np.inf, 0.3),
     Spec("tunnel", "tunnel.exit_recovery_s", "and recovers to within 1 EV in 1.5 s (light adaptation is the fast one)", 0.0, 1.5, 0.3),
-    Spec("cloud", "cloud.recovers_4s", "behind a 5 EV cloud, within 2 EV of proper after 4 s", -2.0, 0.0, 0.3),
+    Spec("cloud", "cloud.window_used_4s", "behind a 5 EV cloud, at least 90% of the short-term range is used after 4 s", 0.9, np.inf, 0.1),
     Spec("cloud", "cloud.exit_recovery_s", "and back to within 0.5 EV within 2 s of it passing", 0.0, 2.0, 0.3),
-    Spec("dusk", "dusk.lag_at_dark", "dusk: when the light bottoms out the view is still at least 1.5 EV darker than proper", -np.inf, -1.5, 0.3),
-    Spec("dusk", "dusk.settled_1h", "an hour later it is within 2 EV (the 14 EV range exceeds what adaptation covers)", 0.0, 2.0, 0.3),
+    Spec("dusk", "dusk.lag_at_dark", "dusk: when the light bottoms out the view lags, 1.5 to 3 EV darker than proper (dark, not black)", -3.0, -1.5, 0.3),
+    Spec("dusk", "dusk.night_stays_dark", "an hour on the night STAYS dark, 0.5 to 3 EV below proper, because long-term adaptation runs out of range", -3.0, -0.5, 0.3),
     Spec("dawn", "dawn.asymmetry", "dawn is not dusk reversed: at the end of an equal 30-minute ramp its lag is at most half of dusk's", 0.0, 0.5, 0.1),
-    Spec("snow", "snow.blinding_5s", "a field 6 EV brighter than the adapted level still blinds by at least 1 EV after 5 s", 1.0, np.inf, 0.3),
-    Spec("snow", "snow.adapted_5min", "and is within 0.5 EV after five minutes", 0.0, 0.5, 0.25),
+    Spec("bright_day", "bright_day.adapted_5min", "a day 3 EV brighter than the adapted one is within the long-term span: within 0.5 EV after five minutes", 0.0, 0.5, 0.25),
+    Spec("snow", "snow.stays_blinding", "a snowy field 6 EV above the day level is past the light limit: it STAYS at least 1 EV too bright", 1.0, np.inf, 0.3),
+    Spec("deep_night", "deep_night.stays_dark", "a drop of 20 EV is past the 12 EV span plus the short-term range: it stays at least 4 EV dark", -np.inf, -4.0, 0.3),
+    Spec("range", "range.short_total", "the short-term range is 3 to 5 EV in total (GT7's figure), not per side", 3.0, 5.0, 0.25),
     Spec("sign", "sign.meter_shift", "a retroreflective sign (0.5% of the frame, +12 EV) moves the metered level by under 0.15 EV", 0.0, 0.15, 0.1),
     Spec("sign", "sign.exposure_shift", "and the exposure by under 0.15 EV", 0.0, 0.15, 0.1),
     Spec("sign", "specular.meter_shift", "speculars (glints, 1.5% of the frame at +9 EV) move the meter by under 0.10 EV", 0.0, 0.10, 0.1),
@@ -303,8 +321,8 @@ def recentre_pair(p: Adaptation, bases: dict, a: str = "trim_hi", b: str = "w_wo
 
 
 def smoothing_only(p: Adaptation) -> Adaptation:
-    """The textbook auto-exposure: one symmetric exponential smoother, no window, no long-term stage. Same meter as `p`."""
-    return replace(p, tau_s_light=1.0, tau_s_dark=1.0, range_dark=60.0, range_light=60.0)
+    """The textbook auto-exposure: one symmetric exponential smoother, no window, no cap, no long-term stage. Same meter."""
+    return replace(p, tau_s_light=1.0, tau_s_dark=1.0, range_dark=60.0, range_light=60.0, light_limit=1e6, long_range=2e6)
 
 
 def feasible_ranges(p: Adaptation, bases: dict, points: int = 41) -> dict:

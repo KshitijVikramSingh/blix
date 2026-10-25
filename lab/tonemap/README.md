@@ -172,37 +172,47 @@ human labels to learn a highlight-protection rule from. Temporal adaptation is n
 
 Why: GT7's slides (176-221) reject the camera model where every frame is properly exposed ("the night stays dark, a
 snowy field stays blinding") and get those cases from the eye's limits instead: a short-term stage (pupil and neural gain,
-3-5 EV, a few seconds) held inside a window set by a long-term stage (receptor sensitivity, ~12 EV, tens of minutes).
+3-5 EV, a few seconds) held inside a window set by a long-term stage (receptor sensitivity, 12 EV, tens of minutes).
 `adaptation.py` models that in log2 luminance: S follows the metered scene level (faster brightening than darkening) and is
-clamped to [A - range_dark, A + range_light]; A follows slowly (tau_a_dark ~15 min); exposure is `key - S`.
+clamped to [A - range_dark, A + range_light], a window of 3 to 5 EV IN TOTAL; A follows slowly and is itself clamped to a
+12 EV span, [light_limit - 12, light_limit]; exposure is `key - S`.
+
+**Two interpretations, the lab's and not GT7's** (the slides give diagrams, 197-209 and 213-219, and no formulas):
+the short-term "range 3-5 EV" is the total width of S's window (a first version, pushed in `0c18c446`, used +-4 EV, an
+8 EV window, twice what the slides support); and the long-term "range 12 EV" caps how far A itself can move.
 
 **What is and is not fitted.** GT7 publishes ranges and orders of magnitude, not constants, and there is no measured data
-here, so nothing is fitted to data. The constants are TUNED to 16 written specs (the lab's own statements of the behaviour
-GT7 describes) over seven scenarios: tunnel, cloud, dusk, dawn, snow, retroreflective signs and speculars, camera cuts.
-The defaults and the specs were written from the same description, so the defaults nearly meet them already (14 of 16;
-tuning moved only the meter's trim and the world weight). What the specs do show:
+here, so nothing is fitted to data. The constants are TUNED to 18 written specs (the lab's own statements of the
+behaviour GT7 describes) over nine scenarios: tunnel, cloud, a brighter day, snow, dusk, dawn, a 20 EV drop,
+retroreflective signs and speculars, camera cuts. The defaults and the specs were written from the same description, so
+the defaults already meet all 18 and tuning moved nothing; the table is a check on the structure, not on the constants.
 
-- A plain single smoother misses 6 of 16 (it never stays dark at a tunnel's end, never lags at dusk, never blinds on
-  snow, is symmetric at dawn); the two-stage model meets all 16.
-- Where each parameter is free (the interval over which every spec still holds, others fixed): range_dark and
-  range_light 3 to about 4.6 EV; tau_s_light about 0.15 to 0.95 s; tau_s_dark up to about 4 s; tau_a_dark at least about
-  840 s (dusk must lag); tau_a_light 30 s upward. Mostly free: those are taste choices, not results. `trim_hi` and
-  `w_world` interact (a higher trim helps speculars and hurts camera cuts, and the world weight pays for it), so one at a
-  time looks pinned and the pair is not: the joint region is trim 0.04 to 0.15 with w_world 0.4 to 0.87, and the tuned
-  point (0.09, 0.64) is its centre, not an edge.
+- A plain single smoother misses 11 of 18 (it never stays dark in a tunnel, at dusk or after a 20 EV drop, never stays
+  blinding on snow, is symmetric at dawn); the two-stage model with the 12 EV cap meets all 18.
+- What the 12 EV cap does: over an hour the night settles 2 EV below proper and STAYS there (A cannot follow past
+  its span); the snowy field stays 2 EV too bright indefinitely; a 20 EV drop stays 8 EV dark. A day only 3 EV brighter
+  adapts within five minutes. Without the cap none of these persist.
+- Where the specs pin each parameter (holding the others fixed; mostly free, so mostly taste): `light_limit` 0.6 to 3 EV
+  above the day level (tight: bright days must adapt, the night must stay dark but visible), range_dark 1.85 to 2.9,
+  tau_s_light 0.3 to 1.5 s, tau_a_dark at most about 690 s (dusk may lag by no more than 3 EV), tau_a_light 20 to 430 s.
+  `trim_hi` and `w_world` interact (a higher trim helps speculars and hurts camera cuts, and the world weight pays for
+  it): the joint region is trim 0.04 to 0.15 with w_world 0.4 to 0.87, and (0.09, 0.64) is its centre.
 - **Retroreflective signs and speculars:** a 0.5% sign at +12 EV moves the metered level 0.02 EV and the exposure 0.01 EV;
-  glints (1.5% at +9 EV) move the meter 0.05 EV; a sky filling 20% of the frame still moves it 1.0 EV, so the rejection
-  is not blind. (A first version of the specular spec deleted everything above median + 6 EV from a real frame, which
-  is 12% of it and includes its sky and lamps; it confounded rejection with trimming real bright areas and was replaced.)
+  glints (1.5% at +9 EV) move the meter 0.05 EV; a sky filling 20% of the frame still moves it 1.0 EV, so the
+  rejection is not blind.
+- **Open and unverified: the tunnel.** With a 2 EV window per side an 8 EV tunnel stays about 6 EV dark for its whole
+  length (`out/12_tunnel_filmstrip.png`: nearly black), where the first version was 4 EV dark. GT7's tunnels probably get
+  help from the other references (sky visibility, light probes), which this model does not have. Real reference data
+  would settle it.
+- `light_limit` is an EV offset from the scenarios' day level. In an engine it would need an absolute luminance (the
+  scene-white anchor gives nits), and what physical luminance the light limit sits at is unknown here.
 
-Figures: `out/11_adaptation.png` (traces against a plain smoother), `out/12_tunnel_filmstrip.png` and
-`out/13_dusk_filmstrip.png` (the same frame through GT7 SDR at each model's exposure). In the tunnel the two-stage view is
-4 EV dark inside and blows out by 2.8 EV on exit; the plain smoother blows out by 6.9 EV. At dusk the two-stage view is
-2 EV darker than proper at the darkest and catches up within 6 minutes; the plain smoother never looks dark.
+Figures: `out/11_adaptation.png` (traces, the 12 EV span drawn), `out/12_tunnel_filmstrip.png`,
+`out/13_dusk_filmstrip.png` (the same frame through GT7 SDR at each model's exposure).
 
-Not modelled: white balance (GT7 adapts it too, separately), the 12 EV cap on long-term range (the 14 EV dusk exceeds it;
-the specs only require the lag), the position-independent references beyond a single stand-in (`w_world`, exercised
-only by the camera-cut spec), and any real data on time constants. Glare and motion blur are next.
+Not modelled: white balance (GT7 adapts it by the same mechanism, on colour temperature and tint), real time-constant
+data, and the position-independent references beyond a stand-in (`w_world`, exercised only by the camera-cut spec).
+Glare and motion blur are after those.
 
 ## Colour-correction fit
 
@@ -223,6 +233,105 @@ The folds agree on the parameters (baseline: ev -0.9, contrast 0.89 to 0.92, sat
 ground keeps a uniform residual (ACES's toe is darker than GT7's) and bright warm lights stay tinted where ACES
 neutralises them (a highlight-dependent desaturation would be the next parameter). A target from artists would use the
 same `fit_grade`. Not done: a LUT grade (the engine has no LUT path) and any change to `tonemap.glsl`.
+
+## The interactive demo and HDR output
+
+`src/Demos/Blix.Demos.TonemapLab` (see `docs/demos.md`) puts the lab's tone mapping in a window with sliders:
+`BLIX_HDR=1 ./blix run Blix.Demos.TonemapLab`. Its GT7 shader is a third copy of the arithmetic (after the published C++
+and `gt7.py`), so `--selftest out.pfm --peak P --gt7 tuned|published` renders the hue ramp through it and
+`tests/test_glsl_parity.py` compares that with `gt7.py` per pixel: they agree to one half-float step (about 0.16% relative;
+the target is RGBA16F). The renders come from `data/selftest`, or from the demo itself with `BLIX_PARITY=1`.
+
+**Auto-exposure in the demo.** A meter pass renders the same world at 1/8 resolution, read back about ten times a second
+(a small, rare device wait); `Adaptation.cs` is a C# port of `adaptation.py` (the two-stage model with the 12 EV span) and of
+the trimmed histogram meter, and steps every frame. Every constant is a slider, a time scale lets a 30-minute dusk run in
+half a minute (`Run dusk` at x60), and "Look at the tunnel" is an instant camera cut. The port is held to the python by
+`tests/test_csharp_parity.py` (no window needed: `--adaptation-selftest`, `--meter-selftest`): the adaptation steps agree
+to 1e-7 and the meter to 1e-15. `--trace --cut-at S --frames N` prints the adaptation per reading for an unattended run: a
+cut into the tunnel moves the metered level 8.07 EV, and S falls to its window floor (the long-term level minus 2 EV) in about
+a second and stays 6 EV dark, as the specs say. (An earlier tunnel was a small dark rectangle, and cutting to it moved the
+meter by only 0.57 EV, because the bright world around it filled 93% of the frame; the interior is now a sector wide enough
+that looking into it fills the screen.)
+
+**HDR output on the window** is an engine change in `Blix.Graphics.Vulkan`: `BLIX_HDR=1` enables
+`VK_EXT_swapchain_colorspace` on the instance and prefers RGBA16F in extended-linear sRGB; `IGraphicsDevice.HdrOutput` says
+whether it got it. On this machine's MoltenVK the surface offers extended-linear sRGB, BT.2020 linear, HLG and HDR10, in
+RGBA16F and 10-bit. An HDR surface takes linear light with no hardware encode (1.0 = UI white), so the mode is opt-in: every
+present shader written for the sRGB surface would come out wrong on it. What the code can show is the values sent to the
+surface (`--capture`: EDR patches 0.25 to 6.0 arrive exactly).
+
+**Measured on the author's Liquid Retina XDR (2026-10-25): it works.** The window's layer is `CAMetalLayer` with
+`wantsExtendedDynamicRangeContent` true (MoltenVK sets it; `MacEdr` only reports it), pixel format RGBA16Float, colour space
+"sRGB IEC61966-2.1 Linear; extended range". `NSScreen`'s EDR headroom reads 3.998 while the window is up (potential 16.0),
+and the EDR patches agree by eye: patches at 4.0 and 6.0 times UI white look the same, because everything at or above the
+headroom clips. Headroom moves with the brightness setting and only rises once the window is displayed (an early probe read
+1.0), so the demo reads it live (`IRenderHost.DisplayHeadroom`) and by default sets GT7's peak to UI white times headroom,
+so the shoulder ends where the display does. The absolute UI white in nits is not known (a 1600-nit peak over a headroom of
+4 would make it about 400); it does not change the relative behaviour, only how literally "nits" can be read.
+
+## Real HDRIs
+
+Ten Poly Haven 2k panoramas (CC0; `sources/hdris.json` records URL, md5, licence and the catalogue's own fields) cover
+midday, sunrise, sunset, night, a mixed-light night and an artificial-light interior. `tools/fetch_hdris.py` fetches them into
+`data/hdri` (gitignored: the bytes are a fetch, not part of the repo); `python -m tmlab.hdri` prints per-image statistics
+(median, 99.9th percentile, range in stops, trimmed meter, colour cast). The demo takes one with `--hdri name`, or from the
+Environment combo; the panorama is scaled so its trimmed meter sits where the noon world's does, then every adaptation and
+tone-map control works on it as on the procedural world. Two things to know:
+
+- The catalogue's `whitebalance` is the balance the photographer *processed* with, not a measured scene illuminant: 5300-5600 K
+  for nearly every natural scene, sunsets included. It is no ground truth for auto white balance.
+- Equirect statistics are weighted by solid angle (cos of latitude), and the engine's cubemap path stores Half, so the demo
+  scales and clamps (60000) before the upload; a few suns would otherwise overflow to infinity.
+
+The C# loader and meter are held to `hdri.py` by `tests/test_hdri_parity.py` (decoders agree to 1e-6 relative on pixels, the
+meter to 1e-5 EV; ten of ten agreed to 2e-7 and 4.9e-8 when checked by hand). `out/14_hdri_views.png` is the contact sheet of
+all ten through GT7 published at a fixed exposure.
+
+## The display probe
+
+`python -m tmlab.display` runs `tools/edr_probe.swift` and reads each screen's EDR headroom (current and potential). The peak
+in nits is not reported by the OS, so the UI white is an inference, `peak / headroom`: on the author's panel, potential 16.0
+over a 1600-nit spec gives 100 nits at lowest brightness (which matches macOS), and a current 3.998 gives about 400 nits now.
+That is labelled as an inference in the code; a photometer would settle it.
+
+## Literature constants
+
+What the adaptation constants rest on, as of 2026-10-25. Nothing here is fitted to data; GT7 publishes ranges only.
+
+| constant | value | status |
+| --- | --- | --- |
+| `tau_a_dark` (long-term, darkening) | 600 s | supported: the slow phase of human dark adaptation is of this order (Webvision) |
+| `tau_a_light` (long-term, brightening) | 90 s | chosen; no source found |
+| `tau_s_light`, `tau_s_dark` | 0.4 s, 1.2 s | chosen to meet the lab's specs; no source found |
+| short-term window | 2 EV below and above | GT7 slides (3-5 EV in total) |
+| long-term span | 12 EV | GT7 slides |
+| `light_limit` | 2 EV | chosen, pinned to 0.6-3 EV by the feasible-range analysis |
+
+The pupil time constants and the Watson and Yellott pupil-diameter formula could not be obtained (the NASA PDF timed out, the
+journal copy returned 403), so they are not used. The honest summary is that one constant has a source and the rest are
+specified behaviour with constants chosen to meet it.
+
+## Auto white balance
+
+`tmlab/awb.py` (model, constants and the reasoning in its docstring), `tests/test_awb.py` (18 specs written before the constants
+were set), and a C# port, `AutoWhiteBalance.cs`, held to it by `tests/test_awb_parity.py`. GT7's slide 222 gives the mechanism
+(exposure's dynamics on colour temperature and tint, toward D65, with a faint virtual light and camera-AWB limits) and no
+constants, so everything is chosen to meet the specs. Decisions (the author's, 2026-10-25): PARTIAL adaptation (strength 0.7:
+a sunset stays warm, tungsten stays a little warm), a strength-0 opt-out for stylised scenes, and measurement from whatever the
+renderer can supply: the demo's meter pass writes a sky mask to alpha, and sky pixels count for 0.15.
+
+What the work found, because it is not obvious:
+
+- Measured plainly (trimmed, saturation-discounted mean RGB of the frame) the ten HDRIs read 6100-11800 K: a blue sky and green
+  grass fill the frame, so the frame mean says "cool, green light" for scenes that are not. That is the classic gray-world
+  failure, and it is why the sky mask exists. Masked, the same scenes read close to neutral and the correction is small
+  (2-3% in the gains on `out/15_awb_views.png`; venice_sunset keeps its warmth).
+- The tint limit is tight (0.06) on purpose: natural light barely varies in tint and a frame's green is mostly foliage.
+- A strong cast is read slightly low (the saturation discount discounts everything once a cast saturates every pixel): the
+  safe side of the error, with partial adaptation on top.
+- The HDRI catalogue's own `whitebalance` is no test of this (see above), so the real-data check is the contact sheet, not a number.
+
+The demo: `--awb off` starts it disabled; "auto white balance" has the sliders; the manual K / tint sliders apply on top.
 
 ## Not covered yet
 
