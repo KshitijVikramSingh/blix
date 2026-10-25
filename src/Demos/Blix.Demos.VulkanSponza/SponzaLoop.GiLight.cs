@@ -21,9 +21,9 @@ internal sealed partial class SponzaLoop
 {
     private bool giHold = true, giLive;
     private float giPlaySpeed = 1f, giLiveSettle = 0.3f;
-    // Live max lead (deg, 6): the playing sun waits while it is this far ahead of the GI's -- at 1 deg/s on Crytek Sponza
+    // Live max lead (deg, 5; the steps at most this, small steps up to 5 deg the user's choice): the playing sun waits while it is this far ahead of the GI's -- at 1 deg/s on Crytek Sponza
     // the GI fell behind, each step grew (6 -> 19 deg) and took longer (5 -> 18 s): 15-19 deg behind (2026-10-25).
-    private float giMaxLead = 6f;
+    private float giMaxLead = 5f;
     private bool LiveSunWaits => giLive && giSunTarget != Vector3.Zero
         && MathF.Acos(Math.Clamp(Vector3.Dot(giSunTarget, SliderToSun), -1f, 1f)) * 180f / MathF.PI >= giMaxLead;
     private float giLiveRate = 3f, giLiveMinStep = 0.5f, giRelightGpuMs = 30f, giKeepOldBelow = 10f;
@@ -31,7 +31,9 @@ internal sealed partial class SponzaLoop
     private int giLiveStop = 3, giRelightStop;
     private static readonly string[] GiStopNames = { "full", "no near round", "coarse + copy", "screen" };
     private bool giRelighting;
-    private (float GpuMs, bool CookScreen, int Stop, bool ScreenFirst, float OldStart, float KeepOld)? giSaved;
+    private (float GpuMs, bool CookScreen, int Stop, bool ScreenFirst, float OldStart, float KeepOld, float ScreenRefine, float Boost)? giSaved;
+    // Live's boost (GPU ms a frame, 0 off): a live step's sweep slot and its re-aim's bounces a frame (SponzaLoop.ChangeBoost).
+    private float giBoostMs = 10f;
 
     private void ParseGiLight(AppArgs args)
     {
@@ -39,6 +41,7 @@ internal sealed partial class SponzaLoop
         giLive = args.Flag("gi-live");
         if (args.Float("gi-live-speed") is { } sp) giPlaySpeed = Math.Clamp(sp, 0.05f, 30f);
         if (args.Float("gi-live-max-lead") is { } ml) giMaxLead = Math.Clamp(ml, 0.5f, 90f);
+        if (args.Float("gi-live-boost-ms") is { } bm) giBoostMs = Math.Clamp(bm, 0f, 100f);
         if (args.Float("gi-live-rate") is { } r) giLiveRate = Math.Clamp(r, 0.05f, 30f);
         if (args.Float("gi-live-min-step") is { } m) giLiveMinStep = Math.Clamp(m, 0.05f, 10f);
         if (args.Float("gi-relight-gpu-ms") is { } g) giRelightGpuMs = Math.Clamp(g, 1f, 200f);
@@ -104,7 +107,7 @@ internal sealed partial class SponzaLoop
 
     private void BeginGiChange(Vector3 toSun, bool relight)
     {
-        giSaved ??= (sweepGpuMs, changeCookScreen, changeStop, screenFirst, oldStartBelow, keepOldBelow);
+        giSaved ??= (sweepGpuMs, changeCookScreen, changeStop, screenFirst, oldStartBelow, keepOldBelow, screenRefineBudget, changeBoostMs);
         giRelighting = relight;
         sweepGpuMs = relight ? giRelightGpuMs : giSaved.Value.GpuMs;
         changeCookScreen = relight;
@@ -115,6 +118,10 @@ internal sealed partial class SponzaLoop
             screenFirst = true;
             oldStartBelow = MathF.Max(giSaved.Value.OldStart, 30f);
             keepOldBelow = giKeepOldBelow;
+            // Live's steps (at most Live max lead, 5 deg) without the screen gather's refine: under 0.003 of the screen's error
+            // for ~2 s a step at 2-5 deg (Crytek Sponza, 2026-10-25); the boost for the step.
+            screenRefineBudget = 0f;
+            changeBoostMs = giBoostMs;
         }
         var angle = MathF.Acos(Math.Clamp(Vector3.Dot(giSunTarget, toSun), -1f, 1f)) * 180f / MathF.PI;
         giSunTarget = toSun;   // FollowSun's turn test starts the change (LiveRestart)
@@ -132,6 +139,8 @@ internal sealed partial class SponzaLoop
         screenFirst = saved.ScreenFirst;
         oldStartBelow = saved.OldStart;
         keepOldBelow = saved.KeepOld;
+        screenRefineBudget = saved.ScreenRefine;
+        changeBoostMs = saved.Boost;
         giSaved = null;
         giRelighting = false;
     }
@@ -153,6 +162,7 @@ internal sealed partial class SponzaLoop
             giLiveRate = debug.Controls.Float("Live max (deg/s)", giLiveRate, 0.1f, 10f);
             giLiveMinStep = debug.Controls.Float("Live min step (deg)", giLiveMinStep, 0.1f, 5f);
             giMaxLead = debug.Controls.Float("Live max lead (deg)", giMaxLead, 0.5f, 30f);
+            giBoostMs = debug.Controls.Float("Live boost GPU ms a frame (0 off)", giBoostMs, 0f, 30f);
             giLiveSettle = debug.Controls.Float("Live settle (s)", giLiveSettle, 0f, 5f);
             if (giLive) sunMoveSettle = giLiveSettle;
             giLiveStop = debug.Controls.Enum("Live stops at", giLiveStop, GiStopNames);
