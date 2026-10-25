@@ -79,6 +79,7 @@ internal sealed partial class SponzaLoop
         if (args.Float("refine-budget") is { } rb) refineBudget = Math.Max(0f, rb);
         if (args.Int("refine-max") is { } rm) refineMax = Math.Clamp(rm, 1, 256);
         ParseRefineWorst(args);
+        ParsePatchRank(args);
     }
 
     private Func<string[], ShaderInterface>? splitReflect;
@@ -198,7 +199,9 @@ internal sealed partial class SponzaLoop
         }
         Console.WriteLine("[VulkanSponza] split light: the cook landed; the texels rest on the sky's part and the sun's."
             + (lightChangeClock.IsRunning ? string.Create(CultureInfo.InvariantCulture, $" The light change took {lightChangeClock.Elapsed.TotalSeconds:0.0} s.") : ""));
+        DumpParts("landed");
         lightChangeClock.Reset();
+        changeDumpNext = 0;
         SunLinearReport();
         restDumpFrame = framesRendered + 30;
         landedFrame = framesRendered;   // BLIX_DUMP_PARTS: the light the image reads, once composed (Recall.cs)
@@ -263,6 +266,7 @@ internal sealed partial class SponzaLoop
     // RecordTexels, each frame: the resting light composed again when a part landed or a scale changed.
     private void RecordSplitCompose()
     {
+        ChangeTimeDumps();
         if (!splitLight || !splitSkyUp) return;
         var sky = new Vector3(render.SkyStrength);
         var sun = EffectiveSunIrradiance;

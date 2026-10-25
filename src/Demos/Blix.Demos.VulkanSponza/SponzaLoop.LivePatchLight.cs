@@ -337,6 +337,7 @@ internal sealed partial class SponzaLoop
         var picked = lightBakeKey is { } key ? LoadStage(key, "texel-patch", r => r.ReadString() != TexelPatchHeader ? null : ReadArray<int>(r)) : null;
         liveTexelPatchStored = picked is not null;
         if (picked is null) { picked = new int[texelCount]; Array.Fill(picked, -1); }
+        if (patchRank) texelPatchHost = picked;
         liveTexelPatch = Own(device.CreateGpuBuffer(texelCount * 4, MemoryMarshal.AsBytes(picked.AsSpan()), "sponza.live.texel-patch"));
     }
 
@@ -393,6 +394,18 @@ internal sealed partial class SponzaLoop
     private void FinishLiveRetarget()
     {
         var toSun = sunNodeDirsAsked![1];
+        // The sun as the bits were shot for it, when it is the asked one but for rounding: --sun-change's turn settles a frame
+        // after the re-aim took it (the yaw and pitch written back), under the 0.25 degrees a new re-aim takes -- the bits went
+        // to the settled sun and the re-aim waited for the other forever (2026-10-25). The cook's sun is the bits' then.
+        if (liveSunDone && liveSunToward != toSun && Vector3.Dot(liveSunToward, toSun) > MathF.Cos(0.25f * MathF.PI / 180f))
+        {
+            toSun = liveSunToward;
+            sunNodeDirsAsked[1] = toSun;
+            sunNodeDirs![1] = new Vector4(toSun, 1f);
+            sunNodeBitDirections[1] = new Vector4(toSun, 0f);
+            RetireGpuBuffer(sunNodeSunsBuffer);
+            sunNodeSunsBuffer = Own(SweepBuffer(sunNodeDirs.Length * 16, MemoryMarshal.AsBytes(sunNodeDirs.AsSpan()), "sponza.sun-nodes.suns"));
+        }
         RecordLivePointBits();
         if (!liveSunDone || liveSunToward != toSun || !LivePatchLightRested || !LivePointsDone || SplitVisiblePending)
         {

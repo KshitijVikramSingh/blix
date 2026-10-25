@@ -48,12 +48,24 @@ internal sealed partial class SponzaLoop
     // under its share of the budget, in id order, written back as list k; the rest the pool. Returns the round's ids.
     private uint[] SelectWorstRound(int k, int count)
     {
-        if (sunNodeRefineRound == 0) { worstPoolIds = Array.Empty<uint>(); worstPoolPlaces = Array.Empty<uint>(); worstPoolScores = Array.Empty<float>(); }
         device.WaitIdle();
         var ids = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(resolveIds[k], 0, Math.Max(4, count * 4)).AsSpan())[..count].ToArray();
         var places = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(resolvePlaces[k], 0, Math.Max(4, count * 4)).AsSpan())[..count].ToArray();
         var scores = new float[count];
         device.ReadMappedGpuBuffer(resolveScores[k], 0, MemoryMarshal.AsBytes(scores.AsSpan()));
+        var (nextIds, nextPlaces) = RankWorst(ids, places, scores, count);
+        device.WriteMappedGpuBuffer(resolveIds[k], 0, MemoryMarshal.AsBytes(nextIds.AsSpan()));
+        device.WriteMappedGpuBuffer(resolvePlaces[k], 0, MemoryMarshal.AsBytes(nextPlaces.AsSpan()));
+        return nextIds;
+    }
+
+    // The ranking (the host's round end and the frame's, on a worker): the round's unsettled with the pool, the best
+    // under the round's share, in id order; the rest the pool. --patch-rank: each score by its patch's screen weight.
+    private (uint[] Ids, uint[] Places) RankWorst(uint[] ids, uint[] places, float[] scores, int count)
+    {
+        if (sunNodeRefineRound == 0) { worstPoolIds = Array.Empty<uint>(); worstPoolPlaces = Array.Empty<uint>(); worstPoolScores = Array.Empty<float>(); }
+        if (patchWeight is not null)
+            for (var i = 0; i < scores.Length; i++) scores[i] *= PatchWeightOf(ids[i]);
         var allIds = worstPoolIds.Concat(ids).ToArray();
         var allPlaces = worstPoolPlaces.Concat(places).ToArray();
         var allScores = worstPoolScores.Concat(scores).ToArray();
@@ -69,11 +81,9 @@ internal sealed partial class SponzaLoop
         worstPoolIds = rest.Select(i => allIds[i]).ToArray();
         worstPoolPlaces = rest.Select(i => allPlaces[i]).ToArray();
         worstPoolScores = rest.Select(i => allScores[i]).ToArray();
-        device.WriteMappedGpuBuffer(resolveIds[k], 0, MemoryMarshal.AsBytes(nextIds.AsSpan()));
-        device.WriteMappedGpuBuffer(resolvePlaces[k], 0, MemoryMarshal.AsBytes(nextPlaces.AsSpan()));
         var cut = take > 0 ? allScores[picked[^1]] : 0f;
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[VulkanSponza] refine worst: {take:N0} of {allIds.Length:N0} candidates (the round's {count:N0} unsettled, the pool's {allIds.Length - count:N0}) take the next round, their score down to {cut:G3} (the best {(order.Length > 0 ? allScores[order[0]] : 0f):G3})."));
-        return nextIds;
+            $"[VulkanSponza] refine worst: {take:N0} of {allIds.Length:N0} candidates (the round's {count:N0} unsettled, the pool's {allIds.Length - count:N0}) take the next round, their score down to {cut:G3} (the best {(order.Length > 0 ? allScores[order[0]] : 0f):G3}){(patchWeight is not null ? ", by patch" : "")}."));
+        return (nextIds, nextPlaces);
     }
 }

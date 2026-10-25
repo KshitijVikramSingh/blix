@@ -576,6 +576,7 @@ internal sealed partial class SponzaLoop
     {
         var (ids, mask, masked, log) = pick;
         ids = SelectFine(ids);
+        if (sunChangeMask is not null) ids = OrderByPatch(ids, "the fine round");
         refineMasked = mask is not null;
         if (mask is not null)
         {

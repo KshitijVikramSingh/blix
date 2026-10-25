@@ -14,7 +14,7 @@ layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) uniform Ratio {
     vec4 uRatio;   // x live texels, y mode, z the largest ratio kept, w the first live texel of this dispatch
-    vec4 uSelect;  // x T (0: off), y the sun's irradiance (luminance), z the dark bar (the error's floor)
+    vec4 uSelect;  // x T (0: off), y the sun's irradiance (luminance), z the dark bar (the error's floor); w 1: SunMoved too
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer LiveIds { uint liveIds[]; };
@@ -24,6 +24,9 @@ layout(std430, set = 0, binding = 4) buffer TexelProvenance { uint provenance[];
 layout(std430, set = 0, binding = 5) readonly buffer TexelSky { uvec2 texelSky[]; };
 layout(std430, set = 0, binding = 6) buffer SunLanded { uint sunLanded[]; };   // by texel id: the landed sun part
 layout(std430, set = 0, binding = 7) buffer Changed { uint changedBits[]; };   // a bit a texel id
+// --patch-rank (SponzaLoop.PatchRank.cs): how far the relit instant moved each texel's light, a byte a texel id (64 = all of
+// it, 255 four times) -- the patches' expected error, a sun change's order.
+layout(std430, set = 0, binding = 8) buffer SunMoved { uint movedBytes[]; };
 #include "provenance.glsl"
 
 uint packRgb9e5(vec3 c) {
@@ -68,7 +71,9 @@ void main() {
             float sky = dot(unpackRgb9e5(texelSky[id].x), luma);
             float before = sky + dot(unpackRgb9e5(sunLanded[id]), luma) * u.uSelect.y;
             float after = sky + dot(relit, luma) * u.uSelect.y;
-            if (abs(after - before) > u.uSelect.x * max(before, u.uSelect.z)) atomicOr(changedBits[id >> 5], 1u << (id & 31u));
+            float rel = abs(after - before) / max(before, u.uSelect.z);
+            if (rel > u.uSelect.x) atomicOr(changedBits[id >> 5], 1u << (id & 31u));
+            if (u.uSelect.w > 0.5) atomicOr(movedBytes[id >> 2], min(uint(rel * 64.0 + 0.5), 255u) << (8u * (id & 3u)));
         }
         provenanceMark(id, 7u, true, false);   // the ratio relight
         ratioWords[id] = instantWord;

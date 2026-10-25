@@ -11,7 +11,7 @@ layout(set = 0, binding = 0) uniform TexelVisible {
     mat4 uInvView;
     vec4 uTarget;       // xy the depth target's pixels, z the pixel stride
     vec4 uTexelGrid;    // xyz the cells' origin, w the spacing
-    vec4 uTexelParams;  // x hash capacity, y levels
+    vec4 uTexelParams;  // x hash capacity, y levels, z 1: count each texel's pixels too (TexelPixels)
     vec4 uLightmap;     // x 1 when the atlas's texels are on, yz the atlas size
 } u;
 
@@ -25,6 +25,9 @@ layout(set = 0, binding = 6) uniform usampler2D uLightmapTexel;
 // The atlas's map from texel to record, as an R32UI texture (SponzaLoop.LightmapGather.cs).
 layout(std430, set = 0, binding = 7) readonly buffer LightmapIndex { uint lightmapIndex[]; };
 #include "lightmap_index.glsl"
+// --patch-rank (SponzaLoop.PatchRank.cs): each texel's share of the pixels, in sixteenths -- the finest level's texels a pixel
+// reads, by their weights -- the patches' screen weight for a sun change's order and refine.
+layout(std430, set = 0, binding = 8) buffer TexelPixels { uint texelPixels[]; };
 #define TEXEL_INDEX_MAP(i) lightmapIndexAt(ivec2(int(i) % int(lightmapIndex[0]), int(i) / int(lightmapIndex[0])))
 #define TEXEL_HASH(i) uvec3(texelHash[3u * uint(i)], texelHash[3u * uint(i) + 1u], texelHash[3u * uint(i) + 2u])
 #include "texel.glsl"
@@ -32,6 +35,11 @@ layout(std430, set = 0, binding = 7) readonly buffer LightmapIndex { uint lightm
 void markTexel(int id) {
     if (id < 0) return;
     atomicOr(visibleBits[uint(id) >> 5], 1u << (uint(id) & 31u));
+}
+
+void countTexel(int id, float w) {
+    if (id < 0 || u.uTexelParams.z < 0.5 || w <= 0.0) return;
+    atomicAdd(texelPixels[uint(id)], uint(w * 16.0 + 0.5));
 }
 
 void main() {
@@ -62,10 +70,10 @@ void main() {
             int lm[4];
             float lw[4];
             texelsAroundLightmap(atlasTexel, n, ivec2(u.uLightmap.yz), lm, lw);
-            for (int i = 0; i < 4; ++i) markTexel(lm[i]);
+            for (int i = 0; i < 4; ++i) { markTexel(lm[i]); countTexel(lm[i], lw[i]); }
             continue;
         }
         texelsAround(texelLevelGrid(g, uint(level)), world, n, nSample.w, ids, weights);
-        for (int i = 0; i < TEXEL_CANDIDATES; ++i) markTexel(ids[i]);
+        for (int i = 0; i < TEXEL_CANDIDATES; ++i) { markTexel(ids[i]); if (level == 0) countTexel(ids[i], weights[i]); }
     }
 }

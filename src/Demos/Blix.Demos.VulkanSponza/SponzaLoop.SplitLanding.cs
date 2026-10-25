@@ -96,7 +96,7 @@ internal sealed partial class SponzaLoop
                 new("uInvView", new Matrix4x4Uniform(invView)),
                 new("uTarget", new Vector4Uniform(new Vector4(width, height, 1f, firstRow))),
                 new("uTexelGrid", new Vector4Uniform(texelGrid)),
-                new("uTexelParams", new Vector4Uniform(new Vector4(texelCapacity, texelLevels, 0f, 0f))),
+                new("uTexelParams", new Vector4Uniform(new Vector4(texelCapacity, texelLevels, PatchRankNow ? 1f : 0f, 0f))),
                 new("uLightmap", new Vector4Uniform(LightmapUniform)),
             },
             new[]
@@ -111,6 +111,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("TexelHash", texelHashBuffer),
                 new ShaderBufferBinding("Texels", texelBuffer),
                 new ShaderBufferBinding("TexelVisibleBits", texelVisibleBits),
+                new ShaderBufferBinding("TexelPixels", TexelPixelsBinding(splitVisibleBand == 0)),
             }));
         if (++splitVisibleBand < bands) return;
         splitVisibleBand = 0;
@@ -132,6 +133,7 @@ internal sealed partial class SponzaLoop
             bitBytes = device.ReadGpuBuffer(texelVisibleBits, 0, bitBytes.Length);
         }
         var bits = MemoryMarshal.Cast<byte, uint>(bitBytes.AsSpan()).ToArray();
+        ReadTexelPixels();
         RetireGpuBuffer(texelVisibleBits);
         texelVisibleBits = default;
         if (liveTexels) visibleAtTurn = bits;

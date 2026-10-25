@@ -358,21 +358,37 @@ internal sealed partial class SponzaLoop
                 var of = sweepEndOf;
                 Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                     $"[VulkanSponza] sun nodes: {of - left:N0} of {of:N0} texels settled after {(sunNodeRefineRound == 0 ? "the sweep" : $"round {sunNodeRefineRound}")} in the frame ({sunNodeClock.Elapsed.TotalMinutes:0.0} min, {sweepFrameSlices:N0} slices, {sweepFramePasses:N0} passes); {left:N0} refine."));
-                var stops = left == 0 || RefineStops(of, left);
+                // --refine-worst: a round that settled all it traced goes on while the pool holds candidates.
+                // In the frame only under --patch-rank: its many small rounds cost a round end each (Crytek Sponza, a 20 deg
+                // change: the screen 0.086 -> 0.084 for 87.7 -> 98.7 s, 2026-10-25).
+                var rankInFrame = refineWorst && patchRank;
+                var pooledOn = rankInFrame && sunNodeRefineRound > 0 && worstPoolIds.Length > 0;
+                var stops = (left == 0 && !pooledOn) || RefineStops(of, left);
                 if (stops)
                 {
+                    if (left > 0 || pooledOn)
+                        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                            $"[VulkanSponza] sun nodes: round {sunNodeRefineRound} settled {of - left:N0} of {of:N0} ({RefineStopsWhy(of, left)}): refining stops; {left:N0} keep their light as it is."));
                     SweepEndFinish();
                     return;
                 }
                 // The round's list in id order (as SortResolveList's), on a worker: the appends land as the threads meet.
+                // --refine-worst: ranked with the pool (RankWorst, as the host's round end; by patch under --patch-rank).
                 var ids = new byte[left * 4];
                 var places = new byte[left * 4];
                 device.ReadMappedGpuBuffer(resolveIds[resolveNext], 0, ids);
                 device.ReadMappedGpuBuffer(resolvePlaces[resolveNext], 0, places);
+                float[]? scores = null;
+                if (rankInFrame && !resolveScores[resolveNext].Equals(default(GpuBufferHandle)))
+                {
+                    scores = new float[left];
+                    device.ReadMappedGpuBuffer(resolveScores[resolveNext], 0, System.Runtime.InteropServices.MemoryMarshal.AsBytes(scores.AsSpan()));
+                }
                 sweepSortTask = Task.Run(() =>
                 {
                     var i = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(ids).ToArray();
                     var p = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(places).ToArray();
+                    if (scores is not null) return RankWorst(i, p, scores, left);
                     Array.Sort(i, p);
                     return (i, p);
                 });
@@ -384,6 +400,7 @@ internal sealed partial class SponzaLoop
                 if (sweepSortTask is not { IsCompleted: true } task) return;
                 var (ids, places) = task.Result;
                 sweepSortTask = null;
+                if (ids.Length == 0) { SweepEndFinish(); return; }
                 device.WriteMappedGpuBuffer(resolveIds[resolveNext], 0, System.Runtime.InteropServices.MemoryMarshal.AsBytes(ids.AsSpan()));
                 device.WriteMappedGpuBuffer(resolvePlaces[resolveNext], 0, System.Runtime.InteropServices.MemoryMarshal.AsBytes(places.AsSpan()));
                 sunNodeRefineIds = ids;

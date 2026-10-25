@@ -50,6 +50,7 @@ internal sealed partial class SponzaLoop
         if (select && mode == 2)
         {
             device.WriteMappedGpuBuffer(changedBitsBuffer, 0, new byte[(texelCount + 31) / 32 * 4]);
+            SunMovedBinding(true);
             changedMarkedFrame = framesRendered;
         }
         const int perDispatch = 65535 * 64;
@@ -58,7 +59,7 @@ internal sealed partial class SponzaLoop
                 new ShaderUniform[]
                 {
                     new("uRatio", new Vector4Uniform(new Vector4(live.Length, mode, RatioMax, first))),
-                    new("uSelect", new Vector4Uniform(new Vector4(select ? sunChangeSelect : 0f, Luminance(EffectiveSunIrradiance), lastDarkBar, 0f))),
+                    new("uSelect", new Vector4Uniform(new Vector4(select ? sunChangeSelect : 0f, Luminance(EffectiveSunIrradiance), lastDarkBar, select && mode == 2 && PatchRankNow ? 1f : 0f))),
                 },
                 Array.Empty<ShaderTextureBinding>(),
                 Buffers: new[]
@@ -70,6 +71,7 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("TexelSky", EnsureLivePart(false)),
                     new ShaderBufferBinding("SunLanded", select ? sunLandedBuffer : sunRatioBuffer),
                     new ShaderBufferBinding("Changed", select ? changedBitsBuffer : sunRatioBuffer),
+                    new ShaderBufferBinding("SunMoved", SunMovedBinding(false)),
                 }), "texel-ratio");
     }
 
@@ -86,6 +88,8 @@ internal sealed partial class SponzaLoop
         device.ReadMappedGpuBuffer(changedBitsBuffer, 0, MemoryMarshal.AsBytes(mask.AsSpan()));
         var all = sunNodeTraceIds;
         var kept = all.Where(id => (mask[id >> 5] >> (int)(id & 31) & 1u) != 0).ToArray();
+        BuildPatchRank();
+        kept = OrderByPatch(kept, "the coarse sweep");
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] sun change select ({sunChangeStepDeg:0.0} deg step{(SelectFineNow ? ", the fine too" : "")}): {kept.Length:N0} of {all.Length:N0} coarse texels moved over {sunChangeSelect:0.##} of their light; the rest keep the relit instant."));
         sunChangeMask = mask;

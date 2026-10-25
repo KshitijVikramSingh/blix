@@ -250,6 +250,21 @@ internal sealed partial class SponzaLoop
     // sunBits, the texels' sun visibility bits after the parts (words a texel, the sun's column, then the words).
     private readonly Dictionary<string, int> dumpPartsCount = new();
 
+    // BLIX_DUMP_CHANGE_TIMES=1,2,5,... (with BLIX_DUMP_PARTS): a light change's parts at those seconds after the turn
+    // (.t<s>.0, then .landed at its landing) -- the screen's error over time against a truth's (tools/gi-model's
+    // change_timeline.py). Each read waits for the device: a measurement.
+    private static readonly double[] changeDumpTimes = (Environment.GetEnvironmentVariable("BLIX_DUMP_CHANGE_TIMES") ?? "")
+        .Split(',', StringSplitOptions.RemoveEmptyEntries).Select(v => double.Parse(v, CultureInfo.InvariantCulture)).ToArray();
+    private int changeDumpNext;
+
+    private void ChangeTimeDumps()
+    {
+        if (dumpParts is null || changeDumpNext >= changeDumpTimes.Length || !lightChangeClock.IsRunning) return;
+        if (lightChangeClock.Elapsed.TotalSeconds < changeDumpTimes[changeDumpNext]) return;
+        DumpParts(string.Create(CultureInfo.InvariantCulture, $"t{changeDumpTimes[changeDumpNext]:0.#}"));
+        changeDumpNext++;
+    }
+
     private void DumpParts(string stage, bool sunBits = false)
     {
         if (dumpParts is null) return;
