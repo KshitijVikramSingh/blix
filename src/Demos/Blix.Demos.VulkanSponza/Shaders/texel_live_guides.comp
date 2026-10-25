@@ -54,7 +54,7 @@ int octBin(vec3 d) {
 }
 
 void main() {
-    uint i = gl_GlobalInvocationID.x;
+    uint i = gl_GlobalInvocationID.x + uint(u.uIrr.w);   // uIrr.w: the chunk's first patch (a chunk a frame)
     if (i >= uint(u.uGuides.x)) return;
     uint G = uint(u.uGuides.y);
     float h[GUIDE_BINS];

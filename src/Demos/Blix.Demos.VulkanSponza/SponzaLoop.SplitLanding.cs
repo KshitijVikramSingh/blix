@@ -71,19 +71,30 @@ internal sealed partial class SponzaLoop
         if (!splitVisibleAsked) return;
         if (splitVisibleRecorded)
         {
+            // Read where they lie once the last band is past the frames in flight (the host's read waited for them).
+            if (sweepInFrame && framesRendered < splitVisibleRecordedFrame + Math.Max(1, device.MaxFramesInFlightCount) + 1) return;
             ReadTexelVisible();
             return;
         }
         var words = (texelCount + 31) / 32;
-        if (!texelVisibleBits.Equals(default(GpuBufferHandle))) RetireGpuBuffer(texelVisibleBits);
-        texelVisibleBits = Own(device.CreateGpuBuffer(words * 4, name: "sponza.texels.visible"));
+        // Under --sweep-in-frame a band of rows a frame (VisibleBands), its bits mapped (read where they lie): the whole
+        // screen at once was ~23 ms of the GPU and its buffer's zeros a submission waited on, a re-aim's (2026-10-25).
+        var bands = sweepInFrame ? VisibleBands : 1;
+        if (splitVisibleBand == 0)
+        {
+            if (!texelVisibleBits.Equals(default(GpuBufferHandle))) RetireGpuBuffer(texelVisibleBits);
+            texelVisibleBits = Own(SweepBuffer(words * 4, default, "sponza.texels.visible"));
+        }
+        var bandRows = (height + bands - 1) / bands;
+        var firstRow = splitVisibleBand * bandRows;
+        var rows = Math.Min(bandRows, height - firstRow);
         splitVisibleRecordedFrame = framesRendered;
-        graph.Dispatch(texelVisiblePass, new DispatchCommand(texelVisiblePipeline, (width + 7) / 8, (height + 7) / 8, 1,
+        graph.Dispatch(texelVisiblePass, new DispatchCommand(texelVisiblePipeline, (width + 7) / 8, (rows + 7) / 8, 1,
             new ShaderUniform[]
             {
                 new("uInvProjection", new Matrix4x4Uniform(invProjection)),
                 new("uInvView", new Matrix4x4Uniform(invView)),
-                new("uTarget", new Vector4Uniform(new Vector4(width, height, 1f, 0f))),
+                new("uTarget", new Vector4Uniform(new Vector4(width, height, 1f, firstRow))),
                 new("uTexelGrid", new Vector4Uniform(texelGrid)),
                 new("uTexelParams", new Vector4Uniform(new Vector4(texelCapacity, texelLevels, 0f, 0f))),
                 new("uLightmap", new Vector4Uniform(LightmapUniform)),
@@ -101,17 +112,25 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("Texels", texelBuffer),
                 new ShaderBufferBinding("TexelVisibleBits", texelVisibleBits),
             }));
+        if (++splitVisibleBand < bands) return;
+        splitVisibleBand = 0;
         splitVisibleRecorded = true;
     }
+    private int splitVisibleBand;
+    private const int VisibleBands = 4;
 
     private void ReadTexelVisible()
     {
         var clock = Stopwatch.StartNew();
         // The frame that marked them may still be in flight: read before it ran, the view came back partial -- 41 K of
         // the texels on screen one run, 395 K the next, the same view (2026-10-21).
-        device.WaitIdle();
         var bitBytes = new byte[(texelCount + 31) / 32 * 4];
-        bitBytes = device.ReadGpuBuffer(texelVisibleBits, 0, bitBytes.Length);
+        if (sweepInFrame) device.ReadMappedGpuBuffer(texelVisibleBits, 0, bitBytes);
+        else
+        {
+            device.WaitIdle();
+            bitBytes = device.ReadGpuBuffer(texelVisibleBits, 0, bitBytes.Length);
+        }
         var bits = MemoryMarshal.Cast<byte, uint>(bitBytes.AsSpan()).ToArray();
         RetireGpuBuffer(texelVisibleBits);
         texelVisibleBits = default;

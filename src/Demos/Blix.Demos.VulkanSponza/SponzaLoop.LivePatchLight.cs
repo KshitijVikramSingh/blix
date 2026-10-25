@@ -20,7 +20,7 @@ internal sealed partial class SponzaLoop
 {
     private bool livePatchLight, liveAlways, liveTexels;
     // The live answer settled for the lights as they are: what --live-texels' gather waits for.
-    private bool LivePatchLightRested => liveInjected && liveBounces >= LiveBouncesToRest
+    private bool LivePatchLightRested => liveInjected && liveBounces >= LiveBouncesToRest && (!liveTexels || liveGuidesFirst < 0 || liveGuidesDone)
         && Vector3.Distance(liveToSun, GiToSun) < 1e-6f;
     // A sun that turned while the cook was in its setup (tasks off the frame thread): restarted once the setup is done.
     private Vector3? liveRestartPending;
@@ -310,13 +310,22 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("NodeFirst", liveFirst),
                 new ShaderBufferBinding("PatchTransmit", solveTransmit.Equals(default(GpuBufferHandle)) ? liveFirst : solveTransmit),
             }.Concat(CookedBuffers()).ToArray());
-        graph.Dispatch(liveDirectPass, Pass(0, d.Patches, 0));
         var live = texelLiveIds!.Length;
+        // Under --sweep-in-frame the texels' pass (mode 1) a quarter a frame, the bounces waiting (liveDirectFirst): all of
+        // it at once was ~17 ms of the GPU in a re-aim's frame on Crytek Sponza (2026-10-25).
+        if (liveDirectFirst < 0) graph.Dispatch(liveDirectPass, Pass(0, d.Patches, 0));
+        var first0 = Math.Max(liveDirectFirst, 0);
+        var per = sweepInFrame ? (live + 3) / 4 : live;
+        var end = Math.Min(live, first0 + per);
         const int chunk = 65535 * 64;
-        for (var first = 0; first < live; first += chunk)
-            graph.Dispatch(liveDirectPass, Pass(1, Math.Min(chunk, live - first), first));
+        for (var first = first0; first < end; first += chunk)
+            graph.Dispatch(liveDirectPass, Pass(1, Math.Min(chunk, end - first), first));
+        if (end < live) { liveDirectFirst = end; liveDirectArgs = (toSun, irr); return; }
+        liveDirectFirst = -1;
         graph.Dispatch(liveDirectPass, Pass(2, d.Patches, 0));
     }
+    private int liveDirectFirst = -1;
+    private (Vector3 ToSun, Vector3 Irr) liveDirectArgs;
 
     private void EnsureLiveTexelPatch()
     {
@@ -426,7 +435,21 @@ internal sealed partial class SponzaLoop
     private bool guideSun, guideSkyOnly, instantOnly;
     private bool GuideSunNow => guideSun && !liveDirect.Equals(default(GpuBufferHandle));
 
-    private void RecordLiveGuides(TransportSolveData d)
+    // The guides a chunk of patches a frame, from the frame the light rests: in one frame they were 45-70 ms of the GPU on
+    // Crytek Sponza (2026-10-25), what kept a re-aim on the cook screen. -1: none under way.
+    private int liveGuidesFirst = -1;
+    private bool liveGuidesDone;
+    private const int LiveGuidesChunks = 16;
+
+    private void RecordLiveGuidesChunk(TransportSolveData d)
+    {
+        var chunk = (d.Patches + LiveGuidesChunks - 1) / LiveGuidesChunks;
+        RecordLiveGuides(d, liveGuidesFirst, Math.Min(chunk, d.Patches - liveGuidesFirst));
+        liveGuidesFirst += chunk;
+        if (liveGuidesFirst >= d.Patches) { liveGuidesFirst = -1; liveGuidesDone = true; }
+    }
+
+    private void RecordLiveGuides(TransportSolveData d, int first, int count)
     {
         if (liveGuides.Equals(default(GpuBufferHandle)))
         {
@@ -440,11 +463,11 @@ internal sealed partial class SponzaLoop
         var lum = liveSkyLum ?? new float[64];
         if (liveSkyLumBuffer.Equals(default(GpuBufferHandle)))
             liveSkyLumBuffer = Own(device.CreateGpuBuffer(64 * 4, MemoryMarshal.AsBytes(lum.AsSpan()), "sponza.live.sky-lum"));
-        graph.Dispatch(liveGuidesPass, new DispatchCommand(liveGuidesPipeline, (d.Patches + 63) / 64, 1, 1,
+        graph.Dispatch(liveGuidesPass, new DispatchCommand(liveGuidesPipeline, (count + 63) / 64, 1, 1,
             new ShaderUniform[]
             {
                 new("uGuides", new Vector4Uniform(new Vector4(d.Patches, LiveComponents, GuideSunNow && !guideSkyOnly ? 1f : 0f, guideSkyOnly ? 1f : 0f))),
-                new("uIrr", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 0f))),
+                new("uIrr", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, first))),
             },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
@@ -543,6 +566,7 @@ internal sealed partial class SponzaLoop
             liveIrr = irr;
             liveInjected = true;
             liveBounces = 0;
+            liveGuidesDone = false;
             liveFramesActive = 0;
             liveClock.Restart();
             return;
@@ -564,14 +588,20 @@ internal sealed partial class SponzaLoop
             liveIrr = irr;
             liveInjected = true;
             liveBounces = 0;
+            liveGuidesDone = false;
             liveFramesActive = 0;
             liveClock.Restart();
             // The injection alone this frame (its shadow batch is the frame's heaviest work); the bounces from the next.
             return;
         }
         // --live-patch-always: never rest (a measurement of what a frame pays while the light moves).
+        if (liveDirectFirst >= 0) { RecordLiveDirect(d, liveDirectArgs.ToSun, liveDirectArgs.Irr); return; }
         if (liveAlways && liveBounces >= LiveBouncesToRest) liveBounces = LiveBouncesToRest - LiveBouncesPerFrame;
-        else if (liveBounces >= LiveBouncesToRest) return;
+        else if (liveBounces >= LiveBouncesToRest)
+        {
+            if (liveGuidesFirst >= 0 && liveTexels) RecordLiveGuidesChunk(d);
+            return;
+        }
         for (var b = 0; b < LiveBouncesPerFrame; b++)
         {
             graph.Dispatch(liveSolveBPass, LiveDispatch(3, toSun, d.Patches * LiveComponents, noSun));
@@ -582,7 +612,7 @@ internal sealed partial class SponzaLoop
         liveFramesActive++;
         // The coarse light at LiveCoarseBounces (the bounces past it add a few percent), and again at rest.
         if (liveBounces == LiveCoarseBounces || liveBounces >= LiveBouncesToRest) LiveProvisionalNow();
-        if (liveBounces >= LiveBouncesToRest && liveTexels) RecordLiveGuides(d);
+        if (liveBounces >= LiveBouncesToRest && liveTexels) { liveGuidesFirst = 0; liveGuidesDone = false; RecordLiveGuidesChunk(d); }
         if (liveBounces >= LiveBouncesToRest)
         {
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,

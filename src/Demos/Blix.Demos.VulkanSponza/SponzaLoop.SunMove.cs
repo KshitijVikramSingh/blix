@@ -35,8 +35,33 @@ internal sealed partial class SponzaLoop
             sunMoving = true;
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] sun move: {rate:0.##} deg/s (--sun-move)."));
         }
+        if (args.Float("sun-move-settle") is { } settle) sunMoveSettle = Math.Max(0f, settle);
+        if (args.Float("sun-move-min-elevation") is { } me) sunMoveMinElevation = Math.Clamp(me, 0f, 80f);
     }
     private readonly Stopwatch sunMoveLogClock = new();
+    // The next step waits for the last to settle: its compose's every range in (SponzaLoop.SplitLight.cs) and then
+    // --sun-move-settle seconds (3). Re-aimed the frame it landed, its relight began over a landing still composing.
+    private float sunMoveSettle = 3f;
+    // The day kept above --sun-move-min-elevation (40 deg): down to the band's 5, Crytek Sponza went too dark to judge.
+    private float sunMoveMinElevation = 40f;
+
+    // The hour angle (degrees) at which the moving sun's day (AuthoredLatitude, Obliquity) sinks to this elevation.
+    private static float HourAtElevation(float elevationDeg)
+    {
+        float r(float d) => d * MathF.PI / 180f;
+        var c = (MathF.Sin(r(elevationDeg)) - MathF.Sin(r(AuthoredLatitude)) * MathF.Sin(r(Obliquity))) / (MathF.Cos(r(AuthoredLatitude)) * MathF.Cos(r(Obliquity)));
+        return MathF.Acos(Math.Clamp(c, -1f, 1f)) * 180f / MathF.PI;
+    }
+    private readonly Stopwatch sunMoveSettled = new();
+    private bool SunMoveSettled
+    {
+        get
+        {
+            if (LightChangeInFlight || composeFilterFirst >= 0 || splitComposeDirty) { sunMoveSettled.Reset(); return false; }
+            if (!sunMoveSettled.IsRunning) sunMoveSettled.Start();
+            return sunMoveSettled.Elapsed.TotalSeconds >= sunMoveSettle;
+        }
+    }
 
     private void ToggleSunMove()
     {
@@ -58,7 +83,7 @@ internal sealed partial class SponzaLoop
         sunMoveClock.Restart();
         if (float.IsNaN(sunMoveHour)) sunMoveNorth = BandNorth(out sunMoveHour);
         // The rate is the sun's own arc a second: on a day circle of declination d an hour angle's degree is cos d of one.
-        var span = DayHalfSpan(Obliquity);
+        var span = MathF.Min(DayHalfSpan(Obliquity), HourAtElevation(sunMoveMinElevation));
         sunMoveHour += sunMoveWay * sunMoveRate * dt / MathF.Cos(Obliquity * MathF.PI / 180f);
         if (MathF.Abs(sunMoveHour) > span) { sunMoveHour = MathF.CopySign(span, sunMoveHour); sunMoveWay = -sunMoveWay; }
         // Through yaw and pitch, as the Sun controls hold it (SponzaLoop.SunSweep.cs); the yaw within the slider's range.
@@ -68,7 +93,7 @@ internal sealed partial class SponzaLoop
         UpdateSunDirection();
         // The push steers the GI's sun in small steps once a gather has landed (SponzaLoop.FlipPush.cs); else the GI
         // catches up when its regather lands.
-        if (!FlipPushStep() && !LightChangeInFlight) giSunTarget = -Vector3.Normalize(sunDirection);
+        if (!FlipPushStep() && SunMoveSettled) giSunTarget = -Vector3.Normalize(sunDirection);
         if (!sunMoveLogClock.IsRunning || sunMoveLogClock.Elapsed.TotalSeconds >= 5)
         {
             sunMoveLogClock.Restart();

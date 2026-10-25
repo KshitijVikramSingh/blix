@@ -35,7 +35,8 @@ void markTexel(int id) {
 }
 
 void main() {
-    ivec2 at = ivec2(gl_GlobalInvocationID.xy) * int(u.uTarget.z);
+    // w: the band's first row (the screen a band of rows a frame: SponzaLoop.SplitLanding.cs)
+    ivec2 at = ivec2(gl_GlobalInvocationID.xy) * int(u.uTarget.z) + ivec2(0, int(u.uTarget.w));
     if (any(greaterThanEqual(at, ivec2(u.uTarget.xy)))) return;
     vec2 uv = (vec2(at) + 0.5) / u.uTarget.xy;
     float raw = texelFetch(uSceneDepth, at, 0).r;
