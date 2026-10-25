@@ -88,3 +88,18 @@ def test_per_channel_albedo_is_independent_per_channel():
     got = eon.f_eon(rgb, 0.7, wi, wo)
     for c in range(3):
         assert got[:, c] == pytest.approx(eon.f_eon(float(rgb[c]), 0.7, wi, wo), rel=1e-12)
+
+
+@pytest.mark.parametrize("r", [0.0, 0.3, 0.7, 1.0])
+@pytest.mark.parametrize("rho", [0.1, 0.4, 0.7, 1.0])
+def test_hemispherical_albedo_is_the_cosine_average_of_the_directional_albedo(rho, r):
+    mu = np.linspace(1e-5, 1.0, 40001)
+    numeric = 2.0 * np.trapezoid(eon.albedo_closed_form(rho, r, mu) * mu, mu)
+    assert eon.hemispherical_albedo(rho, r) == pytest.approx(numeric, abs=3e-3)
+
+
+def test_hemispherical_albedo_is_lambert_at_r_zero_and_lossy_for_a_rough_grey():
+    assert eon.hemispherical_albedo(0.37, 0.0) == pytest.approx(0.37, abs=1e-12)
+    assert eon.hemispherical_albedo(1.0, 0.9) == pytest.approx(1.0, abs=1e-12)        # nothing lost for a white surface
+    assert eon.hemispherical_albedo(0.5, 1.0) < 0.5 - 0.03                            # but a mid grey that rough reflects less than Lambert
+    assert np.all(eon.hemispherical_albedo(np.linspace(0.01, 0.99, 50), 0.8) <= np.linspace(0.01, 0.99, 50) + 1e-12)

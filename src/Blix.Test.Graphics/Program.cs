@@ -7028,6 +7028,18 @@ static ShaderInterface MinimalShader() => new(new[]
             nA++;
         }
         t.Expect($"BZ.4 and its directional albedo (Eq. 20) on {nA} cases", nA > 50 && worstA < 2e-5f, $"worst absolute error {worstA:0.000000}");
+
+        var worstH = 0f;
+        var nH = 0;
+        foreach (var c in golden.RootElement.GetProperty("hemispherical_albedo").EnumerateArray())
+        {
+            var rho = Rgb(c.GetProperty("rho"));
+            var want = Rgb(c.GetProperty("hemispherical_albedo"));
+            var got = EonTwin.HemisphericalAlbedo(new Vector3(rho[0], rho[1], rho[2]), c.GetProperty("r").GetSingle());
+            worstH = MathF.Max(worstH, MathF.Max(MathF.Abs(got.X - want[0]), MathF.Max(MathF.Abs(got.Y - want[1]), MathF.Abs(got.Z - want[2]))));
+            nH++;
+        }
+        t.Expect($"BZ.4 and the hemispherical albedo the transport bakes, on {nH} cases", nH > 10 && worstH < 2e-5f, $"worst absolute error {worstH:0.000000}");
     }
 
     // The properties the paper claims, on the twin: Lambert at r = 0, and nothing lost on a white surface at any roughness.
@@ -7054,6 +7066,23 @@ static ShaderInterface MinimalShader() => new(new[]
         t.Expect("BZ.9 and no fixed Lambert expression is left in the diffuse terms (sun, sheet glow, sky, bounce)",
             !lit.Contains("kDsun * albedo / PI", StringComparison.Ordinal) && !lit.Contains("incident * albedo / PI", StringComparison.Ordinal)
             && !lit.Contains("irradiance * albedo / PI", StringComparison.Ordinal), "a fixed albedo / PI diffuse term is back");
+    }
+
+    // The transport: the rays' surface bake stores EON's hemispherical albedo (the fraction of arriving light a patch sends back, whichever way), so every
+    // bounce (the patch solve, the gather's hits, the probes, both references) loses what the roughness loses. Two dispatch sites bake surfaces; both must say so.
+    var demo = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "Demos", "Blix.Demos.VulkanSponza");
+    var bakeShader = File.Exists(Path.Combine(demo, "Shaders", "ray_surface_bake.comp")) ? File.ReadAllText(Path.Combine(demo, "Shaders", "ray_surface_bake.comp")) : null;
+    t.Expect("BZ.10 CONTROL ray_surface_bake.comp was actually read", bakeShader is { Length: > 1000 }, bakeShader is null ? "not found" : $"{bakeShader.Length} chars");
+    if (bakeShader is not null)
+        t.Expect("BZ.11 the surface bake stores EON's hemispherical albedo at the material's diffuse roughness",
+            bakeShader.Contains("diffuse_eon.glsl", StringComparison.Ordinal) && bakeShader.Contains("blix_eonHemisphericalAlbedo", StringComparison.Ordinal)
+            && bakeShader.Contains("uMetallicRoughness", StringComparison.Ordinal), "the transport's albedo is the base colour again");
+    foreach (var site in new[] { "SponzaLoop.RayScene.cs", "SponzaLoop.BakeScene.cs" })
+    {
+        var source = File.Exists(Path.Combine(demo, site)) ? File.ReadAllText(Path.Combine(demo, site)) : "";
+        t.Expect($"BZ.12 {site} dispatches the bake with the diffuse inputs",
+            source.Contains("BakeDiffuse(material)", StringComparison.Ordinal) && source.Contains("BakeMetallicRoughness(material)", StringComparison.Ordinal),
+            "a surface-bake dispatch omits uDiffuse or uMetallicRoughness (the shader would read an unbound uniform and texture)");
     }
 }
 
@@ -7301,6 +7330,13 @@ static class EonTwin
         var avgE = AvgE(r);
         var rhoMs = rho * rho * avgE / (Vector3.One - rho * (1.0f - avgE));
         return rho * e + rhoMs * (1.0f - e);
+    }
+
+    public static Vector3 HemisphericalAlbedo(Vector3 rho, float r)
+    {
+        var avgE = AvgE(r);
+        var rhoMs = rho * rho * avgE / (Vector3.One - rho * (1.0f - avgE));
+        return rho * avgE + rhoMs * (1.0f - avgE);
     }
 
     /// <summary>The integral of f cos over the hemisphere by the midpoint rule in (mu, phi): the albedo as the BRDF itself gives it.</summary>

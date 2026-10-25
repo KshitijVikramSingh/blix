@@ -815,7 +815,11 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
         bool Cloth = false,
         // KHR_materials_unlit: the camera sees its base colour, unshaded (lit.frag; the reference's camera paths alike,
         // ReferenceUnlit). Light reaching it still reflects off it as off any surface in the GI and the reference.
-        bool Unlit = false);
+        bool Unlit = false,
+        // The material's metallic-roughness texture and roughness factor: the diffuse roughness a ray's surface bake stores EON's albedo at
+        // (ray_surface_bake.comp). Default: no texture, the factor alone.
+        TextureHandle MetallicRoughness = default,
+        float RoughnessFactor = 0.8f);
 
     /// <summary>One placement of a unique primitive: which drawable, its row in the transform table, and its world AABB.</summary>
     /// <remarks>

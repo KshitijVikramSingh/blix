@@ -68,3 +68,24 @@ def test_the_r_zero_rows_are_lambert(render):
     h, w, _ = render.shape
     rows = render[: int(h * 9 / 45) - 2:7, ::97]       # the first nine rows are r = 0
     assert np.allclose(rows, RHO, atol=2e-3)
+
+
+@pytest.fixture(scope="module")
+def render_albedo(tmp_path_factory):
+    out = tmp_path_factory.mktemp("eon5") / "albedo"
+    env = {k: v for k, v in os.environ.items() if k != "BLIX_HDR"}
+    done = subprocess.run([str(REPO / "blix"), "run", "Blix.Demos.TonemapLab", "--pattern", "5", "--exposure", "0", "--capture", str(out),
+                           "--capture-frame", "8"], cwd=REPO, env={**env, "BLIX_CONFIG": "Release"}, capture_output=True, text=True, timeout=300)
+    assert done.returncode == 0, done.stdout[-600:] + done.stderr[-600:]
+    return read_pfm(out.with_suffix(".pfm"))
+
+
+def test_glsl_hemispherical_albedo_matches_python(render_albedo):
+    h, w, _ = render_albedo.shape
+    ys, xs = np.mgrid[0:h:23, 0:w:23]
+    u, v = (xs + 0.5) / w, (ys + 0.5) / h
+    rho = 0.01 + 0.98 * np.floor(np.clip(u, 0, 0.99999) * 256) / 255.0
+    r = np.array(ROUGHNESS)[np.clip((v * 5).astype(int), 0, 4)]
+    want = eon.hemispherical_albedo(rho, r)
+    got = render_albedo[::23, ::23].astype(np.float64)
+    assert np.all(np.abs(got - want[..., None]) <= 1.5e-3 * np.maximum(want[..., None], 1.0)), float(np.abs(got - want[..., None]).max())

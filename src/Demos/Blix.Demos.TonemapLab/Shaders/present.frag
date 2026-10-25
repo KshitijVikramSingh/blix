@@ -116,6 +116,17 @@ void main()
         return;
     }
 
+    // 5: the EON hemispherical albedo, raw: blix_eonHemisphericalAlbedo(rho, r) with rho sweeping 0.01..0.99 across 256 columns and 5 roughnesses down
+    // (every channel the same), for lab/bsdf's tests/test_eon_gpu.py.
+    if (pc.uPattern == 5)
+    {
+        const float R5[5] = float[5](0.0, 0.25, 0.5, 0.75, 1.0);
+        int ri = int(clamp(vUv.y * 5.0, 0.0, 4.999));
+        float rho = 0.01 + 0.98 * floor(clamp(vUv.x, 0.0, 0.99999) * 256.0) / 255.0;
+        outColor = vec4(blix_eonHemisphericalAlbedo(vec3(rho), R5[ri]), 1.0);
+        return;
+    }
+
     // 1: raw EDR patches. No exposure, no tone map: the value written is the value sent. In an SDR surface everything
     // above 1.0 clips to white; on a surface with headroom the brighter patches should be visibly brighter.
     if (pc.uPattern == 1)

@@ -123,10 +123,12 @@ internal sealed partial class SponzaLoop
                         new("uParams", new Vector4Uniform(new Vector4(first, count, material.AlphaCutoff, material.Clear ? 1f : 0f))),
                         new("uParams2", new Vector4Uniform(new Vector4(material.Transmission.Equals(default(TextureHandle)) ? 0f : 1f,
                         material.TransmissionColor.Equals(default(TextureHandle)) ? 0f : 1f, 0f, 0f))),
+                        new("uDiffuse", new Vector4Uniform(BakeDiffuse(material))),
                     },
                     new[] { new ShaderTextureBinding("uAlbedo", material.Albedo),
                         new ShaderTextureBinding("uTransmission", material.Transmission.Equals(default(TextureHandle)) ? material.Albedo : material.Transmission),
-                        new ShaderTextureBinding("uTransmissionColor", material.TransmissionColor.Equals(default(TextureHandle)) ? material.Albedo : material.TransmissionColor) },
+                        new ShaderTextureBinding("uTransmissionColor", material.TransmissionColor.Equals(default(TextureHandle)) ? material.Albedo : material.TransmissionColor),
+                        BakeMetallicRoughness(material) },
                     Buffers: bakeSceneSurfaceBuffers));
             bakeSceneSurfacesFrame = postLoadFrames;
             return;

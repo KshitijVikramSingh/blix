@@ -20,7 +20,7 @@ internal sealed partial class SponzaLoop
     // Per ray-scene placement (the transform table's order): the material a surface bake reads.
     // Clear: authored transmission (the panes): no coverage, rays pass (ray_surface_bake.comp).
     private readonly record struct RayMaterial(TextureHandle Albedo, Vector4 BaseColor, float AlphaCutoff, bool Clear, TextureHandle Transmission = default,
-        TextureHandle TransmissionColor = default);
+        TextureHandle TransmissionColor = default, TextureHandle MetallicRoughness = default, float Roughness = 0.8f);
     private readonly List<RayMaterial> rayPlacementMaterials = new();
     // Per placement (the ray scene's order): whether its surface is in the lightmap atlas (--lightmap). The hashed
     // texels leave those out when the atlas's texels serve them (SponzaLoop.Lightmap.cs).
@@ -454,10 +454,12 @@ internal sealed partial class SponzaLoop
                     new("uParams", new Vector4Uniform(new Vector4(first, count, material.AlphaCutoff, material.Clear ? 1f : 0f))),
                     new("uParams2", new Vector4Uniform(new Vector4(material.Transmission.Equals(default(TextureHandle)) ? 0f : 1f,
                         material.TransmissionColor.Equals(default(TextureHandle)) ? 0f : 1f, 0f, 0f))),
+                    new("uDiffuse", new Vector4Uniform(BakeDiffuse(material))),
                 },
                 new[] { new ShaderTextureBinding("uAlbedo", material.Albedo),
                     new ShaderTextureBinding("uTransmission", material.Transmission.Equals(default(TextureHandle)) ? material.Albedo : material.Transmission),
-                        new ShaderTextureBinding("uTransmissionColor", material.TransmissionColor.Equals(default(TextureHandle)) ? material.Albedo : material.TransmissionColor) },
+                        new ShaderTextureBinding("uTransmissionColor", material.TransmissionColor.Equals(default(TextureHandle)) ? material.Albedo : material.TransmissionColor),
+                        BakeMetallicRoughness(material) },
                 Buffers: raySurfaceBakeBuffers));
         }
         raySurfacesBaked = true;

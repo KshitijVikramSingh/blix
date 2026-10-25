@@ -108,6 +108,18 @@ def albedo_closed_form(rho, r, mu_o, exact: bool = False):
     return rho * e + rho_ms * (1.0 - e)
 
 
+def hemispherical_albedo(rho, r):
+    """The albedo averaged over incident directions as well, cosine-weighted: 2 int E_EON(mu) mu dmu = rho <E> + rho_ms (1 - <E>).
+
+    The fraction of the light that arrives at a patch (from anywhere) that leaves it, whatever way: what a radiosity-style transport has to
+    conserve. Lambert's is rho. EON's is lower for rho < 1 (the interreflections inside the roughness are lossy) and equals rho = 1 at rho = 1.
+    """
+    rho = np.asarray(rho, dtype=np.float64)
+    avg = avg_e_f(r)
+    rho_ms = rho * rho * avg / (1.0 - rho * (1.0 - avg))
+    return rho * avg + rho_ms * (1.0 - avg)
+
+
 def hemisphere(n_mu: int = 96, n_phi: int = 96):
     """Quadrature over the upper hemisphere in (mu, phi): Gauss-Legendre in mu, uniform in phi. Returns (wi (n,3), weight (n,)) with the
     weights integrating dOmega (they sum to 2 pi)."""

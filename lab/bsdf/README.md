@@ -28,13 +28,20 @@ everywhere: radiance out is `E / pi * albedo(mu_o)`, which is Lambert's `E / pi 
 
 - **Default on.** The diffuse roughness is the material's roughness times `--diffuse-roughness-scale` (default 1); glTF has no diffuse roughness.
   `--diffuse lambert` is the old lobe; `--ab diffuse` alternates the two in one process.
-- **Not changed: the transport.** The caches and the reference path still bounce light with `albedo / pi` at each hit: a cached irradiance has no
-  direction to evaluate a lobe against, so a bounce there is Lambertian by construction and the lobe applies where the light is finally seen.
-- **Measured** (cornell and the Khronos plant, scene renders, same camera, EON against Lambert): mean luminance -1.4% and -4.8%; 4.8% and 1.3% of
-  pixels move by more than 8/255, the largest moves (57 and 64 of 255) at grazing rims. A rough mid-grey face-on reflects about 12% less than Lambert
+- **The transport conserves what the roughness loses.** A patch-to-patch bounce (the patch solve, a gather's hits, the probes, both references) has no
+  direction to evaluate a lobe against, so the rays' surface bake (`ray_surface_bake.comp`) stores EON's **hemispherical albedo** at the material's
+  diffuse roughness in place of the base colour: `rho <E> + rho_ms (1 - <E>)`, the fraction of the light that arrives from anywhere and leaves
+  whichever way (`eon.hemispherical_albedo`: the cosine average of the directional albedo, tested against quadrature; below rho for a rough grey,
+  rho itself for white). Every consumer reads that word, and the transport cache's key includes it, so nothing else changed and the two modes keep
+  separate caches. Roughness is the material's factor times its metallic-roughness texture's mean green over the bake's sixteen points. The view-dependent
+  albedo toward the eye is applied at the final shading. Not modelled: the lobe's shape at a hit (a sun-lit hit reflects its sun with Lambert's cosine).
+  The bake runs once at load, so `--diffuse` is read at start and `--ab diffuse` toggles only the lit shader.
+- **Measured** (scene renders, same camera, EON against Lambert), lit shader only: cornell -1.4% and the Khronos plant -4.8% mean luminance; 4.8% and
+  1.3% of pixels move by more than 8/255, the largest moves (57 and 64 of 255) at grazing rims. With the transport as well, in the cornell room: the
+  transport alone takes the room's mean x0.9605 (the indirect-lit pixels x0.932), and the room is 7.8% below Lambert in all (0.2449 to 0.2258). A rough mid-grey face-on reflects about 12% less than Lambert
   (E_EON(1) = 0.44 against 0.5 at rho 0.5, r 1) and more at grazing and back-lit angles: EON's flatter look, not a loss of energy overall.
 
 ### Not done
 
-Per-material diffuse roughness (a cook-time override, `MaterialPatch`); EON in the transport; the Studio and other older shaders (`pbr.glsl`'s
+Per-material diffuse roughness (a cook-time override, `MaterialPatch`); the lobe's shape at a hit; the Studio and other older shaders (`pbr.glsl`'s
 `blix_cookTorranceBrdf` and the Studio lit shader still use Lambert).
