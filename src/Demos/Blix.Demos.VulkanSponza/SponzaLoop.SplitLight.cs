@@ -52,7 +52,7 @@ internal sealed partial class SponzaLoop
     // stopped: 43% of the coarse texels left at 0.134 mean error (the settled 0.010); the fine contacts 0.30 after their
     // near round.
     private bool refineNeed;
-    private float refineBudget = 2f;
+    private float refineBudget = 2f, screenRefineBudget = -1f;
     private int refineMax = 16;
     private int RefineNeedRounds => refineWorst ? 64 : 24;
 
@@ -63,7 +63,12 @@ internal sealed partial class SponzaLoop
         if (PatchLayersCoarseNow && sunNodeRefineRound >= patchLayersCoarseRounds) return true;
         if (!refineNeed) return sunNodeRefineRound > 0 && of - left < splitRefineMinShare * of;
         var sweepRays = (long)sunNodeTraceIds.Length * sunNodeRays;
-        return sunNodeRefineRound >= RefineNeedRounds || sunNodeRefineRays >= refineBudget * sweepRays;
+        // --screen-refine-budget X: a sun change's screen gather (--screen-first's visible and changed) refines to X x its first
+        // pass's rays -- on a 6 deg live step on Crytek Sponza its 2 x budget was 73% of the step's rays (43.7 of 59.6 M) and
+        // settled under 2% of its texels a round, 11.4 s of the 13.6 (2026-10-25).
+        var budget = visibleChangedGathering && liveSkyGathered && screenRefineBudget >= 0f ? screenRefineBudget : refineBudget;
+        if (budget <= 0f) return true;
+        return sunNodeRefineRound >= RefineNeedRounds || sunNodeRefineRays >= budget * sweepRays;
     }
 
     private string RefineStopsWhy(int of, int left) => refineNeed
@@ -79,6 +84,7 @@ internal sealed partial class SponzaLoop
         // boot 40 -> 50 s); every gate and materials ratchet holds. --no-refine-need: the share rule and 4x ceiling.
         refineNeed = !args.Flag("no-refine-need");
         if (args.Float("refine-budget") is { } rb) refineBudget = Math.Max(0f, rb);
+        if (args.Float("screen-refine-budget") is { } srb) screenRefineBudget = Math.Max(0f, srb);
         if (args.Int("refine-max") is { } rm) refineMax = Math.Clamp(rm, 1, 256);
         ParseRefineWorst(args);
         ParsePatchLayers(args);
