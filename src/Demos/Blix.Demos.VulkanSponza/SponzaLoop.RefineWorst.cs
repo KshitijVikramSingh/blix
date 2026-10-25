@@ -24,7 +24,7 @@ internal sealed partial class SponzaLoop
 
     private void ParseRefineWorst(AppArgs args)
     {
-        refineWorst = args.Flag("refine-worst") && refineNeed;
+        refineWorst = !args.Flag("no-refine-worst") && refineNeed;
         if (args.Int("refine-worst-rounds") is { } wr) RefineWorstRounds = Math.Max(1, wr);
     }
 

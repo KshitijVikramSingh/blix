@@ -72,7 +72,10 @@ internal sealed partial class SponzaLoop
     {
         splitLight = args.Flag("split-light");
         if (args.Float("split-refine-min-share") is { } share) splitRefineMinShare = Math.Clamp(share, 0f, 1f);
-        refineNeed = args.Flag("refine-need");
+        // On by default since 2026-10-25 (with --refine-worst): Crytek Sponza's filtered light against two 1,024-ray boots,
+        // its own error (the references' noise taken out) 0.052 -> 0.032, the contacts 0.148 -> 0.088, at 2x the rays (the
+        // boot 40 -> 50 s); every gate and materials ratchet holds. --no-refine-need: the share rule and 4x ceiling.
+        refineNeed = !args.Flag("no-refine-need");
         if (args.Float("refine-budget") is { } rb) refineBudget = Math.Max(0f, rb);
         if (args.Int("refine-max") is { } rm) refineMax = Math.Clamp(rm, 1, 256);
         ParseRefineWorst(args);
