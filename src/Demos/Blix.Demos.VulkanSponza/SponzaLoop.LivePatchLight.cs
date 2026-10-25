@@ -358,8 +358,6 @@ internal sealed partial class SponzaLoop
             sunChangeStepDeg = MathF.Acos(Math.Clamp(Vector3.Dot(Vector3.Normalize(new Vector3(was[1].X, was[1].Y, was[1].Z)), toSun), -1f, 1f)) * 180f / MathF.PI;
         device.WaitIdle();
         SnapshotShownSun();
-        changeComposeHold = screenFirst && liveSkyGathered;
-        changeHoldSlices = sweepFrameSlices;
         RestoreGatherScratch();
         ResetSunNodeRefine();
         sunNodeRefineRays = 0;

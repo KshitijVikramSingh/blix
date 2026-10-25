@@ -265,8 +265,6 @@ internal sealed partial class SponzaLoop
     private int composeFilterChunk = 1 << 18, composeBaseChunk = 1 << 20;
     private bool ComposeUnderWay => composeFilterFirst >= 0 || composeBaseFirst >= 0;
     private long composedAtSlices = -1;
-    private bool changeComposeHold;
-    private long changeHoldSlices;
     private bool ComposeFilterChunked => sweepInFrame && texelFilter && !CookScreenNow;
 
     // RecordTexels, each frame: the resting light composed again when a part landed or a scale changed.
@@ -278,16 +276,6 @@ internal sealed partial class SponzaLoop
         // between, the screen read the raw patch light ~1 s after each sun change (Crytek Sponza, filtered 0.15 -> 0.19,
         // 2026-10-25). Held until the ratio pass (the step's end); a filter's ranges under way go on (they read the composed).
         if (SetupInFrame && transferSetupStep == 2 && instantFirst > 0 && !ComposeUnderWay) return;
-        // --screen-first: the composed light (the old sun's, as it showed) held from the turn until the first gather's slices
-        // land -- the re-aim's provisional writes, the instant layer and the ratio relight showed in between, worse than the
-        // old light at a 20 deg change on Crytek Sponza (filtered 0.16-0.19 against 0.15, 2026-10-25).
-        if (changeComposeHold)
-        {
-            var landed = visibleChangedGathering && sweepFrameSlices > changeHoldSlices;
-            var noFirst = sunNodeStage == SunNodeStage.Tracing && !visibleChangedGathering && !liveRetargeting;
-            if (!landed && !noFirst && !ComposeUnderWay) return;
-            changeComposeHold = false;
-        }
         if (!splitLight || !splitSkyUp) return;
         var sky = new Vector3(render.SkyStrength);
         var sun = EffectiveSunIrradiance;

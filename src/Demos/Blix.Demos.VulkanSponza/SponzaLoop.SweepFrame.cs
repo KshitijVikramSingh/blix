@@ -162,8 +162,15 @@ internal sealed partial class SponzaLoop
         sweepResolvePass = graph.ComputePass("sun-sweep-resolve").Shader(sliceResolveInterface).Handle;
     }
 
+    // --change-stop fine|coarse|screen: a sun change (after the first landing) lands early -- fine: no near round; coarse:
+    // no fine round either (the coarse sweep and its copy); screen: with the screen's first gather (--screen-first). The
+    // tail past ~10 s of a 20 deg change on Crytek Sponza bought the screen ~0.02 over ~85 s (2026-10-25).
+    private int changeStop;
+    private bool ChangeStopsAt(int level) => changeStop >= level && liveSkyGathered;
+
     private void ParseSweepFrame(AppArgs args)
     {
+        changeStop = args.String("change-stop") switch { "fine" => 1, "coarse" => 2, "screen" => 3, _ => 0 };
         // On by default since 2026-10-25 (Crytek Sponza: a sun change at ~102-113 fps, against ~25 s of the cook screen at
         // ~4 fps); --no-sweep-in-frame: the host's passes under the cook screen, as before (the parts dumps read at once).
         sweepInFrame = !args.Flag("no-sweep-in-frame");
@@ -296,10 +303,10 @@ internal sealed partial class SponzaLoop
                 var picked = sweepFinePick is { } pick ? ApplyFinePick(pick.Result) : Array.Empty<uint>();
                 sweepFinePick = null;
                 RecallCopy(picked);
-                if (picked.Length > 0)
+                if (picked.Length > 0 && !ChangeStopsAt(2))
                 {
                     fineRoundIds = picked;
-                    nearRoundsLeft = NearRoundsNow;
+                    nearRoundsLeft = ChangeStopsAt(1) ? 0 : NearRoundsNow;
                     BeginNearCut(picked);
                     StartFineRound(picked);
                     SweepEndDone();

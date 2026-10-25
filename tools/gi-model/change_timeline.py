@@ -62,10 +62,10 @@ def main():
         line = []
         for p in stages:
             s, sc = err(p)
-            line.append(f'{p.name[7:-2]}s {s:.3f}')
+            line.append(f'{p.name[7:-2]}s {s:.3f}/{sc:.3f}')
         s, sc = err(d / 'parts.shot') if filtered else err(d / 'parts.landed.1') if (d / 'parts.landed.1').exists() else err(d / 'parts.landed.0')
         took = [l for l in (d / 'run.log').read_text().splitlines() if 'light change took' in l]
-        print(f'  {d.name:12s} screen ' + ' '.join(line) + f' | landed {s:.3f} (scene {sc:.3f}){" -- " + took[-1].split("took ")[1] if took else ""}')
+        print(f'  {d.name:12s} screen/scene ' + ' '.join(line) + f' | landed {s:.3f} (scene {sc:.3f}){" -- " + took[-1].split("took ")[1] if took else ""}')
 
 
 if __name__ == '__main__':

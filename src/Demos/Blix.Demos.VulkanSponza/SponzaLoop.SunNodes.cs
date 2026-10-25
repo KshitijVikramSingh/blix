@@ -937,7 +937,12 @@ internal sealed partial class SponzaLoop
         ResetSunNodeRefine();
         sunNodeRefineRays = 0;
         if (spotWhy) SpotWhyCompare(fine: false);
-        if (EndVisibleChanged()) return;
+        if (EndVisibleChanged())
+        {
+            // --change-stop screen: the change lands with the screen's gather; the rest keep the relit (or provisional) light.
+            if (ChangeStopsAt(3)) { Console.WriteLine("[VulkanSponza] change stop: landing after the screen's gather."); sunNodeStage = SunNodeStage.Done; FinishSunNodesTail(); }
+            return;
+        }
         // BLIX_NO_FINE=1 (an A/B): the fine texels keep the instant layer's light after the gather.
         if (fineGathering && nearRoundsLeft > 0 && fineRoundIds.Length > 0)
         {
@@ -990,10 +995,10 @@ internal sealed partial class SponzaLoop
             // The fine refine: the flagged texels traced as the coarse were, a round of their own, the cook screen up.
             var picked = FineGatherIds();
             RecallCopy(picked);
-            if (picked is { Length: > 0 } fineIds)
+            if (picked is { Length: > 0 } fineIds && !ChangeStopsAt(2))
             {
                 fineRoundIds = fineIds;
-                nearRoundsLeft = NearRoundsNow;
+                nearRoundsLeft = ChangeStopsAt(1) ? 0 : NearRoundsNow;
                 BeginNearCut(fineIds);
                 StartFineRound(fineIds);
                 return;
