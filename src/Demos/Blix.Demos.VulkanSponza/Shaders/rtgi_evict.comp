@@ -1,0 +1,29 @@
+#version 450
+
+// --rtgi (SponzaLoop.Rtgi.cs): a slice of the slots a frame (uEvict.z onward, uEvict.w of them), each emptied when no
+// training reached it for uEvict.y frames (its stamp, rtgi_train.comp) -- the resolve visits only the cells trained.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform RtgiEvict {
+    vec4 uEvict;   // x the frame's number; y frames a slot lives untrained; z the slice's first slot; w its slots
+} u;
+
+layout(std430, set = 0, binding = 1) buffer RtgiKeys { uint rtgiKeys[]; };
+layout(std430, set = 0, binding = 2) buffer RtgiResolved { vec4 rtgiResolved[]; };
+layout(std430, set = 0, binding = 3) buffer RtgiMoments { vec4 rtgiMoments[]; };
+layout(std430, set = 0, binding = 4) buffer RtgiStamps { uvec2 rtgiStamps[]; };
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= uint(u.uEvict.w)) return;
+    uint s = uint(u.uEvict.z) + i;
+    if (rtgiKeys[s] == 0u) return;
+    uint frame = uint(u.uEvict.x);
+    if (frame - rtgiStamps[s].x <= uint(u.uEvict.y)) return;
+    rtgiKeys[s] = 0u;
+    rtgiResolved[2u * s] = vec4(0.0);
+    rtgiResolved[2u * s + 1u] = vec4(0.0);
+    for (uint k = 0u; k < 3u; k++) rtgiMoments[3u * s + k] = vec4(0.0);
+    rtgiStamps[s] = uvec2(0u);
+}

@@ -937,6 +937,7 @@ internal sealed partial class SponzaLoop
                     if (RtgiReadoutReady) RecordRtgiReadout();
                     else RecordIncidentClipmap(incidentInvProj, incidentInvView, halfWidth, halfHeight, frame.Width, frame.Height, half: true);
                     RecordLightingUpsample(incidentInvProj, incidentInvView, frame.Height);
+                    if (RtgiTemporalNow) RecordRtgiTemporal();
                 }
                 else if (!halfLightingNow && IncidentPassNeeded())
                 {

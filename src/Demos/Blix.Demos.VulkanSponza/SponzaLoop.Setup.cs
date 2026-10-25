@@ -183,6 +183,7 @@ internal sealed partial class SponzaLoop
         rtShadows = args.Flag("rt-shadows");
         ParseRtgiProbe(args);
         ParseRtgi(args);
+        ParseRtgiTemporal(args);
         lightletCensus = args.Flag("lightlet-census");
         lightletRecord = args.Flag("lightlet-record");
         rayLeakCensus = args.Flag("ray-leak-census");
@@ -1017,6 +1018,8 @@ internal sealed partial class SponzaLoop
             .Read(SampleablePrepassNormal)
             .Shader(lightingUpsampleInterface)
             .Handle;
+        // --rtgi-temporal: the raw upsample, the accumulation into the targets above, and its copy (SponzaLoop.RtgiTemporal.cs).
+        DeclareRtgiTemporalPasses((vert, frag) => Reflect(vert, frag), fullSize);
 
         // At one sample there is nothing to resolve, and asking for a resolve anyway is invalid —
         // so the single-sample path renders straight into the target present reads.
@@ -1293,6 +1296,7 @@ internal sealed partial class SponzaLoop
             VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
             new[] { BlendState.Disabled, BlendState.Disabled }, incidentHalfSlowPassHandle, "incident_slow");
         CreateRtgiPipelines(shaderDir, presentVertSpv);
+        CreateRtgiTemporalPipelines(shaderDir, presentVertSpv);
         lightingUpsamplePipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
                 presentVertSpv, File.ReadAllBytes(Path.Combine(shaderDir, "lighting_upsample.frag.spv")), lightingUpsampleInterface, "lighting_upsample")),
             VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,

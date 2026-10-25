@@ -15,7 +15,8 @@ layout(set = 0, binding = 0) uniform RtgiTrain {
     vec4 uCamera;        // xyz position; w points
     vec4 uSun;           // xyz toward the sun; w the sky cube's lod
     vec4 uSunIrradiance; // rgb
-    vec4 uClamp;         // x > 0: a sample's luminance capped at its cell's mean + x standard deviations (once it holds 32)
+    vec4 uClamp;         // x > 0: a sample's luminance capped at its cell's mean + x standard deviations (once it holds 32);
+                         // y the frame's number (from 1); z the dirty list's room
     vec4 uTrain;         // x 1: a landing cell holding nothing counts as dark (else no sample); y 1: no coarser cell for it;
                          // z 1: a back face's hit read as a front's (else dark); w room for landing requests (0: none)
 } u;
@@ -33,6 +34,10 @@ layout(std430, set = 0, binding = 8) readonly buffer RtgiResolved { vec4 rtgiRes
 // camera sees -- not over where it landed: the gate's dead end, lit round a corner, read 0.77 (2026-10-26). A count,
 // then two vec4s each (point, normal), room for uTrain.w.
 layout(std430, set = 0, binding = 10) readonly buffer RtgiMoments { vec4 rtgiMoments[]; };
+// Per slot: the frame it was last trained (x) and the sun it last saw (y, rtgi_resolve.comp). The cells trained this frame,
+// listed once each for the resolve (it visits those alone: scanning every slot was 5.5 ms a frame at San Miguel's 8 M).
+layout(std430, set = 0, binding = 11) buffer RtgiStamps { uvec2 rtgiStamps[]; };
+layout(std430, set = 0, binding = 12) buffer RtgiDirty { uint dirtyCount; uint dirtyPad[3]; uint dirty[]; };
 layout(std430, set = 0, binding = 9) buffer RtgiRequests { uint requestCount; uint requestPad[3]; vec4 requests[]; };
 
 #define RTGI_KEYS(i) rtgiKeys[i]
@@ -76,6 +81,12 @@ vec4 dither;
 
 void add(uint s, vec3 e, bool counted, bool sky, bool sunTraced, bool sunLit) {
     if (s == 0xFFFFFFFFu) return;
+    // Listed for this frame's resolve the first time it is trained this frame.
+    uint frame = uint(u.uClamp.y);
+    if (atomicExchange(rtgiStamps[s].x, frame) != frame) {
+        uint k = atomicAdd(dirtyCount, 1u);
+        if (k < uint(u.uClamp.z)) dirty[k] = s;
+    }
     // --rtgi-clamp-sigma: a rare bright sample (a ray out to the sky, onto a sunlit patch through a gap) capped against the
     // cell's own spread once it has some: in a cell with few samples it was a blob that came and went (San Miguel).
     if (counted && u.uClamp.x > 0.0 && rtgiMoments[3u * s + 2u].z >= 32.0) {

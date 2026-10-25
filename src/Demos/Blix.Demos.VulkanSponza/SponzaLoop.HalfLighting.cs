@@ -40,8 +40,10 @@ internal sealed partial class SponzaLoop
         // The mask the lit pass would bind: this frame's half-res one, the pending one (the sun off), or the placeholder
         // (no traced shadows: the lit pass asks the cascades and never reads the w this writes).
         var mask = RtShadowMask;
-        graph.Pass(lightingUpsamplePassHandle, scope => fullscreen.Draw(
-            scope, lightingUpsamplePipeline,
+        // --rtgi-temporal: into the raw targets the accumulation reads (SponzaLoop.RtgiTemporal.cs).
+        var raw = RtgiTemporalNow;
+        graph.Pass(raw ? lightingUpsampleRawPassHandle : lightingUpsamplePassHandle, scope => fullscreen.Draw(
+            scope, raw ? lightingUpsampleRawPipeline : lightingUpsamplePipeline,
             new[]
             {
                 new ShaderTextureBinding("uIncidentHalf", graph.GetColorTexture(incidentHalfHandle)),

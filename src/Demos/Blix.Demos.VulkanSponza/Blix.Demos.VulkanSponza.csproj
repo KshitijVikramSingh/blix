@@ -73,9 +73,12 @@
     <GlslShader Include="Shaders\rtgi_rays.comp" />
     <GlslShader Include="Shaders\rtgi_train.comp" />
     <GlslShader Include="Shaders\rtgi_resolve.comp" />
+    <GlslShader Include="Shaders\rtgi_evict.comp" />
     <GlslShader Include="Shaders\rtgi_readout.frag" />
     <GlslShader Include="Shaders\rtgi_reservoir.comp" />
     <GlslShader Include="Shaders\rtgi_screen.frag" />
+    <GlslShader Include="Shaders\rtgi_temporal.frag" />
+    <GlslShader Include="Shaders\rtgi_history.frag" />
     <GlslShader Include="Shaders\rt_shadow_filter.comp" />
     <GlslShader Include="Shaders\rt_shadow_fill.comp" />
     <GlslShader Include="Shaders\ray_view.comp" />

@@ -10,14 +10,16 @@
 // cells now and then, each snapping to a noisy 64-sample mean -- spots that bounced everywhere (the user, San Miguel);
 // Crytek Sponza's flicker 4.5% (3, one frame), 3.1% (5), 1.7% (no cuts), 2026-10-26. A known change (the sun turned,
 // uChange.w) cuts at once regardless; this is the net for the rest.
-// Sun visibility likewise, its variance binomial. A slot no training reached for uResolve.y frames is emptied.
+// Sun visibility likewise, its variance binomial. It visits the cells training listed this frame (rtgi_train.comp) -- not
+// every slot (5.5 ms a frame at San Miguel's 8 M slots); emptying the ones no training reached is rtgi_evict.comp's.
 
 layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) uniform RtgiResolve {
     vec4 uResolve;   // x samples held at most, y frames a slot lives untrained, z slots, w standard errors that cut history
     vec4 uChange;    // x frames running a disagreement must last; y the fast mean's samples, z the share of the light a disagreement must pass besides the standard errors,
-                     // w > 0 on a frame the sun turned: every cell's light history capped to it, its sun visibility's to 4
+                     // w the samples a sun turn leaves a cell's light history (its sun visibility's: 4)
+    vec4 uList;      // x the sun's epoch (counts its turns); y the dirty list's room
 } u;
 
 layout(std430, set = 0, binding = 1) buffer RtgiKeys { uint rtgiKeys[]; };
@@ -27,6 +29,10 @@ layout(std430, set = 0, binding = 3) buffer RtgiResolved { vec4 rtgiResolved[]; 
 // disagreed, history cuts);
 // (the fast mean: indirect rgb, sky visibility); (the fast sun visibility, its samples, the fast light's samples, -).
 layout(std430, set = 0, binding = 4) buffer RtgiMoments { vec4 rtgiMoments[]; };
+layout(std430, set = 0, binding = 5) buffer RtgiStamps { uvec2 rtgiStamps[]; };
+layout(std430, set = 0, binding = 6) readonly buffer RtgiDirty { uint dirtyCount; uint dirtyPad[3]; uint dirty[]; };
+// The other parity's list: its count zeroed here for the next frame's training.
+layout(std430, set = 0, binding = 7) buffer RtgiNextDirty { uint nextDirtyCount; uint nextDirtyPad[3]; uint nextDirty[]; };
 
 #define RTGI_SCALE 4096.0
 #define RTGI_LUM2_SCALE 4096.0
@@ -34,25 +40,20 @@ layout(std430, set = 0, binding = 4) buffer RtgiMoments { vec4 rtgiMoments[]; };
 float lum(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 
 void main() {
-    uint s = gl_GlobalInvocationID.x;
-    if (s >= uint(u.uResolve.z) || rtgiKeys[s] == 0u) return;
+    uint i = gl_GlobalInvocationID.x;
+    if (i == 0u) nextDirtyCount = 0u;
+    if (i >= min(dirtyCount, uint(u.uList.y))) return;
+    uint s = dirty[i];
+    if (rtgiKeys[s] == 0u) return;
     uint count = rtgiAccum[8u * s + 3u], sunTraced = rtgiAccum[8u * s + 6u];
     vec4 r0 = rtgiResolved[2u * s], r1 = rtgiResolved[2u * s + 1u];
-    // The sun turned: what every cell holds of it is stale, whether or not its samples have shown it yet -- a known change,
-    // not one to wait for the fast mean to find (at 64 samples, ~10 s to settle a 20 degree change, 2026-10-26).
-    if (u.uChange.w > 0.0) {
+    // The sun turned since this cell last saw it: what it holds of it is stale, whether or not its samples have shown it
+    // yet -- a known change, not one to wait for the fast mean to find (at 64 samples, ~10 s to settle a 20 degree change,
+    // 2026-10-26). Taken when it is next trained (its epoch behind the sun's), not swept over every slot.
+    if (rtgiStamps[s].y != uint(u.uList.x)) {
         r1.y = min(r1.y, u.uChange.w);
         r1.w = min(r1.w, 4.0);
-    }
-    if (count == 0u && sunTraced == 0u) {
-        r1.z += 1.0;
-        if (r1.z > u.uResolve.y) {
-            rtgiKeys[s] = 0u;
-            rtgiResolved[2u * s] = vec4(0.0);
-            rtgiResolved[2u * s + 1u] = vec4(0.0);
-            for (uint k = 0u; k < 3u; k++) rtgiMoments[3u * s + k] = vec4(0.0);
-        } else rtgiResolved[2u * s + 1u] = r1;
-        return;
+        rtgiStamps[s].y = uint(u.uList.x);
     }
     vec4 m = rtgiMoments[3u * s], fast = rtgiMoments[3u * s + 1u], fs = rtgiMoments[3u * s + 2u];
     if (count > 0u) {
