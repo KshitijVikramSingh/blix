@@ -257,7 +257,7 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
     private ShaderProgramHandle downProgram, blurProgram;
     private float glareMix = 1f;          // 0 off .. 1 the full diffraction PSF
     private float airyRadiusPx = 2f;      // the PSF's scale: 1.22 lambda N / pitch, in full-resolution pixels
-    private float tunnelEv = -6.6f;      // how far below the world the tunnel interior is (was -8; lifted 1.4 EV: -5.1 and -5.6 read too bright live)
+    private float tunnelEv = -6.8f;      // how far below the world the tunnel interior is (was -8; lifted 1.2 EV: -5.1, -5.6, -6.6 read too bright live, -7.2 too dark)
     private bool motionBlur = true;
     private float shutter = 0.5f;         // fraction of the frame the shutter is open (0.5 = a 180 degree shutter)
     private int blurSamples = 16;

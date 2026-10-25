@@ -3,7 +3,7 @@
 // A procedural panoramic world, in scene-linear Rec.709 where 1.0 = 250 nits (the lab's anchor). It exists to give the
 // tone mapper and the exposure model the things they have to survive, at real luminance ratios:
 //   - a sky from ~3500 nits overhead to ~9000 at the haze, and a sun disc at 1e6 nits (4000 scene units: inside RGBA16F)
-//   - a ground at ~2500 nits, a tunnel mouth (about 6.6 EV darker than what is around it; the --tunnel-ev slider) behind the starting view
+//   - a ground at ~2500 nits, a tunnel mouth (about 6.8 EV darker than what is around it; the --tunnel-ev slider) behind the starting view
 //   - street lamps (small, 4000 nits), flashing retroreflective signs (small, 1e5 nits)
 // The sky, sun and ground follow the world level (EV) so the same scene can be noon or night; the lamps and signs do not,
 // which is what makes them dominate at night and what a meter has to learn to ignore.
@@ -93,7 +93,7 @@ vec3 world(vec3 d)
 
     // The tunnel, behind the starting view: a sector wide enough that looking into it fills the screen (an interior fills
     // your view; a small dark rectangle left the meter reading the bright world around it and moved it by half a stop).
-    // uTunnelEv (about 6.6) EV below whatever is around it, with a row of lamps along it.
+    // uTunnelEv (about 6.8) EV below whatever is around it, with a row of lamps along it.
     if (angDiff(az, PI) < 1.25 && elv > -0.9 && elv < 1.1)
     {
         nits *= exp2(pc.uTunnelEv);
