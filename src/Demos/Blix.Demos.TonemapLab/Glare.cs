@@ -61,7 +61,7 @@ internal sealed class SpikeChain : IDisposable
         BitConverter.TryWriteBytes(push.AsSpan(12), GlareFit.SpikeKnee);
         BitConverter.TryWriteBytes(push.AsSpan(16), reachPx / 4f);
         BitConverter.TryWriteBytes(push.AsSpan(20), lines);
-        BitConverter.TryWriteBytes(push.AsSpan(24), 64);
+        BitConverter.TryWriteBytes(push.AsSpan(24), Math.Clamp((int)(reachPx / 4f), 16, 400));   // taps a side, one texel apart
         chain.Record((index, stage) => stage.Name.EndsWith(".streak", StringComparison.Ordinal) ? push : null);
     }
 

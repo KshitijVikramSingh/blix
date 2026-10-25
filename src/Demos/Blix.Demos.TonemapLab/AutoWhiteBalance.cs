@@ -47,7 +47,7 @@ internal sealed class AutoWhiteBalance
     public static (double R, double G, double B) Measure(byte[] bytes, int pixels, AwbParams p)
     {
         var rgba = new float[pixels * 4];
-        for (var i = 0; i < pixels * 4; i++) rgba[i] = (float)BitConverter.ToHalf(bytes, i * 2);
+        for (var i = 0; i < pixels * 4; i++) rgba[i] = (float)BitConverter.ToHalf(bytes, i * 2) * (i % 4 == 3 ? 1f : SceneStore.Scale);   // alpha is the sky mask, not light
         return Measure(rgba, pixels, p, useAlphaAsSky: true);
     }
 

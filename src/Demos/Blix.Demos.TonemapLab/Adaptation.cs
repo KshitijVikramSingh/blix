@@ -9,6 +9,12 @@ namespace Blix.Demos.TonemapLab;
 // can itself only move over a 12 EV span (GT7's slides 176-221; the constants are tuned to the lab's own specs, not fitted).
 
 /// <summary>The model's constants. Mutable fields, because every one is a slider.</summary>
+/// <summary>The scene target stores scene-linear light divided by this (scene.frag), so a sun far above half-float range survives; readbacks multiply it back.</summary>
+internal static class SceneStore
+{
+    public const float Scale = 32f;
+}
+
 internal sealed class AdaptationParams
 {
     public float TauSLight = 0.4f;   // s: short-term, scene brighter than S
@@ -118,7 +124,7 @@ internal static class Meter
         var rgb = new float[pixels * 3];
         for (var i = 0; i < pixels; i++)
         {
-            for (var c = 0; c < 3; c++) rgb[i * 3 + c] = (float)BitConverter.ToHalf(bytes, i * 8 + c * 2);
+            for (var c = 0; c < 3; c++) rgb[i * 3 + c] = (float)BitConverter.ToHalf(bytes, i * 8 + c * 2) * SceneStore.Scale;
         }
         return Histogram(rgb);
     }

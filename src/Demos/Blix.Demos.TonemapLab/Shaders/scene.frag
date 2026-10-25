@@ -26,6 +26,8 @@ layout(push_constant) uniform Push {
     float uBlurYaw;     // radians the view sweeps during the shutter (0 = no motion blur)
     float uBlurPitch;
     float uTunnelEv;    // the tunnel interior's level relative to the world, in EV
+    float uSunRadius;   // the sun disc's angular radius, radians; its radiance keeps the disc's total light (see below)
+    float uSunBoost;    // multiplies the sun's total light on top of that (1 = the lab's original sun; the real sun is ~40)
     int uSigns;
     int uUseHdri;
     int uDress;
@@ -75,7 +77,12 @@ vec3 world(vec3 d)
         nits = skyCol * mix(3500.0, 9000.0, haze) * k;
         float cosS = dot(d, sunDir);
         nits += sunCol * 1500.0 * pow(max(cosS, 0.0), 24.0) * k;                       // aureole
-        nits += sunCol * 1.0e6 * smoothstep(cos(0.03), cos(0.025), cosS) * k;          // the disc
+        // The disc: the total light of the original 0.03 rad, 1e6 nit disc is kept as the radius shrinks (radiance goes up as
+        // 1/r^2), so the glare, which follows total light, is unchanged and the disc reads as a sun and not a flat sticker;
+        // uSunBoost then raises the total. The scene target stores light / 32 (STORE below), so 5e8 nits fits half-float; the
+        // real sun is 0.0047 rad and ~1.6e9 nits, total light ~40x the lab's original.
+        float sunNits = min(1.0e6 * (0.03 / pc.uSunRadius) * (0.03 / pc.uSunRadius) * pc.uSunBoost, 5.0e8);
+        nits += sunCol * sunNits * smoothstep(cos(pc.uSunRadius), cos(pc.uSunRadius * 0.83), cosS) * k;   // the disc
     }
     else
     {
@@ -141,8 +148,10 @@ void main()
     for (int i = 0; i < n; ++i)
     {
         float t = n == 1 ? 0.0 : (float(i) + 0.5) / float(n) - 0.5;
-        sum += min(world(viewRay(pc.uYaw + t * pc.uBlurYaw, pc.uPitch + t * pc.uBlurPitch, ndc)), vec3(60000.0));   // RGBA16F tops out at 65504
+        sum += min(world(viewRay(pc.uYaw + t * pc.uBlurYaw, pc.uPitch + t * pc.uBlurPitch, ndc)), vec3(60000.0 * 32.0));
         sky += gSky;
     }
-    outColor = vec4(sum / float(n), sky / float(n));
+    // The target is RGBA16F (65504 max); the scene is stored divided by 32 (SceneStore.Scale in C#, present.frag multiplies back),
+    // so a sun far brighter than half-float can hold survives to the glare passes.
+    outColor = vec4(sum / float(n) / 32.0, sky / float(n));
 }

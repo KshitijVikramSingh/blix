@@ -369,8 +369,20 @@ total amplitude of about 0.17 split across the spikes whatever the blade count. 
 resolution sampled along each spike line (both sides, 64 geometric taps from 1.5 Airy radii out), weighted by the line density
 A / r^2, composited by adding. Two honest notes: the spikes are added on top of the circular diffraction tail, which double-counts
 part of the tail's energy (the slider absorbs it); and at the fitted amplitude they are invisible in the demo, because its sun is
-about 285x the sky where a real one is about 1e5x, so the default is x10 (8 to 12 read right by eye; `--spikes`, `--blades`). Rounded
+about 285x the sky where a real one is about 1e5x, so the default was x10 against the old big disc (now x1 against the boosted small sun; `--spikes`, `--blades`). Rounded
 blades, aperture dirt and colour dispersion are not modelled.
+
+**The sun, and what a real one does to everything else.** The original disc was 1.72 degrees in radius (the real sun is 0.27), a
+big flat clipped disc. It is now 0.57 degrees with its radiance raised to keep the same total light (so the glare you had already
+chosen was unchanged), and a "sun total light" gain (default x20; the real sun is about x40 the lab's original) on top. A real sun
+is far outside half-float, so the scene target stores light / 32 (`scene.frag` divides, `present.frag` and the meter and white-balance
+readbacks multiply back; the cost is a little precision in the very darkest night values, not examined for banding), which lifts the
+ceiling to about 5e8 nits. Everything downstream (glare, scatter, spikes) is linear in the sun's light, so at x20 they were far too
+strong; a single master gain (default 0.5) scales the three together and keeps their proportions. Lesson kept here: the first
+comparison sheets at x20 looked terrible because of a push-constant field-order swap between the C# struct and the shader block
+(the scatter mix read as 1.0 and the whole frame was replaced by its blur); `tests/test_push_layout.py` now checks that order.
+Streak spikes use one-texel steps (geometric spacing left beads on a point-like source), a 300 px reach with a fade over its last
+half, and strength x1.
 
 ## Not covered yet
 

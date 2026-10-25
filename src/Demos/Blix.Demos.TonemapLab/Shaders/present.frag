@@ -50,6 +50,7 @@ layout(push_constant) uniform Push {
     float uShoulderTail;
     float uGlare;       // 0 off .. 1 the full diffraction PSF
     float uSpikes;      // 1 when the spike pass drew this frame, else 0
+    float uGlareTail;   // 1 = the fitted far tails; <1 moves the widest terms' energy into the next-widest (diffraction: terms 4,5 -> 3; scatter: term 3 -> 2)
     float uScatter;     // fraction of the light moved into the veil (0.066 = the standard's, age 25)
     int uOperator;
     int uOutput;
@@ -89,18 +90,21 @@ void main()
         scene = texture(uScene, vUv).rgb;
         if (pc.uGlare > 0.0)
         {
+            float moved = (1.0 - pc.uGlareTail) * (GLARE_W[4] + GLARE_W[5]);   // energy moved from the far tail into term 3
             vec3 g = GLARE_W[0] * texture(uGlare0, vUv).rgb + GLARE_W[1] * texture(uGlare1, vUv).rgb
-                   + GLARE_W[2] * texture(uGlare2, vUv).rgb + GLARE_W[3] * texture(uGlare3, vUv).rgb
-                   + GLARE_W[4] * texture(uGlare4, vUv).rgb + GLARE_W[5] * texture(uGlare5, vUv).rgb;
+                   + GLARE_W[2] * texture(uGlare2, vUv).rgb + (GLARE_W[3] + moved) * texture(uGlare3, vUv).rgb
+                   + pc.uGlareTail * (GLARE_W[4] * texture(uGlare4, vUv).rgb + GLARE_W[5] * texture(uGlare5, vUv).rgb);
             scene = mix(scene, g, pc.uGlare);
         }
         if (pc.uScatter > 0.0)
         {
+            float movedS = (1.0 - pc.uGlareTail) * SCATTER_W[3];
             vec3 v = SCATTER_W[0] * texture(uScatter0, vUv).rgb + SCATTER_W[1] * texture(uScatter1, vUv).rgb
-                   + SCATTER_W[2] * texture(uScatter2, vUv).rgb + SCATTER_W[3] * texture(uScatter3, vUv).rgb;
+                   + (SCATTER_W[2] + movedS) * texture(uScatter2, vUv).rgb + pc.uGlareTail * SCATTER_W[3] * texture(uScatter3, vUv).rgb;
             scene = mix(scene, v, pc.uScatter);
         }
         if (pc.uSpikes > 0.0) scene += texture(uSpike, vUv).rgb;
+        scene *= 32.0;   // the scene target stores light / 32 (see scene.frag); every term above is linear, so it is undone once, here
     }
 
     vec3 c = scene * pc.uExposure * vec3(pc.uWbR, pc.uWbG, pc.uWbB);

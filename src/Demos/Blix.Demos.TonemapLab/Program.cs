@@ -27,6 +27,10 @@ namespace Blix.Demos.TonemapLab;
 //   --hdri name           start in an environment map (lab/tonemap/data/hdri, fetched by tools/fetch_hdris.py); --hdri-dir to point elsewhere.
 //   --glare 0..1          glare mix (default 1), --airy px the PSF's Airy radius (default 2).
 //   --spikes x --blades n aperture-blade spike strength (x the fitted amplitude, default 10) and blade count (default 6).
+//   --sun-boost x         multiplies the sun's total light (default 20; the real sun is about 40).
+//   --sun-radius deg      the sun disc's angular radius (default 0.573; the old disc was 1.72, the real sun is 0.27).
+//   --glare-scale 0..1    master gain on glare, scatter and spikes together (default 0.5).
+//   --tail 0..1           shortens the glare and scatter far tails (1 = as fitted, default).
 //   --scatter x           scatter glare amount (1 = the standard's, default); --tunnel-ev EV sets how far below the world the tunnel is.
 //   --pan deg/s           pan the camera automatically; --shutter 0..1 sets the motion-blur shutter (0 = off).
 //   --awb off             start with auto white balance off.
@@ -254,16 +258,20 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
     private GaussianChains glare = null!;
     private SpikeChain spikes = null!;
     private ShaderProgramHandle streakProgram;
-    private float spikeStrength = 10f;      // x the fitted polygon-aperture amplitude: 8 to 12 read right by eye (this scene's sun is ~285x the sky, a real one ~1e5x)
+    private float spikeStrength = 1f;       // x the fitted polygon-aperture amplitude (x10 was chosen against the old big disc; 1 suits the boosted small sun)
     private int blades = 6;                  // aperture blades: N spikes for even N, 2N for odd
     private float bladeRotationDeg;
-    private float spikeReachPx = 600f;
+    private float spikeReachPx = 300f;
     private GaussianChains scatter = null!;   // veiling glare: Stiles-Holladay 10/theta^2, lab/tonemap/results/scatter_fit.json
     private float scatterAmount = 1f;          // 1 = the standard's amount for an age-25 observer (6.6% of the light)
     private const float ScatterFraction = 0.0662f;   // scatter_fit.json fraction_age25
     private ShaderProgramHandle downProgram, blurProgram;
+    private float glareScale = 0.5f;      // master gain on the glare mix, the scatter and the spikes together (proportions kept); 0.5 read right at sun x20
+    private float glareTail = 1f;         // 1 = the fitted far tails of diffraction and scatter; less moves their energy inward
     private float glareMix = 1f;          // 0 off .. 1 the full diffraction PSF
     private float airyRadiusPx = 2f;      // the PSF's scale: 1.22 lambda N / pitch, in full-resolution pixels
+    private float sunBoost = 20f;            // x the sun's total light (1 = the lab's original; the real sun is about 40); 20 read right by eye
+    private float sunRadiusDeg = 0.573f;   // 0.01 rad: a third of the original disc, nine times the radiance (same total light)
     private float tunnelEv = -6.8f;      // how far below the world the tunnel interior is (was -8; lifted 1.2 EV: -5.1, -5.6, -6.6 read too bright live, -7.2 too dark)
     private bool motionBlur = true;
     private float shutter = 0.5f;         // fraction of the frame the shutter is open (0.5 = a 180 degree shutter)
@@ -314,10 +322,14 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
         if (args.Flag("manual")) autoExposure = false;
         if (args.Float("glare") is { } startGlare) glareMix = startGlare;
         if (args.Float("airy") is { } startAiry) airyRadiusPx = startAiry;
+        if (args.Float("tail") is { } startTail) glareTail = startTail;
+        if (args.Float("glare-scale") is { } startGlareScale) glareScale = startGlareScale;
         if (args.Float("scatter") is { } startScatter) scatterAmount = startScatter;
         if (args.Float("spikes") is { } startSpikes) spikeStrength = startSpikes;
         if (args.Int("blades") is { } startBlades) blades = Math.Clamp(startBlades, 3, 12);
         if (args.Float("tunnel-ev") is { } startTunnel) tunnelEv = startTunnel;
+        if (args.Float("sun-radius") is { } startSun) sunRadiusDeg = startSun;
+        if (args.Float("sun-boost") is { } startBoost) sunBoost = startBoost;
         if (args.Float("shutter") is { } startShutter) shutter = startShutter;
         if (args.Float("pan") is { } startPan) panDegPerSecond = startPan;
         if (args.String("awb") == "off") autoWhiteBalance = false;
@@ -504,6 +516,8 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
             Dress = dress ? 1 : 0,
             BlurYaw = blurYaw,
             TunnelEv = tunnelEv,
+            SunRadius = sunRadiusDeg * MathF.PI / 180f,
+            SunBoost = sunBoost,
             BlurPitch = blurPitch,
             BlurSamples = blurYaw != 0f || blurPitch != 0f ? blurSamples : 1,
         }.ToBytes();
@@ -518,11 +532,11 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
             meterPending = true;
         }
 
-        var glareOn = glareMix > 0f && pattern == 0;
-        var scatterOn = scatterAmount > 0f && pattern == 0;
+        var glareOn = glareMix * glareScale > 0f && pattern == 0;
+        var scatterOn = scatterAmount * glareScale > 0f && pattern == 0;
         if (glareOn) glare.Record(airyRadiusPx);
-        var spikesOn = spikeStrength > 0f && pattern == 0;
-        if (spikesOn) spikes.Record(blades, bladeRotationDeg * MathF.PI / 180f, airyRadiusPx, spikeStrength, spikeReachPx);
+        var spikesOn = spikeStrength * glareScale > 0f && pattern == 0;
+        if (spikesOn) spikes.Record(blades, bladeRotationDeg * MathF.PI / 180f, airyRadiusPx, spikeStrength * glareScale, spikeReachPx);
         if (scatterOn) scatter.Record(frame.Height / fovDegrees);   // sigmas are in degrees: pixels per degree of vertical field of view
 
         var sceneTexture = graph.GetColorTexture(sceneHandle);
@@ -588,9 +602,10 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
             Operator = op,
             Output = selfTest ? 2 : 0,
             Pattern = pattern,
-            GlareMix = glareMix > 0f && pattern == 0 ? glareMix : 0f,
-            SpikesOn = spikeStrength > 0f && pattern == 0 ? 1f : 0f,
-            ScatterAmount = scatterAmount > 0f && pattern == 0 ? Math.Min(scatterAmount * ScatterFraction, 1f) : 0f,
+            GlareMix = glareMix * glareScale > 0f && pattern == 0 ? Math.Min(glareMix * glareScale, 1f) : 0f,
+            GlareTail = glareTail,
+            SpikesOn = spikeStrength * glareScale > 0f && pattern == 0 ? 1f : 0f,
+            ScatterAmount = scatterAmount * glareScale > 0f && pattern == 0 ? Math.Min(scatterAmount * glareScale * ScatterFraction, 1f) : 0f,
             Gt7Sdr = gt7Sdr ? 1 : 0,
         };
     }
@@ -707,8 +722,10 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
 
         using (debug.Scope("glare and motion blur (lab/tonemap/tmlab/glare.py, motionblur.py)"))
         {
+            glareScale = debug.Controls.Float("glare master (scales glare, scatter and spikes together)", glareScale, 0f, 1f);
             glareMix = debug.Controls.Float("glare mix (0 off, 1 diffraction PSF)", glareMix, 0f, 1f);
-            airyRadiusPx = debug.Controls.Float("Airy radius px (PSF scale)", airyRadiusPx, 0.5f, 4f);
+            airyRadiusPx = debug.Controls.Float("Airy radius px (PSF scale)", airyRadiusPx, 0.5f, 8f);
+            glareTail = debug.Controls.Float("far tail (1 = fitted, less = shorter reach)", glareTail, 0f, 1f);
             scatterAmount = debug.Controls.Float("scatter (1 = Stiles-Holladay, age 25)", scatterAmount, 0f, 4f);
             spikeStrength = debug.Controls.Float("blade spikes (1 = fitted polygon PSF)", spikeStrength, 0f, 4f);
             blades = (int)debug.Controls.Float("aperture blades (N spikes if even, 2N if odd)", blades, 3f, 12f);
@@ -775,6 +792,8 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
             signNits = debug.Controls.Float("Sign nits", signNits, 1000f, 1.0e6f);
             signs = debug.Controls.Toggle("Flashing signs", signs);
             tunnelEv = debug.Controls.Float("Tunnel EV below the world", tunnelEv, -10f, -4f);
+            sunRadiusDeg = debug.Controls.Float("Sun radius deg (radiance keeps total light; real sun 0.27)", sunRadiusDeg, 0.27f, 1.72f);
+            sunBoost = debug.Controls.Float("Sun total light x (real sun is about 40)", sunBoost, 1f, 64f);
             fovDegrees = debug.Controls.Float("Field of view deg", fovDegrees, 15f, 110f);
             if (debug.Controls.Button("Look at the tunnel")) { yaw = MathF.PI; pitch = 0.04f; }
             if (debug.Controls.Button("Look at the sun"))
@@ -817,7 +836,7 @@ internal readonly record struct Gt7Set(
 [StructLayout(LayoutKind.Sequential)]
 internal struct ScenePush
 {
-    public float Yaw, Pitch, TanHalfFov, Aspect, Time, SunElevation, SunAzimuth, WorldEv, LampNits, SignNits, BlurYaw, BlurPitch, TunnelEv;
+    public float Yaw, Pitch, TanHalfFov, Aspect, Time, SunElevation, SunAzimuth, WorldEv, LampNits, SignNits, BlurYaw, BlurPitch, TunnelEv, SunRadius, SunBoost;
     public int Signs, UseHdri, Dress, BlurSamples;
 
     public readonly byte[] ToBytes()
@@ -831,7 +850,7 @@ internal struct ScenePush
 internal struct PresentPush
 {
     public float Exposure, AnchorNits, SdrWhiteNits, PeakNits, WbR, WbG, WbB;
-    public float Alpha, GrayPoint, LinearSection, ToeStrength, BlendRatio, FadeStart, FadeEnd, ShoulderTail, GlareMix, SpikesOn, ScatterAmount;
+    public float Alpha, GrayPoint, LinearSection, ToeStrength, BlendRatio, FadeStart, FadeEnd, ShoulderTail, GlareMix, SpikesOn, GlareTail, ScatterAmount;   // in the order present.frag's push block declares them
     public int Operator, Output, Pattern, Gt7Sdr;
 
     public readonly byte[] ToBytes()
