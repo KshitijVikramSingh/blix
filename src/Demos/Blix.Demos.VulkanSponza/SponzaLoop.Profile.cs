@@ -213,6 +213,7 @@ internal sealed partial class SponzaLoop
         }
         Console.WriteLine($"[profile]   {IncidentReuseCounts()}");
         if (RtgiProbeCounts() is { Length: > 0 } rtgiCounts) Console.WriteLine($"[profile]   {rtgiCounts}");
+        if (RtgiCounts() is { Length: > 0 } rtgiCache) Console.WriteLine($"[profile]   {rtgiCache}");
         // --ab: the window's frames by phase, the same process and thermal state.
         if (abMode.Length > 0)
         {

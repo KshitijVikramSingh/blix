@@ -762,6 +762,7 @@ internal sealed partial class SponzaLoop
         profFrameSize = (frame.Width, frame.Height);
         using (Prof("rt-shadows")) RecordRtShadows(frame.Width, frame.Height);
         using (Prof("rtgi-probe")) RecordRtgiProbe(frame.Width, frame.Height);
+        using (Prof("rtgi")) RecordRtgi(frame.Width, frame.Height);
         CookTransportWhenReady();
         CookGiWhenLanded();
         using (Prof("clipmap")) RecordClipmap();
@@ -927,10 +928,12 @@ internal sealed partial class SponzaLoop
                 RecordReference(incidentInvProj, incidentInvView, frame.Width, frame.Height);
                 RecordGpuReference();
                 RecordViewReference();
-                if (halfLightingNow && IncidentHalfPassNeeded())
+                if (halfLightingNow && (RtgiReadoutReady || IncidentHalfPassNeeded()))
                 {
                     var (halfWidth, halfHeight) = HalfLightingSize(frame.Width, frame.Height);
-                    RecordIncidentClipmap(incidentInvProj, incidentInvView, halfWidth, halfHeight, frame.Width, frame.Height, half: true);
+                    // --rtgi: the cache, read every frame (it is still learning), in place of the incident pass.
+                    if (RtgiReadoutReady) RecordRtgiReadout();
+                    else RecordIncidentClipmap(incidentInvProj, incidentInvView, halfWidth, halfHeight, frame.Width, frame.Height, half: true);
                     RecordLightingUpsample(incidentInvProj, incidentInvView, frame.Height);
                 }
                 else if (!halfLightingNow && IncidentPassNeeded())

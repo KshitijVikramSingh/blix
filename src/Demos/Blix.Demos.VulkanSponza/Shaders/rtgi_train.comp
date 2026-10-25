@@ -1,0 +1,107 @@
+#version 450
+
+// --rtgi (S1, SponzaLoop.Rtgi.cs): last frame's training points, their rays answered, into the cache. Per point p (normal n):
+//   indirect  E = PI * L_in along its cosine ray: the sky's radiance where it missed; where it met a surface's front at q,
+//             albedo_q * (E_ind(q) + E_sun * max(0, n_q.s) * sunVis(q)) -- q's outgoing radiance times PI, from q's cell
+//             (a coarser level where q's own has nothing yet; no sample at all where neither has, rather than a dark
+//             one); a back face's 0 (inside something)
+//   sun       whether its shadow ray reached (where it faces the sun)
+// added to p's cell and to the cell two levels coarser (the readout's fallback), made where it is not held yet.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform RtgiTrain {
+    vec4 uParams;        // rtgiParams (rtgi_cache.glsl)
+    vec4 uCamera;        // xyz position; w points
+    vec4 uSun;           // xyz toward the sun; w the sky cube's lod
+    vec4 uSunIrradiance; // rgb
+} u;
+
+layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
+layout(std430, set = 0, binding = 2) readonly buffer RtgiPoints { vec4 points[]; };
+layout(std430, set = 0, binding = 3) readonly buffer RtgiRayBuffer { vec4 rays[]; };
+layout(std430, set = 0, binding = 4) readonly buffer RtgiHits { uvec4 hits[]; };
+layout(std430, set = 0, binding = 5) readonly buffer RtgiOccluded { uint occluded[]; };
+layout(std430, set = 0, binding = 6) buffer RtgiKeys { uint rtgiKeys[]; };
+layout(std430, set = 0, binding = 7) buffer RtgiAccum { uint rtgiAccum[]; };
+layout(std430, set = 0, binding = 8) readonly buffer RtgiResolved { vec4 rtgiResolved[]; };
+
+#define RTGI_KEYS(i) rtgiKeys[i]
+#include "rtgi_cache.glsl"
+
+// The slot for the cell, made if it is not held; 0xFFFFFFFF when its probes are all taken.
+uint rtgiInsert(uvec2 h) {
+    for (uint k = 0u; k < RTGI_PROBES; k++) {
+        uint s = (h.x + k) & uint(u.uParams.z);
+        uint prev = atomicCompSwap(rtgiKeys[s], 0u, h.y);
+        if (prev == 0u || prev == h.y) return s;
+    }
+    return 0xFFFFFFFFu;
+}
+
+uvec2 cellAt(vec3 p, vec3 n, uint level) {
+    return rtgiCellHash(ivec3(floor(p / rtgiSize(level, u.uParams))), level, rtgiSide(n), u.uParams);
+}
+
+// q's outgoing radiance times PI over its albedo: E_ind + direct sun, from its cell or a coarser one; w 0 when neither holds any.
+vec4 irradianceAt(vec3 q, vec3 nq) {
+    uint level = rtgiLevel(q, u.uCamera.xyz, u.uParams);
+    for (uint up = 0u; up <= 2u; up += 2u) {
+        uint l = min(level + up, uint(u.uParams.w));
+        uint s = rtgiFind(cellAt(q, nq, l), u.uParams);
+        if (s == 0xFFFFFFFFu) continue;
+        vec4 r0 = rtgiResolved[2u * s], r1 = rtgiResolved[2u * s + 1u];
+        if (r1.y < 0.5) continue;
+        return vec4(r0.rgb + u.uSunIrradiance.rgb * max(0.0, dot(nq, u.uSun.xyz)) * r1.x, 1.0);
+    }
+    return vec4(0.0);
+}
+
+void add(uint s, vec3 e, bool counted, bool sky, bool sunTraced, bool sunLit) {
+    if (s == 0xFFFFFFFFu) return;
+    if (counted) {
+        vec3 f = min(e, vec3(RTGI_MAX_SAMPLE)) * RTGI_SCALE;
+        atomicAdd(rtgiAccum[8u * s], uint(f.r + 0.5));
+        atomicAdd(rtgiAccum[8u * s + 1u], uint(f.g + 0.5));
+        atomicAdd(rtgiAccum[8u * s + 2u], uint(f.b + 0.5));
+        atomicAdd(rtgiAccum[8u * s + 3u], 1u);
+        if (sky) atomicAdd(rtgiAccum[8u * s + 4u], 1u);
+    }
+    if (sunTraced) {
+        atomicAdd(rtgiAccum[8u * s + 6u], 1u);
+        if (sunLit) atomicAdd(rtgiAccum[8u * s + 5u], 1u);
+    }
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= uint(u.uCamera.w)) return;
+    vec4 p = points[2u * i];
+    if (p.w < 0.5) return;
+    vec3 n = points[2u * i + 1u].xyz;
+    vec3 d = rays[2u * i + 1u].xyz;
+    uvec4 h0 = hits[3u * i];
+    vec3 e = vec3(0.0);
+    bool counted = true, sky = false;
+    if ((h0.w & 1u) == 0u) {
+        e = 3.14159265359 * textureLod(uSkyRadiance, d, u.uSun.w).rgb;
+        sky = true;
+    } else if ((h0.w & 2u) != 0u) {
+        uvec4 h2 = hits[3u * i + 2u];
+        vec3 q = rays[2u * i].xyz + d * uintBitsToFloat(h0.x);
+        vec3 nq = vec3(uintBitsToFloat(h2.x), uintBitsToFloat(h2.y), uintBitsToFloat(h2.z));
+        if (!(dot(nq, nq) > 1e-12)) return;   // a degenerate triangle (rtgi_rays.comp): no sample
+        nq = normalize(nq);
+        if (dot(nq, d) > 0.0) nq = -nq;
+        vec4 eq = irradianceAt(q, nq);
+        counted = eq.w > 0.5;
+        e = unpackUnorm4x8(h2.w).rgb * eq.rgb;
+    }
+    // Nothing not finite reaches a cell: one NaN there spreads to every cell whose rays land in it.
+    if (any(isnan(e)) || any(isinf(e))) counted = false;
+    bool sunTraced = dot(n, u.uSun.xyz) > 0.0;
+    bool sunLit = sunTraced && (occluded[i] & 1u) == 0u;
+    uint level = rtgiLevel(p.xyz, u.uCamera.xyz, u.uParams);
+    add(rtgiInsert(cellAt(p.xyz, n, level)), e, counted, sky, sunTraced, sunLit);
+    add(rtgiInsert(cellAt(p.xyz, n, min(level + 2u, uint(u.uParams.w)))), e, counted, sky, sunTraced, sunLit);
+}

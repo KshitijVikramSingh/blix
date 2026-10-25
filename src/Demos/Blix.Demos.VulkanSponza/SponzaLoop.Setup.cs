@@ -182,6 +182,7 @@ internal sealed partial class SponzaLoop
         // --rt-shadows: the lit pass's sun shadows traced on Apple's ray tracing hardware (SponzaLoop.RtShadows).
         rtShadows = args.Flag("rt-shadows");
         ParseRtgiProbe(args);
+        ParseRtgi(args);
         lightletCensus = args.Flag("lightlet-census");
         lightletRecord = args.Flag("lightlet-record");
         rayLeakCensus = args.Flag("ray-leak-census");
@@ -860,6 +861,7 @@ internal sealed partial class SponzaLoop
             .Read(lightmapEnabled ? lightmapTexelHandle : surfaceKeyHandle).Handle;
         // --rtgi-probe (S0): its rays before the traced shadows' group that takes their batches.
         DeclareRtgiProbePasses(stage => Reflect(stage));
+        DeclareRtgiComputePasses(stage => Reflect(stage));
         rtShadowTracePassHandle = graph.ExternalPass("rt-shadow-trace");
 
         // The Hi-Z pyramid, immediately after the pre-pass that resolves the depth it reduces.
@@ -961,6 +963,8 @@ internal sealed partial class SponzaLoop
             halfBuilder = halfBuilder.Read(lightmapEnabled ? lightmapTexelHandle : surfaceKeyHandle);
             halfBuilder = IncidentReuseReads(halfBuilder);
             incidentHalfPassHandle = halfBuilder.Shader(incidentClipmapInterface).Handle;
+            // --rtgi: the cache read into the same targets in its place (SponzaLoop.Rtgi.cs).
+            DeclareRtgiReadoutPass((vert, frag) => Reflect(vert, frag));
             // The half-res pass split in two (incident_body.glsl, INCIDENT_FAST / INCIDENT_SLOW): the cells' answers and
             // the marks, then the marked pixels over them. Declared before the shadows' join, as the pass they replace.
             incidentFastInterface = Reflect("present.vert", "incident_fast.frag");
@@ -1286,6 +1290,7 @@ internal sealed partial class SponzaLoop
                 presentVertSpv, File.ReadAllBytes(Path.Combine(shaderDir, "incident_slow.frag.spv")), incidentSlowInterface, "incident_slow")),
             VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
             new[] { BlendState.Disabled, BlendState.Disabled }, incidentHalfSlowPassHandle, "incident_slow");
+        CreateRtgiPipelines(shaderDir, presentVertSpv);
         lightingUpsamplePipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
                 presentVertSpv, File.ReadAllBytes(Path.Combine(shaderDir, "lighting_upsample.frag.spv")), lightingUpsampleInterface, "lighting_upsample")),
             VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,

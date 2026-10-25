@@ -1,0 +1,90 @@
+#version 450
+
+// --rtgi (S1, SponzaLoop.Rtgi.cs): this frame's training points and their rays. The first uCounts.x are visible: one per
+// tile of a grid over the screen, at a pixel of its tile (a new one each frame), from the pre-pass's depth and normal.
+// The rest are where last frame's training rays landed (a different share each frame), so the cells one bounce from
+// the screen -- and, through those, the next -- are trained too: a path grows a vertex a frame through the cache.
+// Each point gets a cosine ray (CLOSEST: what it sees) and a sun shadow ray (none where it faces away from the sun).
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform RtgiRays {
+    mat4 uInvViewProj;   // inverse of the view-projection the pre-pass drew with
+    vec4 uSize;          // xy full-res pixels; zw tiles across and down
+    vec4 uCamera;        // xyz position
+    vec4 uCounts;        // x visible points, y points from last frame's hits, z the frame's number, w how far a ray goes
+    vec4 uSun;           // xyz toward the sun; w 1 when last frame's rays and hits are there to read
+} u;
+
+layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
+layout(set = 0, binding = 2) uniform sampler2D uPrepassNormal;
+layout(std430, set = 0, binding = 3) readonly buffer RtgiPrevRays { vec4 prevRays[]; };
+layout(std430, set = 0, binding = 4) readonly buffer RtgiPrevHits { uvec4 prevHits[]; };
+layout(std430, set = 0, binding = 5) writeonly buffer RtgiPoints { vec4 points[]; };   // 2 a point: position and 1 (0: none); normal
+layout(std430, set = 0, binding = 6) writeonly buffer RtgiRayBuffer { vec4 rays[]; };
+layout(std430, set = 0, binding = 7) writeonly buffer RtgiShadowOrigins { vec4 origins[]; };
+
+uint hash(uint x) {
+    x ^= x >> 16; x *= 0x7feb352du;
+    x ^= x >> 15; x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+void none(uint i) {
+    points[2u * i] = vec4(0.0);
+    points[2u * i + 1u] = vec4(0.0);
+    rays[2u * i] = vec4(0.0);
+    rays[2u * i + 1u] = vec4(0.0, 1.0, 0.0, 0.0);
+    origins[i] = vec4(0.0);
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    uint visible = uint(u.uCounts.x), total = visible + uint(u.uCounts.y);
+    if (i >= total) return;
+    uint frame = uint(u.uCounts.z);
+    uint h = hash(i * 0x9E3779B9u ^ hash(frame));
+    vec3 p, n;
+    if (i < visible) {
+        uint tilesX = uint(u.uSize.z);
+        vec2 tileSize = u.uSize.xy / u.uSize.zw;
+        vec2 jitter = vec2(h & 0xFFFFu, h >> 16) / 65536.0;
+        ivec2 q = min(ivec2((vec2(i % tilesX, i / tilesX) + jitter) * tileSize), ivec2(u.uSize.xy) - 1);
+        float raw = texelFetch(uSceneDepth, q, 0).r;
+        vec4 ns = texelFetch(uPrepassNormal, q, 0);
+        if (raw >= 1.0 - 1e-6 || dot(ns.xyz, ns.xyz) < 1e-6) { none(i); return; }
+        vec2 ndc = (vec2(q) + 0.5) / u.uSize.xy * 2.0 - 1.0;
+        vec4 world = u.uInvViewProj * vec4(ndc, raw, 1.0);
+        p = world.xyz / world.w;
+        n = normalize(ns.xyz);
+    } else {
+        if (u.uSun.w < 0.5) { none(i); return; }
+        // A share of last frame's training rays, spread over all of them and turning each frame.
+        uint k = (hash(i ^ frame * 0x632BE5ABu)) % total;
+        uvec4 h0 = prevHits[3u * k];
+        // A hit on a surface's front (bit 2): a back face is inside something, nothing to train.
+        if ((h0.w & 3u) != 3u) { none(i); return; }
+        uvec4 h2 = prevHits[3u * k + 2u];
+        vec4 o = prevRays[2u * k], d = prevRays[2u * k + 1u];
+        p = o.xyz + d.xyz * uintBitsToFloat(h0.x);
+        n = vec3(uintBitsToFloat(h2.x), uintBitsToFloat(h2.y), uintBitsToFloat(h2.z));
+        // A degenerate triangle's normal is zero: normalized, a NaN that spread through every cell reading it (2026-10-25).
+        if (!(dot(n, n) > 1e-12) || any(isnan(p))) { none(i); return; }
+        n = normalize(n);
+        if (dot(n, d.xyz) > 0.0) n = -n;
+    }
+    float lift = 0.01 + 0.001 * length(p - u.uCamera.xyz);
+    vec3 o = p + n * lift;
+    uint h2 = hash(h);
+    float r1 = float(h2 & 0xFFFFu) / 65536.0, r2 = float(h2 >> 16) / 65536.0;
+    float phi = 6.28318530718 * r1, s = sqrt(r2);
+    vec3 t = normalize(abs(n.y) < 0.99 ? cross(n, vec3(0.0, 1.0, 0.0)) : cross(n, vec3(1.0, 0.0, 0.0)));
+    vec3 b = cross(n, t);
+    vec3 d = normalize(t * (cos(phi) * s) + b * (sin(phi) * s) + n * sqrt(max(0.0, 1.0 - r2)));
+    points[2u * i] = vec4(p, 1.0);
+    points[2u * i + 1u] = vec4(n, 0.0);
+    rays[2u * i] = vec4(o, 0.0);
+    rays[2u * i + 1u] = vec4(d, u.uCounts.w);
+    origins[i] = vec4(o, dot(n, u.uSun.xyz) > 0.0 ? u.uCounts.w : 0.0);
+}

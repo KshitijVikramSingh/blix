@@ -31,7 +31,7 @@ internal sealed partial class SponzaLoop
     // GTAO never darkens the texels' light: texels resolve occlusion to 5 cm themselves, and on top of them GTAO darkened
     // corners twice -- the Cornell box's presented image against the reference read mean error 1.53%, p99 19.4%, 2.86% of
     // pixels over 10% with it; 0.64%, 7.4%, 0.57% without.
-    private bool IncidentHoldsOcclusion => (referenceView && referenceSamples > 0) || texelsUploaded;
+    private bool IncidentHoldsOcclusion => (referenceView && referenceSamples > 0) || texelsUploaded || RtgiReadoutReady;
     // --gi-reference-bounces N: path length (6: the 16-bounce CPU reference differs from 6 by well under its noise
     // indoors, where albedos under 0.6 shrink each bounce).
     private int referenceBounces = 6;

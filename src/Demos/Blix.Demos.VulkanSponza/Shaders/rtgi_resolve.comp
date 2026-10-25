@@ -1,0 +1,53 @@
+#version 450
+
+// --rtgi (S1, SponzaLoop.Rtgi.cs): each slot's frame of samples into what it holds -- a running mean over at most
+// uResolve.x samples (older ones fade: the light can change), the samples cleared; a slot no training reached for
+// uResolve.y frames is emptied.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform RtgiResolve {
+    vec4 uResolve;   // x samples held at most, y frames a slot lives untrained, z slots
+} u;
+
+layout(std430, set = 0, binding = 1) buffer RtgiKeys { uint rtgiKeys[]; };
+layout(std430, set = 0, binding = 2) buffer RtgiAccum { uint rtgiAccum[]; };
+layout(std430, set = 0, binding = 3) buffer RtgiResolved { vec4 rtgiResolved[]; };
+
+#define RTGI_SCALE 256.0
+
+void main() {
+    uint s = gl_GlobalInvocationID.x;
+    if (s >= uint(u.uResolve.z) || rtgiKeys[s] == 0u) return;
+    uint count = rtgiAccum[8u * s + 3u], sunTraced = rtgiAccum[8u * s + 6u];
+    vec4 r0 = rtgiResolved[2u * s], r1 = rtgiResolved[2u * s + 1u];
+    if (count == 0u && sunTraced == 0u) {
+        r1.z += 1.0;
+        if (r1.z > u.uResolve.y) {
+            rtgiKeys[s] = 0u;
+            rtgiResolved[2u * s] = vec4(0.0);
+            rtgiResolved[2u * s + 1u] = vec4(0.0);
+        } else rtgiResolved[2u * s + 1u] = r1;
+        return;
+    }
+    if (count > 0u) {
+        vec3 mean = vec3(rtgiAccum[8u * s], rtgiAccum[8u * s + 1u], rtgiAccum[8u * s + 2u]) / (RTGI_SCALE * float(count));
+        float sky = float(rtgiAccum[8u * s + 4u]) / float(count);
+        float held = min(r1.y + float(count), u.uResolve.x);
+        // At most 1: a cell given more samples in a frame than it holds (the coarse fallback's, hundreds) took a weight
+        // past 1 and the mean extrapolated, grew each frame and overflowed to NaN (2026-10-25).
+        float w = min(1.0, float(count) / max(held, 1.0));
+        r0 = vec4(mix(r0.rgb, mean, w), mix(r0.a, sky, w));
+        r1.y = held;
+    }
+    if (sunTraced > 0u) {
+        float lit = float(rtgiAccum[8u * s + 5u]) / float(sunTraced);
+        float held = min(r1.w + float(sunTraced), u.uResolve.x);
+        r1.x = mix(r1.x, lit, min(1.0, float(sunTraced) / max(held, 1.0)));
+        r1.w = held;
+    }
+    r1.z = 0.0;
+    rtgiResolved[2u * s] = r0;
+    rtgiResolved[2u * s + 1u] = r1;
+    for (uint k = 0u; k < 8u; k++) rtgiAccum[8u * s + k] = 0u;
+}
