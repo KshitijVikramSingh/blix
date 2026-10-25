@@ -15,6 +15,7 @@ layout(set = 0, binding = 0) uniform RtgiTrain {
     vec4 uCamera;        // xyz position; w points
     vec4 uSun;           // xyz toward the sun; w the sky cube's lod
     vec4 uSunIrradiance; // rgb
+    vec4 uClamp;         // x > 0: a sample's luminance capped at its cell's mean + x standard deviations (once it holds 32)
     vec4 uTrain;         // x 1: a landing cell holding nothing counts as dark (else no sample); y 1: no coarser cell for it;
                          // z 1: a back face's hit read as a front's (else dark); w room for landing requests (0: none)
 } u;
@@ -31,6 +32,7 @@ layout(std430, set = 0, binding = 8) readonly buffer RtgiResolved { vec4 rtgiRes
 // through the coarser cell instead, a landing took that cell's average over where training had been -- the walls the
 // camera sees -- not over where it landed: the gate's dead end, lit round a corner, read 0.77 (2026-10-26). A count,
 // then two vec4s each (point, normal), room for uTrain.w.
+layout(std430, set = 0, binding = 10) readonly buffer RtgiMoments { vec4 rtgiMoments[]; };
 layout(std430, set = 0, binding = 9) buffer RtgiRequests { uint requestCount; uint requestPad[3]; vec4 requests[]; };
 
 #define RTGI_KEYS(i) rtgiKeys[i]
@@ -70,6 +72,14 @@ vec4 dither;
 
 void add(uint s, vec3 e, bool counted, bool sky, bool sunTraced, bool sunLit) {
     if (s == 0xFFFFFFFFu) return;
+    // --rtgi-clamp-sigma: a rare bright sample (a ray out to the sky, onto a sunlit patch through a gap) capped against the
+    // cell's own spread once it has some: in a cell with few samples it was a blob that came and went (San Miguel).
+    if (counted && u.uClamp.x > 0.0 && rtgiMoments[3u * s + 2u].z >= 32.0) {
+        vec4 m = rtgiMoments[3u * s];
+        float cap = m.x + u.uClamp.x * sqrt(max(m.y - m.x * m.x, 0.0)) + 1e-4;
+        float l = dot(e, vec3(0.2126, 0.7152, 0.0722));
+        if (l > cap) e *= cap / l;
+    }
     if (counted) {
         vec3 f = min(e, vec3(RTGI_MAX_SAMPLE)) * RTGI_SCALE;
         // Rounded stochastically: unbiased however dim (the fraction kept as a chance of one more unit).
@@ -124,6 +134,9 @@ void main() {
     bool sunTraced = dot(n, u.uSun.xyz) > 0.0;
     bool sunLit = sunTraced && (occluded[i] & 1u) == 0u;
     uint level = rtgiLevel(p.xyz, u.uCamera.xyz, u.uParams);
+    // Its level, the next (the readout blends the two) and two up (the fallback).
+    uint top = uint(u.uParams.w);
     add(rtgiInsert(cellAt(p.xyz, n, level)), e, counted, sky, sunTraced, sunLit);
-    add(rtgiInsert(cellAt(p.xyz, n, min(level + 2u, uint(u.uParams.w)))), e, counted, sky, sunTraced, sunLit);
+    if (level + 1u <= top) add(rtgiInsert(cellAt(p.xyz, n, level + 1u)), e, counted, sky, sunTraced, sunLit);
+    if (level + 2u <= top) add(rtgiInsert(cellAt(p.xyz, n, level + 2u)), e, counted, sky, sunTraced, sunLit);
 }

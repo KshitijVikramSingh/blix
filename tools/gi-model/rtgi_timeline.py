@@ -39,7 +39,7 @@ def lum(c):
     return c[..., 0] * 0.2126 + c[..., 1] * 0.7152 + c[..., 2] * 0.0722
 
 
-def points_mode(log, dumps, mean_of=False):
+def points_mode(log, dumps, mean_of=False, flicker=False):
     import re
     pts = []
     for line in Path(log).read_text().splitlines():
@@ -52,6 +52,20 @@ def points_mode(log, dumps, mean_of=False):
     mean = R.mean()
     big = R > 0.02 * mean
     print(f'truth: {Path(log).name}, {len(pts)} points, mean {mean:.4f}')
+    if flicker:
+        # --flicker: consecutive frames' fields at the points -- how much each point's light moves frame to frame (its
+        # standard deviation over its mean, the points' mean), the error of their mean beside it.
+        metas = [load(d) for d in dumps]
+        meta, _, nrm = metas[0]
+        w, h = meta['width'], meta['height']
+        px, py = np.clip((xs * w).astype(int), 0, w - 1), np.clip((ys * h).astype(int), 0, h - 1)
+        ok = np.abs(nrm[py, px, :3]).sum(axis=1) > 1e-6
+        F = np.array([lum(m[1][py, px, :3]) for m in metas])[:, ok]
+        f, r = F.mean(axis=0), R[ok]
+        rel = F.std(axis=0) / np.maximum(f, 0.02 * f.mean())
+        print(f'flicker over {len(metas)} frames: mean {rel.mean():.4f}, p90 {np.percentile(rel, 90):.4f}; '
+              f'their mean: energy {f.sum() / r.sum():.4f}, rel |error| {np.abs(f - r).mean() / r.mean():.4f}')
+        return
     if mean_of:
         # --mean: the dumps' fields averaged first (consecutive frames): what a temporal filter would converge to.
         metas = [load(d) for d in dumps]
@@ -78,8 +92,8 @@ def main():
     if len(sys.argv) < 3:
         raise SystemExit(__doc__)
     if sys.argv[1].endswith('.log'):
-        args = [a for a in sys.argv[2:] if a != '--mean']
-        points_mode(sys.argv[1], args, mean_of='--mean' in sys.argv)
+        args = [a for a in sys.argv[2:] if a not in ('--mean', '--flicker')]
+        points_mode(sys.argv[1], args, mean_of='--mean' in sys.argv, flicker='--flicker' in sys.argv)
         return
     tmeta, _, tnrm = load(sys.argv[1])
     rw, rh = tmeta['referenceWidth'], tmeta['referenceHeight']

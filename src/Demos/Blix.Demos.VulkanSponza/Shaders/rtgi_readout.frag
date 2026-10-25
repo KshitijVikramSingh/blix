@@ -66,9 +66,19 @@ void main() {
     vec3 p = world.xyz / world.w;
     vec3 n = normalize(ns.xyz);
     uint side = rtgiSide(n);
-    uint level = rtgiLevel(p, u.uCamera.xyz, u.uParams);
+    // The two levels around the point's, blended by where it sits between them (rtgiLevelF): no jump at a level's edge.
+    float lf = rtgiLevelF(p, u.uCamera.xyz, u.uParams);
+    uint level = uint(lf);
+    uint top = uint(u.uParams.w);
+    float t = lf - float(level);
+    float sky0, sky1;
+    vec4 e0 = readLevel(p, side, level, sky0);
+    vec4 e1 = level < top ? readLevel(p, side, level + 1u, sky1) : vec4(0.0);
+    vec4 e;
     float sky;
-    vec4 e = readLevel(p, side, level, sky);
-    if (e.w < 0.05) e = readLevel(p, side, min(level + 2u, uint(u.uParams.w)), sky);
+    if (e0.w >= 0.05 && e1.w >= 0.05) { e = vec4(mix(e0.rgb, e1.rgb, t), 1.0); sky = mix(sky0, sky1, t); }
+    else if (e0.w >= 0.05) { e = e0; sky = sky0; }
+    else if (e1.w >= 0.05) { e = e1; sky = sky1; }
+    else e = readLevel(p, side, min(level + 2u, top), sky);
     outIncident = e.w > 0.0 ? vec4(e.rgb, sky) : vec4(0.0, 0.0, 0.0, 1.0);
 }

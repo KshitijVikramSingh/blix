@@ -25,7 +25,9 @@ internal sealed partial class SponzaLoop
 {
     private bool rtgi;
     private int rtgiTiles = 73_000, rtgiHitPoints = 32_000, rtgiSlotsLog2 = 21;
-    private float rtgiCell = 0.05f, rtgiCellGrow = 0.01f, rtgiMaxAge = 600f;
+    // Cells untrained for --rtgi-max-age frames are emptied: 1,800 (30 s at 60 fps; at 600 a walk back to a place left 10 s
+    // before found it gone and re-settling, 2026-10-26).
+    private float rtgiCell = 0.05f, rtgiCellGrow = 0.01f, rtgiMaxAge = 1800f;
     // --rtgi-settle-frames N: frames the cache trains before --shot-when-ready may shoot (600).
     private int rtgiSettleFrames = 600;
     // S2: a cell's history follows its light (rtgi_resolve.comp) -- up to --rtgi-history samples while its samples agree
@@ -33,7 +35,9 @@ internal sealed partial class SponzaLoop
     // samples) when the two disagree by more than --rtgi-change-sigma of the fast one's standard errors.
     // The fast window: 64 (at 16 the cache reset itself on noise -- a bright frame or a dark one -- and read 0.18 rel
     // |error| at Crytek Sponza's points settled, 3-4% dark; 64: 0.10 and 1.00, 2026-10-26).
-    private float rtgiHistory = 1024f, rtgiChangeSigma = 3f, rtgiFast = 64f, rtgiChangeFloor = 0.05f;
+    // --rtgi-change-sigma 5 and --rtgi-change-frames 3: a disagreement must pass 5 standard errors three frames running
+    // (rtgi_resolve.comp): the net for changes nobody announced; announced ones (the sun turned) cut at once.
+    private float rtgiHistory = 1024f, rtgiChangeSigma = 5f, rtgiFast = 64f, rtgiChangeFloor = 0.05f, rtgiChangeFrames = 3f;
     // --rtgi-sun-cut N: on a frame the sun turns (0.02 degrees or more), every cell's light history capped to N samples
     // (and its sun visibility's to 4): a known change, not one for the fast mean to find. 0: none.
     private float rtgiSunCut = 32f;
@@ -43,6 +47,8 @@ internal sealed partial class SponzaLoop
     private bool rtgiCountUnknown, rtgiNoCoarse, rtgiBackfaceLit;
     // Landings in untrained cells, trained the next frame (rtgi_train.comp's requests): by parity. --rtgi-no-requests: off.
     private bool rtgiRequests = true;
+    // --rtgi-clamp-sigma K: a sample capped at its cell's mean + K standard deviations once it holds 32 (0: off).
+    private float rtgiClampSigma;
     private GpuBufferHandle[] rtgiRequestBufs = Array.Empty<GpuBufferHandle>();
     private const int RtgiTopLevel = 10;
     // --rtgi-screen (S3): each half-res pixel's light from the screen tiles' reservoirs (ReSTIR GI: rtgi_reservoir.comp,
@@ -87,11 +93,13 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-change-sigma") is { } cs) rtgiChangeSigma = MathF.Max(0.5f, cs);
         if (args.Float("rtgi-fast") is { } fa) rtgiFast = MathF.Max(1f, fa);
         if (args.Float("rtgi-change-floor") is { } cf) rtgiChangeFloor = MathF.Max(0f, cf);
+        if (args.Float("rtgi-change-frames") is { } cfr) rtgiChangeFrames = MathF.Max(1f, cfr);
         if (args.Float("rtgi-sun-cut") is { } sc) rtgiSunCut = MathF.Max(0f, sc);
         rtgiCountUnknown = args.Flag("rtgi-count-unknown");
         rtgiNoCoarse = args.Flag("rtgi-no-coarse");
         rtgiBackfaceLit = args.Flag("rtgi-backface-lit");
         if (args.Flag("rtgi-no-requests")) rtgiRequests = false;
+        if (args.Float("rtgi-clamp-sigma") is { } cls) rtgiClampSigma = MathF.Max(0f, cls);
         rtgiScreen = args.Flag("rtgi-screen");
         if (rtgiScreen) rtgi = true;
         if (args.Int("rtgi-screen-taps") is { } taps) rtgiScreenTaps = Math.Clamp(taps, 1, 64);
@@ -195,6 +203,7 @@ internal sealed partial class SponzaLoop
                     new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, n))),
                     new("uSun", new Vector4Uniform(new Vector4(towardSun, 1f))),
                     new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 0f))),
+                    new("uClamp", new Vector4Uniform(new Vector4(rtgiClampSigma, 0f, 0f, 0f))),
                     new("uTrain", new Vector4Uniform(new Vector4(rtgiCountUnknown ? 1f : 0f, rtgiNoCoarse ? 1f : 0f, rtgiBackfaceLit ? 1f : 0f, rtgiRequests ? rtgiHitPoints : 0f))),
                 },
                 new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
@@ -208,12 +217,13 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("RtgiAccum", rtgiAccum),
                     new ShaderBufferBinding("RtgiResolved", rtgiResolved),
                     new ShaderBufferBinding("RtgiRequests", rtgiRequestBufs[cur]),
+                    new ShaderBufferBinding("RtgiMoments", rtgiMoments),
                 }));
         graph.Dispatch(rtgiResolvePassHandle, new DispatchCommand(rtgiResolvePipeline, (RtgiSlots + 63) / 64, 1, 1,
             new ShaderUniform[]
             {
                 new("uResolve", new Vector4Uniform(new Vector4(rtgiHistory, rtgiMaxAge, RtgiSlots, rtgiChangeSigma))),
-                new("uChange", new Vector4Uniform(new Vector4(0f, rtgiFast, rtgiChangeFloor, sunTurned ? rtgiSunCut : 0f))),
+                new("uChange", new Vector4Uniform(new Vector4(rtgiChangeFrames, rtgiFast, rtgiChangeFloor, sunTurned ? rtgiSunCut : 0f))),
             },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]

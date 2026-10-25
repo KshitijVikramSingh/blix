@@ -6,20 +6,25 @@
 // uResolve.w of the fast's standard errors (the variance from the cell's luminance moments) plus uChange.z of the light, the slow takes the
 // fast's value and history -- a sun moved, a light switched, a bounce changed upstream. Judged frame by frame instead,
 // a bright frame (a rare sunlit hit) cut the history and a dark one never could: the cache read 30% bright (2026-10-26).
+// The disagreement must also last uChange.x frames running: at 3 standard errors and one frame, heavy-tailed light cut
+// cells now and then, each snapping to a noisy 64-sample mean -- spots that bounced everywhere (the user, San Miguel);
+// Crytek Sponza's flicker 4.5% (3, one frame), 3.1% (5), 1.7% (no cuts), 2026-10-26. A known change (the sun turned,
+// uChange.w) cuts at once regardless; this is the net for the rest.
 // Sun visibility likewise, its variance binomial. A slot no training reached for uResolve.y frames is emptied.
 
 layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) uniform RtgiResolve {
     vec4 uResolve;   // x samples held at most, y frames a slot lives untrained, z slots, w standard errors that cut history
-    vec4 uChange;    // y the fast mean's samples, z the share of the light a disagreement must pass besides the standard errors,
+    vec4 uChange;    // x frames running a disagreement must last; y the fast mean's samples, z the share of the light a disagreement must pass besides the standard errors,
                      // w > 0 on a frame the sun turned: every cell's light history capped to it, its sun visibility's to 4
 } u;
 
 layout(std430, set = 0, binding = 1) buffer RtgiKeys { uint rtgiKeys[]; };
 layout(std430, set = 0, binding = 2) buffer RtgiAccum { uint rtgiAccum[]; };
 layout(std430, set = 0, binding = 3) buffer RtgiResolved { vec4 rtgiResolved[]; };
-// Three per slot: (the samples' luminance mean and mean square over the fast window, history cuts: sun, light);
+// Three per slot: (the samples' luminance mean and mean square over the fast window, frames running the fast mean has
+// disagreed, history cuts);
 // (the fast mean: indirect rgb, sky visibility); (the fast sun visibility, its samples, the fast light's samples, -).
 layout(std430, set = 0, binding = 4) buffer RtgiMoments { vec4 rtgiMoments[]; };
 
@@ -65,10 +70,13 @@ void main() {
         float held = min(r1.y + n, u.uResolve.x);
         float variance = max(m.y - m.x * m.x, 0.0);
         float bound = u.uResolve.w * sqrt(variance / max(fs.z, 1.0)) + u.uChange.z * max(lum(r0.rgb), lum(fast.rgb));
-        if (r1.y > 0.5 && fs.z >= u.uChange.y && abs(lum(fast.rgb) - lum(r0.rgb)) > bound) {
+        bool disagree = r1.y > 0.5 && fs.z >= u.uChange.y && abs(lum(fast.rgb) - lum(r0.rgb)) > bound;
+        m.z = disagree ? m.z + 1.0 : 0.0;
+        if (m.z >= u.uChange.x) {
             r0 = fast;
             held = fs.z;
             m.w += 1.0;
+            m.z = 0.0;
         } else {
             // At most 1: a cell given more samples in a frame than it holds (the coarse fallback's, hundreds) took a weight
             // past 1 and the mean extrapolated, grew each frame and overflowed to NaN (2026-10-25).
@@ -88,7 +96,6 @@ void main() {
         if (r1.w > 0.5 && fs.y >= u.uChange.y && abs(fs.x - r1.x) > bound) {
             r1.x = fs.x;
             held = fs.y;
-            m.z += 1.0;
         } else r1.x = mix(r1.x, lit, min(1.0, n / max(held, 1.0)));
         r1.w = held;
     }

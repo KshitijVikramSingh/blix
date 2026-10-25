@@ -36,6 +36,15 @@ uint rtgiSide(vec3 n) {
     return n.z >= 0.0 ? 4u : 5u;
 }
 
+// The level as a continuous value: the readout blends the two around it (rtgi_readout.frag) and the training fills both
+// (rtgi_train.comp). Picked whole, a surface near a level's edge jumped to the other level's cells as the camera moved --
+// another set of cells, held differently -- and re-settled: patterns that moved with the camera (the user, San Miguel,
+// 2026-10-26).
+float rtgiLevelF(vec3 p, vec3 camera, vec4 params) {
+    float cell = params.x + params.y * length(p - camera);
+    return clamp(log2(cell / params.x), 0.0, params.w);
+}
+
 uint rtgiLevel(vec3 p, vec3 camera, vec4 params) {
     float cell = params.x + params.y * length(p - camera);
     return uint(clamp(floor(log2(cell / params.x)), 0.0, params.w));
