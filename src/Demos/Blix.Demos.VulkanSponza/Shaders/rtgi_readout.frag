@@ -43,7 +43,9 @@ vec4 readLevel(vec3 p, uint side, uint level, out float sky) {
         vec4 r1 = rtgiResolved[2u * s + 1u];
         if (r1.y < 0.5) continue;
         vec3 b = mix(1.0 - t, t, vec3(o));
-        float wk = b.x * b.y * b.z;
+        // Weighted by what it holds too, full at 32 samples: a new cell (a landing just requested, a level just blended in,
+        // one refilled) fades in under its neighbours rather than showing its first draw -- odd lights that came and went.
+        float wk = b.x * b.y * b.z * clamp(r1.y / 32.0, 1.0 / 32.0, 1.0);
         vec4 r0 = rtgiResolved[2u * s];
         e += r0.rgb * wk;
         sky += r0.a * wk;

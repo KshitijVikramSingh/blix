@@ -24,10 +24,14 @@ namespace Blix.Demos.VulkanSponza;
 internal sealed partial class SponzaLoop
 {
     private bool rtgi;
-    private int rtgiTiles = 73_000, rtgiHitPoints = 32_000, rtgiSlotsLog2 = 21;
+    // 4 M slots (272 MB): San Miguel held 1.8-3.6 M cells (87% of 4 M at the old 1 cm per metre growth, its landings then
+    // failing to find a slot).
+    private int rtgiTiles = 73_000, rtgiHitPoints = 32_000, rtgiSlotsLog2 = 22;
     // Cells untrained for --rtgi-max-age frames are emptied: 1,800 (30 s at 60 fps; at 600 a walk back to a place left 10 s
     // before found it gone and re-settling, 2026-10-26).
-    private float rtgiCell = 0.05f, rtgiCellGrow = 0.01f, rtgiMaxAge = 1800f;
+    // Cells 5 cm, growing 0.5 cm a metre from the camera (doubling every ~10 m; at 1 cm, every ~5 m, mid-distance GI went
+    // coarse too soon -- the user, 2026-10-26).
+    private float rtgiCell = 0.05f, rtgiCellGrow = 0.005f, rtgiMaxAge = 1800f;
     // --rtgi-settle-frames N: frames the cache trains before --shot-when-ready may shoot (600).
     private int rtgiSettleFrames = 600;
     // S2: a cell's history follows its light (rtgi_resolve.comp) -- up to --rtgi-history samples while its samples agree
@@ -37,7 +41,10 @@ internal sealed partial class SponzaLoop
     // |error| at Crytek Sponza's points settled, 3-4% dark; 64: 0.10 and 1.00, 2026-10-26).
     // --rtgi-change-sigma 5 and --rtgi-change-frames 3: a disagreement must pass 5 standard errors three frames running
     // (rtgi_resolve.comp): the net for changes nobody announced; announced ones (the sun turned) cut at once.
-    private float rtgiHistory = 1024f, rtgiChangeSigma = 5f, rtgiFast = 64f, rtgiChangeFloor = 0.05f, rtgiChangeFrames = 3f;
+    // --rtgi-history 16384: a still light keeps converging; capped at 1,024 a cell's mean kept moving by a 1/1,024 of each
+    // sample, the shadowed areas' rare bright ones most -- mud that never settled (the user). Crytek Sponza settled: flicker
+    // 1.6% -> 0.8%, error 0.100 -> 0.097 (2026-10-26). Changes are the cuts' (the sun's at once, the rest's net).
+    private float rtgiHistory = 16384f, rtgiChangeSigma = 5f, rtgiFast = 64f, rtgiChangeFloor = 0.05f, rtgiChangeFrames = 3f;
     // --rtgi-sun-cut N: on a frame the sun turns (0.02 degrees or more), every cell's light history capped to N samples
     // (and its sun visibility's to 4): a known change, not one for the fast mean to find. 0: none.
     private float rtgiSunCut = 32f;
@@ -99,6 +106,7 @@ internal sealed partial class SponzaLoop
         rtgiNoCoarse = args.Flag("rtgi-no-coarse");
         rtgiBackfaceLit = args.Flag("rtgi-backface-lit");
         if (args.Flag("rtgi-no-requests")) rtgiRequests = false;
+        fixedSubpixel = args.Flag("fixed-subpixel");
         if (args.Float("rtgi-clamp-sigma") is { } cls) rtgiClampSigma = MathF.Max(0f, cls);
         rtgiScreen = args.Flag("rtgi-screen");
         if (rtgiScreen) rtgi = true;

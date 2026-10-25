@@ -52,20 +52,24 @@ uvec2 cellAt(vec3 p, vec3 n, uint level) {
     return rtgiCellHash(ivec3(floor(p / rtgiSize(level, u.uParams))), level, rtgiSide(n), u.uParams);
 }
 
-// q's outgoing radiance times PI over its albedo: E_ind + direct sun, from its cell or a coarser one; w 0 when neither holds any.
+// q's outgoing radiance times PI over its albedo: E_ind + direct sun, from its cell once it holds 8 samples, else the cell
+// two levels up, else its own however few it holds; w 0 when none holds any. A cell of a sample or two passed its one
+// draw on down the bounce -- odd lights that came and went (the user, Crytek Sponza, 2026-10-26). fine: its own cell
+// held enough (else the landing is requested, rtgi_rays.comp).
 vec4 irradianceAt(vec3 q, vec3 nq, out bool fine) {
     uint level = rtgiLevel(q, u.uCamera.xyz, u.uParams);
     fine = false;
-    for (uint up = 0u; up <= (u.uTrain.y > 0.5 ? 0u : 2u); up += 2u) {
-        uint l = min(level + up, uint(u.uParams.w));
-        uint s = rtgiFind(cellAt(q, nq, l), u.uParams);
-        if (s == 0xFFFFFFFFu) continue;
-        vec4 r0 = rtgiResolved[2u * s], r1 = rtgiResolved[2u * s + 1u];
-        if (r1.y < 0.5) continue;
-        fine = up == 0u;
-        return vec4(r0.rgb + u.uSunIrradiance.rgb * max(0.0, dot(nq, u.uSun.xyz)) * r1.x, 1.0);
+    uint own = rtgiFind(cellAt(q, nq, level), u.uParams);
+    vec4 o0 = vec4(0.0), o1 = vec4(0.0);
+    if (own != 0xFFFFFFFFu) { o0 = rtgiResolved[2u * own]; o1 = rtgiResolved[2u * own + 1u]; }
+    vec4 r0 = o0, r1 = o1;
+    if (o1.y >= 8.0) fine = true;
+    else if (u.uTrain.y < 0.5) {
+        uint s = rtgiFind(cellAt(q, nq, min(level + 2u, uint(u.uParams.w))), u.uParams);
+        if (s != 0xFFFFFFFFu && rtgiResolved[2u * s + 1u].y >= 0.5) { r0 = rtgiResolved[2u * s]; r1 = rtgiResolved[2u * s + 1u]; }
     }
-    return vec4(0.0);
+    if (r1.y < 0.5) return vec4(0.0);
+    return vec4(r0.rgb + u.uSunIrradiance.rgb * max(0.0, dot(nq, u.uSun.xyz)) * r1.x, 1.0);
 }
 
 vec4 dither;
