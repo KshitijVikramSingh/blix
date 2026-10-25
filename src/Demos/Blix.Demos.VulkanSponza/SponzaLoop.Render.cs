@@ -761,6 +761,7 @@ internal sealed partial class SponzaLoop
         UpdateBakeScene();
         profFrameSize = (frame.Width, frame.Height);
         using (Prof("rt-shadows")) RecordRtShadows(frame.Width, frame.Height);
+        using (Prof("rtgi-probe")) RecordRtgiProbe(frame.Width, frame.Height);
         CookTransportWhenReady();
         CookGiWhenLanded();
         using (Prof("clipmap")) RecordClipmap();

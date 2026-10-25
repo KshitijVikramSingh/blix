@@ -181,6 +181,7 @@ internal sealed partial class SponzaLoop
         }
         // --rt-shadows: the lit pass's sun shadows traced on Apple's ray tracing hardware (SponzaLoop.RtShadows).
         rtShadows = args.Flag("rt-shadows");
+        ParseRtgiProbe(args);
         lightletCensus = args.Flag("lightlet-census");
         lightletRecord = args.Flag("lightlet-record");
         rayLeakCensus = args.Flag("ray-leak-census");
@@ -857,6 +858,8 @@ internal sealed partial class SponzaLoop
             .Read(SampleableSceneDepth).Read(SampleablePrepassNormal)
             // The atlas texel a pixel shows, for the lightlets' sun records (rt_shadow_rays.comp).
             .Read(lightmapEnabled ? lightmapTexelHandle : surfaceKeyHandle).Handle;
+        // --rtgi-probe (S0): its rays before the traced shadows' group that takes their batches.
+        DeclareRtgiProbePasses(stage => Reflect(stage));
         rtShadowTracePassHandle = graph.ExternalPass("rt-shadow-trace");
 
         // The Hi-Z pyramid, immediately after the pre-pass that resolves the depth it reduces.
@@ -1303,6 +1306,7 @@ internal sealed partial class SponzaLoop
         var rayViewSpv = File.ReadAllBytes(Path.Combine(shaderDir, "ray_view.comp.spv"));
         rayViewPipeline = Own(device.CreateComputePipeline(
             Own(device.CreateComputeShaderProgramFromSpv(rayViewSpv, rayViewInterface, "ray_view")), "ray_view"));
+        CreateRtgiProbePipelines(shaderDir);
         rtShadowRaysPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "rt_shadow_rays.comp.spv")), rtShadowRaysInterface, "rt_shadow_rays")), "rt_shadow_rays"));
         rtShadowFilterPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
