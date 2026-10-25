@@ -237,6 +237,8 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         graphicsDevice = new VulkanGraphicsDevice(
             vkSurface, w, h, preserveSwapchainDepth: debugSystem is not null);
         Console.WriteLine($"Graphics: {graphicsDevice.Info.Vendor} | {graphicsDevice.Info.Renderer} | {graphicsDevice.Info.Version}");
+        // An HDR surface only lights the panel above SDR white if the layer asks for extended range.
+        if (graphicsDevice.HdrOutput && OperatingSystem.IsMacOS()) Console.WriteLine($"[blix] {MacEdr.EnableExtendedRange(window)}");
         if (debugSystem is not null)
         {
             // VkLineDrawer translates debug.Draw.* commands into a Vulkan
@@ -754,6 +756,9 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
     }
 
     public (int Width, int Height) LogicalSize => (window.Size.X, window.Size.Y);
+
+    // The headroom the display is granting now (see IRenderHost.DisplayHeadroom). macOS only; 1.0 elsewhere.
+    public float DisplayHeadroom => OperatingSystem.IsMacOS() ? (float)Math.Max(1.0, MacEdr.Headroom()) : 1f;
 
     // The present mode is the device's (FIFO when on; mailbox, then immediate, when off). Silk's own
     // window.VSync is a GL swap interval, and setting only that did nothing on Vulkan.
