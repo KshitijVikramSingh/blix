@@ -271,6 +271,8 @@ internal sealed partial class SponzaLoop
     // Crytek Sponza's downward faces 1.088 -> 1.059 against its truth settled, 1.107 -> 1.058 at 60 frames, energy 1.012 ->
     // 1.003; the frame alike (2026-10-26). --rtgi-no-trace-hit-sun: the cell's.
     private bool rtgiTraceHitSun = true;
+    // A sample added three levels up 1 in 2, four up 1 in 4 (rtgi_train.comp). --rtgi-no-thin: every level every sample.
+    private bool rtgiThin = true;
     private float RtgiRandomFrame => (rtgiFrameCount + rtgiSeed * 1_000_003u) % (1u << 24);
     private int RtgiSlots => 1 << rtgiSlotsLog2;
     private Vector4 RtgiParams => new(rtgiCell, rtgiCellGrow, RtgiSlots - 1, RtgiTopLevel);
@@ -281,6 +283,7 @@ internal sealed partial class SponzaLoop
         if (args.Int("rtgi-seed") is { } sd) rtgiSeed = (uint)Math.Max(0, sd);
         if (args.Float("rtgi-hit-sun") is { } hs) rtgiHitSun = MathF.Max(0f, hs);
         if (args.Flag("rtgi-no-trace-hit-sun")) rtgiTraceHitSun = false;
+        if (args.Flag("rtgi-no-thin")) rtgiThin = false;
         if (args.Int("rtgi-tiles") is { } t) rtgiTiles = Math.Max(1, t);
         if (args.Int("rtgi-hits") is { } h) rtgiHitPoints = Math.Max(0, h);
         if (args.Int("rtgi-slots-log2") is { } sl) rtgiSlotsLog2 = Math.Clamp(sl, 16, 24);
@@ -483,7 +486,7 @@ internal sealed partial class SponzaLoop
             rtgiOccludedBuf = Two(n * 4, "occluded");
             rtgiRequestBufs = Enumerable.Range(0, 2).Select(s => Own(device.CreateGpuBuffer(16 + Math.Max(1, rtgiHitPoints) * 80, new byte[16 + Math.Max(1, rtgiHitPoints) * 80], $"sponza.rtgi.requests{s}"))).ToArray();
             rtgiKeys = Own(device.CreateGpuBuffer(RtgiSlots * 4, new byte[RtgiSlots * 4], "sponza.rtgi.keys"));
-            rtgiAccum = Own(device.CreateGpuBuffer(RtgiSlots * 56, new byte[RtgiSlots * 56], "sponza.rtgi.accum"));
+            rtgiAccum = Own(device.CreateGpuBuffer(RtgiSlots * 64, new byte[RtgiSlots * 64], "sponza.rtgi.accum"));
             rtgiDirection = Own(device.CreateGpuBuffer(RtgiSlots * 16, new byte[RtgiSlots * 16], "sponza.rtgi.direction"));
             rtgiConfidence = Own(device.CreateGpuBuffer(RtgiSlots * 16, new byte[RtgiSlots * 16], "sponza.rtgi.confidence"));
             rtgiUnsure = Own(device.CreateGpuBuffer(RtgiUnsureSize * 4, new byte[RtgiUnsureSize * 4], "sponza.rtgi.unsure"));
@@ -496,7 +499,7 @@ internal sealed partial class SponzaLoop
             rtgiGuideDist = Own(device.CreateGpuBuffer(RtgiGuideSlots * 9 * 16, new byte[RtgiGuideSlots * 9 * 16], "sponza.rtgi.guide-dist"));
             rtgiDoneCount = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.rtgi.done-count"));
             rtgiResolved = Own(device.CreateGpuBuffer(RtgiSlots * 32, new byte[RtgiSlots * 32], "sponza.rtgi.resolved"));
-            rtgiPushScratch = Own(device.CreateGpuBuffer(16 + RtgiPushRoom * 14 * 4, new byte[16 + RtgiPushRoom * 14 * 4], "sponza.rtgi.push-scratch"));
+            rtgiPushScratch = Own(device.CreateGpuBuffer(16 + RtgiPushRoom * 16 * 4, new byte[16 + RtgiPushRoom * 16 * 4], "sponza.rtgi.push-scratch"));
             rtgiMoments = Own(device.CreateGpuBuffer(RtgiSlots * 48, new byte[RtgiSlots * 48], "sponza.rtgi.moments"));
             rtgiStamps = Own(device.CreateGpuBuffer(RtgiSlots * 8, new byte[RtgiSlots * 8], "sponza.rtgi.stamps"));
             rtgiCells = Own(device.CreateGpuBuffer(RtgiSlots * 16, new byte[RtgiSlots * 16], "sponza.rtgi.cells"));
@@ -520,7 +523,7 @@ internal sealed partial class SponzaLoop
                 rtgiSpatialOccluded = Twin(rtgiTiles * 4, "spatial-occluded");
             }
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                $"[VulkanSponza] rtgi: {rtgiTiles:N0} visible points and {rtgiHitPoints:N0} from last frame's hits a frame; cache {RtgiSlots:N0} slots ({RtgiSlots * 72 / 1048576.0:0} MB), cells {rtgiCell:0.###} m + {rtgiCellGrow:0.###} per metre, {rtgiHistory:0} samples held, untrained cells emptied after {rtgiMaxAge:0} frames."));
+                $"[VulkanSponza] rtgi: {rtgiTiles:N0} visible points and {rtgiHitPoints:N0} from last frame's hits a frame; cache {RtgiSlots:N0} slots ({RtgiSlots * 80 / 1048576.0:0} MB), cells {rtgiCell:0.###} m + {rtgiCellGrow:0.###} per metre, {rtgiHistory:0} samples held, untrained cells emptied after {rtgiMaxAge:0} frames."));
         }
         // The panel's freeze: no rays, no training, the cache read as it stands.
         if (rtgiFrozen) return;
@@ -548,7 +551,7 @@ internal sealed partial class SponzaLoop
                     new("uClamp", new Vector4Uniform(new Vector4(rtgiClampSigma, frameNumber, RtgiDirtyRoom, 0f))),
                     new("uGuideTable", new Vector4Uniform(new Vector4(rtgiGuide > 0f ? RtgiGuideSlots - 1 : 0f, 0f, 0f, 0f))),
                     new("uTrain", new Vector4Uniform(new Vector4(rtgiCountUnknown ? 1f : 0f, rtgiNoCoarse ? 1f : 0f, rtgiBackfaceLit ? 1f : 0f, rtgiRequests ? rtgiHitPoints : 0f))),
-                    new("uHitSun", new Vector4Uniform(new Vector4(rtgiTraceHitSun ? 1f : 0f, 0f, 0f, 0f))),
+                    new("uHitSun", new Vector4Uniform(new Vector4(rtgiTraceHitSun ? 1f : 0f, rtgiThin ? 1f : 0f, 0f, 0f))),
                     new("uFallback", new Vector4Uniform(new Vector4(rtgiFallbackUp, rtgiContact ? 1f : 0f, rtgiDefer ? 1f : 0f, rtgiSubgroup ? 1f : 0f))),
                 },
                 new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },

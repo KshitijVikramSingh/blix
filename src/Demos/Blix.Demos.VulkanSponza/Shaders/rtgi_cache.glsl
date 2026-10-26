@@ -16,8 +16,11 @@
 // A slot's accumulator words: indirect rgb, count, sky misses, sun reached, sun traced, luminance squared, and the
 // irradiance vector's three components (signed, two's complement in the uints: rtgi_train.comp), the near visibility's
 // weighted count, the luminance the escaping rays brought (the far light: rtgi_readout.frag's contact split), and the
-// rays' inverse hit distances (256ths; a miss at the ray's reach) -- how near the geometry around the cell is.
-#define RTGI_ACC 14u
+// rays' inverse hit distances (256ths; a miss at the ray's reach) -- how near the geometry around the cell is. Fourteen
+// words used (RTGI_WORDS), the stride 16: a cell's frame in one 64-byte line, read and cleared as four uvec4s
+// (rtgi_resolve.comp) and its atomics on one line.
+#define RTGI_ACC 16u
+#define RTGI_WORDS 14u
 // Fixed point 4096, a sample capped at 512, rounded stochastically (rtgi_train.comp): at 256 and rounded to nearest, the
 // gate's dark corridor (irradiance ~0.001, a sample ~0.26 of a unit) rounded most samples to 0 -- its dead end read 0.77,
 // the dimmest quarter of its points 0.70 (2026-10-26). A frame's sum holds ~2,000 capped samples a cell.

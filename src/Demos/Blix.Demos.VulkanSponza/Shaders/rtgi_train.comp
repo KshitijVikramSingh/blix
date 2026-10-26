@@ -27,7 +27,8 @@ layout(set = 0, binding = 0) uniform RtgiTrain {
                          // y the frame's number (from 1); z the dirty list's room
     vec4 uTrain;         // x 1: a landing cell holding nothing counts as dark (else no sample); y 1: no coarser cell for it;
                          // z 1: a back face's hit read as a front's (else dark); w room for landing requests (0: none)
-    vec4 uHitSun;        // x 1: each hit's sun traced (hit flag 8), else read from the hit cell
+    vec4 uHitSun;        // x 1: each hit's sun traced (hit flag 8), else read from the hit cell; y 1: the levels three and four
+                         // up thinned
     vec4 uFallback;      // x the levels past two up a landing may look for a cell holding light (0: two up only); y 1: contact
                          // detail on (the near and far words written); z 1: landings deferred to their request's sample;
                          // w 1: a cell's words summed over the subgroup before they are written
@@ -158,7 +159,8 @@ void commit(uint s, uint w[RTGI_ACC]) {
                 uint lead = subgroupBroadcastFirst(s);
                 if (s == lead) {
                     uint sum[RTGI_ACC];
-                    for (uint k = 0u; k < RTGI_ACC; k++) sum[k] = subgroupAdd(w[k]);
+                    for (uint k = 0u; k < RTGI_WORDS; k++) sum[k] = subgroupAdd(w[k]);
+                    for (uint k = RTGI_WORDS; k < RTGI_ACC; k++) sum[k] = 0u;
                     if (subgroupElect()) writeCell(s, sum);
                     writing = false;
                 }
@@ -301,8 +303,14 @@ void main() {
     // Its level and uNearField.w - 1 above (3: the next, which the readout blends in, and two up, the fallback; more feed
     // the blend's cascade further up, rtgi_filter.comp).
     uint top = uint(u.uParams.w);
-    for (uint k = 0u; k < uint(u.uNearField.w) && level + k <= top; k++)
+    // Thinned (uHitSun.y): three levels up a sample is added 1 in 2, four up 1 in 4 -- parents fed by many fine cells,
+    // their means no different for fewer samples. Each level was an insert and a dozen atomics a sample: the training
+    // ~8 ms a frame through Crytek Sponza's first seconds at 4x the rays (2026-10-26).
+    uint thin = rtgiHash(hd ^ 0x9E3779B9u);
+    for (uint k = 0u; k < uint(u.uNearField.w) && level + k <= top; k++) {
+        if (u.uHitSun.y > 0.5 && k >= 3u && ((thin >> (4u * k)) & ((1u << (k - 2u)) - 1u)) != 0u) continue;
         add(rtgiInsertAt(p.xyz, n, level + k), e, counted, sky, sunTraced, sunLit, k < 3u);
+    }
     // A deferred landing's sample, now that this point -- its landing -- has its own: the light leaving here (this sample's
     // indirect irradiance, its own sun ray's direct) times the albedo, along the origin's ray, into the origin's cells.
     vec4 o0 = pointOrigins[3u * i + 2u];

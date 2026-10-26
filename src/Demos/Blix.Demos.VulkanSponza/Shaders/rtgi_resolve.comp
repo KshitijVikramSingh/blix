@@ -29,7 +29,8 @@ layout(set = 0, binding = 0) uniform RtgiResolve {
 } u;
 
 layout(std430, set = 0, binding = 1) buffer RtgiKeys { uint rtgiKeys[]; };
-layout(std430, set = 0, binding = 2) buffer RtgiAccum { uint rtgiAccum[]; };
+// A slot's frame of samples: 16 words, four uvec4s (rtgi_cache.glsl's RTGI_ACC; the words as there).
+layout(std430, set = 0, binding = 2) buffer RtgiAccum { uvec4 rtgiAccum4[]; };
 layout(std430, set = 0, binding = 3) buffer RtgiResolved { vec4 rtgiResolved[]; };
 // Three per slot: (the samples' luminance mean and mean square over the fast window, frames running the fast mean has
 // disagreed, history cuts);
@@ -45,7 +46,6 @@ layout(std430, set = 0, binding = 6) readonly buffer RtgiDirty { uint dirtyCount
 // The other parity's list: its count zeroed here for the next frame's training.
 layout(std430, set = 0, binding = 7) buffer RtgiNextDirty { uint nextDirtyCount; uint nextDirtyPad[3]; uint nextDirty[]; };
 
-#define RTGI_ACC 14u
 #define RTGI_SCALE 4096.0
 #define RTGI_LUM2_SCALE 4096.0
 
@@ -57,7 +57,8 @@ void main() {
     if (i >= min(dirtyCount, uint(u.uList.y))) return;
     uint s = dirty[i];
     if (rtgiKeys[s] == 0u) return;
-    uint count = rtgiAccum[RTGI_ACC * s + 3u], sunTraced = rtgiAccum[RTGI_ACC * s + 6u];
+    uvec4 a0 = rtgiAccum4[4u * s], a1 = rtgiAccum4[4u * s + 1u], a2 = rtgiAccum4[4u * s + 2u], a3 = rtgiAccum4[4u * s + 3u];
+    uint count = a0.w, sunTraced = a1.z;
     vec4 r0 = rtgiResolved[2u * s], r1 = rtgiResolved[2u * s + 1u];
     // The sun turned since this cell last saw it: what it holds of it is stale, whether or not its samples have shown it
     // yet -- a known change, not one to wait for the fast mean to find (at 64 samples, ~10 s to settle a 20 degree change,
@@ -71,15 +72,15 @@ void main() {
     vec4 m = rtgiMoments[3u * s], fast = rtgiMoments[3u * s + 1u], fs = rtgiMoments[3u * s + 2u];
     if (count > 0u) {
         float n = float(count);
-        vec3 mean = vec3(rtgiAccum[RTGI_ACC * s], rtgiAccum[RTGI_ACC * s + 1u], rtgiAccum[RTGI_ACC * s + 2u]) / (RTGI_SCALE * n);
-        float meanSq = float(rtgiAccum[RTGI_ACC * s + 7u]) / (RTGI_LUM2_SCALE * n);
-        float sky = float(rtgiAccum[RTGI_ACC * s + 4u]) / n;
-        vec3 frameB = vec3(int(rtgiAccum[RTGI_ACC * s + 8u]), int(rtgiAccum[RTGI_ACC * s + 9u]), int(rtgiAccum[RTGI_ACC * s + 10u])) / (RTGI_SCALE * n);
+        vec3 mean = vec3(a0.xyz) / (RTGI_SCALE * n);
+        float meanSq = float(a1.w) / (RTGI_LUM2_SCALE * n);
+        float sky = float(a1.x) / n;
+        vec3 frameB = vec3(ivec3(a2.xyz)) / (RTGI_SCALE * n);
         vec4 dir = rtgiDirection[s];
         // Its near visibility (w): the share of its rays past the contact radius, weighted (rtgi_train.comp).
-        float frameNear = float(rtgiAccum[RTGI_ACC * s + 11u]) / (256.0 * n);
+        float frameNear = float(a2.w) / (256.0 * n);
         // The far light's share of the frame's light (luminance), into the fast state's w.
-        float frameFar = lum(mean) > 1e-7 ? clamp(float(rtgiAccum[RTGI_ACC * s + 12u]) / (RTGI_SCALE * n) / lum(mean), 0.0, 1.0) : 1.0;
+        float frameFar = lum(mean) > 1e-7 ? clamp(float(a3.x) / (RTGI_SCALE * n) / lum(mean), 0.0, 1.0) : 1.0;
         // The fast mean and the moments over its window.
         fs.z = min(fs.z + n, u.uChange.y);
         float wf = min(1.0, n / max(fs.z, 1.0));
@@ -101,7 +102,7 @@ void main() {
             m.w += 1.0;
             m.z = 0.0;
             dir = vec4(frameB, frameNear);
-            rtgiHitInv[s] = float(rtgiAccum[RTGI_ACC * s + 13u]) / (256.0 * n);
+            rtgiHitInv[s] = float(a3.y) / (256.0 * n);
             fs.w = frameFar;
         } else {
             // At most 1: a cell given more samples in a frame than it holds (the coarse fallback's, hundreds) took a weight
@@ -110,7 +111,7 @@ void main() {
             r0 = vec4(mix(r0.rgb, mean, w), mix(r0.a, sky, w));
             dir = vec4(mix(dir.xyz, frameB, w), mix(dir.w, frameNear, w));
             fs.w = mix(fs.w, frameFar, w);
-            rtgiHitInv[s] = mix(rtgiHitInv[s], float(rtgiAccum[RTGI_ACC * s + 13u]) / (256.0 * n), w);
+            rtgiHitInv[s] = mix(rtgiHitInv[s], float(a3.y) / (256.0 * n), w);
         }
         rtgiDirection[s] = dir;
         r1.y = held;
@@ -118,7 +119,7 @@ void main() {
     }
     if (sunTraced > 0u) {
         float n = float(sunTraced);
-        float lit = float(rtgiAccum[RTGI_ACC * s + 5u]) / n;
+        float lit = float(a1.y) / n;
         fs.y = min(fs.y + n, u.uChange.y);
         fs.x = mix(fs.x, lit, min(1.0, n / max(fs.y, 1.0)));
         float held = min(r1.w + n, u.uResolve.x);
@@ -135,5 +136,5 @@ void main() {
     rtgiMoments[3u * s] = m;
     rtgiMoments[3u * s + 1u] = fast;
     rtgiMoments[3u * s + 2u] = fs;
-    for (uint k = 0u; k < RTGI_ACC; k++) rtgiAccum[RTGI_ACC * s + k] = 0u;
+    for (uint k = 0u; k < 4u; k++) rtgiAccum4[4u * s + k] = uvec4(0u);
 }
