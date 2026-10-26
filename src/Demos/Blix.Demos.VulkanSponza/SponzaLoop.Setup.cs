@@ -930,6 +930,11 @@ internal sealed partial class SponzaLoop
         referenceShadowBatch = DeclareShadowBatch("reference-shadow");
         referenceSunBatch = DeclareClosestBatch("reference-sun");
         referenceWaveResolvePass = graph.ComputePass("reference-wave-resolve").Shader(referenceWaveInterface).Handle;
+        // The BSDF reference's sun goes on through thin panes in two more rounds (a pass takes one piece of work a frame, so each has its own).
+        referenceSunBatch2 = DeclareClosestBatch("reference-sun-2");
+        referenceWaveResolve2Pass = graph.ComputePass("reference-wave-resolve-2").Shader(referenceWaveInterface).Handle;
+        referenceSunBatch3 = DeclareClosestBatch("reference-sun-3");
+        referenceWaveResolve3Pass = graph.ComputePass("reference-wave-resolve-3").Shader(referenceWaveInterface).Handle;
         referencePassHandle = graph.ComputePass("reference-trace").Shader(referenceInterface)
             .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
         screenProbeFilterInterface = Reflect("screen_probe_filter.comp");

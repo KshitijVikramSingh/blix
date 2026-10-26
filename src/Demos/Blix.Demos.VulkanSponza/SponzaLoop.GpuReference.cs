@@ -54,8 +54,8 @@ internal sealed partial class SponzaLoop
         ?? Math.Clamp((int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)Math.Max(1, GpuReferenceTarget / ReferenceLaneMostPaths)), 256, ReferenceLanesAuto);
     private ShaderInterface referenceWaveInterface = null!;
     private PipelineHandle referenceWavePipeline;
-    private PassHandle referenceWaveStepPass, referenceWaveShadePass, referenceWaveResolvePass;
-    private RayBatchPasses referenceClosestBatch, referenceShadowBatch, referenceSunBatch;
+    private PassHandle referenceWaveStepPass, referenceWaveShadePass, referenceWaveResolvePass, referenceWaveResolve2Pass, referenceWaveResolve3Pass;
+    private RayBatchPasses referenceClosestBatch, referenceShadowBatch, referenceSunBatch, referenceSunBatch2, referenceSunBatch3;
     // The reference's sun rays traced as closest rays, anything met shade (reference_wave.comp, BatchSunRays): the paths'
     // own trace, independent of the frame's shadow kernel and its sheets. --ref-shadow-batch: the shadow batch, as before.
     private bool refSunClosest = true;
@@ -323,11 +323,10 @@ internal sealed partial class SponzaLoop
         if (bsdf)
         {
             // A thin pane in the sun's way: the light goes on through it, and each further round takes it past one more (three panes in all, then the last stops at anything).
-            for (var round = 0; round < 2; round++)
-            {
-                RecordClosestBatch(referenceSunBatch, w.SunRays, w.SunHits, count, frameSeed ^ 0x5bd1e995u, on, instances: bsdf);
-                graph.Dispatch(referenceWaveResolvePass, Wave(round == 1 ? 3 : 2));
-            }
+            RecordClosestBatch(referenceSunBatch2, w.SunRays, w.SunHits, count, frameSeed ^ 0x5bd1e995u, on, instances: bsdf);
+            graph.Dispatch(referenceWaveResolve2Pass, Wave(2));
+            RecordClosestBatch(referenceSunBatch3, w.SunRays, w.SunHits, count, frameSeed ^ 0x5bd1e995u, on, instances: bsdf);
+            graph.Dispatch(referenceWaveResolve3Pass, Wave(3));
         }
         w.Dispatch++;
     }

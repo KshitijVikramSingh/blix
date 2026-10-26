@@ -247,6 +247,23 @@ internal sealed record SceneProfile(
         DefaultSunDegrees = new Vector2(0f, -45f),
     };
 
+    // Khronos' samples for the BSDF (tools/testbeds/bsdf.sh), each on open ground with the sun in front of it.
+    private static SceneProfile KhronosBsdf(string name, string title, Vector3 start, float pitch) => Cornell with
+    {
+        Name = name,
+        Title = title,
+        Packs = new ScenePack[] { new(name, Required: true) },
+        StartPosition = start,
+        StartPitch = pitch,
+        DefaultSunDegrees = new Vector2(0f, -45f),
+    };
+
+    public static readonly SceneProfile KhronosTransmission = KhronosBsdf("khronos-transmission", "Vulkan Khronos transmission test", new Vector3(0f, 1.2f, 6f), 0f);
+    public static readonly SceneProfile KhronosDragon = KhronosBsdf("khronos-dragon", "Vulkan Khronos attenuating dragon", new Vector3(0f, 1.0f, 4f), 0f);
+    public static readonly SceneProfile KhronosCoat = KhronosBsdf("khronos-coat", "Vulkan Khronos clearcoat test", new Vector3(0f, 1.0f, 4f), 0f);
+    public static readonly SceneProfile KhronosAniso = KhronosBsdf("khronos-aniso", "Vulkan Khronos anisotropy disc", new Vector3(0f, 1.0f, 4f), 0f);
+    public static readonly SceneProfile KhronosSheen = KhronosBsdf("khronos-sheen", "Vulkan Khronos sheen chair", new Vector3(0f, 1.0f, 4f), 0f);
+
     /// <summary>Two rooms sharing a 0.1 m wall, one open to the sky, one sealed (<c>blix thinwall</c>): a leak scene.</summary>
     /// <remarks>
     /// The truth inside the sealed room (x &gt; 0) is exactly no light, so every bit of indirect light the GI puts
@@ -327,7 +344,7 @@ internal sealed record SceneProfile(
         StartPitch = 5f,
     };
 
-    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, CornellPanel, Drapes, SheetSlab, SheetShell, SheetShellThin, ThinWall, Crevices, CrevicesDark, CrevicesHashed, KhronosPlant, KhronosTeacup, KhronosTest, KhronosAlpha, CrytekSponza };
+    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, CornellPanel, Drapes, SheetSlab, SheetShell, SheetShellThin, ThinWall, Crevices, CrevicesDark, CrevicesHashed, KhronosPlant, KhronosTeacup, KhronosTest, KhronosAlpha, KhronosTransmission, KhronosDragon, KhronosCoat, KhronosAniso, KhronosSheen, CrytekSponza };
 
     /// <summary>The profile <c>--scene</c> names, Sponza when it names none.</summary>
     public static SceneProfile Named(string? name)
