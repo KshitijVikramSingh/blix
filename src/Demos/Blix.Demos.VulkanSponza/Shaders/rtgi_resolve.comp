@@ -10,6 +10,11 @@
 // cells now and then, each snapping to a noisy 64-sample mean -- spots that bounced everywhere (the user, San Miguel);
 // Crytek Sponza's flicker 4.5% (3, one frame), 3.1% (5), 1.7% (no cuts), 2026-10-26. A known change (the sun turned,
 // uChange.w) cuts at once regardless; this is the net for the rest.
+// Its history is also held to uAge.x of its age (the samples since it began, or was last cut; at least uAge.y): the first
+// samples were taken while the cells their rays read were still wrong -- dark before the bounce built, bright from coarse
+// fallbacks -- and kept in a mean of up to 16,384 they faded only as fast as new ones diluted them, thousands of frames
+// (the thin wall's open room 4.5% dark at the gate's shot, 3.4% at 6,000 frames; Crytek Sponza 17% bright at 60).
+// Held to half its age, a stale start fades as the square of its share instead; a settled cell still grows without end.
 // Sun visibility likewise, its variance binomial. It visits the cells training listed this frame (rtgi_train.comp) -- not
 // every slot (5.5 ms a frame at San Miguel's 8 M slots); emptying the ones no training reached is rtgi_evict.comp's.
 
@@ -19,6 +24,7 @@ layout(set = 0, binding = 0) uniform RtgiResolve {
     vec4 uResolve;   // x samples held at most, y frames a slot lives untrained, z slots, w standard errors that cut history
     vec4 uChange;    // x frames running a disagreement must last; y the fast mean's samples, z the share of the light a disagreement must pass besides the standard errors,
                      // w the samples a sun turn leaves a cell's light history (its sun visibility's: 4)
+    vec4 uAge;       // x the share of its age a cell's light history holds at most (0: no limit); y that limit at least
     vec4 uList;      // x the sun's epoch (counts its turns); y the dirty list's room
 } u;
 
@@ -56,6 +62,7 @@ void main() {
     // 2026-10-26). Taken when it is next trained (its epoch behind the sun's), not swept over every slot.
     if (rtgiStamps[s].y != uint(u.uList.x)) {
         r1.y = min(r1.y, u.uChange.w);
+        r1.z = min(r1.z, r1.y);
         r1.w = min(r1.w, 4.0);
         rtgiStamps[s].y = uint(u.uList.x);
     }
@@ -77,8 +84,10 @@ void main() {
         fast = vec4(mix(fast.rgb, mean, wf), mix(fast.a, sky, wf));
         m.x = mix(m.x, lum(mean), wf);
         m.y = mix(m.y, meanSq, wf);
-        // The slow mean, or the fast one when they disagree.
+        // The slow mean, or the fast one when they disagree; its history at most uAge.x of its age (r1.z, in samples).
+        float age = r1.z + n;
         float held = min(r1.y + n, u.uResolve.x);
+        if (u.uAge.x > 0.0) held = min(held, max(u.uAge.x * age, u.uAge.y));
         float variance = max(m.y - m.x * m.x, 0.0);
         float bound = u.uResolve.w * sqrt(variance / max(fs.z, 1.0)) + u.uChange.z * max(lum(r0.rgb), lum(fast.rgb));
         bool disagree = r1.y > 0.5 && fs.z >= u.uChange.y && abs(lum(fast.rgb) - lum(r0.rgb)) > bound;
@@ -86,6 +95,7 @@ void main() {
         if (m.z >= u.uChange.x) {
             r0 = fast;
             held = fs.z;
+            age = fs.z;
             m.w += 1.0;
             m.z = 0.0;
             dir = vec4(frameB, frameNear);
@@ -100,6 +110,7 @@ void main() {
         }
         rtgiDirection[s] = dir;
         r1.y = held;
+        r1.z = age;
     }
     if (sunTraced > 0u) {
         float n = float(sunTraced);
@@ -115,7 +126,6 @@ void main() {
         } else r1.x = mix(r1.x, lit, min(1.0, n / max(held, 1.0)));
         r1.w = held;
     }
-    r1.z = 0.0;
     rtgiResolved[2u * s] = r0;
     rtgiResolved[2u * s + 1u] = r1;
     rtgiMoments[3u * s] = m;

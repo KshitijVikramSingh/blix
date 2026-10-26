@@ -51,6 +51,9 @@ internal sealed partial class SponzaLoop
     // --rtgi-sun-cut N: on a frame the sun turns (0.02 degrees or more), every cell's light history capped to N samples
     // (and its sun visibility's to 4): a known change, not one for the fast mean to find. 0: none.
     private float rtgiSunCut = 32f;
+    // --rtgi-age F: a cell's light history held to F of its age in samples (at least --rtgi-age-floor, 64), so the samples
+    // taken before the cells around it had their light fade fast (rtgi_resolve.comp). 0: no limit.
+    private float rtgiAge = 0.25f, rtgiAgeFloor = 64f;
     private Vector3 rtgiLastSun;
     // Diagnostics for the cache's bounce (the dead end 23% dark, 2026-10-26): --rtgi-count-unknown counts a landing cell
     // that holds nothing as dark; --rtgi-no-coarse gives the training no coarser cell to read in its place.
@@ -186,6 +189,8 @@ internal sealed partial class SponzaLoop
         if (args.Int("rtgi-settle-frames") is { } sf) rtgiSettleFrames = Math.Max(0, sf);
         if (args.Float("rtgi-change-sigma") is { } cs) rtgiChangeSigma = MathF.Max(0.5f, cs);
         if (args.Float("rtgi-fast") is { } fa) rtgiFast = MathF.Max(1f, fa);
+        if (args.Float("rtgi-age") is { } ag) rtgiAge = Math.Clamp(ag, 0f, 1f);
+        if (args.Float("rtgi-age-floor") is { } af) rtgiAgeFloor = MathF.Max(1f, af);
         if (args.Float("rtgi-change-floor") is { } cf) rtgiChangeFloor = MathF.Max(0f, cf);
         if (args.Float("rtgi-change-frames") is { } cfr) rtgiChangeFrames = MathF.Max(1f, cfr);
         if (args.Float("rtgi-sun-cut") is { } sc) rtgiSunCut = MathF.Max(0f, sc);
@@ -442,6 +447,7 @@ internal sealed partial class SponzaLoop
             {
                 new("uResolve", new Vector4Uniform(new Vector4(rtgiHistory, rtgiMaxAge, RtgiSlots, rtgiChangeSigma))),
                 new("uChange", new Vector4Uniform(new Vector4(rtgiChangeFrames, rtgiFast, rtgiChangeFloor, rtgiSunCut))),
+                new("uAge", new Vector4Uniform(new Vector4(rtgiAge, rtgiAgeFloor, 0f, 0f))),
                 new("uList", new Vector4Uniform(new Vector4(rtgiSunEpoch, RtgiDirtyRoom, 0f, 0f))),
             },
             Array.Empty<ShaderTextureBinding>(),
