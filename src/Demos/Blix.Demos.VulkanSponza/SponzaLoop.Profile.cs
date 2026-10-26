@@ -208,12 +208,18 @@ internal sealed partial class SponzaLoop
             var shadow = tracer.ShadowStatsOf(-1);
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[profile]   metal a frame: closest traces {(trace.TotalGpuMs - profMetalTraceMs) / frames.Count:0.00} ms ({(trace.Dispatches - profMetalTraces) / (double)frames.Count:0.0} batches), shadow traces {(shadow.TotalGpuMs - profMetalShadowMs) / frames.Count:0.00} ms ({(shadow.Dispatches - profMetalShadows) / (double)frames.Count:0.0} batches); allocated {tracer.Memory.AllocatedMb:N0} of {tracer.Memory.RecommendedMb:N0} MB recommended"));
+            rtgiPanelMetal = string.Create(CultureInfo.InvariantCulture,
+                $"closest {(trace.TotalGpuMs - profMetalTraceMs) / frames.Count:0.00} ms, shadow {(shadow.TotalGpuMs - profMetalShadowMs) / frames.Count:0.00} ms a frame");
             profMetalTraceMs = trace.TotalGpuMs; profMetalTraces = trace.Dispatches;
             profMetalShadowMs = shadow.TotalGpuMs; profMetalShadows = shadow.Dispatches;
         }
         Console.WriteLine($"[profile]   {IncidentReuseCounts()}");
         if (RtgiProbeCounts() is { Length: > 0 } rtgiCounts) Console.WriteLine($"[profile]   {rtgiCounts}");
-        if (RtgiCounts() is { Length: > 0 } rtgiCache) Console.WriteLine($"[profile]   {rtgiCache}");
+        if (RtgiCounts() is { Length: > 0 } rtgiCache)
+        {
+            Console.WriteLine($"[profile]   {rtgiCache}");
+            rtgiPanelCounts = rtgiCache;
+        }
         // --ab: the window's frames by phase, the same process and thermal state.
         if (abMode.Length > 0)
         {

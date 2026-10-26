@@ -119,12 +119,30 @@ float sampleInvD; // 1 / how far its ray went (a miss: its reach)
 // them writes -- ray placement concentrates the points on the cells least sure, and their atomics queued on the same
 // words (Crytek Sponza at 4x the rays: training 9.7 ms, 6.9 with placement off, 2026-10-26). Up to four rounds, each
 // the cell of the first lane still writing; the rest write their own.
+// A slot in a list for each active lane that needs one, at one atomic per subgroup (uFallback.w): the ballot counts
+// them, one lane takes them all from the counter, each lane's its offset among them. Else a lane's own atomic.
+uint appendDirty(bool need) {
+    if (u.uFallback.w < 0.5) return need ? atomicAdd(dirtyCount, 1u) : 0xFFFFFFFFu;
+    uvec4 b = subgroupBallot(need);
+    uint count = subgroupBallotBitCount(b), base = 0u;
+    if (subgroupElect() && count > 0u) base = atomicAdd(dirtyCount, count);
+    base = subgroupBroadcastFirst(base);
+    return need ? base + subgroupBallotExclusiveBitCount(b) : 0xFFFFFFFFu;
+}
+
+uint appendRequest(bool need) {
+    if (u.uFallback.w < 0.5) return need ? atomicAdd(requestCount, 1u) : 0xFFFFFFFFu;
+    uvec4 b = subgroupBallot(need);
+    uint count = subgroupBallotBitCount(b), base = 0u;
+    if (subgroupElect() && count > 0u) base = atomicAdd(requestCount, count);
+    base = subgroupBroadcastFirst(base);
+    return need ? base + subgroupBallotExclusiveBitCount(b) : 0xFFFFFFFFu;
+}
+
 void writeCell(uint s, uint w[RTGI_ACC]) {
     uint frame = uint(u.uClamp.y);
-    if (atomicExchange(rtgiStamps[s].x, frame) != frame) {
-        uint k = atomicAdd(dirtyCount, 1u);
-        if (k < uint(u.uClamp.z)) dirty[k] = s;
-    }
+    uint k = appendDirty(atomicExchange(rtgiStamps[s].x, frame) != frame);
+    if (k < uint(u.uClamp.z)) dirty[k] = s;
     for (uint k = 0u; k < RTGI_ACC; k++)
         if (w[k] != 0u) atomicAdd(rtgiAccum[RTGI_ACC * s + k], w[k]);
 }
@@ -232,7 +250,7 @@ void main() {
         vec4 eq = irradianceAt(q, nq, fine);
         bool deferred = false;
         if (!fine && u.uTrain.w > 0.0) {
-            uint r = atomicAdd(requestCount, 1u);
+            uint r = appendRequest(true);
             if (r < uint(u.uTrain.w)) {
                 requests[5u * r] = vec4(q, 1.0);
                 requests[5u * r + 1u] = vec4(nq, 0.0);
@@ -252,7 +270,8 @@ void main() {
     e *= weight;
     // Nothing not finite reaches a cell: one NaN there spreads to every cell whose rays land in it.
     if (any(isnan(e)) || any(isinf(e))) counted = false;
-    bool sunTraced = dot(n, u.uSun.xyz) > 0.0;
+    // A point whose cell's sun is settled traced none (rtgi_rays.comp: w 2).
+    bool sunTraced = dot(n, u.uSun.xyz) > 0.0 && p.w < 1.5;
     bool sunLit = sunTraced && (occluded[i] & 1u) == 0u;
     uint level = rtgiLevel(p.xyz, u.uCamera.xyz, u.uParams);
     // Path guiding: the sample's light into its guide cell's bin (two levels up, its side), counted -- the bin's light over

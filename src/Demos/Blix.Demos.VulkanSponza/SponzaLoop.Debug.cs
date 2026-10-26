@@ -76,6 +76,7 @@ internal sealed partial class SponzaLoop
             UpdateSunDirection();
         }
         GiLightControls(debug);
+        RtgiControls(debug);
         // ShadowsSettings and RenderSettings are [Tune]-tagged and auto-paneled below.
         // Shader-uniform tunables (//@tune in lit.frag): sun/ambient intensity,
         // metallic/normal/slope/glass thresholds, indirect-shadow base/range,

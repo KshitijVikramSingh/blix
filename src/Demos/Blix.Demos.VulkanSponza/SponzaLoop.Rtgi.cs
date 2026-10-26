@@ -67,17 +67,24 @@ internal sealed partial class SponzaLoop
     // --rtgi-defer: a landing whose cell holds too little takes its light from its request's own sample next frame -- one
     // more bounce of the path, a frame late -- not from the cells around it (rtgi_train.comp).
     private bool rtgiDefer;
-    // --rtgi-subgroup: a cell's frame words summed over the subgroup before they are written (rtgi_train.comp). Off: no
-    // faster -- Crytek Sponza at 4x the rays 50.1 ms p50 against 50.0, training 11.9 ms against 10.3 (2026-10-26). A
-    // subgroup's 32 points come from all over the screen and seldom share a cell; the queue on a cell is between
-    // subgroups. Worth another look if placement keeps neighbouring points together.
-    private bool rtgiSubgroup;
+    // A cell's frame words summed over the subgroup before they are written, and the lists' appends one atomic a subgroup
+    // (rtgi_train.comp; --rtgi-no-subgroup: each lane its own). Alone no faster -- Crytek Sponza at 4x the rays 50.1 ms
+    // p50 against 50.0, training 11.9 ms against 10.3 (2026-10-26): a subgroup's 32 points came from all over the screen,
+    // seldom sharing a cell. Placement in blocks (below) keeps them together.
+    private bool rtgiSubgroup = true;
+    // Placement in blocks (rtgi_rays.comp): a subgroup's points own an 8 x 4 block of tiles, their candidates within
+    // --rtgi-block-window tiles (8) but for --rtgi-block-global of them (0.25) drawn anywhere; hit points in strides.
+    // --rtgi-no-block: row by row, candidates anywhere.
+    private bool rtgiBlock = true;
+    private float rtgiBlockGlobal = 0.25f, rtgiBlockWindow = 8f;
     // A point's cosine direction from its cell's own low-discrepancy sequence (rtgi_rays.comp): Cornell's noise left at 60
     // frames 1.45% against 1.66%, error 0.022 against 0.024; Crytek Sponza alike (2026-10-26). --rtgi-no-blue: hashed.
     private bool rtgiBlue = true;
     // --rtgi-redraw: a point that picked a done cell draws again from more tiles, done cells out, rather than giving its ray
     // back (rtgi_rays.comp): the frozen cells' rays spent on the open ones.
     private bool rtgiRedraw;
+    // A point whose cell's sun visibility is settled traces its sun 1 in 8 (rtgi_rays.comp). --rtgi-every-sun: always.
+    private bool rtgiSettledSun = true;
     private GpuBufferHandle rtgiSeq;
     // --rtgi-hit-prior K: the shrinkage expects a cell's parent to differ by K x parent size / mean hit distance of the light
     // at least (rtgi_filter.comp; 0: none). 0.5: the gate's seams 0.030 / 1.024 -> 0.022 / 1.013, its corridor 0.015 ->
@@ -163,7 +170,7 @@ internal sealed partial class SponzaLoop
     // 0.5% (2026-10-26): at 2% "done" was the noise left -- Cornell's two-seed noise 1.5%, p90 3.8% with 87% of the visible
     // done -- and it showed on a smooth wall (the user).
     private float rtgiDoneError = 0.005f, rtgiDarkFloor = 0.002f, rtgiDoneWindow = 60f, rtgiTrickle = 8f;
-    private bool rtgiViewDone;
+
     private GpuBufferHandle rtgiConfidence, rtgiDoneCount;
     private bool rtgiNoGradient;
     // The neighbour blend (rtgi_filter.comp): the neighbours' share falls from 1 at --rtgi-filter-from samples to 0 at
@@ -275,11 +282,15 @@ internal sealed partial class SponzaLoop
         rtgiNoCoarse = args.Flag("rtgi-no-coarse");
         if (args.Float("rtgi-fallback-up") is { } fu) rtgiFallbackUp = Math.Clamp(fu, 0f, 6f);
         if (args.Flag("rtgi-defer")) rtgiDefer = true;
-        if (args.Flag("rtgi-subgroup")) rtgiSubgroup = true;
+        if (args.Flag("rtgi-no-subgroup")) rtgiSubgroup = false;
+        if (args.Flag("rtgi-no-block")) rtgiBlock = false;
+        if (args.Float("rtgi-block-global") is { } bg) rtgiBlockGlobal = Math.Clamp(bg, 0f, 1f);
+        if (args.Float("rtgi-block-window") is { } bw) rtgiBlockWindow = MathF.Max(1f, MathF.Round(bw));
         if (args.Flag("rtgi-no-blue")) rtgiBlue = false;
         if (args.Float("rtgi-blur") is { } bl) rtgiBlur = MathF.Max(0f, bl);
         if (args.Float("rtgi-blur-hit") is { } bh) rtgiBlurHit = MathF.Max(0f, bh);
         if (args.Flag("rtgi-redraw")) rtgiRedraw = true;
+        if (args.Flag("rtgi-every-sun")) rtgiSettledSun = false;
         if (args.Float("rtgi-hit-prior") is { } hp) rtgiHitPrior = MathF.Max(0f, hp);
         if (args.Float("rtgi-filter-every") is { } fe) rtgiFilterEvery = MathF.Max(1f, MathF.Round(fe));
         if (args.Float("rtgi-filter-settled") is { } fs) rtgiFilterSettled = MathF.Max(1f, fs);
@@ -310,7 +321,7 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-dark-floor") is { } df) rtgiDarkFloor = MathF.Max(1e-6f, df);
         if (args.Float("rtgi-done-window") is { } dw) rtgiDoneWindow = MathF.Max(1f, dw);
         if (args.Float("rtgi-trickle") is { } tr) rtgiTrickle = MathF.Max(1f, tr);
-        rtgiViewDone = args.Flag("rtgi-view-done");
+        if (args.Flag("rtgi-view-done")) rtgiView = 1;
         if (args.Flag("rtgi-contact")) rtgiContact = true;
         if (args.Flag("rtgi-no-contact")) rtgiContact = false;
         if (args.Int("rtgi-contact-rays") is { } cr) rtgiContactRays = Math.Max(1, cr);
@@ -489,6 +500,8 @@ internal sealed partial class SponzaLoop
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] rtgi: {rtgiTiles:N0} visible points and {rtgiHitPoints:N0} from last frame's hits a frame; cache {RtgiSlots:N0} slots ({RtgiSlots * 72 / 1048576.0:0} MB), cells {rtgiCell:0.###} m + {rtgiCellGrow:0.###} per metre, {rtgiHistory:0} samples held, untrained cells emptied after {rtgiMaxAge:0} frames."));
         }
+        // The panel's freeze: no rays, no training, the cache read as it stands.
+        if (rtgiFrozen) return;
         var cur = (int)(rtgiFrameCount & 1u);
         var prev = 1 - cur;
         var towardSun = -Vector3.Normalize(sunDirection);
@@ -639,9 +652,15 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiHitInv", rtgiHitInv),
             }));
         // A sixteenth of the slots a frame: those no training reached for --rtgi-max-age frames emptied.
+        // The panel's reset: every slot at once, as untrained past its age (its frame pushed past every stamp).
         var slice = RtgiSlots / RtgiEvictSlices;
-        graph.Dispatch(rtgiEvictPassHandle, new DispatchCommand(rtgiEvictPipeline, (slice + 63) / 64, 1, 1,
-            new ShaderUniform[] { new("uEvict", new Vector4Uniform(new Vector4(frameNumber, rtgiMaxAge, (int)(rtgiFrameCount % RtgiEvictSlices) * slice, slice))) },
+        var resetting = rtgiResetPending;
+        rtgiResetPending = false;
+        var evictCount = resetting ? RtgiSlots : slice;
+        graph.Dispatch(rtgiEvictPassHandle, new DispatchCommand(rtgiEvictPipeline, (evictCount + 63) / 64, 1, 1,
+            new ShaderUniform[] { new("uEvict", new Vector4Uniform(resetting
+                ? new Vector4(frameNumber + rtgiMaxAge + 2f, rtgiMaxAge, 0f, RtgiSlots)
+                : new Vector4(frameNumber, rtgiMaxAge, (int)(rtgiFrameCount % RtgiEvictSlices) * slice, slice))) },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
             {
@@ -719,8 +738,9 @@ internal sealed partial class SponzaLoop
                 new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, 0f, 0f, 0f))),
                 new("uGuide", new Vector4Uniform(new Vector4(rtgiGuide, rtgiGuideMin, rtgiGuideKappa, RtgiGuideSlots - 1))),
                 new("uAdapt", new Vector4Uniform(new Vector4(rtgiAdaptive, rtgiAdaptiveK, rtgiDoneError, rtgiTrickle))),
+                new("uBlock", new Vector4Uniform(new Vector4(rtgiBlock ? 1f : 0f, rtgiBlockGlobal, rtgiBlockWindow, 0f))),
                 new("uUnsureMap", new Vector4Uniform(new Vector4(rtgiHalfRow, rtgiUnsureWritten ? 1f : 0f, RtgiUnsureSize, 0f))),
-                new("uSeq", new Vector4Uniform(new Vector4(rtgiBlue ? 1f : 0f, rtgiRedraw ? 1f : 0f, 0f, 0f))),
+                new("uSeq", new Vector4Uniform(new Vector4(rtgiBlue ? 1f : 0f, rtgiRedraw ? 1f : 0f, rtgiSettledSun ? 1f : 0f, 0f))),
             },
             new[]
             {
@@ -855,7 +875,7 @@ internal sealed partial class SponzaLoop
                 new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, 0f))),
                 new("uHalf", new Vector4Uniform(new Vector4(0f, sub.X, sub.Y, 0f))),
                 new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, rtgiNoGradient ? 0f : 1f, 0f, 0f))),
-                new("uContact", new Vector4Uniform(new Vector4(rtgiContact ? 1f : 0f, 0.3f, 1.25f, rtgiViewDone ? 1f : 0f))),
+                new("uContact", new Vector4Uniform(new Vector4(rtgiContact ? 1f : 0f, 0.3f, 1.25f, rtgiView))),
                 new("uUnsure", new Vector4Uniform(new Vector4(rtgiDoneError, rtgiHalfRow, RtgiUnsureSize, 0f))),
             },
             buffers: new[]
@@ -866,6 +886,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiConfidence", rtgiConfidence),
                 new ShaderBufferBinding("RtgiDoneCount", rtgiDoneCount),
                 new ShaderBufferBinding("RtgiUnsure", rtgiUnsure),
+                new ShaderBufferBinding("RtgiHitInv", rtgiHitInv),
             }));
         rtgiUnsureWritten = true;
         // Blurred by how sure the cache is, into the incident the upsample reads (rtgi_blur.frag; at 0 a copy).
@@ -885,8 +906,8 @@ internal sealed partial class SponzaLoop
                 new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, rtgiFrameCount))),
                 new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, 0f, 0f, 0f))),
                 // A full-res pixel's footprint per metre of distance: 1 / (pixels per unit at unit distance).
-                new("uBlur", new Vector4Uniform(new Vector4(rtgiBlur, rtgiDoneError, rtgiBlurHit, 1f / LodErrorScale))),
-                new("uHalf", new Vector4Uniform(new Vector4(0f, sub.X, sub.Y, 0f))),
+                new("uBlur", new Vector4Uniform(new Vector4(RtgiBlurNow, rtgiDoneError, rtgiBlurHit, 1f / LodErrorScale))),
+                new("uHalf", new Vector4Uniform(new Vector4(rtgiView == 9 ? 1f : 0f, sub.X, sub.Y, 0f))),
             },
             buffers: new[]
             {

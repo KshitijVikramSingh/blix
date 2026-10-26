@@ -27,9 +27,13 @@ layout(set = 0, binding = 0) uniform RtgiRays {
     vec4 uAdapt;         // x the share of visible points placed by uncertainty (0: every tile its own); y tiles weighed for each;
                          // z the relative error a cell is done under (the blend's, rtgi_filter.comp); w 1 in this many of a
                          // done cell's points keeps its ray (the validation trickle)
+    vec4 uBlock;         // x 1: placement in blocks (a subgroup's 32 points own an 8 x 4 block of tiles, their candidates
+                         // within uBlock.z tiles but for a uBlock.y share drawn anywhere; hit points in strides); y the
+                         // global share; z the window (tiles)
     vec4 uUnsureMap;     // x the uncertainty map's row (half-res pixels); y 1: written last frame (else depth asked); z its size
     vec4 uSeq;           // x 1: a point's cosine direction from its cell's own low-discrepancy sequence (else hashed); y 1: a
-                         // point that picked a done cell draws again rather than giving its ray back
+                         // point that picked a done cell draws again rather than giving its ray back; z 1: a settled cell's points
+                         // trace the sun 1 in 8
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -87,9 +91,21 @@ void main() {
     uint frame = uint(u.uCounts.z);
     uint h = hash(i * 0x9E3779B9u ^ hash(frame));
     vec3 p, n;
+    bool requestPoint = false;
     if (i < visible) {
-        uint tilesX = uint(u.uSize.z);
+        uint tilesX = uint(u.uSize.z), tilesY = uint(u.uSize.w);
         vec2 tileSize = u.uSize.xy / u.uSize.zw;
+        // In blocks (uBlock.x): point i's own tile in its subgroup's 8 x 4 block, and its candidates near it -- so the
+        // subgroup's points land in the same coarse cells (rtgi_train.comp sums their words before writing), their hash
+        // lookups in the same memory, their rays from nearby origins. Row by row, a subgroup's 32 points were a strip,
+        // their candidates anywhere on the screen: 32 different cells.
+        uint own = i;
+        if (u.uBlock.x > 0.5) {
+            uint blocksX = (tilesX + 7u) / 8u, b = i / 32u, w = i % 32u;
+            uint tx = (b % blocksX) * 8u + w % 8u, ty = (b / blocksX) * 4u + w / 8u;
+            if (tx >= tilesX || ty >= tilesY) { none(i); return; }
+            own = ty * tilesX + tx;
+        }
         // Adaptive (uAdapt.x of the points): this point goes where the cache is least sure -- of uAdapt.y tiles (its own
         // and others drawn at random), one in proportion to its cell's uncertainty: the samples' spread over their count's
         // root, relative to the light (1 where it holds under 4). Rays spread evenly kept feeding cells settled long ago
@@ -105,7 +121,16 @@ void main() {
         // more tiles, done cells out -- the ray spent where the light is still open, not given back.
         for (uint round = 0u; round < 2u; round++) {
             for (uint c = 0u; c < candidates; c++) {
-                uint tile = (c == 0u && round == 0u) ? i : (rtgiHash(hc) % visible);
+                uint tile = own;
+                if (c != 0u || round != 0u) {
+                    uint hl = rtgiHash(hc ^ 0x3C6EF372u);
+                    if (u.uBlock.x > 0.5 && float(hl & 0xFFFFu) / 65536.0 >= u.uBlock.y) {
+                        int win = int(u.uBlock.z);
+                        int tx = clamp(int(own % tilesX) + int((hl >> 16) % uint(2 * win + 1)) - win, 0, int(tilesX) - 1);
+                        int ty = clamp(int(own / tilesX) + int(rtgiHash(hl) % uint(2 * win + 1)) - win, 0, int(tilesY) - 1);
+                        tile = uint(ty) * tilesX + uint(tx);
+                    } else tile = rtgiHash(hc) % visible;
+                }
                 hc = rtgiHash(hc ^ 0x2545F491u);
                 vec2 jitter = vec2(hc & 0xFFFFu, hc >> 16) / 65536.0;
                 ivec2 qc = min(ivec2((vec2(tile % tilesX, tile / tilesX) + jitter) * tileSize), ivec2(u.uSize.xy) - 1);
@@ -152,6 +177,7 @@ void main() {
         if (u.uSun.w < 0.5) { none(i); return; }
         uint j = i - visible;
         if (j < min(requestCount, uint(u.uCounts.y))) {
+            requestPoint = true;
             p = requests[5u * j].xyz;
             n = requests[5u * j + 1u].xyz;
             pointOrigins[3u * i] = requests[5u * j + 2u];
@@ -159,7 +185,13 @@ void main() {
             pointOrigins[3u * i + 2u] = requests[5u * j + 4u];
         } else {
             // A share of last frame's training rays, spread over all of them and turning each frame.
+            // In blocks, in strides from a turning offset: neighbouring points take neighbouring rays (theirs came from one
+            // block), so stay together.
             uint k = (hash(i ^ frame * 0x632BE5ABu)) % total;
+            if (u.uBlock.x > 0.5) {
+                uint stride = max(1u, total / max(uint(u.uCounts.y), 1u));
+                k = (j * stride + hash(frame ^ 0x632BE5ABu) % stride) % total;
+            }
             uvec4 h0 = prevHits[3u * k];
             // A hit on a surface's front (bit 2): a back face is inside something, nothing to train.
             if ((h0.w & 3u) != 3u) { none(i); return; }
@@ -181,10 +213,26 @@ void main() {
     // so neighbours do not line up -- each point in the cell the next index. A cell's directions cover its hemisphere
     // evenly over frames instead of clumping by chance: smooth light's error falls faster than 1 / sqrt(samples). NRD
     // assumes its input sampled so (blue noise, a sequence shorter than its history).
-    if (u.uSeq.x > 0.5) {
+    // The point's own cell: its direction sequence (below) and whether its sun is settled (uSeq.z).
+    uvec2 ch = uvec2(0u);
+    uint sc = 0xFFFFFFFFu;
+    if (u.uSeq.x > 0.5 || u.uSeq.z > 0.5) {
         uint lv = rtgiLevel(p, u.uCamera.xyz, u.uParams);
-        uvec2 ch = rtgiCellHash(ivec3(floor(p / rtgiSize(lv, u.uParams))), lv, rtgiSide(n), u.uParams);
-        uint sc = rtgiFind(ch, u.uParams);
+        ch = rtgiCellHash(ivec3(floor(p / rtgiSize(lv, u.uParams))), lv, rtgiSide(n), u.uParams);
+        sc = rtgiFind(ch, u.uParams);
+    }
+    // Settled sun (uSeq.z): a cell whose sun visibility is known within 0.02 (binomial, from 64 rays at least) gets 1 sun
+    // ray in 8 -- the rest told so (points' w 2: rtgi_train.comp adds no sun word). Every training point traced its sun:
+    // the shadow traces 9.3 -> 13.7 ms a frame from 1x to 4x the rays (Crytek Sponza, 2026-10-26), on cells long since
+    // known lit or shadowed. A sun turn cuts a cell's sun history to 4 rays (rtgi_resolve.comp), and it traces again. A
+    // request's point (a deferred landing's light needs its sun) always traces.
+    bool skipSun = false;
+    if (u.uSeq.z > 0.5 && sc != 0xFFFFFFFFu && !requestPoint) {
+        vec4 rc = rtgiResolved[2u * sc + 1u];
+        float pv = clamp(rc.x, 0.0, 1.0);
+        skipSun = rc.w >= 64.0 && sqrt(max(pv * (1.0 - pv), 1e-4) / rc.w) < 0.02 && hash(h ^ 0x51ED27A3u) % 8u != 0u;
+    }
+    if (u.uSeq.x > 0.5) {
         if (sc != 0xFFFFFFFFu) {
             uint k = atomicAdd(rtgiSeq[sc], 1u);
             // In 0.32 fixed point, wrapping: exact however long the sequence (a float's fraction lost it past ~10^5).
@@ -239,9 +287,9 @@ void main() {
         float pdf = (1.0 - pg) * pdfCos + pg * pdfGuide;
         weight = cosd > 0.0 && pdf > 0.0 ? pdfCos / pdf : 0.0;
     }
-    points[2u * i] = vec4(p, 1.0);
+    points[2u * i] = vec4(p, skipSun ? 2.0 : 1.0);
     points[2u * i + 1u] = vec4(n, weight);
     rays[2u * i] = vec4(o, 0.0);
     rays[2u * i + 1u] = vec4(d, u.uCounts.w);
-    origins[i] = vec4(o, dot(n, u.uSun.xyz) > 0.0 ? u.uCounts.w : 0.0);
+    origins[i] = vec4(o, dot(n, u.uSun.xyz) > 0.0 && !skipSun ? u.uCounts.w : 0.0);
 }

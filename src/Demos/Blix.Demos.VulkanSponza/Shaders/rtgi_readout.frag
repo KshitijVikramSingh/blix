@@ -18,7 +18,7 @@ layout(set = 0, binding = 0) uniform RtgiReadout {
     vec4 uCamera;        // xyz position
     vec4 uHalf;          // yz the full-res pixel of its 2x2
     vec4 uNearField;     // x the near field's radius (rtgi_cache.glsl's RTGI_NEAR); y 1: the gradient written
-    vec4 uContact;       // x 1: contact detail on; yz the ratio's clamp; w 1: the done view
+    vec4 uContact;       // x 1: contact detail on; yz the ratio's clamp; w the RTGI panel's view (0: the light)
     vec4 uUnsure;        // x the done threshold (relative error); y the uncertainty map's row (half-res pixels); z its size
 } u;
 
@@ -41,6 +41,13 @@ layout(std430, set = 0, binding = 9) buffer RtgiDoneCount { uint doneCount[4]; }
 // Sponza, 2026-10-26). The blend's relative error, at least the done threshold; a done cell an eighth of that; a cell
 // holding under 4 samples, or none, 1; the sky -1.
 layout(std430, set = 0, binding = 10) writeonly buffer RtgiUnsure { float rtgiUnsure[]; };
+layout(std430, set = 0, binding = 11) readonly buffer RtgiHitInv { float rtgiHitInv[]; };
+
+// Blue (0) to green to red (1).
+vec3 heat(float t) {
+    t = clamp(t, 0.0, 1.0);
+    return clamp(vec3(1.5 - abs(4.0 * t - 3.0), 1.5 - abs(4.0 * t - 2.0), 1.5 - abs(4.0 * t - 1.0)), 0.0, 1.0);
+}
 
 #define RTGI_KEYS(i) rtgiKeys[i]
 #define RTGI_NEAR u.uNearField.x
@@ -171,13 +178,26 @@ void main() {
         atomicAdd(doneCount[0], 1u);
         if (sd != 0xFFFFFFFFu && rtgiConfidence[sd].w > 0.5) atomicAdd(doneCount[1], 1u);
     }
-    // --rtgi-view-done: the bounce light painted by the cell's state (its level's, nearest): green done, red open, its
-    // brightness the shown light's -- where the long tail still is.
-    if (u.uContact.w > 0.5) {
+    // The RTGI panel's views (uContact.w, SponzaLoop.RtgiDebug.cs), the pixel's own cell (its level's, nearest) painted
+    // in place of its light: 1 done (green) or open (red), by the light; 2 how unsure, the blend's relative error, from
+    // the done threshold (blue) to 16x it (red); 3 samples held, 1 to 16,384 on a log scale; 4 its level; 5 the mean hit
+    // distance, 5 cm (red) to 20 m (blue); 6 sky visibility; 7 sun visibility. No cell: magenta.
+    int view = int(u.uContact.w + 0.5);
+    if (view >= 1 && view <= 7) {
         uint s = rtgiFind(rtgiCellHash(ivec3(floor(p / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
-        bool done = s != 0xFFFFFFFFu && rtgiConfidence[s].w > 0.5;
-        float l = max(dot(e.rgb, vec3(0.2126, 0.7152, 0.0722)), 0.05);
-        outIncident = vec4((done ? vec3(0.1, 1.0, 0.1) : vec3(1.0, 0.1, 0.1)) * l, sky);
+        vec3 c = vec3(1.0, 0.0, 1.0);
+        if (s != 0xFFFFFFFFu && rtgiResolved[2u * s + 1u].y >= 0.5) {
+            vec4 r1 = rtgiResolved[2u * s + 1u];
+            vec4 conf = rtgiConfidence[s];
+            if (view == 1) c = (conf.w > 0.5 ? vec3(0.1, 1.0, 0.1) : vec3(1.0, 0.1, 0.1)) * max(dot(e.rgb, vec3(0.2126, 0.7152, 0.0722)), 0.05);
+            else if (view == 2) c = heat(log2(max(conf.x / u.uUnsure.x, 1.0)) / 4.0);
+            else if (view == 3) c = heat(log2(max(r1.y, 1.0)) / 14.0);
+            else if (view == 4) c = heat(float(level) / max(float(top), 1.0));
+            else if (view == 5) c = heat(1.0 - clamp(log2(max(1.0 / max(rtgiHitInv[s], 1e-4), 0.05) / 0.05) / 8.6, 0.0, 1.0));
+            else if (view == 6) c = vec3(rtgiFiltered[s].a);
+            else c = vec3(clamp(r1.x, 0.0, 1.0));
+        }
+        outIncident = vec4(c, sky);
     }
     if (e.w > 0.0 && u.uNearField.y > 0.5) outIncidentGradient = vec4((8.0 / 3.0) * (bv - dot(bv, n) * n), 0.0);
 }

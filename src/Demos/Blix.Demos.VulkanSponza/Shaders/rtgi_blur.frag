@@ -26,7 +26,8 @@ layout(set = 0, binding = 0) uniform RtgiBlur {
     vec4 uNearField;     // x the near field's radius (RTGI_NEAR)
     vec4 uBlur;          // x the radius at most (full-res pixels; 0: no blur); y the done threshold (relative error); z
                          // the share of the mean hit distance the radius may reach; w a full-res pixel's footprint per metre
-    vec4 uHalf;          // yz the full-res pixel of its 2x2
+    vec4 uHalf;          // x 1: the radius painted (the RTGI panel's blur view: 0 blue to the most red); yz the full-res
+                         // pixel of its 2x2
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uIn;
@@ -50,6 +51,11 @@ vec3 worldAt(ivec2 q, ivec2 size, float depth) {
     vec2 ndc = (vec2(q) + 0.5) / vec2(size) * 2.0 - 1.0;
     vec4 w = u.uInvViewProj * vec4(ndc, depth, 1.0);
     return w.xyz / w.w;
+}
+
+vec3 heat(float t) {
+    t = clamp(t, 0.0, 1.0);
+    return clamp(vec3(1.5 - abs(4.0 * t - 3.0), 1.5 - abs(4.0 * t - 2.0), 1.5 - abs(4.0 * t - 1.0)), 0.0, 1.0);
 }
 
 // The full-res pixel half-res pixel h stands for.
@@ -78,6 +84,7 @@ void main() {
     if (invD > 1e-6) worldR = min(worldR, u.uBlur.z / invD);
     worldR *= 2.0;
     float radius = min(worldR / (dist * u.uBlur.w), u.uBlur.x) * 0.5;
+    if (u.uHalf.x > 0.5) { outIncident = vec4(heat(radius / max(0.5 * u.uBlur.x, 1.0)), centre.a); return; }
     if (radius < 1.0) return;
     // The disc turned by the pixel and the frame.
     uint h = rtgiHash(uint(hq.x) * 0x9E3779B1u ^ uint(hq.y) * 0x85EBCA77u ^ uint(u.uCamera.w) * 0xC2B2AE3Du);
