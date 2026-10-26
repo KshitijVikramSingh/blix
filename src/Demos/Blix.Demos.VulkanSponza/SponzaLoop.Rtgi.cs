@@ -147,6 +147,11 @@ internal sealed partial class SponzaLoop
     private ShaderInterface rtgiBlurInterface = null!;
     private PassHandle rtgiBlurPassHandle;
     private GraphResourceHandle rtgiHalfRawHandle;
+    // The half-res guide the readout writes beside its light (half_guide.glsl): each half-res pixel's world position and
+    // normal, which the blur reads at its taps in place of full-res depth and normals fetched two pixels apart (blur 3.03 ->
+    // 2.25 / 2.45 ms at Crytek Sponza, 2026-10-27). RGBA32F: positions kept exactly. Not the upsample's: its four taps a
+    // full-res pixel read it slower than the depth and normals (2.39-2.64 -> 2.95 / 3.12 ms).
+    private GraphResourceHandle rtgiHalfGuideHandle;
     // Per half-res pixel, how unsure its cell is: the readout writes it, the next frame's ray placement reads it
     // (rtgi_readout.frag, rtgi_rays.comp). Sized for a 4096 x 2304 frame's half; its row the frame's (rtgiHalfRow).
     private const int RtgiUnsureSize = 2048 * 1152;
@@ -432,9 +437,11 @@ internal sealed partial class SponzaLoop
         rtgiReadoutInterface = reflect("present.vert", "rtgi_readout.frag");
         // Into the raw half-res target, the blur after it into the incident (rtgi_blur.frag).
         rtgiHalfRawHandle = graph.ColorTarget("rtgi-half-raw", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(0.5f));
+        rtgiHalfGuideHandle = graph.ColorTarget("rtgi-half-guide", TextureFormat.Rgba32F, new MatchSwapchainGraphSize(0.5f));
         rtgiReadoutPassHandle = graph.GraphicsPass("rtgi-readout")
             .Target(rtgiHalfRawHandle, LoadOp.Clear, StoreOp.Store)
             .Target(incidentGradientHalfHandle, LoadOp.Clear, StoreOp.Store)
+            .Target(rtgiHalfGuideHandle, LoadOp.Clear, StoreOp.Store)
             .Read(SampleableSceneDepth)
             .Read(SampleablePrepassNormal)
             .WritesGpuBuffers()
@@ -444,8 +451,7 @@ internal sealed partial class SponzaLoop
         rtgiBlurPassHandle = graph.GraphicsPass("rtgi-blur")
             .Target(incidentHalfHandle, LoadOp.Clear, StoreOp.Store)
             .Read(rtgiHalfRawHandle)
-            .Read(SampleableSceneDepth)
-            .Read(SampleablePrepassNormal)
+            .Read(rtgiHalfGuideHandle)
             .Shader(rtgiBlurInterface)
             .Handle;
         rtgiScreenInterface = reflect("present.vert", "rtgi_screen.frag");
@@ -478,7 +484,7 @@ internal sealed partial class SponzaLoop
         rtgiReadoutPipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
                 presentVertSpv, File.ReadAllBytes(Path.Combine(shaderDir, "rtgi_readout.frag.spv")), rtgiReadoutInterface, "rtgi_readout")),
             VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
-            new[] { BlendState.Disabled, BlendState.Disabled }, rtgiReadoutPassHandle, "rtgi_readout");
+            new[] { BlendState.Disabled, BlendState.Disabled, BlendState.Disabled }, rtgiReadoutPassHandle, "rtgi_readout");
         rtgiBlurPipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
                 presentVertSpv, File.ReadAllBytes(Path.Combine(shaderDir, "rtgi_blur.frag.spv")), rtgiBlurInterface, "rtgi_blur")),
             VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
@@ -958,8 +964,7 @@ internal sealed partial class SponzaLoop
             new[]
             {
                 new ShaderTextureBinding("uIn", graph.GetColorTexture(rtgiHalfRawHandle)),
-                new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
-                new ShaderTextureBinding("uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
+                new ShaderTextureBinding("uGuide", graph.GetColorTexture(rtgiHalfGuideHandle)),
             },
             pushConstants: null,
             uniforms: new ShaderUniform[]

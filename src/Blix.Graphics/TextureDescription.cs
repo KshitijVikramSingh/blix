@@ -59,6 +59,9 @@ public enum TextureFormat
     // One 16-bit float per pixel (VK_FORMAT_R16_SFLOAT): a scalar field such as ambient visibility, filterable,
     // precise enough to accumulate over frames (an 8-bit R8 rounds small temporal blends away). Render-target only.
     R16F,
+    // Four 32-bit floats per pixel (VK_FORMAT_R32G32B32A32_SFLOAT): positions kept exactly, such as a half-res guide's
+    // world positions (the RTGI readout's, for the blur after it). Render-target only; read by texelFetch.
+    Rgba32F,
 }
 
 // Helpers for the compressed-format family. Centralised so the backend +
@@ -88,6 +91,7 @@ public static class TextureFormatExtensions
         TextureFormat.R32Uint => width * height * 4,
         TextureFormat.Rg16F => width * height * 4,
         TextureFormat.R16F => width * height * 2,
+        TextureFormat.Rgba32F => width * height * 16,
         // BC7 / BC5 / BC6h are all 16 bytes per 4x4 block.
         TextureFormat.Bc7Srgb or TextureFormat.Bc7Unorm
             or TextureFormat.Bc5Unorm or TextureFormat.Bc6hUf16

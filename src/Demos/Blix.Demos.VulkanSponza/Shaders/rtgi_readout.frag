@@ -11,6 +11,8 @@
 layout(location = 0) in vec2 vUv;
 layout(location = 0) out vec4 outIncident;
 layout(location = 1) out vec4 outIncidentGradient;
+// The half-res guide (half_guide.glsl): this pixel's world position and normal, for the blur and the upsample.
+layout(location = 2) out vec4 outGuide;
 
 layout(set = 0, binding = 0) uniform RtgiReadout {
     mat4 uInvViewProj;   // inverse of the view-projection the pre-pass drew with
@@ -60,6 +62,7 @@ vec3 heat(float t) {
 #define RTGI_KEYS(i) rtgiKeys[i]
 #define RTGI_NEAR u.uNearField.x
 #include "rtgi_cache.glsl"
+#include "half_guide.glsl"
 
 // Trilinear over the level's cells around p (their centres), w the weight found.
 vec4 readLevel(vec3 p, uint side, uint level, out float sky, out vec3 bvec, out float near, out float far) {
@@ -126,6 +129,7 @@ void main() {
     float raw = texelFetch(uSceneDepth, q, 0).r;
     vec4 ns = texelFetch(uPrepassNormal, q, 0);
     outIncidentGradient = vec4(0.0);
+    outGuide = vec4(0.0, 0.0, 0.0, -1.0);
     uint unsureAt = uint(h.y) * uint(u.uUnsure.y) + uint(h.x);
     bool unsureIn = h.x < int(u.uUnsure.y) && unsureAt < uint(u.uUnsure.z);
     if (raw >= 1.0 - 1e-6 || dot(ns.xyz, ns.xyz) < 1e-6) {
@@ -137,6 +141,7 @@ void main() {
     vec4 world = u.uInvViewProj * vec4(ndc, raw, 1.0);
     vec3 p = world.xyz / world.w;
     vec3 n = normalize(ns.xyz);
+    outGuide = vec4(p, guideNormal(n));
     uint side = rtgiSide(n);
     // The two levels around the point's, blended by where it sits between them (rtgiLevelF): no jump at a level's edge.
     float lf = rtgiLevelF(p, u.uCamera.xyz, u.uParams);

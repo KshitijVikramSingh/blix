@@ -31,8 +31,8 @@ layout(set = 0, binding = 0) uniform RtgiBlur {
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uIn;
-layout(set = 0, binding = 3) uniform sampler2D uSceneDepth;
-layout(set = 0, binding = 4) uniform sampler2D uPrepassNormal;
+// The readout's guide (half_guide.glsl): each half-res pixel's position and normal, the centre's and the taps'.
+layout(set = 0, binding = 3) uniform sampler2D uGuide;
 
 layout(std430, set = 0, binding = 5) readonly buffer RtgiBlurRadius { float rtgiBlurRadius[]; };
 
@@ -43,37 +43,29 @@ uint rtgiHash(uint x) {
     return x;
 }
 
+#include "half_guide.glsl"
+
 const vec2 DISC[12] = vec2[12](
     vec2(-0.326, -0.406), vec2(-0.840, -0.074), vec2(-0.696, 0.457), vec2(-0.203, 0.621),
     vec2(0.962, -0.195), vec2(0.473, -0.480), vec2(0.519, 0.767), vec2(0.185, -0.893),
     vec2(0.507, 0.064), vec2(0.896, 0.412), vec2(-0.322, -0.933), vec2(-0.792, -0.598));
 
-vec3 worldAt(ivec2 q, ivec2 size, float depth) {
-    vec2 ndc = (vec2(q) + 0.5) / vec2(size) * 2.0 - 1.0;
-    vec4 w = u.uInvViewProj * vec4(ndc, depth, 1.0);
-    return w.xyz / w.w;
-}
 
 vec3 heat(float t) {
     t = clamp(t, 0.0, 1.0);
     return clamp(vec3(1.5 - abs(4.0 * t - 3.0), 1.5 - abs(4.0 * t - 2.0), 1.5 - abs(4.0 * t - 1.0)), 0.0, 1.0);
 }
 
-// The full-res pixel half-res pixel h stands for.
-ivec2 fullOf(ivec2 h, ivec2 size) { return min(h * 2 + ivec2(u.uHalf.yz), size - 1); }
 
 void main() {
     ivec2 hq = ivec2(gl_FragCoord.xy);
     vec4 centre = texelFetch(uIn, hq, 0);
     outIncident = centre;
     if (u.uBlur.x <= 0.0) return;
-    ivec2 size = textureSize(uSceneDepth, 0);
     ivec2 halfSize = textureSize(uIn, 0);
-    ivec2 q = fullOf(hq, size);
-    float depth = texelFetch(uSceneDepth, q, 0).r;
-    vec4 ns = texelFetch(uPrepassNormal, q, 0);
-    if (depth >= 1.0 - 1e-6 || dot(ns.xyz, ns.xyz) < 1e-6) return;
-    vec3 p = worldAt(q, size, depth), n = normalize(ns.xyz);
+    vec4 g = texelFetch(uGuide, hq, 0);
+    if (guideSky(g)) return;
+    vec3 p = g.xyz, n = guideNormalOf(g.w);
     float dist = length(p - u.uCamera.xyz);
     // The radius the readout sized (rtgi_readout.frag: its cell's error, size and hit distance), in half-res pixels.
     uint at = uint(hq.y) * uint(u.uHalf.w) + uint(hq.x);
@@ -92,13 +84,10 @@ void main() {
         vec2 o = rot * DISC[k];
         ivec2 th = hq + ivec2(round(o * radius));
         if (any(lessThan(th, ivec2(0))) || any(greaterThanEqual(th, halfSize)) || th == hq) continue;
-        ivec2 t = fullOf(th, size);
-        float dt = texelFetch(uSceneDepth, t, 0).r;
-        vec4 nt = texelFetch(uPrepassNormal, t, 0);
-        if (dt >= 1.0 - 1e-6 || dot(nt.xyz, nt.xyz) < 1e-6) continue;
-        vec3 pt = worldAt(t, size, dt);
-        float plane = dot(n, pt - p) / planeTol;
-        float w = exp(-0.5 * plane * plane) * pow(max(dot(n, normalize(nt.xyz)), 0.0), 16.0)
+        vec4 gt = texelFetch(uGuide, th, 0);
+        if (guideSky(gt)) continue;
+        float plane = dot(n, gt.xyz - p) / planeTol;
+        float w = exp(-0.5 * plane * plane) * pow(max(dot(n, guideNormalOf(gt.w)), 0.0), 16.0)
             * exp(-1.5 * dot(o, o));
         sum += texelFetch(uIn, th, 0) * w;
         wSum += w;
