@@ -157,7 +157,11 @@ internal sealed partial class SponzaLoop
     // Each cell's irradiance vector (where its light comes from, rtgi_resolve.comp): --rtgi-guide S of the training rays
     // drawn toward it where the cell holds --rtgi-guide-min samples (0.5, 16; 0: cosine alone, rtgi_rays.comp), and its part
     // along the surface written as the gradient the lit pass carries onto normal maps (--rtgi-no-gradient: not).
-    private float rtgiGuide = 0.5f, rtgiGuideMin = 16f, rtgiGuideKappa = 40f;
+    // --rtgi-guide S: the share of rays guided by the learnt table (0: off, the default). Off: the user saw a watery
+    // brightness on dark wall ends near the camera with it, gone without it; against Crytek Sponza's truth it changed no
+    // error (downward faces 1.085 against 1.095), its gain measured before blue noise, the cascade and 4x the rays
+    // (2026-10-26). 0.5 as before.
+    private float rtgiGuide = 0f, rtgiGuideMin = 16f, rtgiGuideKappa = 40f;
     // Path guiding's table (rtgi_guide.glsl): 2^--rtgi-guide-slots-log2 coarse cells (18: 262,144, ~72 MB), each 32 bins
     // of where its light comes from, held over --rtgi-guide-history samples (4,096).
     private int rtgiGuideSlotsLog2 = 18;
@@ -260,6 +264,10 @@ internal sealed partial class SponzaLoop
     private uint rtgiSeed;
     // --rtgi-hit-sun S: the direct sun at a training ray's hit scaled by S (1; 0: none) -- a diagnostic.
     private float rtgiHitSun = 1f;
+    // Each training ray's hit shoots its own sun ray (the trace's hit flag 8), not the hit cell's mean (rtgi_train.comp):
+    // Crytek Sponza's downward faces 1.088 -> 1.059 against its truth settled, 1.107 -> 1.058 at 60 frames, energy 1.012 ->
+    // 1.003; the frame alike (2026-10-26). --rtgi-no-trace-hit-sun: the cell's.
+    private bool rtgiTraceHitSun = true;
     private float RtgiRandomFrame => (rtgiFrameCount + rtgiSeed * 1_000_003u) % (1u << 24);
     private int RtgiSlots => 1 << rtgiSlotsLog2;
     private Vector4 RtgiParams => new(rtgiCell, rtgiCellGrow, RtgiSlots - 1, RtgiTopLevel);
@@ -269,6 +277,7 @@ internal sealed partial class SponzaLoop
         rtgi = args.Flag("rtgi");
         if (args.Int("rtgi-seed") is { } sd) rtgiSeed = (uint)Math.Max(0, sd);
         if (args.Float("rtgi-hit-sun") is { } hs) rtgiHitSun = MathF.Max(0f, hs);
+        if (args.Flag("rtgi-no-trace-hit-sun")) rtgiTraceHitSun = false;
         if (args.Int("rtgi-tiles") is { } t) rtgiTiles = Math.Max(1, t);
         if (args.Int("rtgi-hits") is { } h) rtgiHitPoints = Math.Max(0, h);
         if (args.Int("rtgi-slots-log2") is { } sl) rtgiSlotsLog2 = Math.Clamp(sl, 16, 24);
@@ -535,6 +544,7 @@ internal sealed partial class SponzaLoop
                     new("uClamp", new Vector4Uniform(new Vector4(rtgiClampSigma, frameNumber, RtgiDirtyRoom, 0f))),
                     new("uGuideTable", new Vector4Uniform(new Vector4(rtgiGuide > 0f ? RtgiGuideSlots - 1 : 0f, 0f, 0f, 0f))),
                     new("uTrain", new Vector4Uniform(new Vector4(rtgiCountUnknown ? 1f : 0f, rtgiNoCoarse ? 1f : 0f, rtgiBackfaceLit ? 1f : 0f, rtgiRequests ? rtgiHitPoints : 0f))),
+                    new("uHitSun", new Vector4Uniform(new Vector4(rtgiTraceHitSun ? 1f : 0f, 0f, 0f, 0f))),
                     new("uFallback", new Vector4Uniform(new Vector4(rtgiFallbackUp, rtgiContact ? 1f : 0f, rtgiDefer ? 1f : 0f, rtgiSubgroup ? 1f : 0f))),
                 },
                 new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
@@ -821,9 +831,13 @@ internal sealed partial class SponzaLoop
         var origins = rtgiOriginsBuf[cur];
         var occluded = rtgiOccludedBuf[cur];
         var seed = unchecked((rtgiFrameCount + rtgiSeed * 1_000_003u) * 0x9E3779B9u + 0x2545F491u);
+        var traceHitSun = rtgiTraceHitSun;
+        var hitSunReach = rayReach;
+        var hitSunDisc = SunDiscTangent;
         void Encode(ExternalWorkSync sync, MetalRayTracer t)
         {
-            t.EncodeTrace(sync, rays, 0, hits, 0, n, seed);
+            if (traceHitSun) t.EncodeTrace(sync, rays, 0, hits, 0, n, seed, sun: new Vector4(towardSun, 0.01f), reach: hitSunReach, discTan: hitSunDisc);
+            else t.EncodeTrace(sync, rays, 0, hits, 0, n, seed);
             t.EncodeShadow(sync, origins, occluded, 0, n, towardSun, seed, statSlot: 3);
             if (contact) t.EncodeShadow(sync, contactOrigins, contactOccluded, 0, contactRoom, towardSun, seed ^ 0x51ED270Bu, statSlot: 3,
                 limit: contactCount, directions: contactDirs);

@@ -27,6 +27,7 @@ layout(set = 0, binding = 0) uniform RtgiTrain {
                          // y the frame's number (from 1); z the dirty list's room
     vec4 uTrain;         // x 1: a landing cell holding nothing counts as dark (else no sample); y 1: no coarser cell for it;
                          // z 1: a back face's hit read as a front's (else dark); w room for landing requests (0: none)
+    vec4 uHitSun;        // x 1: each hit's sun traced (hit flag 8), else read from the hit cell
     vec4 uFallback;      // x the levels past two up a landing may look for a cell holding light (0: two up only); y 1: contact
                          // detail on (the near and far words written); z 1: landings deferred to their request's sample;
                          // w 1: a cell's words summed over the subgroup before they are written
@@ -90,7 +91,8 @@ uvec2 cellAt(vec3 p, vec3 n, uint level) {
 // two levels up, else its own however few it holds; w 0 when none holds any. A cell of a sample or two passed its one
 // draw on down the bounce -- odd lights that came and went (the user, Crytek Sponza, 2026-10-26). fine: its own cell
 // held enough (else the landing is requested, rtgi_rays.comp).
-vec4 irradianceAt(vec3 q, vec3 nq, out bool fine) {
+// sunAt: the hit's own sun (its traced ray: 0 or 1), or below 0 the cell's sun visibility in its place.
+vec4 irradianceAt(vec3 q, vec3 nq, out bool fine, float sunAt) {
     uint level = rtgiLevel(q, u.uCamera.xyz, u.uParams);
     fine = false;
     uint own = rtgiFind(cellAt(q, nq, level), u.uParams);
@@ -106,7 +108,7 @@ vec4 irradianceAt(vec3 q, vec3 nq, out bool fine) {
         }
     }
     if (r1.y < 0.5) return vec4(0.0);
-    return vec4(r0.rgb + u.uNearField.z * u.uSunIrradiance.rgb * max(0.0, dot(nq, u.uSun.xyz)) * r1.x, 1.0);
+    return vec4(r0.rgb + u.uNearField.z * u.uSunIrradiance.rgb * max(0.0, dot(nq, u.uSun.xyz)) * (sunAt >= 0.0 ? sunAt : r1.x), 1.0);
 }
 
 vec4 dither;
@@ -247,7 +249,11 @@ void main() {
         nq = normalize(nq);
         if (dot(nq, d) > 0.0) nq = -nq;
         bool fine;
-        vec4 eq = irradianceAt(q, nq, fine);
+        // The sun at the hit: its own ray where the trace shot one (uHitSun.x; hit flag 8 where it reached the sun), else
+        // the hit cell's sun visibility -- a cell's mean over the floor it spans, sunlit and shadowed alike, where a ray up
+        // from under an arch meets the floor the arch itself shades: ceilings and the arches' undersides read 8-9% bright
+        // against Crytek Sponza's truth, every other variant alike (2026-10-26).
+        vec4 eq = irradianceAt(q, nq, fine, u.uHitSun.x > 0.5 ? ((h0.w & 8u) != 0u ? 1.0 : 0.0) : -1.0);
         bool deferred = false;
         if (!fine && u.uTrain.w > 0.0) {
             uint r = appendRequest(true);
