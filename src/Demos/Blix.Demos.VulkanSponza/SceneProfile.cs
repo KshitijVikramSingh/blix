@@ -263,6 +263,8 @@ internal sealed record SceneProfile(
     public static readonly SceneProfile KhronosCoat = KhronosBsdf("khronos-coat", "Vulkan Khronos clearcoat test", new Vector3(0f, 1.0f, 4f), 0f);
     public static readonly SceneProfile KhronosAniso = KhronosBsdf("khronos-aniso", "Vulkan Khronos anisotropy disc", new Vector3(0f, 1.0f, 4f), 0f);
     public static readonly SceneProfile KhronosSheen = KhronosBsdf("khronos-sheen", "Vulkan Khronos sheen chair", new Vector3(0f, 1.0f, 4f), 0f);
+    public static readonly SceneProfile KhronosIrid = KhronosBsdf("khronos-irid", "Vulkan Khronos iridescent Suzanne", new Vector3(0f, 1.0f, 4f), 0f);
+    public static readonly SceneProfile KhronosLamp = KhronosBsdf("khronos-lamp", "Vulkan Khronos iridescent lamp", new Vector3(0f, 1.0f, 4f), 0f);
 
     /// <summary>Two rooms sharing a 0.1 m wall, one open to the sky, one sealed (<c>blix thinwall</c>): a leak scene.</summary>
     /// <remarks>
@@ -344,7 +346,7 @@ internal sealed record SceneProfile(
         StartPitch = 5f,
     };
 
-    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, CornellPanel, Drapes, SheetSlab, SheetShell, SheetShellThin, ThinWall, Crevices, CrevicesDark, CrevicesHashed, KhronosPlant, KhronosTeacup, KhronosTest, KhronosAlpha, KhronosTransmission, KhronosDragon, KhronosCoat, KhronosAniso, KhronosSheen, CrytekSponza };
+    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, CornellPanel, Drapes, SheetSlab, SheetShell, SheetShellThin, ThinWall, Crevices, CrevicesDark, CrevicesHashed, KhronosPlant, KhronosTeacup, KhronosTest, KhronosAlpha, KhronosTransmission, KhronosDragon, KhronosCoat, KhronosAniso, KhronosSheen, KhronosIrid, KhronosLamp, CrytekSponza };
 
     /// <summary>The profile <c>--scene</c> names, Sponza when it names none.</summary>
     public static SceneProfile Named(string? name)

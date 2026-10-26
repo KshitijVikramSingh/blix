@@ -123,3 +123,9 @@ specular, transmission, thickness, att-distance, att, dt, and `diffuse-roughness
 - `tools/testbeds/bsdf.sh [scene...]` renders Khronos' TransmissionTest, DragonAttenuation, ClearCoatTest, AnisotropyDiscTest and SheenChair through the frame and the reference and
   prints how they agree (`bsdf_view.py`; `-compare.png` is frame | reference | ratio). 2026-10-26: the thin panes' tints and the coat's swatches agree to a few percent in the mean;
   the attenuating dragon's body reads darker and redder in the frame than in the reference (the thickness factor times a texture against the true chord).
+
+- **Sheen** was already in the lit shader (the engine's `sheen.glsl` rule, the LUT's E); against the reference on Khronos' SheenChair the frame sits within 1% in the mean (the swatch box 0.96).
+- **Iridescence** is `iridescence.glsl` (shared with `bsdf_gltf.glsl`, so the python, the BSDF and the lit pass are one function): the film's Fresnel replaces Schlick's in the sun's lobe and
+  the sky's, weighed by the factor, on the mixed F0 (the reference mixes a dielectric's film and a metal's; the two part only at fractional metallic). Factors only; the maximum thickness
+  stands where a texture would vary it. Against IridescenceSuzanne the film's hues show in the frame, but the picture is dominated by something else the frame lacks: **specular indirect
+  light from the scene** -- the frame reflects the sky cube only, the reference reflects the floor and everything else, so smooth metals read darker in the frame.

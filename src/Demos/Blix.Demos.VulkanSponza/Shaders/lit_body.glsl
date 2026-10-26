@@ -47,6 +47,7 @@ layout(early_fragment_tests) in;
 
 #include "shadow.glsl"
 #include "sheen.glsl"
+#include "iridescence.glsl"
 #include "diffuse_eon.glsl"
 #include "noise.glsl"
 #include "coverage.glsl"
@@ -230,6 +231,7 @@ layout(set = 2, binding = 0) uniform Material {
                                    // y KHR_materials_clearcoat factor, z its roughness
     vec4 uMaterialParams4;         // x the ior (KHR_materials_ior), y the volume's thickness in metres (0: thin-walled), z KHR_materials_specular's factor
     vec4 uAttenuation;             // rgb KHR_materials_volume's attenuation coefficient per metre, -ln(colour) / distance
+    vec4 uMaterialParams5;         // KHR_materials_iridescence: x the factor, y the film's ior, z its thickness in nm
 } mat;
 
 layout(set = 2, binding = 1) uniform sampler2D uAlbedo;
@@ -534,6 +536,10 @@ void main() {
     // cook, not as a per-pixel threshold in the renderer.
 
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
+    // KHR_materials_iridescence: a thin film's Fresnel (iridescence.glsl) in place of Schlick's, weighed by the factor, in the sun's lobe and the sky's. Factors only (the thickness
+    // texture is not read: the maximum stands); a branch most pixels never take. The film is evaluated on the mixed F0, not mixed from a dielectric's and a metal's as the
+    // BSDF reference does it: the two part only where metallic is fractional.
+    float irid = LIT_RARE(true) ? mat.uMaterialParams5.x : 0.0;
 
     vec3 V = normalize(frame.uCameraPos - vWorldPos);
     float NdotV = max(dot(N, V), 0.0);
@@ -665,6 +671,7 @@ void main() {
         float Dsun = distributionGGX(NdotH, roughness);
         float Gsun = geometrySmith(NdotV, NdotL, roughness);
         Fsun = fresnelSchlick(VdotH, F0);
+        if (irid > 0.0) Fsun = mix(Fsun, blix_iridescenceFresnel(1.0, mat.uMaterialParams5.y, VdotH, mat.uMaterialParams5.z, F0), irid);
         sunSpecular = (Dsun * Gsun * Fsun) / max(4.0 * NdotV * NdotL, 1e-3);
     }
 
@@ -770,6 +777,7 @@ void main() {
     // Diffuse: irradiance cube × albedo, modulated by (1 - F) and (1 - metallic)
     // (metallics have no diffuse contribution).
     vec3 F = fresnelSchlickRoughness(NdotV, F0, roughness);
+    if (irid > 0.0) F = mix(F, blix_iridescenceFresnel(1.0, mat.uMaterialParams5.y, NdotV, mat.uMaterialParams5.z, F0), irid);
     vec3 kS = F;
     vec3 kD = (vec3(1.0) - kS) * (1.0 - metallic);
 

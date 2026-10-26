@@ -710,6 +710,7 @@ internal sealed partial class SponzaLoop
             .SetUniform(binding: 0, "uMaterialParams3", new Vector4(DiffuseRoughnessOf(gm), ext.ClearcoatFactor, ext.ClearcoatRoughnessFactor, 0f))
             .SetUniform(binding: 0, "uMaterialParams4", new Vector4(ext.IndexOfRefraction, ext.ThicknessFactor, ext.SpecularFactor, 0f))
             .SetUniform(binding: 0, "uAttenuation", new Vector4(AttenuationCoefficient(ext), 0f))
+            .SetUniform(binding: 0, "uMaterialParams5", new Vector4(ext.IridescenceFactor, ext.IridescenceIor, ext.IridescenceThicknessMaximum, 0f))
             .SetTexture(binding: 1, tex.Albedo)
             .SetTexture(binding: 2, tex.Normal)
             .SetTexture(binding: 3, tex.Emissive)
@@ -720,7 +721,7 @@ internal sealed partial class SponzaLoop
             .SetTexture(binding: 8, tex.Thickness)
             .Handle);
         // Sheen or diffuse transmission: the full opaque build (lit_lean.frag compiles both out).
-        if (sheen != Vector3.Zero || diffuseTransmission > 0f || ext.ClearcoatFactor > 0f) richMaterials.Add(built);   // the clear coat is a branch most pixels never take (lit_lean.frag compiles it out)
+        if (sheen != Vector3.Zero || diffuseTransmission > 0f || ext.ClearcoatFactor > 0f || ext.IridescenceFactor > 0f) richMaterials.Add(built);   // the clear coat is a branch most pixels never take (lit_lean.frag compiles it out)
         return built;
     }
 
