@@ -239,7 +239,8 @@ layout(set = 2, binding = 0) uniform Material {
                                    // y KHR_materials_clearcoat factor, z its roughness
     vec4 uMaterialParams4;         // x the ior (KHR_materials_ior), y the volume's thickness in metres (0: thin-walled), z KHR_materials_specular's factor
     vec4 uAttenuation;             // rgb KHR_materials_volume's attenuation coefficient per metre, -ln(colour) / distance
-    vec4 uMaterialParams5;         // KHR_materials_iridescence: x the factor, y the film's ior, z its thickness in nm
+    vec4 uMaterialParams5;         // KHR_materials_iridescence: x the factor, y the film's ior, z its thickness in nm; w KHR_materials_anisotropy's strength
+    vec4 uSpecularColor;           // rgb KHR_materials_specular's colour factor; w the anisotropy's rotation (radians, from the tangent)
 } mat;
 
 layout(set = 2, binding = 1) uniform sampler2D uAlbedo;
@@ -382,8 +383,8 @@ layout(location = 0) out vec4 outColor;
 // Roughness-aware Fresnel-Schlick that softens edges as surfaces roughen
 // (otherwise rough metals over-glow at grazing angles where the split-sum
 // approximation breaks down). Used for the wide IBL reflection cone.
-vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
-    return F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness, vec3 F90) {
+    return F0 + (max(vec3(1.0 - roughness) * F90, F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
 // --- Cook-Torrance terms for direct (analytic) sun specular --------------
@@ -412,8 +413,18 @@ float geometrySmith(float NdotV, float NdotL, float roughness) {
 
 // Standard Schlick Fresnel for the sharp analytic highlight (the roughness-
 // aware variant above is for the wide IBL cone, not a punctual light).
-vec3 fresnelSchlick(float cosTheta, vec3 F0) {
-    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+vec3 fresnelSchlick(float cosTheta, vec3 F0, vec3 F90) {
+    return F0 + (F90 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+// KHR_materials_anisotropy's GGX (lab/bsdf gltf_bsdf.py's aniso_d and aniso_lambda): alphas along the anisotropy direction and across it, D G2 / (4 NL NV) with the
+// height-correlated Smith the python and the BSDF twin use. h, l and v are in the frame whose x axis is the anisotropy direction and z the normal.
+float anisoSpecular(vec3 h, vec3 l, vec3 v, float ax, float ay) {
+    float d = (h.x / ax) * (h.x / ax) + (h.y / ay) * (h.y / ay) + h.z * h.z;
+    float D = 1.0 / (PI * ax * ay * d * d);
+    float lamL = 0.5 * (sqrt(1.0 + (ax * ax * l.x * l.x + ay * ay * l.y * l.y) / max(l.z * l.z, 1e-12)) - 1.0);
+    float lamV = 0.5 * (sqrt(1.0 + (ax * ax * v.x * v.x + ay * ay * v.y * v.y) / max(v.z * v.z, 1e-12)) - 1.0);
+    return D / (1.0 + lamL + lamV) / max(4.0 * l.z * v.z, 1e-3);
 }
 
 // Cascaded sun shadows are provided by shadow.glsl. Its containment-based selection avoids the
@@ -543,11 +554,27 @@ void main() {
     // Material metalness is consumed as authored. Asset conformance belongs in source data or the
     // cook, not as a per-pixel threshold in the renderer.
 
-    vec3 F0 = mix(vec3(0.04), albedo, metallic);
+    // KHR_materials_ior and KHR_materials_specular (the BSDF's fresnels): the dielectric's f0 is the ior's, tinted by the specular colour and scaled by the factor, and its f90 is
+    // the factor; a metal's is the base colour and 1. At the defaults (ior 1.5, specular 1) it is the 0.04 and 1 this shader always had. The textures are not read.
+    float dielectricIor = mat.uMaterialParams4.x;
+    float dielectricF0Ior = (dielectricIor - 1.0) / (dielectricIor + 1.0);
+    vec3 dielectricF0 = min(dielectricF0Ior * dielectricF0Ior * mat.uSpecularColor.rgb, vec3(1.0)) * mat.uMaterialParams4.z;
+    vec3 F0 = mix(dielectricF0, albedo, metallic);
+    vec3 F90 = mix(vec3(mat.uMaterialParams4.z), vec3(1.0), metallic);
     // KHR_materials_iridescence: a thin film's Fresnel (iridescence.glsl) in place of Schlick's, weighed by the factor, in the sun's lobe and the sky's. Factors only (the thickness
     // texture is not read: the maximum stands); a branch most pixels never take. The film is evaluated on the mixed F0, not mixed from a dielectric's and a metal's as the
     // BSDF reference does it: the two part only where metallic is fractional.
     float irid = LIT_RARE(true) ? mat.uMaterialParams5.x : 0.0;
+    // KHR_materials_anisotropy: the specular lobe's roughness stretched along a direction in the surface (the authored tangent turned by the rotation): the sun's highlight
+    // with the GGX the BSDF twin has (anisoSpecular), the sky's with the Khronos viewer's bent normal. Factors only (the anisotropy texture is not read).
+    float anisotropy = LIT_RARE(true) ? mat.uMaterialParams5.w : 0.0;
+    vec3 anisoDir = T, anisoCross = B;
+    if (anisotropy > 0.0) {
+        vec3 t0 = normalize(T - N * dot(N, T));
+        float rot = mat.uSpecularColor.w;
+        anisoDir = normalize(cos(rot) * t0 + sin(rot) * cross(N, t0));
+        anisoCross = cross(N, anisoDir);
+    }
 
     vec3 V = normalize(frame.uCameraPos - vWorldPos);
     float NdotV = max(dot(N, V), 0.0);
@@ -703,9 +730,14 @@ void main() {
     if (frame.uAbFlags.y < 0.5) {
         float Dsun = distributionGGX(NdotH, roughness);
         float Gsun = geometrySmith(NdotV, NdotL, roughness);
-        Fsun = fresnelSchlick(VdotH, F0);
+        Fsun = fresnelSchlick(VdotH, F0, F90);
         if (irid > 0.0) Fsun = mix(Fsun, blix_iridescenceFresnel(1.0, mat.uMaterialParams5.y, VdotH, mat.uMaterialParams5.z, F0), irid);
         sunSpecular = (Dsun * Gsun * Fsun) / max(4.0 * NdotV * NdotL, 1e-3);
+        if (anisotropy > 0.0) {
+            float aBase = roughness * roughness;
+            sunSpecular = Fsun * anisoSpecular(vec3(dot(H, anisoDir), dot(H, anisoCross), NdotH), vec3(dot(L, anisoDir), dot(L, anisoCross), NdotL),
+                                               vec3(dot(V, anisoDir), dot(V, anisoCross), NdotV), mix(aBase, 1.0, anisotropy * anisotropy), aBase);
+        }
     }
 
     // Energy split: diffuse keeps only the non-reflected fraction (1 - F) and vanishes on metals
@@ -809,7 +841,7 @@ void main() {
     // --- IBL: split-sum diffuse + specular ------------------------------
     // Diffuse: irradiance cube × albedo, modulated by (1 - F) and (1 - metallic)
     // (metallics have no diffuse contribution).
-    vec3 F = fresnelSchlickRoughness(NdotV, F0, roughness);
+    vec3 F = fresnelSchlickRoughness(NdotV, F0, roughness, F90);
     if (irid > 0.0) F = mix(F, blix_iridescenceFresnel(1.0, mat.uMaterialParams5.y, NdotV, mat.uMaterialParams5.z, F0), irid);
     vec3 kS = F;
     vec3 kD = (vec3(1.0) - kS) * (1.0 - metallic);
@@ -860,11 +892,18 @@ void main() {
     vec3 specularIBL = vec3(0.0);
     if (frame.uAbFlags.z < 0.5) {
         float lod = roughness * (frame.uEnvMipCount - 1.0);
-        vec3 prefiltered = textureLod(samplerCube(uPrefilteredEnv, uLinearClamp), R, lod).rgb;
+        vec3 reflectionDir = R;
+        if (anisotropy > 0.0) {
+            // The Khronos viewer's: the normal bent toward the direction the lobe is stretched along, in proportion to how anisotropic the lobe is.
+            vec3 anisoNormal = cross(cross(anisoDir, V), anisoDir);
+            float bend = 1.0 - anisotropy * (1.0 - roughness);
+            reflectionDir = reflect(-V, normalize(mix(anisoNormal, N, bend * bend * bend * bend)));
+        }
+        vec3 prefiltered = textureLod(samplerCube(uPrefilteredEnv, uLinearClamp), reflectionDir, lod).rgb;
         vec2 envBrdf = texture(sampler2D(uBrdfLut, uLinearClamp), vec2(NdotV, roughness)).rg;
         // The reflected sky is the same sky. Not occluding it leaves a courtyard floor with a
         // mirror of an open horizon it cannot see.
-        specularIBL = prefiltered * (F * envBrdf.x + envBrdf.y) * skyVisibility;
+        specularIBL = prefiltered * (F * envBrdf.x + F90 * envBrdf.y) * skyVisibility;
     }
 
     // AO attenuates indirect light only. Sun visibility is not an ambient-occlusion signal.
