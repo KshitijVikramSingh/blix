@@ -101,6 +101,9 @@ internal sealed partial class SponzaLoop
     // its slot (rtgi_filter.comp): 4 -- at 4x the rays the blend 8.5 ms a frame every frame, 2.9 on the rota (Crytek
     // Sponza, 2026-10-26). 1: every cell trained, every frame.
     private float rtgiFilterEvery = 4f, rtgiFilterSettled = 256f;
+    // --rtgi-filter-young N: a young cell (under --rtgi-filter-settled samples) blended one frame in N (2; 1: every frame).
+    // Coarse cells on the rota instead (parents, never shown) measured nothing: they are few, the young fine ones many.
+    private float rtgiFilterYoung = 2f;
     // Landings in untrained cells, trained the next frame (rtgi_train.comp's requests): by parity. --rtgi-no-requests: off.
     private bool rtgiRequests = true;
     // --rtgi-clamp-sigma K: a sample capped at its cell's mean + K standard deviations once it holds 32 (0: off).
@@ -311,6 +314,7 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-hit-prior") is { } hp) rtgiHitPrior = MathF.Max(0f, hp);
         if (args.Float("rtgi-filter-every") is { } fe) rtgiFilterEvery = MathF.Max(1f, MathF.Round(fe));
         if (args.Float("rtgi-filter-settled") is { } fs) rtgiFilterSettled = MathF.Max(1f, fs);
+        if (args.Float("rtgi-filter-young") is { } fy) rtgiFilterYoung = MathF.Max(1f, MathF.Round(fy));
         rtgiBackfaceLit = args.Flag("rtgi-backface-lit");
         if (args.Flag("rtgi-no-requests")) rtgiRequests = false;
         fixedSubpixel = args.Flag("fixed-subpixel");
@@ -568,6 +572,7 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("RtgiPointOrigins", rtgiPointOriginsBuf[prev]),
                 }));
         // Path guiding: each guide cell's frame of samples into its bins.
+        if (rtgiGuide > 0f)
         graph.Dispatch(rtgiGuideResolvePassHandle, new DispatchCommand(rtgiGuideResolvePipeline, (RtgiGuideSlots + 63) / 64, 1, 1,
             new ShaderUniform[] { new("uGuideResolve", new Vector4Uniform(new Vector4(rtgiGuideHistory, RtgiGuideSlots, 0f, 0f))) },
             Array.Empty<ShaderTextureBinding>(),
@@ -654,7 +659,7 @@ internal sealed partial class SponzaLoop
                 new("uFilter2", new Vector4Uniform(new Vector4(rtgiCascade ? 1f : 0f, rtgiParentSigma, rtgiParentTol, rtgiParentMax))),
                 new("uParent2", new Vector4Uniform(new Vector4(rtgiParentInterp ? 1f : 0f, rtgiParentChain ? 1f : 0f, rtgiParentShrink ? 1f : 0f, rtgiParentPool ? 1f : 0f))),
                 new("uHit", new Vector4Uniform(new Vector4(rtgiHitPrior, 0f, 0f, 0f))),
-                new("uRota", new Vector4Uniform(new Vector4(rtgiFilterSettled, rtgiFilterEvery, 0f, 0f))),
+                new("uRota", new Vector4Uniform(new Vector4(rtgiFilterSettled, rtgiFilterEvery, rtgiFilterYoung, 0f))),
                 new("uDone", new Vector4Uniform(new Vector4(frameNumber, rtgiDoneWindow, rtgiDoneError, rtgiDarkFloor))),
             },
             Array.Empty<ShaderTextureBinding>(),

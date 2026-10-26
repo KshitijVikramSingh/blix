@@ -38,7 +38,7 @@ layout(set = 0, binding = 0) uniform RtgiFilter {
     vec4 uHit;      // x the share of the light its parent may differ from the cell by, per parent size over the mean hit
                     // distance (the geometric prior on the shrinkage's bias; 0: none)
     vec4 uRota;     // x the samples from which a cell is settled; y a settled cell blended one frame in this many (its turn by
-                    // its slot), 1: every frame
+                    // its slot), 1: every frame; z a young cell's (1: every frame)
     vec4 uDone;     // x the frame's number; y frames between drift checks; z the relative error under which a cell is
                     // done; w the dark floor (absolute luminance the error is measured against at least)
 } u;
@@ -72,7 +72,12 @@ void main() {
     // A settled cell moves by a few hundredths of its noise a frame: blended on its turn (uRota), its light shown a few
     // frames behind -- the blend 8.5 ms a frame at 4x the rays, every cell trained blended every frame (Crytek Sponza,
     // 2026-10-26; 2.9 ms one frame in 4, Cornell's noise left and Crytek's error alike). A cell cut (its history reset to the fast window's samples) is young again, blended every frame.
+    // A young cell blended one frame in uRota.z (its turn by its slot): the young are most of the cells trained while the
+    // cache fills, each blend ~13 hash lookups -- the blend 11-15 ms a frame through Crytek Sponza's first 15 s at 4x the
+    // rays (2026-10-26).
     if (u.uRota.y > 1.5 && held >= u.uRota.x && (s + uint(u.uDone.x)) % uint(u.uRota.y) != 0u) return;
+    // Under 8 samples every frame: a slot's blend is what its last occupant left until it is blended (eviction clears it not).
+    if (u.uRota.z > 1.5 && held >= 8.0 && held < u.uRota.x && (s + uint(u.uDone.x)) % uint(u.uRota.z) != 0u) return;
     ivec4 cell = rtgiCells[s];
     uint level = uint(cell.w) / 6u, side = uint(cell.w) % 6u;
     // The cell's own spread: its samples' variance (the moments, over the fast window) over what it holds.
