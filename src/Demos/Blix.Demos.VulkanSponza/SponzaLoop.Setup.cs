@@ -183,6 +183,11 @@ internal sealed partial class SponzaLoop
         rtShadows = args.Flag("rt-shadows");
         ParseRtgiProbe(args);
         ParseRtgi(args);
+        // GTAO off under --rtgi unless --ao: the cache's light holds its own occlusion (the bounce never took GTAO), and
+        // GTAO occluded the sky's specular reflection a second time over the sky visibility that already held it --
+        // dark blue seams along Cornell's walls (the user's, 2026-10-27: off looks more correct). Its passes stay in the
+        // graph at a zero radius (--no-ao's way), so this is about the image, not the frame's time.
+        if (rtgi && !args.Flag("ao")) ambient.Enabled = false;
         ParseGpuCapture(args);
         ParseMetalFx(args);
         ParseRtgiTemporal(args);
