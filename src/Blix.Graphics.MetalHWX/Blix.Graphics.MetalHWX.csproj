@@ -33,7 +33,7 @@
           Inputs="$(BlixHwxSrc)" Outputs="$(BlixHwxLib)">
     <MakeDir Directories="$(MSBuildProjectDirectory)/obj/native" />
     <Message Text="Building libblix_hwx.dylib (clang++, Objective-C++)" Importance="high" />
-    <Exec Command="clang++ -O2 -std=c++17 -fobjc-arc -dynamiclib &quot;$(BlixHwxSrc)&quot; -o &quot;$(BlixHwxLib)&quot; -framework Metal -framework Foundation" />
+    <Exec Command="clang++ -O2 -std=c++17 -fobjc-arc -dynamiclib &quot;$(BlixHwxSrc)&quot; -o &quot;$(BlixHwxLib)&quot; -framework Metal -framework MetalFX -framework Foundation" />
   </Target>
 
   <!-- ContentWithTargetPath crosses a ProjectReference, so the dylib lands beside every consumer's assembly. -->

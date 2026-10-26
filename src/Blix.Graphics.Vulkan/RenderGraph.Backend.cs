@@ -263,7 +263,7 @@ internal sealed partial class VulkanRenderGraphBackend : IRenderGraphBackend
                 // that decide. Restating a decision is how the second copy comes to disagree.
                 var (img, mem, view) = device.AllocateAttachmentImage(
                     width, height, format,
-                    ColorTargetUsage(declared.Samples > 1),
+                    ColorTargetUsage(declared.Samples > 1, declared.Storage),
                     ImageAspectFlags.ColorBit,
                     $"graph.{declared.Name}",
                     SampleCount(declared.Samples));
@@ -393,8 +393,8 @@ internal sealed partial class VulkanRenderGraphBackend : IRenderGraphBackend
             // The render scale first, as RenderGraph.RenderSizeFor rounds it, then the target's own scale: at 1 the
             // swapchain's size exactly, as before.
             MatchSwapchainGraphSize ms => (
-                (uint)MathF.Max(1, (uint)MathF.Max(1, device.SwapchainExtent.Width * renderScale) * ms.Scale),
-                (uint)MathF.Max(1, (uint)MathF.Max(1, device.SwapchainExtent.Height * renderScale) * ms.Scale)),
+                (uint)MathF.Max(1, (uint)MathF.Max(1, device.SwapchainExtent.Width * (ms.Display ? 1f : renderScale)) * ms.Scale),
+                (uint)MathF.Max(1, (uint)MathF.Max(1, device.SwapchainExtent.Height * (ms.Display ? 1f : renderScale)) * ms.Scale)),
             _ => throw new ArgumentException($"Unknown GraphSize {size.GetType().Name}"),
         };
     }
@@ -416,10 +416,10 @@ internal sealed partial class VulkanRenderGraphBackend : IRenderGraphBackend
     /// asking to copy from one is a contradiction rather than an oversight.
     /// </para>
     /// </remarks>
-    private static ImageUsageFlags ColorTargetUsage(bool msaa) => msaa
+    private static ImageUsageFlags ColorTargetUsage(bool msaa, bool storage = false) => msaa
         ? ImageUsageFlags.ColorAttachmentBit | ImageUsageFlags.TransientAttachmentBit
         : ImageUsageFlags.ColorAttachmentBit | ImageUsageFlags.SampledBit
-          | ImageUsageFlags.TransferSrcBit;
+          | ImageUsageFlags.TransferSrcBit | (storage ? ImageUsageFlags.StorageBit : 0);
 
     private unsafe void AllocateColorTarget(GraphResourceEntry resource, uint width, uint height)
     {
@@ -427,7 +427,7 @@ internal sealed partial class VulkanRenderGraphBackend : IRenderGraphBackend
         var format = VulkanGraphicsDevice.MapTextureFormat(resource.Format!.Value);
         var msaa = resource.Samples > 1;
         var (image, memory, view) = device.AllocateAttachmentImage(
-            width, height, format, ColorTargetUsage(msaa), ImageAspectFlags.ColorBit,
+            width, height, format, ColorTargetUsage(msaa, resource.Storage), ImageAspectFlags.ColorBit,
             $"graph.{resource.Name}", SampleCount(resource.Samples));
         Unsettled(image, ImageAspectFlags.ColorBit, depth: false, msaa);
 

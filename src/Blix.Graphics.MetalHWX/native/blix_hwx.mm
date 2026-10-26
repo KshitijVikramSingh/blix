@@ -14,6 +14,7 @@
 // signals on the device's frame timeline (an MTLSharedEvent) on the GPU, and returns without waiting.
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import <MetalFX/MetalFX.h>
 
 #include <atomic>
 #include <cstdio>
@@ -1479,6 +1480,118 @@ HWX_EXPORT void hwx_trace_stats(HwxContext* ctx, uint64_t* dispatches, uint64_t*
     *totalGpuNs = ctx->traceGpuNs;
     *lastGpuNs = ctx->traceLastGpuNs;
     *failures = ctx->traceFailures;
+}
+
+// --- MetalFX temporal upscaling (hwx_fx_encode) ------------------------------------------------------------------------
+// The scene rendered below the window's resolution, jittered, brought up to it by MTLFXTemporalScaler: its colour, depth
+// and motion at the render size, the output at the window's (SponzaLoop.MetalFx.cs, --metalfx). The textures are the
+// Vulkan frame's own, exported (VK_EXT_metal_objects); the work is ordered against the frame on its timeline event, as
+// the tracer's. The scaler is made on first use and again when a size or format changes.
+struct HwxFx {
+    id<MTLFXTemporalScaler> scaler;
+    NSUInteger inW = 0, inH = 0, outW = 0, outH = 0;
+    MTLPixelFormat color = MTLPixelFormatInvalid, depth = MTLPixelFormatInvalid, motion = MTLPixelFormatInvalid, output = MTLPixelFormatInvalid;
+    std::atomic<uint64_t> dispatches{0}, gpuNs{0}, lastGpuNs{0}, failures{0};
+};
+static HwxFx gFx;   // one scaler a process: one window
+
+static std::string UsageNames(MTLTextureUsage u) {
+    std::string s;
+    if (u & MTLTextureUsageShaderRead) s += "read ";
+    if (u & MTLTextureUsageShaderWrite) s += "write ";
+    if (u & MTLTextureUsageRenderTarget) s += "render-target ";
+    if (u & MTLTextureUsagePixelFormatView) s += "format-view ";
+    return s.empty() ? "none" : s;
+}
+
+// A texture short of the usage the scaler asks of it: which, and what it has.
+static bool UsageMissing(HwxContext* ctx, id<MTLTexture> t, MTLTextureUsage needed, const char* what) {
+    if ((t.usage & needed) == needed) return false;
+    ctx->error = std::string("MetalFX: the ") + what + " texture's usage (" + UsageNames(t.usage) + ") lacks what the scaler asks ("
+        + UsageNames(needed) + ")";
+    return true;
+}
+
+// jitter: the scene's sample offset this frame, in render pixels ([-0.5, 0.5]); motionScale: what turns the motion
+// texture's values into pixels toward last frame's position; reset: no history (a cut, a resize, the first frame).
+HWX_EXPORT int hwx_fx_encode(HwxContext* ctx, void* sharedEvent, uint64_t waitValue, uint64_t signalValue,
+                             void* color, void* depth, void* motion, void* output,
+                             float jitterX, float jitterY, float motionScaleX, float motionScaleY, int reset) {
+    @autoreleasepool {
+        id<MTLSharedEvent> event = (__bridge id<MTLSharedEvent>)sharedEvent;
+        id<MTLTexture> c = (__bridge id<MTLTexture>)color, d = (__bridge id<MTLTexture>)depth;
+        id<MTLTexture> m = (__bridge id<MTLTexture>)motion, o = (__bridge id<MTLTexture>)output;
+        int result = 0;
+        if (!c || !d || !m || !o) result = Fail(ctx, "MetalFX: a texture is missing");
+        else if (![MTLFXTemporalScalerDescriptor supportsDevice:ctx->device]) result = Fail(ctx, "MetalFX: this device has no temporal scaler");
+        if (result == 0 && (!gFx.scaler || gFx.inW != c.width || gFx.inH != c.height || gFx.outW != o.width || gFx.outH != o.height
+                            || gFx.color != c.pixelFormat || gFx.depth != d.pixelFormat || gFx.motion != m.pixelFormat
+                            || gFx.output != o.pixelFormat)) {
+            MTLFXTemporalScalerDescriptor* desc = [MTLFXTemporalScalerDescriptor new];
+            desc.colorTextureFormat = c.pixelFormat;
+            desc.depthTextureFormat = d.pixelFormat;
+            desc.motionTextureFormat = m.pixelFormat;
+            desc.outputTextureFormat = o.pixelFormat;
+            desc.inputWidth = c.width;
+            desc.inputHeight = c.height;
+            desc.outputWidth = o.width;
+            desc.outputHeight = o.height;
+            // HDR scene radiance (the exposure is the present pass's): the scaler finds its own exposure to weigh history.
+            desc.autoExposureEnabled = YES;
+            gFx.scaler = [desc newTemporalScalerWithDevice:ctx->device];
+            if (!gFx.scaler) {
+                result = Fail(ctx, "MetalFX: no temporal scaler for these formats and sizes (colour "
+                    + std::to_string((int)c.pixelFormat) + ", depth " + std::to_string((int)d.pixelFormat) + ", motion "
+                    + std::to_string((int)m.pixelFormat) + ", output " + std::to_string((int)o.pixelFormat) + ")");
+            } else {
+                gFx.inW = c.width; gFx.inH = c.height; gFx.outW = o.width; gFx.outH = o.height;
+                gFx.color = c.pixelFormat; gFx.depth = d.pixelFormat; gFx.motion = m.pixelFormat; gFx.output = o.pixelFormat;
+                fprintf(stderr, "[MetalHWX] MetalFX temporal scaler %lux%lu -> %lux%lu (colour %d, depth %d, motion %d, output %d)\n",
+                        (unsigned long)c.width, (unsigned long)c.height, (unsigned long)o.width, (unsigned long)o.height,
+                        (int)c.pixelFormat, (int)d.pixelFormat, (int)m.pixelFormat, (int)o.pixelFormat);
+                reset = 1;
+            }
+        }
+        if (result == 0 && (UsageMissing(ctx, c, gFx.scaler.colorTextureUsage, "colour") || UsageMissing(ctx, d, gFx.scaler.depthTextureUsage, "depth")
+                            || UsageMissing(ctx, m, gFx.scaler.motionTextureUsage, "motion") || UsageMissing(ctx, o, gFx.scaler.outputTextureUsage, "output")))
+            result = 1;
+        // Its own command buffer, ordered on the frame's timeline: waits for the frame's work so far, signals the rest on.
+        id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
+        cb.label = @"blix-hwx metalfx";
+        [cb encodeWaitForEvent:event value:waitValue];
+        if (result == 0) {
+            id<MTLFXTemporalScaler> s = gFx.scaler;
+            s.colorTexture = c;
+            s.depthTexture = d;
+            s.motionTexture = m;
+            s.outputTexture = o;
+            s.jitterOffsetX = jitterX;
+            s.jitterOffsetY = jitterY;
+            s.motionVectorScaleX = motionScaleX;
+            s.motionVectorScaleY = motionScaleY;
+            s.depthReversed = NO;
+            s.reset = reset != 0;
+            [s encodeToCommandBuffer:cb];
+        }
+        [cb encodeSignalEvent:event value:signalValue];
+        bool skipped = result != 0;
+        [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
+            if (skipped || done.status != MTLCommandBufferStatusCompleted) { gFx.failures++; return; }
+            uint64_t ns = uint64_t((done.GPUEndTime - done.GPUStartTime) * 1e9);
+            gFx.lastGpuNs = ns;
+            gFx.gpuNs += ns;
+            gFx.dispatches++;
+        }];
+        [cb commit];
+        return result;
+    }
+}
+
+HWX_EXPORT void hwx_fx_stats(uint64_t* dispatches, uint64_t* totalGpuNs, uint64_t* lastGpuNs, uint64_t* failures) {
+    *dispatches = gFx.dispatches;
+    *totalGpuNs = gFx.gpuNs;
+    *lastGpuNs = gFx.lastGpuNs;
+    *failures = gFx.failures;
 }
 
 // What the shadow dispatches of one stats slot (0xFFFFFFFF: all) have cost so far, from their command buffers' GPU

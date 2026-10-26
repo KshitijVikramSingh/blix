@@ -589,6 +589,31 @@ public sealed class MetalRayTracer : IDisposable
     }
 
     /// <summary>
+    /// MetalFX temporal upscaling as an external pass (native hwx_fx_encode): the frame's jittered colour, its depth and
+    /// motion at the render size, into <paramref name="output"/> at the window's. <paramref name="jitter"/>: this frame's
+    /// sample offset in render pixels; <paramref name="motionScale"/>: what turns the motion texture's values into pixels
+    /// toward last frame's position; <paramref name="reset"/>: no history. The frame's event is signalled whatever
+    /// happens; null when the scaler ran, else why not.
+    /// </summary>
+    public string? EncodeUpscale(ExternalWorkSync sync, TextureHandle color, TextureHandle depth, TextureHandle motion, TextureHandle output,
+        Vector2 jitter, Vector2 motionScale, bool reset)
+    {
+        ObjectDisposedException.ThrowIf(ctx == 0, this);
+        var result = HwxNative.hwx_fx_encode(ctx, sync.MetalSharedEvent, sync.WaitValue, sync.SignalValue,
+            device.ExportMetalTexture(color), device.ExportMetalTexture(depth), device.ExportMetalTexture(motion), device.ExportMetalTexture(output),
+            jitter.X, jitter.Y, motionScale.X, motionScale.Y, reset ? 1 : 0);
+        return result == 0 ? null : Error;
+    }
+
+    /// <summary>The MetalFX upscales so far: how many, their GPU time (ns) in all and the last's, and the failed.</summary>
+    public static unsafe (ulong Dispatches, ulong TotalGpuNs, ulong LastGpuNs, ulong Failures) UpscaleStats()
+    {
+        ulong d, t, l, f;
+        HwxNative.hwx_fx_stats(&d, &t, &l, &f);
+        return (d, t, l, f);
+    }
+
+    /// <summary>
     /// Several in-frame batches as one external pass: one Metal command buffer that waits for the frame once, holds every
     /// <see cref="EncodeTrace"/> / <see cref="EncodeShadow"/> <paramref name="encode"/> makes (in order, their own sync
     /// values unused), and signals the frame on once. Each batch alone is a trip to Metal and back, the GPU idle at each

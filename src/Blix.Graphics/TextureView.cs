@@ -24,7 +24,8 @@ public enum StoreOp
 // at the current swapchain extent on compile/resize.
 public abstract record GraphSize;
 public sealed record FixedGraphSize(int Width, int Height) : GraphSize;
-public sealed record MatchSwapchainGraphSize(float Scale = 1.0f) : GraphSize;
+// Display: the swapchain's size whatever RenderGraph.RenderScale is -- a target past an upscaler, at the window's resolution.
+public sealed record MatchSwapchainGraphSize(float Scale = 1.0f, bool Display = false) : GraphSize;
 
 // Opaque handle for graph-managed 2D color/depth resources.
 // Returned by RenderGraph.ColorTarget / DepthTarget.

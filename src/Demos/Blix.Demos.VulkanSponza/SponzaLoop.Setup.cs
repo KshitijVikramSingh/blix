@@ -184,6 +184,7 @@ internal sealed partial class SponzaLoop
         ParseRtgiProbe(args);
         ParseRtgi(args);
         ParseGpuCapture(args);
+        ParseMetalFx(args);
         ParseRtgiTemporal(args);
         lightletCensus = args.Flag("lightlet-census");
         lightletRecord = args.Flag("lightlet-record");
@@ -1082,6 +1083,7 @@ internal sealed partial class SponzaLoop
                 .Shader(Reflect("present.vert", "copy_key.frag"))
                 .Handle;
         }
+        DeclareMetalFx();
         graph.Compile();
         graphResourceGeneration = graph.MatchSwapchainResourceGeneration;
 

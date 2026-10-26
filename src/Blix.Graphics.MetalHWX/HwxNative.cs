@@ -78,6 +78,13 @@ internal static unsafe class HwxNative
     public static extern int hwx_group_end(nint ctx, nint sharedEvent, ulong signalValue);
 
     [DllImport(Library)]
+    public static extern int hwx_fx_encode(nint ctx, nint sharedEvent, ulong waitValue, ulong signalValue,
+        nint color, nint depth, nint motion, nint output, float jitterX, float jitterY, float motionScaleX, float motionScaleY, int reset);
+
+    [DllImport(Library)]
+    public static extern unsafe void hwx_fx_stats(ulong* dispatches, ulong* totalGpuNs, ulong* lastGpuNs, ulong* failures);
+
+    [DllImport(Library)]
     public static extern void hwx_trace_stats(nint ctx, ulong* dispatches, ulong* totalGpuNs, ulong* lastGpuNs, ulong* failures);
 
     [DllImport(Library)]

@@ -389,6 +389,7 @@ internal sealed partial class SponzaLoop
             graphResourceGeneration = graph.MatchSwapchainResourceGeneration;
             ambientHistoryValid = false;
             taaHistoryValid = false;
+            metalFxHistoryValid = false;
             incidentHistoryFrame = -10;
             Console.WriteLine("[VulkanSponza] graph resources recreated; GTAO/TAA history reset");
         }
@@ -469,11 +470,13 @@ internal sealed partial class SponzaLoop
 
         // Apply Halton (2,3) jitter as a clip-space translation: post-multiplication adds offset*w
         // to clip.xy without changing the unjittered projection used by spatial decisions.
-        if (render.Taa > 0f && frame.Width > 0 && frame.Height > 0)
+        if ((render.Taa > 0f || MetalFxOn) && frame.Width > 0 && frame.Height > 0)
         {
             // Use the post-load clock so streaming duration cannot change a capture's jitter phase.
             var jx = (Halton(postLoadFrames, 2) - 0.5f) * 2f / frame.Width;
             var jy = (Halton(postLoadFrames, 3) - 0.5f) * 2f / frame.Height;
+            // The same offset in render pixels, for MetalFX (SponzaLoop.MetalFx.cs).
+            metalFxJitter = new Vector2(Halton(postLoadFrames, 2) - 0.5f, Halton(postLoadFrames, 3) - 0.5f);
             cameraJitter = Matrix4x4.CreateTranslation(jx, jy, 0f);
             viewProjJittered = viewProj * cameraJitter;
         }
@@ -1804,6 +1807,8 @@ internal sealed partial class SponzaLoop
 
     private void RecordTaaResolve()
     {
+        // --metalfx: the temporal scaler in its place (SponzaLoop.MetalFx.cs); the TAA history then goes stale.
+        if (RecordMetalFx()) { taaHistoryValid = false; return; }
         if (render.Taa <= 0f) { taaHistoryValid = false; return; }
         Matrix4x4.Invert(viewProjJittered, out var invJittered);
         var uniforms = new ShaderUniform[]
@@ -1849,7 +1854,8 @@ internal sealed partial class SponzaLoop
     private void RecordPresentPass(RenderCommandList commandList)
     {
         // Present samples whatever was resolved this frame, or the raw HDR when TAA is off.
-        var hdrTex = render.Taa > 0f && taaHistoryValid
+        var hdrTex = metalFxWritten ? graph.GetColorTexture(metalFxOutHandle)
+            : render.Taa > 0f && taaHistoryValid
             ? graph.GetColorTexture(taaHandles[taaWrite])
             : graph.GetColorTexture(hdrHandle);
         var push = new byte[8];

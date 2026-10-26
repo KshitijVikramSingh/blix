@@ -91,7 +91,8 @@ public sealed partial class RenderGraph : IDisposable
     // makes it an MSAA attachment — render into it, then resolve into a 1×
     // target via GraphicsPassBuilder.ResolveColor. MSAA targets aren't
     // sampleable (GetColorTexture throws); sample the resolve target instead.
-    public GraphResourceHandle ColorTarget(string name, TextureFormat format, GraphSize size, int samples = 1)
+    // storage: also writable from a shader as an image (a target an upscaler writes, VK_IMAGE_USAGE_STORAGE_BIT).
+    public GraphResourceHandle ColorTarget(string name, TextureFormat format, GraphSize size, int samples = 1, bool storage = false)
     {
         EnsureNotCompiled(nameof(ColorTarget));
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
@@ -99,7 +100,7 @@ public sealed partial class RenderGraph : IDisposable
 
         var id = nextId++;
         Resources[id] = new GraphResourceEntry(
-            new GraphResourceHandle(id), name, GraphResourceKind.ColorTarget, format, size, samples);
+            new GraphResourceHandle(id), name, GraphResourceKind.ColorTarget, format, size, samples, storage);
         return new GraphResourceHandle(id);
     }
 
@@ -517,7 +518,8 @@ internal sealed record GraphResourceEntry(
     GraphResourceKind Kind,
     TextureFormat? Format,    // null for depth resources
     GraphSize Size,
-    int Samples = 1);         // >1 = MSAA attachment (not sampleable; resolve into a 1× target)
+    int Samples = 1,          // >1 = MSAA attachment (not sampleable; resolve into a 1× target)
+    bool Storage = false);    // also a storage image
 
 internal sealed record ColorAttachmentBinding(TextureView View, LoadOp Load, StoreOp Store);
 internal sealed record DepthAttachmentBinding(TextureView View, LoadOp Load, StoreOp Store);

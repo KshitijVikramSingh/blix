@@ -231,9 +231,13 @@ public sealed partial class VulkanGraphicsDevice
         string label,
         SampleCountFlags samples = SampleCountFlags.Count1Bit)
     {
+        // Exportable as an MTLTexture where the device has Metal objects (ExportMetalTexture): a native Metal pass -- the
+        // MetalFX upscaler -- reads and writes the frame's own targets.
+        var metalTextureExport = MetalTextureExport();
         var imageCi = new ImageCreateInfo
         {
             SType = StructureType.ImageCreateInfo,
+            PNext = MetalObjectsEnabled && samples == SampleCountFlags.Count1Bit ? &metalTextureExport : null,
             ImageType = ImageType.Type2D,
             Format = format,
             Extent = new Extent3D(width, height, 1),
