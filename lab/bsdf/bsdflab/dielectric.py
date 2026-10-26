@@ -113,7 +113,8 @@ def _refract(wo, h, eta_v, eta_l):
     return (k * -wo + (k * c - ct)[..., None] * h) * -1.0, ok
 
 
-def sample(i: Interface, wo, rng):
+def sample_direction(i: Interface, wo, rng):
+    """The direction a sample goes to and whether it is one (a reflection beyond the horizon, a refraction past total internal reflection, is not)."""
     wo = np.asarray(wo, float)
     n = wo.shape[0]
     flip = wo[:, 2] < 0
@@ -134,7 +135,12 @@ def sample(i: Interface, wo, rng):
     wt = -k[:, None] * wf + (k * c - ct)[:, None] * h
     wi = np.where(reflect[:, None], wr, wt)
     valid = np.where(reflect, wr[:, 2] > 0, (wt[:, 2] < 0) & (sin2 < 1.0))
-    wi = wi * s
+    return wi * s, valid
+
+
+def sample(i: Interface, wo, rng):
+    wo = np.asarray(wo, float)
+    wi, valid = sample_direction(i, wo, rng)
     d = pdf(i, wo, wi)
     fval = eval(i, wo, wi)
     weight = np.where((valid & (d > 0))[:, None], fval * np.abs(wi[:, 2])[:, None] / np.maximum(d, 1e-30)[:, None], 0.0)

@@ -55,10 +55,18 @@ class Material:
     diffuse_transmission: float = 0.0           # KHR_materials_diffuse_transmission factor
     diffuse_transmission_color: tuple = (1.0, 1.0, 1.0)
     diffuse_roughness: float = 0.0              # EON's roughness (0: Lambert)
+    volume: bool = False                        # KHR_materials_volume with a thickness: a SOLID, its transmission a refracting interface (dielectric.py)
+    attenuation_color: tuple = (1.0, 1.0, 1.0)  # the medium inside (Beer-Lambert), used by the path tracer
+    attenuation_distance: float = float("inf")
 
     @property
     def alpha(self) -> float:
         return max(self.roughness * self.roughness, 1e-3)
+
+    def interface(self):
+        """The solid's surface: a rough dielectric between air and the material's ior, its refracted light tinted by the base colour."""
+        from .dielectric import Interface
+        return Interface(alpha=self.alpha, eta_out=1.0, eta_in=self.ior, tint=self.base_color)
 
     @property
     def alpha_transmission(self) -> float:
@@ -140,19 +148,29 @@ def eval(m: Material, wo, wi):
     diffuse = eon.f_eon(bc, m.diffuse_roughness, np.where(below[..., None], wo, wi), wo)
     dielectric_up = fr * spec + (1.0 - fr) * ((1.0 - t) * (1.0 - dt) * diffuse)
     metal_up = fresnel_metal(m, vh) * spec
+    solid = m.volume and t > 0.0
+    if solid:
+        # A solid: the transmitted share is a refracting interface (reflection and refraction both), not a thin sheet's BTDF.
+        from . import dielectric
+        fi = dielectric.eval(m.interface(), wo, wi)
+        dielectric_up = (1.0 - t) * (fr * spec + (1.0 - fr) * ((1.0 - dt) * diffuse)) + t * np.where(below[..., None], 0.0, fi)
     up = (1.0 - m.metallic) * dielectric_up + m.metallic * metal_up
 
     # Light below: the thin sheet's BTDF (the reflection lobe at the mirrored light, rougher by the ior's factor) and the diffuse transmission.
     btdf = spec_brdf(wo, wm, m.alpha_transmission)[..., None] * bc * t
     dtl = np.asarray(m.diffuse_transmission_color, float) * ((1.0 - t) * dt / PI)
     down = (1.0 - m.metallic) * (1.0 - fr) * (btdf + dtl)
+    if solid:
+        down = (1.0 - m.metallic) * ((1.0 - fr) * dtl + t * np.where(below[..., None], fi, 0.0))
     return np.where(below[..., None], down, up)
 
 
 def lobe_probabilities(m: Material):
-    """The four lobes `sample` picks among: specular reflection, diffuse reflection, thin transmission, diffuse transmission."""
+    """The five lobes `sample` picks among: specular reflection, diffuse reflection, thin transmission, diffuse transmission, the solid's interface."""
     t, dt, k = m.transmission, m.diffuse_transmission, m.metallic
-    w = np.array([0.2 + 0.8 * k, (1 - k) * (1 - t) * (1 - dt), (1 - k) * t, (1 - k) * (1 - t) * dt], float)
+    solid = m.volume and t > 0.0
+    w = np.array([(0.2 if not solid else 0.2 * (1 - t)) + 0.8 * k, (1 - k) * (1 - t) * (1 - dt), 0.0 if solid else (1 - k) * t, (1 - k) * (1 - t) * dt,
+                  (1 - k) * t if solid else 0.0], float)
     return w / w.sum()
 
 
@@ -170,6 +188,10 @@ def pdf(m: Material, wo, wi):
     below = wi[..., 2] < 0
     up = p[0] * _vndf_pdf(wo, wm, m.alpha) + p[1] * np.abs(wi[..., 2]) / PI
     down = p[2] * _vndf_pdf(wo, wm, m.alpha_transmission) + p[3] * np.abs(wi[..., 2]) / PI
+    if p[4] > 0.0:
+        from . import dielectric
+        pi_ = p[4] * dielectric.pdf(m.interface(), wo, wi)
+        up, down = up + pi_, down + pi_
     return np.where(below, down, up)
 
 
@@ -202,7 +224,7 @@ def sample(m: Material, wo, rng):
     wo = np.asarray(wo, float)
     n = wo.shape[0]
     p = lobe_probabilities(m)
-    lobe = rng.choice(4, size=n, p=p)
+    lobe = rng.choice(5, size=n, p=p)
     wi = np.zeros((n, 3))
     valid = np.ones(n, bool)
     for k, alpha in ((0, m.alpha), (2, m.alpha_transmission)):
@@ -220,6 +242,12 @@ def sample(m: Material, wo, rng):
     diffuse_down = lobe == 3
     if diffuse_down.any():
         wi[diffuse_down] = _cosine(int(diffuse_down.sum()), rng) * np.array([1.0, 1.0, -1.0])
+    iface = lobe == 4
+    if iface.any():
+        from . import dielectric
+        wi_i, ok = dielectric.sample_direction(m.interface(), wo[iface], rng)
+        wi[iface] = wi_i
+        valid[np.flatnonzero(iface)[~ok]] = False
     d = pdf(m, wo, wi)
     f = eval(m, wo, wi)
     weight = np.where(((d > 0) & valid)[:, None], f * np.abs(wi[:, 2])[:, None] / np.maximum(d, 1e-30)[:, None], 0.0)

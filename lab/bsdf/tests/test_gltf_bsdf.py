@@ -108,3 +108,36 @@ def test_a_clear_pane_reflects_and_transmits_nearly_all():
     up, down = w[wi[:, 2] > 0].sum(axis=0) / len(wo), w[wi[:, 2] < 0].sum(axis=0) / len(wo)
     assert (up + down).min() > 0.9
     assert down.min() > 0.8   # F at 0.8 is about 0.04-0.05: most of the light goes through
+
+
+SOLIDS = {
+    "glass": Material(base_color=(0.9, 1.0, 0.95), roughness=0.45, transmission=1.0, volume=True),
+    "frosted block": Material(base_color=(1, 1, 1), roughness=0.6, transmission=0.8, volume=True, diffuse_transmission=0.0),
+    "tinted metal-ish": Material(base_color=(0.8, 0.9, 1.0), metallic=0.3, roughness=0.4, transmission=0.7, volume=True),
+}
+
+
+@pytest.mark.parametrize("name", list(SOLIDS))
+@pytest.mark.parametrize("cos", (0.9, 0.4))
+def test_a_solid_samples_as_it_evaluates(name, cos):
+    m = SOLIDS[name]
+    n = 500_000
+    wo = np.tile(wo_at(cos), (n, 1))
+    wi, w = g.sample(m, wo, RNG)
+    est = w.mean(axis=0)
+    u = sphere_dirs(n)
+    ref = (g.eval(m, wo, u) * np.abs(u[:, 2])[:, None]).mean(axis=0) * 4 * np.pi
+    assert est == pytest.approx(ref, rel=0.06, abs=0.012), (name, cos, est, ref)
+
+
+def test_a_solid_refracts_where_a_thin_pane_does_not():
+    thin = Material(roughness=0.0, transmission=1.0)
+    solid = Material(roughness=0.0, transmission=1.0, volume=True)
+    wo = np.tile(wo_at(0.6), (20_000, 1))
+    wt, _ = g.sample(thin, wo, RNG)
+    ws, _ = g.sample(solid, wo, RNG)
+    below_t, below_s = wt[wt[:, 2] < 0], ws[ws[:, 2] < 0]
+    assert np.linalg.norm(below_t + wo[: len(below_t)], axis=1).mean() < 0.05            # thin: straight through (wi = -wo)
+    sin_in = np.sqrt(1 - 0.6 ** 2)
+    sin_out = np.hypot(below_s[:, 0], below_s[:, 1])
+    assert sin_out.mean() == pytest.approx(sin_in / 1.5, abs=0.02)                        # solid: Snell's law toward the normal
