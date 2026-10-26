@@ -138,6 +138,16 @@ public sealed class MetalRayTracer : IDisposable
         });
 
         var classifyMs = clock.Elapsed.TotalMilliseconds;
+        // What the hardware traverses alone and what calls the coverage function (blix_coverage) at each candidate hit.
+        // BLIX_HWX_ALL_OPAQUE=1: the partly covered built opaque too -- a timing probe for those calls, never an image to
+        // keep (leaves and chains turn solid).
+        var allOpaque = Environment.GetEnvironmentVariable("BLIX_HWX_ALL_OPAQUE") == "1";
+        // Crytek Sponza: 228,576 and 32,383; built all opaque its RTGI rays took 3.75-3.91 ms a frame against 4.10-4.31 (2026-10-27).
+        Console.WriteLine(string.Create(System.Globalization.CultureInfo.InvariantCulture,
+            $"[MetalHWX] {solid.Sum(l => (long)l.Count):N0} opaque triangles, {partial.Sum(l => (long)l.Count):N0} partly covered")
+            + (allOpaque ? " (built opaque: BLIX_HWX_ALL_OPAQUE)" : " (their coverage function at every candidate hit)") + ".");
+        if (allOpaque)
+            for (var h = 0; h < bases.Length; h++) { solid[h].AddRange(partial[h]); partial[h].Clear(); }
         var primCount = solid.Sum(l => (long)l.Count) + partial.Sum(l => (long)l.Count);
         var indices = new uint[Math.Max(1, primCount * 3)];
         var primRows = new uint[Math.Max(1, primCount)];
