@@ -22,7 +22,8 @@ layout(set = 0, binding = 0) uniform RtgiTrain {
     vec4 uNearField;     // x the near field's radius (rtgi_cache.glsl's RTGI_NEAR); y the contact radius (m); z the direct sun at
                          // a ray's hit, scaled (1; 0: none -- a diagnostic of where the samples' variance comes from); w the
                          // levels a sample trains, its own first
-    vec4 uGuideTable;    // x the guide table's slots - 1 (0: no guiding learnt)
+    vec4 uGuideTable;    // x the guide table's slots - 1 (0: no guiding learnt); y 1: a hit cell still holding an earlier sun's
+                         // light (its epoch behind z, the sun's) counts as not ready (irradianceAt)
     vec4 uClamp;         // x > 0: a sample's luminance capped at its cell's mean + x standard deviations (once it holds 32);
                          // y the frame's number (from 1); z the dirty list's room
     vec4 uTrain;         // x 1: a landing cell holding nothing counts as dark (else no sample); y 1: no coarser cell for it;
@@ -109,7 +110,12 @@ vec4 irradianceAt(vec3 q, vec3 nq, out bool fine, float sunAt) {
     vec4 o0 = vec4(0.0), o1 = vec4(0.0);
     if (own != 0xFFFFFFFFu) { o0 = rtgiFiltered[own]; o1 = rtgiResolved[2u * own + 1u]; }
     vec4 r0 = o0, r1 = o1;
-    if (o1.y >= 8.0) fine = true;
+    // Stale (uGuideTable.y): the hit cell has not been trained since the sun turned (rtgi_resolve.comp cuts a cell's
+    // history only when it is next trained), so its light is the old sun's -- off screen, a bounce source, it may not be
+    // trained for a long while, and every ray landing in it brought the old light on. Not ready: the landing is requested,
+    // and its cell trained (and cut) next frame.
+    bool stale = u.uGuideTable.y > 0.5 && own != 0xFFFFFFFFu && rtgiStamps[own].y != uint(u.uGuideTable.z);
+    if (o1.y >= 8.0 && !stale) fine = true;
     else if (u.uTrain.y < 0.5) {
         // Two levels up, then (uFallback.x) further: the first holding any light.
         for (uint k = 2u; k <= 2u + uint(u.uFallback.x); k++) {

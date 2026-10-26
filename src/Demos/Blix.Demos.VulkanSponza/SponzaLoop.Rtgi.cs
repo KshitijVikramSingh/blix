@@ -54,6 +54,13 @@ internal sealed partial class SponzaLoop
     // --rtgi-sun-cut N: on a frame the sun turns (0.02 degrees or more), every cell's light history capped to N samples
     // (and its sun visibility's to 4): a known change, not one for the fast mean to find. 0: none.
     private float rtgiSunCut = 32f;
+    // A ray's hit in a cell not trained since the sun turned counts as not ready (rtgi_train.comp's irradianceAt): its
+    // landing is requested, so the bounce sources off screen are retrained -- and cut -- within a frame or two of a turn
+    // instead of whenever a hit point reaches them. Their old light had lingered: Crytek Sponza 300 frames after a sun
+    // change (71.3, -50 -> 160, -40) read 2.6% bright, its darkest quarter 11.5% bright (|error| 0.381); with this 0.9%
+    // and 4.8% (0.307), at 600 frames 0.4% and 0.9% (0.269 against 0.361), the darkest quarter's error 0.241 against
+    // 0.273 at 2400 -- a boot at the new sun reads 0.1% at 300 (2026-10-27). --rtgi-no-stale-hits: off.
+    private bool rtgiStaleHits = true;
     // --rtgi-age F: a cell's light history held to F of its age in samples (at least --rtgi-age-floor, 64), so the samples
     // taken before the cells around it had their light fade fast (rtgi_resolve.comp). 0: no limit.
     private float rtgiAge = 0.25f, rtgiAgeFloor = 64f;
@@ -326,6 +333,7 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-change-floor") is { } cf) rtgiChangeFloor = MathF.Max(0f, cf);
         if (args.Float("rtgi-change-frames") is { } cfr) rtgiChangeFrames = MathF.Max(1f, cfr);
         if (args.Float("rtgi-sun-cut") is { } sc) rtgiSunCut = MathF.Max(0f, sc);
+        if (args.Flag("rtgi-no-stale-hits")) rtgiStaleHits = false;
         rtgiCountUnknown = args.Flag("rtgi-count-unknown");
         rtgiNoCoarse = args.Flag("rtgi-no-coarse");
         if (args.Float("rtgi-fallback-up") is { } fu) rtgiFallbackUp = Math.Clamp(fu, 0f, 6f);
@@ -583,7 +591,7 @@ internal sealed partial class SponzaLoop
                     new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 0f))),
                     new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, rtgiContactRadius, rtgiHitSun, rtgiPushUp ? 1 : rtgiTrainLevels))),
                     new("uClamp", new Vector4Uniform(new Vector4(rtgiClampSigma, frameNumber, RtgiDirtyRoom, 0f))),
-                    new("uGuideTable", new Vector4Uniform(new Vector4(rtgiGuide > 0f ? RtgiGuideSlots - 1 : 0f, 0f, 0f, 0f))),
+                    new("uGuideTable", new Vector4Uniform(new Vector4(rtgiGuide > 0f ? RtgiGuideSlots - 1 : 0f, rtgiStaleHits ? 1f : 0f, rtgiSunEpoch, 0f))),
                     new("uTrain", new Vector4Uniform(new Vector4(rtgiCountUnknown ? 1f : 0f, rtgiNoCoarse ? 1f : 0f, rtgiBackfaceLit ? 1f : 0f, rtgiRequests ? rtgiHitPoints : 0f))),
                     new("uHitSun", new Vector4Uniform(new Vector4(rtgiTraceHitSun ? 1f : 0f, rtgiThin ? 1f : 0f, rtgiReadFirst ? 1f : 0f, 0f))),
                     new("uFallback", new Vector4Uniform(new Vector4(rtgiFallbackUp, rtgiContact ? 1f : 0f, rtgiDefer ? 1f : 0f, rtgiSubgroup ? (rtgiTrainTable ? 2f : 1f) : 0f))),
