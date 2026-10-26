@@ -333,6 +333,14 @@ internal sealed partial class SponzaLoop
             clipmapRested++;
             return;
         }
+        // Under --rtgi the cache answers the indirect light, and the probes only glass panes' reflection (the sky they
+        // see, lit_body.glsl): solved one frame in --rtgi-clipmap-every (8). Every frame they cost Crytek Sponza ~4 ms
+        // (33.3 -> 29.3 frozen, 2026-10-26). 1: every frame.
+        if (rtgi && !clipmapAlways && rtgiClipmapEvery > 1 && framesRendered % rtgiClipmapEvery != 0)
+        {
+            clipmapRested++;
+            return;
+        }
         MarkIncidentDirty();   // the probes solve: what the incident pass reads where texels do not answer changes
         // Staged (ClipmapStaged): a wave in flight holds its blocks where they were when it started -- the slots it
         // picked must still be the cells it traced when it resolves -- so the clipmap follows the camera only as a wave

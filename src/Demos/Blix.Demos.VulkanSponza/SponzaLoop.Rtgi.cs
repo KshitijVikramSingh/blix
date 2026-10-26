@@ -83,6 +83,8 @@ internal sealed partial class SponzaLoop
     // A point's cosine direction from its cell's own low-discrepancy sequence (rtgi_rays.comp): Cornell's noise left at 60
     // frames 1.45% against 1.66%, error 0.022 against 0.024; Crytek Sponza alike (2026-10-26). --rtgi-no-blue: hashed.
     private bool rtgiBlue = true;
+    // --rtgi-clipmap-every N: the probe clipmap solved one frame in N under RTGI (SponzaLoop.Clipmap.cs).
+    private int rtgiClipmapEvery = 8;
     // --rtgi-redraw: a point that picked a done cell draws again from more tiles, done cells out, rather than giving its ray
     // back (rtgi_rays.comp): the frozen cells' rays spent on the open ones.
     private bool rtgiRedraw;
@@ -137,6 +139,8 @@ internal sealed partial class SponzaLoop
     // (rtgi_readout.frag, rtgi_rays.comp). Sized for a 4096 x 2304 frame's half; its row the frame's (rtgiHalfRow).
     private const int RtgiUnsureSize = 2048 * 1152;
     private GpuBufferHandle rtgiUnsure;
+    // Per half-res pixel, the blur's radius, sized by the readout (rtgi_readout.frag) and read by the blur (rtgi_blur.frag).
+    private GpuBufferHandle rtgiBlurRadius;
     private int rtgiHalfRow;
     private bool rtgiUnsureWritten;
     // --rtgi-blur PX: the readout blurred in screen space by how sure the cache is (rtgi_blur.frag, ReBLUR's way), at most
@@ -290,6 +294,7 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-block-global") is { } bg) rtgiBlockGlobal = Math.Clamp(bg, 0f, 1f);
         if (args.Float("rtgi-block-window") is { } bw) rtgiBlockWindow = MathF.Max(1f, MathF.Round(bw));
         if (args.Flag("rtgi-no-blue")) rtgiBlue = false;
+        if (args.Int("rtgi-clipmap-every") is { } cme) rtgiClipmapEvery = Math.Max(1, cme);
         if (args.Float("rtgi-blur") is { } bl) rtgiBlur = MathF.Max(0f, bl);
         if (args.Float("rtgi-blur-hit") is { } bh) rtgiBlurHit = MathF.Max(0f, bh);
         if (args.Flag("rtgi-redraw")) rtgiRedraw = true;
@@ -469,6 +474,7 @@ internal sealed partial class SponzaLoop
             rtgiDirection = Own(device.CreateGpuBuffer(RtgiSlots * 16, new byte[RtgiSlots * 16], "sponza.rtgi.direction"));
             rtgiConfidence = Own(device.CreateGpuBuffer(RtgiSlots * 16, new byte[RtgiSlots * 16], "sponza.rtgi.confidence"));
             rtgiUnsure = Own(device.CreateGpuBuffer(RtgiUnsureSize * 4, new byte[RtgiUnsureSize * 4], "sponza.rtgi.unsure"));
+            rtgiBlurRadius = Own(device.CreateGpuBuffer(RtgiUnsureSize * 4, new byte[RtgiUnsureSize * 4], "sponza.rtgi.blur-radius"));
             rtgiHitInv = Own(device.CreateGpuBuffer(RtgiSlots * 4, new byte[RtgiSlots * 4], "sponza.rtgi.hit-inv"));
             rtgiSeq = Own(device.CreateGpuBuffer(RtgiSlots * 4, new byte[RtgiSlots * 4], "sponza.rtgi.seq"));
             rtgiStands = Own(device.CreateGpuBuffer(RtgiSlots * 4, new byte[RtgiSlots * 4], "sponza.rtgi.stands"));
@@ -879,7 +885,8 @@ internal sealed partial class SponzaLoop
                 new("uHalf", new Vector4Uniform(new Vector4(0f, sub.X, sub.Y, 0f))),
                 new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, rtgiNoGradient ? 0f : 1f, 0f, 0f))),
                 new("uContact", new Vector4Uniform(new Vector4(rtgiContact ? 1f : 0f, 0.3f, 1.25f, rtgiView))),
-                new("uUnsure", new Vector4Uniform(new Vector4(rtgiDoneError, rtgiHalfRow, RtgiUnsureSize, 0f))),
+                new("uUnsure", new Vector4Uniform(new Vector4(rtgiDoneError, rtgiHalfRow, RtgiUnsureSize, 1f / LodErrorScale))),
+                new("uBlurAt", new Vector4Uniform(new Vector4(RtgiBlurNow, rtgiBlurHit, 0f, 0f))),
             },
             buffers: new[]
             {
@@ -890,6 +897,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiDoneCount", rtgiDoneCount),
                 new ShaderBufferBinding("RtgiUnsure", rtgiUnsure),
                 new ShaderBufferBinding("RtgiHitInv", rtgiHitInv),
+                new ShaderBufferBinding("RtgiBlurRadius", rtgiBlurRadius),
             }));
         rtgiUnsureWritten = true;
         // Blurred by how sure the cache is, into the incident the upsample reads (rtgi_blur.frag; at 0 a copy).
@@ -910,14 +918,9 @@ internal sealed partial class SponzaLoop
                 new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, 0f, 0f, 0f))),
                 // A full-res pixel's footprint per metre of distance: 1 / (pixels per unit at unit distance).
                 new("uBlur", new Vector4Uniform(new Vector4(RtgiBlurNow, rtgiDoneError, rtgiBlurHit, 1f / LodErrorScale))),
-                new("uHalf", new Vector4Uniform(new Vector4(rtgiView == 9 ? 1f : 0f, sub.X, sub.Y, 0f))),
+                new("uHalf", new Vector4Uniform(new Vector4(rtgiView == 9 ? 1f : 0f, sub.X, sub.Y, rtgiHalfRow))),
             },
-            buffers: new[]
-            {
-                new ShaderBufferBinding("RtgiKeys", rtgiKeys),
-                new ShaderBufferBinding("RtgiConfidence", rtgiConfidence),
-                new ShaderBufferBinding("RtgiHitInv", rtgiHitInv),
-            }));
+            buffers: new[] { new ShaderBufferBinding("RtgiBlurRadius", rtgiBlurRadius) }));
     }
 
     // --rtgi-dump DIR --rtgi-dump-frames F1,F2,...: at those post-load frames the incident field the lit pass read

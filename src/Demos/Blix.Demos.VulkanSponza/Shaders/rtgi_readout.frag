@@ -19,7 +19,9 @@ layout(set = 0, binding = 0) uniform RtgiReadout {
     vec4 uHalf;          // yz the full-res pixel of its 2x2
     vec4 uNearField;     // x the near field's radius (rtgi_cache.glsl's RTGI_NEAR); y 1: the gradient written
     vec4 uContact;       // x 1: contact detail on; yz the ratio's clamp; w the RTGI panel's view (0: the light)
-    vec4 uUnsure;        // x the done threshold (relative error); y the uncertainty map's row (half-res pixels); z its size
+    vec4 uUnsure;        // x the done threshold (relative error); y the uncertainty map's row (half-res pixels); z its size;
+                         // w a full-res pixel's footprint per metre of distance
+    vec4 uBlurAt;        // x the blur's radius at most (full-res pixels; 0: none); y the share of the hit distance it may reach
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -42,6 +44,9 @@ layout(std430, set = 0, binding = 9) buffer RtgiDoneCount { uint doneCount[4]; }
 // holding under 4 samples, or none, 1; the sky -1.
 layout(std430, set = 0, binding = 10) writeonly buffer RtgiUnsure { float rtgiUnsure[]; };
 layout(std430, set = 0, binding = 11) readonly buffer RtgiHitInv { float rtgiHitInv[]; };
+// Per half-res pixel, the blur's radius (half-res pixels; rtgi_blur.frag): sized here, where the pixel's cell is found
+// already -- the blur found it in the hash again, 4.6 ms a frame at Crytek Sponza's 4x the rays (2026-10-26).
+layout(std430, set = 0, binding = 12) writeonly buffer RtgiBlurRadius { float rtgiBlurRadius[]; };
 
 // Blue (0) to green to red (1).
 vec3 heat(float t) {
@@ -119,7 +124,7 @@ void main() {
     uint unsureAt = uint(h.y) * uint(u.uUnsure.y) + uint(h.x);
     bool unsureIn = h.x < int(u.uUnsure.y) && unsureAt < uint(u.uUnsure.z);
     if (raw >= 1.0 - 1e-6 || dot(ns.xyz, ns.xyz) < 1e-6) {
-        if (unsureIn) rtgiUnsure[unsureAt] = -1.0;
+        if (unsureIn) { rtgiUnsure[unsureAt] = -1.0; rtgiBlurRadius[unsureAt] = 0.0; }
         outIncident = vec4(0.0, 0.0, 0.0, 1.0);
         return;
     }
@@ -134,11 +139,23 @@ void main() {
     if (unsureIn) {
         uint sc = rtgiFind(rtgiCellHash(ivec3(floor(p / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
         float unsure = 1.0;
+        float rel = 1.0, invD = 0.0;
+        if (sc != 0xFFFFFFFFu) {
+            rel = rtgiConfidence[sc].x;
+            invD = rtgiHitInv[sc];
+        }
         if (sc != 0xFFFFFFFFu && rtgiResolved[2u * sc + 1u].y >= 4.0) {
             vec4 conf = rtgiConfidence[sc];
             unsure = conf.w > 0.5 ? 0.125 * u.uUnsure.x : clamp(conf.x, u.uUnsure.x, 1.0);
         }
         rtgiUnsure[unsureAt] = unsure;
+        // The blur's radius (rtgi_blur.frag): the cell's size times its relative error over the done threshold (0.5 to 4
+        // cells), twice, at most uBlurAt.y of the rays' harmonic mean hit distance; over a full-res pixel's footprint at
+        // its distance, halved, at most uBlurAt.x / 2.
+        float worldR = rtgiSize(level, u.uParams) * clamp(rel / u.uUnsure.x, 0.5, 4.0) * 2.0;
+        if (invD > 1e-6) worldR = min(worldR, u.uBlurAt.y / invD);
+        float dist = length(p - u.uCamera.xyz);
+        rtgiBlurRadius[unsureAt] = u.uBlurAt.x > 0.0 ? min(worldR / (dist * u.uUnsure.w), u.uBlurAt.x) * 0.5 : 0.0;
     }
     uint top = uint(u.uParams.w);
     float t = lf - float(level);

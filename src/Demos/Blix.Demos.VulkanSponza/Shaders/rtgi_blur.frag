@@ -27,20 +27,21 @@ layout(set = 0, binding = 0) uniform RtgiBlur {
     vec4 uBlur;          // x the radius at most (full-res pixels; 0: no blur); y the done threshold (relative error); z
                          // the share of the mean hit distance the radius may reach; w a full-res pixel's footprint per metre
     vec4 uHalf;          // x 1: the radius painted (the RTGI panel's blur view: 0 blue to the most red); yz the full-res
-                         // pixel of its 2x2
+                         // pixel of its 2x2; w the radius map's row (half-res pixels)
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uIn;
 layout(set = 0, binding = 3) uniform sampler2D uSceneDepth;
 layout(set = 0, binding = 4) uniform sampler2D uPrepassNormal;
 
-layout(std430, set = 0, binding = 5) readonly buffer RtgiKeys { uint rtgiKeys[]; };
-layout(std430, set = 0, binding = 6) readonly buffer RtgiConfidence { vec4 rtgiConfidence[]; };
-layout(std430, set = 0, binding = 7) readonly buffer RtgiHitInv { float rtgiHitInv[]; };
+layout(std430, set = 0, binding = 5) readonly buffer RtgiBlurRadius { float rtgiBlurRadius[]; };
 
-#define RTGI_KEYS(i) rtgiKeys[i]
-#define RTGI_NEAR u.uNearField.x
-#include "rtgi_cache.glsl"
+uint rtgiHash(uint x) {
+    x ^= x >> 16; x *= 0x7feb352du;
+    x ^= x >> 15; x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
 
 const vec2 DISC[12] = vec2[12](
     vec2(-0.326, -0.406), vec2(-0.840, -0.074), vec2(-0.696, 0.457), vec2(-0.203, 0.621),
@@ -74,16 +75,10 @@ void main() {
     if (depth >= 1.0 - 1e-6 || dot(ns.xyz, ns.xyz) < 1e-6) return;
     vec3 p = worldAt(q, size, depth), n = normalize(ns.xyz);
     float dist = length(p - u.uCamera.xyz);
-    // How sure the cache is here: the pixel's cell's relative error (rtgi_filter.comp), its hit distance.
-    uint level = rtgiLevel(p, u.uCamera.xyz, u.uParams);
-    float cellSize = rtgiSize(level, u.uParams);
-    uint s = rtgiFind(rtgiCellHash(ivec3(floor(p / cellSize)), level, rtgiSide(n), u.uParams), u.uParams);
-    float rel = s != 0xFFFFFFFFu ? rtgiConfidence[s].x : 1.0;
-    float invD = s != 0xFFFFFFFFu ? rtgiHitInv[s] : 0.0;
-    float worldR = cellSize * clamp(rel / u.uBlur.y, 0.5, 4.0);
-    if (invD > 1e-6) worldR = min(worldR, u.uBlur.z / invD);
-    worldR *= 2.0;
-    float radius = min(worldR / (dist * u.uBlur.w), u.uBlur.x) * 0.5;
+    // The radius the readout sized (rtgi_readout.frag: its cell's error, size and hit distance), in half-res pixels.
+    uint at = uint(hq.y) * uint(u.uHalf.w) + uint(hq.x);
+    float radius = rtgiBlurRadius[at];
+    float worldR = radius * 2.0 * dist * u.uBlur.w;
     if (u.uHalf.x > 0.5) { outIncident = vec4(heat(radius / max(0.5 * u.uBlur.x, 1.0)), centre.a); return; }
     if (radius < 1.0) return;
     // The disc turned by the pixel and the frame.
