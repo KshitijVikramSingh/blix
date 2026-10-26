@@ -1,0 +1,26 @@
+diff --git a/src/Demos/Blix.Demos.VulkanSponza/SponzaLoop.Render.cs b/src/Demos/Blix.Demos.VulkanSponza/SponzaLoop.Render.cs
+index 9a6568b3..d8a7c240 100644
+--- a/src/Demos/Blix.Demos.VulkanSponza/SponzaLoop.Render.cs
++++ b/src/Demos/Blix.Demos.VulkanSponza/SponzaLoop.Render.cs
+@@ -766,6 +766,7 @@ internal sealed partial class SponzaLoop
+         using (Prof("rtgi-probe")) RecordRtgiProbe(frame.Width, frame.Height);
+         if (rtgi && !texelsUploaded) ApplySunChangeIfDue();
+         using (Prof("rtgi")) RecordRtgi(frame.Width, frame.Height);
++        if (rtgi && !transportTexels) DumpViewIfDue();   // the texel pass (which otherwise asks) does not run under RTGI
+         RtgiDumpIfDue();
+         CookTransportWhenReady();
+         CookGiWhenLanded();
+diff --git a/src/Demos/Blix.Demos.VulkanSponza/SponzaLoop.ViewDump.cs b/src/Demos/Blix.Demos.VulkanSponza/SponzaLoop.ViewDump.cs
+index 4e36add6..fed427c2 100644
+--- a/src/Demos/Blix.Demos.VulkanSponza/SponzaLoop.ViewDump.cs
++++ b/src/Demos/Blix.Demos.VulkanSponza/SponzaLoop.ViewDump.cs
+@@ -29,7 +29,8 @@ internal sealed partial class SponzaLoop
+         if (viewDumpWaiting > 0 && --viewDumpWaiting > 0) return;
+         if (viewDumpWaiting == 0 && !viewDumpReady)
+         {
+-            var landed = viewDumpAtLanding && !viewDumpDone && texelResting && landedFrame >= 0 && framesRendered >= landedFrame + 60
++            var landed = viewDumpAtLanding && !viewDumpDone
++                && (texelResting && landedFrame >= 0 && framesRendered >= landedFrame + 60 || rtgi && !transportTexels && postLoadFrames >= 300)   // RTGI has no landing: the field is live
+                 && (viewDumpAtFrame < 0 || postLoadFrames >= viewDumpAtFrame)
+                 // --ref-view: once its camera paths are all in (at landing they were ~10% in, 2026-10-22).
+                 && (refViewStride <= 0 || viewWave is { } vw && vw.Dispatch >= ReferenceWaveFrames(vw));

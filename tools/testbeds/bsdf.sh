@@ -7,7 +7,7 @@
 #   BLIX_BSDF_GI         the GI flags instead of the cooked lightmap's ("--rtgi" on a tree that has it).
 #   BLIX_BSDF_WINDOW     the window, WxH (default 1280x720); the reference's grid is every BLIX_BSDF_STRIDE-th pixel of it (default 4).
 #
-# Usage: tools/testbeds/bsdf.sh [scene...] [-- extra demo flags]    scenes: transmission dragon coat aniso sheen irid lamp (default: all)
+# Usage: tools/testbeds/bsdf.sh [scene...] [-- extra demo flags]    scenes: transmission dragon coat aniso sheen irid lamp, and drapes teacup plant for cloth and diffuse transmission (default: the first seven)
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 : "${BLIX_TESTBED_ASSETS:?BLIX_TESTBED_ASSETS names the cooked scenes}"
@@ -32,12 +32,16 @@ cam() {   # the picture's camera per scene
         sheen) echo "--cam 0,0.6,2.5,0,-5" ;;
         irid) echo "--cam 0,1.0,3.5,0,-5" ;;
         lamp) echo "--cam 0,0.8,3.0,0,-5" ;;
+        drapes) echo "--cam -0.68,2.46,3.28,10,-5 --ray-lod-error 0" ;;
+        teacup) echo "--cam 0.291,1.958,-0.454,-13.78,-33.62" ;;
+        plant) echo "" ;;
     esac
 }
+scene_name() { case "$1" in drapes) echo drapes ;; *) echo "khronos-$1" ;; esac; }
 for s in "${scenes[@]}"; do
     mkdir -p "$OUT/$s"
     # shellcheck disable=SC2046
-    BLIX_DUMP_DIR="$OUT/$s" "$REPO/blix" run ${build[@]+"${build[@]}"} Blix.Demos.VulkanSponza --scene="khronos-$s" $(cam "$s") "${gi[@]}" --no-fog --render-scale 1 --win=${WINDOW%x*} ${WINDOW#*x} \
+    BLIX_DUMP_DIR="$OUT/$s" "$REPO/blix" run ${build[@]+"${build[@]}"} Blix.Demos.VulkanSponza --scene="$(scene_name "$s")" $(cam "$s") "${gi[@]}" --no-fog --render-scale 1 --win=${WINDOW%x*} ${WINDOW#*x} \
         --ref-view $STRIDE --ref-view-lanes 16 --ref-view-paths 256 --ref-bounces 16 --ref-bsdf --view-dump \
         --shot-when-ready --shot-frames=6000 --shot="$OUT/$s.png" ${extra[@]+"${extra[@]}"} > "$OUT/$s.log" 2>&1 || { echo "bsdf: $s failed; $OUT/$s.log" >&2; tail -5 "$OUT/$s.log" >&2; exit 1; }
     build=()
