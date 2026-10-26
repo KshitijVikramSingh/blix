@@ -183,6 +183,7 @@ internal sealed partial class SponzaLoop
         rtShadows = args.Flag("rt-shadows");
         ParseRtgiProbe(args);
         ParseRtgi(args);
+        ParseGpuCapture(args);
         ParseRtgiTemporal(args);
         lightletCensus = args.Flag("lightlet-census");
         lightletRecord = args.Flag("lightlet-record");

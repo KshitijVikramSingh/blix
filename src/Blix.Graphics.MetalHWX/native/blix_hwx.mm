@@ -900,6 +900,33 @@ HWX_EXPORT HwxContext* hwx_create(void* mtlDevice, char* err, int errLength) {
     }
 }
 
+// A GPU frame capture of everything on the device (MoltenVK's queue and this tracer's alike) into a .gputrace document
+// at path, from now until hwx_capture_end -- for Xcode. Metal allows it outside Xcode only with MTL_CAPTURE_ENABLED=1 in
+// the environment before the device is made. 0 when started; else the reason, in ctx's error.
+HWX_EXPORT int hwx_capture_begin(HwxContext* ctx, const char* path) {
+    @autoreleasepool {
+        MTLCaptureManager* manager = [MTLCaptureManager sharedCaptureManager];
+        if (![manager supportsDestination:MTLCaptureDestinationGPUTraceDocument])
+            return Fail(ctx, "GPU trace documents unsupported (MTL_CAPTURE_ENABLED=1 before the device is made?)");
+        MTLCaptureDescriptor* d = [MTLCaptureDescriptor new];
+        d.captureObject = ctx->device;
+        d.destination = MTLCaptureDestinationGPUTraceDocument;
+        d.outputURL = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path]];
+        NSError* error = nil;
+        if (![manager startCaptureWithDescriptor:d error:&error])
+            return Fail(ctx, (std::string("capture: ") + (error ? error.localizedDescription.UTF8String : "unknown")).c_str());
+        return 0;
+    }
+}
+
+HWX_EXPORT void hwx_capture_end(HwxContext* ctx) {
+    (void)ctx;
+    @autoreleasepool {
+        MTLCaptureManager* manager = [MTLCaptureManager sharedCaptureManager];
+        if (manager.isCapturing) [manager stopCapture];
+    }
+}
+
 HWX_EXPORT void hwx_destroy(HwxContext* ctx) {
     if (!ctx) return;
     if (ctx->lastShadow) [ctx->lastShadow waitUntilCompleted];  // its handler writes into ctx

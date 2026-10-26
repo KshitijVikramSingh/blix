@@ -50,6 +50,8 @@ internal static unsafe class HwxNative
 
     [DllImport(Library)] public static extern nint hwx_create(nint mtlDevice, byte* error, int errorLength);
     [DllImport(Library)] public static extern void hwx_destroy(nint ctx);
+    [DllImport(Library)] public static extern int hwx_capture_begin(nint ctx, [MarshalAs(UnmanagedType.LPUTF8Str)] string path);
+    [DllImport(Library)] public static extern void hwx_capture_end(nint ctx);
     [DllImport(Library)] public static extern nint hwx_error(nint ctx);
 
     [DllImport(Library)]

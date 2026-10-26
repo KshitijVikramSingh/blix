@@ -395,6 +395,7 @@ internal sealed partial class SponzaLoop
         // Post-load frames are the reproducible clock for orbit, capture, and temporal sequences;
         // global frames still account for loading and A/B scheduling.
         if (fullyLoaded) postLoadFrames++;
+        GpuCaptureTick();
         // A shot measured across a resize is not the frame its size says (a window maximised mid-run
         // wrote a 2940x1838 image beside 1920x1080 ones), so the size the measured frames start at is
         // kept and the shot refuses a different one. The size, not a recreation: --no-vsync recreates

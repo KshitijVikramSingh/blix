@@ -52,6 +52,26 @@ public sealed class MetalRayTracer : IDisposable
     }
 
     /// <summary>A tracer on this device, or null with the reason it cannot have one.</summary>
+    /// <summary>
+    /// Starts a GPU frame capture of the whole device -- the Vulkan frame (MoltenVK's queue) and this tracer's batches alike --
+    /// into a .gputrace document at <paramref name="path"/>, until <see cref="EndCapture"/>. Needs MTL_CAPTURE_ENABLED=1 in
+    /// the process environment before the Metal device is made. False with the reason when it cannot.
+    /// </summary>
+    public bool BeginCapture(string path, out string reason)
+    {
+        ObjectDisposedException.ThrowIf(ctx == 0, this);
+        reason = "";
+        if (HwxNative.hwx_capture_begin(ctx, path) == 0) return true;
+        reason = Marshal.PtrToStringUTF8(HwxNative.hwx_error(ctx)) ?? "unknown";
+        return false;
+    }
+
+    /// <summary>Ends a capture <see cref="BeginCapture"/> started (the document is written then).</summary>
+    public void EndCapture()
+    {
+        if (ctx != 0) HwxNative.hwx_capture_end(ctx);
+    }
+
     public static unsafe MetalRayTracer? TryCreate(IGraphicsDevice device, out string reason)
     {
         if (!OperatingSystem.IsMacOS()) { reason = "Metal ray tracing needs macOS."; return null; }

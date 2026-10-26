@@ -54,6 +54,8 @@ public static class Program
         // timestamps bracket encoder submission rather than execution.
         // Opens with the overlay showing, as a research renderer is mostly read through it. ` hides it.
         var scene = SceneProfile.Named(args.String("scene"));
+        // GPU captures' environment (SponzaLoop.GpuCapture.cs), before the Vulkan instance and the Metal device exist.
+        SponzaLoop.ApplyGpuCaptureEnvironment(args);
         LogBuild();
         // BLIX_RUN_LABEL: what this run is (its tag, its flags), in the title -- so a window in a sequence of runs says which
         // one it is.
