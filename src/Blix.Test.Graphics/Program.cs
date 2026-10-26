@@ -7167,6 +7167,43 @@ static ShaderInterface MinimalShader() => new(new[]
     }
 }
 
+// The material layers' twins (lab/bsdf): the python is the reference, bsdf_gltf.glsl and iridescence.glsl follow it, and the lit shader reads the material the scene writes. None of this needs a
+// GPU: the numbers a twin must share, and the names the C# and the shader must agree on, are text. (tests/test_gltf_gpu.py holds the GLSL to the python per pixel, on the GPU.)
+{
+    var shaders = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "Blix.Shaders");
+    var lab = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "lab", "bsdf", "bsdflab");
+    var demoDir = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "Demos", "Blix.Demos.VulkanSponza");
+    string Read(string path) => File.Exists(path) ? File.ReadAllText(path) : "";
+    var film = Read(Path.Combine(shaders, "iridescence.glsl"));
+    var filmPy = Read(Path.Combine(lab, "gltf_bsdf.py"));
+    var literal = new System.Text.RegularExpressions.Regex(@"\d+\.\d+e[+-]?\d+");
+    double[] Constants(string text) => literal.Matches(text).Select(m => double.Parse(m.Value, System.Globalization.CultureInfo.InvariantCulture)).Order().ToArray();
+    var glslFilm = Constants(film);
+    var pyFilm = Constants(filmPy[filmPy.IndexOf("def _sensitivity", StringComparison.Ordinal)..filmPy.IndexOf("def _smoothstep", StringComparison.Ordinal)]);
+    t.Expect("CB.1 the thin film's sensitivity constants are the python's", glslFilm.Length >= 10 && glslFilm.SequenceEqual(pyFilm),
+        $"glsl {string.Join(" ", glslFilm)} | python {string.Join(" ", pyFilm)}");
+    var bsdf = Read(Path.Combine(shaders, "bsdf_gltf.glsl"));
+    foreach (var (glsl, py, what) in new[]
+    {
+        ("0.25 * m.clearcoat", "0.25 * m.clearcoat", "the coat's lobe weight"),
+        ("0.3 * max(m.sheenColor.x", "0.3 * max(m.sheen_color)", "the sheen's lobe weight"),
+        ("1.0 / 24.0", "SHEEN_QUADRATURE = (24, 16)", "the sheen albedo's grid"),
+        ("clamp(ior * 2.0 - 2.0, 0.0, 1.0)", "np.clip(self.ior * 2.0 - 2.0, 0.0, 1.0)", "the thin sheet's roughness scale"),
+        ("0.04 + 0.96 * pow(1.0 - clamp(wo.z, 0.0, 1.0), 5.0)", "0.04 + 0.96 * (1.0 - np.clip(wo[..., 2], 0.0, 1.0)) ** 5", "the coat's Fresnel toward the view"),
+    })
+        t.Expect($"CB.2 the BSDF twin and the python agree on {what}", bsdf.Contains(glsl, StringComparison.Ordinal) && filmPy.Contains(py, StringComparison.Ordinal),
+            $"glsl has it: {bsdf.Contains(glsl, StringComparison.Ordinal)}; python has it: {filmPy.Contains(py, StringComparison.Ordinal)}");
+    // The lit shader reads every uniform the scene writes into the material block, and the passes' texture list names what the shader declares.
+    var lit = Read(Path.Combine(demoDir, "Shaders", "lit_body.glsl"));
+    var scene = Read(Path.Combine(demoDir, "SponzaLoop.Scene.cs"));
+    var written = System.Text.RegularExpressions.Regex.Matches(scene, "SetUniform\\(binding: 0, \"(u[A-Za-z0-9]+)\"").Select(m => m.Groups[1].Value).Distinct().ToArray();
+    var missing = written.Where(u => !System.Text.RegularExpressions.Regex.IsMatch(lit, "\\b" + u + "\\b")).ToArray();
+    t.Expect("CB.3 every uniform the scene writes into the material is declared by the lit shader", written.Length > 8 && missing.Length == 0, $"missing: {string.Join(", ", missing)}");
+    var setup = Read(Path.Combine(demoDir, "SponzaLoop.Setup.cs"));
+    var behind = Enumerable.Range(0, 5).Where(k => !lit.Contains($"uBehind{k};", StringComparison.Ordinal) || !setup.Contains($"\"uBehind{k}\"", StringComparison.Ordinal)).ToArray();
+    t.Expect("CB.4 the scene-behind textures are declared by the lit shader and bound by the pass list", behind.Length == 0, $"levels without both: {string.Join(", ", behind)}");
+}
+
 t.PrintSummary();
 return t.Failed;
 
