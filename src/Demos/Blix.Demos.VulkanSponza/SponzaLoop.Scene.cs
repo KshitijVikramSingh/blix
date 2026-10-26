@@ -720,6 +720,8 @@ internal sealed partial class SponzaLoop
             .SetTexture(binding: 7, tex.DiffuseTransmission)
             .SetTexture(binding: 8, tex.Thickness)
             .Handle);
+        // A pane that reads the backdrop (SponzaLoop.GlassBackdrop.cs): transmitting and rough or thick.
+        if (NeedsGlassBackdrop(transmission, roughness, ext.IndexOfRefraction, ext.ThicknessFactor)) glassBackdropMaterials.Add(built);
         // Sheen or diffuse transmission: the full opaque build (lit_lean.frag compiles both out).
         if (sheen != Vector3.Zero || diffuseTransmission > 0f || ext.ClearcoatFactor > 0f || ext.IridescenceFactor > 0f) richMaterials.Add(built);   // the clear coat is a branch most pixels never take (lit_lean.frag compiles it out)
         return built;

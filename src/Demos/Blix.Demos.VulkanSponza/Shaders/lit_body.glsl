@@ -139,6 +139,14 @@ layout(set = 1, binding = 18) uniform texture2D uPrepassNormalViz;
 //@sampler LinearClamp
 layout(set = 1, binding = 19) uniform sampler uLinearClamp;
 
+// The scene as a pane sees what is behind it: the lit pass's colour before the frosted and thick panes, and four halvings of it (full, 1/2, 1/4, 1/8, 1/16 of the frame),
+// the blur a rough pane reads at (lit_glass_backdrop.frag; SponzaLoop.GlassBackdrop.cs). Bound to a placeholder everywhere else.
+layout(set = 1, binding = 40) uniform texture2D uBehind0;
+layout(set = 1, binding = 41) uniform texture2D uBehind1;
+layout(set = 1, binding = 42) uniform texture2D uBehind2;
+layout(set = 1, binding = 43) uniform texture2D uBehind3;
+layout(set = 1, binding = 44) uniform texture2D uBehind4;
+
 // The probe clipmap itself, for the one surface the incident field cannot answer: a glass pane, absent from the
 // pre-pass, so the field at its pixel is the surface behind it. Its reflection asks the clipmap how much sky R sees
 // from the pane (frame.uClip*). Bound to a placeholder until the clipmap exists; uIncident.z gates the read.
@@ -599,7 +607,32 @@ void main() {
             outColor = vec4(c, 1.0);
             return;
         }
-#if defined(LIT_GLASS_FILTER)
+#if defined(LIT_GLASS_BACKDROP)
+        // What is behind the pane: for a solid (a thickness) the view refracts in and is taken where it would leave, at the screen position of that exit point (the spec's
+        // thickness model, a screen-space stand-in for the bending); blurred by the pane's own roughness (scaled by its ior as the BSDF's thin sheet is), along the
+        // chain of halvings. Replaces the pixel: the pane's reflection and the base's remainder are added here, not by a second draw.
+        vec2 screenUv = gl_FragCoord.xy / frame.uFog.xy;
+        vec2 behindUv = screenUv;
+        if (glassThickness > 0.0) {
+            vec3 refracted = refract(-V, N, 1.0 / glassIor);
+            vec4 exitClip = frame.uViewProjUnjittered * vec4(vWorldPos + normalize(refracted) * glassThickness, 1.0);
+            if (exitClip.w > 1e-4) behindUv = clamp(exitClip.xy / exitClip.w * 0.5 + 0.5, vec2(0.001), vec2(0.999));
+        }
+        float transmissionRoughness = clamp(roughness * clamp(glassIor * 2.0 - 2.0, 0.0, 1.0), 0.0, 1.0);
+        float behindLevel = transmissionRoughness * 4.0;
+        vec3 behindLow = vec3(0.0), behindHigh = vec3(0.0);
+        int levelLow = int(floor(behindLevel));
+        {
+            vec3 s0 = texture(sampler2D(uBehind0, uLinearClamp), behindUv).rgb, s1 = texture(sampler2D(uBehind1, uLinearClamp), behindUv).rgb,
+                 s2 = texture(sampler2D(uBehind2, uLinearClamp), behindUv).rgb, s3 = texture(sampler2D(uBehind3, uLinearClamp), behindUv).rgb,
+                 s4 = texture(sampler2D(uBehind4, uLinearClamp), behindUv).rgb;
+            behindLow = levelLow == 0 ? s0 : levelLow == 1 ? s1 : levelLow == 2 ? s2 : levelLow == 3 ? s3 : s4;
+            behindHigh = levelLow == 0 ? s1 : levelLow == 1 ? s2 : levelLow == 2 ? s3 : s4;
+        }
+        vec3 behind = mix(behindLow, behindHigh, behindLevel - float(levelLow));
+        vec3 skyDiffuseB = texture(samplerCube(uIrradiance, uLinearClamp), N).rgb * glassSky * albedo / PI;
+        outColor = vec4(behind * ((1.0 - fresnel) * transmission * albedo * glassAtten) + fresnel * envRefl + (1.0 - transmission) * (1.0 - fresnel) * skyDiffuseB, 1.0);
+#elif defined(LIT_GLASS_FILTER)
         // The first draw: what is behind, filtered (blended Multiply: destination times this).
         outColor = vec4((1.0 - fresnel) * transmission * albedo * glassAtten, 1.0);
 #elif defined(LIT_GLASS_REFLECT)

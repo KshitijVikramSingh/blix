@@ -129,3 +129,11 @@ specular, transmission, thickness, att-distance, att, dt, and `diffuse-roughness
   the sky's, weighed by the factor, on the mixed F0 (the reference mixes a dielectric's film and a metal's; the two part only at fractional metallic). Factors only; the maximum thickness
   stands where a texture would vary it. Against IridescenceSuzanne the film's hues show in the frame, but the picture is dominated by something else the frame lacks: **specular indirect
   light from the scene** -- the frame reflects the sky cube only, the reference reflects the floor and everything else, so smooth metals read darker in the frame.
+
+- **The glass backdrop** (`SponzaLoop.GlassBackdrop.cs`, single-sample; `--no-glass-backdrop` for the two-draw panes alone): a forward pass cannot read the colour it writes, so a ROUGH pane (blur) or
+  a SOLID (a volume thickness: the view bends) is drawn in its own pass after a copy of the scene so far and four halvings of it (`scene_behind_copy.frag`, `scene_behind_down.frag`): each
+  pixel replaced by what is behind it -- read at the screen position of the exit point of the refracted ray (a solid), at the level the pane's roughness names -- times `(1 - F) T baseColor`
+  and the attenuation, plus the sky's reflection (`lit_glass_backdrop.frag`). Smooth thin panes stay on the two blended draws, which stack. On TransmissionTest the rough row now blurs
+  as the reference's does, and the dragon bends the checker through its body; frame / reference over the picture reads 1.007 and 0.995. Not done: panes seen through a backdrop pane (not in
+  the chain), two backdrop panes overlapping (the last drawn shows), the far wall of a solid, and the dragon's colour (the frame's red against the reference's amber: its thickness
+  factor times a texture against the true chord).

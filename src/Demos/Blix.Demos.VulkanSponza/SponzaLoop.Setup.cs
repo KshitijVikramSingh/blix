@@ -1035,6 +1035,8 @@ internal sealed partial class SponzaLoop
         litPass = litPass.Read(incidentHandle);
         litPass = litPass.Read(incidentGradientHandle);
         litPassHandle = litPass.Handle;
+        noGlassBackdrop = args.Flag("no-glass-backdrop");
+        DeclareGlassBackdrop((a, b) => Reflect(a, b), litInterface, skyInterface);
         // After the lit pass, the last reader of this frame's incident light: it becomes the next frame's (reuse).
         incidentHistoryPassHandle = graph.GraphicsPass("incident-history")
             .Target(incidentPrevHandle, LoadOp.DontCare, StoreOp.Store)
@@ -1256,6 +1258,7 @@ internal sealed partial class SponzaLoop
                 File.ReadAllBytes(Path.Combine(shaderDir, "copy_incident.frag.spv")), Reflect("present.vert", "copy_incident.frag"), "copy_incident")),
             VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
             new[] { BlendState.Disabled, BlendState.Disabled }, incidentHistoryPassHandle, "copy_incident");
+        CreateGlassBackdropPipelines((a, b) => Reflect(a, b), litInterface, litVertSpv, presentVertSpv, shaderDir);
         if (SurfaceTargets)
         {
             var copyKeyInterface = Reflect("present.vert", "copy_key.frag");
@@ -1431,6 +1434,12 @@ internal sealed partial class SponzaLoop
             // Placeholders until CreateClipmap puts the atlases here (a hole is a device loss; uIncident.z gates the read).
             new ShaderTextureBinding("uClipmapIrradiance", clipmap is not null ? clipmapIrradiance : brdfLutTexture),
             new ShaderTextureBinding("uClipmapDepth", clipmap is not null ? clipmapDepth : brdfLutTexture),
+            // The scene-behind chain's placeholders (SponzaLoop.GlassBackdrop.cs): only the glass pass binds the real ones.
+            new ShaderTextureBinding("uBehind0", brdfLutTexture),
+            new ShaderTextureBinding("uBehind1", brdfLutTexture),
+            new ShaderTextureBinding("uBehind2", brdfLutTexture),
+            new ShaderTextureBinding("uBehind3", brdfLutTexture),
+            new ShaderTextureBinding("uBehind4", brdfLutTexture),
         };
 
         // The one binding that is not constant: the grid is re-created when the framebuffer changes size.
