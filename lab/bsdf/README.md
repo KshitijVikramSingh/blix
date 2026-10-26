@@ -70,6 +70,14 @@ numbers and the specular extension's tint and f90, reciprocity, the pdf integrat
 sample weight equals the integral of f cos, for seven materials at two view angles), no energy gained at any view angle, and a clear pane reflecting and
 transmitting nearly all of what it gets.
 
-Next layers, each with its tests beside these: a refracting interface with Beer-Lambert volume attenuation (`KHR_materials_volume`, a transmitting solid),
-clearcoat, sheen, iridescence, anisotropy; then the GLSL twin (`src/Blix.Shaders/bsdf_gltf.glsl`), a per-row material table beside the surface words, and
+### The refracting interface and the volume (`bsdflab/dielectric.py`)
+
+What a transmitting **solid** does at its surface where the thin sheet only passes the ray on: Walter et al.'s rough dielectric (GGX, exact unpolarised Fresnel,
+reflection with F, refraction with 1 - F along Snell at the microfacet), its transmission lobe the BTDF for **radiance** (the eta^2 is in it, so a path applies
+nothing at a crossing and a closed solid nets 1), the frame flipped when the ray is inside; and `KHR_materials_volume`'s Beer-Lambert attenuation
+(sigma = -ln(colour) / distance per channel). `tests/test_dielectric.py`: Fresnel at normal incidence and the critical angle, a smooth interface reflecting 4% and
+passing 0.96 / eta^2 as radiance, total internal reflection from inside at grazing, generalised reciprocity (f / eta_o^2 symmetric) from both sides, sampling
+against evaluation over alpha, angle and side, the pdf's integral, and the attenuation distance leaving exactly the colour.
+
+Next layers, each with its tests beside these: clearcoat, sheen, iridescence, anisotropy; then the GLSL twin (`src/Blix.Shaders/bsdf_gltf.glsl`), a per-row material table beside the surface words, and
 `reference_wave.comp` shading with it (camera paths and the gate's points both).
