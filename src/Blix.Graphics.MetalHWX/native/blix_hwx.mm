@@ -1493,7 +1493,11 @@ struct HwxFx {
     MTLPixelFormat color = MTLPixelFormatInvalid, depth = MTLPixelFormatInvalid, motion = MTLPixelFormatInvalid, output = MTLPixelFormatInvalid;
     std::atomic<uint64_t> dispatches{0}, gpuNs{0}, lastGpuNs{0}, failures{0};
 };
-static HwxFx gFx;   // one scaler a process: one window
+// One scaler a process (one window), never destroyed: a static object's destructor ran at exit while Metal's completion
+// handlers and the scaler's own threads could still reach it -- the process aborted on closing ("mutex lock failed",
+// 2026-10-27). Left for the process's end to reclaim.
+static HwxFx& gFxRef = *new HwxFx();
+#define gFx gFxRef
 
 static std::string UsageNames(MTLTextureUsage u) {
     std::string s;
