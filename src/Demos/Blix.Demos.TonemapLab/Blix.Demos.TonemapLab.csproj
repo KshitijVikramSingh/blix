@@ -41,6 +41,7 @@
     <GlslInclude Include="..\..\Blix.Shaders\tonemap.glsl" />
     <GlslInclude Include="..\..\Blix.Shaders\gt7.glsl" />
     <GlslInclude Include="..\..\Blix.Shaders\diffuse_eon.glsl" />
+    <GlslInclude Include="..\..\Blix.Shaders\bsdf_gltf.glsl" />
     <GlslInclude Include="..\..\Blix.Shaders\gt7_params.glsl" />
   </ItemGroup>
 
