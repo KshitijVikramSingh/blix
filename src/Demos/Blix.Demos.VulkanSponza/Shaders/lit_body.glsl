@@ -623,7 +623,9 @@ void main() {
         glassF0 *= glassF0 * mat.uMaterialParams4.z;
         float fresnel = glassF0 + (1.0 - glassF0) * pow(clamp(1.0 - NdotV, 0.0, 1.0), 5.0);
         float cosThrough = sqrt(max(1.0 - (1.0 - NdotV * NdotV) / (glassIor * glassIor), 0.0));
-        float glassThickness = mat.uMaterialParams4.y * texture(uThicknessTex, uv).g;
+        // KHR_materials_volume's thickness is in the mesh's coordinate space (the attenuation distance in the world's): times the placement's scale, which the vertex stage's
+        // tangent (the model's linear part times the authored tangent) carries. The dragon's thickness 2.27 sits on a node scaled 0.25: 0.57 m, not 2.27.
+        float glassThickness = mat.uMaterialParams4.y * texture(uThicknessTex, uv).g * length(vTangentWorld);
         vec3 glassAtten = exp(-mat.uAttenuation.rgb * glassThickness / max(cosThrough, 0.05));
         // Handle diagnostics before the early return so transmissive surfaces remain inspectable.
         if (frame.uVizChannel > 0.5) {
