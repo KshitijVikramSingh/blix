@@ -297,7 +297,7 @@ internal sealed partial class SponzaLoop
     {
         var prim = placed.Primitive;
         {
-            var pm = prim.Material;
+            var pm = ApplyMaterialOverrides(prim.Material, out var diffuseRoughnessOverride);
             var mesh = prim.Mesh;
             // Only materials with authored transmission use alpha blending.
             // Cutout foliage authored as BLEND (the cypress, etc.) is treated as
@@ -336,7 +336,8 @@ internal sealed partial class SponzaLoop
                 pm?.Ext.Unlit ?? false,
                 pm?.MetallicRoughnessTexture is not null ? textureLoader.Load(pm).MetallicRoughness : default,
                 pm?.RoughnessFactor ?? 0.8f,
-                !isBlend && pm?.AlphaMode == AlphaMode.Blend));
+                !isBlend && pm?.AlphaMode == AlphaMode.Blend,
+                pm, diffuseRoughnessOverride));
         }
     }
 
@@ -423,7 +424,8 @@ internal sealed partial class SponzaLoop
                 sceneTransformInstances.Add(s.Instances[w]);
                 rayInstances.Add(new RayQueryScene.Instance(rayMeshes[i], world));
                 rayPlacementMaterials.Add(new RayMaterial(s.Albedo, s.BaseColor, s.AlphaCutoff, s.IsBlend, s.TransmissionTexture, s.TransmissionColorTexture,
-                    s.MetallicRoughness, s.RoughnessFactor, s.AlphaBlended));
+                    s.MetallicRoughness, s.RoughnessFactor, s.AlphaBlended, s.DiffuseRoughness));
+                rayPlacementPbr.Add(s.Pbr);
                 rayPlacementLightmapped.Add(s.LightmapTexels is not null);
                 rayPlacementDoubleSided.Add(s.Pipeline == opaqueDoubleSidedPipeline || s.Pipeline == blendDoubleSidedPipeline);
                 rayPlacementGiTwoSided.Add(GiTwoSided(s));
@@ -705,6 +707,7 @@ internal sealed partial class SponzaLoop
             .SetUniform(binding: 0, "uDiffuseTransmissionColor",
                 new Vector4(diffuseTransmissionColor.X, diffuseTransmissionColor.Y,
                             diffuseTransmissionColor.Z, ClothTransmission(gm) is not null ? 1f : 0f))
+            .SetUniform(binding: 0, "uMaterialParams3", new Vector4(DiffuseRoughnessOf(gm), 0f, 0f, 0f))
             .SetTexture(binding: 1, tex.Albedo)
             .SetTexture(binding: 2, tex.Normal)
             .SetTexture(binding: 3, tex.Emissive)

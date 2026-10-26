@@ -348,6 +348,7 @@ internal sealed partial class SponzaLoop
         ReadSurfaceArgs(args);
         ReadTransportArgs(args);
         ReadDiffuseArgs(args);
+        ReadMaterialOverrideArgs(args);
         ReadRayAlphaArgs(args);
         // --cam x,y,z,yaw,pitch — a reproducible viewpoint. Without it every capture and every
         // census speaks only for wherever the camera happens to start, which for a question like

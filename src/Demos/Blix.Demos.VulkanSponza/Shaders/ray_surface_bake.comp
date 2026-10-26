@@ -30,6 +30,7 @@ layout(set = 0, binding = 0) uniform Bake {
     vec4 uParams;      // x first entry in BakeRows, y how many, z alpha cutoff (0: opaque), w 1: clear (coverage 0)
     vec4 uParams2;     // x 1: uTransmission is the material's factor texture; y 1: uTransmissionColor its colour texture; z the alpha atlas's mip of uAlbedo, w 1: authored BLEND (rays stop with the probability of the alpha: always asked at the hit)
     vec4 uDiffuse;     // x 1: store EON's hemispherical albedo (0: the base colour, Lambert); y the diffuse-roughness scale; z the material's roughness factor; w 1: uMetallicRoughness is its texture
+    vec4 uDiffuse2;    // x the material's diffuse roughness override (--material diffuse-roughness), or -1: the roughness above decides
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uAlbedo;
@@ -87,7 +88,7 @@ void main() {
     // (diffuse_eon.glsl, blix_eonBaseFromHemispherical at the level the word names) recovers the material's albedo exactly. A Lambert bake is level 0.
     uint level = 0u;
     if (u.uDiffuse.x > 0.5) {
-        float r = clamp(u.uDiffuse.z * rough / 16.0 * u.uDiffuse.y, 0.0, 1.0);
+        float r = u.uDiffuse2.x >= 0.0 ? clamp(u.uDiffuse2.x, 0.0, 1.0) : clamp(u.uDiffuse.z * rough / 16.0 * u.uDiffuse.y, 0.0, 1.0);
         for (uint i = 1u; i < 8u; ++i)
             if (abs(BLIX_SURFACE_ROUGHNESS[i] - r) < abs(BLIX_SURFACE_ROUGHNESS[level] - r)) level = i;
         albedo = blix_eonHemisphericalAlbedo(albedo, BLIX_SURFACE_ROUGHNESS[level]);

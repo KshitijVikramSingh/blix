@@ -226,6 +226,7 @@ layout(set = 2, binding = 0) uniform Material {
     vec4 uMaterialParams2;
     vec4 uSheenColor;              // KHR_materials_sheen colour factor; w 1: KHR_materials_unlit
     vec4 uDiffuseTransmissionColor;// KHR_materials_diffuse_transmission colour; w 1: the colour texture's hue (--cloth-transmission)
+    vec4 uMaterialParams3;         // x the diffuse roughness override (--material diffuse-roughness), or -1: the roughness below decides
 } mat;
 
 layout(set = 2, binding = 1) uniform sampler2D uAlbedo;
@@ -589,7 +590,7 @@ void main() {
     vec3 L = -normalize(frame.uSunDirection);
     // The diffuse lobe is EON, not Lambert: its roughness follows the material's (glTF has one roughness), and its albedo toward the eye is what the
     // indirect terms below multiply the irradiance by. At diffuse roughness 0 both are exactly Lambert's.
-    float diffuseRoughness = clamp(roughness * frame.uDiffuseModel.y, 0.0, 1.0);
+    float diffuseRoughness = mat.uMaterialParams3.x >= 0.0 ? clamp(mat.uMaterialParams3.x, 0.0, 1.0) : clamp(roughness * frame.uDiffuseModel.y, 0.0, 1.0);
     vec3 diffuseAlbedoEye = blixDiffuseAlbedo(albedo, diffuseRoughness, NdotV);
     vec3 diffuseSun = blixDiffuseLobe(albedo, diffuseRoughness, max(dot(N, L), 0.0), NdotV, dot(L, V));
     vec3 H = normalize(V + L);

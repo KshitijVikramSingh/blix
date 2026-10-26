@@ -822,7 +822,11 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
         float RoughnessFactor = 0.8f,
         // Authored BLEND without transmission: drawn cut out at 0.5 (BuildMaterial), but a ray is stopped by it with the probability of its alpha
         // (RayAlphaAtlas.FlagStochastic), so a translucent leaf or decal casts the shadow and bounces the light it should, on average.
-        bool AlphaBlended = false);
+        bool AlphaBlended = false,
+        // The material as the loop sees it (--material's overrides applied): what the reference's material table is built from. Null: none (the default diffuse).
+        PbrMaterial? Pbr = null,
+        // --material's diffuse-roughness override (EON), or -1: the material's roughness times --diffuse-roughness-scale.
+        float DiffuseRoughness = -1f);
 
     /// <summary>One placement of a unique primitive: which drawable, its row in the transform table, and its world AABB.</summary>
     /// <remarks>
