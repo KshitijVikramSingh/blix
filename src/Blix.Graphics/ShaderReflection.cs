@@ -138,7 +138,13 @@ public static class ShaderReflection
 
                 var fuller = (slot.BlockLayout?.TotalSize ?? 0) > (existing.BlockLayout?.TotalSize ?? 0)
                     ? slot : existing;
-                merged[key] = fuller with { Stages = existing.Stages | slot.Stages, Sampler = existing.Sampler ?? slot.Sampler };
+                merged[key] = fuller with
+                {
+                    Stages = existing.Stages | slot.Stages,
+                    Sampler = existing.Sampler ?? slot.Sampler,
+                    // Stages that disagree (one reads, another writes) use it both ways.
+                    Access = existing.Access == slot.Access ? existing.Access : BufferAccess.ReadWrite,
+                };
             }
         }
 
@@ -245,9 +251,12 @@ public static class ShaderReflection
             var members = ParseMembers(types, typeRef, where);
             // The block's name, which is what a ShaderBufferBinding names it by.
             var name = b.TryGetProperty("name", out var n) ? n.GetString() : null;
+            var access = b.TryGetProperty("readonly", out var ro) && ro.ValueKind == JsonValueKind.True ? BufferAccess.ReadOnly
+                : b.TryGetProperty("writeonly", out var wo) && wo.ValueKind == JsonValueKind.True ? BufferAccess.WriteOnly
+                : BufferAccess.ReadWrite;
             outSlots.Add(new DescriptorSetSlot(
                 set, binding, type, stage,
-                BlockLayout: new UniformBlockLayout(totalSize, members), Name: name));
+                BlockLayout: new UniformBlockLayout(totalSize, members), Name: name, Access: access));
         }
     }
 

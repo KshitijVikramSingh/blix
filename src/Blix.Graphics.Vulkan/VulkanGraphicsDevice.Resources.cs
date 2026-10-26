@@ -565,7 +565,8 @@ public sealed partial class VulkanGraphicsDevice
     }
 
     // Compute pipeline from a compute shader program (entry point "main").
-    public unsafe PipelineHandle CreateComputePipeline(ShaderProgramHandle program, string? name = null)
+    public unsafe PipelineHandle CreateComputePipeline(ShaderProgramHandle program, string? name = null,
+        ComputePipelineOptions options = ComputePipelineOptions.None)
     {
         if (!shaderProgramTable.TryGetValue(program.Id, out var prog))
         {
@@ -585,6 +586,20 @@ public sealed partial class VulkanGraphicsDevice
             Module = prog.Compute,
             PName = entryName.Ptr,
         };
+        // FullSubgroups32: every subgroup 32 lanes and full (Vulkan 1.3's subgroup size control), which a shader reducing
+        // or balloting over a 32-lane tile assumes; without the request the device may pick any size in its range.
+        var size = new PipelineShaderStageRequiredSubgroupSizeCreateInfo
+        {
+            SType = StructureType.PipelineShaderStageRequiredSubgroupSizeCreateInfo,
+            RequiredSubgroupSize = 32,
+        };
+        if ((options & ComputePipelineOptions.FullSubgroups32) != 0)
+        {
+            if ((Features & GraphicsFeatures.ComputeSubgroups32) == 0)
+                throw new NotSupportedException($"Compute pipeline '{name ?? prog.Name}' asks for full 32-lane subgroups; the device cannot require them (GraphicsFeatures.ComputeSubgroups32).");
+            if (computeSubgroupSizeRequired) stage.PNext = &size;
+            stage.Flags = PipelineShaderStageCreateFlags.RequireFullSubgroupsBit;
+        }
         var ci = new ComputePipelineCreateInfo
         {
             SType = StructureType.ComputePipelineCreateInfo,

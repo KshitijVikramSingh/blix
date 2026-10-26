@@ -163,6 +163,7 @@ public sealed partial class VulkanGraphicsDevice
         var arenaMark = uniformArenaBump.Length > 0 ? uniformArenaBump[arenaSlot].Used : 0;
         var cmd = BeginSingleTimeCommands();
         foreach (var d in dispatches) RecordComputeDispatch(cmd, d, name, currentFrame);
+        EndDispatchRun(cmd);
         EndSingleTimeCommands(cmd);
         ReleaseUniformBlocksPast(arenaMark);
     }

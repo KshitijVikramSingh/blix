@@ -31,7 +31,8 @@ layout(set = 0, binding = 0) uniform RtgiTrain {
                          // up thinned; z 1: keys and stamps read before their atomics
     vec4 uFallback;      // x the levels past two up a landing may look for a cell holding light (0: two up only); y 1: contact
                          // detail on (the near and far words written); z 1: landings deferred to their request's sample;
-                         // w 1: a cell's words summed over the subgroup before they are written
+                         // w 1: a cell's words summed over the subgroup before they are written, 2: over the workgroup, through
+                         // its table (tableAdd)
 } u;
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
@@ -180,6 +181,65 @@ void commit(uint s, uint w[RTGI_ACC]) {
     if (writing) writeCell(s, w);
 }
 
+// The workgroup's table (uFallback.w 2): each sample's words added into its cell's row in shared memory, then one
+// thread a row adds the row's words to the cell -- one device atomic a word a cell a workgroup, where the subgroup's
+// rounds (commit) cost a subgroupAdd a word a round over the whole SIMD group: up to 4 rounds of 14 a level, five levels
+// a sample, and Xcode's profile of Crytek Sponza's training had it bound by instruction issue and its atomics' writes
+// (2026-10-26). The four 0/1 words (count, sky, sun reached, sun traced) share one table word, a byte each: a
+// workgroup's 64 samples at most a byte. Every thread of the workgroup takes part in each round (its barriers), those
+// with no sample with no cell.
+#define RTGI_TABLE 128u
+#define RTGI_TW 11u
+#define RTGI_EMPTY 0xFFFFFFFFu
+shared uint tKey[RTGI_TABLE];
+shared uint tAcc[RTGI_TABLE * RTGI_TW];
+
+void tableClear() {
+    for (uint j = gl_LocalInvocationIndex; j < RTGI_TABLE; j += gl_WorkGroupSize.x) {
+        tKey[j] = RTGI_EMPTY;
+        for (uint k = 0u; k < RTGI_TW; k++) tAcc[j * RTGI_TW + k] = 0u;
+    }
+    barrier();
+}
+
+void tableAdd(uint s, uint w[RTGI_ACC]) {
+    if (s != RTGI_EMPTY) {
+        // A row for the cell: at most a cell a thread, so never full at 128 rows for 64 threads.
+        uint e = rtgiHash(s) & (RTGI_TABLE - 1u);
+        for (uint probe = 0u; probe < RTGI_TABLE; probe++) {
+            uint prev = atomicCompSwap(tKey[e], RTGI_EMPTY, s);
+            if (prev == RTGI_EMPTY || prev == s) break;
+            e = (e + 1u) & (RTGI_TABLE - 1u);
+        }
+        uint row = e * RTGI_TW;
+        uint t[RTGI_TW] = uint[RTGI_TW](w[0], w[1], w[2], w[3] | (w[4] << 8) | (w[5] << 16) | (w[6] << 24),
+                                         w[7], w[8], w[9], w[10], w[11], w[12], w[13]);
+        for (uint k = 0u; k < RTGI_TW; k++)
+            if (t[k] != 0u) atomicAdd(tAcc[row + k], t[k]);
+    }
+    barrier();
+    uint frame = uint(u.uClamp.y);
+    for (uint j = gl_LocalInvocationIndex; j < RTGI_TABLE; j += gl_WorkGroupSize.x) {
+        uint c = tKey[j];
+        uint row = j * RTGI_TW;
+        // Listed the first time this frame (appendDirty's ballot needs every lane: the loop is uniform).
+        bool first = c != RTGI_EMPTY && (u.uHitSun.z < 0.5 || rtgiStamps[c].x != frame) && atomicExchange(rtgiStamps[c].x, frame) != frame;
+        uint k = appendDirty(first);
+        if (k < uint(u.uClamp.z)) dirty[k] = c;
+        if (c != RTGI_EMPTY) {
+            uint small = tAcc[row + 3u];
+            uint words[RTGI_WORDS] = uint[RTGI_WORDS](tAcc[row], tAcc[row + 1u], tAcc[row + 2u],
+                small & 0xFFu, (small >> 8) & 0xFFu, (small >> 16) & 0xFFu, small >> 24,
+                tAcc[row + 4u], tAcc[row + 5u], tAcc[row + 6u], tAcc[row + 7u], tAcc[row + 8u], tAcc[row + 9u], tAcc[row + 10u]);
+            for (uint q = 0u; q < RTGI_WORDS; q++)
+                if (words[q] != 0u) atomicAdd(rtgiAccum[RTGI_ACC * c + q], words[q]);
+            tKey[j] = RTGI_EMPTY;
+            for (uint q = 0u; q < RTGI_TW; q++) tAcc[row + q] = 0u;
+        }
+    }
+    barrier();
+}
+
 // rich: the sample's level and the two above, which the readout reads (its two, and two up where they hold nothing) -- the
 // irradiance vector, hit distance and near visibility written; the levels above feed the blend's parent alone, which
 // reads the light, its spread, sky and sun.
@@ -229,17 +289,21 @@ void add(uint s, vec3 e, bool counted, bool sky, bool sunTraced, bool sunLit, bo
         w[6] = 1u;
         if (sunLit) w[5] = 1u;
     }
-    commit(s, w);
+    if (u.uFallback.w > 1.5) tableAdd(s, w);
+    else commit(s, w);
 }
 
-void main() {
-    uint i = gl_GlobalInvocationID.x;
-    if (i >= uint(u.uCamera.w)) return;
-    uint hd = rtgiHash(i * 0x9E3779B9u ^ floatBitsToUint(points[2u * i].x) ^ floatBitsToUint(rays[2u * i + 1u].y));
+// The point's sample: false where it has none (past the frame's points, a point not live, a degenerate hit).
+bool pointSample(uint i, out vec4 p, out vec3 n, out vec3 e, out bool counted, out bool sky, out bool sunTraced, out bool sunLit,
+                 out uint hd) {
+    p = vec4(0.0); n = vec3(0.0); e = vec3(0.0);
+    counted = false; sky = false; sunTraced = false; sunLit = false; hd = 0u;
+    if (i >= uint(u.uCamera.w)) return false;
+    hd = rtgiHash(i * 0x9E3779B9u ^ floatBitsToUint(points[2u * i].x) ^ floatBitsToUint(rays[2u * i + 1u].y));
     dither = vec4(hd & 0xFFu, (hd >> 8) & 0xFFu, (hd >> 16) & 0xFFu, hd >> 24) / 256.0;
-    vec4 p = points[2u * i];
-    if (p.w < 0.5) return;
-    vec3 n = points[2u * i + 1u].xyz;
+    p = points[2u * i];
+    if (p.w < 0.5) return false;
+    n = points[2u * i + 1u].xyz;
     vec3 d = rays[2u * i + 1u].xyz;
     sampleDir = d;
     // The ray's weight against cosine sampling: cos / (PI x its pdf) -- 1 for a cosine ray, other for a guided one, 0 for
@@ -248,8 +312,7 @@ void main() {
     uvec4 h0 = hits[3u * i];
     nearWord = ((h0.w & 1u) == 0u || uintBitsToFloat(h0.x) > u.uNearField.y) ? weight * 256.0 : 0.0;
     sampleInvD = (h0.w & 1u) == 0u ? 1.0 / max(rays[2u * i + 1u].w, 1.0) : 1.0 / max(uintBitsToFloat(h0.x), 0.05);
-    vec3 e = vec3(0.0);
-    bool counted = true, sky = false;
+    counted = true;
     if ((h0.w & 1u) == 0u) {
         e = 3.14159265359 * textureLod(uSkyRadiance, d, u.uSun.w).rgb;
         sky = true;
@@ -257,7 +320,7 @@ void main() {
         uvec4 h2 = hits[3u * i + 2u];
         vec3 q = rays[2u * i].xyz + d * uintBitsToFloat(h0.x);
         vec3 nq = vec3(uintBitsToFloat(h2.x), uintBitsToFloat(h2.y), uintBitsToFloat(h2.z));
-        if (!(dot(nq, nq) > 1e-12)) return;   // a degenerate triangle (rtgi_rays.comp): no sample
+        if (!(dot(nq, nq) > 1e-12)) return false;   // a degenerate triangle (rtgi_rays.comp): no sample
         nq = normalize(nq);
         if (dot(nq, d) > 0.0) nq = -nq;
         bool fine;
@@ -289,12 +352,26 @@ void main() {
     // Nothing not finite reaches a cell: one NaN there spreads to every cell whose rays land in it.
     if (any(isnan(e)) || any(isinf(e))) counted = false;
     // A point whose cell's sun is settled traced none (rtgi_rays.comp: w 2).
-    bool sunTraced = dot(n, u.uSun.xyz) > 0.0 && p.w < 1.5;
-    bool sunLit = sunTraced && (occluded[i] & 1u) == 0u;
-    uint level = rtgiLevel(p.xyz, u.uCamera.xyz, u.uParams);
+    sunTraced = dot(n, u.uSun.xyz) > 0.0 && p.w < 1.5;
+    sunLit = sunTraced && (occluded[i] & 1u) == 0u;
+    return true;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    // The workgroup's table (uFallback.w 2): every thread through every round below, those with no sample adding nothing.
+    bool table = u.uFallback.w > 1.5;
+    if (table) tableClear();
+    vec4 p;
+    vec3 n, e;
+    bool counted, sky, sunTraced, sunLit;
+    uint hd;
+    bool live = pointSample(i, p, n, e, counted, sky, sunTraced, sunLit, hd);
+    if (!table && !live) return;
+    uint level = live ? rtgiLevel(p.xyz, u.uCamera.xyz, u.uParams) : 0u;
     // Path guiding: the sample's light into its guide cell's bin (two levels up, its side), counted -- the bin's light over
     // the samples counted estimates the light arriving through it (rtgi_guide.glsl).
-    if (counted && u.uGuideTable.x > 0.0) {
+    if (live && counted && u.uGuideTable.x > 0.0) {
         uint gl = min(level + 2u, uint(u.uParams.w));
         uint gside = rtgiSide(n);
         uvec2 gh = guideHash(ivec3(floor(p.xyz / rtgiSize(gl, u.uParams))), gl, gside, uint(u.uGuideTable.x));
@@ -305,7 +382,7 @@ void main() {
             if (prev == 0u || prev == gh.y) { g = gs; break; }
         }
         if (g != 0xFFFFFFFFu) {
-            int bin = guideBin(d, gside);
+            int bin = guideBin(sampleDir, gside);
             if (bin >= 0) atomicAdd(guideAccum[33u * g + uint(bin)], uint(dot(min(e, vec3(RTGI_MAX_SAMPLE)), vec3(0.2126, 0.7152, 0.0722)) * RTGI_SCALE + dither.y));
             atomicAdd(guideAccum[33u * g + 32u], 1u);
         }
@@ -317,24 +394,36 @@ void main() {
     // their means no different for fewer samples. Each level was an insert and a dozen atomics a sample: the training
     // ~8 ms a frame through Crytek Sponza's first seconds at 4x the rays (2026-10-26).
     uint thin = rtgiHash(hd ^ 0x9E3779B9u);
-    for (uint k = 0u; k < uint(u.uNearField.w) && level + k <= top; k++) {
-        if (u.uHitSun.y > 0.5 && k >= 3u && ((thin >> (4u * k)) & ((1u << (k - 2u)) - 1u)) != 0u) continue;
-        add(rtgiInsertAt(p.xyz, n, level + k), e, counted, sky, sunTraced, sunLit, k < 3u);
+    for (uint k = 0u; k < uint(u.uNearField.w); k++) {
+        bool thinned = u.uHitSun.y > 0.5 && k >= 3u && ((thin >> (4u * k)) & ((1u << (k - 2u)) - 1u)) != 0u;
+        bool here = live && level + k <= top && !thinned;
+        if (!table && !here) continue;
+        add(here ? rtgiInsertAt(p.xyz, n, level + k) : RTGI_EMPTY, e, counted, sky, sunTraced, sunLit, k < 3u);
     }
     // A deferred landing's sample, now that this point -- its landing -- has its own: the light leaving here (this sample's
     // indirect irradiance, its own sun ray's direct) times the albedo, along the origin's ray, into the origin's cells.
-    vec4 o0 = pointOrigins[3u * i + 2u];
-    if (o0.w > 0.5 && counted) {
-        vec4 oP = pointOrigins[3u * i], oN = pointOrigins[3u * i + 1u];
+    // Only with deferred landings on (uFallback.z, the same for the whole dispatch: the table's rounds stay uniform).
+    if (u.uFallback.z < 0.5) return;
+    vec4 o0 = live ? pointOrigins[3u * i + 2u] : vec4(0.0);
+    vec3 eo = vec3(0.0);
+    uint lo = 0u;
+    vec4 oP = vec4(0.0), oN = vec4(0.0);
+    bool landing = live && o0.w > 0.5 && counted;
+    if (landing) {
+        oP = pointOrigins[3u * i];
+        oN = pointOrigins[3u * i + 1u];
         vec3 direct = u.uNearField.z * u.uSunIrradiance.rgb * max(0.0, dot(n, u.uSun.xyz)) * (sunLit ? 1.0 : 0.0);
-        vec3 eo = unpackUnorm4x8(floatBitsToUint(oN.w)).rgb * (e + direct) * oP.w;
-        if (!any(isnan(eo)) && !any(isinf(eo))) {
-            sampleDir = o0.xyz;
-            nearWord = 0.0;
-            sampleInvD = 1.0 / max(length(p.xyz - oP.xyz), 0.05);
-            uint lo = rtgiLevel(oP.xyz, u.uCamera.xyz, u.uParams);
-            for (uint k = 0u; k < uint(u.uNearField.w) && lo + k <= top; k++)
-                add(rtgiInsertAt(oP.xyz, oN.xyz, lo + k), eo, true, false, false, false, k < 3u);
-        }
+        eo = unpackUnorm4x8(floatBitsToUint(oN.w)).rgb * (e + direct) * oP.w;
+        landing = !any(isnan(eo)) && !any(isinf(eo));
+        sampleDir = o0.xyz;
+        nearWord = 0.0;
+        sampleInvD = 1.0 / max(length(p.xyz - oP.xyz), 0.05);
+        lo = rtgiLevel(oP.xyz, u.uCamera.xyz, u.uParams);
+    }
+    if (!table && !landing) return;
+    for (uint k = 0u; k < uint(u.uNearField.w); k++) {
+        bool here = landing && lo + k <= top;
+        if (!table && !here) continue;
+        add(here ? rtgiInsertAt(oP.xyz, oN.xyz, lo + k) : RTGI_EMPTY, eo, true, false, false, false, k < 3u);
     }
 }

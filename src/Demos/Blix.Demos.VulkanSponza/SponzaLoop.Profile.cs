@@ -203,6 +203,14 @@ internal sealed partial class SponzaLoop
             $"[profile]   host a frame: wait {frames.Average(f => f.Wait):0.0}, encode {frames.Average(f => f.Encode):0.0}, submit/present {frames.Average(f => f.Present):0.0} ms; gc pause {frames.Sum(f => f.GcPause):0} ms in all ({frames.Sum(f => f.Gen2)} full); clipmap rested {clipmapRested} frames so far; sections a frame (ms): {SectionMeans(frames, 10)}"));
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[profile]   gpu a frame (ms, {gpu.Sum(g => g.Ms):0.0} in all): {string.Join(", ", gpu.OrderByDescending(g => g.Ms).Take(12).Select(g => string.Create(CultureInfo.InvariantCulture, $"{g.Pass} {g.Ms:0.00}")))}"));
+        // Buffer barriers between dispatches (VulkanGraphicsDevice.BufferHazards.cs): emitted where a hazard was, skipped
+        // where none.
+        if (device is Blix.Graphics.Vulkan.VulkanGraphicsDevice vk)
+        {
+            var (emitted, skipped) = vk.TakeBufferBarrierCounts();
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[profile]   buffer barriers a frame: {emitted / (double)Math.Max(frames.Count, 1):0.0} emitted, {skipped / (double)Math.Max(frames.Count, 1):0.0} skipped"));
+        }
         if (frameTracer is { } tracer)
         {
             var trace = tracer.TraceStats;

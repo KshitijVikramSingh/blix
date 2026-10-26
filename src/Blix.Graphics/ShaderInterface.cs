@@ -56,6 +56,9 @@ public enum ShaderResourceType
 //
 // Sampler is a Sampler slot's state, from the shader's //@sampler. The device builds it into the set
 // layout as an immutable sampler, so nothing binds it per draw. Null on every other type.
+//
+// Access is a storage buffer's, as the shader declares its block (readonly, writeonly, or neither): what the device
+// orders a dispatch against -- one that only reads a buffer need not wait for another that only read it.
 public sealed record DescriptorSetSlot(
     int Set,
     int Binding,
@@ -64,7 +67,16 @@ public sealed record DescriptorSetSlot(
     int Count = 1,
     UniformBlockLayout? BlockLayout = null,
     string? Name = null,
-    SamplerDescription? Sampler = null);
+    SamplerDescription? Sampler = null,
+    BufferAccess Access = BufferAccess.ReadWrite);
+
+// How a shader uses a storage buffer block (GLSL's readonly / writeonly on it).
+public enum BufferAccess
+{
+    ReadWrite,
+    ReadOnly,
+    WriteOnly,
+}
 
 // One push-constant range. Per Vulkan spec, two ranges sharing any stage
 // bit must not have overlapping byte ranges; ranges in disjoint stages may

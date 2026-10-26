@@ -182,8 +182,10 @@ public interface IGraphicsDevice : IDisposable
 
     void DestroyPipeline(PipelineHandle handle);
 
-    // A pipeline for a compute program: nothing about rasterisation or vertex input to describe.
-    PipelineHandle CreateComputePipeline(ShaderProgramHandle program, string? name = null);
+    // A pipeline for a compute program: nothing about rasterisation or vertex input to describe. options: what the
+    // program needs of how it runs (ComputePipelineOptions), each behind a GraphicsFeatures capability.
+    PipelineHandle CreateComputePipeline(ShaderProgramHandle program, string? name = null,
+        ComputePipelineOptions options = ComputePipelineOptions.None);
 
     // A material's own descriptor set for `program` (see IMaterialBindings). setIndex is where the
     // program declares its material resources, DescriptorSets.Material by convention; framesInFlight

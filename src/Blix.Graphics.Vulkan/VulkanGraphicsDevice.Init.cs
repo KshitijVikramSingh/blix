@@ -422,27 +422,29 @@ public sealed partial class VulkanGraphicsDevice
         var supported2 = new PhysicalDeviceFeatures2 { SType = StructureType.PhysicalDeviceFeatures2, PNext = &supported12 };
         Vk.GetPhysicalDeviceFeatures2(PhysicalDevice, &supported2);
         var frameTimelineWanted = MetalObjectsEnabled && supported12.TimelineSemaphore;
-        var enable12 = new PhysicalDeviceVulkan12Features
-        {
-            SType = StructureType.PhysicalDeviceVulkan12Features,
-            TimelineSemaphore = frameTimelineWanted,
-        };
+        // The 1.1-1.4 features (VulkanGraphicsDevice.Features.cs), the timeline among them.
+        var modern = ChooseModernFeatures(frameTimelineWanted, supportedFeatures);
+        SubgroupSizeRange = (modern.MinSubgroupSize, modern.MaxSubgroupSize);
+        computeSubgroupSizeRequired = modern.ComputeSizeRequired;
 
         Features = (MultiDrawIndirectSupported ? GraphicsFeatures.MultiDrawIndirect : GraphicsFeatures.None)
             | (firstInstance ? GraphicsFeatures.DrawIndirectFirstInstance : GraphicsFeatures.None)
             | (FragmentStoresSupported ? GraphicsFeatures.FragmentStoresAndAtomics : GraphicsFeatures.None)
-            | (frameTimelineWanted ? GraphicsFeatures.MetalObjects : GraphicsFeatures.None);
+            | (frameTimelineWanted ? GraphicsFeatures.MetalObjects : GraphicsFeatures.None)
+            | modern.Capabilities;
+        Console.WriteLine($"[Vulkan] capabilities: {Features}; compute subgroups {modern.MinSubgroupSize}-{modern.MaxSubgroupSize} lanes.");
         var features = new PhysicalDeviceFeatures
         {
             SamplerAnisotropy = AnisotropySupported,
             MultiDrawIndirect = MultiDrawIndirectSupported,
             DrawIndirectFirstInstance = firstInstance,
             FragmentStoresAndAtomics = FragmentStoresSupported,
+            ShaderInt16 = modern.ShaderInt16,
         };
         var ci = new DeviceCreateInfo
         {
             SType = StructureType.DeviceCreateInfo,
-            PNext = frameTimelineWanted ? &enable12 : null,
+            PNext = ChainModernFeatures(&modern),
             QueueCreateInfoCount = 1,
             PQueueCreateInfos = &queueInfo,
             EnabledExtensionCount = (uint)deviceExts.Count,

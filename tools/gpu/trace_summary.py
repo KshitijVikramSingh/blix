@@ -63,6 +63,7 @@ def main():
     frames = set()
     busy = []
     work = []
+    by_channel = defaultdict(list)   # this app's work by kind: 'compute' or 'raster' (vertex and fragment)
     for r in table(trace, 'metal-gpu-intervals'):
         enc = text(r.get('encoder-id'))
         dur = int(text(r.get('duration')) or 0)
@@ -84,6 +85,8 @@ def main():
         # summed to more than the frame. Kept apart from the work.
         if not name.startswith('Blit Command'):
             work.append((start, start + dur))
+            if enc in names:
+                by_channel['compute' if chan == 'Compute' else 'raster'].append((start, start + dur))
 
     def merged(iv):
         total, end = 0, -1
@@ -104,6 +107,25 @@ def main():
     span_ns = (max(b for _, b in busy) - min(a for a, _ in busy)) if busy else 0
     print(f'{n} frames in the trace, {span_ns / n / 1e6:.2f} ms a frame wall: GPU working {merged(work) / n / 1e6:.2f} ms '
           f'(its encoders merged), with the end-of-buffer sync blits {merged(busy) / n / 1e6:.2f} ms')
+    # Where the frame's time goes by kind: compute alone, raster alone, both at once (overlapped), neither (the GPU idle
+    # or on another process's work). A pass whose time is all overlap shortens the frame by nothing when it is cut.
+    events = []
+    for kind, iv in by_channel.items():
+        for a, b in iv:
+            events.append((a, 1, kind))
+            events.append((b, -1, kind))
+    events.sort()
+    active = defaultdict(int)
+    shares = defaultdict(int)
+    last = events[0][0] if events else 0
+    for t, delta, kind in events:
+        state = (active['compute'] > 0, active['raster'] > 0)
+        shares[state] += t - last
+        last = t
+        active[kind] += delta
+    print(f'  this app\'s time a frame: compute alone {shares[(True, False)] / n / 1e6:.2f} ms, raster alone '
+          f'{shares[(False, True)] / n / 1e6:.2f}, both at once {shares[(True, True)] / n / 1e6:.2f}, neither '
+          f'{shares[(False, False)] / n / 1e6:.2f}')
     print(f'{"pass":<32} {"ms/frame":>9}  {"vertex":>7} {"fragment":>8} {"compute":>8}')
     for name, ns in sorted(per_pass.items(), key=lambda kv: -kv[1]):
         c = passes[name]

@@ -75,6 +75,12 @@ internal sealed partial class SponzaLoop
     // p50 against 50.0, training 11.9 ms against 10.3 (2026-10-26): a subgroup's 32 points came from all over the screen,
     // seldom sharing a cell. Placement in blocks (below) keeps them together.
     private bool rtgiSubgroup = true;
+    // The training's words summed over the workgroup, through a table in shared memory, before the cell's atomics
+    // (rtgi_train.comp's tableAdd) -- in place of the subgroup's rounds, whose reductions Xcode's profile had the training
+    // bound by (Crytek Sponza, 2026-10-26). With the hazard-tracked barriers, training 2.51 / 2.79 ms a frame with the
+    // rounds, 2.54 / 2.46 with the table (Crytek Sponza, two runs each, 2026-10-27); the gate's numbers the same to the
+    // third place. --rtgi-no-train-table: the subgroup's rounds (or none, --rtgi-no-subgroup).
+    private bool rtgiTrainTable = true;
     // Placement in blocks (rtgi_rays.comp): a subgroup's points own an 8 x 4 block of tiles, their candidates within
     // --rtgi-block-window tiles (8) but for --rtgi-block-global of them (0.25) drawn anywhere; hit points in strides.
     // --rtgi-no-block: row by row, candidates anywhere.
@@ -314,6 +320,7 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-fallback-up") is { } fu) rtgiFallbackUp = Math.Clamp(fu, 0f, 6f);
         if (args.Flag("rtgi-defer")) rtgiDefer = true;
         if (args.Flag("rtgi-no-subgroup")) rtgiSubgroup = false;
+        if (args.Flag("rtgi-no-train-table")) rtgiTrainTable = false;
         if (args.Flag("rtgi-no-block")) rtgiBlock = false;
         if (args.Float("rtgi-block-global") is { } bg) rtgiBlockGlobal = Math.Clamp(bg, 0f, 1f);
         if (args.Float("rtgi-block-window") is { } bw) rtgiBlockWindow = MathF.Max(1f, MathF.Round(bw));
@@ -450,9 +457,13 @@ internal sealed partial class SponzaLoop
 
     private void CreateRtgiPipelines(string shaderDir, byte[] presentVertSpv)
     {
-        PipelineHandle Compute(string name, ShaderInterface iface) => Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
-            File.ReadAllBytes(Path.Combine(shaderDir, name + ".comp.spv")), iface, name)), name));
-        rtgiTrainPipeline = Compute("rtgi_train", rtgiTrainInterface);
+        // Full 32-lane subgroups where a shader's subgroup work assumes them (the training's ballots and reductions, the
+        // placement's 8 x 4 tiles), where the device can promise them (GraphicsFeatures.ComputeSubgroups32).
+        var full32 = (device.Features & GraphicsFeatures.ComputeSubgroups32) != 0 ? ComputePipelineOptions.FullSubgroups32 : ComputePipelineOptions.None;
+        PipelineHandle Compute(string name, ShaderInterface iface, ComputePipelineOptions options = ComputePipelineOptions.None) =>
+            Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
+                File.ReadAllBytes(Path.Combine(shaderDir, name + ".comp.spv")), iface, name)), name, options));
+        rtgiTrainPipeline = Compute("rtgi_train", rtgiTrainInterface, full32);
         rtgiResolvePipeline = Compute("rtgi_resolve", rtgiResolveInterface);
         rtgiEvictPipeline = Compute("rtgi_evict", rtgiEvictInterface);
         rtgiPushUpPipeline = Compute("rtgi_pushup", rtgiPushUpInterface);
@@ -460,7 +471,7 @@ internal sealed partial class SponzaLoop
         rtgiGuideResolvePipeline = Compute("rtgi_guide_resolve", rtgiGuideResolveInterface);
         rtgiContactRaysPipeline = Compute("rtgi_contact_rays", rtgiContactRaysInterface);
         rtgiContactTrainPipeline = Compute("rtgi_contact_train", rtgiContactTrainInterface);
-        rtgiRaysPipeline = Compute("rtgi_rays", rtgiRaysInterface);
+        rtgiRaysPipeline = Compute("rtgi_rays", rtgiRaysInterface, full32);
         rtgiReadoutPipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
                 presentVertSpv, File.ReadAllBytes(Path.Combine(shaderDir, "rtgi_readout.frag.spv")), rtgiReadoutInterface, "rtgi_readout")),
             VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
@@ -561,7 +572,7 @@ internal sealed partial class SponzaLoop
                     new("uGuideTable", new Vector4Uniform(new Vector4(rtgiGuide > 0f ? RtgiGuideSlots - 1 : 0f, 0f, 0f, 0f))),
                     new("uTrain", new Vector4Uniform(new Vector4(rtgiCountUnknown ? 1f : 0f, rtgiNoCoarse ? 1f : 0f, rtgiBackfaceLit ? 1f : 0f, rtgiRequests ? rtgiHitPoints : 0f))),
                     new("uHitSun", new Vector4Uniform(new Vector4(rtgiTraceHitSun ? 1f : 0f, rtgiThin ? 1f : 0f, rtgiReadFirst ? 1f : 0f, 0f))),
-                    new("uFallback", new Vector4Uniform(new Vector4(rtgiFallbackUp, rtgiContact ? 1f : 0f, rtgiDefer ? 1f : 0f, rtgiSubgroup ? 1f : 0f))),
+                    new("uFallback", new Vector4Uniform(new Vector4(rtgiFallbackUp, rtgiContact ? 1f : 0f, rtgiDefer ? 1f : 0f, rtgiSubgroup ? (rtgiTrainTable ? 2f : 1f) : 0f))),
                 },
                 new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
                 Buffers: new[]

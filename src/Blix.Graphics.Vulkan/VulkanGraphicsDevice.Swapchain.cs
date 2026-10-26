@@ -635,6 +635,7 @@ public sealed partial class VulkanGraphicsDevice
     // makes splitting one buffer into many correct rather than merely plausible.
     private unsafe void FlushIsolatedPass(CommandBuffer cmd, string passName, ref bool first, Semaphore imageAvail, ref ulong timelineWait)
     {
+        EndDispatchRun(cmd);
         ThrowIfNotSuccess(Vk.EndCommandBuffer(cmd), "vkEndCommandBuffer(isolate)");
         var local = cmd;
         var fence = isolationFence;
@@ -957,6 +958,8 @@ public sealed partial class VulkanGraphicsDevice
         var isolationFirstSubmit = true;
         foreach (var pass in commandList.Passes)
         {
+            // A run of dispatches ends at anything else (VulkanGraphicsDevice.BufferHazards.cs).
+            if (!pass.Description.Compute) EndDispatchRun(cmd);
             // Native Metal work: the frame splits here (RunExternalPass) and continues in another buffer, which waits
             // for the work at once, or, when the pass has a join, carries on alongside it until the join.
             if (pass.Description.External is { } external)
@@ -1215,6 +1218,7 @@ public sealed partial class VulkanGraphicsDevice
             if (gpuPassIsolation)
                 FlushIsolatedPass(cmd, pass.Name, ref isolationFirstSubmit, f.ImageAvailable, ref timelineWait);
         }
+        EndDispatchRun(cmd);
         ThrowIfNotSuccess(Vk.EndCommandBuffer(cmd), "vkEndCommandBuffer");
         var swSubmit = Stopwatch.GetTimestamp();
         var encodeMs = Stopwatch.GetElapsedTime(swEncode, swSubmit).TotalMilliseconds;
@@ -1758,7 +1762,7 @@ public sealed partial class VulkanGraphicsDevice
         }
 
         var bindsGpuBuffers = d.Buffers is { Count: > 0 } || d.IndirectArgs is not null;
-        if (bindsGpuBuffers) FenceGpuBuffers(cmd, beforeDispatch: true, indirect: d.IndirectArgs is not null);
+        if (bindsGpuBuffers) OrderDispatchBuffers(cmd, prog, d);
 
         if (d.Uniforms.Count > 0) WriteUniformsAcrossSets(prog, frameSlot, d.Uniforms);
         Vk.CmdBindPipeline(cmd, PipelineBindPoint.Compute, pipe.Pipeline);
@@ -1776,7 +1780,7 @@ public sealed partial class VulkanGraphicsDevice
             Vk.CmdDispatchIndirect(cmd, entry.Buffer, (ulong)d.IndirectOffset);
         }
         else Vk.CmdDispatch(cmd, (uint)d.GroupsX, (uint)d.GroupsY, (uint)d.GroupsZ);
-        if (bindsGpuBuffers) FenceGpuBuffers(cmd, beforeDispatch: false);
+        if (bindsGpuBuffers) AfterDispatchBuffers(cmd);
 
         for (var i = 0; i < d.Textures.Count; i++)
         {

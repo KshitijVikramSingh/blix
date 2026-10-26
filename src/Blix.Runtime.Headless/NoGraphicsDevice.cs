@@ -77,7 +77,8 @@ public sealed class NoGraphicsDevice : IGraphicsDevice
     public ShaderProgramHandle CreateComputeShaderProgramFromSpv(
         byte[] computeSpv, ShaderInterface shaderInterface, string? name = null) => throw Refuse();
 
-    public PipelineHandle CreateComputePipeline(ShaderProgramHandle program, string? name = null) => throw Refuse();
+    public PipelineHandle CreateComputePipeline(ShaderProgramHandle program, string? name = null,
+        ComputePipelineOptions options = ComputePipelineOptions.None) => throw Refuse();
 
     public IMaterialBindings CreateMaterial(
         ShaderProgramHandle program, int setIndex = DescriptorSets.Material, int framesInFlight = 1, string? name = null,
