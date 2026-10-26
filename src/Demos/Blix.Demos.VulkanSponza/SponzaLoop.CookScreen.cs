@@ -31,7 +31,12 @@ internal sealed partial class SponzaLoop : IUiSource
     // --live-texels too: a live gather takes the screen like any cook, so its interruptions show and are timed (the
     // user, 2026-10-16: "keep it for actual loading every time so we know when we're getting interrupted and for how
     // long"). Its view is read first, from a scene frame (SplitVisiblePending); an empty read keeps the last view.
+    // The frame's tracer too, with traced shadows (EnsureFrameTracer, built during the cook screen's frames): before it the
+    // frame ran on a fallback sun -- shadows from another direction, then a snap -- and the clipmap, the specular, cloth
+    // and foliage held that light for hundreds of solves after (the user, Crytek Sponza, 2026-10-26).
+    private bool TracerPending => rtShadows && frameTracer is null && !frameTracerFailed;
     private bool CookScreenNow => !cookScreenOff && (transportCookTask is { IsCompleted: false } || LightletBakePending || ReferenceCookingNow
+        || TracerPending
         || (SplitCookRunning && sceneFrameDrawn && !SplitVisiblePending && instantShowFrames == 0 && !GatherInBackground && !ChangeBehindFrame));
     // A light change after the first landing, under --sweep-in-frame: behind the frame from its re-aim on -- its setup's
     // passes chunked a frame at a time (the guides, the direct, the visible bands, the cells, the instant layer), the
