@@ -76,6 +76,12 @@ layout(std430, set = 0, binding = 21) buffer ReferenceMedium { uint medium[]; };
 layout(std430, set = 0, binding = 22) readonly buffer ReferenceMaterialRows { uint materialRows[]; };
 layout(std430, set = 0, binding = 23) readonly buffer ReferenceMaterialTable { vec4 materialTable[]; };
 layout(std430, set = 0, binding = 24) readonly buffer ReferenceRowMr { uint rowMr[]; };
+// The scene's texture coordinates, one per ray position (RayQueryGpuData.Uvs): the tangent of an anisotropic hit comes from the triangle's.
+layout(std430, set = 0, binding = 25) readonly buffer ReferenceUvs { vec2 refUvs[]; };
+// The table's vec4s a material: 0 (base colour factor, metallic), 1 (roughness, ior, specular, transmission), 2 (specular colour, diffuse transmission), 3 (diffuse
+// transmission colour, -), 4 (attenuation coefficient, -), 5 (flags: x solid, y a thin transmitting pane), 6 (sheen colour, sheen roughness), 7 (clearcoat,
+// clearcoat roughness, iridescence, iridescence ior), 8 (iridescence thickness, anisotropy, anisotropy rotation, -), 9 (emitted radiance, -).
+const uint REF_STRIDE = 10u;
 
 #define BLIX_RAY_SET 0
 #define BLIX_RAY_BINDING 13
@@ -88,8 +94,8 @@ bool referenceBsdfOn() { return (uint(u.uCount.w + 0.5) & 4u) != 0u; }
 // The row's material for the BSDF: the table's factors, the row's baked means, the row's albedo word (base colour at its diffuse roughness level), and its sheet
 // (the diffuse transmission, as the old reference reads it).
 BlixGltfMaterial referenceMaterial(uint mi, uint rowIdx, vec4 albedoWord) {
-    vec4 m1 = materialTable[6u * mi + 1u], m2 = materialTable[6u * mi + 2u];
-    BlixGltfMaterial m;
+    vec4 m1 = materialTable[REF_STRIDE * mi + 1u], m2 = materialTable[REF_STRIDE * mi + 2u];
+    BlixGltfMaterial m = blix_gltfDefaultMaterial();
     m.diffuseRoughness = albedoWord.a;
     m.baseColor = blix_eonBaseFromHemispherical(albedoWord.rgb, albedoWord.a);
     uint mr = rowMr[rowIdx];
@@ -99,12 +105,40 @@ BlixGltfMaterial referenceMaterial(uint mi, uint rowIdx, vec4 albedoWord) {
     m.specular = m1.z;
     m.transmission = m1.w;
     m.specularColor = m2.rgb;
-    m.solid = materialTable[6u * mi + 5u].x > 0.5;
+    m.solid = materialTable[REF_STRIDE * mi + 5u].x > 0.5;
+    vec4 m6 = materialTable[REF_STRIDE * mi + 6u], m7 = materialTable[REF_STRIDE * mi + 7u], m8 = materialTable[REF_STRIDE * mi + 8u];
+    m.sheenColor = m6.rgb;
+    m.sheenRoughness = m6.w;
+    m.clearcoat = m7.x;
+    m.clearcoatRoughness = m7.y;
+    m.iridescence = m7.z;
+    m.iridescenceIor = m7.w;
+    m.iridescenceThickness = m8.x;
+    m.anisotropy = m8.y;
+    m.anisotropyRotation = m8.z;
     uint sheet = (mod(u.uCount.w, 2.0) > 0.5) ? sheets[rowIdx] : 0u;
     float share = float(sheet >> 24) / 255.0;
     m.diffuseTransmission = share;
     m.dtColor = share > 0.0 ? min(unpackUnorm4x8(sheet).rgb / share, vec3(1.0)) : vec3(1.0);
     return m;
+}
+
+// The media a path is in, innermost first: up to three solids' material indices + 1, ten bits each (0: air). The index of the one entered from is what a surface
+// bounds against, and the innermost one's attenuation is what the path runs through.
+float referenceMediumIor(uint entry) { return entry == 0u ? 1.0 : materialTable[REF_STRIDE * (entry - 1u) + 1u].y; }
+
+// The tangent of the hit triangle in world space (dP/du of its texture coordinates, turned by its entry's transform, made square to the normal): the direction an
+// anisotropic lobe's roughness is measured along.
+vec3 referenceTangent(uint row, uint entry, vec3 n) {
+    uvec4 tri = blix_triangles[row];
+    vec3 p0 = blix_positions[tri.x].xyz, p1 = blix_positions[tri.y].xyz, p2 = blix_positions[tri.z].xyz;
+    vec2 d1 = refUvs[tri.y] - refUvs[tri.x], d2 = refUvs[tri.z] - refUvs[tri.x];
+    float det = d1.x * d2.y - d1.y * d2.x;
+    vec3 e1 = p1 - p0, e2 = p2 - p0;
+    vec3 local = abs(det) > 1e-12 ? (e1 * d2.y - e2 * d1.y) / det : e1;
+    vec3 t = inverse(mat3(blix_instances[entry].worldToLocal)) * local;
+    t -= n * dot(n, t);
+    return dot(t, t) > 1e-14 ? normalize(t) : normalize(abs(n.y) < 0.999 ? cross(vec3(0.0, 1.0, 0.0), n) : cross(vec3(1.0, 0.0, 0.0), n));
 }
 
 // lanes[4l + 0] origin.xyz, hits so far (-1: no path)
@@ -183,14 +217,20 @@ void main() {
                 // The glTF BSDF: the path's segment through its medium, the sun's light at the hit, and the next direction -- on whichever side.
                 float tSeg = uintBitsToFloat(h0.x);
                 uint med = medium[l];
-                if (med != 0u) c.rgb *= exp(-materialTable[6u * (med - 1u) + 4u].rgb * tSeg);
+                if ((med & 1023u) != 0u) c.rgb *= exp(-materialTable[REF_STRIDE * ((med & 1023u) - 1u) + 4u].rgb * tSeg);
                 vec3 hpB = a.xyz + dir * tSeg;
                 bool front = (h0.w & 2u) != 0u;
                 BlixGltfMaterial m = referenceMaterial(matIndex, matRow & 0x7FFFFFFFu, albedoWord);
                 bool solid = blix_gltfIsSolid(m);
                 vec3 nB = solid ? (front ? hn : -hn) : hn;   // a solid's outward side: the ray's side where it hit the front, the far side from inside
-                vec3 tx = normalize(abs(nB.y) < 0.999 ? cross(vec3(0.0, 1.0, 0.0), nB) : cross(vec3(1.0, 0.0, 0.0), nB));
+                // The medium it is entered from: entering a solid, the innermost one (air without); leaving it, the one outside it (the second).
+                m.etaOut = referenceMediumIor(front ? (med & 1023u) : ((med >> 10u) & 1023u));
+                // The roughness's directions: the triangle's own tangent where the lobe is anisotropic (the instance's entry rides the hit's flags), any otherwise.
+                vec3 tx = (m.anisotropy > 0.0) ? referenceTangent(matRow & 0x7FFFFFFFu, h0.w >> 4u, nB)
+                                               : normalize(abs(nB.y) < 0.999 ? cross(vec3(0.0, 1.0, 0.0), nB) : cross(vec3(1.0, 0.0, 0.0), nB));
                 vec3 ty = cross(nB, tx);
+                // What the surface gives off along the ray (KHR_materials_emissive_strength folded into the table).
+                r.rgb += c.rgb * materialTable[REF_STRIDE * matIndex + 9u].rgb;
                 vec3 woL = vec3(dot(wo, tx), dot(wo, ty), dot(wo, nB));
                 bool inside = woL.z < 0.0;
                 uint bs = blix_pcg(floatBitsToUint(c.w) ^ 0xB5297A4Du ^ (l * 0x68E31DA4u));
@@ -220,10 +260,10 @@ void main() {
                 bool ok;
                 if (inside) {
                     float aI = blix_bsdfAlpha(m.roughness);
-                    ok = blix_ifaceSampleDirection(aI, 1.0, m.ior, woL, bs, wiL);
-                    float pI = blix_ifacePdf(aI, 1.0, m.ior, woL, wiL);
+                    ok = blix_ifaceSampleDirection(aI, m.etaOut, m.ior, woL, bs, wiL);
+                    float pI = blix_ifacePdf(aI, m.etaOut, m.ior, woL, wiL);
                     ok = ok && pI > 0.0;
-                    if (ok) weightB = blix_ifaceEval(aI, 1.0, m.ior, vec3(1.0), woL, wiL) * abs(wiL.z) / pI;   // the tint was taken on the way in
+                    if (ok) weightB = blix_ifaceEval(aI, m.etaOut, m.ior, vec3(1.0), woL, wiL) * abs(wiL.z) / pI;   // the tint was taken on the way in
                 } else {
                     ok = blix_gltfSample(m, woL, bs, wiL, weightB);
                 }
@@ -232,8 +272,8 @@ void main() {
                     float sideN = wiL.z > 0.0 ? 1.0 : -1.0;
                     a = vec4(hpB + nB * sideN * u.uLift.x, a.w + 1.0);
                     b.xyz = normalize(wiL.x * tx + wiL.y * ty + wiL.z * nB);
-                    if (solid && !inside && wiL.z < 0.0) medium[l] = matIndex + 1u;
-                    else if (solid && inside && wiL.z > 0.0) medium[l] = 0u;
+                    if (solid && !inside && wiL.z < 0.0) medium[l] = (med << 10u) | (matIndex + 1u);   // in: this solid becomes the innermost
+                    else if (solid && inside && wiL.z > 0.0) medium[l] = med >> 10u;                   // out: the one it was in
                 } else {
                     c.rgb = vec3(0.0);   // no sample: the path carries nothing on (it ends at the bounce cap), its sun light already counted
                     a = vec4(hpB + nB * u.uLift.x, a.w + 1.0);
@@ -314,7 +354,7 @@ void main() {
     if (shade && mode == 2 && referenceBsdfOn() && sunClosest && dot(pending.rgb, vec3(1.0)) > 0.0) {
         uint srow = batchSunHits[3u * l + 1u].z;
         uint smi = srow != 0xFFFFFFFFu ? materialRows[srow & 0x7FFFFFFFu] : 0xFFFFFFFFu;
-        if (smi != 0xFFFFFFFFu && materialTable[6u * smi + 5u].y > 0.5) {
+        if (smi != 0xFFFFFFFFu && materialTable[REF_STRIDE * smi + 5u].y > 0.5) {
             vec3 so = batchSunRays[2u * l].xyz, sd = batchSunRays[2u * l + 1u].xyz;
             float st = uintBitsToFloat(batchSunHits[3u * l].x);
             vec3 sn = normalize(vec3(uintBitsToFloat(batchSunHits[3u * l + 2u].x), uintBitsToFloat(batchSunHits[3u * l + 2u].y), uintBitsToFloat(batchSunHits[3u * l + 2u].z)));

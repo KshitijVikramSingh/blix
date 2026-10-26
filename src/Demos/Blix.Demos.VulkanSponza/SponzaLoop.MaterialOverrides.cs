@@ -21,6 +21,11 @@ namespace Blix.Demos.VulkanSponza;
 //                             a SOLID (the transmitted light refracts at the surface and is attenuated inside)
 //   att-distance, att=r/g/b   the volume's attenuation distance and colour (Beer-Lambert)
 //   dt                        KHR_materials_diffuse_transmission factor
+//   clearcoat, clearcoat-roughness            KHR_materials_clearcoat
+//   sheen=r/g/b, sheen-roughness              KHR_materials_sheen
+//   iridescence, iridescence-ior, iridescence-thickness   KHR_materials_iridescence (the thickness in nm: both ends of its range)
+//   anisotropy, anisotropy-rotation           KHR_materials_anisotropy (strength; the rotation in radians)
+//   emissive=r/g/b                            the emitted radiance factor (the textures still multiply it; the reference reads the factor only)
 //   diffuse-roughness         the diffuse lobe's (EON) roughness, 0..1, in place of the material's roughness times --diffuse-roughness-scale
 //
 // glTF has no diffuse roughness, so that key is not a PbrMaterial field: it travels beside the material (DrawableStaging.DiffuseRoughness, RayMaterial,
@@ -43,7 +48,9 @@ internal sealed partial class SponzaLoop
                 var eq = pair.IndexOf('=');
                 if (eq <= 0) throw new ArgumentException($"--material '{spec}': '{pair}' is not key=value");
                 var key = pair[..eq].Trim().ToLowerInvariant();
-                if (key is not ("roughness" or "metallic" or "base" or "ior" or "specular" or "transmission" or "thickness" or "att-distance" or "att" or "dt" or "diffuse-roughness"))
+                if (key is not ("roughness" or "metallic" or "base" or "ior" or "specular" or "transmission" or "thickness" or "att-distance" or "att" or "dt" or "diffuse-roughness"
+                    or "clearcoat" or "clearcoat-roughness" or "sheen" or "sheen-roughness" or "iridescence" or "iridescence-ior" or "iridescence-thickness"
+                    or "anisotropy" or "anisotropy-rotation" or "emissive"))
                     throw new ArgumentException($"--material '{spec}': unknown key '{key}'");
                 keys[key] = pair[(eq + 1)..].Trim();
             }
@@ -97,6 +104,18 @@ internal sealed partial class SponzaLoop
                     case "thickness": ext = ext with { ThicknessFactor = Math.Max(0f, OverrideFloat(text)) }; break;
                     case "att-distance": ext = ext with { AttenuationDistance = OverrideFloat(text) <= 0f ? float.PositiveInfinity : OverrideFloat(text) }; break;
                     case "att": ext = ext with { AttenuationColor = OverrideColour(text) }; break;
+                    case "clearcoat": ext = ext with { ClearcoatFactor = Math.Clamp(OverrideFloat(text), 0f, 1f) }; break;
+                    case "clearcoat-roughness": ext = ext with { ClearcoatRoughnessFactor = Math.Clamp(OverrideFloat(text), 0f, 1f) }; break;
+                    case "sheen": ext = ext with { SheenColorFactor = OverrideColour(text) }; break;
+                    case "sheen-roughness": ext = ext with { SheenRoughnessFactor = Math.Clamp(OverrideFloat(text), 0f, 1f) }; break;
+                    case "iridescence": ext = ext with { IridescenceFactor = Math.Clamp(OverrideFloat(text), 0f, 1f) }; break;
+                    case "iridescence-ior": ext = ext with { IridescenceIor = Math.Max(1f, OverrideFloat(text)) }; break;
+                    case "iridescence-thickness":
+                        ext = ext with { IridescenceThicknessMinimum = Math.Max(0f, OverrideFloat(text)), IridescenceThicknessMaximum = Math.Max(0f, OverrideFloat(text)) };
+                        break;
+                    case "anisotropy": ext = ext with { AnisotropyStrength = Math.Clamp(OverrideFloat(text), 0f, 1f) }; break;
+                    case "anisotropy-rotation": ext = ext with { AnisotropyRotation = OverrideFloat(text) }; break;
+                    case "emissive": result = result with { EmissiveFactor = OverrideColour(text) }; break;
                     case "dt": ext = ext with { DiffuseTransmissionFactor = Math.Clamp(OverrideFloat(text), 0f, 1f) }; break;
                     case "diffuse-roughness": diffuseRoughness = Math.Clamp(OverrideFloat(text), 0f, 1f); break;
                 }

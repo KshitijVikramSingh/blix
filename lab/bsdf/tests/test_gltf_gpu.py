@@ -29,6 +29,15 @@ MATERIALS = [
     Material(base_color=(0.3, 0.5, 0.2), roughness=0.6, diffuse_transmission=0.6, diffuse_transmission_color=(0.5, 0.7, 0.2), diffuse_roughness=0.5),
     Material(base_color=(0.5, 0.5, 0.5), roughness=0.5, specular=0.5, specular_color=(1.0, 0.8, 0.6), ior=1.8),
     Material(base_color=(0.9, 1.0, 0.95), roughness=0.45, transmission=1.0, volume=True),
+    Material(base_color=(0.7, 0.4, 0.2), roughness=0.5, anisotropy=0.7, anisotropy_rotation=0.5),
+    Material(base_color=(0.9, 0.7, 0.4), metallic=1.0, roughness=0.4, anisotropy=0.9, anisotropy_rotation=1.2),
+    Material(base_color=(0.7, 0.4, 0.2), roughness=0.5, clearcoat=1.0, clearcoat_roughness=0.2),
+    Material(base_color=(0.7, 0.4, 0.2), roughness=0.5, clearcoat=0.5, clearcoat_roughness=0.4),
+    Material(base_color=(0.5, 0.2, 0.2), roughness=0.7, sheen_color=(0.8, 0.8, 0.9), sheen_roughness=0.5),
+    Material(base_color=(0.6, 0.6, 0.6), roughness=0.4, iridescence=1.0, iridescence_ior=1.3, iridescence_thickness=400.0),
+    Material(base_color=(0.9, 0.8, 0.7), metallic=1.0, roughness=0.4, iridescence=0.8, iridescence_ior=1.5, iridescence_thickness=300.0),
+    Material(base_color=(0.5, 0.3, 0.6), roughness=0.45, clearcoat=0.6, clearcoat_roughness=0.15, sheen_color=(0.4, 0.4, 0.4), sheen_roughness=0.6,
+             iridescence=0.5, anisotropy=0.4, anisotropy_rotation=0.3),
 ]
 VIEW = [0.9, 0.5, 0.2]
 TINT = (1.0, 0.8, 0.6)
@@ -48,7 +57,7 @@ def cells(h, w, stride):
     u, v = (xs + 0.5) / w, (ys + 0.5) / h
     col = np.floor(np.clip(u, 0, 0.99999) * 256)
     wi_z = -0.99 + 1.98 * col / 255.0
-    row = np.clip((v * 48).astype(int), 0, 47)
+    row = np.clip((v * 96).astype(int), 0, 95)
     return ys, wi_z, row
 
 

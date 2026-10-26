@@ -79,7 +79,20 @@ nothing at a crossing and a closed solid nets 1), the frame flipped when the ray
 passing 0.96 / eta^2 as radiance, total internal reflection from inside at grazing, generalised reciprocity (f / eta_o^2 symmetric) from both sides, sampling
 against evaluation over alpha, angle and side, the pdf's integral, and the attenuation distance leaving exactly the colour.
 
-Next layers, each with its tests beside these: clearcoat, sheen, iridescence, anisotropy; then the GLSL twin (`src/Blix.Shaders/bsdf_gltf.glsl`), a per-row material table beside the surface words, and
+### The layers (`tests/test_gltf_layers.py`)
+
+`gltf_bsdf.py` also carries **clearcoat** (a smooth GGX layer of ior 1.5; the base beneath is darkened by the coat's reflectance toward the *view*, the Khronos viewer's rule:
+the spec's fresnel_mix read literally weighs it by F(V.H), which gave a plastic under a rough coat 1.12 at cos 0.15), **sheen** (Charlie, the engine's `sheen.glsl` rule,
+the directional albedo by a midpoint grid that the GLSL repeats), **iridescence** (Belcour and Barla's thin film as the Khronos viewer evaluates it; at zero thickness it is
+the plain Fresnel at normal incidence only: the viewer's film interface adds (1 - cos)^5 off the normal) and **anisotropy** (GGX with alpha_t = mix(alpha, 1, s^2) along the
+rotated tangent). Held by: every layer off is the base model exactly; anisotropy 0 is isotropic and a quarter-turn swaps the axes; the coat over a black base reflects 4% at
+normal incidence; the film is a reflectance in [0, 1] that swings with thickness and parts the colours; the sheen albedo converges; reciprocity where the model has it (not the
+sheen's or the coat's base darkening, which read the view angle); sampling against evaluation for eight layered materials at two angles; no energy gained; a nested interface's
+Snell between 1.33 and 1.5. `KHR_materials_specular`'s factor now scales f0 as well as f90 (as the extension's formula has it).
+
+Emission and nested solids are the path tracer's: `Material.eta_out` is the index of the medium a surface is entered from.
+
+Next layers, each with its tests beside these: then the GLSL twin (`src/Blix.Shaders/bsdf_gltf.glsl`), a per-row material table beside the surface words, and
 `reference_wave.comp` shading with it (camera paths and the gate's points both).
 
 ### In the engine: `--ref-bsdf`

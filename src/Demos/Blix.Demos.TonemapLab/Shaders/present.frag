@@ -128,17 +128,16 @@ void main()
         return;
     }
 
-    // 6 and 7: the glTF BSDF (bsdf_gltf.glsl) for lab/bsdf's tests/test_gltf_gpu.py. Rows: 8 materials x 3 view cosines x 2 sides (the second side
+    // 6 and 7: the glTF BSDF (bsdf_gltf.glsl) for lab/bsdf's tests/test_gltf_gpu.py. Rows: 16 materials x 3 view cosines x 2 sides (the second side
     // views from below the surface, which only the interface answers); columns sweep the light's z from -0.99 to 0.99 over 256 columns at azimuth 0.6.
     // 6: |cos| f(wo, wi) per channel (pdf-free), PI times it; 7: (the material's pdf, the interface's |cos| f green channel, its pdf).
     if (pc.uPattern == 6 || pc.uPattern == 7)
     {
         const float VIEW[3] = float[3](0.9, 0.5, 0.2);
-        int row = int(clamp(vUv.y * 48.0, 0.0, 47.999));
+        int row = int(clamp(vUv.y * 96.0, 0.0, 95.999));
         int mi = row / 6, rest = row % 6, vi = rest / 2, side = rest % 2;
-        BlixGltfMaterial m;
-        m.baseColor = vec3(0.7, 0.4, 0.2); m.metallic = 0.0; m.specularColor = vec3(1.0); m.specular = 1.0;
-        m.dtColor = vec3(1.0); m.diffuseTransmission = 0.0; m.roughness = 0.5; m.ior = 1.5; m.transmission = 0.0; m.diffuseRoughness = 0.0; m.solid = false;
+        BlixGltfMaterial m = blix_gltfDefaultMaterial();
+        m.baseColor = vec3(0.7, 0.4, 0.2);
         if (mi == 1) { m.baseColor = vec3(0.9, 0.6, 0.3); m.metallic = 1.0; m.roughness = 0.6; }
         else if (mi == 2) { m.baseColor = vec3(0.8); m.metallic = 0.5; }
         else if (mi == 3) { m.baseColor = vec3(0.9, 0.95, 1.0); m.transmission = 1.0; }
@@ -146,6 +145,15 @@ void main()
         else if (mi == 5) { m.baseColor = vec3(0.3, 0.5, 0.2); m.roughness = 0.6; m.diffuseTransmission = 0.6; m.dtColor = vec3(0.5, 0.7, 0.2); m.diffuseRoughness = 0.5; }
         else if (mi == 6) { m.baseColor = vec3(0.5); m.specular = 0.5; m.specularColor = vec3(1.0, 0.8, 0.6); m.ior = 1.8; }
         else if (mi == 7) { m.baseColor = vec3(0.9, 1.0, 0.95); m.roughness = 0.45; m.transmission = 1.0; m.solid = true; }
+        else if (mi == 8) { m.anisotropy = 0.7; m.anisotropyRotation = 0.5; }
+        else if (mi == 9) { m.baseColor = vec3(0.9, 0.7, 0.4); m.metallic = 1.0; m.roughness = 0.4; m.anisotropy = 0.9; m.anisotropyRotation = 1.2; }
+        else if (mi == 10) { m.clearcoat = 1.0; m.clearcoatRoughness = 0.2; }
+        else if (mi == 11) { m.clearcoat = 0.5; m.clearcoatRoughness = 0.4; }
+        else if (mi == 12) { m.baseColor = vec3(0.5, 0.2, 0.2); m.roughness = 0.7; m.sheenColor = vec3(0.8, 0.8, 0.9); m.sheenRoughness = 0.5; }
+        else if (mi == 13) { m.baseColor = vec3(0.6); m.roughness = 0.4; m.iridescence = 1.0; m.iridescenceIor = 1.3; m.iridescenceThickness = 400.0; }
+        else if (mi == 14) { m.baseColor = vec3(0.9, 0.8, 0.7); m.metallic = 1.0; m.roughness = 0.4; m.iridescence = 0.8; m.iridescenceIor = 1.5; m.iridescenceThickness = 300.0; }
+        else if (mi == 15) { m.baseColor = vec3(0.5, 0.3, 0.6); m.roughness = 0.45; m.clearcoat = 0.6; m.clearcoatRoughness = 0.15; m.sheenColor = vec3(0.4); m.sheenRoughness = 0.6;
+                             m.iridescence = 0.5; m.anisotropy = 0.4; m.anisotropyRotation = 0.3; }
         float cosO = VIEW[vi];
         float wiZ = -0.99 + 1.98 * floor(clamp(vUv.x, 0.0, 0.99999) * 256.0) / 255.0;
         float sinI = sqrt(max(1.0 - wiZ * wiZ, 0.0));

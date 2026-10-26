@@ -67,7 +67,7 @@ internal static unsafe class HwxNative
     [DllImport(Library)]
     public static extern unsafe int hwx_encode_trace(nint ctx, nint sharedEvent, ulong waitValue, ulong signalValue,
         nint rays, ulong raysOffset, nint hits, ulong hitsOffset, uint count, uint seedBase, nint limit, ulong limitOffset,
-        float* sun, float reach, float discTan);
+        float* sun, float reach, float discTan, int instances);
 
     [DllImport(Library)]
     public static extern int hwx_group_begin(nint ctx, nint sharedEvent, ulong waitValue);

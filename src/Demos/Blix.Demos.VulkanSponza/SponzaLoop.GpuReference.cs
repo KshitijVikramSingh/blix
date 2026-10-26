@@ -302,6 +302,7 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("ReferenceMaterialRows", referenceMaterialRows),
                     new ShaderBufferBinding("ReferenceMaterialTable", referenceMaterialTable),
                     new ShaderBufferBinding("ReferenceRowMr", rayMrRows),
+                    new ShaderBufferBinding("ReferenceUvs", raySurfaceBakeBuffers.First(b => b.Name == "BlixRayUvs").Buffer),
                 } : new[]
                 {
                     // Declared by the shader, read only in the BSDF mode: bound to something so the dispatch is complete.
@@ -309,12 +310,13 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("ReferenceMaterialRows", w.Occluded),
                     new ShaderBufferBinding("ReferenceMaterialTable", w.Origins),
                     new ShaderBufferBinding("ReferenceRowMr", w.Occluded),
+                    new ShaderBufferBinding("ReferenceUvs", w.Occluded),
                 })
                 .Where(b => declared.Contains(b.Name)).ToArray());
         graph.Dispatch(referenceWaveStepPass, Wave(0));
-        RecordClosestBatch(referenceClosestBatch, w.Rays, w.Hits, count, frameSeed, on);
+        RecordClosestBatch(referenceClosestBatch, w.Rays, w.Hits, count, frameSeed, on, instances: bsdf);
         graph.Dispatch(referenceWaveShadePass, Wave(1));
-        if (refSunClosest) RecordClosestBatch(referenceSunBatch, w.SunRays, w.SunHits, count, frameSeed ^ 0x5bd1e995u, on);
+        if (refSunClosest) RecordClosestBatch(referenceSunBatch, w.SunRays, w.SunHits, count, frameSeed ^ 0x5bd1e995u, on, instances: bsdf);
         else RecordShadowBatch(referenceShadowBatch, w.Origins, w.Occluded, count, -Vector3.Normalize(sunDirection), frameSeed ^ 0x5bd1e995u, on,
             directions: refSunDisc ? w.Directions : null);
         graph.Dispatch(referenceWaveResolvePass, Wave(2));
@@ -323,7 +325,7 @@ internal sealed partial class SponzaLoop
             // A thin pane in the sun's way: the light goes on through it, and each further round takes it past one more (three panes in all, then the last stops at anything).
             for (var round = 0; round < 2; round++)
             {
-                RecordClosestBatch(referenceSunBatch, w.SunRays, w.SunHits, count, frameSeed ^ 0x5bd1e995u, on);
+                RecordClosestBatch(referenceSunBatch, w.SunRays, w.SunHits, count, frameSeed ^ 0x5bd1e995u, on, instances: bsdf);
                 graph.Dispatch(referenceWaveResolvePass, Wave(round == 1 ? 3 : 2));
             }
         }

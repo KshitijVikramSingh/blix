@@ -21,8 +21,13 @@ namespace Blix.Demos.VulkanSponza;
 // from the same scene with the pane rows given coverage in a copy of the surface words (EnsureReferenceTracer); the frame's tracer, and every cook, never see them.
 // Hardware rays only (the software traversal's hits do not name a row).
 //
+// The layers are the table's too: clearcoat, sheen, iridescence (the film at its maximum thickness: its texture is not read), anisotropy (the tangent from the hit
+// triangle's texture coordinates; its texture not read) and emission (the factor times the strength: an emissive TEXTURE is not read and emits nothing). Solids
+// nest, three deep (the medium a surface is entered from bounds it: water over glass over air).
+//
 // What it does not model: caustics (the sun is a point or a small disc; light through a solid reaches what is behind it by the sky and the bounces, never by the sun),
-// emission, clearcoat, sheen, iridescence and anisotropy (the layers still to come in lab/bsdf), nested solids (one medium at a time).
+// textured clearcoat, sheen, iridescence, transmission, thickness, specular and anisotropy (their factors only), a normal map on the coat, and overlapping solids
+// that are not nested.
 internal sealed partial class SponzaLoop
 {
     private bool refBsdf;
@@ -43,13 +48,15 @@ internal sealed partial class SponzaLoop
         var perPlacement = new uint[rayPlacementPbr.Count];
         var solids = 0;
         var panes = 0;
+        var emitters = 0;
+        var texturedEmitters = 0;
         for (var p = 0; p < perPlacement.Length; p++)
         {
             var pm = rayPlacementPbr[p];
             if (pm is null) { perPlacement[p] = uint.MaxValue; continue; }
             if (!index.TryGetValue(pm, out var m))
             {
-                index[pm] = m = (uint)(table.Count / 6);
+                index[pm] = m = (uint)(table.Count / 10);
                 var e = pm.Ext;
                 var t = Math.Clamp(Math.Max(e.TransmissionFactor, pm.TransmissionFactor), 0f, 1f);
                 var solid = t > 0f && e.ThicknessFactor > 0f;
@@ -65,6 +72,15 @@ internal sealed partial class SponzaLoop
                 table.Add(new Vector4(e.DiffuseTransmissionColorFactor, DiffuseRoughnessOf(pm)));
                 table.Add(new Vector4(sigma, 0f));
                 table.Add(new Vector4(solid ? 1f : 0f, thin ? 1f : 0f, 0f, 0f));
+                table.Add(new Vector4(e.SheenColorFactor, e.SheenRoughnessFactor));
+                table.Add(new Vector4(e.ClearcoatFactor, e.ClearcoatRoughnessFactor, e.IridescenceFactor, e.IridescenceIor));
+                // The film's thickness is the maximum where no texture varies it (the spec's default); the anisotropy texture's direction and strength are not read.
+                table.Add(new Vector4(e.IridescenceThicknessMaximum, e.AnisotropyStrength, e.AnisotropyRotation, 0f));
+                // Emission: the factor times KHR_materials_emissive_strength. A textured emission is not read (the texture's mean would be a bake of its own): it emits nothing here.
+                var emission = pm.EmissiveTexture is null ? pm.EmissiveFactor * pm.EmissiveStrength : Vector3.Zero;
+                if (pm.EmissiveTexture is not null && pm.EmissiveFactor != Vector3.Zero) texturedEmitters++;
+                if (emission != Vector3.Zero) emitters++;
+                table.Add(new Vector4(emission, 0f));
                 if (solid) solids++;
                 if (thin) panes++;
             }
@@ -80,7 +96,7 @@ internal sealed partial class SponzaLoop
         referenceMaterialTable = Own(device.CreateGpuBuffer(table.Count * 16, MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(table)), "sponza.reference.material-table"));
         referenceMaterialRows = Own(device.CreateGpuBuffer(rows.Length * 4, MemoryMarshal.AsBytes(rows.AsSpan()), "sponza.reference.material-rows"));
         referenceMaterialsMade = true;
-        Console.WriteLine(string.Create(Inv, $"[VulkanSponza] reference BSDF: {table.Count / 6} materials ({solids} solids with a volume, {panes} thin transmitting), shaded per row by the glTF BSDF."));
+        Console.WriteLine(string.Create(Inv, $"[VulkanSponza] reference BSDF: {table.Count / 10} materials ({solids} solids with a volume, {panes} thin transmitting, {emitters} emitting{(texturedEmitters > 0 ? $"; {texturedEmitters} with an emissive texture emit nothing here" : "")}), shaded per row by the glTF BSDF."));
         return true;
     }
 

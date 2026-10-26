@@ -45,7 +45,7 @@ def test_fresnel_at_normal_incidence_is_the_iors_f0():
 
 def test_specular_extension_sets_f0_tint_and_f90():
     m = Material(ior=1.5, specular=0.5, specular_color=(1.0, 0.5, 0.0))
-    assert g.fresnel_dielectric(m, np.array([1.0]))[0] == pytest.approx([0.04, 0.02, 0.0], abs=1e-6)
+    assert g.fresnel_dielectric(m, np.array([1.0]))[0] == pytest.approx([0.02, 0.01, 0.0], abs=1e-6)   # f0 = ior's x colour x factor
     assert g.fresnel_dielectric(m, np.array([0.0]))[0] == pytest.approx([0.5, 0.5, 0.5], abs=1e-6)
 
 

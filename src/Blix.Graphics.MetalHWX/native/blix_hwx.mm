@@ -423,6 +423,8 @@ kernel void blix_trace(device const float4* rays [[buffer(0)]],
     }
 
     uint flags = (found ? 1u : 0u) | (front ? 2u : 0u) | (any ? 4u : 0u) | (sunlit ? 8u : 0u);
+    // p.flags 16: the entry (instance) the hit is on, in the flags' upper bits -- what a consumer that needs the placement's transform (a tangent into world space) asks for.
+    if (found && (p.flags & 16u) != 0u) flags |= res.instance_id << 4u;
     hits[i * 3u] = uint4(as_type<uint>(t), as_type<uint>(bary.x), as_type<uint>(bary.y), flags);
     // z: the packed triangle row (RayQueryGpuData's), top bit an instance's (its row serves every placement of the
     // mesh, so a per-row answer does not hold); w: the row's own barycentrics -- a table keyed by them answers what
@@ -1352,7 +1354,7 @@ HWX_EXPORT int hwx_encode_shadow(HwxContext* ctx, void* sharedEvent, uint64_t wa
 HWX_EXPORT int hwx_encode_trace(HwxContext* ctx, void* sharedEvent, uint64_t waitValue, uint64_t signalValue,
                                 void* rays, uint64_t raysOffset, void* hits, uint64_t hitsOffset,
                                 uint32_t count, uint32_t seedBase, void* limit, uint64_t limitOffset,
-                                const float* sun, float reach, float discTan) {
+                                const float* sun, float reach, float discTan, int instances) {
     @autoreleasepool {
         id<MTLSharedEvent> event = (__bridge id<MTLSharedEvent>)sharedEvent;
         id<MTLBuffer> rayBuffer = (__bridge id<MTLBuffer>)rays;
@@ -1379,7 +1381,7 @@ HWX_EXPORT int hwx_encode_trace(HwxContext* ctx, void* sharedEvent, uint64_t wai
             [enc setIntersectionFunctionTable:ctx->table atBufferIndex:3];
             // Params, as hwx_trace's: flags 1 the live count, 2 each hit's sun, 4 through sheets that transmit.
             struct { uint32_t count, seedBase, closestOnly, flags; float sun[4]; float reach; float discTan; uint32_t pad[2]; } params = {
-                count, seedBase, 1u, (limitBuffer ? 1u : 0u) | (sun ? 2u : 0u) | (sun && ctx->rowTransmit ? 4u : 0u),
+                count, seedBase, 1u, (limitBuffer ? 1u : 0u) | (sun ? 2u : 0u) | (sun && ctx->rowTransmit ? 4u : 0u) | (instances ? 16u : 0u),
                 {sun ? sun[0] : 0.0f, sun ? sun[1] : 0.0f, sun ? sun[2] : 0.0f, sun ? sun[3] : 0.0f}, reach, discTan, {0, 0}};
             [enc setBytes:&params length:sizeof(params) atIndex:4];
             [enc setBuffer:limitBuffer ? limitBuffer : rayBuffer offset:limitBuffer ? limitOffset : raysOffset atIndex:12];
