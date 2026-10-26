@@ -30,7 +30,7 @@ layout(set = 0, binding = 0) uniform Bake {
     vec4 uParams;      // x first entry in BakeRows, y how many, z alpha cutoff (0: opaque), w 1: clear (coverage 0)
     vec4 uParams2;     // x 1: uTransmission is the material's factor texture; y 1: uTransmissionColor its colour texture; z the alpha atlas's mip of uAlbedo, w 1: authored BLEND (rays stop with the probability of the alpha: always asked at the hit)
     vec4 uDiffuse;     // x 1: store EON's hemispherical albedo (0: the base colour, Lambert); y the diffuse-roughness scale; z the material's roughness factor; w 1: uMetallicRoughness is its texture
-    vec4 uDiffuse2;    // x the material's diffuse roughness override (--material diffuse-roughness), or -1: the roughness above decides
+    vec4 uDiffuse2;    // x the material's diffuse roughness override (--material diffuse-roughness), or -1: the roughness above decides; y the metallic factor
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uAlbedo;
@@ -49,6 +49,9 @@ layout(std430, set = 0, binding = 7) buffer BlixRayTransmission { uint transmiss
 layout(set = 0, binding = 8) uniform sampler2D uTransmissionColor;
 // The material's metallic-roughness texture (uDiffuse.w 1: it has one; green is roughness, times the factor): the diffuse roughness the albedo is baked at.
 layout(set = 0, binding = 9) uniform sampler2D uMetallicRoughness;
+// The row's specular roughness and metallic, the factors times the texture's mean over the same sixteen points, unorm8 each (roughness low byte): what the
+// reference's path tracer shades the row's specular lobe with (reference_wave.comp, ReferenceMaterialRows).
+layout(std430, set = 0, binding = 10) buffer BlixRayMr { uint mr[]; };
 
 vec3 encodeSrgb(vec3 c) {
     c = clamp(c, 0.0, 1.0);
@@ -69,7 +72,7 @@ void main() {
     vec3 sum = vec3(0.0);
     float kept = 0.0, through = 0.0;
     vec3 colour = vec3(0.0);
-    float rough = 0.0;
+    float rough = 0.0, metal = 0.0;
     for (int i = 0; i < 4; ++i)
     for (int j = 0; j < 4; ++j) {
         float r1 = (float(i) + 0.5) / 4.0;
@@ -81,6 +84,7 @@ void main() {
         if (u.uParams2.x > 0.5) through += textureLod(uTransmission, uv, lod).a;
         if (u.uParams2.y > 0.5) colour += textureLod(uTransmissionColor, uv, lod).rgb;
         rough += u.uDiffuse.w > 0.5 ? textureLod(uMetallicRoughness, uv, lod).g : 1.0;
+        metal += u.uDiffuse.w > 0.5 ? textureLod(uMetallicRoughness, uv, lod).b : 1.0;
         kept += (u.uParams.z <= 0.0 || texel.a * u.uBaseColor.a >= u.uParams.z) ? 1.0 : 0.0;
     }
     vec3 albedo = sum / 16.0 * u.uBaseColor.rgb;
@@ -114,4 +118,5 @@ void main() {
     uint share = u.uParams2.x > 0.5 ? uint(round(clamp(through / 16.0, 0.0, 1.0) * 255.0)) : 255u;
     uint tint = u.uParams2.y > 0.5 ? packUnorm4x8(vec4(encodeSrgb(colour / 16.0), 0.0)) : 0xFFFFFFu;
     transmission[row] = share | (tint << 8);
+    mr[row] = uint(round(clamp(u.uDiffuse.z * rough / 16.0, 0.0, 1.0) * 255.0)) | (uint(round(clamp(u.uDiffuse2.y * metal / 16.0, 0.0, 1.0) * 255.0)) << 8);
 }

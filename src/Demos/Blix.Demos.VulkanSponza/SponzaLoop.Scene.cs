@@ -424,7 +424,7 @@ internal sealed partial class SponzaLoop
                 sceneTransformInstances.Add(s.Instances[w]);
                 rayInstances.Add(new RayQueryScene.Instance(rayMeshes[i], world));
                 rayPlacementMaterials.Add(new RayMaterial(s.Albedo, s.BaseColor, s.AlphaCutoff, s.IsBlend, s.TransmissionTexture, s.TransmissionColorTexture,
-                    s.MetallicRoughness, s.RoughnessFactor, s.AlphaBlended, s.DiffuseRoughness));
+                    s.MetallicRoughness, s.RoughnessFactor, s.AlphaBlended, s.DiffuseRoughness, s.Pbr?.MetallicFactor ?? 0f));
                 rayPlacementPbr.Add(s.Pbr);
                 rayPlacementLightmapped.Add(s.LightmapTexels is not null);
                 rayPlacementDoubleSided.Add(s.Pipeline == opaqueDoubleSidedPipeline || s.Pipeline == blendDoubleSidedPipeline);

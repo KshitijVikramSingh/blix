@@ -127,7 +127,7 @@ internal sealed partial class SponzaLoop
                         new("uParams2", new Vector4Uniform(new Vector4(material.Transmission.Equals(default(TextureHandle)) ? 0f : 1f,
                         material.TransmissionColor.Equals(default(TextureHandle)) ? 0f : 1f, RayAlphaMip(material), RayStochastic(material) ? 1f : 0f))),
                         new("uDiffuse", new Vector4Uniform(BakeDiffuse(material))),
-                    new("uDiffuse2", new Vector4Uniform(new Vector4(material.DiffuseRoughness, 0f, 0f, 0f))),
+                    new("uDiffuse2", new Vector4Uniform(new Vector4(material.DiffuseRoughness, material.Metallic, 0f, 0f))),
                     },
                     new[] { new ShaderTextureBinding("uAlbedo", material.Albedo),
                         new ShaderTextureBinding("uTransmission", material.Transmission.Equals(default(TextureHandle)) ? material.Albedo : material.Transmission),
@@ -203,11 +203,12 @@ internal sealed partial class SponzaLoop
         Volatile.Write(ref bakeTracer, null);
         tracer?.Dispose();
         foreach (var b in bakeSceneBlocks) Disown(b);
-        if (bakeSceneSurfaceBuffers.Length == 5)
+        if (bakeSceneSurfaceBuffers.Length == 6)
         {
             Disown(bakeSceneSurfaceBuffers[1].Buffer);   // the coordinates, rows and shares; triangles and surfaces are blocks
             Disown(bakeSceneSurfaceBuffers[2].Buffer);
             Disown(bakeSceneSurfaceBuffers[4].Buffer);
+            Disown(bakeSceneSurfaceBuffers[5].Buffer);
         }
         bakeSceneBlocks = Array.Empty<GpuBufferHandle>();
         bakeSceneSurfaceBuffers = Array.Empty<ShaderBufferBinding>();
@@ -257,6 +258,7 @@ internal sealed partial class SponzaLoop
             new ShaderBufferBinding("BlixRaySurfaces", bakeSceneBlocks[6]),
             // The rows' transmission share (ray_surface_bake.comp): the bake scene's own, unread -- the frame scene's is.
             new ShaderBufferBinding("BlixRayTransmission", Own(device.CreateGpuBuffer(Math.Max(16, data.RowPlacements.Length * 4), name: "sponza.bake-scene.transmission"))),
+            new ShaderBufferBinding("BlixRayMr", Own(device.CreateGpuBuffer(Math.Max(16, data.RowPlacements.Length * 4), name: "sponza.bake-scene.mr"))),
         };
         bytes += uvBytes.Length + bakeRowBytes.Length;
         Console.WriteLine(string.Create(Inv,

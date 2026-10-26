@@ -20,7 +20,7 @@ internal sealed partial class SponzaLoop
     // Per ray-scene placement (the transform table's order): the material a surface bake reads.
     // Clear: authored transmission (the panes): no coverage, rays pass (ray_surface_bake.comp).
     private readonly record struct RayMaterial(TextureHandle Albedo, Vector4 BaseColor, float AlphaCutoff, bool Clear, TextureHandle Transmission = default,
-        TextureHandle TransmissionColor = default, TextureHandle MetallicRoughness = default, float Roughness = 0.8f, bool Blended = false, float DiffuseRoughness = -1f);
+        TextureHandle TransmissionColor = default, TextureHandle MetallicRoughness = default, float Roughness = 0.8f, bool Blended = false, float DiffuseRoughness = -1f, float Metallic = 0f);
     // Per placement: the material as the loop sees it (overrides applied), for the reference's material table; null where there is none.
     private readonly List<PbrMaterial?> rayPlacementPbr = new();
     private readonly List<RayMaterial> rayPlacementMaterials = new();
@@ -54,6 +54,8 @@ internal sealed partial class SponzaLoop
     // alpha averaged over the triangle, unorm8; 255 whole, the default), and its colour texture's mean (sRGB, the upper
     // three bytes; white without one): ray_surface_bake.comp writes them.
     private GpuBufferHandle rayTransmissionRows;
+    // Per row, the baked specular roughness (low byte) and metallic (next), unorm8: the reference's per-row material means (ray_surface_bake.comp).
+    private GpuBufferHandle rayMrRows;
     private uint[]? rowTransmissionWords;
     private bool RowTransmissionWords()
     {
@@ -280,6 +282,7 @@ internal sealed partial class SponzaLoop
             new ShaderBufferBinding("BlixRaySurfaces", raySurfaces),
             new ShaderBufferBinding("BlixRayTransmission", rayTransmissionRows = Own(device.CreateGpuBuffer(Math.Max(16, data.RowPlacements.Length * 4),
                 MemoryMarshal.AsBytes(Enumerable.Repeat(255u, Math.Max(4, data.RowPlacements.Length)).ToArray().AsSpan()), "sponza.ray.transmission"))),
+            new ShaderBufferBinding("BlixRayMr", rayMrRows = Own(device.CreateGpuBuffer(Math.Max(16, data.RowPlacements.Length * 4), name: "sponza.ray.mr"))),
         };
         rayBlockBuffers = buffers.ToArray();
         Console.WriteLine(string.Create(Inv,
@@ -468,7 +471,7 @@ internal sealed partial class SponzaLoop
                     new("uParams2", new Vector4Uniform(new Vector4(material.Transmission.Equals(default(TextureHandle)) ? 0f : 1f,
                         material.TransmissionColor.Equals(default(TextureHandle)) ? 0f : 1f, RayAlphaMip(material), RayStochastic(material) ? 1f : 0f))),
                     new("uDiffuse", new Vector4Uniform(BakeDiffuse(material))),
-                    new("uDiffuse2", new Vector4Uniform(new Vector4(material.DiffuseRoughness, 0f, 0f, 0f))),
+                    new("uDiffuse2", new Vector4Uniform(new Vector4(material.DiffuseRoughness, material.Metallic, 0f, 0f))),
                 },
                 new[] { new ShaderTextureBinding("uAlbedo", material.Albedo),
                     new ShaderTextureBinding("uTransmission", material.Transmission.Equals(default(TextureHandle)) ? material.Albedo : material.Transmission),
