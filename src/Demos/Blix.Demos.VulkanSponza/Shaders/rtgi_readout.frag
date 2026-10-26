@@ -39,7 +39,9 @@ layout(std430, set = 0, binding = 7) readonly buffer RtgiMoments { vec4 rtgiMome
 layout(std430, set = 0, binding = 8) readonly buffer RtgiConfidence { vec4 rtgiConfidence[]; };
 // The visible share done: one pixel in 16 counted (x), and of those the ones whose cell is done (y); SponzaLoop.Rtgi.cs
 // reads and zeroes them at the profile window.
-layout(std430, set = 0, binding = 9) buffer RtgiDoneCount { uint doneCount[4]; };
+// z, w: the sampled pixels' cell lookups, and those that found no cell (a miss walks all RTGI_PROBES slots); [4], [5]
+// the sampled pixels with a blur radius, and those under a half-res pixel (the blur reads nothing for them).
+layout(std430, set = 0, binding = 9) buffer RtgiDoneCount { uint doneCount[8]; };
 // Per half-res pixel: how unsure its cell is, for the next frame's ray placement (rtgi_rays.comp) -- read there for
 // a texel's price, where each candidate found its cell in the hash itself: 5.8 ms a frame at 4x the rays (Crytek
 // Sponza, 2026-10-26). The blend's relative error, at least the done threshold; a done cell an eighth of that; a cell
@@ -65,6 +67,8 @@ vec3 heat(float t) {
 #include "half_guide.glsl"
 
 // Trilinear over the level's cells around p (their centres), w the weight found.
+uint lookups = 0u, misses = 0u;
+
 vec4 readLevel(vec3 p, uint side, uint level, out float sky, out vec3 bvec, out float near, out float far) {
     float size = rtgiSize(level, u.uParams);
     vec3 f = p / size - 0.5;
@@ -79,7 +83,8 @@ vec4 readLevel(vec3 p, uint side, uint level, out float sky, out vec3 bvec, out 
     for (int k = 0; k < 8; k++) {
         ivec3 o = ivec3(k & 1, (k >> 1) & 1, k >> 2);
         uint s = rtgiFind(rtgiCellHash(c0 + o, level, side, u.uParams), u.uParams);
-        if (s == 0xFFFFFFFFu) continue;
+        lookups++;
+        if (s == 0xFFFFFFFFu) { misses++; continue; }
         uvec4 a = rtgiRecord[2u * s], c = rtgiRecord[2u * s + 1u];
         float held = uintBitsToFloat(c.w);
         if (held < 0.5) continue;
@@ -146,6 +151,7 @@ void main() {
     // The two levels around the point's, blended by where it sits between them (rtgiLevelF): no jump at a level's edge.
     float lf = rtgiLevelF(p, u.uCamera.xyz, u.uParams);
     uint level = uint(lf);
+    float blurR = -1.0;
     if (unsureIn) {
         uint sc = rtgiFind(rtgiCellHash(ivec3(floor(p / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
         float unsure = 1.0;
@@ -165,7 +171,8 @@ void main() {
         float worldR = rtgiSize(level, u.uParams) * clamp(rel / u.uUnsure.x, 0.5, 4.0) * 2.0;
         if (invD > 1e-6) worldR = min(worldR, u.uBlurAt.y / invD);
         float dist = length(p - u.uCamera.xyz);
-        rtgiBlurRadius[unsureAt] = u.uBlurAt.x > 0.0 ? min(worldR / (dist * u.uUnsure.w), u.uBlurAt.x) * 0.5 : 0.0;
+        blurR = u.uBlurAt.x > 0.0 ? min(worldR / (dist * u.uUnsure.w), u.uBlurAt.x) * 0.5 : 0.0;
+        rtgiBlurRadius[unsureAt] = blurR;
     }
     uint top = uint(u.uParams.w);
     float t = lf - float(level);
@@ -203,6 +210,12 @@ void main() {
     if (e.w > 0.0 && ((uint(h.x) & 3u) | ((uint(h.y) & 3u) << 2)) == 0u) {
         uint sd = rtgiFind(rtgiCellHash(ivec3(floor(p / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
         atomicAdd(doneCount[0], 1u);
+        atomicAdd(doneCount[2], lookups);
+        atomicAdd(doneCount[3], misses);
+        if (blurR >= 0.0) {
+            atomicAdd(doneCount[4], 1u);
+            if (blurR < 1.0) atomicAdd(doneCount[5], 1u);
+        }
         if (sd != 0xFFFFFFFFu && unpackHalf2x16(rtgiRecord[2u * sd].z).y > 0.5) atomicAdd(doneCount[1], 1u);
     }
     // The RTGI panel's views (uContact.w, SponzaLoop.RtgiDebug.cs), the pixel's own cell (its level's, nearest) painted
