@@ -60,3 +60,16 @@ everywhere: radiance out is `E / pi * albedo(mu_o)`, which is Lambert's `E / pi 
 Per-material diffuse roughness (a cook-time override, `MaterialPatch`); the CPU reference (`--probe-reference`) still bounces with Lambert; the two-sided
 discrepancy above; a directional (not isotropic) lit-shader indirect; the Studio and other older shaders (`pbr.glsl`'s
 `blix_cookTorranceBrdf` and the Studio lit shader still use Lambert).
+
+## The glTF surface model as a BSDF (`bsdflab/gltf_bsdf.py`)
+
+The reference every renderer and reference path is built from: the spec's metallic-roughness BRDF (Appendix B) with `KHR_materials_ior`, `_specular`,
+`_transmission` (the spec's thin-walled rule: the BTDF is the reflection lobe read at the light's mirror image, so a smooth sheet passes the ray straight on)
+and `_diffuse_transmission`, as `eval`, `pdf` and `sample` (one lobe a sample, so the estimator is the mixture's). `tests/test_gltf_bsdf.py` pins it: Fresnel's
+numbers and the specular extension's tint and f90, reciprocity, the pdf integrating to what its lobes can reach, **sampling against evaluation** (the mean
+sample weight equals the integral of f cos, for seven materials at two view angles), no energy gained at any view angle, and a clear pane reflecting and
+transmitting nearly all of what it gets.
+
+Next layers, each with its tests beside these: a refracting interface with Beer-Lambert volume attenuation (`KHR_materials_volume`, a transmitting solid),
+clearcoat, sheen, iridescence, anisotropy; then the GLSL twin (`src/Blix.Shaders/bsdf_gltf.glsl`), a per-row material table beside the surface words, and
+`reference_wave.comp` shading with it (camera paths and the gate's points both).
