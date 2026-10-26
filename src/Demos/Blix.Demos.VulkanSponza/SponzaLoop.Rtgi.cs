@@ -58,6 +58,16 @@ internal sealed partial class SponzaLoop
     // Diagnostics for the cache's bounce (the dead end 23% dark, 2026-10-26): --rtgi-count-unknown counts a landing cell
     // that holds nothing as dark; --rtgi-no-coarse gives the training no coarser cell to read in its place.
     private bool rtgiCountUnknown, rtgiNoCoarse, rtgiBackfaceLit;
+    // --rtgi-fallback-up N: a landing whose cell holds too little looks two levels up, then N more, for light (2). A landing
+    // finding none gives no sample, and those are the unseen -- the back of an arch, inside a gap: mostly dark, so the
+    // samples kept read bright where the geometry is complex (the user, Crytek Sponza). Crytek's error at 60 frames 0.207
+    // -> 0.157, Cornell's 0.030 -> 0.027 (2026-10-26). Counted dark instead (--rtgi-count-unknown): Crytek 0.138, but
+    // Cornell 0.067 and the thin wall's open room 0.963 -- the unseen are not always dark.
+    private float rtgiFallbackUp = 2f;
+    // --rtgi-filter-every N: a cell holding --rtgi-filter-settled samples (256) or more is blended one frame in N, its turn by
+    // its slot (rtgi_filter.comp): 4 -- at 4x the rays the blend 8.5 ms a frame every frame, 2.9 on the rota (Crytek
+    // Sponza, 2026-10-26). 1: every cell trained, every frame.
+    private float rtgiFilterEvery = 4f, rtgiFilterSettled = 256f;
     // Landings in untrained cells, trained the next frame (rtgi_train.comp's requests): by parity. --rtgi-no-requests: off.
     private bool rtgiRequests = true;
     // --rtgi-clamp-sigma K: a sample capped at its cell's mean + K standard deviations once it holds 32 (0: off).
@@ -122,10 +132,18 @@ internal sealed partial class SponzaLoop
     private float rtgiFilterFrom = 32f, rtgiFilterTo = 256f, rtgiFilterSigma = 2f;
     // --rtgi-parent N: the parent cell (a level up) weighed as N samples beside the blend's own (32; 0: none).
     private float rtgiParentWeight = 32f;
-    // --rtgi-parent-sigma K: the parent weighs its samples besides (to --rtgi-parent-max, 4096) where the cell's blend is
+    // --rtgi-parent-sigma K: the parent weighs its samples besides (to --rtgi-parent-max, 65,536) where the cell's blend is
     // within K of their standard errors of it, plus --rtgi-parent-tol of the light (rtgi_filter.comp): cell size by how
     // smooth the light is. 0: the fixed weight alone.
-    private float rtgiParentSigma = 2f, rtgiParentTol = 0.02f, rtgiParentMax = 4096f;
+    private float rtgiParentSigma = 2f, rtgiParentTol = 0.02f, rtgiParentMax = 65536f;
+    // The harder cascade (the user: the noise is on the flat surfaces): the parent read interpolated at the cell's centre
+    // (--rtgi-no-parent-interp: the cell holding it) and weighed by all its blend stands for, the chain up the levels
+    // (--rtgi-no-parent-chain: its own samples alone).
+    // The parent weighed as the better of two estimates (shrinkage, rtgi_filter.comp); --rtgi-no-parent-shrink: by the
+    // agreement test (--rtgi-parent-sigma, --rtgi-parent-tol).
+    // --rtgi-no-parent-pool: the shrinkage's cell error from the cell's own spread, not pooled over its neighbours.
+    private bool rtgiParentInterp = true, rtgiParentChain = true, rtgiParentShrink = true, rtgiParentPool = true;
+    private GpuBufferHandle rtgiStands;
     // --rtgi-filter-floor F: the neighbours' share never below F, however many samples a cell holds (0: it fades to none).
     private float rtgiFilterFloor = 1f;
     // --rtgi-cascade: the parent lean takes the parent's blend (rtgi_filter.comp), cascading up every level trained;
@@ -214,6 +232,9 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-sun-cut") is { } sc) rtgiSunCut = MathF.Max(0f, sc);
         rtgiCountUnknown = args.Flag("rtgi-count-unknown");
         rtgiNoCoarse = args.Flag("rtgi-no-coarse");
+        if (args.Float("rtgi-fallback-up") is { } fu) rtgiFallbackUp = Math.Clamp(fu, 0f, 6f);
+        if (args.Float("rtgi-filter-every") is { } fe) rtgiFilterEvery = MathF.Max(1f, MathF.Round(fe));
+        if (args.Float("rtgi-filter-settled") is { } fs) rtgiFilterSettled = MathF.Max(1f, fs);
         rtgiBackfaceLit = args.Flag("rtgi-backface-lit");
         if (args.Flag("rtgi-no-requests")) rtgiRequests = false;
         fixedSubpixel = args.Flag("fixed-subpixel");
@@ -251,6 +272,10 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-parent-sigma") is { } ps) rtgiParentSigma = MathF.Max(0f, ps);
         if (args.Float("rtgi-parent-tol") is { } pt) rtgiParentTol = MathF.Max(0f, pt);
         if (args.Float("rtgi-parent-max") is { } pm) rtgiParentMax = MathF.Max(1f, pm);
+        if (args.Flag("rtgi-no-parent-interp")) rtgiParentInterp = false;
+        if (args.Flag("rtgi-no-parent-chain")) rtgiParentChain = false;
+        if (args.Flag("rtgi-no-parent-shrink")) rtgiParentShrink = false;
+        if (args.Flag("rtgi-no-parent-pool")) rtgiParentPool = false;
         if (args.Float("rtgi-filter-floor") is { } ffl) rtgiFilterFloor = Math.Clamp(ffl, 0f, 1f);
         if (args.Flag("rtgi-no-cascade")) rtgiCascade = false;
         args.Flag("rtgi-cascade");
@@ -365,6 +390,7 @@ internal sealed partial class SponzaLoop
             rtgiAccum = Own(device.CreateGpuBuffer(RtgiSlots * 52, new byte[RtgiSlots * 52], "sponza.rtgi.accum"));
             rtgiDirection = Own(device.CreateGpuBuffer(RtgiSlots * 16, new byte[RtgiSlots * 16], "sponza.rtgi.direction"));
             rtgiConfidence = Own(device.CreateGpuBuffer(RtgiSlots * 16, new byte[RtgiSlots * 16], "sponza.rtgi.confidence"));
+            rtgiStands = Own(device.CreateGpuBuffer(RtgiSlots * 4, new byte[RtgiSlots * 4], "sponza.rtgi.stands"));
             rtgiGuideKeys = Own(device.CreateGpuBuffer(RtgiGuideSlots * 4, new byte[RtgiGuideSlots * 4], "sponza.rtgi.guide-keys"));
             rtgiGuideAccum = Own(device.CreateGpuBuffer(RtgiGuideSlots * 33 * 4, new byte[RtgiGuideSlots * 33 * 4], "sponza.rtgi.guide-accum"));
             rtgiGuideDist = Own(device.CreateGpuBuffer(RtgiGuideSlots * 9 * 16, new byte[RtgiGuideSlots * 9 * 16], "sponza.rtgi.guide-dist"));
@@ -416,6 +442,7 @@ internal sealed partial class SponzaLoop
                     new("uClamp", new Vector4Uniform(new Vector4(rtgiClampSigma, frameNumber, RtgiDirtyRoom, 0f))),
                     new("uGuideTable", new Vector4Uniform(new Vector4(rtgiGuide > 0f ? RtgiGuideSlots - 1 : 0f, 0f, 0f, 0f))),
                     new("uTrain", new Vector4Uniform(new Vector4(rtgiCountUnknown ? 1f : 0f, rtgiNoCoarse ? 1f : 0f, rtgiBackfaceLit ? 1f : 0f, rtgiRequests ? rtgiHitPoints : 0f))),
+                    new("uFallback", new Vector4Uniform(new Vector4(rtgiFallbackUp, rtgiContact ? 1f : 0f, 0f, 0f))),
                 },
                 new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
                 Buffers: new[]
@@ -520,6 +547,8 @@ internal sealed partial class SponzaLoop
                 new("uFilter", new Vector4Uniform(new Vector4(rtgiFilterFrom, rtgiFilterTo, rtgiFilterSigma, RtgiDirtyRoom))),
                 new("uParent", new Vector4Uniform(new Vector4(rtgiParentWeight, RtgiTopLevel, rtgiFilterFloor, rtgiNoFilter ? 0f : 1f))),
                 new("uFilter2", new Vector4Uniform(new Vector4(rtgiCascade ? 1f : 0f, rtgiParentSigma, rtgiParentTol, rtgiParentMax))),
+                new("uParent2", new Vector4Uniform(new Vector4(rtgiParentInterp ? 1f : 0f, rtgiParentChain ? 1f : 0f, rtgiParentShrink ? 1f : 0f, rtgiParentPool ? 1f : 0f))),
+                new("uRota", new Vector4Uniform(new Vector4(rtgiFilterSettled, rtgiFilterEvery, 0f, 0f))),
                 new("uDone", new Vector4Uniform(new Vector4(frameNumber, rtgiDoneWindow, rtgiDoneError, rtgiDarkFloor))),
             },
             Array.Empty<ShaderTextureBinding>(),
@@ -532,6 +561,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiDirty", rtgiDirtyBufs[cur]),
                 new ShaderBufferBinding("RtgiFiltered", rtgiFiltered),
                 new ShaderBufferBinding("RtgiConfidence", rtgiConfidence),
+                new ShaderBufferBinding("RtgiStands", rtgiStands),
             }));
         // A sixteenth of the slots a frame: those no training reached for --rtgi-max-age frames emptied.
         var slice = RtgiSlots / RtgiEvictSlices;

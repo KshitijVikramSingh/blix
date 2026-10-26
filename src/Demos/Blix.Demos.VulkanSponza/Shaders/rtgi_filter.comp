@@ -30,6 +30,13 @@ layout(set = 0, binding = 0) uniform RtgiFilter {
     vec4 uFilter2;  // x 1: the parent's blend (the cascade), else its raw light; y the standard errors within which the
                     // cell agrees with its parent (0: the parent weighs uParent.x alone); z the share of the light they may
                     // differ by besides; w the samples the parent may weigh at most
+    vec4 uParent2;  // x 1: the parent's light read interpolated at the cell's centre (bilinear over the parent level's cells
+                    // in the side's plane), else the cell holding it; y 1: the parent weighed by what its blend stands for
+                    // (its own and what it leaned on, the chain), else by its own samples; z 1: weighed as the better of two
+                    // estimates (shrinkage), else by the agreement test (uFilter2.y, z); w 1: the shrinkage's cell error
+                    // from the spread pooled over its neighbours, else its own
+    vec4 uRota;     // x the samples from which a cell is settled; y a settled cell blended one frame in this many (its turn by
+                    // its slot), 1: every frame
     vec4 uDone;     // x the frame's number; y frames between drift checks; z the relative error under which a cell is
                     // done; w the dark floor (absolute luminance the error is measured against at least)
 } u;
@@ -43,6 +50,9 @@ layout(std430, set = 0, binding = 6) buffer RtgiFiltered { vec4 rtgiFiltered[]; 
 // Per slot, whether it is done (SponzaLoop.Rtgi.cs): x the shown light's relative standard error, y its luminance at the
 // last drift check, z that check's frame, w 1 when done.
 layout(std430, set = 0, binding = 7) buffer RtgiConfidence { vec4 rtgiConfidence[]; };
+// Per slot: the samples its shown light stands for -- its own, its neighbours' share and its parent's (written here, read
+// as a parent's by the cells below).
+layout(std430, set = 0, binding = 8) buffer RtgiStands { float rtgiStands[]; };
 
 #define RTGI_KEYS(i) rtgiKeys[i]
 #include "rtgi_cache.glsl"
@@ -56,6 +66,10 @@ void main() {
     if (rtgiKeys[s] == 0u) return;
     vec4 r0 = rtgiResolved[2u * s];
     float held = rtgiResolved[2u * s + 1u].y;
+    // A settled cell moves by a few hundredths of its noise a frame: blended on its turn (uRota), its light shown a few
+    // frames behind -- the blend 8.5 ms a frame at 4x the rays, every cell trained blended every frame (Crytek Sponza,
+    // 2026-10-26; 2.9 ms one frame in 4, Cornell's noise left and Crytek's error alike). A cell cut (its history reset to the fast window's samples) is young again, blended every frame.
+    if (u.uRota.y > 1.5 && held >= u.uRota.x && (s + uint(u.uDone.x)) % uint(u.uRota.y) != 0u) return;
     ivec4 cell = rtgiCells[s];
     uint level = uint(cell.w) / 6u, side = uint(cell.w) % 6u;
     // The cell's own spread: its samples' variance (the moments, over the fast window) over what it holds.
@@ -102,31 +116,82 @@ void main() {
     vec4 blended = wSum > 0.0 ? sum / wSum : r0;
     // The samples the blend stands for: the cell's own, all of them, and its neighbours' share.
     float stands = held + (wSum - wSelf);
+    float standsAll = stands;
     if (u.uParent.x > 0.0 && level < uint(u.uParent.y)) {
         uint t = rtgiFind(rtgiCellHash(cell.xyz >> 1, level + 1u, side, u.uParams), u.uParams);
         if (t != 0xFFFFFFFFu && rtgiResolved[2u * t + 1u].y >= 0.5) {
             vec4 parent = u.uFilter2.x > 0.5 ? rtgiFiltered[t] : rtgiResolved[2u * t];
+            float heldP = rtgiResolved[2u * t + 1u].y;
+            float standsP = u.uParent2.y > 0.5 ? max(rtgiStands[t], heldP) : heldP;
+            // The parent level's light at the cell's centre: bilinear over its cells in the side's plane (the cell's
+            // centre sits a quarter or three quarters across its parent), each by what it holds. The containing parent's
+            // flat mean differs from a fine cell's by the light's gradient across it -- a gently lit wall disagreed, and
+            // fell back on the cell's own noise, once the cell held enough to tell (the user: the noise is on the flat).
+            if (u.uParent2.x > 0.5) {
+                uint axis = side / 2u;
+                ivec3 ua = axis == 0u ? ivec3(0, 1, 0) : ivec3(1, 0, 0);
+                ivec3 va = axis == 2u ? ivec3(0, 1, 0) : ivec3(0, 0, 1);
+                int cu = axis == 0u ? cell.y : cell.x, cv = axis == 2u ? cell.y : cell.z;
+                // In the parent's cells: the centre (c + 0.5) / 2 - 0.5 = c / 2 - 0.25.
+                float fu = float(cu) * 0.5 - 0.25, fv = float(cv) * 0.5 - 0.25;
+                int pu = int(floor(fu)), pv = int(floor(fv));
+                float tu = fu - float(pu), tv = fv - float(pv);
+                ivec3 base = (cell.xyz >> 1) - ua * (cu >> 1) - va * (cv >> 1);
+                vec4 sum4 = vec4(0.0);
+                float wSum4 = 0.0, standsSum4 = 0.0;
+                for (int k = 0; k < 4; k++) {
+                    int du = k & 1, dv = k >> 1;
+                    uint q = rtgiFind(rtgiCellHash(base + ua * (pu + du) + va * (pv + dv), level + 1u, side, u.uParams), u.uParams);
+                    if (q == 0xFFFFFFFFu) continue;
+                    float hq = rtgiResolved[2u * q + 1u].y;
+                    if (hq < 0.5) continue;
+                    float wq = (du == 1 ? tu : 1.0 - tu) * (dv == 1 ? tv : 1.0 - tv) * clamp(hq / 32.0, 1.0 / 32.0, 1.0);
+                    sum4 += (u.uFilter2.x > 0.5 ? rtgiFiltered[q] : rtgiResolved[2u * q]) * wq;
+                    standsSum4 += (u.uParent2.y > 0.5 ? max(rtgiStands[q], hq) : hq) * wq;
+                    wSum4 += wq;
+                }
+                if (wSum4 > 0.0) { parent = sum4 / wSum4; standsP = standsSum4 / wSum4; }
+            }
             // Cell size by how smooth the light is: where the cell agrees with its parent within their standard errors
-            // (and uFilter2.z of the light), the parent weighs all its samples (to uFilter2.w) -- the coarse cell's
+            // (and uFilter2.z of the light), the parent weighs all it stands for (to uFilter2.w) -- the coarse cells'
             // convergence wherever the light is smooth, the fine cell's where it differs (a crease, a shadow's edge). Few
             // samples, wide errors: the parent; detail shows as the cell gathers enough to tell. 10 cm cells everywhere
             // converged as 4x the rays but read creases 3% bright and Crytek Sponza's settled error 0.111 for 0.090.
+            // Weighed by what the parent's blend stands for (uParent2.y), the lean compounds up the levels: on a flat
+            // wall each level up holds ~4x the samples.
             float wp = u.uParent.x;
             if (u.uFilter2.y > 0.0) {
-                float heldP = rtgiResolved[2u * t + 1u].y;
                 vec4 mp = rtgiMoments[3u * t];
-                float seP2 = max(mp.y - mp.x * mp.x, 0.0) / max(heldP, 1.0);
+                float seP2 = max(mp.y - mp.x * mp.x, 0.0) / max(standsP, 1.0);
                 float seB2 = sigma * sigma * held / max(stands, 1.0);
                 float lb = lum(blended.rgb), lp = lum(parent.rgb);
-                float dp = (lb - lp) / (u.uFilter2.y * sqrt(seB2 + seP2) + u.uFilter2.z * max(lb, lp) + 1e-5);
-                wp += min(heldP, u.uFilter2.w) * exp(-0.5 * dp * dp);
+                if (u.uParent2.z > 0.5) {
+                    // Shrinkage: the cell (unbiased, its error seB2) and the parent (smooth, its error seP2, biased by
+                    // how the light differs across it) weighed for the least squared error -- the parent against the
+                    // cell as seB2 over (its bias squared + seP2), its bias squared the difference squared less both
+                    // errors. A difference all noise: the parent weighs all it stands for. Where the light really
+                    // differs, it fades as the cell converges. The agreement test passed anything within 2% of the
+                    // light; with the chain's thousands of samples behind it the creases read 4% bright and Cornell's
+                    // error stalled at 0.018 (noise left 0.14%) by 6,000 frames (2026-10-26).
+                    // The cell's error from the spread pooled over it and its neighbours alike in light (the done test's):
+                    // a bounce-lit cell's light is a few bright paths, its own spread as noisy as its mean -- neighbours
+                    // guessed their borrowing far apart, blotches under Cornell's roof (the user, 2026-10-26).
+                    float seB2p = (u.uParent2.w > 0.5 ? poolVar / max(poolW, 1e-6) : sigma * sigma * held) / max(stands, 1.0);
+                    float bias2 = max((lb - lp) * (lb - lp) - seB2p - seP2, 0.0);
+                    wp += min(stands * seB2p / max(bias2 + seP2, 1e-12), u.uFilter2.w);
+                } else {
+                    float dp = (lb - lp) / (u.uFilter2.y * sqrt(seB2 + seP2) + u.uFilter2.z * max(lb, lp) + 1e-5);
+                    wp += min(standsP, u.uFilter2.w) * exp(-0.5 * dp * dp);
+                }
             }
             blended = (blended * stands + parent * wp) / (stands + wp);
+            standsAll = stands + wp;
         }
     }
     bool showBlend = u.uParent.w > 0.5;
     vec4 shown = showBlend ? blended : r0;
     rtgiFiltered[s] = shown;
+    rtgiStands[s] = showBlend ? standsAll : held;
     // Done: the shown light's standard error (the pooled spread over the samples it stands for) under uDone.z of it, and
     // no drift at the last check -- a neighbourhood agreeing on a value still waiting for its bounce keeps creeping, and
     // stays open. Checked every uDone.y frames this cell is trained.

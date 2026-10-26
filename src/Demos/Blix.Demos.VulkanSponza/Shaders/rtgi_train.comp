@@ -23,6 +23,8 @@ layout(set = 0, binding = 0) uniform RtgiTrain {
                          // y the frame's number (from 1); z the dirty list's room
     vec4 uTrain;         // x 1: a landing cell holding nothing counts as dark (else no sample); y 1: no coarser cell for it;
                          // z 1: a back face's hit read as a front's (else dark); w room for landing requests (0: none)
+    vec4 uFallback;      // x the levels past two up a landing may look for a cell holding light (0: two up only); y 1: contact
+                         // detail on (the near and far words written)
 } u;
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
@@ -89,8 +91,11 @@ vec4 irradianceAt(vec3 q, vec3 nq, out bool fine) {
     vec4 r0 = o0, r1 = o1;
     if (o1.y >= 8.0) fine = true;
     else if (u.uTrain.y < 0.5) {
-        uint s = rtgiFind(cellAt(q, nq, min(level + 2u, uint(u.uParams.w))), u.uParams);
-        if (s != 0xFFFFFFFFu && rtgiResolved[2u * s + 1u].y >= 0.5) { r0 = rtgiFiltered[s]; r1 = rtgiResolved[2u * s + 1u]; }
+        // Two levels up, then (uFallback.x) further: the first holding any light.
+        for (uint k = 2u; k <= 2u + uint(u.uFallback.x); k++) {
+            uint s = rtgiFind(cellAt(q, nq, min(level + k, uint(u.uParams.w))), u.uParams);
+            if (s != 0xFFFFFFFFu && rtgiResolved[2u * s + 1u].y >= 0.5) { r0 = rtgiFiltered[s]; r1 = rtgiResolved[2u * s + 1u]; break; }
+        }
     }
     if (r1.y < 0.5) return vec4(0.0);
     return vec4(r0.rgb + u.uNearField.z * u.uSunIrradiance.rgb * max(0.0, dot(nq, u.uSun.xyz)) * r1.x, 1.0);
@@ -100,7 +105,11 @@ vec4 dither;
 vec3 sampleDir;
 float nearWord;   // this sample's near visibility, weighted (256ths): it left past the contact radius
 
-void add(uint s, vec3 e, bool counted, bool sky, bool sunTraced, bool sunLit) {
+// rich: the sample's level and the two above, which the readout reads (its two, and two up where they hold nothing) -- the
+// irradiance vector and near visibility written; the levels above feed the blend's parent alone, which reads the light,
+// its spread, sky and sun. Every word
+// is an atomic, a sample's five levels ~65 of them: the training 12 ms a frame at 4x the rays (Crytek Sponza, 2026-10-26).
+void add(uint s, vec3 e, bool counted, bool sky, bool sunTraced, bool sunLit, bool rich) {
     if (s == 0xFFFFFFFFu) return;
     // Listed for this frame's resolve the first time it is trained this frame.
     uint frame = uint(u.uClamp.y);
@@ -127,12 +136,16 @@ void add(uint s, vec3 e, bool counted, bool sky, bool sunTraced, bool sunLit) {
         float l = min(dot(min(e, vec3(RTGI_MAX_SAMPLE)), vec3(0.2126, 0.7152, 0.0722)), RTGI_LUM2_MAX);
         atomicAdd(rtgiAccum[RTGI_ACC * s + 7u], uint(l * l * RTGI_LUM2_SCALE + dither.w));
         if (sky) atomicAdd(rtgiAccum[RTGI_ACC * s + 4u], 1u);
+    }
+    if (counted && rich) {
         // The irradiance vector: the sample's luminance along its direction, fixed point, signed (its two's complement
         // added as uints sums as ints), rounded stochastically -- where the cell's light comes from (rtgi_resolve.comp).
         vec3 b = dot(min(e, vec3(RTGI_MAX_SAMPLE)), vec3(0.2126, 0.7152, 0.0722)) * sampleDir * RTGI_SCALE;
         atomicAdd(rtgiAccum[RTGI_ACC * s + 8u], uint(int(floor(b.x + dither.x))));
         atomicAdd(rtgiAccum[RTGI_ACC * s + 9u], uint(int(floor(b.y + dither.y))));
         atomicAdd(rtgiAccum[RTGI_ACC * s + 10u], uint(int(floor(b.z + dither.z))));
+    }
+    if (counted && rich && u.uFallback.y > 0.5) {
         // Near visibility (S4 contact detail, rtgi_readout.frag): its weight where the ray left past the contact radius --
         // the cell's cosine-weighted unoccluded share within it, which the contact cells' own rays are held against.
         atomicAdd(rtgiAccum[RTGI_ACC * s + 11u], uint(nearWord + dither.w));
@@ -211,5 +224,5 @@ void main() {
     // the blend's cascade further up, rtgi_filter.comp).
     uint top = uint(u.uParams.w);
     for (uint k = 0u; k < uint(u.uNearField.w) && level + k <= top; k++)
-        add(rtgiInsertAt(p.xyz, n, level + k), e, counted, sky, sunTraced, sunLit);
+        add(rtgiInsertAt(p.xyz, n, level + k), e, counted, sky, sunTraced, sunLit, k < 3u);
 }
