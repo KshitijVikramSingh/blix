@@ -97,7 +97,7 @@ internal sealed partial class SponzaLoop
         }
         sb.Append(CultureInfo.InvariantCulture, $"v{TransportCacheVersion};{scene.Name};");
         // How a cut-out is met: by the point-hit alpha (RayAlphaAtlas) or the coin -- the patches' visibility and the couplings differ.
-        sb.Append(rayAlphaPlan is not null ? $"alpha-atlas {rayAlphaSide}{(rayBlendCutoff ? "" : " blend-stochastic")}{(rtShadowAlphaTexture ? " shadow-texture" : "")};" : "alpha-coin;");
+        sb.Append(rayAlphaPlan is not null ? $"alpha-atlas {rayAlphaSide}{(rayBlendCutoff ? "" : " blend-stochastic")}{(rtShadowAlphaTexture ? " shadow-texture" : "")}{(rayPanes ? " ray-panes" : "")};" : "alpha-coin;");
         sb.Append(CultureInfo.InvariantCulture, $"bounds {sceneBoundsMin};{sceneBoundsSpan};");
         if (sceneAssetsRoot is { } root && Directory.Exists(root))
             foreach (var f in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)

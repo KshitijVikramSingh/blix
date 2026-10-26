@@ -833,7 +833,10 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
         float DiffuseRoughness = -1f,
         // The material's emissive texture (default: none): its mean over each triangle, baked beside the row's roughness and metallic, is what the reference multiplies
         // the emissive factor by.
-        TextureHandle EmissiveTexture = default);
+        TextureHandle EmissiveTexture = default,
+        // --ray-panes: the share of rays a transmitting pane stops (what it reflects or absorbs) and the albedo of what stops (SponzaLoop.RayPanes.cs); 0, 0: the rays pass it whole.
+        float PaneStops = 0f,
+        float PaneAlbedo = 0f);
 
     /// <summary>One placement of a unique primitive: which drawable, its row in the transform table, and its world AABB.</summary>
     /// <remarks>

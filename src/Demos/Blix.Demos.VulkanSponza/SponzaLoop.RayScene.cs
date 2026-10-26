@@ -20,7 +20,7 @@ internal sealed partial class SponzaLoop
     // Per ray-scene placement (the transform table's order): the material a surface bake reads.
     // Clear: authored transmission (the panes): no coverage, rays pass (ray_surface_bake.comp).
     private readonly record struct RayMaterial(TextureHandle Albedo, Vector4 BaseColor, float AlphaCutoff, bool Clear, TextureHandle Transmission = default,
-        TextureHandle TransmissionColor = default, TextureHandle MetallicRoughness = default, float Roughness = 0.8f, bool Blended = false, float DiffuseRoughness = -1f, float Metallic = 0f, TextureHandle Emissive = default);
+        TextureHandle TransmissionColor = default, TextureHandle MetallicRoughness = default, float Roughness = 0.8f, bool Blended = false, float DiffuseRoughness = -1f, float Metallic = 0f, TextureHandle Emissive = default, float PaneStops = 0f, float PaneAlbedo = 0f);
     // Per placement: the material as the loop sees it (overrides applied), for the reference's material table; null where there is none.
     private readonly List<PbrMaterial?> rayPlacementPbr = new();
     private readonly List<RayMaterial> rayPlacementMaterials = new();
@@ -472,6 +472,7 @@ internal sealed partial class SponzaLoop
                         material.TransmissionColor.Equals(default(TextureHandle)) ? 0f : 1f, RayAlphaMip(material), RayStochastic(material) ? 1f : 0f))),
                     new("uDiffuse", new Vector4Uniform(BakeDiffuse(material))),
                     new("uDiffuse2", new Vector4Uniform(new Vector4(material.DiffuseRoughness, material.Metallic, material.Emissive.Equals(default(TextureHandle)) ? 0f : 1f, 0f))),
+                    new("uPane", new Vector4Uniform(new Vector4(material.PaneStops, material.PaneAlbedo, 0f, 0f))),
                 },
                 new[] { new ShaderTextureBinding("uAlbedo", material.Albedo),
                     new ShaderTextureBinding("uTransmission", material.Transmission.Equals(default(TextureHandle)) ? material.Albedo : material.Transmission),

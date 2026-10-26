@@ -350,6 +350,7 @@ internal sealed partial class SponzaLoop
         ReadDiffuseArgs(args);
         ReadMaterialOverrideArgs(args);
         ReadRefBsdfArgs(args);
+        ReadRayPaneArgs(args);
         ReadRayAlphaArgs(args);
         // --cam x,y,z,yaw,pitch — a reproducible viewpoint. Without it every capture and every
         // census speaks only for wherever the camera happens to start, which for a question like

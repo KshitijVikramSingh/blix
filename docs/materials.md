@@ -47,8 +47,10 @@ roughness glTF has no field for.
 4. **Textures on the extension factors** (clearcoat, sheen, iridescence thickness, anisotropy, specular, transmission, volume thickness in the reference): factors only, in the lit pass and the
    reference alike (they agree, so the comparison is fair; the engine does not yet show them). Each is a bake of a row mean for the reference (as the emissive's is, `BlixRayMr`'s upper half)
    and a sampler on the material for the lit pass.
-5. **The rays still pass panes** (the GI sees the room behind a window through it, unattenuated); a tint and a Fresnel weight on the way through would put the glass into the transport.
-   The reference already has them.
+5. **The rays pass panes whole** (the GI sees the room behind a window through it, unattenuated). `--ray-panes` (built, not yet run) gives a pane's rows a coverage -- the share of rays the glass
+   reflects or absorbs, by the hemispherical Fresnel and `1 - T luminance(base)` -- through the partly covered rows' coin, so the light through is `(1 - F) T luminance(base)` as the reference has
+   it, in grey (the tint is lost: a per-channel pass needs the rays to carry a colour); what stops reflects diffusely what the glass reflects. To judge it: a scene with a window, the GI
+   against `--ref-bsdf` (which has the panes) with and without the flag.
 6. **Per-texel diffuse transmission** in the GI is a per-triangle share.
 7. **Caustics**: none, in the reference or the frame. The sun reaches what is behind a solid by the sky and the bounces only.
 8. **Dispersion**: not modelled anywhere.

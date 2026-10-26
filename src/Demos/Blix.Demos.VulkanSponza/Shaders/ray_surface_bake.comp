@@ -31,6 +31,7 @@ layout(set = 0, binding = 0) uniform Bake {
     vec4 uParams2;     // x 1: uTransmission is the material's factor texture; y 1: uTransmissionColor its colour texture; z the alpha atlas's mip of uAlbedo, w 1: authored BLEND (rays stop with the probability of the alpha: always asked at the hit)
     vec4 uDiffuse;     // x 1: store EON's hemispherical albedo (0: the base colour, Lambert); y the diffuse-roughness scale; z the material's roughness factor; w 1: uMetallicRoughness is its texture
     vec4 uDiffuse2;    // x the material's diffuse roughness override (--material diffuse-roughness), or -1: the roughness above decides; y the metallic factor; z 1: the material has an emissive texture
+    vec4 uPane;        // a clear pane's rays (--ray-panes): x the share of rays it stops (0: none stop, as before), y the albedo of what stops (the reflected share of those)
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uAlbedo;
@@ -119,6 +120,13 @@ void main() {
     }
     // Authored BLEND is never none or all: even a texel of alpha 0.9 stops one ray in ten, so the row is always asked at the hit (RayAlphaAtlas.FlagStochastic).
     if (u.uParams.w < 0.5 && u.uParams.z > 0.0 && u.uParams2.w > 0.5) sixteenths = 8u;
+    // A transmitting pane under --ray-panes (SponzaLoop.RayPanes.cs): it stops the share of rays that the glass reflects or absorbs, in sixteenths (the coin of the partly covered:
+    // a ray that is stopped reflects diffusely what the pane reflects of it, the rest absorbed), and the rest pass through as they always did.
+    if (u.uParams.w > 0.5 && u.uPane.x > 0.0) {
+        sixteenths = uint(clamp(round(u.uPane.x * 16.0), 1.0, 15.0));
+        albedo = vec3(u.uPane.y);
+        level = 0u;
+    }
     surfaces[row] = (packUnorm4x8(vec4(encodeSrgb(albedo), 0.0)) & 0xFFFFFFu) | (((level << 5u) | sixteenths) << 24u);
     uint share = u.uParams2.x > 0.5 ? uint(round(clamp(through / 16.0, 0.0, 1.0) * 255.0)) : 255u;
     uint tint = u.uParams2.y > 0.5 ? packUnorm4x8(vec4(encodeSrgb(colour / 16.0), 0.0)) : 0xFFFFFFu;

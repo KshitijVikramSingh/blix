@@ -337,7 +337,8 @@ internal sealed partial class SponzaLoop
                 pm?.MetallicRoughnessTexture is not null ? textureLoader.Load(pm).MetallicRoughness : default,
                 pm?.RoughnessFactor ?? 0.8f,
                 !isBlend && pm?.AlphaMode == AlphaMode.Blend,
-                pm, diffuseRoughnessOverride, pm?.EmissiveTexture is not null ? textureLoader.Load(pm).Emissive : default));
+                pm, diffuseRoughnessOverride, pm?.EmissiveTexture is not null ? textureLoader.Load(pm).Emissive : default,
+                RayPaneStops(pm, isBlend, out var paneAlbedo), paneAlbedo));
         }
     }
 
@@ -424,7 +425,7 @@ internal sealed partial class SponzaLoop
                 sceneTransformInstances.Add(s.Instances[w]);
                 rayInstances.Add(new RayQueryScene.Instance(rayMeshes[i], world));
                 rayPlacementMaterials.Add(new RayMaterial(s.Albedo, s.BaseColor, s.AlphaCutoff, s.IsBlend, s.TransmissionTexture, s.TransmissionColorTexture,
-                    s.MetallicRoughness, s.RoughnessFactor, s.AlphaBlended, s.DiffuseRoughness, s.Pbr?.MetallicFactor ?? 0f, s.EmissiveTexture));
+                    s.MetallicRoughness, s.RoughnessFactor, s.AlphaBlended, s.DiffuseRoughness, s.Pbr?.MetallicFactor ?? 0f, s.EmissiveTexture, s.PaneStops, s.PaneAlbedo));
                 rayPlacementPbr.Add(s.Pbr);
                 rayPlacementLightmapped.Add(s.LightmapTexels is not null);
                 rayPlacementDoubleSided.Add(s.Pipeline == opaqueDoubleSidedPipeline || s.Pipeline == blendDoubleSidedPipeline);
