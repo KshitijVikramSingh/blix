@@ -47,6 +47,9 @@ layout(std430, set = 0, binding = 11) readonly buffer RtgiHitInv { float rtgiHit
 // Per half-res pixel, the blur's radius (half-res pixels; rtgi_blur.frag): sized here, where the pixel's cell is found
 // already -- the blur found it in the hash again, 4.6 ms a frame at Crytek Sponza's 4x the rays (2026-10-26).
 layout(std430, set = 0, binding = 12) writeonly buffer RtgiBlurRadius { float rtgiBlurRadius[]; };
+// Each cell's light, direction, hit distance, how sure and how much it holds, in one 32-byte line (rtgi_cache.glsl): read
+// in place of the five buffers above, which the panel's views alone still read.
+layout(std430, set = 0, binding = 13) readonly buffer RtgiRecord { uvec4 rtgiRecord[]; };
 
 // Blue (0) to green to red (1).
 vec3 heat(float t) {
@@ -74,18 +77,20 @@ vec4 readLevel(vec3 p, uint side, uint level, out float sky, out vec3 bvec, out 
         ivec3 o = ivec3(k & 1, (k >> 1) & 1, k >> 2);
         uint s = rtgiFind(rtgiCellHash(c0 + o, level, side, u.uParams), u.uParams);
         if (s == 0xFFFFFFFFu) continue;
-        vec4 r1 = rtgiResolved[2u * s + 1u];
-        if (r1.y < 0.5) continue;
+        uvec4 a = rtgiRecord[2u * s], c = rtgiRecord[2u * s + 1u];
+        float held = uintBitsToFloat(c.w);
+        if (held < 0.5) continue;
         vec3 b = mix(1.0 - t, t, vec3(o));
         // Weighted by what it holds too, full at 32 samples: a new cell (a landing just requested, a level just blended in,
         // one refilled) fades in under its neighbours rather than showing its first draw -- odd lights that came and went.
-        float wk = b.x * b.y * b.z * clamp(r1.y / 32.0, 1.0 / 32.0, 1.0);
-        vec4 r0 = rtgiFiltered[s];
-        e += r0.rgb * wk;
-        sky += r0.a * wk;
-        bvec += rtgiDirection[s].xyz * wk;
-        near += rtgiDirection[s].w * wk;
-        far += rtgiMoments[3u * s + 2u].w * wk;
+        float wk = b.x * b.y * b.z * clamp(held / 32.0, 1.0 / 32.0, 1.0);
+        vec2 rg = unpackHalf2x16(a.x), bs = unpackHalf2x16(a.y);
+        vec2 dxy = unpackHalf2x16(c.x), dzn = unpackHalf2x16(c.y);
+        e += vec3(rg, bs.x) * wk;
+        sky += bs.y * wk;
+        bvec += vec3(dxy, dzn.x) * wk;
+        near += dzn.y * wk;
+        far += unpackHalf2x16(c.z).x * wk;
         w += wk;
     }
     if (w > 0.0) { e /= w; sky /= w; bvec /= w; near /= w; far /= w; }
@@ -141,12 +146,12 @@ void main() {
         float unsure = 1.0;
         float rel = 1.0, invD = 0.0;
         if (sc != 0xFFFFFFFFu) {
-            rel = rtgiConfidence[sc].x;
-            invD = rtgiHitInv[sc];
-        }
-        if (sc != 0xFFFFFFFFu && rtgiResolved[2u * sc + 1u].y >= 4.0) {
-            vec4 conf = rtgiConfidence[sc];
-            unsure = conf.w > 0.5 ? 0.125 * u.uUnsure.x : clamp(conf.x, u.uUnsure.x, 1.0);
+            uvec4 a = rtgiRecord[2u * sc];
+            vec2 conf = unpackHalf2x16(a.z);   // relative error, done
+            rel = conf.x;
+            invD = uintBitsToFloat(a.w);
+            if (uintBitsToFloat(rtgiRecord[2u * sc + 1u].w) >= 4.0)
+                unsure = conf.y > 0.5 ? 0.125 * u.uUnsure.x : clamp(conf.x, u.uUnsure.x, 1.0);
         }
         rtgiUnsure[unsureAt] = unsure;
         // The blur's radius (rtgi_blur.frag): the cell's size times its relative error over the done threshold (0.5 to 4
@@ -193,7 +198,7 @@ void main() {
     if (e.w > 0.0 && ((uint(h.x) & 3u) | ((uint(h.y) & 3u) << 2)) == 0u) {
         uint sd = rtgiFind(rtgiCellHash(ivec3(floor(p / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
         atomicAdd(doneCount[0], 1u);
-        if (sd != 0xFFFFFFFFu && rtgiConfidence[sd].w > 0.5) atomicAdd(doneCount[1], 1u);
+        if (sd != 0xFFFFFFFFu && unpackHalf2x16(rtgiRecord[2u * sd].z).y > 0.5) atomicAdd(doneCount[1], 1u);
     }
     // The RTGI panel's views (uContact.w, SponzaLoop.RtgiDebug.cs), the pixel's own cell (its level's, nearest) painted
     // in place of its light: 1 done (green) or open (red), by the light; 2 how unsure, the blend's relative error, from

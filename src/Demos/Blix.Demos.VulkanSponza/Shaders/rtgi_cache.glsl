@@ -9,6 +9,17 @@
 //                             how many missed (sky), sun rays that reached, sun rays traced
 //   rtgiResolved[2s]          indirect irradiance E (rgb: sky and bounce, no direct sun), sky visibility
 //   rtgiResolved[2s + 1]      sun visibility, samples held (capped), frames since last trained, sun samples held
+//   rtgiRecord[2s .. 2s + 1]  what the readout reads of the cell, in one 32-byte line (rtgi_readout.frag): it read four
+//                             or five buffers a cell, 17 cells a half-res pixel, and was the frame's largest pass (5 ms at
+//                             Crytek Sponza, 2026-10-27). Halves (packHalf2x16) but two floats:
+//                             [2s].x  light r, g          (the blend's, rtgi_filter.comp)
+//                             [2s].y  light b, sky        (the blend's)
+//                             [2s].z  relative error, done (the blend's)
+//                             [2s].w  inverse hit distance, float (the resolve's, rtgi_resolve.comp)
+//                             [2s+1].x direction x, y     (the resolve's)
+//                             [2s+1].y direction z, near visibility
+//                             [2s+1].z far light's share, 0
+//                             [2s+1].w samples held, float (0: nothing; the eviction zeroes it all, rtgi_evict.comp)
 // The includer defines RTGI_KEYS(i), RTGI_RESOLVED(i) accessors, and the uniforms' values through rtgiParams:
 //   x the finest cell (m), y its growth per metre of distance, z slots - 1 (a power of two), w the top level.
 

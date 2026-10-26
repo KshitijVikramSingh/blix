@@ -103,6 +103,9 @@ internal sealed partial class SponzaLoop
     // (nooks keep their own light, open walls still borrow; 1 and 2 noisier, no better), 2026-10-26.
     private float rtgiHitPrior = 0.5f;
     private GpuBufferHandle rtgiHitInv;
+    // What the readout reads of a cell, in one 32-byte line (rtgi_cache.glsl's rtgiRecord): written by the resolve and the
+    // blend, zeroed by the eviction. 32 bytes a slot (128 MB at 4 M).
+    private GpuBufferHandle rtgiRecord;
     // --rtgi-filter-every N: a cell holding --rtgi-filter-settled samples (256) or more is blended one frame in N, its turn by
     // its slot (rtgi_filter.comp): 4 -- at 4x the rays the blend 8.5 ms a frame every frame, 2.9 on the rota (Crytek
     // Sponza, 2026-10-26). 1: every cell trained, every frame.
@@ -512,6 +515,7 @@ internal sealed partial class SponzaLoop
             rtgiUnsure = Own(device.CreateGpuBuffer(RtgiUnsureSize * 4, new byte[RtgiUnsureSize * 4], "sponza.rtgi.unsure"));
             rtgiBlurRadius = Own(device.CreateGpuBuffer(RtgiUnsureSize * 4, new byte[RtgiUnsureSize * 4], "sponza.rtgi.blur-radius"));
             rtgiHitInv = Own(device.CreateGpuBuffer(RtgiSlots * 4, new byte[RtgiSlots * 4], "sponza.rtgi.hit-inv"));
+            rtgiRecord = Own(device.CreateGpuBuffer(RtgiSlots * 32, new byte[RtgiSlots * 32], "sponza.rtgi.record"));
             rtgiSeq = Own(device.CreateGpuBuffer(RtgiSlots * 4, new byte[RtgiSlots * 4], "sponza.rtgi.seq"));
             rtgiStands = Own(device.CreateGpuBuffer(RtgiSlots * 4, new byte[RtgiSlots * 4], "sponza.rtgi.stands"));
             rtgiGuideKeys = Own(device.CreateGpuBuffer(RtgiGuideSlots * 4, new byte[RtgiGuideSlots * 4], "sponza.rtgi.guide-keys"));
@@ -670,6 +674,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiNextDirty", rtgiDirtyBufs[prev]),
                 new ShaderBufferBinding("RtgiDirection", rtgiDirection),
                 new ShaderBufferBinding("RtgiHitInv", rtgiHitInv),
+                new ShaderBufferBinding("RtgiRecord", rtgiRecord),
             }));
         // The cells just resolved, blended with their neighbours into what the readout and lookups read (a copy alone with
         // --rtgi-no-filter).
@@ -699,6 +704,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiConfidence", rtgiConfidence),
                 new ShaderBufferBinding("RtgiStands", rtgiStands),
                 new ShaderBufferBinding("RtgiHitInv", rtgiHitInv),
+                new ShaderBufferBinding("RtgiRecord", rtgiRecord),
             }));
         // A sixteenth of the slots a frame: those no training reached for --rtgi-max-age frames emptied.
         // The panel's reset: every slot at once, as untrained past its age (its frame pushed past every stamp).
@@ -719,6 +725,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiStamps", rtgiStamps),
                 new ShaderBufferBinding("RtgiDirection", rtgiDirection),
                 new ShaderBufferBinding("RtgiConfidence", rtgiConfidence),
+                new ShaderBufferBinding("RtgiRecord", rtgiRecord),
             }));
 
         // S3: last frame's visible points (tile i is point i) into this frame's reservoirs, merged with the frame before's.
@@ -942,6 +949,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiUnsure", rtgiUnsure),
                 new ShaderBufferBinding("RtgiHitInv", rtgiHitInv),
                 new ShaderBufferBinding("RtgiBlurRadius", rtgiBlurRadius),
+                new ShaderBufferBinding("RtgiRecord", rtgiRecord),
             }));
         rtgiUnsureWritten = true;
         // Blurred by how sure the cache is, into the incident the upsample reads (rtgi_blur.frag; at 0 a copy).

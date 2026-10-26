@@ -43,6 +43,8 @@ layout(std430, set = 0, binding = 4) buffer RtgiMoments { vec4 rtgiMoments[]; };
 layout(std430, set = 0, binding = 8) buffer RtgiDirection { vec4 rtgiDirection[]; };
 // Per slot: the running mean of its rays' inverse hit distances (rtgi_filter.comp's geometric prior).
 layout(std430, set = 0, binding = 9) buffer RtgiHitInv { float rtgiHitInv[]; };
+// The readout's record (rtgi_cache.glsl): this pass's words.
+layout(std430, set = 0, binding = 10) buffer RtgiRecord { uvec4 rtgiRecord[]; };
 layout(std430, set = 0, binding = 5) buffer RtgiStamps { uvec2 rtgiStamps[]; };
 layout(std430, set = 0, binding = 6) readonly buffer RtgiDirty { uint dirtyCount; uint dirtyPad[3]; uint dirty[]; };
 // The other parity's list: its count zeroed here for the next frame's training.
@@ -142,5 +144,10 @@ void main() {
     rtgiMoments[3u * s] = m;
     rtgiMoments[3u * s + 1u] = fast;
     rtgiMoments[3u * s + 2u] = fs;
+    // The readout's record: the hit distance, the direction and near visibility, the far share, the samples held.
+    vec4 dirNow = rtgiDirection[s];
+    rtgiRecord[2u * s].w = floatBitsToUint(rtgiHitInv[s]);
+    rtgiRecord[2u * s + 1u] = uvec4(packHalf2x16(dirNow.xy), packHalf2x16(dirNow.zw), packHalf2x16(vec2(fs.w, 0.0)),
+                                    floatBitsToUint(r1.y));
     for (uint k = 0u; k < 4u; k++) rtgiAccum4[4u * s + k] = uvec4(0u);
 }

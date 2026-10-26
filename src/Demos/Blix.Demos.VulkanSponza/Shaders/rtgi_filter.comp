@@ -57,6 +57,8 @@ layout(std430, set = 0, binding = 7) buffer RtgiConfidence { vec4 rtgiConfidence
 // as a parent's by the cells below).
 layout(std430, set = 0, binding = 8) buffer RtgiStands { float rtgiStands[]; };
 layout(std430, set = 0, binding = 9) readonly buffer RtgiHitInv { float rtgiHitInv[]; };
+// The readout's record (rtgi_cache.glsl): this pass's words, the light shown and how sure it is.
+layout(std430, set = 0, binding = 10) buffer RtgiRecord { uvec4 rtgiRecord[]; };
 
 #define RTGI_KEYS(i) rtgiKeys[i]
 #include "rtgi_cache.glsl"
@@ -228,4 +230,7 @@ void main() {
     } else if (rel >= u.uDone.z) c.w = 0.0;
     c.x = rel;
     rtgiConfidence[s] = c;
+    rtgiRecord[2u * s].x = packHalf2x16(shown.rg);
+    rtgiRecord[2u * s].y = packHalf2x16(shown.ba);
+    rtgiRecord[2u * s].z = packHalf2x16(vec2(min(rel, 60000.0), c.w));
 }
