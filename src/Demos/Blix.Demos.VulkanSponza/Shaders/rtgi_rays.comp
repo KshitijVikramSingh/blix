@@ -23,7 +23,7 @@ layout(set = 0, binding = 0) uniform RtgiRays {
     vec4 uParams;        // rtgiParams (rtgi_cache.glsl)
     vec4 uNearField;     // x the near field's radius (RTGI_NEAR)
     vec4 uGuide;         // x the share of rays guided where a cell has learnt its light's way (0: none); y samples it must hold;
-                         // z the lobe's concentration at most
+                         // z the lobe's concentration at most; w the guide table's slots - 1 (0: the lobe, no table)
     vec4 uAdapt;         // x the share of visible points placed by uncertainty (0: every tile its own); y tiles weighed for each;
                          // z the relative error a cell is done under (the blend's, rtgi_filter.comp); w 1 in this many of a
                          // done cell's points keeps its ray (the validation trickle)
@@ -45,10 +45,14 @@ layout(std430, set = 0, binding = 11) readonly buffer RtgiResolved { vec4 rtgiRe
 layout(std430, set = 0, binding = 12) readonly buffer RtgiDirection { vec4 rtgiDirection[]; };
 layout(std430, set = 0, binding = 13) readonly buffer RtgiMoments { vec4 rtgiMoments[]; };
 layout(std430, set = 0, binding = 14) readonly buffer RtgiConfidence { vec4 rtgiConfidence[]; };
+layout(std430, set = 0, binding = 15) readonly buffer GuideKeys { uint guideKeys[]; };
+layout(std430, set = 0, binding = 16) readonly buffer GuideDist { vec4 guideDist[]; };
 
 #define RTGI_KEYS(i) rtgiKeys[i]
 #define RTGI_NEAR u.uNearField.x
 #include "rtgi_cache.glsl"
+#define GUIDE_KEYS(i) guideKeys[i]
+#include "rtgi_guide.glsl"
 
 uint hash(uint x) {
     x ^= x >> 16; x *= 0x7feb352du;
@@ -147,40 +151,46 @@ void main() {
     vec3 t = normalize(abs(n.y) < 0.99 ? cross(n, vec3(0.0, 1.0, 0.0)) : cross(n, vec3(1.0, 0.0, 0.0)));
     vec3 b = cross(n, t);
     vec3 d = normalize(t * (cos(phi) * s) + b * (sin(phi) * s) + n * sqrt(max(0.0, 1.0 - r2)));
-    // The guide: the point's cell's irradiance vector, where it holds enough and is one-sided enough.
-    float pg = 0.0, kappa = 0.0;
-    vec3 gw = n;
-    if (u.uGuide.x > 0.0) {
-        uint cell = rtgiFind(rtgiCellHash(ivec3(floor(p / rtgiSize(rtgiLevel(p, u.uCamera.xyz, u.uParams), u.uParams))),
-            rtgiLevel(p, u.uCamera.xyz, u.uParams), rtgiSide(n), u.uParams), u.uParams);
-        if (cell != 0xFFFFFFFFu && rtgiResolved[2u * cell + 1u].y >= u.uGuide.y) {
-            vec3 bv = rtgiDirection[cell].xyz;
-            float el = dot(rtgiResolved[2u * cell].rgb, vec3(0.2126, 0.7152, 0.0722));
-            float len = length(bv);
-            float rr = el > 1e-6 ? clamp(len / el, 0.0, 0.995) : 0.0;
-            if (rr > 0.1 && dot(bv, n) > 0.0) {
-                gw = bv / len;
-                kappa = min(rr * (3.0 - rr * rr) / (1.0 - rr * rr), u.uGuide.z);
-                pg = u.uGuide.x;
-            }
+    // The guide: the learnt distribution of the point's guide cell (rtgi_guide.glsl: 32 bins by the light through them),
+    // where it holds uGuide.y samples -- a bin drawn by its light, a direction uniformly within it, with probability
+    // uGuide.x, else cosine. A single lobe about the cell's mean light direction aimed between a room's openings and its
+    // sunlit floor, never at either (Cornell's noise 1.50% against 1.57% unguided, 2026-10-26).
+    float pg = 0.0;
+    uint gslot = 0xFFFFFFFFu, gside = rtgiSide(n);
+    float gsum = 0.0;
+    if (u.uGuide.x > 0.0 && u.uGuide.w > 0.0) {
+        uint gl = min(rtgiLevel(p, u.uCamera.xyz, u.uParams) + 2u, uint(u.uParams.w));
+        gslot = guideFind(guideHash(ivec3(floor(p / rtgiSize(gl, u.uParams))), gl, gside, uint(u.uGuide.w)), uint(u.uGuide.w));
+        if (gslot != 0xFFFFFFFFu) {
+            vec4 meta = guideDist[9u * gslot + 8u];
+            gsum = meta.y;
+            if (meta.x >= u.uGuide.y && gsum > 1e-7) pg = u.uGuide.x;
         }
     }
     uint h3 = hash(h2 ^ 0xA511E9B3u);
     if (pg > 0.0 && float(h3 & 0xFFFFu) / 65536.0 < pg) {
-        // A von Mises-Fisher draw around gw.
-        float x1 = float(hash(h3) & 0xFFFFFFu) / 16777216.0, x2 = float(h3 >> 16) / 65536.0;
-        float wz = 1.0 + log(x1 + (1.0 - x1) * exp(-2.0 * kappa)) / kappa;
-        float sw = sqrt(max(0.0, 1.0 - wz * wz)), ph = 6.28318530718 * x2;
-        vec3 gt = normalize(abs(gw.y) < 0.99 ? cross(gw, vec3(0.0, 1.0, 0.0)) : cross(gw, vec3(1.0, 0.0, 0.0)));
-        vec3 gb = cross(gw, gt);
-        d = normalize(gt * (cos(ph) * sw) + gb * (sin(ph) * sw) + gw * wz);
+        // A bin by its light, then a direction uniform within it.
+        float pick = float(hash(h3) & 0xFFFFFFu) / 16777216.0 * gsum;
+        uint k = GUIDE_BINS - 1u;
+        float acc = 0.0;
+        for (uint v = 0u; v < 8u; v++) {
+            vec4 bins = guideDist[9u * gslot + v];
+            for (uint c = 0u; c < 4u; c++) {
+                acc += bins[c];
+                if (pick < acc) { k = 4u * v + c; v = 8u; break; }
+            }
+        }
+        uint h4 = hash(h3 ^ 0x68E31DA4u);
+        d = guideSample(k, gside, float(h4 & 0xFFFFu) / 65536.0, float(h4 >> 16) / 65536.0);
     }
     float cosd = dot(d, n);
     float weight = 1.0;
     if (pg > 0.0) {
         float pdfCos = max(cosd, 0.0) / 3.14159265359;
-        float pdfVmf = kappa * exp(kappa * (dot(d, gw) - 1.0)) / (6.28318530718 * (1.0 - exp(-2.0 * kappa)));
-        float pdf = (1.0 - pg) * pdfCos + pg * pdfVmf;
+        int bin = guideBin(d, gside);
+        float pdfGuide = 0.0;
+        if (bin >= 0) pdfGuide = guideDist[9u * gslot + uint(bin) / 4u][uint(bin) % 4u] / gsum / GUIDE_BIN_SOLID_ANGLE;
+        float pdf = (1.0 - pg) * pdfCos + pg * pdfGuide;
         weight = cosd > 0.0 && pdf > 0.0 ? pdfCos / pdf : 0.0;
     }
     points[2u * i] = vec4(p, 1.0);

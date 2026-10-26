@@ -18,6 +18,7 @@ layout(set = 0, binding = 0) uniform RtgiTrain {
     vec4 uNearField;     // x the near field's radius (rtgi_cache.glsl's RTGI_NEAR); y the contact radius (m); z the direct sun at
                          // a ray's hit, scaled (1; 0: none -- a diagnostic of where the samples' variance comes from); w the
                          // levels a sample trains, its own first
+    vec4 uGuideTable;    // x the guide table's slots - 1 (0: no guiding learnt)
     vec4 uClamp;         // x > 0: a sample's luminance capped at its cell's mean + x standard deviations (once it holds 32);
                          // y the frame's number (from 1); z the dirty list's room
     vec4 uTrain;         // x 1: a landing cell holding nothing counts as dark (else no sample); y 1: no coarser cell for it;
@@ -46,10 +47,15 @@ layout(std430, set = 0, binding = 9) buffer RtgiRequests { uint requestCount; ui
 // (rtgi_filter.comp); and the blended light the lookups read (indirect rgb, sky visibility).
 layout(std430, set = 0, binding = 13) buffer RtgiCells { ivec4 rtgiCells[]; };
 layout(std430, set = 0, binding = 14) readonly buffer RtgiFiltered { vec4 rtgiFiltered[]; };
+// Path guiding's table (rtgi_guide.glsl): each sample's light added to its guide cell's bin.
+layout(std430, set = 0, binding = 15) buffer GuideKeys { uint guideKeys[]; };
+layout(std430, set = 0, binding = 16) buffer GuideAccum { uint guideAccum[]; };
 
 #define RTGI_KEYS(i) rtgiKeys[i]
 #define RTGI_NEAR u.uNearField.x
 #include "rtgi_cache.glsl"
+#define GUIDE_KEYS(i) guideKeys[i]
+#include "rtgi_guide.glsl"
 
 // The slot for the cell at p (its level, the side n faces), made if it is not held -- its cell written then; 0xFFFFFFFF
 // when its probes are all taken.
@@ -183,6 +189,24 @@ void main() {
     bool sunTraced = dot(n, u.uSun.xyz) > 0.0;
     bool sunLit = sunTraced && (occluded[i] & 1u) == 0u;
     uint level = rtgiLevel(p.xyz, u.uCamera.xyz, u.uParams);
+    // Path guiding: the sample's light into its guide cell's bin (two levels up, its side), counted -- the bin's light over
+    // the samples counted estimates the light arriving through it (rtgi_guide.glsl).
+    if (counted && u.uGuideTable.x > 0.0) {
+        uint gl = min(level + 2u, uint(u.uParams.w));
+        uint gside = rtgiSide(n);
+        uvec2 gh = guideHash(ivec3(floor(p.xyz / rtgiSize(gl, u.uParams))), gl, gside, uint(u.uGuideTable.x));
+        uint g = 0xFFFFFFFFu;
+        for (uint k = 0u; k < GUIDE_PROBES; k++) {
+            uint gs = (gh.x + k) & uint(u.uGuideTable.x);
+            uint prev = atomicCompSwap(guideKeys[gs], 0u, gh.y);
+            if (prev == 0u || prev == gh.y) { g = gs; break; }
+        }
+        if (g != 0xFFFFFFFFu) {
+            int bin = guideBin(d, gside);
+            if (bin >= 0) atomicAdd(guideAccum[33u * g + uint(bin)], uint(dot(min(e, vec3(RTGI_MAX_SAMPLE)), vec3(0.2126, 0.7152, 0.0722)) * RTGI_SCALE + dither.y));
+            atomicAdd(guideAccum[33u * g + 32u], 1u);
+        }
+    }
     // Its level and uNearField.w - 1 above (3: the next, which the readout blends in, and two up, the fallback; more feed
     // the blend's cascade further up, rtgi_filter.comp).
     uint top = uint(u.uParams.w);

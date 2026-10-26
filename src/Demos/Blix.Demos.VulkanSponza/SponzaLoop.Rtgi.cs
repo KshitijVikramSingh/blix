@@ -92,6 +92,15 @@ internal sealed partial class SponzaLoop
     // drawn toward it where the cell holds --rtgi-guide-min samples (0.5, 16; 0: cosine alone, rtgi_rays.comp), and its part
     // along the surface written as the gradient the lit pass carries onto normal maps (--rtgi-no-gradient: not).
     private float rtgiGuide = 0.5f, rtgiGuideMin = 16f, rtgiGuideKappa = 40f;
+    // Path guiding's table (rtgi_guide.glsl): 2^--rtgi-guide-slots-log2 coarse cells (18: 262,144, ~72 MB), each 32 bins
+    // of where its light comes from, held over --rtgi-guide-history samples (4,096).
+    private int rtgiGuideSlotsLog2 = 18;
+    private float rtgiGuideHistory = 4096f;
+    private GpuBufferHandle rtgiGuideKeys, rtgiGuideAccum, rtgiGuideDist;
+    private ShaderInterface rtgiGuideResolveInterface = null!;
+    private PassHandle rtgiGuideResolvePassHandle;
+    private PipelineHandle rtgiGuideResolvePipeline;
+    private int RtgiGuideSlots => 1 << rtgiGuideSlotsLog2;
     // --rtgi-adaptive S: that share of the visible points placed by the cache's uncertainty, each the likeliest of
     // --rtgi-adaptive-k tiles (0.5, 4; 0: a tile each, rtgi_rays.comp).
     private float rtgiAdaptive = 1f, rtgiAdaptiveK = 4f;
@@ -200,6 +209,8 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-guide") is { } gd) rtgiGuide = Math.Clamp(gd, 0f, 0.95f);
         if (args.Float("rtgi-guide-min") is { } gm) rtgiGuideMin = MathF.Max(1f, gm);
         if (args.Float("rtgi-guide-kappa") is { } gk) rtgiGuideKappa = Math.Clamp(gk, 1f, 2000f);
+        if (args.Int("rtgi-guide-slots-log2") is { } gsl) rtgiGuideSlotsLog2 = Math.Clamp(gsl, 12, 22);
+        if (args.Float("rtgi-guide-history") is { } gh) rtgiGuideHistory = MathF.Max(16f, gh);
         rtgiNoGradient = args.Flag("rtgi-no-gradient");
         if (args.Float("rtgi-adaptive") is { } ad) rtgiAdaptive = Math.Clamp(ad, 0f, 1f);
         if (args.Float("rtgi-adaptive-k") is { } ak) rtgiAdaptiveK = Math.Clamp(ak, 1f, 16f);
@@ -239,6 +250,8 @@ internal sealed partial class SponzaLoop
         rtgiContactTrainPassHandle = graph.ComputePass("rtgi-contact-train").Shader(rtgiContactTrainInterface).Handle;
         rtgiResolveInterface = reflect("rtgi_resolve.comp");
         rtgiResolvePassHandle = graph.ComputePass("rtgi-resolve").Shader(rtgiResolveInterface).Handle;
+        rtgiGuideResolveInterface = reflect("rtgi_guide_resolve.comp");
+        rtgiGuideResolvePassHandle = graph.ComputePass("rtgi-guide-resolve").Shader(rtgiGuideResolveInterface).Handle;
         rtgiFilterInterface = reflect("rtgi_filter.comp");
         rtgiFilterPassHandle = graph.ComputePass("rtgi-filter").Shader(rtgiFilterInterface).Handle;
         rtgiEvictInterface = reflect("rtgi_evict.comp");
@@ -285,6 +298,7 @@ internal sealed partial class SponzaLoop
         rtgiResolvePipeline = Compute("rtgi_resolve", rtgiResolveInterface);
         rtgiEvictPipeline = Compute("rtgi_evict", rtgiEvictInterface);
         rtgiFilterPipeline = Compute("rtgi_filter", rtgiFilterInterface);
+        rtgiGuideResolvePipeline = Compute("rtgi_guide_resolve", rtgiGuideResolveInterface);
         rtgiContactRaysPipeline = Compute("rtgi_contact_rays", rtgiContactRaysInterface);
         rtgiContactTrainPipeline = Compute("rtgi_contact_train", rtgiContactTrainInterface);
         rtgiRaysPipeline = Compute("rtgi_rays", rtgiRaysInterface);
@@ -319,6 +333,9 @@ internal sealed partial class SponzaLoop
             rtgiAccum = Own(device.CreateGpuBuffer(RtgiSlots * 52, new byte[RtgiSlots * 52], "sponza.rtgi.accum"));
             rtgiDirection = Own(device.CreateGpuBuffer(RtgiSlots * 16, new byte[RtgiSlots * 16], "sponza.rtgi.direction"));
             rtgiConfidence = Own(device.CreateGpuBuffer(RtgiSlots * 16, new byte[RtgiSlots * 16], "sponza.rtgi.confidence"));
+            rtgiGuideKeys = Own(device.CreateGpuBuffer(RtgiGuideSlots * 4, new byte[RtgiGuideSlots * 4], "sponza.rtgi.guide-keys"));
+            rtgiGuideAccum = Own(device.CreateGpuBuffer(RtgiGuideSlots * 33 * 4, new byte[RtgiGuideSlots * 33 * 4], "sponza.rtgi.guide-accum"));
+            rtgiGuideDist = Own(device.CreateGpuBuffer(RtgiGuideSlots * 9 * 16, new byte[RtgiGuideSlots * 9 * 16], "sponza.rtgi.guide-dist"));
             rtgiDoneCount = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.rtgi.done-count"));
             rtgiResolved = Own(device.CreateGpuBuffer(RtgiSlots * 32, new byte[RtgiSlots * 32], "sponza.rtgi.resolved"));
             rtgiMoments = Own(device.CreateGpuBuffer(RtgiSlots * 48, new byte[RtgiSlots * 48], "sponza.rtgi.moments"));
@@ -364,6 +381,7 @@ internal sealed partial class SponzaLoop
                     new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 0f))),
                     new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, rtgiContactRadius, rtgiHitSun, rtgiTrainLevels))),
                     new("uClamp", new Vector4Uniform(new Vector4(rtgiClampSigma, frameNumber, RtgiDirtyRoom, 0f))),
+                    new("uGuideTable", new Vector4Uniform(new Vector4(rtgiGuide > 0f ? RtgiGuideSlots - 1 : 0f, 0f, 0f, 0f))),
                     new("uTrain", new Vector4Uniform(new Vector4(rtgiCountUnknown ? 1f : 0f, rtgiNoCoarse ? 1f : 0f, rtgiBackfaceLit ? 1f : 0f, rtgiRequests ? rtgiHitPoints : 0f))),
                 },
                 new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
@@ -382,7 +400,19 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("RtgiDirty", rtgiDirtyBufs[cur]),
                     new ShaderBufferBinding("RtgiCells", rtgiCells),
                     new ShaderBufferBinding("RtgiFiltered", rtgiFiltered),
+                    new ShaderBufferBinding("GuideKeys", rtgiGuideKeys),
+                    new ShaderBufferBinding("GuideAccum", rtgiGuideAccum),
                 }));
+        // Path guiding: each guide cell's frame of samples into its bins.
+        graph.Dispatch(rtgiGuideResolvePassHandle, new DispatchCommand(rtgiGuideResolvePipeline, (RtgiGuideSlots + 63) / 64, 1, 1,
+            new ShaderUniform[] { new("uGuideResolve", new Vector4Uniform(new Vector4(rtgiGuideHistory, RtgiGuideSlots, 0f, 0f))) },
+            Array.Empty<ShaderTextureBinding>(),
+            Buffers: new[]
+            {
+                new ShaderBufferBinding("GuideKeys", rtgiGuideKeys),
+                new ShaderBufferBinding("GuideAccum", rtgiGuideAccum),
+                new ShaderBufferBinding("GuideDist", rtgiGuideDist),
+            }));
         // Last frame's contact rays into the contact cells (S4), listed for the resolve too.
         if (rtgiContact)
             graph.Dispatch(rtgiContactTrainPassHandle, new DispatchCommand(rtgiContactTrainPipeline, (rtgiContactRays + 63) / 64, 1, 1,
@@ -528,7 +558,7 @@ internal sealed partial class SponzaLoop
                 new("uSun", new Vector4Uniform(new Vector4(towardSun, rtgiTraced > 0 ? 1f : 0f))),
                 new("uParams", new Vector4Uniform(RtgiParams)),
                 new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, 0f, 0f, 0f))),
-                new("uGuide", new Vector4Uniform(new Vector4(rtgiGuide, rtgiGuideMin, rtgiGuideKappa, 0f))),
+                new("uGuide", new Vector4Uniform(new Vector4(rtgiGuide, rtgiGuideMin, rtgiGuideKappa, RtgiGuideSlots - 1))),
                 new("uAdapt", new Vector4Uniform(new Vector4(rtgiAdaptive, rtgiAdaptiveK, rtgiDoneError, rtgiTrickle))),
             },
             new[]
@@ -550,6 +580,8 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiDirection", rtgiDirection),
                 new ShaderBufferBinding("RtgiMoments", rtgiMoments),
                 new ShaderBufferBinding("RtgiConfidence", rtgiConfidence),
+                new ShaderBufferBinding("GuideKeys", rtgiGuideKeys),
+                new ShaderBufferBinding("GuideDist", rtgiGuideDist),
             }));
 
         // This frame's contact rays (S4), into the same Metal group.

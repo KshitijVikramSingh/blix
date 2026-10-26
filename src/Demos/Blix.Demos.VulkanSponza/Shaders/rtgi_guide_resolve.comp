@@ -1,0 +1,37 @@
+#version 450
+
+// --rtgi path guiding (rtgi_guide.glsl): each guide cell's frame of samples into its bins' running means -- the light per
+// bin over the samples counted, held over at most uGuideResolve.x samples -- the frame's cleared.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform RtgiGuideResolve {
+    vec4 uGuideResolve;   // x samples held at most; y slots
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer GuideKeys { uint guideKeys[]; };
+layout(std430, set = 0, binding = 2) buffer GuideAccum { uint guideAccum[]; };
+layout(std430, set = 0, binding = 3) buffer GuideDist { vec4 guideDist[]; };
+
+#define RTGI_SCALE 4096.0
+
+void main() {
+    uint g = gl_GlobalInvocationID.x;
+    if (g >= uint(u.uGuideResolve.y) || guideKeys[g] == 0u) return;
+    uint n = guideAccum[33u * g + 32u];
+    if (n == 0u) return;
+    vec4 meta = guideDist[9u * g + 8u];
+    float held = min(meta.x + float(n), u.uGuideResolve.x);
+    float w = min(1.0, float(n) / max(held, 1.0));
+    float sum = 0.0;
+    for (uint v = 0u; v < 8u; v++) {
+        vec4 bins = guideDist[9u * g + v];
+        vec4 frame = vec4(guideAccum[33u * g + 4u * v], guideAccum[33u * g + 4u * v + 1u],
+                          guideAccum[33u * g + 4u * v + 2u], guideAccum[33u * g + 4u * v + 3u]) / (RTGI_SCALE * float(n));
+        bins = mix(bins, frame, w);
+        guideDist[9u * g + v] = bins;
+        sum += bins.x + bins.y + bins.z + bins.w;
+    }
+    guideDist[9u * g + 8u] = vec4(held, sum, 0.0, 0.0);
+    for (uint k = 0u; k < 33u; k++) guideAccum[33u * g + k] = 0u;
+}

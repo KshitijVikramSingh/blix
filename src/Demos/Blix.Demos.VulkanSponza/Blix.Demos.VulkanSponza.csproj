@@ -75,6 +75,7 @@
     <GlslShader Include="Shaders\rtgi_resolve.comp" />
     <GlslShader Include="Shaders\rtgi_evict.comp" />
     <GlslShader Include="Shaders\rtgi_filter.comp" />
+    <GlslShader Include="Shaders\rtgi_guide_resolve.comp" />
     <GlslShader Include="Shaders\rtgi_contact_rays.comp" />
     <GlslShader Include="Shaders\rtgi_contact_train.comp" />
     <GlslShader Include="Shaders\rtgi_readout.frag" />
