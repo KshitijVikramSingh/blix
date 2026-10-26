@@ -110,3 +110,16 @@ two extra rounds; a solid blocks it (no caustics).
 
 `--material "name:key=value,..."` overrides a material's parameters for the lit shader, the bake and both references alike (roughness, metallic, base, ior,
 specular, transmission, thickness, att-distance, att, dt, and `diffuse-roughness`, the EON lobe's, which glTF has no field for).
+
+### In the lit shader (`lit_body.glsl`): transmission and clearcoat
+
+- **Clearcoat** follows the python: the base (diffuse, specular, sheen, the bounce, emission) is scaled by `1 - coat F(N.V)` and the coat adds the sun's GGX highlight (F at the
+  half vector) and the prefiltered sky at the coat's roughness through the split-sum LUT (F0 0.04). Factors only (`uMaterialParams3.yz`); a branch most pixels never take, so
+  materials with a coat join `richMaterials` and the lean build compiles it out.
+- **Transmission** is two draws per pane instead of one alpha blend (`BlendMode.Multiply`, new in `Blix.Graphics`): the scene behind filtered by `(1 - F) T baseColor` times the
+  volume's Beer-Lambert attenuation along the refracted chord (`uMaterialParams4`, `uAttenuation`, the thickness texture in `uThicknessTex`), then `F` times the sky's reflection added
+  (`lit_glass_filter.frag`, `lit_glass_reflect.frag`; F from the material's ior and specular factor). What it cannot do: bend the view of what is behind a solid and blur it
+  for roughness, which need the scene as a texture (a solid shows what is behind it unbent; a rough pane is as clear as a smooth one).
+- `tools/testbeds/bsdf.sh [scene...]` renders Khronos' TransmissionTest, DragonAttenuation, ClearCoatTest, AnisotropyDiscTest and SheenChair through the frame and the reference and
+  prints how they agree (`bsdf_view.py`; `-compare.png` is frame | reference | ratio). 2026-10-26: the thin panes' tints and the coat's swatches agree to a few percent in the mean;
+  the attenuating dragon's body reads darker and redder in the frame than in the reference (the thickness factor times a texture against the true chord).

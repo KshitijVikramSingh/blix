@@ -982,7 +982,10 @@ internal sealed partial class SponzaLoop
             // draw per (pipeline, material) group, same as opaque.
             foreach (var g in blendGroups)
             {
+                // The pane's two draws: the scene behind filtered, then its reflection added (Program.cs, blendSolidPipeline).
                 DrawSceneGroup(scope, SceneListBlend, g, g.Pipeline, perFrame, passBindings, g.Material);
+                DrawSceneGroup(scope, SceneListBlend, g, g.Pipeline == blendDoubleSidedPipeline ? glassReflectDoubleSidedPipeline : glassReflectSolidPipeline,
+                    perFrame, passBindings, g.Material);
             }
         }, clearColor: new GraphicsColor(0.05f, 0.07f, 0.10f, 1f));
 

@@ -226,7 +226,10 @@ layout(set = 2, binding = 0) uniform Material {
     vec4 uMaterialParams2;
     vec4 uSheenColor;              // KHR_materials_sheen colour factor; w 1: KHR_materials_unlit
     vec4 uDiffuseTransmissionColor;// KHR_materials_diffuse_transmission colour; w 1: the colour texture's hue (--cloth-transmission)
-    vec4 uMaterialParams3;         // x the diffuse roughness override (--material diffuse-roughness), or -1: the roughness below decides
+    vec4 uMaterialParams3;         // x the diffuse roughness override (--material diffuse-roughness), or -1: the roughness below decides;
+                                   // y KHR_materials_clearcoat factor, z its roughness
+    vec4 uMaterialParams4;         // x the ior (KHR_materials_ior), y the volume's thickness in metres (0: thin-walled), z KHR_materials_specular's factor
+    vec4 uAttenuation;             // rgb KHR_materials_volume's attenuation coefficient per metre, -ln(colour) / distance
 } mat;
 
 layout(set = 2, binding = 1) uniform sampler2D uAlbedo;
@@ -246,6 +249,8 @@ layout(set = 2, binding = 5) uniform sampler2D uOcclusion;
 layout(set = 2, binding = 6) uniform sampler2D uDiffuseTransmissionColorTex;
 // Its factor texture: the alpha times diffuseTransmissionFactor is the share that goes through (white by default).
 layout(set = 2, binding = 7) uniform sampler2D uDiffuseTransmissionTex;
+// KHR_materials_volume's thickness texture (G, linear), multiplying the factor beside it: a glass pane's thickness where it varies over the surface.
+layout(set = 2, binding = 8) uniform sampler2D uThicknessTex;
 
 layout(location = 0) in vec3 vNormalWorld;
 layout(location = 1) in vec2 vUv;
@@ -568,10 +573,17 @@ void main() {
             if (found) glassSky = field.a;
         }
         vec3 envRefl = textureLod(samplerCube(uPrefilteredEnv, uLinearClamp), R, lod).rgb * glassSky;
-        float fresnel = 0.04 + 0.96 * pow(clamp(1.0 - NdotV, 0.0, 1.0), 5.0);
-        // No opacity floor: this branch models Fresnel reflection over the background, without
-        // refraction or absorption. Clean head-on glass is therefore nearly transparent.
-        float glassAlpha = mix(albedo4.a, fresnel, transmission);
+        // The pane's two lights, as the BSDF reference has them (gltf_bsdf.py, thin-walled): the Fresnel share of the environment reflects off it, and the rest of
+        // what is behind goes through, times the base colour (KHR_materials_transmission) and, with a volume thickness, Beer-Lambert's attenuation along the
+        // refracted chord (KHR_materials_volume; the bending itself needs the scene behind, which a forward pass does not have, so a solid shows what is behind it
+        // unbent). A material with transmission under 1 keeps its remainder as the base's diffuse lit by the sky alone.
+        float glassIor = mat.uMaterialParams4.x;
+        float glassF0 = (glassIor - 1.0) / (glassIor + 1.0);
+        glassF0 *= glassF0 * mat.uMaterialParams4.z;
+        float fresnel = glassF0 + (1.0 - glassF0) * pow(clamp(1.0 - NdotV, 0.0, 1.0), 5.0);
+        float cosThrough = sqrt(max(1.0 - (1.0 - NdotV * NdotV) / (glassIor * glassIor), 0.0));
+        float glassThickness = mat.uMaterialParams4.y * texture(uThicknessTex, uv).g;
+        vec3 glassAtten = exp(-mat.uAttenuation.rgb * glassThickness / max(cosThrough, 0.05));
         // Handle diagnostics before the early return so transmissive surfaces remain inspectable.
         if (frame.uVizChannel > 0.5) {
             float vis = glassSky;
@@ -581,7 +593,19 @@ void main() {
             outColor = vec4(c, 1.0);
             return;
         }
+#if defined(LIT_GLASS_FILTER)
+        // The first draw: what is behind, filtered (blended Multiply: destination times this).
+        outColor = vec4((1.0 - fresnel) * transmission * albedo * glassAtten, 1.0);
+#elif defined(LIT_GLASS_REFLECT)
+        // The second: what the pane adds (blended Additive): its reflection, and the base's remainder lit by the sky.
+        vec3 skyDiffuse = texture(samplerCube(uIrradiance, uLinearClamp), N).rgb * glassSky * albedo / PI;
+        outColor = vec4(fresnel * envRefl + (1.0 - transmission) * (1.0 - fresnel) * skyDiffuse, 1.0);
+#else
+        // No opacity floor: this branch models Fresnel reflection over the background, without
+        // refraction or absorption. Clean head-on glass is therefore nearly transparent.
+        float glassAlpha = mix(albedo4.a, fresnel, transmission);
         outColor = vec4(envRefl, glassAlpha);
+#endif
         return;
     }
 #endif
@@ -886,7 +910,32 @@ void main() {
     // --- Emissive ------------------------------------------------------
     vec3 emissive = texture(uEmissive, uv).rgb * mat.uEmissiveFactor.rgb * mat.uEmissiveFactor.a;
 
-    vec3 color = direct + ambient + emissive;
+    // --- Clear coat (KHR_materials_clearcoat) ----------------------------------------------------------------------------------------------
+    // A smooth GGX layer of ior 1.5 over everything beneath it, as the BSDF reference has it (lab/bsdf gltf_bsdf.py): the base -- diffuse, specular, sheen, the
+    // bounce, the emission -- is darkened by the coat's Fresnel reflectance toward the VIEW, and the coat adds its own highlight (the sun's, F at the half vector)
+    // and its reflection of the sky (the prefiltered environment at the coat's roughness, the split-sum LUT with F0 0.04). Factors only: the coat's textures and its
+    // normal map are not read. A branch most pixels never take: the lean build compiles it out.
+    float coat = LIT_RARE(true) ? mat.uMaterialParams3.y : 0.0;
+    vec3 coatLight = vec3(0.0);
+    float coatScale = 1.0;
+    if (coat > 0.0) {
+        float coatRoughness = clamp(mat.uMaterialParams3.z, 0.04, 1.0);
+        float coatFresnelView = 0.04 + 0.96 * pow(clamp(1.0 - NdotV, 0.0, 1.0), 5.0);
+        coatScale = 1.0 - coat * coatFresnelView;
+        float coatD = distributionGGX(NdotH, coatRoughness);
+        float coatG = geometrySmith(NdotV, NdotL, coatRoughness);
+        float coatF = 0.04 + 0.96 * pow(clamp(1.0 - VdotH, 0.0, 1.0), 5.0);
+        coatLight = vec3(coat * coatD * coatG * coatF / max(4.0 * NdotV * NdotL, 1e-3)) * NdotL * frame.uSunIrradiance * sunShadow * terminatorFront;
+        if (frame.uAbFlags.z < 0.5) {
+            float coatLod = coatRoughness * (frame.uEnvMipCount - 1.0);
+            vec3 coatEnv = textureLod(samplerCube(uPrefilteredEnv, uLinearClamp), R, coatLod).rgb;
+            vec2 coatBrdf = texture(sampler2D(uBrdfLut, uLinearClamp), vec2(NdotV, coatRoughness)).rg;
+            float coatSpecVis = clamp(pow(max(NdotV + visibility, 0.0), exp2(-16.0 * coatRoughness - 1.0)) - 1.0 + visibility, 0.0, 1.0);
+            coatLight += coat * coatEnv * (0.04 * coatBrdf.x + coatBrdf.y) * skyVisibility * coatSpecVis * ao;
+        }
+    }
+
+    vec3 color = (direct + ambient + emissive) * coatScale + coatLight;
     // KHR_materials_unlit: the base colour, unshaded -- the spec's whole model (DiffuseTransmissionTest's labels and its
     // swatches read black before, 2026-10-22).
     bool unlit = mat.uSheenColor.w > 0.5;

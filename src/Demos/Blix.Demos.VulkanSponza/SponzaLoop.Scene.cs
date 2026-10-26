@@ -337,7 +337,7 @@ internal sealed partial class SponzaLoop
                 pm?.MetallicRoughnessTexture is not null ? textureLoader.Load(pm).MetallicRoughness : default,
                 pm?.RoughnessFactor ?? 0.8f,
                 !isBlend && pm?.AlphaMode == AlphaMode.Blend,
-                pm, diffuseRoughnessOverride));
+                pm, diffuseRoughnessOverride, pm?.EmissiveTexture is not null ? textureLoader.Load(pm).Emissive : default));
         }
     }
 
@@ -424,7 +424,7 @@ internal sealed partial class SponzaLoop
                 sceneTransformInstances.Add(s.Instances[w]);
                 rayInstances.Add(new RayQueryScene.Instance(rayMeshes[i], world));
                 rayPlacementMaterials.Add(new RayMaterial(s.Albedo, s.BaseColor, s.AlphaCutoff, s.IsBlend, s.TransmissionTexture, s.TransmissionColorTexture,
-                    s.MetallicRoughness, s.RoughnessFactor, s.AlphaBlended, s.DiffuseRoughness, s.Pbr?.MetallicFactor ?? 0f));
+                    s.MetallicRoughness, s.RoughnessFactor, s.AlphaBlended, s.DiffuseRoughness, s.Pbr?.MetallicFactor ?? 0f, s.EmissiveTexture));
                 rayPlacementPbr.Add(s.Pbr);
                 rayPlacementLightmapped.Add(s.LightmapTexels is not null);
                 rayPlacementDoubleSided.Add(s.Pipeline == opaqueDoubleSidedPipeline || s.Pipeline == blendDoubleSidedPipeline);
@@ -707,7 +707,9 @@ internal sealed partial class SponzaLoop
             .SetUniform(binding: 0, "uDiffuseTransmissionColor",
                 new Vector4(diffuseTransmissionColor.X, diffuseTransmissionColor.Y,
                             diffuseTransmissionColor.Z, ClothTransmission(gm) is not null ? 1f : 0f))
-            .SetUniform(binding: 0, "uMaterialParams3", new Vector4(DiffuseRoughnessOf(gm), 0f, 0f, 0f))
+            .SetUniform(binding: 0, "uMaterialParams3", new Vector4(DiffuseRoughnessOf(gm), ext.ClearcoatFactor, ext.ClearcoatRoughnessFactor, 0f))
+            .SetUniform(binding: 0, "uMaterialParams4", new Vector4(ext.IndexOfRefraction, ext.ThicknessFactor, ext.SpecularFactor, 0f))
+            .SetUniform(binding: 0, "uAttenuation", new Vector4(AttenuationCoefficient(ext), 0f))
             .SetTexture(binding: 1, tex.Albedo)
             .SetTexture(binding: 2, tex.Normal)
             .SetTexture(binding: 3, tex.Emissive)
@@ -715,11 +717,19 @@ internal sealed partial class SponzaLoop
             .SetTexture(binding: 5, materialOcclusion ? tex.Occlusion : textureLoader.Load(null).Occlusion)
             .SetTexture(binding: 6, diffuseTransmissionTexture)
             .SetTexture(binding: 7, tex.DiffuseTransmission)
+            .SetTexture(binding: 8, tex.Thickness)
             .Handle);
         // Sheen or diffuse transmission: the full opaque build (lit_lean.frag compiles both out).
-        if (sheen != Vector3.Zero || diffuseTransmission > 0f) richMaterials.Add(built);
+        if (sheen != Vector3.Zero || diffuseTransmission > 0f || ext.ClearcoatFactor > 0f) richMaterials.Add(built);   // the clear coat is a branch most pixels never take (lit_lean.frag compiles it out)
         return built;
     }
+
+    // KHR_materials_volume's attenuation coefficient per metre, -ln(colour) / distance per channel (none at the default infinite distance).
+    private static Vector3 AttenuationCoefficient(PbrMaterialExtensions ext) =>
+        float.IsFinite(ext.AttenuationDistance) && ext.AttenuationDistance > 0f
+            ? new Vector3(-MathF.Log(Math.Clamp(ext.AttenuationColor.X, 1e-6f, 1f)), -MathF.Log(Math.Clamp(ext.AttenuationColor.Y, 1e-6f, 1f)),
+                -MathF.Log(Math.Clamp(ext.AttenuationColor.Z, 1e-6f, 1f))) / ext.AttenuationDistance
+            : Vector3.Zero;
 
     // --cloth-transmission F: the curtains' KHR_materials_diffuse_transmission, which Sponza does not author -- factor F,
     // the light through them in their own colour (the base colour factor; the albedo texture as the colour texture).

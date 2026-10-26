@@ -1125,12 +1125,24 @@ internal sealed partial class SponzaLoop
         // depth-write (so successive translucent fragments don't z-fight),
         // src-alpha blend. Back-to-front sort within the blend bucket is a
         // deferred polish.
-        blendSolidPipeline = Pipeline(litProgram, VertexPosition3NormalTangentTexture.Layout,
+        // Glass is two draws, the scene behind it filtered by what the pane lets through (Multiply) and its reflection added on top (Additive): a tinted pane, and a
+        // volume's attenuation, need a per-channel filter that one alpha blend cannot say.
+        var litGlassFilterProgram = Own(device.CreateShaderProgramFromSpv(litVertSpv,
+            File.ReadAllBytes(Path.Combine(shaderDir, "lit_glass_filter.frag.spv")), litInterface, "lit.glass.filter"));
+        var litGlassReflectProgram = Own(device.CreateShaderProgramFromSpv(litVertSpv,
+            File.ReadAllBytes(Path.Combine(shaderDir, "lit_glass_reflect.frag.spv")), litInterface, "lit.glass.reflect"));
+        blendSolidPipeline = Pipeline(litGlassFilterProgram, VertexPosition3NormalTangentTexture.Layout,
             DepthState.LessEqualNoWrite, RasterizerState.BackFaceCulling,
-            new[] { BlendState.AlphaBlend }, litPassHandle, "lit.blend");
-        blendDoubleSidedPipeline = Pipeline(litProgram, VertexPosition3NormalTangentTexture.Layout,
+            new[] { BlendState.Multiply }, litPassHandle, "lit.glass.filter");
+        blendDoubleSidedPipeline = Pipeline(litGlassFilterProgram, VertexPosition3NormalTangentTexture.Layout,
             DepthState.LessEqualNoWrite, RasterizerState.NoCulling,
-            new[] { BlendState.AlphaBlend }, litPassHandle, "lit.blend.doubleSided");
+            new[] { BlendState.Multiply }, litPassHandle, "lit.glass.filter.doubleSided");
+        glassReflectSolidPipeline = Pipeline(litGlassReflectProgram, VertexPosition3NormalTangentTexture.Layout,
+            DepthState.LessEqualNoWrite, RasterizerState.BackFaceCulling,
+            new[] { BlendState.Additive }, litPassHandle, "lit.glass.reflect");
+        glassReflectDoubleSidedPipeline = Pipeline(litGlassReflectProgram, VertexPosition3NormalTangentTexture.Layout,
+            DepthState.LessEqualNoWrite, RasterizerState.NoCulling,
+            new[] { BlendState.Additive }, litPassHandle, "lit.glass.reflect.doubleSided");
 
         // Sky pipeline. Depth-test LessEqual with NO write, so the sky only
         // draws where the depth buffer still holds the clear value (1.0)

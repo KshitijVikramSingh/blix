@@ -230,7 +230,13 @@ void main() {
                                                : normalize(abs(nB.y) < 0.999 ? cross(vec3(0.0, 1.0, 0.0), nB) : cross(vec3(1.0, 0.0, 0.0), nB));
                 vec3 ty = cross(nB, tx);
                 // What the surface gives off along the ray (KHR_materials_emissive_strength folded into the table).
-                r.rgb += c.rgb * materialTable[REF_STRIDE * matIndex + 9u].rgb;
+                vec4 emitted = materialTable[REF_STRIDE * matIndex + 9u];
+                vec3 emission = emitted.rgb;
+                if (emitted.w > 0.5) {   // textured: the row's mean of the texture (RGB565 in the upper half of the row's word)
+                    uint e565 = rowMr[matRow & 0x7FFFFFFFu] >> 16u;
+                    emission *= vec3(float((e565 >> 11u) & 31u) / 31.0, float((e565 >> 5u) & 63u) / 63.0, float(e565 & 31u) / 31.0);
+                }
+                r.rgb += c.rgb * emission;
                 vec3 woL = vec3(dot(wo, tx), dot(wo, ty), dot(wo, nB));
                 bool inside = woL.z < 0.0;
                 uint bs = blix_pcg(floatBitsToUint(c.w) ^ 0xB5297A4Du ^ (l * 0x68E31DA4u));

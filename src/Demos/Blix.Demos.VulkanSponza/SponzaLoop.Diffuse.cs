@@ -41,6 +41,10 @@ internal sealed partial class SponzaLoop
     private static ShaderTextureBinding BakeMetallicRoughness(RayMaterial material) =>
         new("uMetallicRoughness", material.MetallicRoughness.Equals(default(TextureHandle)) ? material.Albedo : material.MetallicRoughness);
 
+    // And the emissive texture the same way (uDiffuse2.z says whether it is one).
+    private static ShaderTextureBinding BakeEmissive(RayMaterial material) =>
+        new("uEmissive", material.Emissive.Equals(default(TextureHandle)) ? material.Albedo : material.Emissive);
+
     private bool DiffuseEonNow => diffuseEon && !(abMode == "diffuse" && AbOffPhase);
 
     private void ReadDiffuseArgs(AppArgs args)

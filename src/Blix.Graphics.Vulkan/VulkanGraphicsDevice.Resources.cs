@@ -834,14 +834,19 @@ public sealed partial class VulkanGraphicsDevice
                 {
                     BlendMode.Additive => BlendFactor.One,
                     BlendMode.PremultipliedAlpha => BlendFactor.One,
+                    BlendMode.Multiply => BlendFactor.Zero,
                     _ => BlendFactor.SrcAlpha,
                 },
-                DstColorBlendFactor = blendState.Mode == BlendMode.Additive
-                    ? BlendFactor.One
-                    : BlendFactor.OneMinusSrcAlpha,
+                DstColorBlendFactor = blendState.Mode switch
+                {
+                    BlendMode.Additive => BlendFactor.One,
+                    BlendMode.Multiply => BlendFactor.SrcColor,
+                    _ => BlendFactor.OneMinusSrcAlpha,
+                },
                 ColorBlendOp = BlendOp.Add,
-                SrcAlphaBlendFactor = BlendFactor.One,
-                DstAlphaBlendFactor = BlendFactor.Zero,
+                // Multiply filters the colour and leaves the destination's alpha alone.
+                SrcAlphaBlendFactor = blendState.Mode == BlendMode.Multiply ? BlendFactor.Zero : BlendFactor.One,
+                DstAlphaBlendFactor = blendState.Mode == BlendMode.Multiply ? BlendFactor.One : BlendFactor.Zero,
                 AlphaBlendOp = BlendOp.Add,
             };
         }

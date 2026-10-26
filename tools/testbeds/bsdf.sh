@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The BSDF reference's pictures: Khronos' material samples (tools/testbeds/setup.sh with BLIX_TESTBED_KHRONOS=1), each rendered by the frame (--shot) and by the
+# The BSDF reference's pictures (the frame's lit pass beside them, and how the two agree): Khronos' material samples (tools/testbeds/setup.sh with BLIX_TESTBED_KHRONOS=1), each rendered by the frame (--shot) and by the
 # reference's camera paths with the glTF BSDF (--ref-bsdf, --ref-view; tools/testbeds/bsdf_view.py turns the dump into a picture). The frame's lit pass does not yet
 # shade the layers the reference does, so the pair shows what it is missing; --material "name:key=value" overrides a material on any of them.
 #
@@ -32,7 +32,7 @@ for s in "${scenes[@]}"; do
     mkdir -p "$OUT/$s"
     # shellcheck disable=SC2046
     BLIX_DUMP_DIR="$OUT/$s" "$REPO/blix" run ${build[@]+"${build[@]}"} Blix.Demos.VulkanSponza --scene="khronos-$s" $(cam "$s") "${gi[@]}" --no-fog --render-scale 1 --win=480 270 \
-        --viz 26 --ref-view 2 --ref-view-lanes 16 --ref-view-paths 256 --ref-bounces 16 --ref-bsdf --view-dump \
+        --ref-view 2 --ref-view-lanes 16 --ref-view-paths 256 --ref-bounces 16 --ref-bsdf --view-dump \
         --shot-when-ready --shot-frames=6000 --shot="$OUT/$s.png" ${extra[@]+"${extra[@]}"} > "$OUT/$s.log" 2>&1 || { echo "bsdf: $s failed; $OUT/$s.log" >&2; tail -5 "$OUT/$s.log" >&2; exit 1; }
     build=()
     uv run -q --with numpy python3 "$REPO/tools/testbeds/bsdf_view.py" "$OUT/$s"/view-* "$OUT/$s-reference.png"
