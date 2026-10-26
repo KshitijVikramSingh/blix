@@ -122,7 +122,9 @@ public sealed partial class VulkanGraphicsDevice
             ApplicationVersion = MakeVersion(0, 1, 0),
             PEngineName = engineNamePin.Ptr,
             EngineVersion = MakeVersion(0, 1, 0),
-            ApiVersion = Vk.Version12,
+            // 1.4 (MoltenVK 1.4 advertises what the instance asks: at 1.2 the M4 reported 1.2.334). Silk.NET 2.22 has no
+            // Version14: made here. The shaders are built for it (Blix.Tools.Shader: --target-env=vulkan1.4, SPIR-V 1.6).
+            ApiVersion = (1u << 22) | (4u << 12),
         };
 
         // Instance extensions: GLFW reports the platform-correct set via
@@ -472,7 +474,13 @@ public sealed partial class VulkanGraphicsDevice
             Vendor: $"{vendor} (driver {driverVer})",
             Renderer: renderer,
             Version: $"Vulkan {apiMajor}.{apiMinor}.{apiPatch}",
-            ShadingLanguageVersion: "SPIR-V 1.5");
+            ShadingLanguageVersion: "SPIR-V 1.6");
+        // What the shaders' subgroup operations may use (subgroupAdd, ballots, broadcasts): read once, logged, so a shader
+        // that leans on them can be checked against the device it runs on (MoltenVK maps them to Metal's SIMD groups).
+        var subgroup = new PhysicalDeviceSubgroupProperties { SType = StructureType.PhysicalDeviceSubgroupProperties };
+        var props2 = new PhysicalDeviceProperties2 { SType = StructureType.PhysicalDeviceProperties2, PNext = &subgroup };
+        Vk.GetPhysicalDeviceProperties2(PhysicalDevice, &props2);
+        Console.WriteLine($"Subgroups: {subgroup.SubgroupSize} lanes; stages {subgroup.SupportedStages}; operations {subgroup.SupportedOperations}; quad ops in all stages {(bool)subgroup.QuadOperationsInAllStages}.");
     }
 
     private static string VendorIdName(uint vendorId) => vendorId switch

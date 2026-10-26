@@ -51,6 +51,9 @@ try
         RedirectStandardError = true,
         UseShellExecute = false,
     };
+    // Vulkan 1.4, as the device is created (VulkanGraphicsDevice): SPIR-V 1.6, so subgroup operations (SPIR-V 1.3 and up)
+    // compile -- glslc's default, vulkan1.0, refused them.
+    start.ArgumentList.Add("--target-env=vulkan1.4");
     start.ArgumentList.Add("-o");
     start.ArgumentList.Add(output);
     start.ArgumentList.Add(tempSource);
