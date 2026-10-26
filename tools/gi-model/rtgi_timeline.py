@@ -131,9 +131,41 @@ def points_mode(log, dumps, mean_of=False, flicker=False, settle=False):
               f'median {np.median(f[b] / r[b]):.4f} ({ok.sum()} points)')
 
 
+def pair_mode(log, dirs_a, dirs_b):
+    """--pair: two runs differing only in --rtgi-seed, dumped at the same frames. Per frame the runs' relative difference
+    over every surface pixel (mean and p90 of |A - B| / ((A + B) / 2), over sqrt 2: the noise left in one run, bias
+    cancelled) and each run's error against the truth's points."""
+    import re
+    pts = []
+    for line in Path(log).read_text().splitlines():
+        m = re.match(r'\s+surface\s+at ([0-9.]+),([0-9.]+)\s+gpu\s+total \S+ ref ([0-9.eE+-]+)', line)
+        if m and m.group(3) != 'NaN':
+            pts.append((float(m.group(1)), float(m.group(2)), float(m.group(3))))
+    xs, ys, R = (np.array(v) for v in zip(*pts))
+    for da, db in zip(dirs_a, dirs_b):
+        ma, ia, na = load(da)
+        mb, ib, nb = load(db)
+        la, lb = lum(ia[..., :3]), lum(ib[..., :3])
+        surf = (np.abs(na[..., :3]).sum(axis=2) > 1e-6) & (np.abs(nb[..., :3]).sum(axis=2) > 1e-6)
+        avg = 0.5 * (la + lb)
+        floor = 0.02 * avg[surf].mean()
+        rel = (np.abs(la - lb) / np.maximum(avg, floor))[surf] / np.sqrt(2.0)
+        w, h = ma['width'], ma['height']
+        px, py = np.clip((xs * w).astype(int), 0, w - 1), np.clip((ys * h).astype(int), 0, h - 1)
+        ea = np.abs(la[py, px] - R).mean() / R.mean()
+        eb = np.abs(lb[py, px] - R).mean() / R.mean()
+        print(f'{Path(da).name:>8} (frame {ma["frame"]}): noise left mean {rel.mean():.4f}, p90 {np.percentile(rel, 90):.4f}; '
+              f'error against the truth {ea:.4f} / {eb:.4f}')
+
+
 def main():
     if len(sys.argv) < 3:
         raise SystemExit(__doc__)
+    if '--pair' in sys.argv:
+        args = [a for a in sys.argv[2:] if a != '--pair']
+        half = len(args) // 2
+        pair_mode(sys.argv[1], args[:half], args[half:])
+        return
     if sys.argv[1].endswith('.log'):
         args = [a for a in sys.argv[2:] if a not in ('--mean', '--flicker', '--settle')]
         points_mode(sys.argv[1], args, mean_of='--mean' in sys.argv, flicker='--flicker' in sys.argv, settle='--settle' in sys.argv)

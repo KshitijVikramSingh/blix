@@ -22,7 +22,8 @@ layout(set = 0, binding = 0) uniform RtgiRays {
     vec4 uSun;           // xyz toward the sun; w 1 when last frame's rays and hits are there to read
     vec4 uParams;        // rtgiParams (rtgi_cache.glsl)
     vec4 uNearField;     // x the near field's radius (RTGI_NEAR)
-    vec4 uGuide;         // x the share of rays guided where a cell has learnt its light's way (0: none); y samples it must hold
+    vec4 uGuide;         // x the share of rays guided where a cell has learnt its light's way (0: none); y samples it must hold;
+                         // z the lobe's concentration at most
     vec4 uAdapt;         // x the share of visible points placed by uncertainty (0: every tile its own); y tiles weighed for each;
                          // z the relative error a cell is done under (the blend's, rtgi_filter.comp); w 1 in this many of a
                          // done cell's points keeps its ray (the validation trickle)
@@ -156,10 +157,10 @@ void main() {
             vec3 bv = rtgiDirection[cell].xyz;
             float el = dot(rtgiResolved[2u * cell].rgb, vec3(0.2126, 0.7152, 0.0722));
             float len = length(bv);
-            float rr = el > 1e-6 ? clamp(len / el, 0.0, 0.95) : 0.0;
+            float rr = el > 1e-6 ? clamp(len / el, 0.0, 0.995) : 0.0;
             if (rr > 0.1 && dot(bv, n) > 0.0) {
                 gw = bv / len;
-                kappa = min(rr * (3.0 - rr * rr) / (1.0 - rr * rr), 40.0);
+                kappa = min(rr * (3.0 - rr * rr) / (1.0 - rr * rr), u.uGuide.z);
                 pg = u.uGuide.x;
             }
         }

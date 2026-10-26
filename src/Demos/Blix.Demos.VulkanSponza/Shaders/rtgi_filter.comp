@@ -15,7 +15,8 @@
 //     dead end 0.89 against 1.00 without the blend (2026-10-26).
 // Then leaned on its parent (the cell a level up holding it: twice its size, several times its samples, smoother): the
 // blend weighted by the samples it stands for, the parent by uParent.x -- a cell of few samples shows mostly its parent,
-// one of thousands its own. The 3 x 3 blend alone left blotches the size of a patch of cells all short of samples
+// one of thousands its own. Cascaded (uFilter2.x): the parent's own blend, as last frame left it -- itself leaned on its
+// parent's, and so up every level trained (the user, 2026-10-26); raw, one round. The 3 x 3 blend alone left blotches the size of a patch of cells all short of samples
 // together (San Miguel, 2026-10-26).
 
 layout(local_size_x = 64) in;
@@ -26,6 +27,7 @@ layout(set = 0, binding = 0) uniform RtgiFilter {
                     // w the dirty list's room
     vec4 uParent;   // x the samples the parent stands for (0: no parent); y the top level; z the neighbours' share at least;
                     // w 1: the blend is what is shown (--rtgi-denoise), else the cell's own light (the blend only judging)
+    vec4 uFilter2;  // x 1: the parent's blend (the cascade), else its raw light
     vec4 uDone;     // x the frame's number; y frames between drift checks; z the relative error under which a cell is
                     // done; w the dark floor (absolute luminance the error is measured against at least)
 } u;
@@ -101,7 +103,7 @@ void main() {
     if (u.uParent.x > 0.0 && level < uint(u.uParent.y)) {
         uint t = rtgiFind(rtgiCellHash(cell.xyz >> 1, level + 1u, side, u.uParams), u.uParams);
         if (t != 0xFFFFFFFFu && rtgiResolved[2u * t + 1u].y >= 0.5) {
-            vec4 parent = rtgiResolved[2u * t];
+            vec4 parent = u.uFilter2.x > 0.5 ? rtgiFiltered[t] : rtgiResolved[2u * t];
             blended = (blended * stands + parent * u.uParent.x) / (stands + u.uParent.x);
         }
     }

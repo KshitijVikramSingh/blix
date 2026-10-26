@@ -15,7 +15,9 @@ layout(set = 0, binding = 0) uniform RtgiTrain {
     vec4 uCamera;        // xyz position; w points
     vec4 uSun;           // xyz toward the sun; w the sky cube's lod
     vec4 uSunIrradiance; // rgb
-    vec4 uNearField;     // x the near field's radius (rtgi_cache.glsl's RTGI_NEAR); y the contact radius (m)
+    vec4 uNearField;     // x the near field's radius (rtgi_cache.glsl's RTGI_NEAR); y the contact radius (m); z the direct sun at
+                         // a ray's hit, scaled (1; 0: none -- a diagnostic of where the samples' variance comes from); w the
+                         // levels a sample trains, its own first
     vec4 uClamp;         // x > 0: a sample's luminance capped at its cell's mean + x standard deviations (once it holds 32);
                          // y the frame's number (from 1); z the dirty list's room
     vec4 uTrain;         // x 1: a landing cell holding nothing counts as dark (else no sample); y 1: no coarser cell for it;
@@ -85,7 +87,7 @@ vec4 irradianceAt(vec3 q, vec3 nq, out bool fine) {
         if (s != 0xFFFFFFFFu && rtgiResolved[2u * s + 1u].y >= 0.5) { r0 = rtgiFiltered[s]; r1 = rtgiResolved[2u * s + 1u]; }
     }
     if (r1.y < 0.5) return vec4(0.0);
-    return vec4(r0.rgb + u.uSunIrradiance.rgb * max(0.0, dot(nq, u.uSun.xyz)) * r1.x, 1.0);
+    return vec4(r0.rgb + u.uNearField.z * u.uSunIrradiance.rgb * max(0.0, dot(nq, u.uSun.xyz)) * r1.x, 1.0);
 }
 
 vec4 dither;
@@ -181,9 +183,9 @@ void main() {
     bool sunTraced = dot(n, u.uSun.xyz) > 0.0;
     bool sunLit = sunTraced && (occluded[i] & 1u) == 0u;
     uint level = rtgiLevel(p.xyz, u.uCamera.xyz, u.uParams);
-    // Its level, the next (the readout blends the two) and two up (the fallback).
+    // Its level and uNearField.w - 1 above (3: the next, which the readout blends in, and two up, the fallback; more feed
+    // the blend's cascade further up, rtgi_filter.comp).
     uint top = uint(u.uParams.w);
-    add(rtgiInsertAt(p.xyz, n, level), e, counted, sky, sunTraced, sunLit);
-    if (level + 1u <= top) add(rtgiInsertAt(p.xyz, n, level + 1u), e, counted, sky, sunTraced, sunLit);
-    if (level + 2u <= top) add(rtgiInsertAt(p.xyz, n, level + 2u), e, counted, sky, sunTraced, sunLit);
+    for (uint k = 0u; k < uint(u.uNearField.w) && level + k <= top; k++)
+        add(rtgiInsertAt(p.xyz, n, level + k), e, counted, sky, sunTraced, sunLit);
 }

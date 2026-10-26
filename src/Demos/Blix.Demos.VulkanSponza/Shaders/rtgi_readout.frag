@@ -32,6 +32,9 @@ layout(std430, set = 0, binding = 6) readonly buffer RtgiDirection { vec4 rtgiDi
 // The far light's share of a cell's light (the third moment vec4's w, rtgi_resolve.comp).
 layout(std430, set = 0, binding = 7) readonly buffer RtgiMoments { vec4 rtgiMoments[]; };
 layout(std430, set = 0, binding = 8) readonly buffer RtgiConfidence { vec4 rtgiConfidence[]; };
+// The visible share done: one pixel in 16 counted (x), and of those the ones whose cell is done (y); SponzaLoop.Rtgi.cs
+// reads and zeroes them at the profile window.
+layout(std430, set = 0, binding = 9) buffer RtgiDoneCount { uint doneCount[4]; };
 
 #define RTGI_KEYS(i) rtgiKeys[i]
 #define RTGI_NEAR u.uNearField.x
@@ -141,6 +144,12 @@ void main() {
     // luminance per unit of normal along the surface). Radiance taken as linear in direction, L = a + b.w, the irradiance
     // vector's part along the surface is pi/4 b_t and the irradiance's change 2 pi / 3 b_t: 8/3 of it. Zero before
     // (2026-10-26): the bounce light lost every normal map. uNearField.y 0: none.
+    // The visible share done: one half-res pixel in 16, its level's nearest cell.
+    if (e.w > 0.0 && ((uint(h.x) & 3u) | ((uint(h.y) & 3u) << 2)) == 0u) {
+        uint sd = rtgiFind(rtgiCellHash(ivec3(floor(p / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
+        atomicAdd(doneCount[0], 1u);
+        if (sd != 0xFFFFFFFFu && rtgiConfidence[sd].w > 0.5) atomicAdd(doneCount[1], 1u);
+    }
     // --rtgi-view-done: the bounce light painted by the cell's state (its level's, nearest): green done, red open, its
     // brightness the shown light's -- where the long tail still is.
     if (u.uContact.w > 0.5) {
