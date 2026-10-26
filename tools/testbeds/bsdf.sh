@@ -4,6 +4,7 @@
 # shade the layers the reference does, so the pair shows what it is missing; --material "name:key=value" overrides a material on any of them.
 #
 #   BLIX_TESTBED_ASSETS  the cooked scenes.
+#   BLIX_BSDF_GI         the GI flags instead of the cooked lightmap's ("--rtgi" on a tree that has it).
 #   BLIX_BSDF_WINDOW     the window, WxH (default 1280x720); the reference's grid is every BLIX_BSDF_STRIDE-th pixel of it (default 4).
 #
 # Usage: tools/testbeds/bsdf.sh [scene...] [-- extra demo flags]    scenes: transmission dragon coat aniso sheen irid lamp (default: all)
@@ -20,6 +21,7 @@ OUT="$(mktemp -d "${TMPDIR:-/tmp}/blix-bsdf.XXXXXX")"
 WINDOW="${BLIX_BSDF_WINDOW:-1280x720}"; STRIDE="${BLIX_BSDF_STRIDE:-4}"
 export BLIX_CONFIG=Release BLIX_DIAG=off
 gi=(--lightmap --transport-texels --rt-shadows --lod-pixels 0 --split-light --transport-own-fallback --transport-fill --far-transport --transport-rays 1024 --live-texels --live-patch-refine)
+[[ -n "${BLIX_BSDF_GI:-}" ]] && read -r -a gi <<< "$BLIX_BSDF_GI"
 build=(--build)
 cam() {   # the picture's camera per scene
     case "$1" in
