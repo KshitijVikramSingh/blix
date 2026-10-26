@@ -24,7 +24,15 @@ for _ in $(seq 1 120); do
 done
 [[ -z "$pid" ]] && { echo "trace: the demo did not start (log: $log)" >&2; exit 1; }
 sleep "$warmup"
+# xctrace's recording leaves an instruments*.ktrace of 200-900 MB in the user's temporary folder for every recording
+# (written by the recording service: TMPDIR does not move it), and a day of traces filled the disk (49 GB, 2026-10-27).
+# The ones this recording made -- absent before it -- are removed after it; the .trace holds what it recorded.
+tmp=$(getconf DARWIN_USER_TEMP_DIR)
+before=$(ls "$tmp" 2>/dev/null | grep '^instruments.*\.ktrace$' || true)
 xcrun xctrace record --instrument 'Metal Application' --instrument 'GPU' --attach "$pid" --time-limit "${seconds}s" --output "$out" > /dev/null
+for f in $(ls "$tmp" 2>/dev/null | grep '^instruments.*\.ktrace$' || true); do
+    grep -qxF "$f" <<< "$before" || rm -f "$tmp/$f"
+done
 kill "$pid" 2>/dev/null || true
 wait "$launcher" 2>/dev/null || true
 python3 "$REPO/tools/gpu/trace_summary.py" "$out"
