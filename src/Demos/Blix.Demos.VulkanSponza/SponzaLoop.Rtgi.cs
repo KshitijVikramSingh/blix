@@ -141,8 +141,9 @@ internal sealed partial class SponzaLoop
     // (--rtgi-no-parent-chain: its own samples alone).
     // The parent weighed as the better of two estimates (shrinkage, rtgi_filter.comp); --rtgi-no-parent-shrink: by the
     // agreement test (--rtgi-parent-sigma, --rtgi-parent-tol).
-    // --rtgi-no-parent-pool: the shrinkage's cell error from the cell's own spread, not pooled over its neighbours.
-    private bool rtgiParentInterp = true, rtgiParentChain = true, rtgiParentShrink = true, rtgiParentPool = true;
+    // --rtgi-parent-pool: the shrinkage's cell error from the spread pooled over its neighbours alike in light, not its
+    // own: noise left 10% lower, error alike, the gate's seams 0.032 / 1.025 against 0.027 / 1.021 -- off (the user).
+    private bool rtgiParentInterp = true, rtgiParentChain = true, rtgiParentShrink = true, rtgiParentPool;
     private GpuBufferHandle rtgiStands;
     // --rtgi-filter-floor F: the neighbours' share never below F, however many samples a cell holds (0: it fades to none).
     private float rtgiFilterFloor = 1f;
@@ -275,7 +276,7 @@ internal sealed partial class SponzaLoop
         if (args.Flag("rtgi-no-parent-interp")) rtgiParentInterp = false;
         if (args.Flag("rtgi-no-parent-chain")) rtgiParentChain = false;
         if (args.Flag("rtgi-no-parent-shrink")) rtgiParentShrink = false;
-        if (args.Flag("rtgi-no-parent-pool")) rtgiParentPool = false;
+        if (args.Flag("rtgi-parent-pool")) rtgiParentPool = true;
         if (args.Float("rtgi-filter-floor") is { } ffl) rtgiFilterFloor = Math.Clamp(ffl, 0f, 1f);
         if (args.Flag("rtgi-no-cascade")) rtgiCascade = false;
         args.Flag("rtgi-cascade");
