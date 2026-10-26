@@ -454,6 +454,10 @@ internal sealed partial class SponzaLoop
         var towardSun = -Vector3.Normalize(sunDirection);
         var groups = (n + 63) / 64;
         var sunTurned = rtgiTraced > 0 && Vector3.Dot(towardSun, rtgiLastSun) < MathF.Cos(0.02f * MathF.PI / 180f);
+        // Logged: the sun the cache trains under, its first frames and every turn -- a boot that showed the scene's default
+        // sun's shadows and then snapped to --sun (the user, Crytek Sponza, 2026-10-26).
+        if (sunTurned || rtgiTraced < 3)
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] rtgi: sun toward {towardSun} at traced frame {rtgiTraced} (frame {framesRendered}){(sunTurned ? ", turned" : "")}."));
         rtgiLastSun = towardSun;
         if (sunTurned && rtgiSunCut > 0f) rtgiSunEpoch++;
         var frameNumber = rtgiFrameCount + 1u;
