@@ -27,7 +27,9 @@ layout(set = 0, binding = 0) uniform RtgiFilter {
                     // w the dirty list's room
     vec4 uParent;   // x the samples the parent stands for (0: no parent); y the top level; z the neighbours' share at least;
                     // w 1: the blend is what is shown (--rtgi-denoise), else the cell's own light (the blend only judging)
-    vec4 uFilter2;  // x 1: the parent's blend (the cascade), else its raw light
+    vec4 uFilter2;  // x 1: the parent's blend (the cascade), else its raw light; y the standard errors within which the
+                    // cell agrees with its parent (0: the parent weighs uParent.x alone); z the share of the light they may
+                    // differ by besides; w the samples the parent may weigh at most
     vec4 uDone;     // x the frame's number; y frames between drift checks; z the relative error under which a cell is
                     // done; w the dark floor (absolute luminance the error is measured against at least)
 } u;
@@ -104,7 +106,22 @@ void main() {
         uint t = rtgiFind(rtgiCellHash(cell.xyz >> 1, level + 1u, side, u.uParams), u.uParams);
         if (t != 0xFFFFFFFFu && rtgiResolved[2u * t + 1u].y >= 0.5) {
             vec4 parent = u.uFilter2.x > 0.5 ? rtgiFiltered[t] : rtgiResolved[2u * t];
-            blended = (blended * stands + parent * u.uParent.x) / (stands + u.uParent.x);
+            // Cell size by how smooth the light is: where the cell agrees with its parent within their standard errors
+            // (and uFilter2.z of the light), the parent weighs all its samples (to uFilter2.w) -- the coarse cell's
+            // convergence wherever the light is smooth, the fine cell's where it differs (a crease, a shadow's edge). Few
+            // samples, wide errors: the parent; detail shows as the cell gathers enough to tell. 10 cm cells everywhere
+            // converged as 4x the rays but read creases 3% bright and Crytek Sponza's settled error 0.111 for 0.090.
+            float wp = u.uParent.x;
+            if (u.uFilter2.y > 0.0) {
+                float heldP = rtgiResolved[2u * t + 1u].y;
+                vec4 mp = rtgiMoments[3u * t];
+                float seP2 = max(mp.y - mp.x * mp.x, 0.0) / max(heldP, 1.0);
+                float seB2 = sigma * sigma * held / max(stands, 1.0);
+                float lb = lum(blended.rgb), lp = lum(parent.rgb);
+                float dp = (lb - lp) / (u.uFilter2.y * sqrt(seB2 + seP2) + u.uFilter2.z * max(lb, lp) + 1e-5);
+                wp += min(heldP, u.uFilter2.w) * exp(-0.5 * dp * dp);
+            }
+            blended = (blended * stands + parent * wp) / (stands + wp);
         }
     }
     bool showBlend = u.uParent.w > 0.5;

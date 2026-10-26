@@ -1,0 +1,70 @@
+#version 450
+
+// --rtgi (SponzaLoop.Rtgi.cs): the frame's samples carried up the levels. Training adds each sample to its own cell alone
+// (rtgi_train.comp); this adds each cell's frame -- every accumulator word is a sum -- to the uPush.y - 1 cells above it
+// (each a level up holding it: its coordinates halved, the same side), made where they are not held and listed for the
+// resolve: the same sums as each sample adding itself to its level and those above, at atomics a cell instead of a
+// sample (five sets a sample, the coarse cells' shared by thousands of samples a frame -- the training 0.46 ms at Cornell's
+// rays, 6.4 at 4x, 2026-10-26). Carried to the top level instead, the cascade leaned every cell on cells tens of metres
+// wide: Cornell's error at 30 frames 0.14 against 0.06.
+// Two dispatches: uPush.x 0 copies each cell training listed (the list's head) to the scratch -- its own samples, before
+// any are added to it from below; 1 adds those up.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform RtgiPushUp {
+    vec4 uParams;   // rtgiParams (rtgi_cache.glsl)
+    vec4 uPush;     // x the dispatch (0 copy, 1 add); y the levels a sample trains, its own first; z the dirty list's room;
+                    // w the frame's number
+} u;
+
+layout(std430, set = 0, binding = 1) buffer RtgiKeys { uint rtgiKeys[]; };
+layout(std430, set = 0, binding = 2) buffer RtgiAccum { uint rtgiAccum[]; };
+layout(std430, set = 0, binding = 3) buffer RtgiStamps { uvec2 rtgiStamps[]; };
+layout(std430, set = 0, binding = 4) buffer RtgiDirty { uint dirtyCount; uint dirtyPad[3]; uint dirty[]; };
+layout(std430, set = 0, binding = 5) buffer RtgiCells { ivec4 rtgiCells[]; };
+// The cells training listed: how many (x, at most its room), then RTGI_ACC words each.
+layout(std430, set = 0, binding = 6) buffer RtgiPushScratch { uvec4 scratchHead; uint scratch[]; };
+
+#define RTGI_KEYS(i) rtgiKeys[i]
+#include "rtgi_cache.glsl"
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    uint room = uint(u.uPush.z);
+    if (u.uPush.x < 0.5) {
+        uint listed = min(dirtyCount, room);
+        if (i == 0u) scratchHead.x = listed;
+        if (i >= listed) return;
+        uint s = dirty[i];
+        for (uint k = 0u; k < RTGI_ACC; k++) scratch[RTGI_ACC * i + k] = rtgiAccum[RTGI_ACC * s + k];
+        return;
+    }
+    if (i >= scratchHead.x) return;
+    uint s = dirty[i];
+    if (rtgiKeys[s] == 0u) return;
+    if (scratch[RTGI_ACC * i + 3u] == 0u && scratch[RTGI_ACC * i + 6u] == 0u) return;
+    ivec4 cell = rtgiCells[s];
+    uint level = uint(cell.w) / 6u, side = uint(cell.w) % 6u;
+    uint frame = uint(u.uPush.w);
+    for (uint d = 1u; d < uint(u.uPush.y) && level + d <= uint(u.uParams.w); d++) {
+        ivec3 c = cell.xyz >> int(d);
+        uvec2 h = rtgiCellHash(c, level + d, side, u.uParams);
+        uint t = 0xFFFFFFFFu;
+        for (uint k = 0u; k < RTGI_PROBES; k++) {
+            uint q = (h.x + k) & uint(u.uParams.z);
+            uint prev = atomicCompSwap(rtgiKeys[q], 0u, h.y);
+            if (prev == 0u) rtgiCells[q] = ivec4(c, int((level + d) * 6u + side));
+            if (prev == 0u || prev == h.y) { t = q; break; }
+        }
+        if (t == 0xFFFFFFFFu) continue;
+        if (atomicExchange(rtgiStamps[t].x, frame) != frame) {
+            uint k = atomicAdd(dirtyCount, 1u);
+            if (k < room) dirty[k] = t;
+        }
+        for (uint k = 0u; k < RTGI_ACC; k++) {
+            uint v = scratch[RTGI_ACC * i + k];
+            if (v != 0u) atomicAdd(rtgiAccum[RTGI_ACC * t + k], v);
+        }
+    }
+}
