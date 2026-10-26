@@ -24,7 +24,10 @@ layout(set = 0, binding = 0) uniform RtgiFilter {
     vec4 uParams;   // rtgiParams (rtgi_cache.glsl)
     vec4 uFilter;   // x samples at which the neighbours' share starts to fall; y at which it is gone; z luminance sigmas;
                     // w the dirty list's room
-    vec4 uParent;   // x the samples the parent stands for (0: no parent); y the top level; z the neighbours' share at least
+    vec4 uParent;   // x the samples the parent stands for (0: no parent); y the top level; z the neighbours' share at least;
+                    // w 1: the blend is what is shown (--rtgi-denoise), else the cell's own light (the blend only judging)
+    vec4 uDone;     // x the frame's number; y frames between drift checks; z the relative error under which a cell is
+                    // done; w the dark floor (absolute luminance the error is measured against at least)
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer RtgiKeys { uint rtgiKeys[]; };
@@ -33,6 +36,9 @@ layout(std430, set = 0, binding = 3) readonly buffer RtgiMoments { vec4 rtgiMome
 layout(std430, set = 0, binding = 4) readonly buffer RtgiCells { ivec4 rtgiCells[]; };
 layout(std430, set = 0, binding = 5) readonly buffer RtgiDirty { uint dirtyCount; uint dirtyPad[3]; uint dirty[]; };
 layout(std430, set = 0, binding = 6) buffer RtgiFiltered { vec4 rtgiFiltered[]; };
+// Per slot, whether it is done (SponzaLoop.Rtgi.cs): x the shown light's relative standard error, y its luminance at the
+// last drift check, z that check's frame, w 1 when done.
+layout(std430, set = 0, binding = 7) buffer RtgiConfidence { vec4 rtgiConfidence[]; };
 
 #define RTGI_KEYS(i) rtgiKeys[i]
 #include "rtgi_cache.glsl"
@@ -59,7 +65,11 @@ void main() {
     float wSelf = min(held, 64.0);
     vec4 sum = r0 * wSelf;
     float wSum = wSelf;
-    if (share > 0.0) {
+    // The pooled spread (when is it done): the samples' variance over the cell and its neighbours alike in light, by the
+    // same stop, each by its samples to 64 -- nine cells' samples, so a rare bright one is seldom missing from them all.
+    float varSelf = max(m.y - m.x * m.x, 0.0);
+    float poolVar = varSelf * wSelf, poolW = wSelf;
+    {
         // The two axes in the side's plane.
         uint axis = side / 2u;
         ivec3 ua = axis == 0u ? ivec3(0, 1, 0) : ivec3(1, 0, 0);
@@ -76,7 +86,10 @@ void main() {
                 float ln = lum(rn.rgb);
                 float sigmaN2 = max(mn.y - mn.x * mn.x, 0.0) / max(r1.y, 1.0);
                 float d = (ln - l0) / (u.uFilter.z * sqrt(sigma * sigma + sigmaN2) + 0.1 * max(l0, ln) + 1e-5);
-                float w = share * min(r1.y, 64.0) * ((a == 0 || b == 0) ? 1.0 : 0.7) * exp(-0.5 * d * d);
+                float pw = min(r1.y, 64.0) * ((a == 0 || b == 0) ? 1.0 : 0.7) * exp(-0.5 * d * d);
+                poolVar += max(mn.y - mn.x * mn.x, 0.0) * pw;
+                poolW += pw;
+                float w = share * pw;
                 sum += rn * w;
                 wSum += w;
             }
@@ -92,5 +105,24 @@ void main() {
             blended = (blended * stands + parent * u.uParent.x) / (stands + u.uParent.x);
         }
     }
-    rtgiFiltered[s] = blended;
+    bool showBlend = u.uParent.w > 0.5;
+    vec4 shown = showBlend ? blended : r0;
+    rtgiFiltered[s] = shown;
+    // Done: the shown light's standard error (the pooled spread over the samples it stands for) under uDone.z of it, and
+    // no drift at the last check -- a neighbourhood agreeing on a value still waiting for its bounce keeps creeping, and
+    // stays open. Checked every uDone.y frames this cell is trained.
+    float pooled = poolVar / max(poolW, 1e-6);
+    float se = sqrt(pooled / max(showBlend ? stands : held, 1.0));
+    float ls = lum(shown.rgb);
+    float rel = se / max(ls, u.uDone.w);
+    vec4 c = rtgiConfidence[s];
+    float frame = u.uDone.x;
+    if (c.z <= 0.0 || frame - c.z >= u.uDone.y) {
+        bool drifted = c.z > 0.0 && abs(ls - c.y) > max(2.0 * se, u.uDone.z * max(ls, u.uDone.w));
+        c.w = (!drifted && c.z > 0.0 && rel < u.uDone.z) ? 1.0 : 0.0;
+        c.y = ls;
+        c.z = frame;
+    } else if (rel >= u.uDone.z) c.w = 0.0;
+    c.x = rel;
+    rtgiConfidence[s] = c;
 }

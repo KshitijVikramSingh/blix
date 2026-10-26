@@ -94,7 +94,14 @@ internal sealed partial class SponzaLoop
     private float rtgiGuide = 0.5f, rtgiGuideMin = 16f;
     // --rtgi-adaptive S: that share of the visible points placed by the cache's uncertainty, each the likeliest of
     // --rtgi-adaptive-k tiles (0.5, 4; 0: a tile each, rtgi_rays.comp).
-    private float rtgiAdaptive = 0.5f, rtgiAdaptiveK = 4f;
+    private float rtgiAdaptive = 1f, rtgiAdaptiveK = 4f;
+    // When a cell is done (rtgi_filter.comp, the blend judging): its shown light's relative standard error under
+    // --rtgi-done-error (0.02) against at least --rtgi-dark-floor (0.002), and no drift at the last check, every
+    // --rtgi-done-window frames it is trained (60). A done cell keeps 1 in --rtgi-trickle of its points' rays (8).
+    // --rtgi-view-done paints the bounce light green where done, red where open.
+    private float rtgiDoneError = 0.02f, rtgiDarkFloor = 0.002f, rtgiDoneWindow = 60f, rtgiTrickle = 8f;
+    private bool rtgiViewDone;
+    private GpuBufferHandle rtgiConfidence;
     private bool rtgiNoGradient;
     // The neighbour blend (rtgi_filter.comp): the neighbours' share falls from 1 at --rtgi-filter-from samples to 0 at
     // --rtgi-filter-to (32, 256), stopped beyond --rtgi-filter-sigma (2) of the cell's spread; --rtgi-no-filter: none.
@@ -173,6 +180,11 @@ internal sealed partial class SponzaLoop
         rtgiNoGradient = args.Flag("rtgi-no-gradient");
         if (args.Float("rtgi-adaptive") is { } ad) rtgiAdaptive = Math.Clamp(ad, 0f, 1f);
         if (args.Float("rtgi-adaptive-k") is { } ak) rtgiAdaptiveK = Math.Clamp(ak, 1f, 16f);
+        if (args.Float("rtgi-done-error") is { } de) rtgiDoneError = MathF.Max(1e-4f, de);
+        if (args.Float("rtgi-dark-floor") is { } df) rtgiDarkFloor = MathF.Max(1e-6f, df);
+        if (args.Float("rtgi-done-window") is { } dw) rtgiDoneWindow = MathF.Max(1f, dw);
+        if (args.Float("rtgi-trickle") is { } tr) rtgiTrickle = MathF.Max(1f, tr);
+        rtgiViewDone = args.Flag("rtgi-view-done");
         if (args.Flag("rtgi-contact")) rtgiContact = true;
         if (args.Flag("rtgi-no-contact")) rtgiContact = false;
         if (args.Int("rtgi-contact-rays") is { } cr) rtgiContactRays = Math.Max(1, cr);
@@ -279,6 +291,7 @@ internal sealed partial class SponzaLoop
             rtgiKeys = Own(device.CreateGpuBuffer(RtgiSlots * 4, new byte[RtgiSlots * 4], "sponza.rtgi.keys"));
             rtgiAccum = Own(device.CreateGpuBuffer(RtgiSlots * 52, new byte[RtgiSlots * 52], "sponza.rtgi.accum"));
             rtgiDirection = Own(device.CreateGpuBuffer(RtgiSlots * 16, new byte[RtgiSlots * 16], "sponza.rtgi.direction"));
+            rtgiConfidence = Own(device.CreateGpuBuffer(RtgiSlots * 16, new byte[RtgiSlots * 16], "sponza.rtgi.confidence"));
             rtgiResolved = Own(device.CreateGpuBuffer(RtgiSlots * 32, new byte[RtgiSlots * 32], "sponza.rtgi.resolved"));
             rtgiMoments = Own(device.CreateGpuBuffer(RtgiSlots * 48, new byte[RtgiSlots * 48], "sponza.rtgi.moments"));
             rtgiStamps = Own(device.CreateGpuBuffer(RtgiSlots * 8, new byte[RtgiSlots * 8], "sponza.rtgi.stamps"));
@@ -391,8 +404,10 @@ internal sealed partial class SponzaLoop
             new ShaderUniform[]
             {
                 new("uParams", new Vector4Uniform(RtgiParams)),
-                new("uFilter", new Vector4Uniform(rtgiNoFilter ? new Vector4(0f, 0f, rtgiFilterSigma, RtgiDirtyRoom) : new Vector4(rtgiFilterFrom, rtgiFilterTo, rtgiFilterSigma, RtgiDirtyRoom))),
-                new("uParent", new Vector4Uniform(new Vector4(rtgiNoFilter ? 0f : rtgiParentWeight, RtgiTopLevel, rtgiNoFilter ? 0f : rtgiFilterFloor, 0f))),
+                // The blend always runs -- it judges when a cell is done -- and is shown only with --rtgi-denoise.
+                new("uFilter", new Vector4Uniform(new Vector4(rtgiFilterFrom, rtgiFilterTo, rtgiFilterSigma, RtgiDirtyRoom))),
+                new("uParent", new Vector4Uniform(new Vector4(rtgiParentWeight, RtgiTopLevel, rtgiFilterFloor, rtgiNoFilter ? 0f : 1f))),
+                new("uDone", new Vector4Uniform(new Vector4(frameNumber, rtgiDoneWindow, rtgiDoneError, rtgiDarkFloor))),
             },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
@@ -403,6 +418,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiCells", rtgiCells),
                 new ShaderBufferBinding("RtgiDirty", rtgiDirtyBufs[cur]),
                 new ShaderBufferBinding("RtgiFiltered", rtgiFiltered),
+                new ShaderBufferBinding("RtgiConfidence", rtgiConfidence),
             }));
         // A sixteenth of the slots a frame: those no training reached for --rtgi-max-age frames emptied.
         var slice = RtgiSlots / RtgiEvictSlices;
@@ -416,6 +432,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiMoments", rtgiMoments),
                 new ShaderBufferBinding("RtgiStamps", rtgiStamps),
                 new ShaderBufferBinding("RtgiDirection", rtgiDirection),
+                new ShaderBufferBinding("RtgiConfidence", rtgiConfidence),
             }));
 
         // S3: last frame's visible points (tile i is point i) into this frame's reservoirs, merged with the frame before's.
@@ -483,7 +500,7 @@ internal sealed partial class SponzaLoop
                 new("uParams", new Vector4Uniform(RtgiParams)),
                 new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, 0f, 0f, 0f))),
                 new("uGuide", new Vector4Uniform(new Vector4(rtgiGuide, rtgiGuideMin, 0f, 0f))),
-                new("uAdapt", new Vector4Uniform(new Vector4(rtgiAdaptive, rtgiAdaptiveK, 0f, 0f))),
+                new("uAdapt", new Vector4Uniform(new Vector4(rtgiAdaptive, rtgiAdaptiveK, rtgiDoneError, rtgiTrickle))),
             },
             new[]
             {
@@ -503,6 +520,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiResolved", rtgiResolved),
                 new ShaderBufferBinding("RtgiDirection", rtgiDirection),
                 new ShaderBufferBinding("RtgiMoments", rtgiMoments),
+                new ShaderBufferBinding("RtgiConfidence", rtgiConfidence),
             }));
 
         // This frame's contact rays (S4), into the same Metal group.
@@ -612,13 +630,14 @@ internal sealed partial class SponzaLoop
                 new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, 0f))),
                 new("uHalf", new Vector4Uniform(new Vector4(0f, sub.X, sub.Y, 0f))),
                 new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, rtgiNoGradient ? 0f : 1f, 0f, 0f))),
-                new("uContact", new Vector4Uniform(new Vector4(rtgiContact ? 1f : 0f, 0.3f, 1.25f, 0f))),
+                new("uContact", new Vector4Uniform(new Vector4(rtgiContact ? 1f : 0f, 0.3f, 1.25f, rtgiViewDone ? 1f : 0f))),
             },
             buffers: new[]
             {
                 new ShaderBufferBinding("RtgiKeys", rtgiKeys), new ShaderBufferBinding("RtgiResolved", rtgiResolved),
                 new ShaderBufferBinding("RtgiFiltered", rtgiFiltered), new ShaderBufferBinding("RtgiDirection", rtgiDirection),
                 new ShaderBufferBinding("RtgiMoments", rtgiMoments),
+                new ShaderBufferBinding("RtgiConfidence", rtgiConfidence),
             }));
     }
 
@@ -667,6 +686,8 @@ internal sealed partial class SponzaLoop
         var keys = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(rtgiKeys, 0, count * 4).AsSpan());
         var resolved = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(rtgiResolved, 0, count * 32).AsSpan());
         var moments = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(rtgiMoments, 0, count * 48).AsSpan());
+        var confidence = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(rtgiConfidence, 0, count * 16).AsSpan());
+        double done = 0;
         double cutsLight = 0;
         int used = 0, trained = 0, bad = 0;
         double samples = 0, energy = 0;
@@ -686,6 +707,7 @@ internal sealed partial class SponzaLoop
             trained++;
             samples += r1.Y;
             cutsLight += moments[3 * s].W;
+            if (confidence[s].W > 0.5f) done++;
             var e = resolved[2 * s];
             energy += 0.2126 * e.X + 0.7152 * e.Y + 0.0722 * e.Z;
         }
@@ -695,7 +717,8 @@ internal sealed partial class SponzaLoop
         samples *= Share;
         energy *= Share;
         cutsLight *= Share;
+        done *= Share;
         return string.Create(CultureInfo.InvariantCulture,
-            $"rtgi: ~{used:N0} of {RtgiSlots:N0} slots held ({100.0 * used / RtgiSlots:0.0}%), {trained:N0} trained, {samples / Math.Max(1, trained):0.0} samples a cell, history cut {cutsLight / Math.Max(1, trained):0.00} times a cell, mean indirect {energy / Math.Max(1, trained):0.000}; {bad:N0} not finite{firstBad}; {rtgiTraced:N0} frames traced");
+            $"rtgi: ~{used:N0} of {RtgiSlots:N0} slots held ({100.0 * used / RtgiSlots:0.0}%), {trained:N0} trained, {samples / Math.Max(1, trained):0.0} samples a cell, {100.0 * done / Math.Max(1, trained):0.0}% done, history cut {cutsLight / Math.Max(1, trained):0.00} times a cell, mean indirect {energy / Math.Max(1, trained):0.000}; {bad:N0} not finite{firstBad}; {rtgiTraced:N0} frames traced");
     }
 }

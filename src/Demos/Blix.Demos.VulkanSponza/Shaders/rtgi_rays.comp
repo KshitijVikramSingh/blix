@@ -23,7 +23,9 @@ layout(set = 0, binding = 0) uniform RtgiRays {
     vec4 uParams;        // rtgiParams (rtgi_cache.glsl)
     vec4 uNearField;     // x the near field's radius (RTGI_NEAR)
     vec4 uGuide;         // x the share of rays guided where a cell has learnt its light's way (0: none); y samples it must hold
-    vec4 uAdapt;         // x the share of visible points placed by uncertainty (0: every tile its own); y tiles weighed for each
+    vec4 uAdapt;         // x the share of visible points placed by uncertainty (0: every tile its own); y tiles weighed for each;
+                         // z the relative error a cell is done under (the blend's, rtgi_filter.comp); w 1 in this many of a
+                         // done cell's points keeps its ray (the validation trickle)
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -41,6 +43,7 @@ layout(std430, set = 0, binding = 10) readonly buffer RtgiKeys { uint rtgiKeys[]
 layout(std430, set = 0, binding = 11) readonly buffer RtgiResolved { vec4 rtgiResolved[]; };
 layout(std430, set = 0, binding = 12) readonly buffer RtgiDirection { vec4 rtgiDirection[]; };
 layout(std430, set = 0, binding = 13) readonly buffer RtgiMoments { vec4 rtgiMoments[]; };
+layout(std430, set = 0, binding = 14) readonly buffer RtgiConfidence { vec4 rtgiConfidence[]; };
 
 #define RTGI_KEYS(i) rtgiKeys[i]
 #define RTGI_NEAR u.uNearField.x
@@ -80,7 +83,7 @@ void main() {
         bool adaptive = float(rtgiHash(i ^ 0x7F4A7C15u ^ uint(u.uCounts.z) * 0x9E3779B9u) & 0xFFFFu) / 65536.0 < u.uAdapt.x;
         uint candidates = adaptive ? uint(u.uAdapt.y) : 1u;
         float wsum = 0.0;
-        bool found = false;
+        bool found = false, chosenDone = false;
         uint hc = h;
         for (uint c = 0u; c < candidates; c++) {
             uint tile = c == 0u ? i : (rtgiHash(hc) % visible);
@@ -93,22 +96,26 @@ void main() {
             vec2 ndcc = (vec2(qc) + 0.5) / u.uSize.xy * 2.0 - 1.0;
             vec4 wc = u.uInvViewProj * vec4(ndcc, rawc, 1.0);
             vec3 pc = wc.xyz / wc.w, nc = normalize(nsc.xyz);
+            // How unsure its cell is: the blend's relative error (rtgi_filter.comp), at least the done threshold; a done
+            // cell an eighth of that (a new or unheld one: 1).
             float unsure = 1.0;
+            bool done = false;
             if (adaptive) {
                 uint lc = rtgiLevel(pc, u.uCamera.xyz, u.uParams);
                 uint sc = rtgiFind(rtgiCellHash(ivec3(floor(pc / rtgiSize(lc, u.uParams))), lc, rtgiSide(nc), u.uParams), u.uParams);
-                if (sc != 0xFFFFFFFFu) {
-                    float held = rtgiResolved[2u * sc + 1u].y;
-                    vec4 m = rtgiMoments[3u * sc];
-                    float mean = max(dot(rtgiResolved[2u * sc].rgb, vec3(0.2126, 0.7152, 0.0722)), 1e-4);
-                    unsure = held < 4.0 ? 1.0 : clamp(sqrt(max(m.y - m.x * m.x, 0.0) / held) / mean, 1e-3, 1.0);
+                if (sc != 0xFFFFFFFFu && rtgiResolved[2u * sc + 1u].y >= 4.0) {
+                    vec4 conf = rtgiConfidence[sc];
+                    done = conf.w > 0.5;
+                    unsure = done ? 0.125 * u.uAdapt.z : clamp(conf.x, u.uAdapt.z, 1.0);
                 }
             }
             wsum += unsure;
             hc = rtgiHash(hc ^ 0x68E31DA4u);
-            if (float(hc & 0xFFFFFFu) / 16777216.0 * wsum < unsure) { p = pc; n = nc; found = true; }
+            if (float(hc & 0xFFFFFFu) / 16777216.0 * wsum < unsure) { p = pc; n = nc; found = true; chosenDone = done; }
         }
         if (!found) { none(i); return; }
+        // Every candidate done: the GPU's rays given back, one in uAdapt.w kept to notice what changes.
+        if (chosenDone && rtgiHash(hc ^ 0x1B873593u) % uint(u.uAdapt.w) != 0u) { none(i); return; }
     } else {
         if (u.uSun.w < 0.5) { none(i); return; }
         uint j = i - visible;

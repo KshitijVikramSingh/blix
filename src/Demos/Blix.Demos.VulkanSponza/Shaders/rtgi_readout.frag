@@ -18,7 +18,7 @@ layout(set = 0, binding = 0) uniform RtgiReadout {
     vec4 uCamera;        // xyz position
     vec4 uHalf;          // yz the full-res pixel of its 2x2
     vec4 uNearField;     // x the near field's radius (rtgi_cache.glsl's RTGI_NEAR); y 1: the gradient written
-    vec4 uContact;       // x 1: contact detail on; yz the ratio's clamp
+    vec4 uContact;       // x 1: contact detail on; yz the ratio's clamp; w 1: the done view
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -31,6 +31,7 @@ layout(std430, set = 0, binding = 5) readonly buffer RtgiFiltered { vec4 rtgiFil
 layout(std430, set = 0, binding = 6) readonly buffer RtgiDirection { vec4 rtgiDirection[]; };
 // The far light's share of a cell's light (the third moment vec4's w, rtgi_resolve.comp).
 layout(std430, set = 0, binding = 7) readonly buffer RtgiMoments { vec4 rtgiMoments[]; };
+layout(std430, set = 0, binding = 8) readonly buffer RtgiConfidence { vec4 rtgiConfidence[]; };
 
 #define RTGI_KEYS(i) rtgiKeys[i]
 #define RTGI_NEAR u.uNearField.x
@@ -140,5 +141,13 @@ void main() {
     // luminance per unit of normal along the surface). Radiance taken as linear in direction, L = a + b.w, the irradiance
     // vector's part along the surface is pi/4 b_t and the irradiance's change 2 pi / 3 b_t: 8/3 of it. Zero before
     // (2026-10-26): the bounce light lost every normal map. uNearField.y 0: none.
+    // --rtgi-view-done: the bounce light painted by the cell's state (its level's, nearest): green done, red open, its
+    // brightness the shown light's -- where the long tail still is.
+    if (u.uContact.w > 0.5) {
+        uint s = rtgiFind(rtgiCellHash(ivec3(floor(p / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
+        bool done = s != 0xFFFFFFFFu && rtgiConfidence[s].w > 0.5;
+        float l = max(dot(e.rgb, vec3(0.2126, 0.7152, 0.0722)), 0.05);
+        outIncident = vec4((done ? vec3(0.1, 1.0, 0.1) : vec3(1.0, 0.1, 0.1)) * l, sky);
+    }
     if (e.w > 0.0 && u.uNearField.y > 0.5) outIncidentGradient = vec4((8.0 / 3.0) * (bv - dot(bv, n) * n), 0.0);
 }
