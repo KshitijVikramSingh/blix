@@ -190,7 +190,7 @@ internal sealed class LabLoop : IGameLoop, IDebuggable, IDisposable
     public string DebugName => "tonemap-lab";
 
     private static readonly string[] Operators = { "Blix ACES", "Blix AgX", "Blix Reinhard", "Blix neutral", "GT7" };
-    private static readonly string[] Patterns = { "scene", "EDR patches (raw)", "hue ramp (through the pipeline)", "gamut bars (raw: Rec.709 then P3 primaries)", "EON diffuse table (raw, for lab/bsdf)", "EON hemispherical albedo (raw, for lab/bsdf)" };
+    private static readonly string[] Patterns = { "scene", "EDR patches (raw)", "hue ramp (through the pipeline)", "gamut bars (raw: Rec.709 then P3 primaries)", "EON diffuse table (raw, for lab/bsdf)", "EON hemispherical albedo (raw, for lab/bsdf)", "glTF BSDF eval (raw, for lab/bsdf)", "glTF BSDF pdf and interface (raw, for lab/bsdf)" };
     private static readonly string[] Presets = { "published GT7", "tuned for HDR (floor 0.30)", "custom (the sliders)" };
 
     // The two GT7 parameter sets. The tuned one is lab/tonemap/results/hdr_tuned.json, copied here: a fit run elsewhere,
