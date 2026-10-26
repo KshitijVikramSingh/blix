@@ -1181,11 +1181,12 @@ internal sealed class RenderSettings
     // (the user's, 2026-10-22: the image judged at full resolution, as the gate runs; 0.75 was the 2026-10-20 baseline,
     // the tree view 21.5 -> 28.5 fps).
     [Tune(0.5f, 1f)]   public float RenderScale = 1f;
-    // The traced sun shadows at half resolution too (only with HalfResLighting: the upsample brings the mask back). On by
-    // default since 2026-10-24: the trace grows with the sunlit pixels, 7.5-18 ms a frame close to a sunlit wall at full
-    // resolution, 0.6-1.8 at half. Cloth's shadows stair-step at either (to come). --full-res-shadows: off (it was, for
-    // blocky patches the upsample could not hide, worst on cloth).
-    [Tune]             public bool HalfResShadows = true;
+    // The traced sun shadows at half resolution too (only with HalfResLighting: the upsample brings the mask back). Off by
+    // default again since 2026-10-27 (the user's: full-resolution shadows); on 2026-10-24-27, for the trace growing with
+    // the sunlit pixels, 7.5-18 ms a frame close to a sunlit wall at full resolution, 0.6-1.8 at half -- at the cost of
+    // blocky patches the upsample could not hide, worst on cloth. Cloth's shadows stair-step at either (to come).
+    // --half-res-shadows: on.
+    [Tune]             public bool HalfResShadows = false;
     // Two-phase occlusion culling of the camera's opaque placements (scene_occlusion.comp; --no-occlusion turns it off
     // for the whole run). Off: the frustum alone decides -- the reference, for geometry that breaks up and comes back.
     [Tune]             public bool OcclusionCull = true;
