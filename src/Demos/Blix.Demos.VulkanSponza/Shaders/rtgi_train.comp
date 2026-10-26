@@ -28,7 +28,7 @@ layout(set = 0, binding = 0) uniform RtgiTrain {
     vec4 uTrain;         // x 1: a landing cell holding nothing counts as dark (else no sample); y 1: no coarser cell for it;
                          // z 1: a back face's hit read as a front's (else dark); w room for landing requests (0: none)
     vec4 uHitSun;        // x 1: each hit's sun traced (hit flag 8), else read from the hit cell; y 1: the levels three and four
-                         // up thinned
+                         // up thinned; z 1: keys and stamps read before their atomics
     vec4 uFallback;      // x the levels past two up a landing may look for a cell holding light (0: two up only); y 1: contact
                          // detail on (the near and far words written); z 1: landings deferred to their request's sample;
                          // w 1: a cell's words summed over the subgroup before they are written
@@ -77,6 +77,14 @@ uint rtgiInsertAt(vec3 p, vec3 n, uint level) {
     uvec2 h = rtgiCellHash(c, level, side, u.uParams);
     for (uint k = 0u; k < RTGI_PROBES; k++) {
         uint s = (h.x + k) & uint(u.uParams.z);
+        // Read first (uHitSun.z): a cell already held answers without an atomic -- most of a frame's inserts, five a
+        // sample. Keys only go from 0 to a key within a frame (emptied by the eviction pass alone), so a read key is current
+        // or 0, and the swap settles a 0.
+        if (u.uHitSun.z > 0.5) {
+            uint seen = rtgiKeys[s];
+            if (seen == h.y) return s;
+            if (seen != 0u) continue;
+        }
         uint prev = atomicCompSwap(rtgiKeys[s], 0u, h.y);
         if (prev == 0u) rtgiCells[s] = ivec4(c, int(level * 6u + side));
         if (prev == 0u || prev == h.y) return s;
@@ -144,7 +152,9 @@ uint appendRequest(bool need) {
 
 void writeCell(uint s, uint w[RTGI_ACC]) {
     uint frame = uint(u.uClamp.y);
-    uint k = appendDirty(atomicExchange(rtgiStamps[s].x, frame) != frame);
+    // Listed the first time this frame; read first (uHitSun.z), the swap only where it is not stamped this frame yet.
+    bool first = (u.uHitSun.z < 0.5 || rtgiStamps[s].x != frame) && atomicExchange(rtgiStamps[s].x, frame) != frame;
+    uint k = appendDirty(first);
     if (k < uint(u.uClamp.z)) dirty[k] = s;
     for (uint k = 0u; k < RTGI_ACC; k++)
         if (w[k] != 0u) atomicAdd(rtgiAccum[RTGI_ACC * s + k], w[k]);

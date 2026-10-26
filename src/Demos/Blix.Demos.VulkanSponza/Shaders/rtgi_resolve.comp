@@ -26,6 +26,8 @@ layout(set = 0, binding = 0) uniform RtgiResolve {
                      // w the samples a sun turn leaves a cell's light history (its sun visibility's: 4)
     vec4 uAge;       // x the share of its age a cell's light history holds at most (0: no limit); y that limit at least
     vec4 uList;      // x the sun's epoch (counts its turns); y the dirty list's room
+    vec4 uRotaR;     // x the samples from which a cell is settled; y a settled cell resolved one frame in this many (1:
+                     // every frame); z the frame's number
 } u;
 
 layout(std430, set = 0, binding = 1) buffer RtgiKeys { uint rtgiKeys[]; };
@@ -57,6 +59,10 @@ void main() {
     if (i >= min(dirtyCount, uint(u.uList.y))) return;
     uint s = dirty[i];
     if (rtgiKeys[s] == 0u) return;
+    // A settled cell (uRotaR.x samples) resolved one frame in uRotaR.y, its turn by its slot: its frame's samples stay in
+    // the accumulator and the next resolve takes them all -- nothing lost, its light a frame older.
+    if (u.uRotaR.y > 1.5 && rtgiResolved[2u * s + 1u].y >= u.uRotaR.x && (s + uint(u.uRotaR.z)) % uint(u.uRotaR.y) != 0u)
+        return;
     uvec4 a0 = rtgiAccum4[4u * s], a1 = rtgiAccum4[4u * s + 1u], a2 = rtgiAccum4[4u * s + 2u], a3 = rtgiAccum4[4u * s + 3u];
     uint count = a0.w, sunTraced = a1.z;
     vec4 r0 = rtgiResolved[2u * s], r1 = rtgiResolved[2u * s + 1u];

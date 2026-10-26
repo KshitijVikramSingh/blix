@@ -273,6 +273,12 @@ internal sealed partial class SponzaLoop
     private bool rtgiTraceHitSun = true;
     // A sample added three levels up 1 in 2, four up 1 in 4 (rtgi_train.comp). --rtgi-no-thin: every level every sample.
     private bool rtgiThin = true;
+    // Keys and stamps read before their atomics in training (rtgi_train.comp). --rtgi-no-read-first: the atomics always.
+    private bool rtgiReadFirst = true;
+    // --rtgi-interp-from N: the parent read interpolated from N samples, below it the cell holding it (32; rtgi_filter.comp).
+    private float rtgiInterpFrom = 32f;
+    // --rtgi-resolve-every N: a settled cell (--rtgi-filter-settled samples) resolved one frame in N (2; rtgi_resolve.comp).
+    private float rtgiResolveEvery = 2f;
     private float RtgiRandomFrame => (rtgiFrameCount + rtgiSeed * 1_000_003u) % (1u << 24);
     private int RtgiSlots => 1 << rtgiSlotsLog2;
     private Vector4 RtgiParams => new(rtgiCell, rtgiCellGrow, RtgiSlots - 1, RtgiTopLevel);
@@ -284,6 +290,9 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-hit-sun") is { } hs) rtgiHitSun = MathF.Max(0f, hs);
         if (args.Flag("rtgi-no-trace-hit-sun")) rtgiTraceHitSun = false;
         if (args.Flag("rtgi-no-thin")) rtgiThin = false;
+        if (args.Flag("rtgi-no-read-first")) rtgiReadFirst = false;
+        if (args.Float("rtgi-interp-from") is { } inf) rtgiInterpFrom = MathF.Max(0f, inf);
+        if (args.Float("rtgi-resolve-every") is { } rev) rtgiResolveEvery = MathF.Max(1f, MathF.Round(rev));
         if (args.Int("rtgi-tiles") is { } t) rtgiTiles = Math.Max(1, t);
         if (args.Int("rtgi-hits") is { } h) rtgiHitPoints = Math.Max(0, h);
         if (args.Int("rtgi-slots-log2") is { } sl) rtgiSlotsLog2 = Math.Clamp(sl, 16, 24);
@@ -551,7 +560,7 @@ internal sealed partial class SponzaLoop
                     new("uClamp", new Vector4Uniform(new Vector4(rtgiClampSigma, frameNumber, RtgiDirtyRoom, 0f))),
                     new("uGuideTable", new Vector4Uniform(new Vector4(rtgiGuide > 0f ? RtgiGuideSlots - 1 : 0f, 0f, 0f, 0f))),
                     new("uTrain", new Vector4Uniform(new Vector4(rtgiCountUnknown ? 1f : 0f, rtgiNoCoarse ? 1f : 0f, rtgiBackfaceLit ? 1f : 0f, rtgiRequests ? rtgiHitPoints : 0f))),
-                    new("uHitSun", new Vector4Uniform(new Vector4(rtgiTraceHitSun ? 1f : 0f, rtgiThin ? 1f : 0f, 0f, 0f))),
+                    new("uHitSun", new Vector4Uniform(new Vector4(rtgiTraceHitSun ? 1f : 0f, rtgiThin ? 1f : 0f, rtgiReadFirst ? 1f : 0f, 0f))),
                     new("uFallback", new Vector4Uniform(new Vector4(rtgiFallbackUp, rtgiContact ? 1f : 0f, rtgiDefer ? 1f : 0f, rtgiSubgroup ? 1f : 0f))),
                 },
                 new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
@@ -636,6 +645,7 @@ internal sealed partial class SponzaLoop
                 new("uChange", new Vector4Uniform(new Vector4(rtgiChangeFrames, rtgiFast, rtgiChangeFloor, rtgiSunCut))),
                 new("uAge", new Vector4Uniform(new Vector4(rtgiAge, rtgiAgeFloor, 0f, 0f))),
                 new("uList", new Vector4Uniform(new Vector4(rtgiSunEpoch, RtgiDirtyRoom, 0f, 0f))),
+                new("uRotaR", new Vector4Uniform(new Vector4(rtgiFilterSettled, rtgiResolveEvery, frameNumber, 0f))),
             },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
@@ -663,6 +673,7 @@ internal sealed partial class SponzaLoop
                 new("uParent2", new Vector4Uniform(new Vector4(rtgiParentInterp ? 1f : 0f, rtgiParentChain ? 1f : 0f, rtgiParentShrink ? 1f : 0f, rtgiParentPool ? 1f : 0f))),
                 new("uHit", new Vector4Uniform(new Vector4(rtgiHitPrior, 0f, 0f, 0f))),
                 new("uRota", new Vector4Uniform(new Vector4(rtgiFilterSettled, rtgiFilterEvery, rtgiFilterYoung, 0f))),
+                new("uInterp", new Vector4Uniform(new Vector4(rtgiInterpFrom, 0f, 0f, 0f))),
                 new("uDone", new Vector4Uniform(new Vector4(frameNumber, rtgiDoneWindow, rtgiDoneError, rtgiDarkFloor))),
             },
             Array.Empty<ShaderTextureBinding>(),

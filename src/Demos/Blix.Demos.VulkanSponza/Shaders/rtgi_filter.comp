@@ -37,6 +37,7 @@ layout(set = 0, binding = 0) uniform RtgiFilter {
                     // from the spread pooled over its neighbours, else its own
     vec4 uHit;      // x the share of the light its parent may differ from the cell by, per parent size over the mean hit
                     // distance (the geometric prior on the shrinkage's bias; 0: none)
+    vec4 uInterp;   // x the samples from which the parent is read interpolated (uParent2.x), below it the one holding it
     vec4 uRota;     // x the samples from which a cell is settled; y a settled cell blended one frame in this many (its turn by
                     // its slot), 1: every frame; z a young cell's (1: every frame)
     vec4 uDone;     // x the frame's number; y frames between drift checks; z the relative error under which a cell is
@@ -135,7 +136,9 @@ void main() {
             // centre sits a quarter or three quarters across its parent), each by what it holds. The containing parent's
             // flat mean differs from a fine cell's by the light's gradient across it -- a gently lit wall disagreed, and
             // fell back on the cell's own noise, once the cell held enough to tell (the user: the noise is on the flat).
-            if (u.uParent2.x > 0.5) {
+            // From uInterp.x samples: a cell younger leans on its parent almost wholly, the containing one will do --
+            // four lookups less, for most of the cells trained while the cache fills.
+            if (u.uParent2.x > 0.5 && held >= u.uInterp.x) {
                 uint axis = side / 2u;
                 ivec3 ua = axis == 0u ? ivec3(0, 1, 0) : ivec3(1, 0, 0);
                 ivec3 va = axis == 2u ? ivec3(0, 1, 0) : ivec3(0, 0, 1);
