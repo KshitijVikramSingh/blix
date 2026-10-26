@@ -57,6 +57,7 @@ internal sealed partial class SponzaLoop
     private double profMetalTraceMs, profMetalShadowMs;
     // The frame's size, for the TAA readout's share of pixels (set where the frame is recorded).
     private (int Width, int Height) profFrameSize;
+    private readonly double[] profMetalSlotMs = new double[4];
     private long profMetalTraces, profMetalShadows;
     private long profFrames;
 
@@ -208,6 +209,11 @@ internal sealed partial class SponzaLoop
             var shadow = tracer.ShadowStatsOf(-1);
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[profile]   metal a frame: closest traces {(trace.TotalGpuMs - profMetalTraceMs) / frames.Count:0.00} ms ({(trace.Dispatches - profMetalTraces) / (double)frames.Count:0.0} batches), shadow traces {(shadow.TotalGpuMs - profMetalShadowMs) / frames.Count:0.00} ms ({(shadow.Dispatches - profMetalShadows) / (double)frames.Count:0.0} batches); allocated {tracer.Memory.AllocatedMb:N0} of {tracer.Memory.RecommendedMb:N0} MB recommended"));
+            // The shadow traces by slot: 0-2 the pixels' kinds (with the clipmap's and other batches in 0), 3 the RTGI's.
+            var slotMs = new double[4];
+            for (var k = 0; k < 4; k++) { var st = tracer.ShadowStatsOf(k); slotMs[k] = (st.TotalGpuMs - profMetalSlotMs[k]) / frames.Count; profMetalSlotMs[k] = st.TotalGpuMs; }
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[profile]   metal shadow slots a frame (ms): pixels+batches {slotMs[0]:0.00}, pixels 1 {slotMs[1]:0.00}, pixels 2 {slotMs[2]:0.00}, rtgi {slotMs[3]:0.00}"));
             rtgiPanelMetal = string.Create(CultureInfo.InvariantCulture,
                 $"closest {(trace.TotalGpuMs - profMetalTraceMs) / frames.Count:0.00} ms, shadow {(shadow.TotalGpuMs - profMetalShadowMs) / frames.Count:0.00} ms a frame");
             profMetalTraceMs = trace.TotalGpuMs; profMetalTraces = trace.Dispatches;

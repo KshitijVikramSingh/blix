@@ -16,6 +16,9 @@
 #import <Metal/Metal.h>
 
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
+#include <unistd.h>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -723,6 +726,14 @@ struct HwxContext {
     static constexpr uint32_t kShadowSlots = 4;
     std::atomic<uint64_t> shadowDispatches[kShadowSlots]{}, shadowGpuNs[kShadowSlots]{}, shadowLastGpuNs[kShadowSlots]{}, shadowFailures[kShadowSlots]{};
     std::atomic<uint64_t> traceDispatches{0}, traceGpuNs{0}, traceLastGpuNs{0}, traceFailures{0};
+    // Each traced batch's own GPU time: its encoder's start and end sampled into a pair of this buffer's slots
+    // (TimedEncoder, StampNs). A grouped command buffer holds a frame's batches, and timed whole each batch's handler
+    // counted all of them -- the alpha-tested pixels' shadows and the RTGI's read 7.43 ms alike (2026-10-26). Nil where
+    // the device cannot sample at encoder boundaries: the command buffer's time, as before.
+    id<MTLCounterSampleBuffer> stamps;
+    static constexpr uint32_t kStampPairs = 2048;
+    std::atomic<uint32_t> stampNext{0};
+    double nsPerTick = 1.0;
     // The alpha test's inputs (hwx_set_alpha), bound to both tables: on for the shadow table, off for the trace's, so
     // the ray check keeps the software traversal's coverage.
     id<MTLBuffer> alphaOff, alphaOn, rowMaterial, materials, uvs;
@@ -735,6 +746,59 @@ struct HwxContext {
     id<MTLBuffer> positions, instances, triangles, owners, surfaces;
     std::string error;
 };
+
+// The timestamp counter set's sample buffer, and how many nanoseconds a GPU tick is (two CPU/GPU timestamp pairs 20 ms
+// apart; sampleTimestamps' CPU value is in nanoseconds -- read as mach ticks, every time came out 41.67x). Opt-in
+// (BLIX_METAL_STAMPS=1): sampling at encoder boundaries cost Crytek Sponza ~13 ms a frame (33.5 -> 46.2 ms, 2026-10-26).
+static void CreateStamps(HwxContext* c) {
+    const char* on = getenv("BLIX_METAL_STAMPS");
+    if (!on || on[0] != '1') return;
+    if (![c->device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary]) return;
+    id<MTLCounterSet> timestamps = nil;
+    for (id<MTLCounterSet> set in c->device.counterSets)
+        if ([set.name isEqualToString:MTLCommonCounterSetTimestamp]) timestamps = set;
+    if (!timestamps) return;
+    MTLCounterSampleBufferDescriptor* d = [MTLCounterSampleBufferDescriptor new];
+    d.counterSet = timestamps;
+    d.storageMode = MTLStorageModeShared;
+    d.sampleCount = 2 * HwxContext::kStampPairs;
+    d.label = @"blix-hwx batch stamps";
+    NSError* error = nil;
+    c->stamps = [c->device newCounterSampleBufferWithDescriptor:d error:&error];
+    if (!c->stamps) return;
+    MTLTimestamp cpu0 = 0, gpu0 = 0, cpu1 = 0, gpu1 = 0;
+    [c->device sampleTimestamps:&cpu0 gpuTimestamp:&gpu0];
+    usleep(20000);
+    [c->device sampleTimestamps:&cpu1 gpuTimestamp:&gpu1];
+    double cpuNs = double(cpu1 - cpu0);
+    if (gpu1 > gpu0 && cpuNs > 0) c->nsPerTick = cpuNs / double(gpu1 - gpu0);
+    fprintf(stderr, "[blix-hwx] batch stamps on: %.4f ns a GPU tick\n", c->nsPerTick);
+}
+
+// A compute encoder whose start and end are sampled into its pair (*pair; UINT32_MAX where untimed).
+static id<MTLComputeCommandEncoder> TimedEncoder(HwxContext* c, id<MTLCommandBuffer> cb, uint32_t* pair) {
+    *pair = UINT32_MAX;
+    if (!c->stamps) return [cb computeCommandEncoder];
+    uint32_t k = c->stampNext.fetch_add(1) % HwxContext::kStampPairs;
+    MTLComputePassDescriptor* d = [MTLComputePassDescriptor computePassDescriptor];
+    d.sampleBufferAttachments[0].sampleBuffer = c->stamps;
+    d.sampleBufferAttachments[0].startOfEncoderSampleIndex = 2 * k;
+    d.sampleBufferAttachments[0].endOfEncoderSampleIndex = 2 * k + 1;
+    *pair = k;
+    return [cb computeCommandEncoderWithDescriptor:d];
+}
+
+// The encoder's GPU time from its pair, once its command buffer completed; false where it has none.
+static bool StampNs(HwxContext* c, uint32_t pair, uint64_t* ns) {
+    if (pair == UINT32_MAX || !c->stamps) return false;
+    NSData* data = [c->stamps resolveCounterRange:NSMakeRange(2 * pair, 2)];
+    if (!data || data.length < 2 * sizeof(MTLCounterResultTimestamp)) return false;
+    const MTLCounterResultTimestamp* t = (const MTLCounterResultTimestamp*)data.bytes;
+    if (t[0].timestamp == MTLCounterErrorValue || t[1].timestamp == MTLCounterErrorValue || t[1].timestamp < t[0].timestamp)
+        return false;
+    *ns = uint64_t(double(t[1].timestamp - t[0].timestamp) * c->nsPerTick);
+    return true;
+}
 
 static int Fail(HwxContext* ctx, const std::string& message) {
     ctx->error = message;
@@ -812,6 +876,7 @@ HWX_EXPORT HwxContext* hwx_create(void* mtlDevice, char* err, int errLength) {
 
         auto* ctx = new HwxContext();
         ctx->device = device;
+        CreateStamps(ctx);
         ctx->queue = [device newCommandQueue];
         ctx->ownQueue = ctx->queue;
         ctx->queue.label = @"blix-hwx";
@@ -1241,8 +1306,9 @@ HWX_EXPORT int hwx_encode_shadow(HwxContext* ctx, void* sharedEvent, uint64_t wa
         else if (directionBuffer && directionBuffer.length < uint64_t(count) * 16) result = Fail(ctx, "the direction buffer is smaller than its count");
         else if ((alphaTest & 2u) != 0 && occludedBuffer.length < occludedOffset + (uint64_t(throughAt) + (pixelBuffer ? throughAt : count)) * 4)
             result = Fail(ctx, "the occlusion buffer has no room for the sheets' light past throughAt");
+        uint32_t pair = UINT32_MAX;
         if (result == 0 && count > 0) {
-            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            id<MTLComputeCommandEncoder> enc = TimedEncoder(ctx, cb, &pair);
             // The live count's dispatch size first (blix_limit_args), then the trace over that alone.
             if (limitBuffer) {
                 uint32_t cap = count;
@@ -1291,7 +1357,8 @@ HWX_EXPORT int hwx_encode_shadow(HwxContext* ctx, void* sharedEvent, uint64_t wa
         uint32_t slot = std::min(statSlot, HwxContext::kShadowSlots - 1);
         [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
             if (skipped || done.status != MTLCommandBufferStatusCompleted) { c->shadowFailures[slot]++; return; }
-            uint64_t ns = uint64_t((done.GPUEndTime - done.GPUStartTime) * 1e9);
+            uint64_t ns = 0;
+            if (!StampNs(c, pair, &ns)) ns = uint64_t((done.GPUEndTime - done.GPUStartTime) * 1e9);
             c->shadowLastGpuNs[slot] = ns;
             c->shadowGpuNs[slot] += ns;
             c->shadowDispatches[slot]++;
@@ -1332,8 +1399,9 @@ HWX_EXPORT int hwx_encode_trace(HwxContext* ctx, void* sharedEvent, uint64_t wai
         else if (!rayBuffer || rayBuffer.length < raysOffset + uint64_t(count) * 32) result = Fail(ctx, "the ray buffer is smaller than its count");
         else if (!hitBuffer || hitBuffer.length < hitsOffset + uint64_t(count) * 48) result = Fail(ctx, "the hit buffer is smaller than its count");
         else if (limitBuffer && limitBuffer.length < limitOffset + 4) result = Fail(ctx, "the limit buffer is smaller than its offset");
+        uint32_t pair = UINT32_MAX;
         if (result == 0 && count > 0) {
-            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            id<MTLComputeCommandEncoder> enc = TimedEncoder(ctx, cb, &pair);
             [enc setComputePipelineState:ctx->pso];
             [enc setBuffer:rayBuffer offset:raysOffset atIndex:0];
             [enc setBuffer:hitBuffer offset:hitsOffset atIndex:1];
@@ -1365,7 +1433,8 @@ HWX_EXPORT int hwx_encode_trace(HwxContext* ctx, void* sharedEvent, uint64_t wai
         bool skipped = result != 0;
         [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
             if (skipped || done.status != MTLCommandBufferStatusCompleted) { c->traceFailures++; return; }
-            uint64_t ns = uint64_t((done.GPUEndTime - done.GPUStartTime) * 1e9);
+            uint64_t ns = 0;
+            if (!StampNs(c, pair, &ns)) ns = uint64_t((done.GPUEndTime - done.GPUStartTime) * 1e9);
             c->traceLastGpuNs = ns;
             c->traceGpuNs += ns;
             c->traceDispatches++;
