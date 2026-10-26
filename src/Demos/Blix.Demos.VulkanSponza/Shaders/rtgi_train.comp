@@ -24,7 +24,7 @@ layout(set = 0, binding = 0) uniform RtgiTrain {
     vec4 uTrain;         // x 1: a landing cell holding nothing counts as dark (else no sample); y 1: no coarser cell for it;
                          // z 1: a back face's hit read as a front's (else dark); w room for landing requests (0: none)
     vec4 uFallback;      // x the levels past two up a landing may look for a cell holding light (0: two up only); y 1: contact
-                         // detail on (the near and far words written)
+                         // detail on (the near and far words written); z 1: landings deferred to their request's sample
 } u;
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
@@ -45,6 +45,9 @@ layout(std430, set = 0, binding = 10) readonly buffer RtgiMoments { vec4 rtgiMom
 layout(std430, set = 0, binding = 11) buffer RtgiStamps { uvec2 rtgiStamps[]; };
 layout(std430, set = 0, binding = 12) buffer RtgiDirty { uint dirtyCount; uint dirtyPad[3]; uint dirty[]; };
 layout(std430, set = 0, binding = 9) buffer RtgiRequests { uint requestCount; uint requestPad[3]; vec4 requests[]; };
+// Per point: where a deferred landing came from (rtgi_rays.comp copies it from its request) -- its point and ray weight,
+// its normal and the landing's albedo (packed), its ray's direction and w 1 (0: no deferred landing).
+layout(std430, set = 0, binding = 17) readonly buffer RtgiPointOrigins { vec4 pointOrigins[]; };
 // Per slot: its cell (coordinates, level x 6 + side), written when made -- the neighbour blend finds its neighbours by it
 // (rtgi_filter.comp); and the blended light the lookups read (indirect rgb, sky visibility).
 layout(std430, set = 0, binding = 13) buffer RtgiCells { ivec4 rtgiCells[]; };
@@ -104,6 +107,7 @@ vec4 irradianceAt(vec3 q, vec3 nq, out bool fine) {
 vec4 dither;
 vec3 sampleDir;
 float nearWord;   // this sample's near visibility, weighted (256ths): it left past the contact radius
+float sampleInvD; // 1 / how far its ray went (a miss: its reach)
 
 // rich: the sample's level and the two above, which the readout reads (its two, and two up where they hold nothing) -- the
 // irradiance vector and near visibility written; the levels above feed the blend's parent alone, which reads the light,
@@ -144,6 +148,9 @@ void add(uint s, vec3 e, bool counted, bool sky, bool sunTraced, bool sunLit, bo
         atomicAdd(rtgiAccum[RTGI_ACC * s + 8u], uint(int(floor(b.x + dither.x))));
         atomicAdd(rtgiAccum[RTGI_ACC * s + 9u], uint(int(floor(b.y + dither.y))));
         atomicAdd(rtgiAccum[RTGI_ACC * s + 10u], uint(int(floor(b.z + dither.z))));
+        // How near the geometry is: the inverse hit distance, its mean the harmonic -- the nearest occluders set how fast
+        // the light can change across the cell (rtgi_filter.comp's prior on how much its parent differs).
+        atomicAdd(rtgiAccum[RTGI_ACC * s + 13u], uint(sampleInvD * 256.0 + dither.y));
     }
     if (counted && rich && u.uFallback.y > 0.5) {
         // Near visibility (S4 contact detail, rtgi_readout.frag): its weight where the ray left past the contact radius --
@@ -175,6 +182,7 @@ void main() {
     float weight = points[2u * i + 1u].w;
     uvec4 h0 = hits[3u * i];
     nearWord = ((h0.w & 1u) == 0u || uintBitsToFloat(h0.x) > u.uNearField.y) ? weight * 256.0 : 0.0;
+    sampleInvD = (h0.w & 1u) == 0u ? 1.0 / max(rays[2u * i + 1u].w, 1.0) : 1.0 / max(uintBitsToFloat(h0.x), 0.05);
     vec3 e = vec3(0.0);
     bool counted = true, sky = false;
     if ((h0.w & 1u) == 0u) {
@@ -189,11 +197,23 @@ void main() {
         if (dot(nq, d) > 0.0) nq = -nq;
         bool fine;
         vec4 eq = irradianceAt(q, nq, fine);
+        bool deferred = false;
         if (!fine && u.uTrain.w > 0.0) {
             uint r = atomicAdd(requestCount, 1u);
-            if (r < uint(u.uTrain.w)) { requests[2u * r] = vec4(q, 1.0); requests[2u * r + 1u] = vec4(nq, 0.0); }
+            if (r < uint(u.uTrain.w)) {
+                requests[5u * r] = vec4(q, 1.0);
+                requests[5u * r + 1u] = vec4(nq, 0.0);
+                // Deferred (uFallback.z): the light at q is not guessed from cells around it -- the unseen behind an
+                // arch, inside a gap, read the open surfaces' light (bright) or none (dark, where it was lit round a
+                // corner) -- but taken from q's own sample next frame, its request traced: one more bounce of the path,
+                // a frame late. A request's own landings are not deferred again (the walk up the levels instead).
+                deferred = u.uFallback.z > 0.5 && pointOrigins[3u * i + 2u].w < 0.5;
+                requests[5u * r + 2u] = vec4(p.xyz, deferred ? weight : 0.0);
+                requests[5u * r + 3u] = vec4(n, uintBitsToFloat(h2.w));
+                requests[5u * r + 4u] = vec4(d, deferred ? 1.0 : 0.0);
+            }
         }
-        counted = eq.w > 0.5 || u.uTrain.x > 0.5;
+        counted = !deferred && (eq.w > 0.5 || u.uTrain.x > 0.5);
         e = unpackUnorm4x8(h2.w).rgb * eq.rgb;
     }
     e *= weight;
@@ -225,4 +245,20 @@ void main() {
     uint top = uint(u.uParams.w);
     for (uint k = 0u; k < uint(u.uNearField.w) && level + k <= top; k++)
         add(rtgiInsertAt(p.xyz, n, level + k), e, counted, sky, sunTraced, sunLit, k < 3u);
+    // A deferred landing's sample, now that this point -- its landing -- has its own: the light leaving here (this sample's
+    // indirect irradiance, its own sun ray's direct) times the albedo, along the origin's ray, into the origin's cells.
+    vec4 o0 = pointOrigins[3u * i + 2u];
+    if (o0.w > 0.5 && counted) {
+        vec4 oP = pointOrigins[3u * i], oN = pointOrigins[3u * i + 1u];
+        vec3 direct = u.uNearField.z * u.uSunIrradiance.rgb * max(0.0, dot(n, u.uSun.xyz)) * (sunLit ? 1.0 : 0.0);
+        vec3 eo = unpackUnorm4x8(floatBitsToUint(oN.w)).rgb * (e + direct) * oP.w;
+        if (!any(isnan(eo)) && !any(isinf(eo))) {
+            sampleDir = o0.xyz;
+            nearWord = 0.0;
+            sampleInvD = 1.0 / max(length(p.xyz - oP.xyz), 0.05);
+            uint lo = rtgiLevel(oP.xyz, u.uCamera.xyz, u.uParams);
+            for (uint k = 0u; k < uint(u.uNearField.w) && lo + k <= top; k++)
+                add(rtgiInsertAt(oP.xyz, oN.xyz, lo + k), eo, true, false, false, false, k < 3u);
+        }
+    }
 }

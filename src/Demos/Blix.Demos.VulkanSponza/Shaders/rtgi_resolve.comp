@@ -38,12 +38,14 @@ layout(std430, set = 0, binding = 4) buffer RtgiMoments { vec4 rtgiMoments[]; };
 // Per slot: the irradiance vector's running mean (xyz; luminance along where the light comes from) and its near visibility
 // (w), by the light's weights.
 layout(std430, set = 0, binding = 8) buffer RtgiDirection { vec4 rtgiDirection[]; };
+// Per slot: the running mean of its rays' inverse hit distances (rtgi_filter.comp's geometric prior).
+layout(std430, set = 0, binding = 9) buffer RtgiHitInv { float rtgiHitInv[]; };
 layout(std430, set = 0, binding = 5) buffer RtgiStamps { uvec2 rtgiStamps[]; };
 layout(std430, set = 0, binding = 6) readonly buffer RtgiDirty { uint dirtyCount; uint dirtyPad[3]; uint dirty[]; };
 // The other parity's list: its count zeroed here for the next frame's training.
 layout(std430, set = 0, binding = 7) buffer RtgiNextDirty { uint nextDirtyCount; uint nextDirtyPad[3]; uint nextDirty[]; };
 
-#define RTGI_ACC 13u
+#define RTGI_ACC 14u
 #define RTGI_SCALE 4096.0
 #define RTGI_LUM2_SCALE 4096.0
 
@@ -99,6 +101,7 @@ void main() {
             m.w += 1.0;
             m.z = 0.0;
             dir = vec4(frameB, frameNear);
+            rtgiHitInv[s] = float(rtgiAccum[RTGI_ACC * s + 13u]) / (256.0 * n);
             fs.w = frameFar;
         } else {
             // At most 1: a cell given more samples in a frame than it holds (the coarse fallback's, hundreds) took a weight
@@ -107,6 +110,7 @@ void main() {
             r0 = vec4(mix(r0.rgb, mean, w), mix(r0.a, sky, w));
             dir = vec4(mix(dir.xyz, frameB, w), mix(dir.w, frameNear, w));
             fs.w = mix(fs.w, frameFar, w);
+            rtgiHitInv[s] = mix(rtgiHitInv[s], float(rtgiAccum[RTGI_ACC * s + 13u]) / (256.0 * n), w);
         }
         rtgiDirection[s] = dir;
         r1.y = held;

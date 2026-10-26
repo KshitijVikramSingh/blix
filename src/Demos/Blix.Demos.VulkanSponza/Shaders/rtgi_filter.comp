@@ -35,6 +35,8 @@ layout(set = 0, binding = 0) uniform RtgiFilter {
                     // (its own and what it leaned on, the chain), else by its own samples; z 1: weighed as the better of two
                     // estimates (shrinkage), else by the agreement test (uFilter2.y, z); w 1: the shrinkage's cell error
                     // from the spread pooled over its neighbours, else its own
+    vec4 uHit;      // x the share of the light its parent may differ from the cell by, per parent size over the mean hit
+                    // distance (the geometric prior on the shrinkage's bias; 0: none)
     vec4 uRota;     // x the samples from which a cell is settled; y a settled cell blended one frame in this many (its turn by
                     // its slot), 1: every frame
     vec4 uDone;     // x the frame's number; y frames between drift checks; z the relative error under which a cell is
@@ -53,6 +55,7 @@ layout(std430, set = 0, binding = 7) buffer RtgiConfidence { vec4 rtgiConfidence
 // Per slot: the samples its shown light stands for -- its own, its neighbours' share and its parent's (written here, read
 // as a parent's by the cells below).
 layout(std430, set = 0, binding = 8) buffer RtgiStands { float rtgiStands[]; };
+layout(std430, set = 0, binding = 9) readonly buffer RtgiHitInv { float rtgiHitInv[]; };
 
 #define RTGI_KEYS(i) rtgiKeys[i]
 #include "rtgi_cache.glsl"
@@ -178,6 +181,14 @@ void main() {
                     // guessed their borrowing far apart, blotches under Cornell's roof (the user, 2026-10-26).
                     float seB2p = (u.uParent2.w > 0.5 ? poolVar / max(poolW, 1e-6) : sigma * sigma * held) / max(stands, 1.0);
                     float bias2 = max((lb - lp) * (lb - lp) - seB2p - seP2, 0.0);
+                    // The geometric prior (uHit.x): light changes over the distance to what is around it -- across a
+                    // parent cell of size S, by ~S / d of itself, d the rays' harmonic mean hit distance. Open flat
+                    // light (long hits) borrows freely; a nook or a crease (short hits) keeps its own, even while its
+                    // samples are too few to show the difference (ReBLUR sizes its blur by hit distance).
+                    if (u.uHit.x > 0.0) {
+                        float prior = u.uHit.x * rtgiSize(level + 1u, u.uParams) * rtgiHitInv[s] * max(lb, lp);
+                        bias2 = max(bias2, prior * prior);
+                    }
                     wp += min(stands * seB2p / max(bias2 + seP2, 1e-12), u.uFilter2.w);
                 } else {
                     float dp = (lb - lp) / (u.uFilter2.y * sqrt(seB2 + seP2) + u.uFilter2.z * max(lb, lp) + 1e-5);
