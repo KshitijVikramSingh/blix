@@ -49,8 +49,9 @@ roughness glTF has no field for.
    and a sampler on the material for the lit pass.
 5. **The rays pass panes whole** (the GI sees the room behind a window through it, unattenuated). `--ray-panes` (built, not yet run) gives a pane's rows a coverage -- the share of rays the glass
    reflects or absorbs, by the hemispherical Fresnel and `1 - T luminance(base)` -- through the partly covered rows' coin, so the light through is `(1 - F) T luminance(base)` as the reference has
-   it, in grey (the tint is lost: a per-channel pass needs the rays to carry a colour); what stops reflects diffusely what the glass reflects. To judge it: a scene with a window, the GI
-   against `--ref-bsdf` (which has the panes) with and without the flag.
+   it, in grey (the tint is lost: a per-channel pass needs the rays to carry a colour); what stops reflects diffusely what the glass reflects. First run (2026-10-26, TransmissionTest, open ground): frame / reference 0.988 with the flag against 1.007 without, and the partly covered rows' coin, keyed on the triangle, leaves
+   dark speckle inside and under the spheres at this ray count -- not an improvement worth the flag there, so it stays off. To judge it properly: a room with a window, the GI against
+   `--ref-bsdf` with and without the flag; the per-triangle coin may want a per-texel one (the hashed texels') to be smooth.
 6. **Per-texel diffuse transmission** in the GI is a per-triangle share.
 7. **Caustics**: none, in the reference or the frame. The sun reaches what is behind a solid by the sky and the bounces only.
 8. **Dispersion**: not modelled anywhere.

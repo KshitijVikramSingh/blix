@@ -123,6 +123,13 @@ internal sealed partial class SponzaLoop
             var p = (int)data.RowPlacements[row];
             if (p >= rayPlacementMaterials.Count || !rayPlacementMaterials[p].Clear) continue;
             words[row] = (words[row] & 0xE0FFFFFFu) | (16u << 24);   // coverage solid (sixteenths 16), the diffuse roughness level kept
+            // --ray-panes baked the GI's stopped-ray albedo into these words (SponzaLoop.RayPanes.cs); the BSDF wants the glass's own base colour: the factor's (its texture is not kept).
+            if (rayPanes)
+            {
+                static uint Srgb(float linear) => (uint)Math.Clamp(MathF.Round((linear <= 0.0031308f ? linear * 12.92f : 1.055f * MathF.Pow(linear, 1f / 2.4f) - 0.055f) * 255f), 0f, 255f);
+                var c = rayPlacementMaterials[p].BaseColor;
+                words[row] = (words[row] & 0xFF000000u) | Srgb(c.X) | (Srgb(c.Y) << 8) | (Srgb(c.Z) << 16);
+            }
             panes++;
         }
         var surfaces = Own(device.CreateGpuBuffer(bytes.Length, bytes, "sponza.reference.surfaces"));
