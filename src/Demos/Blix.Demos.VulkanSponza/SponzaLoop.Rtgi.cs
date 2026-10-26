@@ -26,7 +26,10 @@ internal sealed partial class SponzaLoop
     private bool rtgi;
     // 4 M slots (272 MB): San Miguel held 1.8-3.6 M cells (87% of 4 M at the old 1 cm per metre growth, its landings then
     // failing to find a slot).
-    private int rtgiTiles = 73_000, rtgiHitPoints = 32_000, rtgiSlotsLog2 = 22;
+    // --rtgi-tiles / --rtgi-hits: 292,000 visible points and 128,000 from last frame's hits a frame (4x the 73,000 / 32,000
+    // before): with placement in blocks, Crytek Sponza 33.4 ms a frame against 29.4 at 1x; Cornell's noise left at 60
+    // frames 0.70% against 1.14%, at 16.5 ms against 8.7 -- better in the same second (2026-10-26).
+    private int rtgiTiles = 292_000, rtgiHitPoints = 128_000, rtgiSlotsLog2 = 22;
     // Cells untrained for --rtgi-max-age frames are emptied: 1,800 (30 s at 60 fps; at 600 a walk back to a place left 10 s
     // before found it gone and re-settling, 2026-10-26).
     // Cells 5 cm, growing 0.5 cm a metre from the camera (doubling every ~10 m; at 1 cm, every ~5 m, mid-distance GI went
