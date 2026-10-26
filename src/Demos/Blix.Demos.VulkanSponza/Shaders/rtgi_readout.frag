@@ -19,7 +19,8 @@ layout(set = 0, binding = 0) uniform RtgiReadout {
     vec4 uParams;        // rtgiParams (rtgi_cache.glsl)
     vec4 uCamera;        // xyz position
     vec4 uHalf;          // yz the full-res pixel of its 2x2
-    vec4 uNearField;     // x the near field's radius (rtgi_cache.glsl's RTGI_NEAR); y 1: the gradient written
+    vec4 uNearField;     // x the near field's radius (rtgi_cache.glsl's RTGI_NEAR); y 1: the gradient written; z 1: the
+                         // tangent plane's four cells (readLevel), 0: the eight around the point
     vec4 uContact;       // x 1: contact detail on; yz the ratio's clamp; w the RTGI panel's view (0: the light)
     vec4 uUnsure;        // x the done threshold (relative error); y the uncertainty map's row (half-res pixels); z its size;
                          // w a full-res pixel's footprint per metre of distance
@@ -80,15 +81,31 @@ vec4 readLevel(vec3 p, uint side, uint level, out float sky, out vec3 bvec, out 
     bvec = vec3(0.0);
     near = 0.0;
     far = 0.0;
-    for (int k = 0; k < 8; k++) {
+    // The tangent plane's (uNearField.z): along the axis the side faces, the cell holding the point alone; across the
+    // other two, bilinear. The eight around it reached in front of the surface and behind it -- air and the inside of the
+    // wall, cells no ray trains -- and 37% of the lookups missed at Crytek Sponza (14% Cornell, 2026-10-27), each one a
+    // walk of the probes and its memory.
+    bool plane = u.uNearField.z > 0.5;
+    uint axis = side >> 1u;
+    uint a0 = (axis + 1u) % 3u, a1 = (axis + 2u) % 3u;
+    int cAxis = int(floor(p[axis] / size));
+    for (int k = 0; k < (plane ? 4 : 8); k++) {
         ivec3 o = ivec3(k & 1, (k >> 1) & 1, k >> 2);
-        uint s = rtgiFind(rtgiCellHash(c0 + o, level, side, u.uParams), u.uParams);
+        if (plane) {
+            o = ivec3(0);
+            o[a0] = k & 1;
+            o[a1] = k >> 1;
+        }
+        ivec3 cc = c0 + o;
+        if (plane) cc[axis] = cAxis;
+        uint s = rtgiFind(rtgiCellHash(cc, level, side, u.uParams), u.uParams);
         lookups++;
         if (s == 0xFFFFFFFFu) { misses++; continue; }
         uvec4 a = rtgiRecord[2u * s], c = rtgiRecord[2u * s + 1u];
         float held = uintBitsToFloat(c.w);
         if (held < 0.5) continue;
         vec3 b = mix(1.0 - t, t, vec3(o));
+        if (plane) b[axis] = 1.0;
         // Weighted by what it holds too, full at 32 samples: a new cell (a landing just requested, a level just blended in,
         // one refilled) fades in under its neighbours rather than showing its first draw -- odd lights that came and went.
         float wk = b.x * b.y * b.z * clamp(held / 32.0, 1.0 / 32.0, 1.0);
