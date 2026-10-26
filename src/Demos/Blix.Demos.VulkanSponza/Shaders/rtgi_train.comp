@@ -1,4 +1,8 @@
 #version 450
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_vote : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
 
 // --rtgi (S1, SponzaLoop.Rtgi.cs): last frame's training points, their rays answered, into the cache. Per point p (normal n):
 //   indirect  E = PI * L_in along its cosine ray: the sky's radiance where it missed; where it met a surface's front at q,
@@ -24,7 +28,8 @@ layout(set = 0, binding = 0) uniform RtgiTrain {
     vec4 uTrain;         // x 1: a landing cell holding nothing counts as dark (else no sample); y 1: no coarser cell for it;
                          // z 1: a back face's hit read as a front's (else dark); w room for landing requests (0: none)
     vec4 uFallback;      // x the levels past two up a landing may look for a cell holding light (0: two up only); y 1: contact
-                         // detail on (the near and far words written); z 1: landings deferred to their request's sample
+                         // detail on (the near and far words written); z 1: landings deferred to their request's sample;
+                         // w 1: a cell's words summed over the subgroup before they are written
 } u;
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
@@ -109,62 +114,90 @@ vec3 sampleDir;
 float nearWord;   // this sample's near visibility, weighted (256ths): it left past the contact radius
 float sampleInvD; // 1 / how far its ray went (a miss: its reach)
 
-// rich: the sample's level and the two above, which the readout reads (its two, and two up where they hold nothing) -- the
-// irradiance vector and near visibility written; the levels above feed the blend's parent alone, which reads the light,
-// its spread, sky and sun. Every word
-// is an atomic, a sample's five levels ~65 of them: the training 12 ms a frame at 4x the rays (Crytek Sponza, 2026-10-26).
-void add(uint s, vec3 e, bool counted, bool sky, bool sunTraced, bool sunLit, bool rich) {
-    if (s == 0xFFFFFFFFu) return;
-    // Listed for this frame's resolve the first time it is trained this frame.
+// The cell's frame words written: listed for this frame's resolve the first time it is trained, then each non-zero word
+// added. Aggregated over the subgroup first (uFallback.w): the lanes training the same cell sum their words and one of
+// them writes -- ray placement concentrates the points on the cells least sure, and their atomics queued on the same
+// words (Crytek Sponza at 4x the rays: training 9.7 ms, 6.9 with placement off, 2026-10-26). Up to four rounds, each
+// the cell of the first lane still writing; the rest write their own.
+void writeCell(uint s, uint w[RTGI_ACC]) {
     uint frame = uint(u.uClamp.y);
     if (atomicExchange(rtgiStamps[s].x, frame) != frame) {
         uint k = atomicAdd(dirtyCount, 1u);
         if (k < uint(u.uClamp.z)) dirty[k] = s;
     }
+    for (uint k = 0u; k < RTGI_ACC; k++)
+        if (w[k] != 0u) atomicAdd(rtgiAccum[RTGI_ACC * s + k], w[k]);
+}
+
+void commit(uint s, uint w[RTGI_ACC]) {
+    bool writing = s != 0xFFFFFFFFu;
+    if (u.uFallback.w > 0.5) {
+        for (uint round = 0u; round < 4u; round++) {
+            if (!subgroupAny(writing)) return;
+            if (writing) {
+                uint lead = subgroupBroadcastFirst(s);
+                if (s == lead) {
+                    uint sum[RTGI_ACC];
+                    for (uint k = 0u; k < RTGI_ACC; k++) sum[k] = subgroupAdd(w[k]);
+                    if (subgroupElect()) writeCell(s, sum);
+                    writing = false;
+                }
+            }
+        }
+    }
+    if (writing) writeCell(s, w);
+}
+
+// rich: the sample's level and the two above, which the readout reads (its two, and two up where they hold nothing) -- the
+// irradiance vector, hit distance and near visibility written; the levels above feed the blend's parent alone, which
+// reads the light, its spread, sky and sun.
+void add(uint s, vec3 e, bool counted, bool sky, bool sunTraced, bool sunLit, bool rich) {
     // --rtgi-clamp-sigma: a rare bright sample (a ray out to the sky, onto a sunlit patch through a gap) capped against the
     // cell's own spread once it has some: in a cell with few samples it was a blob that came and went (San Miguel).
-    if (counted && u.uClamp.x > 0.0 && rtgiMoments[3u * s + 2u].z >= 32.0) {
+    if (s != 0xFFFFFFFFu && counted && u.uClamp.x > 0.0 && rtgiMoments[3u * s + 2u].z >= 32.0) {
         vec4 m = rtgiMoments[3u * s];
         float cap = m.x + u.uClamp.x * sqrt(max(m.y - m.x * m.x, 0.0)) + 1e-4;
         float l = dot(e, vec3(0.2126, 0.7152, 0.0722));
         if (l > cap) e *= cap / l;
     }
+    uint w[RTGI_ACC];
+    for (uint k = 0u; k < RTGI_ACC; k++) w[k] = 0u;
+    vec3 ec = min(e, vec3(RTGI_MAX_SAMPLE));
+    float le = dot(ec, vec3(0.2126, 0.7152, 0.0722));
     if (counted) {
-        vec3 f = min(e, vec3(RTGI_MAX_SAMPLE)) * RTGI_SCALE;
         // Rounded stochastically: unbiased however dim (the fraction kept as a chance of one more unit).
-        atomicAdd(rtgiAccum[RTGI_ACC * s], uint(f.r + dither.x));
-        atomicAdd(rtgiAccum[RTGI_ACC * s + 1u], uint(f.g + dither.y));
-        atomicAdd(rtgiAccum[RTGI_ACC * s + 2u], uint(f.b + dither.z));
-        atomicAdd(rtgiAccum[RTGI_ACC * s + 3u], 1u);
+        vec3 f = ec * RTGI_SCALE;
+        w[0] = uint(f.r + dither.x);
+        w[1] = uint(f.g + dither.y);
+        w[2] = uint(f.b + dither.z);
+        w[3] = 1u;
+        if (sky) w[4] = 1u;
         // The luminance's square: the cell's sample variance (rtgi_resolve.comp).
-        float l = min(dot(min(e, vec3(RTGI_MAX_SAMPLE)), vec3(0.2126, 0.7152, 0.0722)), RTGI_LUM2_MAX);
-        atomicAdd(rtgiAccum[RTGI_ACC * s + 7u], uint(l * l * RTGI_LUM2_SCALE + dither.w));
-        if (sky) atomicAdd(rtgiAccum[RTGI_ACC * s + 4u], 1u);
-    }
-    if (counted && rich) {
-        // The irradiance vector: the sample's luminance along its direction, fixed point, signed (its two's complement
-        // added as uints sums as ints), rounded stochastically -- where the cell's light comes from (rtgi_resolve.comp).
-        vec3 b = dot(min(e, vec3(RTGI_MAX_SAMPLE)), vec3(0.2126, 0.7152, 0.0722)) * sampleDir * RTGI_SCALE;
-        atomicAdd(rtgiAccum[RTGI_ACC * s + 8u], uint(int(floor(b.x + dither.x))));
-        atomicAdd(rtgiAccum[RTGI_ACC * s + 9u], uint(int(floor(b.y + dither.y))));
-        atomicAdd(rtgiAccum[RTGI_ACC * s + 10u], uint(int(floor(b.z + dither.z))));
-        // How near the geometry is: the inverse hit distance, its mean the harmonic -- the nearest occluders set how fast
-        // the light can change across the cell (rtgi_filter.comp's prior on how much its parent differs).
-        atomicAdd(rtgiAccum[RTGI_ACC * s + 13u], uint(sampleInvD * 256.0 + dither.y));
-    }
-    if (counted && rich && u.uFallback.y > 0.5) {
-        // Near visibility (S4 contact detail, rtgi_readout.frag): its weight where the ray left past the contact radius --
-        // the cell's cosine-weighted unoccluded share within it, which the contact cells' own rays are held against.
-        atomicAdd(rtgiAccum[RTGI_ACC * s + 11u], uint(nearWord + dither.w));
-        // The far light: this sample's luminance where it left past the contact radius (the readout splits a cell's light
-        // into what came from past it and what from nearer, and scales each by its own visibility, rtgi_readout.frag).
-        if (nearWord > 0.0)
-            atomicAdd(rtgiAccum[RTGI_ACC * s + 12u], uint(dot(min(e, vec3(RTGI_MAX_SAMPLE)), vec3(0.2126, 0.7152, 0.0722)) * RTGI_SCALE + dither.x));
+        float l = min(le, RTGI_LUM2_MAX);
+        w[7] = uint(l * l * RTGI_LUM2_SCALE + dither.w);
+        if (rich) {
+            // The irradiance vector: the sample's luminance along its direction, fixed point, signed (its two's
+            // complement added as uints sums as ints) -- where the cell's light comes from (rtgi_resolve.comp).
+            vec3 b = le * sampleDir * RTGI_SCALE;
+            w[8] = uint(int(floor(b.x + dither.x)));
+            w[9] = uint(int(floor(b.y + dither.y)));
+            w[10] = uint(int(floor(b.z + dither.z)));
+            // How near the geometry is: the inverse hit distance, its mean the harmonic -- the nearest occluders set how
+            // fast the light can change across the cell (rtgi_filter.comp's prior on how much its parent differs).
+            w[13] = uint(sampleInvD * 256.0 + dither.y);
+            if (u.uFallback.y > 0.5) {
+                // Near visibility and the far light (S4 contact detail, rtgi_readout.frag): its weight, and its
+                // luminance, where the ray left past the contact radius.
+                w[11] = uint(nearWord + dither.w);
+                if (nearWord > 0.0) w[12] = uint(le * RTGI_SCALE + dither.x);
+            }
+        }
     }
     if (sunTraced) {
-        atomicAdd(rtgiAccum[RTGI_ACC * s + 6u], 1u);
-        if (sunLit) atomicAdd(rtgiAccum[RTGI_ACC * s + 5u], 1u);
+        w[6] = 1u;
+        if (sunLit) w[5] = 1u;
     }
+    commit(s, w);
 }
 
 void main() {

@@ -67,6 +67,11 @@ internal sealed partial class SponzaLoop
     // --rtgi-defer: a landing whose cell holds too little takes its light from its request's own sample next frame -- one
     // more bounce of the path, a frame late -- not from the cells around it (rtgi_train.comp).
     private bool rtgiDefer;
+    // --rtgi-subgroup: a cell's frame words summed over the subgroup before they are written (rtgi_train.comp). Off: no
+    // faster -- Crytek Sponza at 4x the rays 50.1 ms p50 against 50.0, training 11.9 ms against 10.3 (2026-10-26). A
+    // subgroup's 32 points come from all over the screen and seldom share a cell; the queue on a cell is between
+    // subgroups. Worth another look if placement keeps neighbouring points together.
+    private bool rtgiSubgroup;
     // A point's cosine direction from its cell's own low-discrepancy sequence (rtgi_rays.comp): Cornell's noise left at 60
     // frames 1.45% against 1.66%, error 0.022 against 0.024; Crytek Sponza alike (2026-10-26). --rtgi-no-blue: hashed.
     private bool rtgiBlue = true;
@@ -270,6 +275,7 @@ internal sealed partial class SponzaLoop
         rtgiNoCoarse = args.Flag("rtgi-no-coarse");
         if (args.Float("rtgi-fallback-up") is { } fu) rtgiFallbackUp = Math.Clamp(fu, 0f, 6f);
         if (args.Flag("rtgi-defer")) rtgiDefer = true;
+        if (args.Flag("rtgi-subgroup")) rtgiSubgroup = true;
         if (args.Flag("rtgi-no-blue")) rtgiBlue = false;
         if (args.Float("rtgi-blur") is { } bl) rtgiBlur = MathF.Max(0f, bl);
         if (args.Float("rtgi-blur-hit") is { } bh) rtgiBlurHit = MathF.Max(0f, bh);
@@ -507,7 +513,7 @@ internal sealed partial class SponzaLoop
                     new("uClamp", new Vector4Uniform(new Vector4(rtgiClampSigma, frameNumber, RtgiDirtyRoom, 0f))),
                     new("uGuideTable", new Vector4Uniform(new Vector4(rtgiGuide > 0f ? RtgiGuideSlots - 1 : 0f, 0f, 0f, 0f))),
                     new("uTrain", new Vector4Uniform(new Vector4(rtgiCountUnknown ? 1f : 0f, rtgiNoCoarse ? 1f : 0f, rtgiBackfaceLit ? 1f : 0f, rtgiRequests ? rtgiHitPoints : 0f))),
-                    new("uFallback", new Vector4Uniform(new Vector4(rtgiFallbackUp, rtgiContact ? 1f : 0f, rtgiDefer ? 1f : 0f, 0f))),
+                    new("uFallback", new Vector4Uniform(new Vector4(rtgiFallbackUp, rtgiContact ? 1f : 0f, rtgiDefer ? 1f : 0f, rtgiSubgroup ? 1f : 0f))),
                 },
                 new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
                 Buffers: new[]
