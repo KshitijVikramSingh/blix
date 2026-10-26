@@ -375,6 +375,10 @@ internal sealed partial class SponzaLoop
         if (MathF.Abs(graph.RenderScale - render.RenderScale) > 1e-4f) graph.RenderScale = render.RenderScale;
         var (renderWidth, renderHeight) = RenderGraph.RenderSizeFor(frame.Width, frame.Height, graph.RenderScale);
         frame = frame with { Width = renderWidth, Height = renderHeight };
+        // The pixels the scene renders: what a screen-space error means (LodErrorScale). The window's size is in logical
+        // points (OnResize, host.LogicalSize) -- half the pixels on a Retina display at render scale 1 -- and it was
+        // read as pixels until 2026-10-27, so the mesh LODs were picked twice as coarse as asked there.
+        renderHeightPx = renderHeight;
         // Match-swapchain graph targets are reallocated rather than resized in place. Their public
         // handles stay stable, but their contents do not. GTAO reads ambientDenoisedHandle as the
         // preceding frame and TAA reads the other parity target, so both must refuse history once

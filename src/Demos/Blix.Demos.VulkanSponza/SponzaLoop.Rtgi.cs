@@ -946,7 +946,7 @@ internal sealed partial class SponzaLoop
                 new("uHalf", new Vector4Uniform(new Vector4(0f, sub.X, sub.Y, 0f))),
                 new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, rtgiNoGradient ? 0f : 1f, rtgiReadoutPlane ? 1f : 0f, 0f))),
                 new("uContact", new Vector4Uniform(new Vector4(rtgiContact ? 1f : 0f, 0.3f, 1.25f, rtgiView))),
-                new("uUnsure", new Vector4Uniform(new Vector4(rtgiDoneError, rtgiHalfRow, RtgiUnsureSize, 1f / LodErrorScale))),
+                new("uUnsure", new Vector4Uniform(new Vector4(rtgiDoneError, rtgiHalfRow, RtgiUnsureSize, RtgiPixelFootprint))),
                 new("uBlurAt", new Vector4Uniform(new Vector4(RtgiBlurNow, rtgiBlurHit, 0f, 0f))),
             },
             buffers: new[]
@@ -978,7 +978,7 @@ internal sealed partial class SponzaLoop
                 new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, rtgiFrameCount))),
                 new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, 0f, 0f, 0f))),
                 // A full-res pixel's footprint per metre of distance: 1 / (pixels per unit at unit distance).
-                new("uBlur", new Vector4Uniform(new Vector4(RtgiBlurNow, rtgiDoneError, rtgiBlurHit, 1f / LodErrorScale))),
+                new("uBlur", new Vector4Uniform(new Vector4(RtgiBlurNow, rtgiDoneError, rtgiBlurHit, RtgiPixelFootprint))),
                 new("uHalf", new Vector4Uniform(new Vector4(rtgiView == 9 ? 1f : 0f, sub.X, sub.Y, rtgiHalfRow))),
             },
             buffers: new[] { new ShaderBufferBinding("RtgiBlurRadius", rtgiBlurRadius) }));
@@ -1016,6 +1016,13 @@ internal sealed partial class SponzaLoop
     }
 
     private bool RtgiReadoutReady => rtgi && !rtgiKeys.Equals(default(GpuBufferHandle));
+
+    // A full-res pixel's footprint per metre of distance, as the readout sizes the blur's radius and the blur its plane
+    // tolerance (uUnsure.w, uBlur.w): doubled. Both were tuned by eye at render scale 1 on a Retina display when this came
+    // from the window's logical height, half the frame's pixels (2026-10-26); with the render height in pixels
+    // (renderHeightPx, 2026-10-27), doubled gives them the same numbers there -- the look kept -- and at any other scale
+    // the same radius in the world.
+    private float RtgiPixelFootprint => 2f / LodErrorScale;
 
     // At the profile window: how full the cache is and how much its cells hold.
     private string RtgiCounts()

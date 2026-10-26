@@ -957,7 +957,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
             Position = scene.StartPosition, Yaw = scene.StartYaw, Pitch = scene.StartPitch, MoveSpeed = scene.MoveSpeed,
         };
     }
-    private float renderHeightPx = 810f; // updated on resize; drives screen-space-error LOD
+    private float renderHeightPx = 810f; // the render height in pixels, set each frame (RenderFrame); drives screen-space-error LOD
     // Screen-space-error LOD threshold: a level is used when its baked geometric error projects to
     // no more than this many pixels at the viewing distance. About 1 px targets imperceptibility;
     // raise it to trim more aggressively, while zero forces full detail. The metric accounts for
