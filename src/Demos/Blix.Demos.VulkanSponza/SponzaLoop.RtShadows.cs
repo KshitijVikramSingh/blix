@@ -45,6 +45,8 @@ internal sealed partial class SponzaLoop
     // --rt-coverage-coin: leaf cards' shadows by the baked coverage's coin (as the software traversal meets them), not by
     // their textures' alpha at the point hit.
     private bool rtCoverageCoin;
+    // --rt-alpha-texture: the shadow tables sample the material textures (the older test) instead of reading the alpha atlas (SponzaLoop.RayAlpha.cs).
+    private bool rtShadowAlphaTexture;
     // --rt-alpha-mip N: the mip the shadows' alpha test reads (0: full resolution).
     private float rtAlphaMip;
     // --rt-alpha-ab: the lit pass's trace takes the coin and the alpha test in turn, a frame each, its GPU time kept
@@ -432,7 +434,7 @@ internal sealed partial class SponzaLoop
         rtBuild = tracer.Build(rayGpuData, blocks, surfaceWords, alphaTested);
         if (!rtCoverageCoin) tracer.SetAlpha(alphaMaterials, rowMaterial, raySurfaceBakeBuffers.First(b => b.Name == "BlixRayUvs").Buffer, rtAlphaMip);
         if (rtSheetRows > 0) tracer.SetTransmit(rowTransmit);
-        if (rayAlphaPlan is not null) tracer.SetAlphaAtlas(rayGpuData.RowPlacements.Length);   // the other traces' per-hit alpha (SponzaLoop.RayAlpha.cs)
+        if (rayAlphaPlan is not null) tracer.SetAlphaAtlas(rayGpuData.RowPlacements.Length, !rtShadowAlphaTexture);   // the other traces' per-hit alpha (SponzaLoop.RayAlpha.cs)
         frameTracer = tracer;
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] metal tracer: {rtBuild.Value.SolidTriangles + rtBuild.Value.PartialTriangles:N0} triangles ({rtBuild.Value.PartialTriangles:N0} partly covered, {(rtCoverageCoin ? "by the coverage coin" : string.Create(Inv, $"alpha-tested by {alphaMaterials.Count} materials' textures"))}) in {rtBuild.Value.Hierarchies} bottom-level structures, built in {rtBuild.Value.CpuPrepareMs + rtBuild.Value.BlasGpuMs + rtBuild.Value.CompactTlasGpuMs:0} ms; {rtBuild.Value.CompactedBytes / 1048576.0:0} MB."));

@@ -1474,13 +1474,16 @@ HWX_EXPORT int hwx_set_alpha(HwxContext* ctx, void* const* textures, const float
     }
 }
 
-// The per-hit alpha test for every trace that is not the shadow pass's own (its tables take alphaOff): the trailer of RayAlphaAtlas on the
-// surface words, from word `rows`. Written into the shared alphaOff buffer the tables already name, so nothing is re-bound.
-HWX_EXPORT int hwx_set_alpha_atlas(HwxContext* ctx, uint32_t rows) {
+// The per-hit alpha test from the trailer of RayAlphaAtlas on the surface words, from word `rows`. Written into the shared alphaOff buffer the
+// tables already name, so nothing is re-bound. With `shadows`, the tables that took hwx_set_alpha's textures (the sun's shadows and the lightlet
+// bake's) read the atlas too, so authored BLEND stops a shadow ray with the probability of its alpha and every trace meets a cut-out alike;
+// it does nothing for them where hwx_set_alpha was not called (their coin stays).
+HWX_EXPORT int hwx_set_alpha_atlas(HwxContext* ctx, uint32_t rows, int shadows) {
     @autoreleasepool {
         if (!ctx->alphaOff) return Fail(ctx, "the alpha atlas before build");
         uint32_t on[4] = {2, 0, rows, 0};
         memcpy([ctx->alphaOff contents], on, sizeof(on));
+        if (shadows && ctx->alphaOn) memcpy([ctx->alphaOn contents], on, sizeof(on));
         return 0;
     }
 }

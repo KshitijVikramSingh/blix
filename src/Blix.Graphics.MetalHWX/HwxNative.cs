@@ -79,7 +79,7 @@ internal static unsafe class HwxNative
     public static extern void hwx_trace_stats(nint ctx, ulong* dispatches, ulong* totalGpuNs, ulong* lastGpuNs, ulong* failures);
 
     [DllImport(Library)]
-    public static extern int hwx_set_alpha_atlas(nint ctx, uint rows);
+    public static extern int hwx_set_alpha_atlas(nint ctx, uint rows, int shadows);
 
     [DllImport(Library)]
     public static extern int hwx_set_transmit(nint ctx, uint* rowTransmit, uint rowCount);

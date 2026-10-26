@@ -217,6 +217,7 @@ internal sealed partial class SponzaLoop
         // --rt-isolated: nothing but the trace lights the frame, sky included: no incident field (SponzaLoop.RtShadows).
         rtIsolated = args.Flag("rt-isolated");
         rtCoverageCoin = args.Flag("rt-coverage-coin");
+        rtShadowAlphaTexture = args.Flag("rt-alpha-texture");
         if (args.Float("rt-alpha-mip") is { } alphaMip) rtAlphaMip = Math.Clamp(alphaMip, 0f, 12f);
         rtAlphaAb = args.Flag("rt-alpha-ab");
         var fogAsked = args.Flag("fog");

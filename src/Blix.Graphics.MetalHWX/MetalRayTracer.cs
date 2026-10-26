@@ -482,12 +482,14 @@ public sealed class MetalRayTracer : IDisposable
     /// <summary>
     /// From now on every trace but the shadow pass's own (its tables take the coin until <see cref="SetAlpha"/>) meets a partly covered triangle
     /// where its material's alpha passes at the point hit, read from the trailer of <see cref="Blix.Geometry.RayAlphaAtlas"/> on the surface
-    /// words (<paramref name="rows"/> words in: the triangle count) -- the software traversal's per-hit test, test for test.
+    /// words (<paramref name="rows"/> words in: the triangle count) -- the software traversal's per-hit test, test for test. With
+    /// <paramref name="shadows"/> the tables <see cref="SetAlpha"/> gave textures to (the sun's shadows, the lightlet bake) read the atlas too, so
+    /// authored BLEND is stochastic in shadow as in every other ray; they keep the coin where <see cref="SetAlpha"/> was not called.
     /// </summary>
-    public void SetAlphaAtlas(int rows)
+    public void SetAlphaAtlas(int rows, bool shadows = false)
     {
         ObjectDisposedException.ThrowIf(ctx == 0, this);
-        if (HwxNative.hwx_set_alpha_atlas(ctx, (uint)rows) != 0)
+        if (HwxNative.hwx_set_alpha_atlas(ctx, (uint)rows, shadows ? 1 : 0) != 0)
             throw new InvalidOperationException($"Metal alpha atlas: {Error}");
     }
 
