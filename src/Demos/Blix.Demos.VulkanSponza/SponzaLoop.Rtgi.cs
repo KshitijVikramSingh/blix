@@ -114,7 +114,23 @@ internal sealed partial class SponzaLoop
     private int rtgiReservoirCur = -1, rtgiSpatialTiles;
     private ShaderInterface rtgiRaysInterface = null!, rtgiTrainInterface = null!, rtgiResolveInterface = null!, rtgiReadoutInterface = null!;
     private PassHandle rtgiRaysPassHandle, rtgiTrainPassHandle, rtgiResolvePassHandle, rtgiReadoutPassHandle;
-    private PipelineHandle rtgiRaysPipeline, rtgiTrainPipeline, rtgiResolvePipeline, rtgiReadoutPipeline;
+    private PipelineHandle rtgiRaysPipeline, rtgiTrainPipeline, rtgiResolvePipeline, rtgiReadoutPipeline, rtgiBlurPipeline;
+    private ShaderInterface rtgiBlurInterface = null!;
+    private PassHandle rtgiBlurPassHandle;
+    private GraphResourceHandle rtgiHalfRawHandle;
+    // Per half-res pixel, how unsure its cell is: the readout writes it, the next frame's ray placement reads it
+    // (rtgi_readout.frag, rtgi_rays.comp). Sized for a 4096 x 2304 frame's half; its row the frame's (rtgiHalfRow).
+    private const int RtgiUnsureSize = 2048 * 1152;
+    private GpuBufferHandle rtgiUnsure;
+    private int rtgiHalfRow;
+    private bool rtgiUnsureWritten;
+    // --rtgi-blur PX: the readout blurred in screen space by how sure the cache is (rtgi_blur.frag, ReBLUR's way), at most
+    // PX full-res pixels (16; 0: a copy). The cache is already the history, in world space: a screen history of 16 frames
+    // on top lagged the converging light (Cornell's error at 30 frames 0.111 against 0.036, Crytek Sponza's 0.54 against
+    // 0.21), and the blur needs none. Cornell's noise left at 30 / 60 / 960 frames 2.6% / 1.62% / 0.73% -> 1.56% / 0.97%
+    // / 0.43%, error at 30 / 60 0.036 / 0.022 -> 0.030 / 0.018 (2026-10-26). --rtgi-blur-hit: the share of the mean hit
+    // distance the radius may reach (0.25).
+    private float rtgiBlur = 16f, rtgiBlurHit = 0.25f;
     // By the frame's parity: this frame's points, rays and answers; the other parity's are last frame's, trained now.
     private GpuBufferHandle[] rtgiPointsBuf = Array.Empty<GpuBufferHandle>(), rtgiRaysBuf = Array.Empty<GpuBufferHandle>(),
         rtgiHitsBuf = Array.Empty<GpuBufferHandle>(), rtgiOriginsBuf = Array.Empty<GpuBufferHandle>(), rtgiOccludedBuf = Array.Empty<GpuBufferHandle>();
@@ -255,6 +271,8 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-fallback-up") is { } fu) rtgiFallbackUp = Math.Clamp(fu, 0f, 6f);
         if (args.Flag("rtgi-defer")) rtgiDefer = true;
         if (args.Flag("rtgi-no-blue")) rtgiBlue = false;
+        if (args.Float("rtgi-blur") is { } bl) rtgiBlur = MathF.Max(0f, bl);
+        if (args.Float("rtgi-blur-hit") is { } bh) rtgiBlurHit = MathF.Max(0f, bh);
         if (args.Flag("rtgi-redraw")) rtgiRedraw = true;
         if (args.Float("rtgi-hit-prior") is { } hp) rtgiHitPrior = MathF.Max(0f, hp);
         if (args.Float("rtgi-filter-every") is { } fe) rtgiFilterEvery = MathF.Max(1f, MathF.Round(fe));
@@ -352,13 +370,23 @@ internal sealed partial class SponzaLoop
     private void DeclareRtgiReadoutPass(Func<string, string, ShaderInterface> reflect)
     {
         rtgiReadoutInterface = reflect("present.vert", "rtgi_readout.frag");
+        // Into the raw half-res target, the blur after it into the incident (rtgi_blur.frag).
+        rtgiHalfRawHandle = graph.ColorTarget("rtgi-half-raw", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(0.5f));
         rtgiReadoutPassHandle = graph.GraphicsPass("rtgi-readout")
-            .Target(incidentHalfHandle, LoadOp.Clear, StoreOp.Store)
+            .Target(rtgiHalfRawHandle, LoadOp.Clear, StoreOp.Store)
             .Target(incidentGradientHalfHandle, LoadOp.Clear, StoreOp.Store)
             .Read(SampleableSceneDepth)
             .Read(SampleablePrepassNormal)
             .WritesGpuBuffers()
             .Shader(rtgiReadoutInterface)
+            .Handle;
+        rtgiBlurInterface = reflect("present.vert", "rtgi_blur.frag");
+        rtgiBlurPassHandle = graph.GraphicsPass("rtgi-blur")
+            .Target(incidentHalfHandle, LoadOp.Clear, StoreOp.Store)
+            .Read(rtgiHalfRawHandle)
+            .Read(SampleableSceneDepth)
+            .Read(SampleablePrepassNormal)
+            .Shader(rtgiBlurInterface)
             .Handle;
         rtgiScreenInterface = reflect("present.vert", "rtgi_screen.frag");
         rtgiScreenPassHandle = graph.GraphicsPass("rtgi-screen")
@@ -387,6 +415,10 @@ internal sealed partial class SponzaLoop
                 presentVertSpv, File.ReadAllBytes(Path.Combine(shaderDir, "rtgi_readout.frag.spv")), rtgiReadoutInterface, "rtgi_readout")),
             VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
             new[] { BlendState.Disabled, BlendState.Disabled }, rtgiReadoutPassHandle, "rtgi_readout");
+        rtgiBlurPipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
+                presentVertSpv, File.ReadAllBytes(Path.Combine(shaderDir, "rtgi_blur.frag.spv")), rtgiBlurInterface, "rtgi_blur")),
+            VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
+            new[] { BlendState.Disabled }, rtgiBlurPassHandle, "rtgi_blur");
         rtgiReservoirPipeline = Compute("rtgi_reservoir", rtgiReservoirInterface);
         rtgiSpatialPipeline = Compute("rtgi_spatial", rtgiSpatialInterface);
         rtgiScreenPipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
@@ -398,6 +430,7 @@ internal sealed partial class SponzaLoop
     // After the traced shadows are recorded: train, resolve, this frame's rays and their batches.
     private void RecordRtgi(int width, int height)
     {
+        rtgiHalfRow = HalfLightingSize(width, height).Width;
         if (!rtgi || frameTracer is not { } tracer) return;
         var n = RtgiPoints;
         if (rtgiKeys.Equals(default(GpuBufferHandle)))
@@ -415,6 +448,7 @@ internal sealed partial class SponzaLoop
             rtgiAccum = Own(device.CreateGpuBuffer(RtgiSlots * 56, new byte[RtgiSlots * 56], "sponza.rtgi.accum"));
             rtgiDirection = Own(device.CreateGpuBuffer(RtgiSlots * 16, new byte[RtgiSlots * 16], "sponza.rtgi.direction"));
             rtgiConfidence = Own(device.CreateGpuBuffer(RtgiSlots * 16, new byte[RtgiSlots * 16], "sponza.rtgi.confidence"));
+            rtgiUnsure = Own(device.CreateGpuBuffer(RtgiUnsureSize * 4, new byte[RtgiUnsureSize * 4], "sponza.rtgi.unsure"));
             rtgiHitInv = Own(device.CreateGpuBuffer(RtgiSlots * 4, new byte[RtgiSlots * 4], "sponza.rtgi.hit-inv"));
             rtgiSeq = Own(device.CreateGpuBuffer(RtgiSlots * 4, new byte[RtgiSlots * 4], "sponza.rtgi.seq"));
             rtgiStands = Own(device.CreateGpuBuffer(RtgiSlots * 4, new byte[RtgiSlots * 4], "sponza.rtgi.stands"));
@@ -679,6 +713,7 @@ internal sealed partial class SponzaLoop
                 new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, 0f, 0f, 0f))),
                 new("uGuide", new Vector4Uniform(new Vector4(rtgiGuide, rtgiGuideMin, rtgiGuideKappa, RtgiGuideSlots - 1))),
                 new("uAdapt", new Vector4Uniform(new Vector4(rtgiAdaptive, rtgiAdaptiveK, rtgiDoneError, rtgiTrickle))),
+                new("uUnsureMap", new Vector4Uniform(new Vector4(rtgiHalfRow, rtgiUnsureWritten ? 1f : 0f, RtgiUnsureSize, 0f))),
                 new("uSeq", new Vector4Uniform(new Vector4(rtgiBlue ? 1f : 0f, rtgiRedraw ? 1f : 0f, 0f, 0f))),
             },
             new[]
@@ -704,6 +739,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("GuideDist", rtgiGuideDist),
                 new ShaderBufferBinding("RtgiPointOrigins", rtgiPointOriginsBuf[cur]),
                 new ShaderBufferBinding("RtgiSeq", rtgiSeq),
+                new ShaderBufferBinding("RtgiUnsure", rtgiUnsure),
             }));
 
         // This frame's contact rays (S4), into the same Metal group.
@@ -814,6 +850,7 @@ internal sealed partial class SponzaLoop
                 new("uHalf", new Vector4Uniform(new Vector4(0f, sub.X, sub.Y, 0f))),
                 new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, rtgiNoGradient ? 0f : 1f, 0f, 0f))),
                 new("uContact", new Vector4Uniform(new Vector4(rtgiContact ? 1f : 0f, 0.3f, 1.25f, rtgiViewDone ? 1f : 0f))),
+                new("uUnsure", new Vector4Uniform(new Vector4(rtgiDoneError, rtgiHalfRow, RtgiUnsureSize, 0f))),
             },
             buffers: new[]
             {
@@ -822,6 +859,34 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiMoments", rtgiMoments),
                 new ShaderBufferBinding("RtgiConfidence", rtgiConfidence),
                 new ShaderBufferBinding("RtgiDoneCount", rtgiDoneCount),
+                new ShaderBufferBinding("RtgiUnsure", rtgiUnsure),
+            }));
+        rtgiUnsureWritten = true;
+        // Blurred by how sure the cache is, into the incident the upsample reads (rtgi_blur.frag; at 0 a copy).
+        graph.Pass(rtgiBlurPassHandle, scope => fullscreen.Draw(
+            scope, rtgiBlurPipeline,
+            new[]
+            {
+                new ShaderTextureBinding("uIn", graph.GetColorTexture(rtgiHalfRawHandle)),
+                new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
+                new ShaderTextureBinding("uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
+            },
+            pushConstants: null,
+            uniforms: new ShaderUniform[]
+            {
+                new("uInvViewProj", new Matrix4x4Uniform(invViewProj)),
+                new("uParams", new Vector4Uniform(RtgiParams)),
+                new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, rtgiFrameCount))),
+                new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, 0f, 0f, 0f))),
+                // A full-res pixel's footprint per metre of distance: 1 / (pixels per unit at unit distance).
+                new("uBlur", new Vector4Uniform(new Vector4(rtgiBlur, rtgiDoneError, rtgiBlurHit, 1f / LodErrorScale))),
+                new("uHalf", new Vector4Uniform(new Vector4(0f, sub.X, sub.Y, 0f))),
+            },
+            buffers: new[]
+            {
+                new ShaderBufferBinding("RtgiKeys", rtgiKeys),
+                new ShaderBufferBinding("RtgiConfidence", rtgiConfidence),
+                new ShaderBufferBinding("RtgiHitInv", rtgiHitInv),
             }));
     }
 

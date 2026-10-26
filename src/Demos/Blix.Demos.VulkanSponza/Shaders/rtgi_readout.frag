@@ -19,6 +19,7 @@ layout(set = 0, binding = 0) uniform RtgiReadout {
     vec4 uHalf;          // yz the full-res pixel of its 2x2
     vec4 uNearField;     // x the near field's radius (rtgi_cache.glsl's RTGI_NEAR); y 1: the gradient written
     vec4 uContact;       // x 1: contact detail on; yz the ratio's clamp; w 1: the done view
+    vec4 uUnsure;        // x the done threshold (relative error); y the uncertainty map's row (half-res pixels); z its size
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -35,6 +36,11 @@ layout(std430, set = 0, binding = 8) readonly buffer RtgiConfidence { vec4 rtgiC
 // The visible share done: one pixel in 16 counted (x), and of those the ones whose cell is done (y); SponzaLoop.Rtgi.cs
 // reads and zeroes them at the profile window.
 layout(std430, set = 0, binding = 9) buffer RtgiDoneCount { uint doneCount[4]; };
+// Per half-res pixel: how unsure its cell is, for the next frame's ray placement (rtgi_rays.comp) -- read there for
+// a texel's price, where each candidate found its cell in the hash itself: 5.8 ms a frame at 4x the rays (Crytek
+// Sponza, 2026-10-26). The blend's relative error, at least the done threshold; a done cell an eighth of that; a cell
+// holding under 4 samples, or none, 1; the sky -1.
+layout(std430, set = 0, binding = 10) writeonly buffer RtgiUnsure { float rtgiUnsure[]; };
 
 #define RTGI_KEYS(i) rtgiKeys[i]
 #define RTGI_NEAR u.uNearField.x
@@ -103,7 +109,13 @@ void main() {
     float raw = texelFetch(uSceneDepth, q, 0).r;
     vec4 ns = texelFetch(uPrepassNormal, q, 0);
     outIncidentGradient = vec4(0.0);
-    if (raw >= 1.0 - 1e-6 || dot(ns.xyz, ns.xyz) < 1e-6) { outIncident = vec4(0.0, 0.0, 0.0, 1.0); return; }
+    uint unsureAt = uint(h.y) * uint(u.uUnsure.y) + uint(h.x);
+    bool unsureIn = h.x < int(u.uUnsure.y) && unsureAt < uint(u.uUnsure.z);
+    if (raw >= 1.0 - 1e-6 || dot(ns.xyz, ns.xyz) < 1e-6) {
+        if (unsureIn) rtgiUnsure[unsureAt] = -1.0;
+        outIncident = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
     vec2 ndc = (vec2(q) + 0.5) / vec2(fullSize) * 2.0 - 1.0;
     vec4 world = u.uInvViewProj * vec4(ndc, raw, 1.0);
     vec3 p = world.xyz / world.w;
@@ -112,6 +124,15 @@ void main() {
     // The two levels around the point's, blended by where it sits between them (rtgiLevelF): no jump at a level's edge.
     float lf = rtgiLevelF(p, u.uCamera.xyz, u.uParams);
     uint level = uint(lf);
+    if (unsureIn) {
+        uint sc = rtgiFind(rtgiCellHash(ivec3(floor(p / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
+        float unsure = 1.0;
+        if (sc != 0xFFFFFFFFu && rtgiResolved[2u * sc + 1u].y >= 4.0) {
+            vec4 conf = rtgiConfidence[sc];
+            unsure = conf.w > 0.5 ? 0.125 * u.uUnsure.x : clamp(conf.x, u.uUnsure.x, 1.0);
+        }
+        rtgiUnsure[unsureAt] = unsure;
+    }
     uint top = uint(u.uParams.w);
     float t = lf - float(level);
     float sky0, sky1;

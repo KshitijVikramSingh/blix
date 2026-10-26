@@ -27,6 +27,7 @@ layout(set = 0, binding = 0) uniform RtgiRays {
     vec4 uAdapt;         // x the share of visible points placed by uncertainty (0: every tile its own); y tiles weighed for each;
                          // z the relative error a cell is done under (the blend's, rtgi_filter.comp); w 1 in this many of a
                          // done cell's points keeps its ray (the validation trickle)
+    vec4 uUnsureMap;     // x the uncertainty map's row (half-res pixels); y 1: written last frame (else depth asked); z its size
     vec4 uSeq;           // x 1: a point's cosine direction from its cell's own low-discrepancy sequence (else hashed); y 1: a
                          // point that picked a done cell draws again rather than giving its ray back
 } u;
@@ -46,6 +47,8 @@ layout(std430, set = 0, binding = 9) buffer RtgiNextRequests { uint nextRequestC
 layout(std430, set = 0, binding = 17) writeonly buffer RtgiPointOrigins { vec4 pointOrigins[]; };
 // Per slot: how far along its direction sequence the cell is (the next index), bumped by each point in it.
 layout(std430, set = 0, binding = 18) buffer RtgiSeq { uint rtgiSeq[]; };
+// Per half-res pixel, how unsure its cell is (rtgi_readout.frag, last frame).
+layout(std430, set = 0, binding = 19) readonly buffer RtgiUnsure { float rtgiUnsure[]; };
 layout(std430, set = 0, binding = 10) readonly buffer RtgiKeys { uint rtgiKeys[]; };
 layout(std430, set = 0, binding = 11) readonly buffer RtgiResolved { vec4 rtgiResolved[]; };
 layout(std430, set = 0, binding = 12) readonly buffer RtgiDirection { vec4 rtgiDirection[]; };
@@ -96,6 +99,7 @@ void main() {
         uint candidates = adaptive ? uint(u.uAdapt.y) : 1u;
         float wsum = 0.0;
         bool found = false, chosenDone = false;
+        ivec2 pick = ivec2(0);
         uint hc = h;
         // Frozen (uSeq.y): a point whose pick was a done cell, its ray not kept for the trickle, draws again from as many
         // more tiles, done cells out -- the ray spent where the light is still open, not given back.
@@ -105,29 +109,26 @@ void main() {
                 hc = rtgiHash(hc ^ 0x2545F491u);
                 vec2 jitter = vec2(hc & 0xFFFFu, hc >> 16) / 65536.0;
                 ivec2 qc = min(ivec2((vec2(tile % tilesX, tile / tilesX) + jitter) * tileSize), ivec2(u.uSize.xy) - 1);
-                float rawc = texelFetch(uSceneDepth, qc, 0).r;
-                vec4 nsc = texelFetch(uPrepassNormal, qc, 0);
-                if (rawc >= 1.0 - 1e-6 || dot(nsc.xyz, nsc.xyz) < 1e-6) continue;
-                vec2 ndcc = (vec2(qc) + 0.5) / u.uSize.xy * 2.0 - 1.0;
-                vec4 wc = u.uInvViewProj * vec4(ndcc, rawc, 1.0);
-                vec3 pc = wc.xyz / wc.w, nc = normalize(nsc.xyz);
-                // How unsure its cell is: the blend's relative error (rtgi_filter.comp), at least the done threshold; a
-                // done cell an eighth of that (a new or unheld one: 1).
+                // How unsure its cell is: last frame's readout's map (rtgi_readout.frag) at its half-res pixel -- the
+                // blend's relative error, at least the done threshold; a done cell an eighth of that; the sky -1. Read
+                // for a texel's price, where each candidate found its cell in the hash itself (5.8 ms a frame at 4x the
+                // rays, Crytek Sponza). Not adaptive, or off the map: 1, its depth asked.
                 float unsure = 1.0;
                 bool done = false;
-                if (adaptive) {
-                    uint lc = rtgiLevel(pc, u.uCamera.xyz, u.uParams);
-                    uint sc = rtgiFind(rtgiCellHash(ivec3(floor(pc / rtgiSize(lc, u.uParams))), lc, rtgiSide(nc), u.uParams), u.uParams);
-                    if (sc != 0xFFFFFFFFu && rtgiResolved[2u * sc + 1u].y >= 4.0) {
-                        vec4 conf = rtgiConfidence[sc];
-                        done = conf.w > 0.5;
-                        unsure = done ? 0.125 * u.uAdapt.z : clamp(conf.x, u.uAdapt.z, 1.0);
-                    }
+                uint at = uint(qc.y / 2) * uint(u.uUnsureMap.x) + uint(qc.x / 2);
+                if (adaptive && u.uUnsureMap.y > 0.5 && qc.x / 2 < int(u.uUnsureMap.x) && at < uint(u.uUnsureMap.z)) {
+                    unsure = rtgiUnsure[at];
+                    if (unsure < 0.0) continue;
+                    done = unsure < 0.5 * u.uAdapt.z;
+                } else {
+                    float rawc = texelFetch(uSceneDepth, qc, 0).r;
+                    vec4 nsc = texelFetch(uPrepassNormal, qc, 0);
+                    if (rawc >= 1.0 - 1e-6 || dot(nsc.xyz, nsc.xyz) < 1e-6) continue;
                 }
                 if (round == 1u && done) continue;
                 wsum += unsure;
                 hc = rtgiHash(hc ^ 0x68E31DA4u);
-                if (float(hc & 0xFFFFFFu) / 16777216.0 * wsum < unsure) { p = pc; n = nc; found = true; chosenDone = done; }
+                if (float(hc & 0xFFFFFFu) / 16777216.0 * wsum < unsure) { pick = qc; found = true; chosenDone = done; }
             }
             // Every candidate done: the GPU's rays given back (or drawn again), one in uAdapt.w kept to notice what
             // changes.
@@ -139,6 +140,14 @@ void main() {
             chosenDone = false;
         }
         if (!found) { none(i); return; }
+        // The chosen candidate's point and normal (a map's read may name a pixel whose depth turned to sky).
+        float rawp = texelFetch(uSceneDepth, pick, 0).r;
+        vec4 nsp = texelFetch(uPrepassNormal, pick, 0);
+        if (rawp >= 1.0 - 1e-6 || dot(nsp.xyz, nsp.xyz) < 1e-6) { none(i); return; }
+        vec2 ndcp = (vec2(pick) + 0.5) / u.uSize.xy * 2.0 - 1.0;
+        vec4 wp = u.uInvViewProj * vec4(ndcp, rawp, 1.0);
+        p = wp.xyz / wp.w;
+        n = normalize(nsp.xyz);
     } else {
         if (u.uSun.w < 0.5) { none(i); return; }
         uint j = i - visible;
