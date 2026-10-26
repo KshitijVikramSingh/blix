@@ -81,3 +81,19 @@ against evaluation over alpha, angle and side, the pdf's integral, and the atten
 
 Next layers, each with its tests beside these: clearcoat, sheen, iridescence, anisotropy; then the GLSL twin (`src/Blix.Shaders/bsdf_gltf.glsl`), a per-row material table beside the surface words, and
 `reference_wave.comp` shading with it (camera paths and the gate's points both).
+
+### In the engine: `--ref-bsdf`
+
+`src/Blix.Shaders/bsdf_gltf.glsl` is the GLSL twin of both modules (python first; same names where they carry over). `Blix.Demos.TonemapLab`'s patterns 6 and 7 render its
+evaluation and densities for a table of materials, view angles and light directions, and `tests/test_gltf_gpu.py` holds them to the python per pixel
+(needs the demo built in Release and a GPU).
+
+`reference_wave.comp` shades with it under `--ref-bsdf` (camera paths and the gate's points alike): per triangle row the material (`ReferenceMaterialRows` into
+`ReferenceMaterialTable`, `SponzaLoop.ReferenceMaterials.cs`) and the baked specular roughness and metallic means (`ray_surface_bake.comp`, `BlixRayMr`); **thin or
+solid per material** (a transmitting material with a `KHR_materials_volume` thickness above 0 is a solid: the path refracts in, is attenuated by Beer-Lambert
+inside, and leaves through the interface from inside; with none it is a thin-walled sheet). The frame's rays pass the panes (they carry no coverage), so the reference
+runs on **its own tracer** with the pane rows solid in a copy of the surface words. The sun goes on through a thin pane by its straight-through transmission in
+two extra rounds; a solid blocks it (no caustics).
+
+`--material "name:key=value,..."` overrides a material's parameters for the lit shader, the bake and both references alike (roughness, metallic, base, ior,
+specular, transmission, thickness, att-distance, att, dt, and `diffuse-roughness`, the EON lobe's, which glTF has no field for).

@@ -16,6 +16,12 @@
 // glow on this one, and a path goes through with probability T. Shadow rays meet a sheet as any surface: a diffuse sheet
 // scatters the beam, it does not pass it (tools/gi-model/thin_sheet.py).
 //
+// The glTF BSDF (uCount.w bit 2, --ref-bsdf): every hit is shaded with bsdf_gltf.glsl -- GGX metal and dielectric, ior, specular, thin-walled transmission,
+// diffuse transmission, and a SOLID (KHR_materials_volume with a thickness: a refracting interface, Beer-Lambert attenuation inside) -- from the row's material
+// (ReferenceMaterialRows, ReferenceMaterialTable) and baked means (ReferenceRowMr), both sides of the surface. The reference's own tracer sees the panes the
+// frame's rays pass (SponzaLoop.ReferenceMaterials.cs); the sun's ray goes on through a thin pane, by its straight-through transmission, in extra
+// rounds (modes 2 and 3). A solid blocks the sun (no caustics): light reaches what is behind glass by the sky and the bounces.
+//
 // Bounces count as reference_path.glsl counts them (the CPU reference's way): the sun at hits 1..N+1, the sky escaping
 // after up to N+1 hits. A finished path adds pi x its radiance to its lane's sum; the host adds a point's lanes at the
 // shot. Lane l serves point l / uParams.w.
@@ -54,7 +60,7 @@ layout(std430, set = 0, binding = 10) readonly buffer ReferenceSheets { uint she
 // The sun's rays as CLOSEST rays (uCount.w's bit 1): each lane's, and its answer -- anything met in the way is shade. The
 // same trace the paths take, so the reference's sheets stop the beam whatever the frame's shadow kernel makes of sheets
 // that transmit (its glow mode lets rays through them).
-layout(std430, set = 0, binding = 11) writeonly buffer BatchSunRays { vec4 batchSunRays[]; };
+layout(std430, set = 0, binding = 11) buffer BatchSunRays { vec4 batchSunRays[]; };
 layout(std430, set = 0, binding = 12) readonly buffer BatchSunHits { uvec4 batchSunHits[]; };
 // Per triangle row, a bit: KHR_materials_unlit. A camera path's first hit on one sees its base colour (the row's albedo)
 // and ends, as lit.frag shows it; any later hit reflects as any surface does (the GI's rule).
@@ -62,10 +68,44 @@ layout(std430, set = 0, binding = 20) readonly buffer ReferenceUnlit { uint unli
 
 // Nothing here traces (the batches do); ray_query.glsl comes in for blix_pcg and reference_path.glsl's sampling, which
 // the paths must share with the monolithic reference to be the same paths.
+// The BSDF mode's inputs. Per lane: the medium its path is in (the solid's material index + 1; 0: air). Per triangle row: its material index (0xFFFFFFFF: none, the
+// default diffuse) and baked roughness (low byte) and metallic. Per material six vec4s: (base colour factor, metallic), (roughness, ior, specular, transmission),
+// (specular colour, diffuse transmission), (diffuse transmission colour, diffuse roughness override), (attenuation coefficient per metre, 0), (flags: x solid,
+// y a thin transmitting pane the sun passes through).
+layout(std430, set = 0, binding = 21) buffer ReferenceMedium { uint medium[]; };
+layout(std430, set = 0, binding = 22) readonly buffer ReferenceMaterialRows { uint materialRows[]; };
+layout(std430, set = 0, binding = 23) readonly buffer ReferenceMaterialTable { vec4 materialTable[]; };
+layout(std430, set = 0, binding = 24) readonly buffer ReferenceRowMr { uint rowMr[]; };
+
 #define BLIX_RAY_SET 0
 #define BLIX_RAY_BINDING 13
 #include "ray_query.glsl"
 #include "reference_path.glsl"
+#include "bsdf_gltf.glsl"
+
+bool referenceBsdfOn() { return (uint(u.uCount.w + 0.5) & 4u) != 0u; }
+
+// The row's material for the BSDF: the table's factors, the row's baked means, the row's albedo word (base colour at its diffuse roughness level), and its sheet
+// (the diffuse transmission, as the old reference reads it).
+BlixGltfMaterial referenceMaterial(uint mi, uint rowIdx, vec4 albedoWord) {
+    vec4 m1 = materialTable[6u * mi + 1u], m2 = materialTable[6u * mi + 2u];
+    BlixGltfMaterial m;
+    m.diffuseRoughness = albedoWord.a;
+    m.baseColor = blix_eonBaseFromHemispherical(albedoWord.rgb, albedoWord.a);
+    uint mr = rowMr[rowIdx];
+    m.roughness = float(mr & 255u) / 255.0;
+    m.metallic = float((mr >> 8u) & 255u) / 255.0;
+    m.ior = m1.y;
+    m.specular = m1.z;
+    m.transmission = m1.w;
+    m.specularColor = m2.rgb;
+    m.solid = materialTable[6u * mi + 5u].x > 0.5;
+    uint sheet = (mod(u.uCount.w, 2.0) > 0.5) ? sheets[rowIdx] : 0u;
+    float share = float(sheet >> 24) / 255.0;
+    m.diffuseTransmission = share;
+    m.dtColor = share > 0.0 ? min(unpackUnorm4x8(sheet).rgb / share, vec3(1.0)) : vec3(1.0);
+    return m;
+}
 
 // lanes[4l + 0] origin.xyz, hits so far (-1: no path)
 // lanes[4l + 1] normal.xyz, paths finished
@@ -96,6 +136,7 @@ void main() {
             c = vec4(1.0, 1.0, 1.0, c.w);
             r = vec4(0.0);
             if (seed == 0u) seed = blix_pcg(l * 9781u + uint(u.uCount.y) * 2654435761u + 1u);
+            if (referenceBsdfOn()) medium[l] = 0u;
         }
         // The first ray of a path: the camera's own, or a cosine ray about the point's normal; after a hit, the direction the shade step already chose
         // (b.xyz): it is drawn there, where the BRDF at the hit can be weighed against it (reference_path.glsl).
@@ -136,6 +177,70 @@ void main() {
             vec3 base = blix_eonBaseFromHemispherical(albedoWord.rgb, rough);   // the material's own albedo: the BRDF needs it, a bounce's albedo is the hemispherical one
             vec3 wo = -dir;                                                   // toward where the path came from (the camera, for a camera path's first hit)
             vec3 hn = dot(normal, dir) > 0.0 ? -normal : normal;
+            uint matRow = batchHits[3u * l + 1u].z;
+            uint matIndex = (referenceBsdfOn() && matRow != 0xFFFFFFFFu) ? materialRows[matRow & 0x7FFFFFFFu] : 0xFFFFFFFFu;
+            if (matIndex != 0xFFFFFFFFu) {
+                // The glTF BSDF: the path's segment through its medium, the sun's light at the hit, and the next direction -- on whichever side.
+                float tSeg = uintBitsToFloat(h0.x);
+                uint med = medium[l];
+                if (med != 0u) c.rgb *= exp(-materialTable[6u * (med - 1u) + 4u].rgb * tSeg);
+                vec3 hpB = a.xyz + dir * tSeg;
+                bool front = (h0.w & 2u) != 0u;
+                BlixGltfMaterial m = referenceMaterial(matIndex, matRow & 0x7FFFFFFFu, albedoWord);
+                bool solid = blix_gltfIsSolid(m);
+                vec3 nB = solid ? (front ? hn : -hn) : hn;   // a solid's outward side: the ray's side where it hit the front, the far side from inside
+                vec3 tx = normalize(abs(nB.y) < 0.999 ? cross(vec3(0.0, 1.0, 0.0), nB) : cross(vec3(1.0, 0.0, 0.0), nB));
+                vec3 ty = cross(nB, tx);
+                vec3 woL = vec3(dot(wo, tx), dot(wo, ty), dot(wo, nB));
+                bool inside = woL.z < 0.0;
+                uint bs = blix_pcg(floatBitsToUint(c.w) ^ 0xB5297A4Du ^ (l * 0x68E31DA4u));
+                vec3 toSunB = -normalize(u.uSunDirection.xyz);
+                if (u.uCount.z > 0.0) {
+                    vec3 ax = abs(toSunB.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+                    vec3 txs = normalize(cross(ax, toSunB));
+                    vec3 tys = cross(toSunB, txs);
+                    uint hs = blix_pcg(floatBitsToUint(c.w) ^ (l * 0x2545F491u) ^ uint(u.uCount.y) * 0x9E3779B9u);
+                    float rr = sqrt(float(hs >> 8) / 16777216.0) * u.uCount.z;
+                    float ph = float(blix_pcg(hs) >> 8) / 16777216.0 * 6.28318530718;
+                    toSunB = normalize(toSunB + rr * (cos(ph) * txs + sin(ph) * tys));
+                    batchDirections[l] = vec4(toSunB, 0.0);
+                }
+                if (!inside) {
+                    vec3 sunL = vec3(dot(toSunB, tx), dot(toSunB, ty), dot(toSunB, nB));
+                    vec3 fS = blix_gltfEval(m, woL, sunL);
+                    if ((!solid || sunL.z > 0.0) && dot(fS, vec3(1.0)) > 0.0) {
+                        vec3 oS = hpB + nB * (sunL.z > 0.0 ? 1.0 : -1.0) * u.uLift.x;
+                        batchOrigins[l] = vec4(oS, uintBitsToFloat(0x7F800000u));
+                        batchSunRays[2u * l] = vec4(oS, 0.0);
+                        batchSunRays[2u * l + 1u] = vec4(toSunB, uintBitsToFloat(0x7F800000u));
+                        sums[2u * l] = vec4(c.rgb * fS * abs(sunL.z) * u.uSunIrradiance.rgb, 0.0);
+                    }
+                }
+                vec3 wiL = vec3(0.0, 0.0, 1.0), weightB = vec3(0.0);
+                bool ok;
+                if (inside) {
+                    float aI = blix_bsdfAlpha(m.roughness);
+                    ok = blix_ifaceSampleDirection(aI, 1.0, m.ior, woL, bs, wiL);
+                    float pI = blix_ifacePdf(aI, 1.0, m.ior, woL, wiL);
+                    ok = ok && pI > 0.0;
+                    if (ok) weightB = blix_ifaceEval(aI, 1.0, m.ior, vec3(1.0), woL, wiL) * abs(wiL.z) / pI;   // the tint was taken on the way in
+                } else {
+                    ok = blix_gltfSample(m, woL, bs, wiL, weightB);
+                }
+                if (ok) {
+                    c.rgb *= weightB;
+                    float sideN = wiL.z > 0.0 ? 1.0 : -1.0;
+                    a = vec4(hpB + nB * sideN * u.uLift.x, a.w + 1.0);
+                    b.xyz = normalize(wiL.x * tx + wiL.y * ty + wiL.z * nB);
+                    if (solid && !inside && wiL.z < 0.0) medium[l] = matIndex + 1u;
+                    else if (solid && inside && wiL.z > 0.0) medium[l] = 0u;
+                } else {
+                    c.rgb = vec3(0.0);   // no sample: the path carries nothing on (it ends at the bounce cap), its sun light already counted
+                    a = vec4(hpB + nB * u.uLift.x, a.w + 1.0);
+                    b.xyz = nB;
+                }
+                c.w = uintBitsToFloat(bs);
+            } else {
             uint sheet = 0u;
             if (mod(u.uCount.w, 2.0) > 0.5) {
                 uint row = batchHits[3u * l + 1u].z;
@@ -186,6 +291,7 @@ void main() {
                 b.xyz = next;
             }
             c.w = uintBitsToFloat(nextSeed);
+            }
         }
         if (ended) {
             vec4 s = sums[2u * l + 1u];
@@ -200,8 +306,28 @@ void main() {
         return;
     }
 
-    // mode 2: the sun light lands where nothing was in the way.
+    // modes 2 and 3: the sun light lands where nothing was in the way. In the BSDF mode a thin transmitting pane in the way is not: mode 2 takes the light on
+    // through it (times its straight-through transmission) from just beyond it, for the next round's sun batch; mode 3, the last, stops at anything.
     vec4 pending = sums[2u * l];
-    bool shade = u.uCount.w > 1.5 ? (batchSunHits[3u * l].w & 1u) != 0u : batchOccluded[l] != 0u;
-    if (dot(pending.rgb, vec3(1.0)) > 0.0 && !shade) lanes[4u * l + 3u] = vec4(r.rgb + pending.rgb, 0.0);
+    bool sunClosest = (uint(u.uCount.w + 0.5) & 2u) != 0u;
+    bool shade = sunClosest ? (batchSunHits[3u * l].w & 1u) != 0u : batchOccluded[l] != 0u;
+    if (shade && mode == 2 && referenceBsdfOn() && sunClosest && dot(pending.rgb, vec3(1.0)) > 0.0) {
+        uint srow = batchSunHits[3u * l + 1u].z;
+        uint smi = srow != 0xFFFFFFFFu ? materialRows[srow & 0x7FFFFFFFu] : 0xFFFFFFFFu;
+        if (smi != 0xFFFFFFFFu && materialTable[6u * smi + 5u].y > 0.5) {
+            vec3 so = batchSunRays[2u * l].xyz, sd = batchSunRays[2u * l + 1u].xyz;
+            float st = uintBitsToFloat(batchSunHits[3u * l].x);
+            vec3 sn = normalize(vec3(uintBitsToFloat(batchSunHits[3u * l + 2u].x), uintBitsToFloat(batchSunHits[3u * l + 2u].y), uintBitsToFloat(batchSunHits[3u * l + 2u].z)));
+            BlixGltfMaterial pm = referenceMaterial(smi, srow & 0x7FFFFFFFu, unpackUnorm4x8(batchSunHits[3u * l + 2u].w));
+            vec3 fr = blix_bsdfFresnelDielectric(pm, abs(dot(sn, sd)));
+            vec3 passed = (1.0 - pm.metallic) * (vec3(1.0) - fr) * pm.baseColor * pm.transmission * 1.0;
+            sums[2u * l] = vec4(pending.rgb * passed, 0.0);
+            batchSunRays[2u * l] = vec4(so + sd * (st + u.uLift.x), 0.0);
+            return;
+        }
+    }
+    if (dot(pending.rgb, vec3(1.0)) > 0.0 && !shade) {
+        lanes[4u * l + 3u] = vec4(r.rgb + pending.rgb, 0.0);
+        sums[2u * l] = vec4(0.0);   // taken: a later round of the sun batch must not add it again
+    }
 }
