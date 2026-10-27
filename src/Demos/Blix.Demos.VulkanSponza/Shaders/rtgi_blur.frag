@@ -18,6 +18,11 @@
 
 layout(location = 0) in vec2 vUv;
 layout(location = 0) out vec4 outIncident;
+// Kept for the next frame's readout to reuse (rtgi_readout.frag's uReuse): its raw light, gradient, guide and this blur.
+layout(location = 1) out vec4 outHistRaw;
+layout(location = 2) out vec4 outHistGradient;
+layout(location = 3) out vec4 outHistBlurred;
+layout(location = 4) out vec4 outHistGuide;
 
 layout(set = 0, binding = 0) uniform RtgiBlur {
     mat4 uInvViewProj;   // this frame's (jittered), inverted
@@ -35,6 +40,9 @@ layout(set = 0, binding = 1) uniform sampler2D uIn;
 layout(set = 0, binding = 3) uniform sampler2D uGuide;
 
 layout(std430, set = 0, binding = 5) readonly buffer RtgiBlurRadius { float rtgiBlurRadius[]; };
+// The readout's reuse (rtgi_readout.frag): last frame's blurred value for a pixel taken from history, else -1.
+layout(set = 0, binding = 6) uniform sampler2D uReuse;
+layout(set = 0, binding = 7) uniform sampler2D uGradient;
 
 uint rtgiHash(uint x) {
     x ^= x >> 16; x *= 0x7feb352du;
@@ -57,22 +65,22 @@ vec3 heat(float t) {
 }
 
 
-void main() {
-    ivec2 hq = ivec2(gl_FragCoord.xy);
+vec4 blurred(ivec2 hq) {
+    vec4 reused = texelFetch(uReuse, hq, 0);
+    if (reused.a >= 0.0) return reused;
     vec4 centre = texelFetch(uIn, hq, 0);
-    outIncident = centre;
-    if (u.uBlur.x <= 0.0) return;
+    if (u.uBlur.x <= 0.0) return centre;
     ivec2 halfSize = textureSize(uIn, 0);
     vec4 g = texelFetch(uGuide, hq, 0);
-    if (guideSky(g)) return;
+    if (guideSky(g)) return centre;
     vec3 p = g.xyz, n = guideNormalOf(g.w);
     float dist = length(p - u.uCamera.xyz);
     // The radius the readout sized (rtgi_readout.frag: its cell's error, size and hit distance), in half-res pixels.
     uint at = uint(hq.y) * uint(u.uHalf.w) + uint(hq.x);
     float radius = rtgiBlurRadius[at];
     float worldR = radius * 2.0 * dist * u.uBlur.w;
-    if (u.uHalf.x > 0.5) { outIncident = vec4(heat(radius / max(0.5 * u.uBlur.x, 1.0)), centre.a); return; }
-    if (radius < 1.0) return;
+    if (u.uHalf.x > 0.5) return vec4(heat(radius / max(0.5 * u.uBlur.x, 1.0)), centre.a);
+    if (radius < 1.0) return centre;
     // The disc turned by the pixel and the frame.
     uint h = rtgiHash(uint(hq.x) * 0x9E3779B1u ^ uint(hq.y) * 0x85EBCA77u ^ uint(u.uCamera.w) * 0xC2B2AE3Du);
     float a = float(h & 0xFFFFu) / 65536.0 * 6.28318530718;
@@ -92,5 +100,14 @@ void main() {
         sum += texelFetch(uIn, th, 0) * w;
         wSum += w;
     }
-    outIncident = sum / wSum;
+    return sum / wSum;
+}
+
+void main() {
+    ivec2 hq = ivec2(gl_FragCoord.xy);
+    outIncident = blurred(hq);
+    outHistRaw = texelFetch(uIn, hq, 0);
+    outHistGradient = texelFetch(uGradient, hq, 0);
+    outHistBlurred = outIncident;
+    outHistGuide = texelFetch(uGuide, hq, 0);
 }

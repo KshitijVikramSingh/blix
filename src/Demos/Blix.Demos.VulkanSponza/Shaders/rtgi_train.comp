@@ -12,6 +12,8 @@
 //   sun       whether its shadow ray reached (where it faces the sun)
 // added to p's cell and to the cell two levels coarser (the readout's fallback), made where it is not held yet.
 
+// 128 a workgroup was slower (3.36 -> 3.52 ms a dispatch on the bench, SponzaLoop.RtgiBench.cs, 2026-10-27): half the
+// workgroups resident.
 layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) uniform RtgiTrain {
@@ -36,7 +38,16 @@ layout(set = 0, binding = 0) uniform RtgiTrain {
                          // detail on (the near and far words written); z 1: landings deferred to their request's sample;
                          // w 1: a cell's words summed over the subgroup before they are written, 2: over the workgroup, through
                          // its table (tableAdd)
+    vec4 uDouble;        // x BLIX_RTGI_TRAIN_DOUBLE, bits, measurement only: a piece run twice, the second changing nothing
+                         // (its result into a never-true test; its atomics adding 0), on another cell's memory (the next slot,
+                         // the neighbour cell: cold lines, as the first's) -- the time it adds is its cost. 1 the
+                         // hit's lookup, 2 the level inserts, 4 the guide table, 8 the flush's device atomics, 16 the
+                         // clamp's moments, 32 the table's shared atomics. Variants (changing the light): 64 the clamp at
+                         // the sample's own level alone, carried up. Removals (the bench's frozen cache: no state to drift):
+                         // 128 no hit lookup, 256 no flush device atomics, 512 no level finds (a slot from the hash), 1024
+                         // no guide table, 2048 no table rounds, 4096 no keep-alive or stale check at a hit
 } u;
+bool twice(uint b) { return (uint(u.uDouble.x) & b) != 0u; }
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
 layout(std430, set = 0, binding = 2) readonly buffer RtgiPoints { vec4 points[]; };
@@ -70,6 +81,9 @@ layout(std430, set = 0, binding = 16) buffer GuideAccum { uint guideAccum[]; };
 
 // The cache's work, counted for the profile (SponzaLoop.Rtgi.cs's RtgiWork): one atomic a subgroup, never a lane.
 layout(std430, set = 0, binding = 18) buffer RtgiStats { uint rtgiStats[64]; };
+// The readout's record (rtgi_cache.glsl; the blend's light, the resolve's samples held and sun epoch): a hit's cell read
+// in one 32-byte line (irradianceAt).
+layout(std430, set = 0, binding = 19) readonly buffer RtgiRecord { uvec4 rtgiRecord[]; };
 void tally(uint slot, bool v) {
     uint n = subgroupBallotBitCount(subgroupBallot(v));
     if (subgroupElect() && n > 0u) atomicAdd(rtgiStats[slot], n);
@@ -77,6 +91,9 @@ void tally(uint slot, bool v) {
 
 // The level offset the round being added is for (0 the sample's own level): the table's new listings counted by it.
 uint statOffset = 0u;
+// Variant 64 (uDouble): the sample clamped at its own level, the levels above taking it as clamped.
+bool clampDone = false;
+void sink(bool never) { if (never) atomicAdd(rtgiStats[63], 1u); }
 
 #define RTGI_KEYS(i) rtgiKeys[i]
 #define RTGI_NEAR u.uNearField.x
@@ -86,10 +103,18 @@ uint statOffset = 0u;
 
 // The slot for the cell at p (its level, the side n faces), made if it is not held -- its cell written then; 0xFFFFFFFF
 // when its probes are all taken.
+uint rtgiInsertHashed(uvec2 h, ivec4 cell);
+
 uint rtgiInsertAt(vec3 p, vec3 n, uint level) {
     ivec3 c = ivec3(floor(p / rtgiSize(level, u.uParams)));
     uint side = rtgiSide(n);
     uvec2 h = rtgiCellHash(c, level, side, u.uParams);
+    if (twice(512u)) return h.x & uint(u.uParams.z);
+    return rtgiInsertHashed(h, ivec4(c, int(level * 6u + side)));
+}
+
+// Cell (its coordinates, level * 6 + side) of hash h found or made.
+uint rtgiInsertHashed(uvec2 h, ivec4 cell) {
     // Held anywhere along its probes first: the eviction empties slots inside other cells' chains, and a swap into the
     // first empty one made a second copy of a cell held past it -- young, its history restarted, the old one left
     // untrained to be evicted in turn 1800 frames on: a wave of young cells through the resolve and the blend every ~30 s
@@ -101,7 +126,7 @@ uint rtgiInsertAt(vec3 p, vec3 n, uint level) {
     for (uint k = 0u; k < RTGI_PROBES; k++) {
         uint s = (h.x + k) & uint(u.uParams.z);
         uint prev = atomicCompSwap(rtgiKeys[s], 0u, h.y);
-        if (prev == 0u) { rtgiCells[s] = ivec4(c, int(level * 6u + side)); atomicAdd(rtgiStats[statOffset >= 8u ? 31u : statOffset == 0u ? 29u : 30u], 1u); }
+        if (prev == 0u) { rtgiCells[s] = cell; atomicAdd(rtgiStats[statOffset >= 8u ? 31u : statOffset == 0u ? 29u : 30u], 1u); }
         if (prev == 0u || prev == h.y) return s;
     }
     return 0xFFFFFFFFu;
@@ -129,15 +154,28 @@ void keepAlive(uint s) {
 vec4 irradianceAt(vec3 q, vec3 nq, out bool fine, float sunAt) {
     uint level = rtgiLevel(q, u.uCamera.xyz, u.uParams);
     fine = false;
+    if (twice(128u)) { fine = true; return vec4(0.1, 0.1, 0.1, 1.0); }
     uint own = rtgiFind(cellAt(q, nq, level), u.uParams);
     vec4 o0 = vec4(0.0), o1 = vec4(0.0);
-    if (own != 0xFFFFFFFFu) { o0 = rtgiFiltered[own]; o1 = rtgiResolved[2u * own + 1u]; keepAlive(own); }
+    uint epochHere = 0u;
+    if (own != 0xFFFFFFFFu) {
+        // From the readout's record, one 32-byte line: the light (half floats), and the samples held and the sun's epoch
+        // (the resolve's, mod 2048). Its sun visibility (o1.x) only where the hit's own was not traced. The blend's light,
+        // the resolve's record and the stamp were three lines: the training 3.36 -> 2.71 ms a dispatch (the bench,
+        // SponzaLoop.RtgiBench.cs, 2026-10-27). Kept alive one hit in 16, a frame in turn: well within --rtgi-max-age.
+        uvec4 a = rtgiRecord[2u * own], c = rtgiRecord[2u * own + 1u];
+        o0 = vec4(unpackHalf2x16(a.x), unpackHalf2x16(a.y));
+        o1 = vec4(sunAt >= 0.0 ? 0.0 : rtgiResolved[2u * own + 1u].x, uintBitsToFloat(c.w), 0.0, 0.0);
+        epochHere = uint(unpackHalf2x16(c.z).y);
+        if (!twice(4096u) && (rtgiHash(own ^ uint(u.uClamp.y) * 0x9E3779B9u) & 15u) == 0u) keepAlive(own);
+    }
     vec4 r0 = o0, r1 = o1;
     // Stale (uGuideTable.y): the hit cell has not been trained since the sun turned (rtgi_resolve.comp cuts a cell's
     // history only when it is next trained), so its light is the old sun's -- off screen, a bounce source, it may not be
     // trained for a long while, and every ray landing in it brought the old light on. Not ready: the landing is requested,
     // and its cell trained (and cut) next frame.
-    bool stale = u.uGuideTable.y > 0.5 && own != 0xFFFFFFFFu && rtgiStamps[own].y != uint(u.uGuideTable.z);
+    bool stale = !twice(4096u) && u.uGuideTable.y > 0.5 && own != 0xFFFFFFFFu
+        && epochHere != (uint(u.uGuideTable.z) & 2047u);
     if (o1.y >= 8.0 && !stale) fine = true;
     else if (u.uTrain.y < 0.5) {
         // Two levels up, then (uFallback.x) further: the first holding any light.
@@ -262,6 +300,9 @@ void tableAdd(uint s, uint w[RTGI_ACC]) {
                                          w[7], w[8], w[9], w[10], w[11], w[12], w[13]);
         for (uint k = 0u; k < RTGI_TW; k++)
             if (t[k] != 0u) atomicAdd(tAcc[row + k], t[k]);
+        if (twice(32u))
+            for (uint k = 0u; k < RTGI_TW; k++)
+                if (t[k] != 0u) atomicAdd(tAcc[row + k], 0u);
     }
     barrier();
     uint frame = uint(u.uClamp.y);
@@ -277,9 +318,14 @@ void tableAdd(uint s, uint w[RTGI_ACC]) {
             uint words[RTGI_WORDS] = uint[RTGI_WORDS](tAcc[row], tAcc[row + 1u], tAcc[row + 2u],
                 small & 0xFFu, (small >> 8) & 0xFFu, (small >> 16) & 0xFFu, small >> 24,
                 tAcc[row + 4u], tAcc[row + 5u], tAcc[row + 6u], tAcc[row + 7u], tAcc[row + 8u], tAcc[row + 9u], tAcc[row + 10u]);
-            pending = atomicAdd(rtgiAccum[RTGI_ACC * c + 3u], words[3]) + words[3];
-            for (uint q = 0u; q < RTGI_WORDS; q++)
-                if (q != 3u && words[q] != 0u) atomicAdd(rtgiAccum[RTGI_ACC * c + q], words[q]);
+            if (!twice(256u)) {
+                pending = atomicAdd(rtgiAccum[RTGI_ACC * c + 3u], words[3]) + words[3];
+                for (uint q = 0u; q < RTGI_WORDS; q++)
+                    if (q != 3u && words[q] != 0u) atomicAdd(rtgiAccum[RTGI_ACC * c + q], words[q]);
+            }
+            if (twice(8u))
+                for (uint q = 0u; q < RTGI_WORDS; q++)
+                    if (words[q] != 0u) atomicAdd(rtgiAccum[RTGI_ACC * ((c + 1u) & uint(u.uParams.z)) + q], 0u);
             tKey[j] = RTGI_EMPTY;
             for (uint q = 0u; q < RTGI_TW; q++) tAcc[row + q] = 0u;
         }
@@ -294,10 +340,20 @@ void tableAdd(uint s, uint w[RTGI_ACC]) {
 // rich: the sample's level and the two above, which the readout reads (its two, and two up where they hold nothing) -- the
 // irradiance vector, hit distance and near visibility written; the levels above feed the blend's parent alone, which
 // reads the light, its spread, sky and sun.
+vec3 clampOwn(uint s, vec3 e, bool counted) {
+    if (s == 0xFFFFFFFFu || !counted || u.uClamp.x <= 0.0 || rtgiMoments[3u * s + 2u].z < 32.0) return e;
+    vec4 m = rtgiMoments[3u * s];
+    float cap = m.x + u.uClamp.x * sqrt(max(m.y - m.x * m.x, 0.0)) + 1e-4;
+    float l = dot(e, vec3(0.2126, 0.7152, 0.0722));
+    return l > cap ? e * (cap / l) : e;
+}
+
 void add(uint s, vec3 e, bool counted, bool sky, bool sunTraced, bool sunLit, bool rich) {
     // --rtgi-clamp-sigma: a rare bright sample (a ray out to the sky, onto a sunlit patch through a gap) capped against the
     // cell's own spread once it has some: in a cell with few samples it was a blob that came and went (San Miguel).
-    if (s != 0xFFFFFFFFu && counted && u.uClamp.x > 0.0 && rtgiMoments[3u * s + 2u].z >= 32.0) {
+    uint s1 = (s + 1u) & uint(u.uParams.z);
+    if (twice(16u) && s != 0xFFFFFFFFu && counted) sink(rtgiMoments[3u * s1].x + rtgiMoments[3u * s1 + 2u].z == -1234.5);
+    if (!clampDone && s != 0xFFFFFFFFu && counted && u.uClamp.x > 0.0 && rtgiMoments[3u * s + 2u].z >= 32.0) {
         vec4 m = rtgiMoments[3u * s];
         float cap = m.x + u.uClamp.x * sqrt(max(m.y - m.x * m.x, 0.0)) + 1e-4;
         float l = dot(e, vec3(0.2126, 0.7152, 0.0722));
@@ -380,6 +436,12 @@ bool pointSample(uint i, out vec4 p, out vec3 n, out vec3 e, out bool counted, o
         // from under an arch meets the floor the arch itself shades: ceilings and the arches' undersides read 8-9% bright
         // against Crytek Sponza's truth, every other variant alike (2026-10-26).
         vec4 eq = irradianceAt(q, nq, fine, u.uHitSun.x > 0.5 ? ((h0.w & 8u) != 0u ? 1.0 : 0.0) : -1.0);
+        if (twice(1u)) {
+            bool fine2;
+            vec3 tq = normalize(abs(nq.y) < 0.99 ? cross(nq, vec3(0.0, 1.0, 0.0)) : cross(nq, vec3(1.0, 0.0, 0.0)));
+            vec4 eq2 = irradianceAt(q + tq * rtgiSize(rtgiLevel(q, u.uCamera.xyz, u.uParams), u.uParams), nq, fine2, -1.0);
+            sink(eq2.x == -1234.5);
+        }
         bool deferred = false;
         if (!fine && u.uTrain.w > 0.0) {
             uint r = appendRequest(true);
@@ -423,7 +485,7 @@ void main() {
     uint level = live ? rtgiLevel(p.xyz, u.uCamera.xyz, u.uParams) : 0u;
     // Path guiding: the sample's light into its guide cell's bin (two levels up, its side), counted -- the bin's light over
     // the samples counted estimates the light arriving through it (rtgi_guide.glsl).
-    if (live && counted && u.uGuideTable.x > 0.0) {
+    if (live && counted && u.uGuideTable.x > 0.0 && !twice(1024u)) {
         uint gl = min(level + 2u, uint(u.uParams.w));
         uint gside = rtgiSide(n);
         uvec2 gh = guideHash(ivec3(floor(p.xyz / rtgiSize(gl, u.uParams))), gl, gside, uint(u.uGuideTable.x));
@@ -437,6 +499,20 @@ void main() {
             int bin = guideBin(sampleDir, gside);
             if (bin >= 0) atomicAdd(guideAccum[33u * g + uint(bin)], uint(dot(min(e, vec3(RTGI_MAX_SAMPLE)), vec3(0.2126, 0.7152, 0.0722)) * RTGI_SCALE + dither.y));
             atomicAdd(guideAccum[33u * g + 32u], 1u);
+        }
+        if (twice(4u)) {
+            uint g2 = 0xFFFFFFFFu;
+            uint gx = rtgiHash(gh.x ^ 0x5bd1e995u);
+            for (uint k = 0u; k < GUIDE_PROBES; k++) {
+                uint gs = (gx + k) & uint(u.uGuideTable.x);
+                uint seen = guideKeys[gs];
+                if (seen == 0u || seen == gh.y) { g2 = gs; break; }
+            }
+            if (g2 != 0xFFFFFFFFu) {
+                int bin = guideBin(sampleDir, gside);
+                if (bin >= 0) atomicAdd(guideAccum[33u * g2 + uint(bin)], 0u);
+                atomicAdd(guideAccum[33u * g2 + 32u], 0u);
+            }
         }
     }
     // Its level and uNearField.w - 1 above (3: the next, which the readout blends in, and two up, the fallback; more feed
@@ -452,8 +528,21 @@ void main() {
         tally(2u + min(k, 4u), here);
         statOffset = k;
         if (!table && !here) continue;
-        add(here ? rtgiInsertAt(p.xyz, n, level + k) : RTGI_EMPTY, e, counted, sky, sunTraced, sunLit, k < 3u);
+        if (twice(2048u)) continue;
+        if (twice(2u) && here) {
+            ivec3 cn = ivec3(floor(p.xyz / rtgiSize(level + k, u.uParams))) + ivec3(1, 0, 0);
+            sink(rtgiFind(rtgiCellHash(cn, level + k, rtgiSide(n), u.uParams), u.uParams) == 0xFFFFFFFEu);
+        }
+        // Finding the levels above once a workgroup instead (the table keyed by the cell's hash, the flush's thread
+        // finding it) moved each find in front of that cell's atomics: 3.36 -> 3.31 ms, nothing (the bench, 2026-10-27).
+        uint slot = here ? rtgiInsertAt(p.xyz, n, level + k) : RTGI_EMPTY;
+        if (twice(64u)) {
+            if (k == 0u) e = clampOwn(slot, e, counted);
+            clampDone = true;
+        }
+        add(slot, e, counted, sky, sunTraced, sunLit, k < 3u);
     }
+    clampDone = false;
     // A deferred landing's sample, now that this point -- its landing -- has its own: the light leaving here (this sample's
     // indirect irradiance, its own sun ray's direct) times the albedo, along the origin's ray, into the origin's cells.
     // Only with deferred landings on (uFallback.z, the same for the whole dispatch: the table's rounds stay uniform).

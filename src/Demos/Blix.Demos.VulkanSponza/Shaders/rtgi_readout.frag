@@ -13,6 +13,8 @@ layout(location = 0) out vec4 outIncident;
 layout(location = 1) out vec4 outIncidentGradient;
 // The half-res guide (half_guide.glsl): this pixel's world position and normal, for the blur and the upsample.
 layout(location = 2) out vec4 outGuide;
+// Reuse (uReuse): last frame's blurred incident for a pixel taken from history, -1 for one read fresh (rtgi_blur.frag).
+layout(location = 3) out vec4 outReuse;
 
 layout(set = 0, binding = 0) uniform RtgiReadout {
     mat4 uInvViewProj;   // inverse of the view-projection the pre-pass drew with
@@ -26,6 +28,9 @@ layout(set = 0, binding = 0) uniform RtgiReadout {
                          // w a full-res pixel's footprint per metre of distance
     vec4 uBlurAt;        // x the blur's radius at most (full-res pixels; 0: none); y the share of the hit distance it may reach;
                          // z the cache's frame number (the keep-alive below)
+    mat4 uPrevViewProj;  // last frame's view-projection (the history's)
+    vec4 uReuse;         // x 1: history to reuse; y this frame's fresh blocks (0-3); z how far a history pixel may sit from
+                         // the point, per metre of distance
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -62,6 +67,11 @@ layout(std430, set = 0, binding = 13) readonly buffer RtgiRecord { uvec4 rtgiRec
 // and the blend (a still Crytek Sponza view, frames 16.7 -> 25 ms for ~10 s every 30 s, 2026-10-27). A pixel in 64 a frame,
 // in turn, each of its cells stamped a frame back (rtgi_train.comp's keepAlive) where no training stamped it for 64 frames.
 layout(std430, set = 0, binding = 14) buffer RtgiStamps { uvec2 rtgiStamps[]; };
+// Last frame's readout, kept by the blur (rtgi_blur.frag): raw, gradient, blurred, guide.
+layout(set = 0, binding = 15) uniform sampler2D uHistRaw;
+layout(set = 0, binding = 16) uniform sampler2D uHistGradient;
+layout(set = 0, binding = 17) uniform sampler2D uHistBlurred;
+layout(set = 0, binding = 18) uniform sampler2D uHistGuide;
 
 
 // Blue (0) to green to red (1).
@@ -173,6 +183,7 @@ void main() {
     vec4 ns = texelFetch(uPrepassNormal, q, 0);
     outIncidentGradient = vec4(0.0);
     outGuide = vec4(0.0, 0.0, 0.0, -1.0);
+    outReuse = vec4(-1.0);
     uint unsureAt = uint(h.y) * uint(u.uUnsure.y) + uint(h.x);
     bool unsureIn = h.x < int(u.uUnsure.y) && unsureAt < uint(u.uUnsure.z);
     if (raw >= 1.0 - 1e-6 || dot(ns.xyz, ns.xyz) < 1e-6) {
@@ -185,6 +196,31 @@ void main() {
     vec3 p = world.xyz / world.w;
     vec3 n = normalize(ns.xyz);
     outGuide = vec4(p, guideNormal(n));
+    // Reused (uReuse.x): a settled cache gives a pixel the same light frame after frame -- ~17 hash lookups a half-res
+    // pixel, the readout and the blur 3.1 ms a frame at 1080p (Crytek Sponza, 2026-10-27). A quarter of the screen read
+    // fresh a frame, in 16 x 16 blocks in turn (whole SIMD groups: one pixel in four would run every group's full path);
+    // the rest take last frame's values where its pixel there is this surface -- the same plane and normal, within
+    // uReuse.z of the distance -- else read fresh too (a disocclusion). A cell's change shows within four frames (the
+    // cache's own turns are sixteen).
+    if (u.uReuse.x > 0.5) {
+        uvec2 blk = uvec2(h) / 16u;
+        bool fresh = ((blk.x & 1u) | ((blk.y & 1u) << 1)) == uint(u.uReuse.y);
+        vec4 pc = u.uPrevViewProj * vec4(p, 1.0);
+        if (!fresh && pc.w > 0.0) {
+            ivec2 ph = ivec2(floor((pc.xy / pc.w * 0.5 + 0.5) * vec2(fullSize) * 0.5));
+            if (all(greaterThanEqual(ph, ivec2(0))) && all(lessThan(ph, textureSize(uHistGuide, 0)))) {
+                vec4 g = texelFetch(uHistGuide, ph, 0);
+                float dist = length(p - u.uCamera.xyz);
+                if (!guideSky(g) && dot(guideNormalOf(g.w), n) > 0.95 && abs(dot(n, g.xyz - p)) < 0.01 * dist + 0.01
+                    && length(g.xyz - p) < u.uReuse.z * dist) {
+                    outIncident = texelFetch(uHistRaw, ph, 0);
+                    outIncidentGradient = texelFetch(uHistGradient, ph, 0);
+                    outReuse = texelFetch(uHistBlurred, ph, 0);
+                    return;
+                }
+            }
+        }
+    }
     uint side = rtgiSide(n);
     // The two levels around the point's, blended by where it sits between them (rtgiLevelF): no jump at a level's edge.
     float lf = rtgiLevelF(p, u.uCamera.xyz, u.uParams);

@@ -194,10 +194,11 @@ void main() {
     rtgiMoments[3u * s] = m;
     rtgiMoments[3u * s + 1u] = fast;
     rtgiMoments[3u * s + 2u] = fs;
-    // The readout's record: the hit distance, the direction and near visibility, the far share, the samples held.
+    // The readout's record: the hit distance, the direction and near visibility, the far share and the sun's epoch (mod
+    // 2048: a hit's stale test, rtgi_train.comp's irradianceAt), the samples held.
     vec4 dirNow = rtgiDirection[s];
     rtgiRecord[2u * s].w = floatBitsToUint(rtgiHitInv[s]);
-    rtgiRecord[2u * s + 1u] = uvec4(packHalf2x16(dirNow.xy), packHalf2x16(dirNow.zw), packHalf2x16(vec2(fs.w, 0.0)),
+    rtgiRecord[2u * s + 1u] = uvec4(packHalf2x16(dirNow.xy), packHalf2x16(dirNow.zw), packHalf2x16(vec2(fs.w, float(uint(u.uList.x) & 2047u))),
                                     floatBitsToUint(r1.y));
     for (uint k = 0u; k < 4u; k++) rtgiAccum4[4u * s + k] = uvec4(0u);
 }

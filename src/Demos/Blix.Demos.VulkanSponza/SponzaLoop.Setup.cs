@@ -189,6 +189,7 @@ internal sealed partial class SponzaLoop
         // graph at a zero radius (--no-ao's way), so this is about the image, not the frame's time.
         if (rtgi && !args.Flag("ao")) ambient.Enabled = false;
         ParseGpuCapture(args);
+        ParseRtgiBench(args);
         ParseMetalFx(args);
         ParseRtgiTemporal(args);
         lightletCensus = args.Flag("lightlet-census");

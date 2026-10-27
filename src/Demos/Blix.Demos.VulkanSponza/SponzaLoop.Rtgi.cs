@@ -61,6 +61,9 @@ internal sealed partial class SponzaLoop
     // and 4.8% (0.307), at 600 frames 0.4% and 0.9% (0.269 against 0.361), the darkest quarter's error 0.241 against
     // 0.273 at 2400 -- a boot at the new sun reads 0.1% at 300 (2026-10-27). --rtgi-no-stale-hits: off.
     private bool rtgiStaleHits = true;
+    // BLIX_RTGI_TRAIN_DOUBLE: bits of the training run twice to measure their cost (rtgi_train.comp's uDouble), for the
+    // bench (SponzaLoop.RtgiBench.cs).
+    private float rtgiTrainDouble = int.TryParse(Environment.GetEnvironmentVariable("BLIX_RTGI_TRAIN_DOUBLE"), out var v) ? v : 0;
     // A cell listed for the resolve and the blend once its waiting samples reach 1 / --rtgi-list-worth (8) of what it holds,
     // else one frame in --rtgi-filter-every (rtgi_train.comp's listNow); the resolve and the blend then take every cell
     // listed. --rtgi-list-all: every frame it is trained, the resolve's and the blend's own turns.
@@ -171,6 +174,13 @@ internal sealed partial class SponzaLoop
     private PipelineHandle rtgiRaysPipeline, rtgiTrainPipeline, rtgiResolvePipeline, rtgiReadoutPipeline, rtgiBlurPipeline;
     private ShaderInterface rtgiBlurInterface = null!;
     private PassHandle rtgiBlurPassHandle;
+    // The readout's reuse (rtgi_readout.frag's uReuse): its targets kept for the next frame (by the blur, rtgi_blur.frag),
+    // the view they were drawn with, the frame they hold. Opt-in, --rtgi-reuse: the readout and blur 3.2 -> 1.7 ms on a still
+    // Crytek Sponza 1080p view, truth unchanged, but it smears in motion (the user, 2026-10-27) -- off until that is fixed.
+    private GraphResourceHandle rtgiHalfReuseHandle, rtgiHistRawHandle, rtgiHistGradientHandle, rtgiHistBlurredHandle, rtgiHistGuideHandle;
+    private bool rtgiReuse;
+    private long rtgiReuseFrame = -2;
+    private Matrix4x4 rtgiReusePrevViewProj;
     private GraphResourceHandle rtgiHalfRawHandle;
     // The half-res guide the readout writes beside its light (half_guide.glsl): each half-res pixel's world position and
     // normal, which the blur reads at its taps in place of full-res depth and normals fetched two pixels apart (blur 3.03 ->
@@ -228,6 +238,9 @@ internal sealed partial class SponzaLoop
     // 0.127 / 0.096 / 0.094 at 239k (2026-10-27) -- the cells' relative error (a pooled spread over heavy-tailed bounce
     // light) stays high everywhere, and fewer points only slowed convergence across the board.
     private float rtgiBudgetError = 0f, rtgiBudgetFloor = 0.125f;
+    // --rtgi-settled-samples / --rtgi-settled-keep: a visible point whose cell holds that many samples kept at that share
+    // (rtgi_rays.comp); samples 0: off.
+    private float rtgiSettledSamples = 0f, rtgiSettledKeep = 0.25f;
     private float rtgiDoneError = 0.005f, rtgiDarkFloor = 0.002f, rtgiDoneWindow = 60f, rtgiTrickle = 8f;
 
     private GpuBufferHandle rtgiConfidence, rtgiDoneCount;
@@ -407,7 +420,10 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-trickle") is { } tr) rtgiTrickle = MathF.Max(1f, tr);
         if (args.Float("rtgi-budget-error") is { } be) rtgiBudgetError = MathF.Max(0f, be);
         if (args.Float("rtgi-budget-floor") is { } bf) rtgiBudgetFloor = Math.Clamp(bf, 0f, 1f);
+        if (args.Float("rtgi-settled-samples") is { } ss) rtgiSettledSamples = MathF.Max(0f, ss);
+        if (args.Float("rtgi-settled-keep") is { } sk) rtgiSettledKeep = Math.Clamp(sk, 0f, 1f);
         if (args.Flag("rtgi-view-done")) rtgiView = 1;
+        if (args.Flag("rtgi-reuse")) rtgiReuse = true;
         if (args.Flag("rtgi-contact")) rtgiContact = true;
         if (args.Flag("rtgi-no-contact")) rtgiContact = false;
         if (args.Int("rtgi-contact-rays") is { } cr) rtgiContactRays = Math.Max(1, cr);
@@ -476,22 +492,38 @@ internal sealed partial class SponzaLoop
         // Into the raw half-res target, the blur after it into the incident (rtgi_blur.frag).
         rtgiHalfRawHandle = graph.ColorTarget("rtgi-half-raw", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(0.5f));
         rtgiHalfGuideHandle = graph.ColorTarget("rtgi-half-guide", TextureFormat.Rgba32F, new MatchSwapchainGraphSize(0.5f));
+        var half = new MatchSwapchainGraphSize(0.5f);
+        rtgiHalfReuseHandle = graph.ColorTarget("rtgi-half-reuse", TextureFormat.Rgba16F, half);
+        rtgiHistRawHandle = graph.ColorTarget("rtgi-hist-raw", TextureFormat.Rgba16F, half);
+        rtgiHistGradientHandle = graph.ColorTarget("rtgi-hist-gradient", TextureFormat.Rgba16F, half);
+        rtgiHistBlurredHandle = graph.ColorTarget("rtgi-hist-blurred", TextureFormat.Rgba16F, half);
+        rtgiHistGuideHandle = graph.ColorTarget("rtgi-hist-guide", TextureFormat.Rgba32F, half);
         rtgiReadoutPassHandle = graph.GraphicsPass("rtgi-readout")
             .Target(rtgiHalfRawHandle, LoadOp.Clear, StoreOp.Store)
             .Target(incidentGradientHalfHandle, LoadOp.Clear, StoreOp.Store)
             .Target(rtgiHalfGuideHandle, LoadOp.Clear, StoreOp.Store)
+            .Target(rtgiHalfReuseHandle, LoadOp.Clear, StoreOp.Store)
             .Read(SampleableSceneDepth)
             .Read(SampleablePrepassNormal)
+            .ReadHistory(rtgiHistRawHandle).ReadHistory(rtgiHistGradientHandle).ReadHistory(rtgiHistBlurredHandle).ReadHistory(rtgiHistGuideHandle)
             .WritesGpuBuffers()
             .Shader(rtgiReadoutInterface)
             .Handle;
         rtgiBlurInterface = reflect("present.vert", "rtgi_blur.frag");
-        rtgiBlurPassHandle = graph.GraphicsPass("rtgi-blur")
+        var blur = graph.GraphicsPass("rtgi-blur")
             .Target(incidentHalfHandle, LoadOp.Clear, StoreOp.Store)
             .Read(rtgiHalfRawHandle)
             .Read(rtgiHalfGuideHandle)
-            .Shader(rtgiBlurInterface)
-            .Handle;
+            .Read(rtgiHalfReuseHandle)
+            .Read(incidentGradientHalfHandle);
+        // The history for the next frame's reuse, only with it on: the four writes cost the blur ~0.3 ms a frame at 1080p
+        // (1.37 -> 1.66, 2026-10-27). Without, the shader's history outputs have no target and are dropped.
+        if (rtgiReuse)
+            blur = blur.Target(rtgiHistRawHandle, LoadOp.Clear, StoreOp.Store)
+                .Target(rtgiHistGradientHandle, LoadOp.Clear, StoreOp.Store)
+                .Target(rtgiHistBlurredHandle, LoadOp.Clear, StoreOp.Store)
+                .Target(rtgiHistGuideHandle, LoadOp.Clear, StoreOp.Store);
+        rtgiBlurPassHandle = blur.Shader(rtgiBlurInterface).Handle;
         rtgiScreenInterface = reflect("present.vert", "rtgi_screen.frag");
         rtgiScreenPassHandle = graph.GraphicsPass("rtgi-screen")
             .Target(incidentHalfHandle, LoadOp.Clear, StoreOp.Store)
@@ -522,11 +554,13 @@ internal sealed partial class SponzaLoop
         rtgiReadoutPipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
                 presentVertSpv, File.ReadAllBytes(Path.Combine(shaderDir, "rtgi_readout.frag.spv")), rtgiReadoutInterface, "rtgi_readout")),
             VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
-            new[] { BlendState.Disabled, BlendState.Disabled, BlendState.Disabled }, rtgiReadoutPassHandle, "rtgi_readout");
+            new[] { BlendState.Disabled, BlendState.Disabled, BlendState.Disabled, BlendState.Disabled }, rtgiReadoutPassHandle, "rtgi_readout");
+
         rtgiBlurPipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
                 presentVertSpv, File.ReadAllBytes(Path.Combine(shaderDir, "rtgi_blur.frag.spv")), rtgiBlurInterface, "rtgi_blur")),
             VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
-            new[] { BlendState.Disabled }, rtgiBlurPassHandle, "rtgi_blur");
+            rtgiReuse ? new[] { BlendState.Disabled, BlendState.Disabled, BlendState.Disabled, BlendState.Disabled, BlendState.Disabled } : new[] { BlendState.Disabled },
+            rtgiBlurPassHandle, "rtgi_blur");
         rtgiReservoirPipeline = Compute("rtgi_reservoir", rtgiReservoirInterface);
         rtgiSpatialPipeline = Compute("rtgi_spatial", rtgiSpatialInterface);
         rtgiScreenPipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
@@ -609,8 +643,11 @@ internal sealed partial class SponzaLoop
         rtgiLastSun = towardSun;
         if (sunTurned && rtgiSunCut > 0f) rtgiSunEpoch++;
         var frameNumber = rtgiFrameCount + 1u;
+        // On the bench (SponzaLoop.RtgiBench.cs) the training dispatched N times, the rest of the cache's frame skipped.
+        var trainReps = RtgiTrainReps();
         if (rtgiTraced > 0)
-            graph.Dispatch(rtgiTrainPassHandle, new DispatchCommand(rtgiTrainPipeline, groups, 1, 1,
+        {
+            var train = new DispatchCommand(rtgiTrainPipeline, groups, 1, 1,
                 new ShaderUniform[]
                 {
                     new("uParams", new Vector4Uniform(RtgiParams)),
@@ -623,6 +660,7 @@ internal sealed partial class SponzaLoop
                     new("uTrain", new Vector4Uniform(new Vector4(rtgiCountUnknown ? 1f : 0f, rtgiNoCoarse ? 1f : 0f, rtgiBackfaceLit ? 1f : 0f, rtgiRequests ? rtgiHitPoints : 0f))),
                     new("uHitSun", new Vector4Uniform(new Vector4(rtgiTraceHitSun ? 1f : 0f, rtgiThin ? 1f : 0f, rtgiReadFirst ? 1f : 0f, rtgiListOnTurn ? rtgiFilterEvery : 0f))),
                     new("uFallback", new Vector4Uniform(new Vector4(rtgiFallbackUp, rtgiContact ? 1f : 0f, rtgiDefer ? 1f : 0f, rtgiSubgroup ? (rtgiTrainTable ? 2f : 1f) : 0f))),
+                    new("uDouble", new Vector4Uniform(new Vector4(rtgiTrainDouble, 0f, 0f, 0f))),
                 },
                 new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
                 Buffers: new[]
@@ -644,7 +682,11 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("GuideAccum", rtgiGuideAccum),
                     new ShaderBufferBinding("RtgiPointOrigins", rtgiPointOriginsBuf[prev]),
                     new ShaderBufferBinding("RtgiStats", rtgiStats),
-                }));
+                    new ShaderBufferBinding("RtgiRecord", rtgiRecord),
+                });
+            for (var r = 0; r < trainReps; r++) graph.Dispatch(rtgiTrainPassHandle, train);
+        }
+        if (rtgiBenching) return;
         // Path guiding: each guide cell's frame of samples into its bins.
         if (rtgiGuide > 0f)
         graph.Dispatch(rtgiGuideResolvePassHandle, new DispatchCommand(rtgiGuideResolvePipeline, (RtgiGuideSlots + 63) / 64, 1, 1,
@@ -854,7 +896,7 @@ internal sealed partial class SponzaLoop
                 new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, 0f, 0f, 0f))),
                 new("uGuide", new Vector4Uniform(new Vector4(rtgiGuide, rtgiGuideMin, rtgiGuideKappa, RtgiGuideSlots - 1))),
                 new("uAdapt", new Vector4Uniform(new Vector4(rtgiAdaptive, rtgiAdaptiveK, rtgiDoneError, rtgiTrickle))),
-                new("uBudget", new Vector4Uniform(new Vector4(rtgiBudgetError, rtgiBudgetFloor, 0f, 0f))),
+                new("uBudget", new Vector4Uniform(new Vector4(rtgiBudgetError, rtgiBudgetFloor, rtgiSettledSamples, rtgiSettledKeep))),
                 new("uBlock", new Vector4Uniform(new Vector4(rtgiBlock ? 1f : 0f, rtgiBlockGlobal, rtgiBlockWindow, 0f))),
                 new("uUnsureMap", new Vector4Uniform(new Vector4(rtgiHalfRow, rtgiUnsureWritten ? 1f : 0f, RtgiUnsureSize, 0f))),
                 new("uSeq", new Vector4Uniform(new Vector4(rtgiBlue ? 1f : 0f, rtgiRedraw ? 1f : 0f, rtgiSettledSun ? 1f : 0f, 0f))),
@@ -981,12 +1023,18 @@ internal sealed partial class SponzaLoop
                 }));
             return;
         }
+        // Reused from last frame's readout where it is there and the panel's views are off (they paint every pixel).
+        var reuse = rtgiReuse && rtgiView == 0 && rtgiReuseFrame == rtgiFrameCount - 1;
         graph.Pass(rtgiReadoutPassHandle, scope => fullscreen.Draw(
             scope, rtgiReadoutPipeline,
             new[]
             {
                 new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
                 new ShaderTextureBinding("uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
+                new ShaderTextureBinding("uHistRaw", graph.GetColorTexture(rtgiHistRawHandle)),
+                new ShaderTextureBinding("uHistGradient", graph.GetColorTexture(rtgiHistGradientHandle)),
+                new ShaderTextureBinding("uHistBlurred", graph.GetColorTexture(rtgiHistBlurredHandle)),
+                new ShaderTextureBinding("uHistGuide", graph.GetColorTexture(rtgiHistGuideHandle)),
             },
             pushConstants: null,
             uniforms: new ShaderUniform[]
@@ -995,6 +1043,9 @@ internal sealed partial class SponzaLoop
                 new("uParams", new Vector4Uniform(RtgiParams)),
                 new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, 0f))),
                 new("uHalf", new Vector4Uniform(new Vector4(0f, sub.X, sub.Y, 0f))),
+                new("uPrevViewProj", new Matrix4x4Uniform(rtgiReusePrevViewProj)),
+                // Within four full-res pixels' footprint of the point.
+                new("uReuse", new Vector4Uniform(new Vector4(reuse ? 1f : 0f, rtgiFrameCount & 3u, 4f * RtgiPixelFootprint, 0f))),
                 new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, rtgiNoGradient ? 0f : 1f, rtgiReadoutPlane ? 1f : 0f, 0f))),
                 new("uContact", new Vector4Uniform(new Vector4(rtgiContact ? 1f : 0f, 0.3f, 1.25f, rtgiView))),
                 new("uUnsure", new Vector4Uniform(new Vector4(rtgiDoneError, rtgiHalfRow, RtgiUnsureSize, RtgiPixelFootprint))),
@@ -1021,6 +1072,8 @@ internal sealed partial class SponzaLoop
             {
                 new ShaderTextureBinding("uIn", graph.GetColorTexture(rtgiHalfRawHandle)),
                 new ShaderTextureBinding("uGuide", graph.GetColorTexture(rtgiHalfGuideHandle)),
+                new ShaderTextureBinding("uReuse", graph.GetColorTexture(rtgiHalfReuseHandle)),
+                new ShaderTextureBinding("uGradient", graph.GetColorTexture(incidentGradientHalfHandle)),
             },
             pushConstants: null,
             uniforms: new ShaderUniform[]
@@ -1034,6 +1087,8 @@ internal sealed partial class SponzaLoop
                 new("uHalf", new Vector4Uniform(new Vector4(rtgiView == 9 ? 1f : 0f, sub.X, sub.Y, rtgiHalfRow))),
             },
             buffers: new[] { new ShaderBufferBinding("RtgiBlurRadius", rtgiBlurRadius) }));
+        rtgiReuseFrame = rtgiFrameCount;
+        rtgiReusePrevViewProj = viewProjJittered;
     }
 
     // --rtgi-dump DIR --rtgi-dump-frames F1,F2,...: at those post-load frames the incident field the lit pass read
