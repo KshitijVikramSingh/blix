@@ -51,7 +51,10 @@ public sealed class RenderCommandList
     public void ExternalPass(string name, Action<ExternalWorkSync> encode) => ExternalPass(name, encode, joinLater: false);
 
     /// <param name="joinLater">The frame does not wait after the pass; an <see cref="ExternalJoin"/> later in it does.</param>
-    public void ExternalPass(string name, Action<ExternalWorkSync> encode, bool joinLater)
+    public void ExternalPass(string name, Action<ExternalWorkSync> encode, bool joinLater) => ExternalPass(name, encode, joinLater, async: false);
+
+    /// <param name="async">Only async compute reads its work (RenderPassDescription.ExternalAsync).</param>
+    public void ExternalPass(string name, Action<ExternalWorkSync> encode, bool joinLater, bool async)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         ArgumentNullException.ThrowIfNull(encode);
@@ -60,7 +63,7 @@ public sealed class RenderCommandList
         {
             var desc = new RenderPassDescription(
                 RenderSurfaceHandle.Default, Array.Empty<GraphicsColor?>(), ClearDepth: false, Compute: true, External: encode,
-                ExternalJoinLater: joinLater);
+                ExternalJoinLater: joinLater, ExternalAsync: async);
             passes.Add(new RenderPass(name, desc, Array.Empty<RenderCommand>()));
         }
         finally

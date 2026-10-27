@@ -41,6 +41,10 @@ public sealed record RenderPassDescription(
     // A join (RenderGraph.ExternalJoin): the name of the external pass whose work everything after this waits for.
     string? ExternalJoin = null,
 
+    // An external pass only async compute reads (RenderGraph.ExternalPass's async): the frame goes on without waiting, the
+    // next async run and the frame's end wait for it, on a timeline of its own.
+    bool ExternalAsync = false,
+
     // Graphics pass: its draws write GPU buffers (a fragment shader appending to a list, say), fenced after the
     // render pass ends so a later dispatch, an indirect fetch or a draw sees them (GraphicsPassBuilder.WritesGpuBuffers).
     // Without it only dispatches fence GPU buffers.

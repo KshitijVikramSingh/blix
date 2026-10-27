@@ -42,6 +42,13 @@ public sealed partial class VulkanGraphicsDevice
     // the main queue's later ones, so it cannot be a value of the frame timeline (a timeline only rises).
     private Semaphore asyncTimeline;
     private ulong asyncTimelineValue;
+    // Async external passes' timelines (RenderPassDescription.ExternalAsync), two in turn by frame: the main queue signals
+    // one's wait value, the Metal work its signal, and the next async run and the frame's end wait for that. A frame's
+    // own: its signal comes whenever the Metal queue gets to it, after the main queue's later work; the one two frames on
+    // signals it only once this frame's is done (that frame's readout waited for the async run that waited for it).
+    private readonly Semaphore[] asyncExternalTimeline = new Semaphore[2];
+    private readonly nint[] asyncExternalEvent = new nint[2];
+    private readonly ulong[] asyncExternalValue = new ulong[2];
 
     private unsafe void CreateFrameTimeline()
     {
@@ -66,6 +73,23 @@ public sealed partial class VulkanGraphicsDevice
         var info = new ExportMetalObjectsInfoEXT { SType = StructureType.ExportMetalObjectsInfoExt, PNext = &eventInfo };
         MetalObjects.ExportMetalObjects(Device, &info);
         frameTimelineEvent = (nint)eventInfo.MtlSharedEvent;
+        for (var i = 0; i < 2; i++)
+        {
+            var sideExport = new ExportMetalObjectCreateInfoEXT
+            {
+                SType = StructureType.ExportMetalObjectCreateInfoExt,
+                ExportObjectType = ExportMetalObjectTypeFlagsEXT.ExportMetalObjectTypeMetalSharedEventBitExt,
+            };
+            var sideType = new SemaphoreTypeCreateInfo { SType = StructureType.SemaphoreTypeCreateInfo, PNext = &sideExport, SemaphoreType = SemaphoreType.Timeline, InitialValue = 0 };
+            var sci = new SemaphoreCreateInfo { SType = StructureType.SemaphoreCreateInfo, PNext = &sideType };
+            Semaphore side;
+            ThrowIfNotSuccess(Vk.CreateSemaphore(Device, in sci, null, &side), "vkCreateSemaphore(async external timeline)");
+            asyncExternalTimeline[i] = side;
+            var sideEventInfo = new ExportMetalSharedEventInfoEXT { SType = StructureType.ExportMetalSharedEventInfoExt, Semaphore = side };
+            var sideInfo = new ExportMetalObjectsInfoEXT { SType = StructureType.ExportMetalObjectsInfoExt, PNext = &sideEventInfo };
+            MetalObjects.ExportMetalObjects(Device, &sideInfo);
+            asyncExternalEvent[i] = (nint)sideEventInfo.MtlSharedEvent;
+        }
         if (HasAsyncQueue)
         {
             var asyncType = new SemaphoreTypeCreateInfo { SType = StructureType.SemaphoreTypeCreateInfo, SemaphoreType = SemaphoreType.Timeline, InitialValue = 0 };
@@ -85,6 +109,12 @@ public sealed partial class VulkanGraphicsDevice
         frameTimeline = default;
         if (asyncTimeline.Handle != 0) Vk.DestroySemaphore(Device, asyncTimeline, null);
         asyncTimeline = default;
+        for (var i = 0; i < 2; i++)
+        {
+            if (asyncExternalTimeline[i].Handle != 0) Vk.DestroySemaphore(Device, asyncExternalTimeline[i], null);
+            asyncExternalTimeline[i] = default;
+            asyncExternalEvent[i] = 0;
+        }
         frameTimelineEvent = 0;
     }
 

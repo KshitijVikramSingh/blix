@@ -169,12 +169,19 @@ public sealed partial class RenderGraph : IDisposable
     /// placed in declaration order like any pass, with no shader and no dispatches. Needs
     /// <see cref="GraphicsFeatures.MetalObjects"/> when it has work in a frame.
     /// </summary>
-    public PassHandle ExternalPass(string name)
+    public PassHandle ExternalPass(string name) => ExternalPass(name, async: false);
+
+    /// <summary>
+    /// <paramref name="async"/>: native Metal work only the async compute after it reads (ComputePassBuilder.Async) --
+    /// the frame goes on without waiting for it, no join, and the next async run and the frame's end wait for it, on a
+    /// timeline of its own (so its signal, coming whenever the Metal queue gets to it, orders against nothing else).
+    /// </summary>
+    public PassHandle ExternalPass(string name, bool async)
     {
         EnsureNotCompiled(nameof(ExternalPass));
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         var id = nextId++;
-        ComputePasses[id] = new ComputePassEntry { Handle = new PassHandle(id), Name = name, External = true };
+        ComputePasses[id] = new ComputePassEntry { Handle = new PassHandle(id), Name = name, External = true, ExternalAsync = async };
         PassOrder.Add(id);
         return new PassHandle(id);
     }
@@ -436,7 +443,7 @@ public sealed partial class RenderGraph : IDisposable
             {
                 if (recordedExternal.TryGetValue(passId, out var external))
                 {
-                    commandList.ExternalPass(cpass.Name, external, joinLater: cpass.Join != 0);
+                    commandList.ExternalPass(cpass.Name, external, joinLater: cpass.Join != 0, async: cpass.ExternalAsync);
                     continue;
                 }
                 // A join emits only when its external pass has work this frame.
@@ -577,6 +584,9 @@ internal sealed class ComputePassEntry
 
     /// <summary>Declared with RenderGraph.ExternalPass: native Metal work, no shader and no dispatches.</summary>
     public bool External { get; init; }
+
+    /// <summary>An external pass only async compute reads (RenderGraph.ExternalPass's async).</summary>
+    public bool ExternalAsync { get; init; }
 
     /// <summary>Declared with RenderGraph.ExternalJoin: the external pass (its id) whose work the passes after this wait for.</summary>
     public int JoinOf { get; init; }

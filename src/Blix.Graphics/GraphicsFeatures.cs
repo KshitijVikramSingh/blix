@@ -62,6 +62,10 @@ public enum GraphicsFeatures
 
     /// <summary>Descriptors written straight into the command buffer (pushDescriptor).</summary>
     PushDescriptors = 1 << 13,
+
+    /// <summary>A second queue async compute runs on (ComputePassBuilder.Async), beside the frame; without it async
+    /// passes run in place, and an async external pass (RenderGraph.ExternalPass's async) has no async run to wait for it.</summary>
+    AsyncCompute = 1 << 14,
 }
 
 /// <summary>What a compute program needs of how it runs (IGraphicsDevice.CreateComputePipeline).</summary>

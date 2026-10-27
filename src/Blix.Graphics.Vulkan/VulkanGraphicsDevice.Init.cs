@@ -502,6 +502,7 @@ public sealed partial class VulkanGraphicsDevice
             AsyncQueue = second;
             AsyncQueueFamily = family;
             HasAsyncQueue = true;
+            Features |= GraphicsFeatures.AsyncCompute;
         }
         Console.WriteLine(HasAsyncQueue
             ? $"[Vulkan] async compute: family {AsyncQueueFamily}'s queue beside the graphics family {GraphicsQueueFamily}'s."

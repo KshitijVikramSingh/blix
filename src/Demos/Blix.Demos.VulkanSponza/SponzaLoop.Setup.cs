@@ -874,6 +874,9 @@ internal sealed partial class SponzaLoop
         DeclareRtgiProbePasses(stage => Reflect(stage));
         DeclareRtgiComputePasses(stage => Reflect(stage));
         rtShadowTracePassHandle = graph.ExternalPass("rt-shadow-trace");
+        // The cache's rays (SponzaLoop.Rtgi.cs): traced after the sun's, which the lit pass waits for, and read only by the
+        // cache's async update -- an async external pass, nothing in the frame waiting for it.
+        rtgiTracePassHandle = graph.ExternalPass("rtgi-trace", async: true);
 
         // The Hi-Z pyramid, immediately after the pre-pass that resolves the depth it reduces.
         // Level 0 is half the framebuffer — the same grid GTAO already works on, so its consumers

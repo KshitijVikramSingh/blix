@@ -63,6 +63,7 @@ internal sealed partial class SponzaLoop
     private bool rtgiStaleHits = true;
     // The cache's update on the device's second queue (DeclareRtgiCachePasses); --rtgi-no-async: in place.
     private bool rtgiAsync = true;
+    private PassHandle rtgiTracePassHandle;
     // BLIX_RTGI_TRAIN_DOUBLE: bits of the training run twice to measure their cost (rtgi_train.comp's uDouble), for the
     // bench (SponzaLoop.RtgiBench.cs).
     private float rtgiTrainDouble = int.TryParse(Environment.GetEnvironmentVariable("BLIX_RTGI_TRAIN_DOUBLE"), out var v) ? v : 0;
@@ -1022,7 +1023,12 @@ internal sealed partial class SponzaLoop
         {
             for (var r = 0; r < traceReps; r++) Encode(sync, t);
         }
-        if (!TracerGroupsOn) graph.External(rtgiProbeTracePassHandle, sync => tracer.EncodeGroup(sync, () => EncodeAll(sync, tracer)));
+        // With async compute (and its update async): a Metal pass of its own after the sun's (rtgi-trace), which the lit
+        // pass's join no longer waits for -- in the sun's group, the frame waited at that join for the cache's ~2 ms of
+        // rays too, ahead of the upsample and the lit pass (Crytek Sponza's intervals, 2026-10-28).
+        if (rtgiAsync && (device.Features & GraphicsFeatures.AsyncCompute) != 0)
+            graph.External(rtgiTracePassHandle, sync => tracer.EncodeGroup(sync, () => EncodeAll(sync, tracer)));
+        else if (!TracerGroupsOn) graph.External(rtgiProbeTracePassHandle, sync => tracer.EncodeGroup(sync, () => EncodeAll(sync, tracer)));
         else DeferTracerBatch(EncodeAll);
         // The bench: the frame stands still (its number, its buffers' parity).
         if (rtgiBenching) return;
