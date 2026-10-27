@@ -22,7 +22,7 @@ layout(location = 0) out vec4 outIncident;
 layout(location = 1) out vec4 outHistRaw;
 layout(location = 2) out vec4 outHistGradient;
 layout(location = 3) out vec4 outHistBlurred;
-layout(location = 4) out vec4 outHistGuide;
+layout(location = 4) out uvec2 outHistGuide;
 
 layout(set = 0, binding = 0) uniform RtgiBlur {
     mat4 uInvViewProj;   // this frame's (jittered), inverted
@@ -37,7 +37,7 @@ layout(set = 0, binding = 0) uniform RtgiBlur {
 
 layout(set = 0, binding = 1) uniform sampler2D uIn;
 // The readout's guide (half_guide.glsl): each half-res pixel's position and normal, the centre's and the taps'.
-layout(set = 0, binding = 3) uniform sampler2D uGuide;
+layout(set = 0, binding = 3) uniform usampler2D uGuide;
 
 layout(std430, set = 0, binding = 5) readonly buffer RtgiBlurRadius { float rtgiBlurRadius[]; };
 // The readout's reuse (rtgi_readout.frag): last frame's blurred value for a pixel taken from history, else -1.
@@ -71,9 +71,9 @@ vec4 blurred(ivec2 hq) {
     vec4 centre = texelFetch(uIn, hq, 0);
     if (u.uBlur.x <= 0.0) return centre;
     ivec2 halfSize = textureSize(uIn, 0);
-    vec4 g = texelFetch(uGuide, hq, 0);
+    uvec2 g = texelFetch(uGuide, hq, 0).xy;
     if (guideSky(g)) return centre;
-    vec3 p = g.xyz, n = guideNormalOf(g.w);
+    vec3 p = guidePosition(g, u.uCamera.xyz), n = guideNormalOf(g);
     float dist = length(p - u.uCamera.xyz);
     // The radius the readout sized (rtgi_readout.frag: its cell's error, size and hit distance), in half-res pixels.
     uint at = uint(hq.y) * uint(u.uHalf.w) + uint(hq.x);
@@ -92,10 +92,11 @@ vec4 blurred(ivec2 hq) {
         vec2 o = rot * DISC[k];
         ivec2 th = hq + ivec2(round(o * radius));
         if (any(lessThan(th, ivec2(0))) || any(greaterThanEqual(th, halfSize)) || th == hq) continue;
-        vec4 gt = texelFetch(uGuide, th, 0);
+        uvec2 gt = texelFetch(uGuide, th, 0).xy;
         if (guideSky(gt)) continue;
-        float plane = dot(n, gt.xyz - p) / planeTol;
-        float w = exp(-0.5 * plane * plane) * pow(max(dot(n, guideNormalOf(gt.w)), 0.0), 16.0)
+        vec3 pt = guidePosition(gt, u.uCamera.xyz);
+        float plane = dot(n, pt - p) / planeTol;
+        float w = exp(-0.5 * plane * plane) * pow(max(dot(n, guideNormalOf(gt)), 0.0), 16.0)
             * exp(-1.5 * dot(o, o));
         sum += texelFetch(uIn, th, 0) * w;
         wSum += w;
@@ -109,5 +110,5 @@ void main() {
     outHistRaw = texelFetch(uIn, hq, 0);
     outHistGradient = texelFetch(uGradient, hq, 0);
     outHistBlurred = outIncident;
-    outHistGuide = texelFetch(uGuide, hq, 0);
+    outHistGuide = texelFetch(uGuide, hq, 0).xy;
 }

@@ -175,12 +175,15 @@ internal sealed partial class SponzaLoop
     private ShaderInterface rtgiBlurInterface = null!;
     private PassHandle rtgiBlurPassHandle;
     // The readout's reuse (rtgi_readout.frag's uReuse): its targets kept for the next frame (by the blur, rtgi_blur.frag),
-    // the view they were drawn with, the frame they hold. Opt-in, --rtgi-reuse: the readout and blur 3.2 -> 1.7 ms on a still
-    // Crytek Sponza 1080p view, truth unchanged, but it smears in motion (the user, 2026-10-27) -- off until that is fixed.
+    // the view they were drawn with, the frame they hold. --rtgi-no-reuse: every pixel read fresh. Its history reprojected
+    // bilinear, each tap the same surface: from the nearest pixel it jittered in motion; bilinear it holds (the user,
+    // 2026-10-27).
     private GraphResourceHandle rtgiHalfReuseHandle, rtgiHistRawHandle, rtgiHistGradientHandle, rtgiHistBlurredHandle, rtgiHistGuideHandle;
-    private bool rtgiReuse;
+    private bool rtgiReuse = true;
     private long rtgiReuseFrame = -2;
     private Matrix4x4 rtgiReusePrevViewProj;
+    private Vector2 rtgiReusePrevSub;
+    private Vector3 rtgiReusePrevCamera;
     private GraphResourceHandle rtgiHalfRawHandle;
     // The half-res guide the readout writes beside its light (half_guide.glsl): each half-res pixel's world position and
     // normal, which the blur reads at its taps in place of full-res depth and normals fetched two pixels apart (blur 3.03 ->
@@ -423,7 +426,7 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-settled-samples") is { } ss) rtgiSettledSamples = MathF.Max(0f, ss);
         if (args.Float("rtgi-settled-keep") is { } sk) rtgiSettledKeep = Math.Clamp(sk, 0f, 1f);
         if (args.Flag("rtgi-view-done")) rtgiView = 1;
-        if (args.Flag("rtgi-reuse")) rtgiReuse = true;
+        if (args.Flag("rtgi-no-reuse")) rtgiReuse = false;
         if (args.Flag("rtgi-contact")) rtgiContact = true;
         if (args.Flag("rtgi-no-contact")) rtgiContact = false;
         if (args.Int("rtgi-contact-rays") is { } cr) rtgiContactRays = Math.Max(1, cr);
@@ -491,13 +494,13 @@ internal sealed partial class SponzaLoop
         rtgiReadoutInterface = reflect("present.vert", "rtgi_readout.frag");
         // Into the raw half-res target, the blur after it into the incident (rtgi_blur.frag).
         rtgiHalfRawHandle = graph.ColorTarget("rtgi-half-raw", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(0.5f));
-        rtgiHalfGuideHandle = graph.ColorTarget("rtgi-half-guide", TextureFormat.Rgba32F, new MatchSwapchainGraphSize(0.5f));
+        rtgiHalfGuideHandle = graph.ColorTarget("rtgi-half-guide", TextureFormat.Rg32Uint, new MatchSwapchainGraphSize(0.5f));
         var half = new MatchSwapchainGraphSize(0.5f);
         rtgiHalfReuseHandle = graph.ColorTarget("rtgi-half-reuse", TextureFormat.Rgba16F, half);
         rtgiHistRawHandle = graph.ColorTarget("rtgi-hist-raw", TextureFormat.Rgba16F, half);
         rtgiHistGradientHandle = graph.ColorTarget("rtgi-hist-gradient", TextureFormat.Rgba16F, half);
         rtgiHistBlurredHandle = graph.ColorTarget("rtgi-hist-blurred", TextureFormat.Rgba16F, half);
-        rtgiHistGuideHandle = graph.ColorTarget("rtgi-hist-guide", TextureFormat.Rgba32F, half);
+        rtgiHistGuideHandle = graph.ColorTarget("rtgi-hist-guide", TextureFormat.Rg32Uint, half);
         rtgiReadoutPassHandle = graph.GraphicsPass("rtgi-readout")
             .Target(rtgiHalfRawHandle, LoadOp.Clear, StoreOp.Store)
             .Target(incidentGradientHalfHandle, LoadOp.Clear, StoreOp.Store)
@@ -1057,7 +1060,8 @@ internal sealed partial class SponzaLoop
                 new("uHalf", new Vector4Uniform(new Vector4(0f, sub.X, sub.Y, 0f))),
                 new("uPrevViewProj", new Matrix4x4Uniform(rtgiReusePrevViewProj)),
                 // Within four full-res pixels' footprint of the point.
-                new("uReuse", new Vector4Uniform(new Vector4(reuse ? 1f : 0f, rtgiFrameCount & 3u, 4f * RtgiPixelFootprint, 0f))),
+                new("uReuse", new Vector4Uniform(new Vector4(reuse ? 1f : 0f, rtgiFrameCount & 3u, 4f * RtgiPixelFootprint, rtgiReusePrevSub.X + 2f * rtgiReusePrevSub.Y))),
+                new("uPrevCamera", new Vector4Uniform(new Vector4(rtgiReusePrevCamera, 0f))),
                 new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, rtgiNoGradient ? 0f : 1f, rtgiReadoutPlane ? 1f : 0f, 0f))),
                 new("uContact", new Vector4Uniform(new Vector4(rtgiContact ? 1f : 0f, 0.3f, 1.25f, rtgiView))),
                 new("uUnsure", new Vector4Uniform(new Vector4(rtgiDoneError, rtgiHalfRow, RtgiUnsureSize, RtgiPixelFootprint))),
@@ -1101,6 +1105,8 @@ internal sealed partial class SponzaLoop
             buffers: new[] { new ShaderBufferBinding("RtgiBlurRadius", rtgiBlurRadius) }));
         rtgiReuseFrame = rtgiFrameCount;
         rtgiReusePrevViewProj = viewProjJittered;
+        rtgiReusePrevSub = new Vector2(LightingSubpixel.X, LightingSubpixel.Y);
+        rtgiReusePrevCamera = cameraPosition;
     }
 
     // --rtgi-dump DIR --rtgi-dump-frames F1,F2,...: at those post-load frames the incident field the lit pass read

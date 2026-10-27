@@ -62,6 +62,10 @@ public enum TextureFormat
     // Four 32-bit floats per pixel (VK_FORMAT_R32G32B32A32_SFLOAT): positions kept exactly, such as a half-res guide's
     // world positions (the RTGI readout's, for the blur after it). Render-target only; read by texelFetch.
     Rgba32F,
+    // Two 32-bit unsigned integers per pixel (VK_FORMAT_R32G32_UINT): packed records read exactly, such as the RTGI
+    // half-res guide's (a position in halves and an octahedral normal, 8 bytes where Rgba32F took 16). Render-target
+    // only; read by texelFetch from a usampler2D, never filtered or blended.
+    Rg32Uint,
 }
 
 // Helpers for the compressed-format family. Centralised so the backend +
@@ -69,7 +73,7 @@ public enum TextureFormat
 public static class TextureFormatExtensions
 {
     /// <summary>Whether the format holds integers: read exactly (texelFetch), never filtered, blended or resolved.</summary>
-    public static bool IsInteger(this TextureFormat format) => format == TextureFormat.R32Uint;
+    public static bool IsInteger(this TextureFormat format) => format is TextureFormat.R32Uint or TextureFormat.Rg32Uint;
 
     public static bool IsCompressed(this TextureFormat format) => format switch
     {
@@ -92,6 +96,7 @@ public static class TextureFormatExtensions
         TextureFormat.Rg16F => width * height * 4,
         TextureFormat.R16F => width * height * 2,
         TextureFormat.Rgba32F => width * height * 16,
+        TextureFormat.Rg32Uint => width * height * 8,
         // BC7 / BC5 / BC6h are all 16 bytes per 4x4 block.
         TextureFormat.Bc7Srgb or TextureFormat.Bc7Unorm
             or TextureFormat.Bc5Unorm or TextureFormat.Bc6hUf16

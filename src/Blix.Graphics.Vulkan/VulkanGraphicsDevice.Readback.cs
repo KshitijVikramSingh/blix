@@ -104,6 +104,7 @@ public sealed partial class VulkanGraphicsDevice
         TextureFormat.Rg16F => 4,
         TextureFormat.R16F => 2,
         TextureFormat.Rgba32F => 16,
+        TextureFormat.Rg32Uint => 8,
         _ => 0,
     };
 }
