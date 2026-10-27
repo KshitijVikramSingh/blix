@@ -197,6 +197,35 @@ void main() {
     if (u.uClear.y > 2.5) { maskWords[index] = floatBitsToUint(room + position.x); return; }
     float sunLift = room > 0.0 ? min(lift, max(0.5 * room, 0.001 * length(position - u.uCamera.xyz) + 2.5e-4)) : lift;
     vec3 origin = position + n * (away ? -sunLift : sunLift);
+    // The shadow terminator (uClear.z: the skip, 0 off; w: the facet's n.l at most): a coarse mesh shaded by smooth
+    // normals -- a curtain -- has facets turned from the sun whose smooth normal still faces it. Their ray, however far it
+    // is lifted along the normal, heads below the facet's own plane and meets the neighbouring facets: whole triangles
+    // dark across sunlit cloth, a staircase along every fold (Crytek Sponza's curtains, 2026-10-27). There the ray starts
+    // uClear.z further toward the sun, past its own facets. The facet's normal is the depth's: this pixel's point against
+    // its nearer neighbour each way.
+    if (u.uClear.z > 0.0 && !away) {
+        vec3 side[2];
+        bool okFacet = true;
+        for (int axis = 0; axis < 2; axis++) {
+            ivec2 step = axis == 0 ? ivec2(1, 0) : ivec2(0, 1);
+            ivec2 qa = clamp(q + step, ivec2(0), fullSize - 1), qb = clamp(q - step, ivec2(0), fullSize - 1);
+            float ra = texelFetch(uSceneDepth, qa, 0).r, rb = texelFetch(uSceneDepth, qb, 0).r;
+            bool useA = abs(ra - raw) <= abs(rb - raw);
+            ivec2 qn = useA ? qa : qb;
+            float rn = useA ? ra : rb;
+            if (rn >= 1.0 - 1e-6) { okFacet = false; break; }
+            vec4 wn = u.uInvViewProj * vec4((vec2(qn) + 0.5) / vec2(fullSize) * 2.0 - 1.0, rn, 1.0);
+            side[axis] = (wn.xyz / wn.w - position) * (useA ? 1.0 : -1.0);
+        }
+        if (okFacet) {
+            vec3 ng = cross(side[0], side[1]);
+            if (dot(ng, ng) > 1e-20) {
+                ng = normalize(ng);
+                if (dot(ng, n) < 0.0) ng = -ng;
+                if (dot(ng, u.uSun.xyz) <= u.uClear.w) origin += u.uSun.xyz * u.uClear.z;
+            }
+        }
+    }
     uint answer = bakedSun(q, n);
     if (u.uSky.z > 0.5) baked[index] = answer;
     // Answered: no ray, and the answer rides the reach (blix_shadow: 0 answered lit, < 0 answered shadowed), so the mask

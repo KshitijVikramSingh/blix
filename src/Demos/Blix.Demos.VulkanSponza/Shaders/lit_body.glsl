@@ -579,8 +579,13 @@ void main() {
     vec3 Ngeo = cross(dFdx(vWorldPos), dFdy(vWorldPos));
     Ngeo = dot(Ngeo, Ngeo) > 1e-20 ? normalize(Ngeo) : Nsmooth;
     if (dot(Ngeo, Nsmooth) < 0.0) Ngeo = -Ngeo;
-    float terminatorFront = blix_terminator(N, Ngeo, L);
-    float terminatorBack = blix_terminator(-N, -Ngeo, L);
+    // Against the smooth (vertex) normal, not the flat triangle's: Ngeo is constant over a facet, and against it the term
+    // was a per-facet constant -- 0 on every facet turned even slightly from the sun -- whole triangles black across
+    // sunlit cloth, a staircase along each fold (Crytek Sponza's curtains, 2026-10-27). The term softens what the normal
+    // map adds over the smooth surface; the coarse facets' own self-shadowing is the sun ray's (rt_shadow_rays.comp, the
+    // terminator skip).
+    float terminatorFront = blix_terminator(N, Nsmooth, L);
+    float terminatorBack = blix_terminator(-N, -Nsmooth, L);
     float NdotH = max(dot(N, H), 0.0);
     float VdotH = max(dot(V, H), 0.0);
     // The shared shadow path chooses the cascade before applying its world-space normal offset and
@@ -903,6 +908,9 @@ void main() {
             frame.uVizChannel < 18.5 ? specularIBL * specularVisibility * ao :
             frame.uVizChannel < 19.5 ? transmittedIBL :
             frame.uVizChannel < 20.5 ? bounce * transScale :
+            // 21: the material's albedo as shaded (texture, factor and vertex colour), which multiplies every light above --
+            // a fault in it (a chart's UVs, a broken mip) shows in the image and in no lighting channel.
+            frame.uVizChannel > 20.5 && frame.uVizChannel < 21.5 ? albedo :
             // 22 shows the pre-pass normal used by the half-resolution incident field. Compare it
             // with geometric channel 1 and shading channel 2 to localize reconstruction faults.
             frame.uVizChannel < 22.5 && frame.uVizChannel > 21.5

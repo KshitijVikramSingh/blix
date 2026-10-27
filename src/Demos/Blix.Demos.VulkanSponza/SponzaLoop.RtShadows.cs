@@ -78,6 +78,14 @@ internal sealed partial class SponzaLoop
     // (rt_shadow_filter.comp, which lit.frag reads with the header's z at 2).
     private const int RtMaskPlanes = 3;
     // Triangle rows of sheets that transmit (RtRowTransmit); none: the trace writes no sheet light.
+    // The shadow terminator on coarse smooth-shaded meshes (rt_shadow_rays.comp): where a facet turns from the sun (its n.l
+    // at most TerminatorFacing) under a smooth normal that faces it, the sun ray starts TerminatorSkip metres toward the
+    // sun, past its own facets. BLIX_TERMINATOR_SKIP / BLIX_TERMINATOR_FACING to tune by eye; skip 0: off.
+    private static readonly float TerminatorSkip = EnvFloat("BLIX_TERMINATOR_SKIP", 0.15f);
+    private static readonly float TerminatorFacing = EnvFloat("BLIX_TERMINATOR_FACING", 0.05f);
+    private static float EnvFloat(string name, float fallback) =>
+        float.TryParse(Environment.GetEnvironmentVariable(name), System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : fallback;
     private int rtSheetRows;
     // Per ray, its own direction toward the sun's disc (ShadowsSettings.SunDiscDegrees), per frame slot.
     private GpuBufferHandle[] rtShadowDirections = Array.Empty<GpuBufferHandle>();
@@ -285,7 +293,7 @@ internal sealed partial class SponzaLoop
                 new("uLightlet", new Vector4Uniform(LightletUniform(towardSun))),
                 new("uLightmap", new Vector4Uniform(LightmapUniform)),
                 new("uCompact", new Vector4Uniform(new Vector4(pack ? 1f : 0f, counter, rtShadowOrigins.Length > 0 ? 1f : 0f, historyGood ? 1f + phase : 0f))),
-                new("uClear", new Vector4Uniform(new Vector4(GatherClearOn && texelsUploaded ? 1f : 0f, RaysStop, 0f, 0f))),
+                new("uClear", new Vector4Uniform(new Vector4(GatherClearOn && texelsUploaded ? 1f : 0f, RaysStop, TerminatorSkip, TerminatorFacing))),
             },
             new[]
             {

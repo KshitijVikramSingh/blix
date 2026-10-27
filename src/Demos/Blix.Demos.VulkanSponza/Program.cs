@@ -498,7 +498,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
         "unused",
         "Ambient: sky diffuse", "Ambient: sky specular",
         "Ambient: transmitted", "Ambient: bounce",
-        "unused",
+        "Albedo (as shaded: texture, factor, vertex colour)",
         "Pre-pass normal (what the incident field reads)",
         "Clipmap: solves behind the light (red 1, orange 2-3, yellow 4-7, green 8-31, blue 32+)",
         "Clipmap: answering level (white 0, green 1, blue 2, magenta 3)",
