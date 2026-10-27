@@ -63,14 +63,14 @@ internal sealed partial class SponzaLoop
     }
 
     // BLIX_RTGI_BENCH_DUMP=DIR: the frozen frame's training inputs written once -- points, rays, hits (as the training reads
-    // them: last frame's parity) and meta.json (the cell parameters, camera, points) -- for tools/gi-model's layout
+    // them: this frame's parity) and meta.json (the cell parameters, camera, points) -- for tools/gi-model's layout
     // models (rtgi_layout.py: what a frame touches, cache lines and pages, under one slot layout or another).
     private void RtgiBenchDump()
     {
         if (Environment.GetEnvironmentVariable("BLIX_RTGI_BENCH_DUMP") is not { Length: > 0 } dir) return;
         Directory.CreateDirectory(dir);
         device.WaitIdle();
-        var prev = 1 - (int)(rtgiFrameCount & 1u);
+        var prev = (int)(rtgiFrameCount & 1u);
         var n = RtgiPoints;
         File.WriteAllBytes(Path.Combine(dir, "points.bin"), device.ReadGpuBuffer(rtgiPointsBuf[prev], 0, n * 32));
         File.WriteAllBytes(Path.Combine(dir, "rays.bin"), device.ReadGpuBuffer(rtgiRaysBuf[prev], 0, n * 32));

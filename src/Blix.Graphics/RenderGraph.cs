@@ -452,7 +452,7 @@ public sealed partial class RenderGraph : IDisposable
                     {
                         if (Backend.TryGetSampleable(resourceId, out var texture) && texture is { } handle) reads.Add(handle);
                     }
-                    commandList.ComputePass(cpass.Name, dispatches, reads);
+                    commandList.ComputePass(cpass.Name, dispatches, reads, cpass.Async, cpass.AfterAsync);
                 }
                 continue;
             }
@@ -484,7 +484,8 @@ public sealed partial class RenderGraph : IDisposable
                 Target: surface,
                 ClearColors: clearColors,
                 ClearDepth: clearDepth,
-                WritesGpuBuffers: gpass.WritesGpuBuffers);
+                WritesGpuBuffers: gpass.WritesGpuBuffers,
+                AfterAsync: gpass.AfterAsync);
             commandList.Pass(gpass.Name, desc, recorded.Scope);
         }
 
@@ -535,6 +536,9 @@ internal sealed class GraphicsPassEntry
     // GraphicsPassBuilder.WritesGpuBuffers: its draws write GPU buffers, fenced after the pass.
     public bool WritesGpuBuffers;
 
+    // GraphicsPassBuilder.AfterAsync: waits for the previous frame's async compute.
+    public bool AfterAsync;
+
     // <b>Reads that are satisfied by the PREVIOUS frame, not this one.</b> A read edge normally has
     // to follow the write that produces it, which is the check that catches a resource bound but
     // never declared. A temporal pass inverts that by definition: it samples what the last frame
@@ -579,4 +583,10 @@ internal sealed class ComputePassEntry
 
     /// <summary>For an external pass: its join, when one was declared.</summary>
     public int Join { get; set; }
+
+    /// <summary>Declared with ComputePassBuilder.Async: run on the device's second queue beside what follows.</summary>
+    public bool Async { get; set; }
+
+    /// <summary>Declared with ComputePassBuilder.AfterAsync: waits for the previous frame's async compute.</summary>
+    public bool AfterAsync { get; set; }
 }

@@ -1005,6 +1005,9 @@ internal sealed partial class SponzaLoop
 
         // The traced shadows are needed from here on.
         if (!rtNoOverlap) graph.ExternalJoin(rtShadowTracePassHandle, "rt-shadow-join");
+        // --rtgi: the cache's update, after its last reader (the readout's blur) and the trace it trains from (the join
+        // above): async beside the rest of the frame (SponzaLoop.Rtgi.cs).
+        DeclareRtgiCachePasses(stage => Reflect(stage));
         // Interleaved (ShadowsSettings.Interleave): the untraced pixels' words, before the filter reads the mask.
         rtShadowFillInterface = Reflect("rt_shadow_fill.comp");
         rtShadowFillPassHandle = graph.ComputePass("rt-shadow-fill").Shader(rtShadowFillInterface)

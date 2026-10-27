@@ -61,6 +61,8 @@ internal sealed partial class SponzaLoop
     // and 4.8% (0.307), at 600 frames 0.4% and 0.9% (0.269 against 0.361), the darkest quarter's error 0.241 against
     // 0.273 at 2400 -- a boot at the new sun reads 0.1% at 300 (2026-10-27). --rtgi-no-stale-hits: off.
     private bool rtgiStaleHits = true;
+    // The cache's update on the device's second queue (DeclareRtgiCachePasses); --rtgi-no-async: in place.
+    private bool rtgiAsync = true;
     // BLIX_RTGI_TRAIN_DOUBLE: bits of the training run twice to measure their cost (rtgi_train.comp's uDouble), for the
     // bench (SponzaLoop.RtgiBench.cs).
     private float rtgiTrainDouble = int.TryParse(Environment.GetEnvironmentVariable("BLIX_RTGI_TRAIN_DOUBLE"), out var v) ? v : 0;
@@ -146,6 +148,8 @@ internal sealed partial class SponzaLoop
     // --rtgi-clamp-sigma K: a sample capped at its cell's mean + K standard deviations once it holds 32 (0: off).
     private float rtgiClampSigma;
     private GpuBufferHandle[] rtgiRequestBufs = Array.Empty<GpuBufferHandle>();
+    // The request buffer of the frame `back` frames before this one (rtgiRequestBufs: three, in turn).
+    private int RtgiRequestSlot(int back) => (int)((rtgiFrameCount + 3u + (uint)back) % 3u);
     // Per point, a deferred landing's origin (rtgi_rays.comp from its request, rtgi_train.comp the next frame): by parity.
     private GpuBufferHandle[] rtgiPointOriginsBuf = Array.Empty<GpuBufferHandle>();
     private const int RtgiTopLevel = 10;
@@ -373,6 +377,7 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-sun-cut") is { } sc) rtgiSunCut = MathF.Max(0f, sc);
         if (args.Flag("rtgi-no-stale-hits")) rtgiStaleHits = false;
         if (args.Flag("rtgi-list-all")) rtgiListOnTurn = false;
+        if (args.Flag("rtgi-no-async")) rtgiAsync = false;
         if (args.Float("rtgi-list-worth") is { } lw) rtgiListWorth = MathF.Max(1f, lw);
         rtgiCountUnknown = args.Flag("rtgi-count-unknown");
         rtgiNoCoarse = args.Flag("rtgi-no-coarse");
@@ -458,33 +463,43 @@ internal sealed partial class SponzaLoop
     }
 
     // Setup: the compute passes before the traced shadows' group that takes their batches.
-    private void DeclareRtgiComputePasses(Func<string, ShaderInterface> reflect)
+    // Setup, after the blur, the cache's last reader this frame: its update -- training, the resolve, the blend, the
+    // eviction -- on the device's second queue (async compute), beside the upsample, the lit pass and the rest of the frame,
+    // which read none of it; the frame's end waits for it. The readout reads the cache as the last frame's update left
+    // it, and the update reads this frame's points, rays and hits (placed and traced earlier in the frame). --rtgi-no-async:
+    // in place on the graphics queue (2026-10-27).
+    private void DeclareRtgiCachePasses(Func<string, ShaderInterface> reflect)
     {
         rtgiTrainInterface = reflect("rtgi_train.comp");
-        rtgiTrainPassHandle = graph.ComputePass("rtgi-train").Shader(rtgiTrainInterface).Handle;
+        rtgiTrainPassHandle = graph.ComputePass("rtgi-train").Async(rtgiAsync).Shader(rtgiTrainInterface).Handle;
         rtgiContactTrainInterface = reflect("rtgi_contact_train.comp");
-        rtgiContactTrainPassHandle = graph.ComputePass("rtgi-contact-train").Shader(rtgiContactTrainInterface).Handle;
+        rtgiContactTrainPassHandle = graph.ComputePass("rtgi-contact-train").Async(rtgiAsync).Shader(rtgiContactTrainInterface).Handle;
         // Declared here: passes run in declaration order (RenderGraph), and the push-up reads what training wrote before the
         // resolve empties it -- declared after, it read emptied sums and the coarse levels went untrained.
         rtgiPushUpInterface = reflect("rtgi_pushup.comp");
-        rtgiPushUpPassHandle = graph.ComputePass("rtgi-pushup").Shader(rtgiPushUpInterface).Handle;
+        rtgiPushUpPassHandle = graph.ComputePass("rtgi-pushup").Async(rtgiAsync).Shader(rtgiPushUpInterface).Handle;
         rtgiResolveInterface = reflect("rtgi_resolve.comp");
-        rtgiResolvePassHandle = graph.ComputePass("rtgi-resolve").Shader(rtgiResolveInterface).Handle;
+        rtgiResolvePassHandle = graph.ComputePass("rtgi-resolve").Async(rtgiAsync).Shader(rtgiResolveInterface).Handle;
         rtgiGuideResolveInterface = reflect("rtgi_guide_resolve.comp");
-        rtgiGuideResolvePassHandle = graph.ComputePass("rtgi-guide-resolve").Shader(rtgiGuideResolveInterface).Handle;
+        rtgiGuideResolvePassHandle = graph.ComputePass("rtgi-guide-resolve").Async(rtgiAsync).Shader(rtgiGuideResolveInterface).Handle;
         rtgiFilterInterface = reflect("rtgi_filter.comp");
-        rtgiFilterPassHandle = graph.ComputePass("rtgi-filter").Shader(rtgiFilterInterface).Handle;
+        rtgiFilterPassHandle = graph.ComputePass("rtgi-filter").Async(rtgiAsync).Shader(rtgiFilterInterface).Handle;
         rtgiEvictInterface = reflect("rtgi_evict.comp");
-        rtgiEvictPassHandle = graph.ComputePass("rtgi-evict").Shader(rtgiEvictInterface).Handle;
+        rtgiEvictPassHandle = graph.ComputePass("rtgi-evict").Async(rtgiAsync).Shader(rtgiEvictInterface).Handle;
+    }
+
+    // Setup, after the pre-pass: placement (this frame's rays, traced in the shadow trace's group after it).
+    private void DeclareRtgiComputePasses(Func<string, ShaderInterface> reflect)
+    {
         rtgiReservoirInterface = reflect("rtgi_reservoir.comp");
-        rtgiReservoirPassHandle = graph.ComputePass("rtgi-reservoir").Shader(rtgiReservoirInterface).Handle;
+        rtgiReservoirPassHandle = graph.ComputePass("rtgi-reservoir").AfterAsync().Shader(rtgiReservoirInterface).Handle;
         rtgiSpatialInterface = reflect("rtgi_spatial.comp");
-        rtgiSpatialPassHandle = graph.ComputePass("rtgi-spatial").Shader(rtgiSpatialInterface).Handle;
+        rtgiSpatialPassHandle = graph.ComputePass("rtgi-spatial").AfterAsync().Shader(rtgiSpatialInterface).Handle;
         rtgiRaysInterface = reflect("rtgi_rays.comp");
         rtgiRaysPassHandle = graph.ComputePass("rtgi-rays").Shader(rtgiRaysInterface)
             .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
         rtgiContactRaysInterface = reflect("rtgi_contact_rays.comp");
-        rtgiContactRaysPassHandle = graph.ComputePass("rtgi-contact-rays").Shader(rtgiContactRaysInterface)
+        rtgiContactRaysPassHandle = graph.ComputePass("rtgi-contact-rays").AfterAsync().Shader(rtgiContactRaysInterface)
             .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
     }
 
@@ -501,7 +516,9 @@ internal sealed partial class SponzaLoop
         rtgiHistGradientHandle = graph.ColorTarget("rtgi-hist-gradient", TextureFormat.Rgba16F, half);
         rtgiHistBlurredHandle = graph.ColorTarget("rtgi-hist-blurred", TextureFormat.Rgba16F, half);
         rtgiHistGuideHandle = graph.ColorTarget("rtgi-hist-guide", TextureFormat.Rg32Uint, half);
+        // After the last frame's async update (DeclareRtgiCachePasses): the first pass of a frame reading what it writes.
         rtgiReadoutPassHandle = graph.GraphicsPass("rtgi-readout")
+            .AfterAsync()
             .Target(rtgiHalfRawHandle, LoadOp.Clear, StoreOp.Store)
             .Target(incidentGradientHalfHandle, LoadOp.Clear, StoreOp.Store)
             .Target(rtgiHalfGuideHandle, LoadOp.Clear, StoreOp.Store)
@@ -529,6 +546,7 @@ internal sealed partial class SponzaLoop
         rtgiBlurPassHandle = blur.Shader(rtgiBlurInterface).Handle;
         rtgiScreenInterface = reflect("present.vert", "rtgi_screen.frag");
         rtgiScreenPassHandle = graph.GraphicsPass("rtgi-screen")
+            .AfterAsync()
             .Target(incidentHalfHandle, LoadOp.Clear, StoreOp.Store)
             .Target(incidentGradientHalfHandle, LoadOp.Clear, StoreOp.Store)
             .Read(SampleableSceneDepth)
@@ -588,7 +606,10 @@ internal sealed partial class SponzaLoop
             rtgiHitsBuf = Two(n * 48, "hits");
             rtgiOriginsBuf = Two(n * 16, "origins");
             rtgiOccludedBuf = Two(n * 4, "occluded");
-            rtgiRequestBufs = Enumerable.Range(0, 2).Select(s => Own(device.CreateGpuBuffer(16 + Math.Max(1, rtgiHitPoints) * 80, new byte[16 + Math.Max(1, rtgiHitPoints) * 80], $"sponza.rtgi.requests{s}"))).ToArray();
+            // Three, in turn by frame (RtgiRequestSlot): the training appends to this frame's while the next frame's
+            // placement, beside the async update (DeclareRtgiCachePasses), reads the one two frames back and empties the
+            // one after.
+            rtgiRequestBufs = Enumerable.Range(0, 3).Select(s => Own(device.CreateGpuBuffer(16 + Math.Max(1, rtgiHitPoints) * 80, new byte[16 + Math.Max(1, rtgiHitPoints) * 80], $"sponza.rtgi.requests{s}"))).ToArray();
             rtgiKeys = Own(device.CreateGpuBuffer(RtgiSlots * 4, new byte[RtgiSlots * 4], "sponza.rtgi.keys"));
             rtgiAccum = Own(device.CreateGpuBuffer(RtgiSlots * 64, new byte[RtgiSlots * 64], "sponza.rtgi.accum"));
             rtgiDirection = Own(device.CreateGpuBuffer(RtgiSlots * 16, new byte[RtgiSlots * 16], "sponza.rtgi.direction"));
@@ -668,21 +689,21 @@ internal sealed partial class SponzaLoop
                 new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
                 Buffers: new[]
                 {
-                    new ShaderBufferBinding("RtgiPoints", rtgiPointsBuf[prev]),
-                    new ShaderBufferBinding("RtgiRayBuffer", rtgiRaysBuf[prev]),
-                    new ShaderBufferBinding("RtgiHits", rtgiHitsBuf[prev]),
-                    new ShaderBufferBinding("RtgiOccluded", rtgiOccludedBuf[prev]),
+                    new ShaderBufferBinding("RtgiPoints", rtgiPointsBuf[cur]),
+                    new ShaderBufferBinding("RtgiRayBuffer", rtgiRaysBuf[cur]),
+                    new ShaderBufferBinding("RtgiHits", rtgiHitsBuf[cur]),
+                    new ShaderBufferBinding("RtgiOccluded", rtgiOccludedBuf[cur]),
                     new ShaderBufferBinding("RtgiKeys", rtgiKeys),
                     new ShaderBufferBinding("RtgiAccum", rtgiAccum),
                     new ShaderBufferBinding("RtgiResolved", rtgiResolved),
-                    new ShaderBufferBinding("RtgiRequests", rtgiRequestBufs[cur]),
+                    new ShaderBufferBinding("RtgiRequests", rtgiRequestBufs[RtgiRequestSlot(0)]),
                     new ShaderBufferBinding("RtgiMoments", rtgiMoments),
                     new ShaderBufferBinding("RtgiDirty", rtgiDirtyBufs[cur]),
                     new ShaderBufferBinding("RtgiCells", rtgiCells),
                     new ShaderBufferBinding("RtgiFiltered", rtgiFiltered),
                     new ShaderBufferBinding("GuideKeys", rtgiGuideKeys),
                     new ShaderBufferBinding("GuideAccum", rtgiGuideAccum),
-                    new ShaderBufferBinding("RtgiPointOrigins", rtgiPointOriginsBuf[prev]),
+                    new ShaderBufferBinding("RtgiPointOrigins", rtgiPointOriginsBuf[cur]),
                     new ShaderBufferBinding("RtgiStats", rtgiStats),
                     new ShaderBufferBinding("RtgiRecord", rtgiRecord),
                 });
@@ -702,7 +723,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("GuideAccum", rtgiGuideAccum),
                 new ShaderBufferBinding("GuideDist", rtgiGuideDist),
             }));
-        // Last frame's contact rays into the contact cells (S4), listed for the resolve too.
+        // This frame's contact rays into the contact cells (S4), listed for the resolve too.
         if (rtgiContact)
             graph.Dispatch(rtgiContactTrainPassHandle, new DispatchCommand(rtgiContactTrainPipeline, (rtgiContactRays + 63) / 64, 1, 1,
                 new ShaderUniform[]
@@ -719,10 +740,12 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("RtgiAccum", rtgiAccum),
                     new ShaderBufferBinding("RtgiDirty", rtgiDirtyBufs[cur]),
                     new ShaderBufferBinding("RtgiCells", rtgiCells),
-                    new ShaderBufferBinding("RtgiContactCount", rtgiContactCount[prev]),
-                    new ShaderBufferBinding("RtgiContactPoints", rtgiContactPoints[prev]),
-                    new ShaderBufferBinding("RtgiContactOccluded", rtgiContactOccluded[prev]),
-                    new ShaderBufferBinding("RtgiNextContactCount", rtgiContactCount[cur]),
+                    // This frame's contact rays (placed and traced earlier in the frame); the other count emptied for the
+                    // next frame's.
+                    new ShaderBufferBinding("RtgiContactCount", rtgiContactCount[cur]),
+                    new ShaderBufferBinding("RtgiContactPoints", rtgiContactPoints[cur]),
+                    new ShaderBufferBinding("RtgiContactOccluded", rtgiContactOccluded[cur]),
+                    new ShaderBufferBinding("RtgiNextContactCount", rtgiContactCount[prev]),
                 }));
         // The frame's samples carried up the levels, finest first (each dispatch the list's room; past its count, or off its
         // level, each thread returns).
@@ -917,8 +940,10 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiPoints", rtgiPointsBuf[cur]),
                 new ShaderBufferBinding("RtgiRayBuffer", rtgiRaysBuf[cur]),
                 new ShaderBufferBinding("RtgiShadowOrigins", rtgiOriginsBuf[cur]),
-                new ShaderBufferBinding("RtgiRequests", rtgiRequestBufs[cur]),
-                new ShaderBufferBinding("RtgiNextRequests", rtgiRequestBufs[prev]),
+                // The landing requests of the training two frames back (the last frame's may still be appending, beside
+                // this placement: its update is async); this frame's training appends to its own, emptied here.
+                new ShaderBufferBinding("RtgiRequests", rtgiRequestBufs[RtgiRequestSlot(-2)]),
+                new ShaderBufferBinding("RtgiNextRequests", rtgiRequestBufs[RtgiRequestSlot(0)]),
                 new ShaderBufferBinding("RtgiKeys", rtgiKeys),
                 new ShaderBufferBinding("RtgiResolved", rtgiResolved),
                 new ShaderBufferBinding("RtgiDirection", rtgiDirection),

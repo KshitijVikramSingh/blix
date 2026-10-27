@@ -661,11 +661,15 @@ public sealed partial class VulkanGraphicsDevice
     // (imageAvailPending, consumed here); one after an external pass waits for its signal on the frame timeline
     // (timelineWait, consumed here). It may signal the timeline, the binary render-done semaphore, and a fence.
     private unsafe void SubmitFrameBatch(CommandBuffer cmd, ref bool imageAvailPending, ref ulong timelineWait, Semaphore imageAvail,
+        ulong signalTimeline, Semaphore binarySignal, Fence fence, string what) =>
+        SubmitFrameBatch(GraphicsQueue, cmd, ref imageAvailPending, ref timelineWait, imageAvail, signalTimeline, binarySignal, fence, what);
+
+    private unsafe void SubmitFrameBatch(Queue queue, CommandBuffer cmd, ref bool imageAvailPending, ref ulong timelineWait, Semaphore imageAvail,
         ulong signalTimeline, Semaphore binarySignal, Fence fence, string what)
     {
-        var waits = stackalloc Semaphore[2];
-        var waitStages = stackalloc PipelineStageFlags[2];
-        var waitValues = stackalloc ulong[2];
+        var waits = stackalloc Semaphore[3];
+        var waitStages = stackalloc PipelineStageFlags[3];
+        var waitValues = stackalloc ulong[3];
         var signals = stackalloc Semaphore[2];
         var signalValues = stackalloc ulong[2];
         uint waitCount = 0, signalCount = 0;
@@ -683,6 +687,15 @@ public sealed partial class VulkanGraphicsDevice
             waitStages[waitCount] = PipelineStageFlags.AllCommandsBit;
             waitValues[waitCount++] = timelineWait;
             timelineWait = 0;
+            timeline = true;
+        }
+        // A main submission an async run must come before (an external pass after it): the run's own timeline.
+        if (pendingAsyncWait != 0 && queue.Handle == GraphicsQueue.Handle)
+        {
+            waits[waitCount] = asyncTimeline;
+            waitStages[waitCount] = PipelineStageFlags.AllCommandsBit;
+            waitValues[waitCount++] = pendingAsyncWait;
+            pendingAsyncWait = 0;
             timeline = true;
         }
         if (binarySignal.Handle != 0)
@@ -716,7 +729,7 @@ public sealed partial class VulkanGraphicsDevice
             SignalSemaphoreCount = signalCount,
             PSignalSemaphores = signalCount > 0 ? signals : null,
         };
-        ThrowIfNotSuccess(Vk.QueueSubmit(GraphicsQueue, 1, in submit, fence), what);
+        ThrowIfNotSuccess(Vk.QueueSubmit(queue, 1, in submit, fence), what);
     }
 
     // An external pass: the frame so far is submitted signalling the timeline, the pass encodes its Metal work
@@ -786,6 +799,83 @@ public sealed partial class VulkanGraphicsDevice
         return next;
     }
 
+    // An async run sent out on the second queue: waiting for `wait` (the frame before it, and unjoined external work),
+    // signalling the next timeline value, which the frame's last submission waits for (`done`).
+    private unsafe void EndAsyncRun(ref CommandBuffer asyncCmd, ulong wait, ref ulong done)
+    {
+        EndDispatchRun(asyncCmd);
+        ThrowIfNotSuccess(Vk.EndCommandBuffer(asyncCmd), "vkEndCommandBuffer(async)");
+        var signal = ++asyncTimelineValue;
+        var waitSemaphore = frameTimeline;
+        var waitStage = PipelineStageFlags.AllCommandsBit;
+        var signalSemaphore = asyncTimeline;
+        var cmd = asyncCmd;
+        var timelineInfo = new TimelineSemaphoreSubmitInfo
+        {
+            SType = StructureType.TimelineSemaphoreSubmitInfo,
+            WaitSemaphoreValueCount = 1,
+            PWaitSemaphoreValues = &wait,
+            SignalSemaphoreValueCount = 1,
+            PSignalSemaphoreValues = &signal,
+        };
+        var submit = new SubmitInfo
+        {
+            SType = StructureType.SubmitInfo,
+            PNext = &timelineInfo,
+            WaitSemaphoreCount = 1,
+            PWaitSemaphores = &waitSemaphore,
+            PWaitDstStageMask = &waitStage,
+            CommandBufferCount = 1,
+            PCommandBuffers = &cmd,
+            SignalSemaphoreCount = 1,
+            PSignalSemaphores = &signalSemaphore,
+        };
+        ThrowIfNotSuccess(Vk.QueueSubmit(AsyncQueue, 1, in submit, default), "vkQueueSubmit(async)");
+        done = Math.Max(done, signal);
+        asyncCmd = default;
+    }
+
+    // An async run's signal a main submission waits for (SubmitFrameBatch), consumed there.
+    private ulong pendingAsyncWait;
+    // The last frame's async run's signal, for the next frame's first AfterAsync pass; and BLIX_ASYNC_CHAIN=off: frames
+    // chained on their whole end instead (the next waits for the run before it starts).
+    private ulong previousAsyncDone;
+    private readonly bool asyncChainOn = Environment.GetEnvironmentVariable("BLIX_ASYNC_CHAIN") != "off";
+
+    // The frame's end with an async run: no commands, waiting for the main work's signal (the frame timeline) and the
+    // run's (its own), signalling the frame timeline's end value and the slot's fence (a fence signals for its own batch:
+    // the waits put every earlier batch under it).
+    private unsafe void SubmitFrameEnd(ulong mainDone, ulong asyncDone, ulong end, Fence fence)
+    {
+        var waits = stackalloc Semaphore[2] { frameTimeline, asyncTimeline };
+        var waitValues = stackalloc ulong[2] { mainDone, asyncDone };
+        var waitStages = stackalloc PipelineStageFlags[2] { PipelineStageFlags.AllCommandsBit, PipelineStageFlags.AllCommandsBit };
+        var signal = frameTimeline;
+        var timelineInfo = new TimelineSemaphoreSubmitInfo
+        {
+            SType = StructureType.TimelineSemaphoreSubmitInfo,
+            WaitSemaphoreValueCount = 2,
+            PWaitSemaphoreValues = waitValues,
+            SignalSemaphoreValueCount = 1,
+            PSignalSemaphoreValues = &end,
+        };
+        var submit = new SubmitInfo
+        {
+            SType = StructureType.SubmitInfo,
+            PNext = &timelineInfo,
+            WaitSemaphoreCount = 2,
+            PWaitSemaphores = waits,
+            PWaitDstStageMask = waitStages,
+            CommandBufferCount = 0,
+            SignalSemaphoreCount = 1,
+            PSignalSemaphores = &signal,
+        };
+        ThrowIfNotSuccess(Vk.QueueSubmit(GraphicsQueue, 1, in submit, fence), "vkQueueSubmit(frame end)");
+    }
+
+    // BLIX_ASYNC_COMPUTE=off: async passes run in place on the graphics queue (the A/B).
+    private readonly bool asyncComputeOn = Environment.GetEnvironmentVariable("BLIX_ASYNC_COMPUTE") != "off";
+
     private unsafe void WaitFrameTimeline(ulong value)
     {
         var semaphore = frameTimeline;
@@ -804,6 +894,46 @@ public sealed partial class VulkanGraphicsDevice
         CommandPool pool;
         ThrowIfNotSuccess(Vk.CreateCommandPool(Device, in ci, null, &pool), "vkCreateCommandPool");
         commandPool = pool;
+        if (HasAsyncQueue)
+        {
+            var aci = new CommandPoolCreateInfo
+            {
+                SType = StructureType.CommandPoolCreateInfo,
+                Flags = CommandPoolCreateFlags.ResetCommandBufferBit,
+                QueueFamilyIndex = AsyncQueueFamily,
+            };
+            CommandPool apool;
+            ThrowIfNotSuccess(Vk.CreateCommandPool(Device, in aci, null, &apool), "vkCreateCommandPool(async)");
+            asyncCommandPool = apool;
+        }
+    }
+
+    // Async compute's buffers (its queue's family's pool), one a frame slot, reused once the slot's fence has signalled
+    // (the frame's last submission waits for the async run).
+    private CommandPool asyncCommandPool;
+    private CommandBuffer[] asyncBuffers = Array.Empty<CommandBuffer>();
+
+    private unsafe CommandBuffer NextAsyncBuffer()
+    {
+        if (asyncBuffers.Length != MaxFramesInFlight) asyncBuffers = new CommandBuffer[MaxFramesInFlight];
+        if (asyncBuffers[currentFrame].Handle == 0)
+        {
+            var ai = new CommandBufferAllocateInfo
+            {
+                SType = StructureType.CommandBufferAllocateInfo,
+                CommandPool = asyncCommandPool,
+                Level = CommandBufferLevel.Primary,
+                CommandBufferCount = 1,
+            };
+            CommandBuffer fresh;
+            ThrowIfNotSuccess(Vk.AllocateCommandBuffers(Device, in ai, &fresh), "vkAllocateCommandBuffers(async)");
+            asyncBuffers[currentFrame] = fresh;
+        }
+        var next = asyncBuffers[currentFrame];
+        ThrowIfNotSuccess(Vk.ResetCommandBuffer(next, 0), "vkResetCommandBuffer(async)");
+        var bi = new CommandBufferBeginInfo { SType = StructureType.CommandBufferBeginInfo, Flags = CommandBufferUsageFlags.OneTimeSubmitBit };
+        ThrowIfNotSuccess(Vk.BeginCommandBuffer(next, in bi), "vkBeginCommandBuffer(async)");
+        return next;
     }
 
     // Command buffers a frame continues in after an external pass split it (RunExternalPass), per frame slot. The
@@ -956,8 +1086,54 @@ public sealed partial class VulkanGraphicsDevice
         // behind it on the same queue and by their own fences. If isolation flushed at least once,
         // the final submit must not wait on it again — a semaphore is consumed by the wait.
         var isolationFirstSubmit = true;
+        // Async compute (ComputePassBuilder.Async): the run of async passes being recorded (its buffer), and the timeline
+        // value the frame's last submission waits for once it is out.
+        var asyncCmd = default(CommandBuffer);
+        ulong asyncWait = 0, asyncDone = 0;
         foreach (var pass in commandList.Passes)
         {
+            // The first pass reading what the last frame's async run writes (RenderPassDescription.AfterAsync): frames chain
+            // on their main work alone (asyncChainOn), so what came before it goes out now and the rest waits for that run.
+            if (pass.Description.AfterAsync && previousAsyncDone != 0 && !gpuPassIsolation)
+            {
+                EndDispatchRun(cmd);
+                ThrowIfNotSuccess(Vk.EndCommandBuffer(cmd), "vkEndCommandBuffer(after async)");
+                SubmitFrameBatch(cmd, ref isolationFirstSubmit, ref timelineWait, f.ImageAvailable, signalTimeline: 0, binarySignal: default,
+                    fence: default, "vkQueueSubmit(after async)");
+                cmd = NextContinuationBuffer();
+                pendingAsyncWait = previousAsyncDone;
+                previousAsyncDone = 0;
+                // As at a join: the batch just submitted put under the rest of the frame, and its fence.
+                var afterAll = new MemoryBarrier
+                {
+                    SType = StructureType.MemoryBarrier,
+                    SrcAccessMask = AccessFlags.MemoryWriteBit,
+                    DstAccessMask = AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit,
+                };
+                Vk.CmdPipelineBarrier(cmd, PipelineStageFlags.AllCommandsBit, PipelineStageFlags.AllCommandsBit, 0, 1, &afterAll, 0, null, 0, null);
+            }
+            // An async run: begun at its first pass -- the frame so far submitted, signalling the value the run waits for
+            // (with any external pass's work not yet joined: the run may read it) -- and sent out on the second queue at
+            // the first pass after it, the main queue carrying on without waiting.
+            var asyncPass = pass.Description.Async && asyncComputeOn && HasAsyncQueue && frameTimeline.Handle != 0 && !gpuPassIsolation;
+            if (asyncPass && asyncCmd.Handle == 0)
+            {
+                EndDispatchRun(cmd);
+                ThrowIfNotSuccess(Vk.EndCommandBuffer(cmd), "vkEndCommandBuffer(async split)");
+                var split = ++frameTimelineValue;
+                SubmitFrameBatch(cmd, ref isolationFirstSubmit, ref timelineWait, f.ImageAvailable, signalTimeline: split, binarySignal: default,
+                    fence: default, "vkQueueSubmit(async split)");
+                cmd = NextContinuationBuffer();
+                asyncCmd = NextAsyncBuffer();
+                asyncWait = split;
+                if (pendingJoins is not null) foreach (var value in pendingJoins.Values) asyncWait = Math.Max(asyncWait, value);
+            }
+            else if (!asyncPass && asyncCmd.Handle != 0)
+            {
+                EndAsyncRun(ref asyncCmd, asyncWait, ref asyncDone);
+            }
+            var mainCmd = cmd;
+            if (asyncPass) cmd = asyncCmd;
             // A run of dispatches ends at anything else (VulkanGraphicsDevice.BufferHazards.cs).
             if (!pass.Description.Compute) EndDispatchRun(cmd);
             // Native Metal work: the frame splits here (RunExternalPass) and continues in another buffer, which waits
@@ -973,6 +1149,8 @@ public sealed partial class VulkanGraphicsDevice
                     foreach (var value in pendingJoins.Values) timelineWait = Math.Max(timelineWait, value);
                     pendingJoins.Clear();
                 }
+                // Likewise an async run already out (its run ended at this pass, above): its signal comes before this one's.
+                if (asyncDone != 0) pendingAsyncWait = asyncDone;
                 cmd = RunExternalPass(cmd, pass, external, ref isolationFirstSubmit, ref timelineWait, f.ImageAvailable, out var signalled);
                 if (pass.Description.ExternalJoinLater) (pendingJoins ??= new Dictionary<string, ulong>())[pass.Name] = signalled;
                 else timelineWait = Math.Max(timelineWait, signalled);
@@ -1043,6 +1221,7 @@ public sealed partial class VulkanGraphicsDevice
                 }
                 if (gpuPassIsolation)
                     FlushIsolatedPass(cmd, pass.Name, ref isolationFirstSubmit, f.ImageAvailable, ref timelineWait);
+                if (asyncPass) cmd = mainCmd;
                 continue;
             }
 
@@ -1219,6 +1398,8 @@ public sealed partial class VulkanGraphicsDevice
                 FlushIsolatedPass(cmd, pass.Name, ref isolationFirstSubmit, f.ImageAvailable, ref timelineWait);
         }
         EndDispatchRun(cmd);
+        // An async run the frame ended in goes out now.
+        if (asyncCmd.Handle != 0) EndAsyncRun(ref asyncCmd, asyncWait, ref asyncDone);
         ThrowIfNotSuccess(Vk.EndCommandBuffer(cmd), "vkEndCommandBuffer");
         var swSubmit = Stopwatch.GetTimestamp();
         var encodeMs = Stopwatch.GetElapsedTime(swEncode, swSubmit).TotalMilliseconds;
@@ -1229,9 +1410,28 @@ public sealed partial class VulkanGraphicsDevice
         // A join that never came still holds the frame: its fence must mean the Metal work is done too.
         if (pendingJoins is not null) foreach (var value in pendingJoins.Values) timelineWait = Math.Max(timelineWait, value);
         var renderDone = perImageRenderFinished[imageIndex];
-        var frameEnd = ChainFrames && frameTimeline.Handle != 0 ? ++frameTimelineValue : 0;
-        SubmitFrameBatch(cmd, ref isolationFirstSubmit, ref timelineWait, f.ImageAvailable, signalTimeline: frameEnd, renderDone, f.InFlight, "vkQueueSubmit");
-        if (frameEnd != 0) previousFrameEnd = frameEnd;
+        if (asyncDone != 0)
+        {
+            // With an async run out: the frame's main work goes out without waiting for it (present waits only for that,
+            // render-done), then an empty submission waits for both and ends the frame -- the fence and the frame
+            // timeline. Waited for in the main batch, the upsample, the lit pass and present queued behind the cache's
+            // update instead of running beside it (the trace's intervals, 2026-10-28).
+            var mainDone = ++frameTimelineValue;
+            SubmitFrameBatch(cmd, ref isolationFirstSubmit, ref timelineWait, f.ImageAvailable, signalTimeline: mainDone, renderDone,
+                fence: default, "vkQueueSubmit");
+            var end = ++frameTimelineValue;
+            SubmitFrameEnd(mainDone, asyncDone, end, f.InFlight);
+            // The next frame chained on the main work alone (asyncChainOn): it starts while this run is out, its first
+            // pass reading what the run writes waiting for it (AfterAsync). Else on the frame's end, run and all.
+            if (ChainFrames) previousFrameEnd = asyncChainOn ? mainDone : end;
+            previousAsyncDone = asyncChainOn ? asyncDone : 0;
+        }
+        else
+        {
+            var frameEnd = ChainFrames && frameTimeline.Handle != 0 ? ++frameTimelineValue : 0;
+            SubmitFrameBatch(cmd, ref isolationFirstSubmit, ref timelineWait, f.ImageAvailable, signalTimeline: frameEnd, renderDone, f.InFlight, "vkQueueSubmit");
+            if (frameEnd != 0) previousFrameEnd = frameEnd;
+        }
 
         var swapchain = Swapchain;
         var present = new PresentInfoKHR
@@ -1362,6 +1562,7 @@ public sealed partial class VulkanGraphicsDevice
         if (commandPool.Handle != 0)
         {
             Vk.DestroyCommandPool(Device, commandPool, null);
+            if (asyncCommandPool.Handle != 0) Vk.DestroyCommandPool(Device, asyncCommandPool, null);
             commandPool = default;
         }
         if (gpuTimingPool.Handle != 0)

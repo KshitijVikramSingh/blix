@@ -80,7 +80,13 @@ public sealed class RenderCommandList
     }
 
     /// <param name="attachmentReads">Render-target outputs the dispatches sample; see RenderPassDescription.AttachmentReads.</param>
-    public void ComputePass(string name, IReadOnlyList<DispatchCommand> dispatches, IReadOnlyList<TextureHandle>? attachmentReads)
+    public void ComputePass(string name, IReadOnlyList<DispatchCommand> dispatches, IReadOnlyList<TextureHandle>? attachmentReads) =>
+        ComputePass(name, dispatches, attachmentReads, async: false, afterAsync: false);
+
+    /// <param name="async">On the device's second queue (RenderPassDescription.Async).</param>
+    /// <param name="afterAsync">After the previous frame's async compute (RenderPassDescription.AfterAsync).</param>
+    public void ComputePass(string name, IReadOnlyList<DispatchCommand> dispatches, IReadOnlyList<TextureHandle>? attachmentReads, bool async,
+        bool afterAsync)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         ArgumentNullException.ThrowIfNull(dispatches);
@@ -91,7 +97,7 @@ public sealed class RenderCommandList
         {
             var desc = new RenderPassDescription(
                 RenderSurfaceHandle.Default, Array.Empty<GraphicsColor?>(), ClearDepth: false, Compute: true,
-                AttachmentReads: attachmentReads is { Count: > 0 } ? attachmentReads.ToArray() : null);
+                AttachmentReads: attachmentReads is { Count: > 0 } ? attachmentReads.ToArray() : null, Async: async, AfterAsync: afterAsync);
             passes.Add(new RenderPass(name, desc, dispatches.ToArray<RenderCommand>()));
         }
         finally

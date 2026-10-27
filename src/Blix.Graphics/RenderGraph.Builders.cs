@@ -137,6 +137,18 @@ public sealed class GraphicsPassBuilder
         return this;
     }
 
+    /// <summary>
+    /// Waits for the previous frame's async compute (ComputePassBuilder.Async) before it starts: frames are chained on
+    /// their main queue's work alone, so a frame begins while the last one's async run is still out, up to the first
+    /// pass that reads what that run writes -- which this marks.
+    /// </summary>
+    public GraphicsPassBuilder AfterAsync()
+    {
+        EnsureMutable();
+        entry.AfterAsync = true;
+        return this;
+    }
+
     // Closed set of shaders this pass supports. Drawing with one not in
     // the list is rejected at draw time.
     public GraphicsPassBuilder Shader(params ShaderInterface[] shaders)
@@ -206,6 +218,28 @@ public sealed class ComputePassBuilder
 
     public ComputePassBuilder Write(GraphResourceHandle handle) =>
         Write((TextureView)handle);
+
+    /// <summary>
+    /// Run on the device's second queue (async compute), beside the passes declared after it: the frame's work so far is
+    /// submitted, a run of consecutive async passes goes out on the other queue waiting for it (and for any external
+    /// pass's work not yet joined), the main queue carries on without waiting, and the frame's last submission waits
+    /// for the run. For work no later pass of the frame reads or writes -- nothing orders them but the frame's end. On a
+    /// device with one queue, or isolating passes, it runs in place.
+    /// </summary>
+    public ComputePassBuilder Async(bool async = true)
+    {
+        EnsureMutable();
+        entry.Async = async;
+        return this;
+    }
+
+    /// <summary>Waits for the previous frame's async compute before it starts; see GraphicsPassBuilder.AfterAsync.</summary>
+    public ComputePassBuilder AfterAsync()
+    {
+        EnsureMutable();
+        entry.AfterAsync = true;
+        return this;
+    }
 
     public ComputePassBuilder Shader(ShaderInterface shader)
     {

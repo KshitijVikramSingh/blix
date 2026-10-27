@@ -21,13 +21,17 @@ public sealed partial class VulkanGraphicsDevice
         }
 
         var label = name ?? "gpu-buffer";
+        // Both queues' families (async compute's, VulkanGraphicsDevice.Init): concurrent, no ownership to transfer.
+        var sharedFamilies = stackalloc uint[2] { GraphicsQueueFamily, AsyncQueueFamily };
         var ci = new BufferCreateInfo
         {
             SType = StructureType.BufferCreateInfo,
             Size = (ulong)sizeBytes,
             Usage = BufferUsageFlags.StorageBufferBit | BufferUsageFlags.IndirectBufferBit
                 | BufferUsageFlags.TransferDstBit | BufferUsageFlags.TransferSrcBit,
-            SharingMode = SharingMode.Exclusive,
+            SharingMode = HasAsyncQueue ? SharingMode.Concurrent : SharingMode.Exclusive,
+            QueueFamilyIndexCount = HasAsyncQueue ? 2u : 0u,
+            PQueueFamilyIndices = HasAsyncQueue ? sharedFamilies : null,
         };
         VkBuffer buffer;
         ThrowIfNotSuccess(Vk.CreateBuffer(Device, in ci, null, &buffer), $"vkCreateBuffer({label})");
@@ -87,12 +91,15 @@ public sealed partial class VulkanGraphicsDevice
         ThrowIfDisposed();
         if (sizeBytes <= 0) throw new ArgumentOutOfRangeException(nameof(sizeBytes), $"a GPU buffer needs a positive size; got {sizeBytes}.");
         var label = name ?? "gpu-buffer.readable";
+        var sharedFamilies = stackalloc uint[2] { GraphicsQueueFamily, AsyncQueueFamily };
         var ci = new BufferCreateInfo
         {
             SType = StructureType.BufferCreateInfo,
             Size = (ulong)sizeBytes,
             Usage = BufferUsageFlags.StorageBufferBit | BufferUsageFlags.TransferDstBit | BufferUsageFlags.TransferSrcBit,
-            SharingMode = SharingMode.Exclusive,
+            SharingMode = HasAsyncQueue ? SharingMode.Concurrent : SharingMode.Exclusive,
+            QueueFamilyIndexCount = HasAsyncQueue ? 2u : 0u,
+            PQueueFamilyIndices = HasAsyncQueue ? sharedFamilies : null,
         };
         VkBuffer buffer;
         ThrowIfNotSuccess(Vk.CreateBuffer(Device, in ci, null, &buffer), $"vkCreateBuffer({label})");

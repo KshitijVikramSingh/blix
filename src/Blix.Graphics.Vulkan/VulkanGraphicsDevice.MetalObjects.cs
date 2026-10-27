@@ -38,6 +38,10 @@ public sealed partial class VulkanGraphicsDevice
     private Semaphore frameTimeline;
     private nint frameTimelineEvent;
     private ulong frameTimelineValue;
+    // Async compute's own timeline (VulkanGraphicsDevice.Swapchain's EndAsyncRun): its run's signal comes in no order with
+    // the main queue's later ones, so it cannot be a value of the frame timeline (a timeline only rises).
+    private Semaphore asyncTimeline;
+    private ulong asyncTimelineValue;
 
     private unsafe void CreateFrameTimeline()
     {
@@ -62,6 +66,14 @@ public sealed partial class VulkanGraphicsDevice
         var info = new ExportMetalObjectsInfoEXT { SType = StructureType.ExportMetalObjectsInfoExt, PNext = &eventInfo };
         MetalObjects.ExportMetalObjects(Device, &info);
         frameTimelineEvent = (nint)eventInfo.MtlSharedEvent;
+        if (HasAsyncQueue)
+        {
+            var asyncType = new SemaphoreTypeCreateInfo { SType = StructureType.SemaphoreTypeCreateInfo, SemaphoreType = SemaphoreType.Timeline, InitialValue = 0 };
+            var aci = new SemaphoreCreateInfo { SType = StructureType.SemaphoreCreateInfo, PNext = &asyncType };
+            Semaphore asyncSemaphore;
+            ThrowIfNotSuccess(Vk.CreateSemaphore(Device, in aci, null, &asyncSemaphore), "vkCreateSemaphore(async timeline)");
+            asyncTimeline = asyncSemaphore;
+        }
         if (frameTimelineEvent == 0)
             throw new InvalidOperationException("the frame timeline exported no MTLSharedEvent (an emulated timeline semaphore?).");
     }
@@ -71,6 +83,8 @@ public sealed partial class VulkanGraphicsDevice
         if (frameTimeline.Handle == 0) return;
         Vk.DestroySemaphore(Device, frameTimeline, null);
         frameTimeline = default;
+        if (asyncTimeline.Handle != 0) Vk.DestroySemaphore(Device, asyncTimeline, null);
+        asyncTimeline = default;
         frameTimelineEvent = 0;
     }
 

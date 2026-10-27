@@ -19,6 +19,16 @@ public sealed partial class VulkanGraphicsDevice
     internal PhysicalDevice PhysicalDevice { get; private set; }
     internal Device Device { get; private set; }
     internal Queue GraphicsQueue { get; private set; }
+    // A queue of another family with compute, where there is one -- MoltenVK offers four families of one queue each, every
+    // one graphics, compute and transfer, each queue its own Metal command queue, run side by side: async compute's
+    // (ComputePassBuilder.Async). GPU buffers are shared by both families (concurrent), so neither queue takes ownership.
+    // Else the graphics queue, and async passes run in place.
+    internal Queue AsyncQueue { get; private set; }
+    internal uint AsyncQueueFamily { get; private set; }
+    internal bool HasAsyncQueue { get; private set; }
+    private uint graphicsFamilyQueueCount = 1;
+    private uint? asyncFamilyCandidate;
+    private readonly bool asyncComputeWanted = Environment.GetEnvironmentVariable("BLIX_ASYNC_COMPUTE") != "off";
     internal uint GraphicsQueueFamily { get; private set; }
     internal bool PortabilitySubsetRequired { get; private set; }
     // Anisotropic filtering capability, resolved at device creation.
@@ -330,6 +340,8 @@ public sealed partial class VulkanGraphicsDevice
         {
             Vk.GetPhysicalDeviceQueueFamilyProperties(device, &count, p);
         }
+        if (Environment.GetEnvironmentVariable("BLIX_LIST_QUEUES") is not null)
+            for (uint i = 0; i < count; i++) Console.WriteLine($"[Vulkan] queue family {i}: {families[i].QueueFlags}, {families[i].QueueCount} queues");
         for (uint i = 0; i < count; i++)
         {
             if ((families[i].QueueFlags & QueueFlags.GraphicsBit) == 0) continue;
@@ -338,6 +350,10 @@ public sealed partial class VulkanGraphicsDevice
             if (supported)
             {
                 family = i;
+                graphicsFamilyQueueCount = families[i].QueueCount;
+                asyncFamilyCandidate = null;
+                for (uint j = 0; j < count; j++)
+                    if (j != i && (families[j].QueueFlags & QueueFlags.ComputeBit) != 0) { asyncFamilyCandidate = j; break; }
                 return true;
             }
         }
@@ -347,13 +363,23 @@ public sealed partial class VulkanGraphicsDevice
     private unsafe void CreateLogicalDevice()
     {
         var priority = 1.0f;
-        var queueInfo = new DeviceQueueCreateInfo
+        var asyncFamily = asyncComputeWanted ? asyncFamilyCandidate : null;
+        var queueInfos = stackalloc DeviceQueueCreateInfo[2];
+        queueInfos[0] = new DeviceQueueCreateInfo
         {
             SType = StructureType.DeviceQueueCreateInfo,
             QueueFamilyIndex = GraphicsQueueFamily,
             QueueCount = 1,
             PQueuePriorities = &priority,
         };
+        if (asyncFamily is { } af)
+            queueInfos[1] = new DeviceQueueCreateInfo
+            {
+                SType = StructureType.DeviceQueueCreateInfo,
+                QueueFamilyIndex = af,
+                QueueCount = 1,
+                PQueuePriorities = &priority,
+            };
 
         var deviceExts = new List<string> { "VK_KHR_swapchain" };
         if (PortabilitySubsetRequired) deviceExts.Add("VK_KHR_portability_subset");
@@ -445,8 +471,8 @@ public sealed partial class VulkanGraphicsDevice
         {
             SType = StructureType.DeviceCreateInfo,
             PNext = ChainModernFeatures(&modern),
-            QueueCreateInfoCount = 1,
-            PQueueCreateInfos = &queueInfo,
+            QueueCreateInfoCount = asyncFamily is null ? 1u : 2u,
+            PQueueCreateInfos = queueInfos,
             EnabledExtensionCount = (uint)deviceExts.Count,
             PpEnabledExtensionNames = extNames.Ptr,
             PEnabledFeatures = &features,
@@ -459,6 +485,18 @@ public sealed partial class VulkanGraphicsDevice
 
         Vk.GetDeviceQueue(Device, GraphicsQueueFamily, 0, out var queue);
         GraphicsQueue = queue;
+        AsyncQueue = queue;
+        AsyncQueueFamily = GraphicsQueueFamily;
+        if (asyncFamily is { } family)
+        {
+            Vk.GetDeviceQueue(Device, family, 0, out var second);
+            AsyncQueue = second;
+            AsyncQueueFamily = family;
+            HasAsyncQueue = true;
+        }
+        Console.WriteLine(HasAsyncQueue
+            ? $"[Vulkan] async compute: family {AsyncQueueFamily}'s queue beside the graphics family {GraphicsQueueFamily}'s."
+            : "[Vulkan] async compute: none (one queue family with compute, or BLIX_ASYNC_COMPUTE=off).");
         if (frameTimelineWanted) CreateFrameTimeline();
     }
 

@@ -44,4 +44,12 @@ public sealed record RenderPassDescription(
     // Graphics pass: its draws write GPU buffers (a fragment shader appending to a list, say), fenced after the
     // render pass ends so a later dispatch, an indirect fetch or a draw sees them (GraphicsPassBuilder.WritesGpuBuffers).
     // Without it only dispatches fence GPU buffers.
-    bool WritesGpuBuffers = false);
+    bool WritesGpuBuffers = false,
+
+    // Compute pass on the device's second queue (ComputePassBuilder.Async): a run of them goes out beside the passes after
+    // it, the frame's last submission waiting for it.
+    bool Async = false,
+
+    // Waits for the previous frame's async compute (GraphicsPassBuilder.AfterAsync / ComputePassBuilder.AfterAsync): frames
+    // chain on their main queue's work, so this marks the first pass reading what the last frame's async run writes.
+    bool AfterAsync = false);
