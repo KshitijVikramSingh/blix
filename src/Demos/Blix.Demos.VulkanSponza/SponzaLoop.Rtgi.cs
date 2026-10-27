@@ -99,6 +99,10 @@ internal sealed partial class SponzaLoop
     // rounds, 2.54 / 2.46 with the table (Crytek Sponza, two runs each, 2026-10-27); the gate's numbers the same to the
     // third place. --rtgi-no-train-table: the subgroup's rounds (or none, --rtgi-no-subgroup).
     private bool rtgiTrainTable = true;
+    // Placement's candidates from the subgroup's pool (rtgi_rays.comp): each point reads one besides its own tile and weighs
+    // its neighbours' by shuffle, where it read its own four and four more on a redraw -- placement 1.80 -> 1.52 ms a
+    // dispatch (Crytek Sponza 1080p, the bench, 2026-10-28). --rtgi-no-pool: each its own.
+    private bool rtgiPool = true;
     // The readout across the tangent plane's four cells, the cell holding the point along the normal (rtgi_readout.frag's
     // readLevel); --rtgi-readout-trilinear: the eight around the point, half of them in front of the surface or behind it.
     private bool rtgiReadoutPlane = true;
@@ -386,6 +390,7 @@ internal sealed partial class SponzaLoop
         if (args.Flag("rtgi-defer")) rtgiDefer = true;
         if (args.Flag("rtgi-no-subgroup")) rtgiSubgroup = false;
         if (args.Flag("rtgi-no-train-table")) rtgiTrainTable = false;
+        if (args.Flag("rtgi-no-pool")) rtgiPool = false;
         if (args.Flag("rtgi-readout-trilinear")) rtgiReadoutPlane = false;
         if (args.Flag("rtgi-no-block")) rtgiBlock = false;
         if (args.Float("rtgi-block-global") is { } bg) rtgiBlockGlobal = Math.Clamp(bg, 0f, 1f);
@@ -787,6 +792,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiStamps", rtgiStamps),
                 new ShaderBufferBinding("RtgiDirty", rtgiDirtyBufs[cur]),
                 new ShaderBufferBinding("RtgiNextDirty", rtgiDirtyBufs[prev]),
+                new ShaderBufferBinding("RtgiSeq", rtgiSeq),
                 new ShaderBufferBinding("RtgiDirection", rtgiDirection),
                 new ShaderBufferBinding("RtgiHitInv", rtgiHitInv),
                 new ShaderBufferBinding("RtgiRecord", rtgiRecord),
@@ -855,6 +861,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiCells", rtgiCells),
                 new ShaderBufferBinding("RtgiStats", rtgiStats),
                 new ShaderBufferBinding("RtgiOccupancy", rtgiOccupancy),
+                new ShaderBufferBinding("RtgiSeq", rtgiSeq),
             }));
 
         // S3: last frame's visible points (tile i is point i) into this frame's reservoirs, merged with the frame before's.
@@ -924,6 +931,7 @@ internal sealed partial class SponzaLoop
                 new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, 0f, 0f, 0f))),
                 new("uGuide", new Vector4Uniform(new Vector4(rtgiGuide, rtgiGuideMin, rtgiGuideKappa, RtgiGuideSlots - 1))),
                 new("uAdapt", new Vector4Uniform(new Vector4(rtgiAdaptive, rtgiAdaptiveK, rtgiDoneError, rtgiTrickle))),
+                new("uSkip", new Vector4Uniform(new Vector4((rtgiBenching && rtgiBenchPass == "rays" ? (int)rtgiTrainDouble : 0) | (rtgiPool ? 0 : 16), 0, 0, 0))),
                 new("uBudget", new Vector4Uniform(new Vector4(rtgiBudgetError, rtgiBudgetFloor, rtgiSettledSamples, rtgiSettledKeep))),
                 new("uBlock", new Vector4Uniform(new Vector4(rtgiBlock ? 1f : 0f, rtgiBlockGlobal, rtgiBlockWindow, 0f))),
                 new("uUnsureMap", new Vector4Uniform(new Vector4(rtgiHalfRow, rtgiUnsureWritten ? 1f : 0f, RtgiUnsureSize, 0f))),

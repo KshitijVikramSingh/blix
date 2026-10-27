@@ -64,10 +64,12 @@ void tallySum(uint slot, uint v) {
 layout(std430, set = 0, binding = 5) buffer RtgiStamps { uvec2 rtgiStamps[]; };
 layout(std430, set = 0, binding = 6) readonly buffer RtgiDirty { uint dirtyCount; uint dirtyPad[3]; uint dirty[]; };
 // The other parity's list: its count zeroed here for the next frame's training.
+// Per slot: its direction sequence's counter (rtgi_rays.comp); the top bit kept here, whether its sun is settled.
+layout(std430, set = 0, binding = 13) buffer RtgiSeq { uint rtgiSeq[]; };
 layout(std430, set = 0, binding = 7) buffer RtgiNextDirty { uint nextDirtyCount; uint nextDirtyPad[3]; uint nextDirty[]; };
 
-#define RTGI_SCALE 4096.0
-#define RTGI_LUM2_SCALE 4096.0
+#define RTGI_KEYS(i) rtgiKeys[i]
+#include "rtgi_cache.glsl"
 
 float lum(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 
@@ -192,6 +194,12 @@ void main() {
     }
     rtgiResolved[2u * s] = r0;
     rtgiResolved[2u * s + 1u] = r1;
+    // Its sun settled or not, in its direction sequence's counter's top bit: placement reads it with the atomic it bumps.
+    bool settled = rtgiSunSettled(r1.x, r1.w);
+    if (((rtgiSeq[s] >> 31) != 0u) != settled) {
+        if (settled) atomicOr(rtgiSeq[s], 0x80000000u);
+        else atomicAnd(rtgiSeq[s], 0x7FFFFFFFu);
+    }
     rtgiMoments[3u * s] = m;
     rtgiMoments[3u * s + 1u] = fast;
     rtgiMoments[3u * s + 2u] = fs;

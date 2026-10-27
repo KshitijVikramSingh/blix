@@ -76,6 +76,13 @@ uint rtgiLevel(vec3 p, vec3 camera, vec4 params) {
 
 float rtgiSize(uint level, vec4 params) { return params.x * exp2(float(level)); }
 
+// A cell's sun visibility known within 0.02 (binomial, from 64 rays at least): its points trace the sun 1 in 8
+// (rtgi_rays.comp), told by its sequence counter's top bit (rtgi_resolve.comp).
+bool rtgiSunSettled(float visibility, float rays) {
+    float pv = clamp(visibility, 0.0, 1.0);
+    return rays >= 64.0 && sqrt(max(pv * (1.0 - pv), 1e-4) / rays) < 0.02;
+}
+
 // The cell's two hashes: x the slot it starts probing at, y its key.
 uvec2 rtgiCellHash(ivec3 c, uint level, uint side, vec4 params) {
     uint a = rtgiHash(uint(c.x) * 0x9E3779B1u ^ rtgiHash(uint(c.y) * 0x85EBCA77u ^ rtgiHash(uint(c.z) * 0xC2B2AE3Du ^ (level * 6u + side))));

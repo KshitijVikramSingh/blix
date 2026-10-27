@@ -45,9 +45,12 @@ layout(set = 0, binding = 0) uniform RtgiTrain {
                          // clamp's moments, 32 the table's shared atomics. Variants (changing the light): 64 the clamp at
                          // the sample's own level alone, carried up. Removals (the bench's frozen cache: no state to drift):
                          // 128 no hit lookup, 256 no flush device atomics, 512 no level finds (a slot from the hash), 1024
-                         // no guide table, 2048 no table rounds, 4096 no keep-alive or stale check at a hit
+                         // no guide table, 2048 no level loop (its finds, table and flush), 4096 no keep-alive or stale check
+                         // at a hit. Aggregation (the same light): 8192 the subgroup's rounds, 16384 each lane's own atomics
 } u;
 bool twice(uint b) { return (uint(u.uDouble.x) & b) != 0u; }
+// How a sample's words reach its cell (uFallback.w): 0 each lane's atomics, 1 the subgroup's rounds, 2 the workgroup's table.
+float aggregation() { return twice(16384u) ? 0.0 : twice(8192u) ? 1.0 : u.uFallback.w; }
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
 layout(std430, set = 0, binding = 2) readonly buffer RtgiPoints { vec4 points[]; };
@@ -200,7 +203,7 @@ float sampleInvD; // 1 / how far its ray went (a miss: its reach)
 // A slot in a list for each active lane that needs one, at one atomic per subgroup (uFallback.w): the ballot counts
 // them, one lane takes them all from the counter, each lane's its offset among them. Else a lane's own atomic.
 uint appendDirty(bool need) {
-    if (u.uFallback.w < 0.5) return need ? atomicAdd(dirtyCount, 1u) : 0xFFFFFFFFu;
+    if (aggregation() < 0.5) return need ? atomicAdd(dirtyCount, 1u) : 0xFFFFFFFFu;
     uvec4 b = subgroupBallot(need);
     uint count = subgroupBallotBitCount(b), base = 0u;
     if (subgroupElect() && count > 0u) base = atomicAdd(dirtyCount, count);
@@ -209,7 +212,7 @@ uint appendDirty(bool need) {
 }
 
 uint appendRequest(bool need) {
-    if (u.uFallback.w < 0.5) return need ? atomicAdd(requestCount, 1u) : 0xFFFFFFFFu;
+    if (aggregation() < 0.5) return need ? atomicAdd(requestCount, 1u) : 0xFFFFFFFFu;
     uvec4 b = subgroupBallot(need);
     uint count = subgroupBallotBitCount(b), base = 0u;
     if (subgroupElect() && count > 0u) base = atomicAdd(requestCount, count);
@@ -258,7 +261,7 @@ void writeCell(uint s, uint w[RTGI_ACC]) {
 
 void commit(uint s, uint w[RTGI_ACC]) {
     bool writing = s != 0xFFFFFFFFu;
-    if (u.uFallback.w > 0.5) {
+    if (aggregation() > 0.5) {
         for (uint round = 0u; round < 4u; round++) {
             if (!subgroupAny(writing)) return;
             if (writing) {
@@ -405,7 +408,7 @@ void add(uint s, vec3 e, bool counted, bool sky, bool sunTraced, bool sunLit, bo
         w[6] = 1u;
         if (sunLit) w[5] = 1u;
     }
-    if (u.uFallback.w > 1.5) tableAdd(s, w);
+    if (aggregation() > 1.5) tableAdd(s, w);
     else commit(s, w);
 }
 
@@ -482,7 +485,7 @@ bool pointSample(uint i, out vec4 p, out vec3 n, out vec3 e, out bool counted, o
 void main() {
     uint i = gl_GlobalInvocationID.x;
     // The workgroup's table (uFallback.w 2): every thread through every round below, those with no sample adding nothing.
-    bool table = u.uFallback.w > 1.5;
+    bool table = aggregation() > 1.5;
     if (table) tableClear();
     vec4 p;
     vec3 n, e;

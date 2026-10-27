@@ -32,6 +32,8 @@ layout(std430, set = 0, binding = 7) buffer RtgiRecord { uvec4 rtgiRecord[]; };
 layout(std430, set = 0, binding = 8) readonly buffer RtgiCells { ivec4 rtgiCells[]; };
 // The cache's work counters (rtgi_train.comp): 21-26 the cells emptied by level (0-5, past 5 the last), 27 contact cells
 // (level 16 up), 28 those emptied holding 8 samples or more.
+// Per slot: its direction sequence's counter, the top bit its sun settled (rtgi_resolve.comp): cleared with the cell.
+layout(std430, set = 0, binding = 12) buffer RtgiSeq { uint rtgiSeq[]; };
 layout(std430, set = 0, binding = 9) buffer RtgiStats { uint rtgiStats[64]; };
 
 void main() {
@@ -52,6 +54,7 @@ void main() {
     rtgiKeys[s] = 0u;
     rtgiResolved[2u * s] = vec4(0.0);
     rtgiResolved[2u * s + 1u] = vec4(0.0);
+    atomicAnd(rtgiSeq[s], 0x7FFFFFFFu);
     for (uint k = 0u; k < 3u; k++) rtgiMoments[3u * s + k] = vec4(0.0);
     rtgiStamps[s] = uvec2(0u);
     rtgiDirection[s] = vec4(0.0);
