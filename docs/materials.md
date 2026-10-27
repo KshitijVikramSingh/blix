@@ -56,6 +56,37 @@ roughness glTF has no field for.
 7. **Caustics**: none, in the reference or the frame. The sun reaches what is behind a solid by the sky and the bounces only.
 8. **Dispersion**: not modelled anywhere.
 
+## Under --rtgi (bistro): what the cache does not do yet
+
+Measured 2026-10-27 against `--ref-bsdf` on a scratch merge of `origin/bistro` and this branch (`tools/testbeds/bsdf.sh`, `BLIX_BSDF_GI="--rtgi"`; the dump under RTGI needs `docs/rtgi-view-dump.patch`).
+Frame / reference, ratio of means -- cooked lightmap, then RTGI: sheen 1.002, 1.002; coat 0.999, 0.999; transmission 1.007, 0.999; plant 1.007, 1.007; teacup 0.975, **0.915**; drapes 1.020, **0.837**.
+What the materials do through the lit pass holds on both; what has to pass through the *cache* does not.
+
+RTGI shades a hit as `albedo x (E_ind + sun)`: an opaque diffuse surface. So, by what the cache is asked to carry:
+
+| gap | state | where it goes |
+|---|---|---|
+| a sheet's far face in the lit pass (cloth, leaves seen from the room) | built, unmeasured (scratch `8aee9013`): the lit pass reads the cache's -N cells (`rtgiBackIrradiance`, `--rtgi-no-back`) | lit_body.glsl; the cells hold nothing until something trains that face |
+| a hit on a transmitting sheet (a bounce off a curtain) | built, unmeasured (scratch S1): the hit gives back `(1 - share) albedo E_front + share tint E_back`, and requests the far face's cells | rtgi_train.comp; `--rtgi-no-hit-materials` |
+| emission at a hit (a lamp lights the walls it faces) | built, unmeasured (scratch S1): the material table's emission (and the row's texture mean) added as `PI L_e` | rtgi_train.comp |
+| foliage | the tracer's per-hit alpha test is the ray's (atlas, stochastic BLEND); translucency is the sheet rows, so S1 | -- |
+| glass in the GI | rays pass a pane whole (`--ray-panes` stops a share, in grey); the tint is lost | see below |
+| RT reflections, RT refractions | not built | see below |
+
+**Glass tint in the GI.** The stopped-ray share is right in the mean; the colour is not. A ray that passes a pane should carry its tint (`T x base`, per channel) to whatever it reaches. In Metal's
+intersector the passed candidates are decided one by one (`blix_covered`), so the throughput can be multiplied there and returned: into the hit record's albedo word at a hit (the albedo the cache
+multiplies by), into a miss's unused word (the sky the cache reads: `e = PI sky(d) x tint`). The record is full otherwise, so a miss's word is the one place for the sky case. Needs the intersection function's
+payload (blix_hwx.mm, `hwx_trace`) -- untried, since it cannot be tested without the GPU.
+
+**RT reflections and refractions** (the lit pass's smooth specular and a pane's refraction, from the scene instead of the sky cube). The investigation found what the design has to work around:
+the pre-pass has no per-pixel material (its surface key is a surface identity, not a row), so a ray pass before the lit pass cannot tell which pixels want a ray. The shape that fits:
+1. The lit pass writes, for the pixels that want one, roughness and the specular weight (F x specular colour) into a small target, and leaves their sky specular out of the colour (`specularIBL` for those pixels).
+2. A pass after it traces one ray a flagged pixel -- the mirror direction (GGX-sampled above roughness ~0.1), or the refracted one for a transmitting pane (the pane's own chord for a solid) -- with the frame tracer
+   (`EncodeTrace`, as `RecordRtgi` does), from the depth and normal.
+3. The hit is shaded from the cache: its cell's light at its face (`irradianceAt`, rtgi_train.comp) times its albedo, its sun from the hit's own sun ray, its emission and sheet transmission as S1 -- the sky where the ray escapes.
+4. The colour, times the weight, is added to the scene colour; a bilateral filter on the roughness (a rough lobe is a blurred neighbourhood) before it.
+`--ref-bsdf` with the specular sums alone is the judge (the wave keeps them apart). Not built: one pass of this size needs the GPU to be debugged as it is written.
+
 ## Tools
 
 - `lab/bsdf` -- `uv run python -m pytest tests` (the GPU twin test runs the TonemapLab demo; `--ignore=tests/test_gltf_gpu.py` keeps it off the GPU).
