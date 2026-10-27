@@ -24,6 +24,8 @@ layout(std430, set = 0, binding = 1) buffer RtgiKeys { uint rtgiKeys[]; };
 layout(std430, set = 0, binding = 2) buffer RtgiResolved { vec4 rtgiResolved[]; };
 layout(std430, set = 0, binding = 3) buffer RtgiMoments { vec4 rtgiMoments[]; };
 layout(std430, set = 0, binding = 4) buffer RtgiStamps { uvec2 rtgiStamps[]; };
+// Its accumulator's spare word 14: the frame it was last trained, low 24 bits (rtgi_train.comp's claimFrame).
+layout(std430, set = 0, binding = 11) readonly buffer RtgiAccum { uint rtgiAccum[]; };
 layout(std430, set = 0, binding = 5) buffer RtgiDirection { vec4 rtgiDirection[]; };
 layout(std430, set = 0, binding = 6) buffer RtgiConfidence { vec4 rtgiConfidence[]; };
 layout(std430, set = 0, binding = 7) buffer RtgiRecord { uvec4 rtgiRecord[]; };
@@ -43,7 +45,7 @@ void main() {
     if (!held) return;
     if (u.uPressure.y > 0.0 && float(rtgiHeld[(sweep + 2u) % 3u]) <= u.uPressure.y) return;
     uint frame = uint(u.uEvict.x);
-    if (frame - rtgiStamps[s].x <= uint(u.uEvict.y)) return;
+    if (((frame - rtgiAccum[16u * s + 14u]) & 0xFFFFFFu) <= uint(u.uEvict.y)) return;
     uint level = uint(rtgiCells[s].w) / 6u;
     atomicAdd(rtgiStats[level >= 16u ? 27u : 21u + min(level, 5u)], 1u);
     if (rtgiResolved[2u * s + 1u].y >= 8.0) atomicAdd(rtgiStats[28], 1u);

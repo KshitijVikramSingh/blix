@@ -64,7 +64,6 @@ layout(std430, set = 0, binding = 8) readonly buffer RtgiResolved { vec4 rtgiRes
 layout(std430, set = 0, binding = 10) readonly buffer RtgiMoments { vec4 rtgiMoments[]; };
 // Per slot: the frame it was last trained (x) and the sun it last saw (y, rtgi_resolve.comp). The cells trained this frame,
 // listed once each for the resolve (it visits those alone: scanning every slot was 5.5 ms a frame at San Miguel's 8 M).
-layout(std430, set = 0, binding = 11) buffer RtgiStamps { uvec2 rtgiStamps[]; };
 layout(std430, set = 0, binding = 12) buffer RtgiDirty { uint dirtyCount; uint dirtyPad[3]; uint dirty[]; };
 layout(std430, set = 0, binding = 9) buffer RtgiRequests { uint requestCount; uint requestPad[3]; vec4 requests[]; };
 // Per point: where a deferred landing came from (rtgi_rays.comp copies it from its request) -- its point and ray weight,
@@ -126,7 +125,7 @@ uint rtgiInsertHashed(uvec2 h, ivec4 cell) {
     for (uint k = 0u; k < RTGI_PROBES; k++) {
         uint s = (h.x + k) & uint(u.uParams.z);
         uint prev = atomicCompSwap(rtgiKeys[s], 0u, h.y);
-        if (prev == 0u) { rtgiCells[s] = cell; atomicAdd(rtgiStats[statOffset >= 8u ? 31u : statOffset == 0u ? 29u : 30u], 1u); }
+        if (prev == 0u) { rtgiCells[s] = cell; rtgiAccum[RTGI_ACC * s + 14u] = 0u; rtgiAccum[RTGI_ACC * s + 15u] = 0u; atomicAdd(rtgiStats[statOffset >= 8u ? 31u : statOffset == 0u ? 29u : 30u], 1u); }
         if (prev == 0u || prev == h.y) return s;
     }
     return 0xFFFFFFFFu;
@@ -147,8 +146,8 @@ uvec2 cellAt(vec3 p, vec3 n, uint level) {
 // on a still Crytek Sponza view, and its light restarting (2026-10-27). Stamped a frame back, so a training this frame
 // still finds it unlisted; only once in 64 frames, and only where no training stamped it since.
 void keepAlive(uint s) {
-    uint frame = uint(u.uClamp.y), seen = rtgiStamps[s].x;
-    if (frame - seen > 64u) atomicCompSwap(rtgiStamps[s].x, seen, frame - 1u);
+    uint frame = uint(u.uClamp.y), w = rtgiAccum[RTGI_ACC * s + 14u];
+    if (((frame - w) & 0xFFFFFFu) > 64u) atomicCompSwap(rtgiAccum[RTGI_ACC * s + 14u], w, (w & 0xFF000000u) | ((frame - 1u) & 0xFFFFFFu));
 }
 
 vec4 irradianceAt(vec3 q, vec3 nq, out bool fine, float sunAt) {
@@ -226,17 +225,29 @@ uint appendRequest(bool need) {
 // resolved every frame and blended every other at ~1.6 samples a frame -- each moved ~1%: 200-300k cells listed a frame,
 // 25-33 ms frames for 15-60 s after a load or a sun turn on Crytek Sponza (2026-10-27). Still stamped either way (the
 // eviction's age, rtgi_evict.comp).
+// A cell's training state in its accumulator's spare words, the line its samples are added to: word 14 the frame it was
+// last trained (low 24 bits; the eviction's age, rtgi_evict.comp) and the sun's epoch it was last resolved under (high 8,
+// mod 256, rtgi_resolve.comp's); word 15 its samples held and its clamp (halves: the luminance a sample is capped at, 0
+// none yet), the resolve's. In the stamp, the resolved record and the moments, a cell touched was four lines: the
+// training 2.96 -> 2.54 ms a dispatch (the bench, SponzaLoop.RtgiBench.cs, 2026-10-27).
 bool listNow(uint s, uint frame, uint pending) {
     if (u.uHitSun.w < 1.5) return true;
-    if (rtgiStamps[s].y != uint(u.uGuideTable.z)) return true;
-    if (float(pending) * u.uClamp.w >= rtgiResolved[2u * s + 1u].y) return true;
+    if ((rtgiAccum[RTGI_ACC * s + 14u] >> 24) != (uint(u.uGuideTable.z) & 255u)) return true;
+    if (float(pending) * u.uClamp.w >= unpackHalf2x16(rtgiAccum[RTGI_ACC * s + 15u]).x) return true;
     return (s + frame) % uint(u.uHitSun.w) == 0u;
+}
+
+// First trained this frame: its frame bits claimed, the epoch bits kept.
+bool claimFrame(uint s, uint frame) {
+    uint seen = rtgiAccum[RTGI_ACC * s + 14u];
+    if ((seen & 0xFFFFFFu) == (frame & 0xFFFFFFu)) return false;
+    return atomicCompSwap(rtgiAccum[RTGI_ACC * s + 14u], seen, (seen & 0xFF000000u) | (frame & 0xFFFFFFu)) == seen;
 }
 
 void writeCell(uint s, uint w[RTGI_ACC]) {
     uint frame = uint(u.uClamp.y);
     // Listed the first time this frame; read first (uHitSun.z), the swap only where it is not stamped this frame yet.
-    bool first = (u.uHitSun.z < 0.5 || rtgiStamps[s].x != frame) && atomicExchange(rtgiStamps[s].x, frame) != frame;
+    bool first = claimFrame(s, frame);
     // The count (word 3) first: what was waiting, for listNow.
     uint pending = atomicAdd(rtgiAccum[RTGI_ACC * s + 3u], w[3]) + w[3];
     for (uint k = 0u; k < RTGI_ACC; k++)
@@ -310,7 +321,7 @@ void tableAdd(uint s, uint w[RTGI_ACC]) {
         uint c = tKey[j];
         uint row = j * RTGI_TW;
         // Listed the first time this frame (appendDirty's ballot needs every lane: the loop is uniform).
-        bool first = c != RTGI_EMPTY && (u.uHitSun.z < 0.5 || rtgiStamps[c].x != frame) && atomicExchange(rtgiStamps[c].x, frame) != frame;
+        bool first = c != RTGI_EMPTY && claimFrame(c, frame);
         // The words added first: the count's (word 3) old value is what was waiting, for listNow.
         uint pending = 0u;
         if (c != RTGI_EMPTY) {
@@ -341,11 +352,9 @@ void tableAdd(uint s, uint w[RTGI_ACC]) {
 // irradiance vector, hit distance and near visibility written; the levels above feed the blend's parent alone, which
 // reads the light, its spread, sky and sun.
 vec3 clampOwn(uint s, vec3 e, bool counted) {
-    if (s == 0xFFFFFFFFu || !counted || u.uClamp.x <= 0.0 || rtgiMoments[3u * s + 2u].z < 32.0) return e;
-    vec4 m = rtgiMoments[3u * s];
-    float cap = m.x + u.uClamp.x * sqrt(max(m.y - m.x * m.x, 0.0)) + 1e-4;
+    float cap = s != 0xFFFFFFFFu && counted && u.uClamp.x > 0.0 ? unpackHalf2x16(rtgiAccum[RTGI_ACC * s + 15u]).y : 0.0;
     float l = dot(e, vec3(0.2126, 0.7152, 0.0722));
-    return l > cap ? e * (cap / l) : e;
+    return cap > 0.0 && l > cap ? e * (cap / l) : e;
 }
 
 void add(uint s, vec3 e, bool counted, bool sky, bool sunTraced, bool sunLit, bool rich) {
@@ -353,11 +362,11 @@ void add(uint s, vec3 e, bool counted, bool sky, bool sunTraced, bool sunLit, bo
     // cell's own spread once it has some: in a cell with few samples it was a blob that came and went (San Miguel).
     uint s1 = (s + 1u) & uint(u.uParams.z);
     if (twice(16u) && s != 0xFFFFFFFFu && counted) sink(rtgiMoments[3u * s1].x + rtgiMoments[3u * s1 + 2u].z == -1234.5);
-    if (!clampDone && s != 0xFFFFFFFFu && counted && u.uClamp.x > 0.0 && rtgiMoments[3u * s + 2u].z >= 32.0) {
-        vec4 m = rtgiMoments[3u * s];
-        float cap = m.x + u.uClamp.x * sqrt(max(m.y - m.x * m.x, 0.0)) + 1e-4;
+    // The cap from the accumulator's spare word 15 (the resolve's; 0 none yet: under 32 samples in its fast window).
+    if (!clampDone) {
+        float cap = s != 0xFFFFFFFFu && counted && u.uClamp.x > 0.0 ? unpackHalf2x16(rtgiAccum[RTGI_ACC * s + 15u]).y : 0.0;
         float l = dot(e, vec3(0.2126, 0.7152, 0.0722));
-        if (l > cap) e *= cap / l;
+        if (cap > 0.0 && l > cap) e *= cap / l;
     }
     uint w[RTGI_ACC];
     for (uint k = 0u; k < RTGI_ACC; k++) w[k] = 0u;

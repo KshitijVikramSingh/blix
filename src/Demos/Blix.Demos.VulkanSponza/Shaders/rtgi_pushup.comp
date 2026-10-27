@@ -20,7 +20,6 @@ layout(set = 0, binding = 0) uniform RtgiPushUp {
 
 layout(std430, set = 0, binding = 1) buffer RtgiKeys { uint rtgiKeys[]; };
 layout(std430, set = 0, binding = 2) buffer RtgiAccum { uint rtgiAccum[]; };
-layout(std430, set = 0, binding = 3) buffer RtgiStamps { uvec2 rtgiStamps[]; };
 layout(std430, set = 0, binding = 4) buffer RtgiDirty { uint dirtyCount; uint dirtyPad[3]; uint dirty[]; };
 layout(std430, set = 0, binding = 5) buffer RtgiCells { ivec4 rtgiCells[]; };
 // The cells training listed: how many (x, at most its room), then RTGI_ACC words each.
@@ -56,11 +55,15 @@ void main() {
         for (uint k = 0u; t == 0xFFFFFFFFu && k < RTGI_PROBES; k++) {
             uint q = (h.x + k) & uint(u.uParams.z);
             uint prev = atomicCompSwap(rtgiKeys[q], 0u, h.y);
-            if (prev == 0u) rtgiCells[q] = ivec4(c, int((level + d) * 6u + side));
+            if (prev == 0u) { rtgiCells[q] = ivec4(c, int((level + d) * 6u + side)); rtgiAccum[RTGI_ACC * q + 14u] = 0u; rtgiAccum[RTGI_ACC * q + 15u] = 0u; }
             if (prev == 0u || prev == h.y) { t = q; break; }
         }
         if (t == 0xFFFFFFFFu) continue;
-        if (atomicExchange(rtgiStamps[t].x, frame) != frame) {
+        // Its frame claimed in the accumulator's spare word 14 (rtgi_train.comp's claimFrame: frame bits low, epoch high).
+    uint seen = rtgiAccum[RTGI_ACC * t + 14u];
+    bool first = (seen & 0xFFFFFFu) != (frame & 0xFFFFFFu)
+        && atomicCompSwap(rtgiAccum[RTGI_ACC * t + 14u], seen, (seen & 0xFF000000u) | (frame & 0xFFFFFFu)) == seen;
+    if (first) {
             uint k = atomicAdd(dirtyCount, 1u);
             if (k < room) dirty[k] = t;
         }

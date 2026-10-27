@@ -26,7 +26,8 @@ layout(set = 0, binding = 0) uniform RtgiResolve {
     vec4 uResolve;   // x samples held at most, y frames a slot lives untrained, z slots, w standard errors that cut history
     vec4 uChange;    // x frames running a disagreement must last; y the fast mean's samples, z the share of the light a disagreement must pass besides the standard errors,
                      // w the samples a sun turn leaves a cell's light history (its sun visibility's: 4)
-    vec4 uAge;       // x the share of its age a cell's light history holds at most (0: no limit); y that limit at least
+    vec4 uAge;       // x the share of its age a cell's light history holds at most (0: no limit); y that limit at least; z the
+                     // training's clamp (standard deviations, --rtgi-clamp-sigma), for the accumulator's spare word
     vec4 uList;      // x the sun's epoch (counts its turns); y the dirty list's room
     vec4 uRotaR;     // x the samples from which a cell is settled; y a settled cell resolved one frame in this many (1:
                      // every frame); z the frame's number
@@ -200,5 +201,10 @@ void main() {
     rtgiRecord[2u * s].w = floatBitsToUint(rtgiHitInv[s]);
     rtgiRecord[2u * s + 1u] = uvec4(packHalf2x16(dirNow.xy), packHalf2x16(dirNow.zw), packHalf2x16(vec2(fs.w, float(uint(u.uList.x) & 2047u))),
                                     floatBitsToUint(r1.y));
-    for (uint k = 0u; k < 4u; k++) rtgiAccum4[4u * s + k] = uvec4(0u);
+    // Its frame's words emptied; the spare two (rtgi_train.comp's accumWords) kept up: word 14's epoch bits (its frame
+    // bits the training's), word 15 the samples held and the clamp (uAge.z standard deviations over the mean, once the
+    // fast window holds 32; 0 none).
+    for (uint k = 0u; k < 3u; k++) rtgiAccum4[4u * s + k] = uvec4(0u);
+    float clampCap = u.uAge.z > 0.0 && fs.z >= 32.0 ? m.x + u.uAge.z * sqrt(max(m.y - m.x * m.x, 0.0)) + 1e-4 : 0.0;
+    rtgiAccum4[4u * s + 3u] = uvec4(0u, 0u, (a3.z & 0xFFFFFFu) | ((uint(u.uList.x) & 255u) << 24), packHalf2x16(vec2(r1.y, clampCap)));
 }

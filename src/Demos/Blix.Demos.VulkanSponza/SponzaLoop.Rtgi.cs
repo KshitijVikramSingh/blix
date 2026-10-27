@@ -674,7 +674,6 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("RtgiResolved", rtgiResolved),
                     new ShaderBufferBinding("RtgiRequests", rtgiRequestBufs[cur]),
                     new ShaderBufferBinding("RtgiMoments", rtgiMoments),
-                    new ShaderBufferBinding("RtgiStamps", rtgiStamps),
                     new ShaderBufferBinding("RtgiDirty", rtgiDirtyBufs[cur]),
                     new ShaderBufferBinding("RtgiCells", rtgiCells),
                     new ShaderBufferBinding("RtgiFiltered", rtgiFiltered),
@@ -715,7 +714,6 @@ internal sealed partial class SponzaLoop
                 {
                     new ShaderBufferBinding("RtgiKeys", rtgiKeys),
                     new ShaderBufferBinding("RtgiAccum", rtgiAccum),
-                    new ShaderBufferBinding("RtgiStamps", rtgiStamps),
                     new ShaderBufferBinding("RtgiDirty", rtgiDirtyBufs[cur]),
                     new ShaderBufferBinding("RtgiCells", rtgiCells),
                     new ShaderBufferBinding("RtgiContactCount", rtgiContactCount[prev]),
@@ -738,7 +736,6 @@ internal sealed partial class SponzaLoop
                     {
                         new ShaderBufferBinding("RtgiKeys", rtgiKeys),
                         new ShaderBufferBinding("RtgiAccum", rtgiAccum),
-                        new ShaderBufferBinding("RtgiStamps", rtgiStamps),
                         new ShaderBufferBinding("RtgiDirty", rtgiDirtyBufs[cur]),
                         new ShaderBufferBinding("RtgiCells", rtgiCells),
                         new ShaderBufferBinding("RtgiPushScratch", rtgiPushScratch),
@@ -749,7 +746,7 @@ internal sealed partial class SponzaLoop
             {
                 new("uResolve", new Vector4Uniform(new Vector4(rtgiHistory, rtgiMaxAge, RtgiSlots, rtgiChangeSigma))),
                 new("uChange", new Vector4Uniform(new Vector4(rtgiChangeFrames, rtgiFast, rtgiChangeFloor, rtgiSunCut))),
-                new("uAge", new Vector4Uniform(new Vector4(rtgiAge, rtgiAgeFloor, 0f, 0f))),
+                new("uAge", new Vector4Uniform(new Vector4(rtgiAge, rtgiAgeFloor, rtgiClampSigma, 0f))),
                 new("uList", new Vector4Uniform(new Vector4(rtgiSunEpoch, RtgiDirtyRoom, 0f, 0f))),
                 new("uRotaR", new Vector4Uniform(new Vector4(rtgiFilterSettled, rtgiListOnTurn ? 1f : rtgiResolveEvery, frameNumber, 0f))),
             },
@@ -824,6 +821,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiResolved", rtgiResolved),
                 new ShaderBufferBinding("RtgiMoments", rtgiMoments),
                 new ShaderBufferBinding("RtgiStamps", rtgiStamps),
+                new ShaderBufferBinding("RtgiAccum", rtgiAccum),
                 new ShaderBufferBinding("RtgiDirection", rtgiDirection),
                 new ShaderBufferBinding("RtgiConfidence", rtgiConfidence),
                 new ShaderBufferBinding("RtgiRecord", rtgiRecord),
@@ -1068,7 +1066,7 @@ internal sealed partial class SponzaLoop
             buffers: new[]
             {
                 new ShaderBufferBinding("RtgiKeys", rtgiKeys), new ShaderBufferBinding("RtgiResolved", rtgiResolved),
-                new ShaderBufferBinding("RtgiStamps", rtgiStamps),
+                new ShaderBufferBinding("RtgiAccum", rtgiAccum),
                 new ShaderBufferBinding("RtgiFiltered", rtgiFiltered), new ShaderBufferBinding("RtgiDirection", rtgiDirection),
                 new ShaderBufferBinding("RtgiMoments", rtgiMoments),
                 new ShaderBufferBinding("RtgiConfidence", rtgiConfidence),

@@ -16,7 +16,6 @@ layout(set = 0, binding = 0) uniform RtgiContactTrain {
 
 layout(std430, set = 0, binding = 1) buffer RtgiKeys { uint rtgiKeys[]; };
 layout(std430, set = 0, binding = 2) buffer RtgiAccum { uint rtgiAccum[]; };
-layout(std430, set = 0, binding = 3) buffer RtgiStamps { uvec2 rtgiStamps[]; };
 layout(std430, set = 0, binding = 4) buffer RtgiDirty { uint dirtyCount; uint dirtyPad[3]; uint dirty[]; };
 layout(std430, set = 0, binding = 5) buffer RtgiCells { ivec4 rtgiCells[]; };
 layout(std430, set = 0, binding = 6) readonly buffer RtgiContactCount { uint contactCount; uint contactPad[3]; };
@@ -42,12 +41,16 @@ void main() {
     for (uint k = 0u; s == 0xFFFFFFFFu && k < RTGI_PROBES; k++) {
         uint t = (h.x + k) & uint(u.uParams.z);
         uint prev = atomicCompSwap(rtgiKeys[t], 0u, h.y);
-        if (prev == 0u) rtgiCells[t] = ivec4(c, int((level + 16u) * 6u + side));
+        if (prev == 0u) { rtgiCells[t] = ivec4(c, int((level + 16u) * 6u + side)); rtgiAccum[RTGI_ACC * t + 14u] = 0u; rtgiAccum[RTGI_ACC * t + 15u] = 0u; }
         if (prev == 0u || prev == h.y) { s = t; break; }
     }
     if (s == 0xFFFFFFFFu) return;
     uint frame = uint(u.uList.x);
-    if (atomicExchange(rtgiStamps[s].x, frame) != frame) {
+    // Its frame claimed in the accumulator's spare word 14 (rtgi_train.comp's claimFrame: frame bits low, epoch high).
+    uint seen = rtgiAccum[RTGI_ACC * s + 14u];
+    bool first = (seen & 0xFFFFFFu) != (frame & 0xFFFFFFu)
+        && atomicCompSwap(rtgiAccum[RTGI_ACC * s + 14u], seen, (seen & 0xFF000000u) | (frame & 0xFFFFFFu)) == seen;
+    if (first) {
         uint k = atomicAdd(dirtyCount, 1u);
         if (k < uint(u.uList.y)) dirty[k] = s;
     }

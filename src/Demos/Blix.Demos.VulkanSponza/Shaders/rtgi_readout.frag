@@ -65,8 +65,9 @@ layout(std430, set = 0, binding = 13) readonly buffer RtgiRecord { uvec4 rtgiRec
 // frames): a settled cell the placement no longer aims rays at was read here every frame, emptied at 1800 frames, and the
 // screen's cells came back unsure together -- placed on, retrained from nothing, a wave of young cells through the resolve
 // and the blend (a still Crytek Sponza view, frames 16.7 -> 25 ms for ~10 s every 30 s, 2026-10-27). A pixel in 64 a frame,
-// in turn, each of its cells stamped a frame back (rtgi_train.comp's keepAlive) where no training stamped it for 64 frames.
-layout(std430, set = 0, binding = 14) buffer RtgiStamps { uvec2 rtgiStamps[]; };
+// in turn, each of its cells stamped a frame back in its accumulator's spare word 14 (rtgi_train.comp's keepAlive) where
+// no training stamped it for 64 frames.
+layout(std430, set = 0, binding = 14) buffer RtgiAccum { uint rtgiAccum[]; };
 // Last frame's readout, kept by the blur (rtgi_blur.frag): raw, gradient, blurred, guide.
 layout(set = 0, binding = 15) uniform sampler2D uHistRaw;
 layout(set = 0, binding = 16) uniform sampler2D uHistGradient;
@@ -90,8 +91,8 @@ bool keeper = false;
 uint rtgiFindKept(uvec2 h, vec4 params) {
     uint s = rtgiFind(h, params);
     if (keeper && s != 0xFFFFFFFFu) {
-        uint frame = uint(u.uBlurAt.z), seen = rtgiStamps[s].x;
-        if (frame - seen > 64u) atomicCompSwap(rtgiStamps[s].x, seen, frame - 1u);
+        uint frame = uint(u.uBlurAt.z), seen = rtgiAccum[16u * s + 14u];
+        if (((frame - seen) & 0xFFFFFFu) > 64u) atomicCompSwap(rtgiAccum[16u * s + 14u], seen, (seen & 0xFF000000u) | ((frame - 1u) & 0xFFFFFFu));
     }
     return s;
 }
