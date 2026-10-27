@@ -65,6 +65,17 @@ layout(std430, set = 0, binding = 14) readonly buffer RtgiFiltered { vec4 rtgiFi
 layout(std430, set = 0, binding = 15) buffer GuideKeys { uint guideKeys[]; };
 layout(std430, set = 0, binding = 16) buffer GuideAccum { uint guideAccum[]; };
 
+
+// The cache's work, counted for the profile (SponzaLoop.Rtgi.cs's RtgiWork): one atomic a subgroup, never a lane.
+layout(std430, set = 0, binding = 18) buffer RtgiStats { uint rtgiStats[32]; };
+void tally(uint slot, bool v) {
+    uint n = subgroupBallotBitCount(subgroupBallot(v));
+    if (subgroupElect() && n > 0u) atomicAdd(rtgiStats[slot], n);
+}
+
+// The level offset the round being added is for (0 the sample's own level): the table's new listings counted by it.
+uint statOffset = 0u;
+
 #define RTGI_KEYS(i) rtgiKeys[i]
 #define RTGI_NEAR u.uNearField.x
 #include "rtgi_cache.glsl"
@@ -77,18 +88,18 @@ uint rtgiInsertAt(vec3 p, vec3 n, uint level) {
     ivec3 c = ivec3(floor(p / rtgiSize(level, u.uParams)));
     uint side = rtgiSide(n);
     uvec2 h = rtgiCellHash(c, level, side, u.uParams);
+    // Held anywhere along its probes first: the eviction empties slots inside other cells' chains, and a swap into the
+    // first empty one made a second copy of a cell held past it -- young, its history restarted, the old one left
+    // untrained to be evicted in turn 1800 frames on: a wave of young cells through the resolve and the blend every ~30 s
+    // on a still Crytek Sponza view (frames 16.7 -> 25 ms for ~10 s, 2026-10-27). Keys only go from 0 to a key within a
+    // frame (emptied by the eviction pass alone), so a read key is current or 0, and the swap settles a 0. (Read first
+    // was uHitSun.z: a held cell answering without an atomic -- most of a frame's inserts, five a sample.)
+    uint held = rtgiFind(h, u.uParams);
+    if (held != 0xFFFFFFFFu) return held;
     for (uint k = 0u; k < RTGI_PROBES; k++) {
         uint s = (h.x + k) & uint(u.uParams.z);
-        // Read first (uHitSun.z): a cell already held answers without an atomic -- most of a frame's inserts, five a
-        // sample. Keys only go from 0 to a key within a frame (emptied by the eviction pass alone), so a read key is current
-        // or 0, and the swap settles a 0.
-        if (u.uHitSun.z > 0.5) {
-            uint seen = rtgiKeys[s];
-            if (seen == h.y) return s;
-            if (seen != 0u) continue;
-        }
         uint prev = atomicCompSwap(rtgiKeys[s], 0u, h.y);
-        if (prev == 0u) rtgiCells[s] = ivec4(c, int(level * 6u + side));
+        if (prev == 0u) { rtgiCells[s] = ivec4(c, int(level * 6u + side)); atomicAdd(rtgiStats[statOffset >= 8u ? 31u : statOffset == 0u ? 29u : 30u], 1u); }
         if (prev == 0u || prev == h.y) return s;
     }
     return 0xFFFFFFFFu;
@@ -103,12 +114,22 @@ uvec2 cellAt(vec3 p, vec3 n, uint level) {
 // draw on down the bounce -- odd lights that came and went (the user, Crytek Sponza, 2026-10-26). fine: its own cell
 // held enough (else the landing is requested, rtgi_rays.comp).
 // sunAt: the hit's own sun (its traced ray: 0 or 1), or below 0 the cell's sun visibility in its place.
+// A cell a ray landed in kept from eviction (rtgi_evict.comp): a bounce source off screen is read every frame and, once
+// it holds 8 samples, never trained, so at --rtgi-max-age it was emptied, its landings requested again and retrained from
+// nothing -- a wave of young cells through the resolve and the blend every 1800 frames, frames 16.7 -> 25 ms for ~10 s
+// on a still Crytek Sponza view, and its light restarting (2026-10-27). Stamped a frame back, so a training this frame
+// still finds it unlisted; only once in 64 frames, and only where no training stamped it since.
+void keepAlive(uint s) {
+    uint frame = uint(u.uClamp.y), seen = rtgiStamps[s].x;
+    if (frame - seen > 64u) atomicCompSwap(rtgiStamps[s].x, seen, frame - 1u);
+}
+
 vec4 irradianceAt(vec3 q, vec3 nq, out bool fine, float sunAt) {
     uint level = rtgiLevel(q, u.uCamera.xyz, u.uParams);
     fine = false;
     uint own = rtgiFind(cellAt(q, nq, level), u.uParams);
     vec4 o0 = vec4(0.0), o1 = vec4(0.0);
-    if (own != 0xFFFFFFFFu) { o0 = rtgiFiltered[own]; o1 = rtgiResolved[2u * own + 1u]; }
+    if (own != 0xFFFFFFFFu) { o0 = rtgiFiltered[own]; o1 = rtgiResolved[2u * own + 1u]; keepAlive(own); }
     vec4 r0 = o0, r1 = o1;
     // Stale (uGuideTable.y): the hit cell has not been trained since the sun turned (rtgi_resolve.comp cuts a cell's
     // history only when it is next trained), so its light is the old sun's -- off screen, a bounce source, it may not be
@@ -120,7 +141,7 @@ vec4 irradianceAt(vec3 q, vec3 nq, out bool fine, float sunAt) {
         // Two levels up, then (uFallback.x) further: the first holding any light.
         for (uint k = 2u; k <= 2u + uint(u.uFallback.x); k++) {
             uint s = rtgiFind(cellAt(q, nq, min(level + k, uint(u.uParams.w))), u.uParams);
-            if (s != 0xFFFFFFFFu && rtgiResolved[2u * s + 1u].y >= 0.5) { r0 = rtgiFiltered[s]; r1 = rtgiResolved[2u * s + 1u]; break; }
+            if (s != 0xFFFFFFFFu && rtgiResolved[2u * s + 1u].y >= 0.5) { r0 = rtgiFiltered[s]; r1 = rtgiResolved[2u * s + 1u]; keepAlive(s); break; }
         }
     }
     if (r1.y < 0.5) return vec4(0.0);
@@ -232,6 +253,7 @@ void tableAdd(uint s, uint w[RTGI_ACC]) {
         bool first = c != RTGI_EMPTY && (u.uHitSun.z < 0.5 || rtgiStamps[c].x != frame) && atomicExchange(rtgiStamps[c].x, frame) != frame;
         uint k = appendDirty(first);
         if (k < uint(u.uClamp.z)) dirty[k] = c;
+        tally(7u + min(statOffset, 4u), first);
         if (c != RTGI_EMPTY) {
             uint small = tAcc[row + 3u];
             uint words[RTGI_WORDS] = uint[RTGI_WORDS](tAcc[row], tAcc[row + 1u], tAcc[row + 2u],
@@ -373,6 +395,7 @@ void main() {
     bool counted, sky, sunTraced, sunLit;
     uint hd;
     bool live = pointSample(i, p, n, e, counted, sky, sunTraced, sunLit, hd);
+    tally(1u, live);
     if (!table && !live) return;
     uint level = live ? rtgiLevel(p.xyz, u.uCamera.xyz, u.uParams) : 0u;
     // Path guiding: the sample's light into its guide cell's bin (two levels up, its side), counted -- the bin's light over
@@ -403,6 +426,8 @@ void main() {
     for (uint k = 0u; k < uint(u.uNearField.w); k++) {
         bool thinned = u.uHitSun.y > 0.5 && k >= 3u && ((thin >> (4u * k)) & ((1u << (k - 2u)) - 1u)) != 0u;
         bool here = live && level + k <= top && !thinned;
+        tally(2u + min(k, 4u), here);
+        statOffset = k;
         if (!table && !here) continue;
         add(here ? rtgiInsertAt(p.xyz, n, level + k) : RTGI_EMPTY, e, counted, sky, sunTraced, sunLit, k < 3u);
     }
@@ -427,6 +452,7 @@ void main() {
         lo = rtgiLevel(oP.xyz, u.uCamera.xyz, u.uParams);
     }
     if (!table && !landing) return;
+    statOffset = 8u;
     for (uint k = 0u; k < uint(u.uNearField.w); k++) {
         bool here = landing && lo + k <= top;
         if (!table && !here) continue;

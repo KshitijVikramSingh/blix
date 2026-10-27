@@ -50,8 +50,10 @@ void main() {
     for (uint d = 1u; d < uint(u.uPush.y) && level + d <= uint(u.uParams.w); d++) {
         ivec3 c = cell.xyz >> int(d);
         uvec2 h = rtgiCellHash(c, level + d, side, u.uParams);
-        uint t = 0xFFFFFFFFu;
-        for (uint k = 0u; k < RTGI_PROBES; k++) {
+        // Held anywhere along its probes first (rtgi_train.comp's rtgiInsertAt: an evicted slot ahead of it is no place
+        // for a second copy).
+        uint t = rtgiFind(h, u.uParams);
+        for (uint k = 0u; t == 0xFFFFFFFFu && k < RTGI_PROBES; k++) {
             uint q = (h.x + k) & uint(u.uParams.z);
             uint prev = atomicCompSwap(rtgiKeys[q], 0u, h.y);
             if (prev == 0u) rtgiCells[q] = ivec4(c, int((level + d) * 6u + side));

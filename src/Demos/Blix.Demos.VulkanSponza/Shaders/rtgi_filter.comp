@@ -1,4 +1,5 @@
 #version 450
+#extension GL_KHR_shader_subgroup_ballot : require
 
 // --rtgi (SponzaLoop.Rtgi.cs): each cell trained this frame (the dirty list) blended with its neighbours in its plane --
 // the same level and side, offset along the surface only (never along its normal: a parallel surface a cell away is
@@ -60,6 +61,14 @@ layout(std430, set = 0, binding = 9) readonly buffer RtgiHitInv { float rtgiHitI
 // The readout's record (rtgi_cache.glsl): this pass's words, the light shown and how sure it is.
 layout(std430, set = 0, binding = 10) buffer RtgiRecord { uvec4 rtgiRecord[]; };
 
+// The cache's work, counted for the profile (SponzaLoop.Rtgi.cs's RtgiWork): one atomic a subgroup, never a lane.
+layout(std430, set = 0, binding = 11) buffer RtgiStats { uint rtgiStats[32]; };
+void tally(uint slot, bool v) {
+    uint n = subgroupBallotBitCount(subgroupBallot(v));
+    if (subgroupElect() && n > 0u) atomicAdd(rtgiStats[slot], n);
+}
+
+
 #define RTGI_KEYS(i) rtgiKeys[i]
 #include "rtgi_cache.glsl"
 
@@ -72,6 +81,11 @@ void main() {
     if (rtgiKeys[s] == 0u) return;
     vec4 r0 = rtgiResolved[2u * s];
     float held = rtgiResolved[2u * s + 1u].y;
+    tally(18u, true);
+    bool skip = (u.uRota.y > 1.5 && held >= u.uRota.x && (s + uint(u.uDone.x)) % uint(u.uRota.y) != 0u)
+             || (u.uRota.z > 1.5 && held >= 8.0 && held < u.uRota.x && (s + uint(u.uDone.x)) % uint(u.uRota.z) != 0u);
+    tally(19u, skip);
+    tally(20u, !skip);
     // A settled cell moves by a few hundredths of its noise a frame: blended on its turn (uRota), its light shown a few
     // frames behind -- the blend 8.5 ms a frame at 4x the rays, every cell trained blended every frame (Crytek Sponza,
     // 2026-10-26; 2.9 ms one frame in 4, Cornell's noise left and Crytek's error alike). A cell cut (its history reset to the fast window's samples) is young again, blended every frame.

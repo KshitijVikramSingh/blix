@@ -116,6 +116,14 @@ internal sealed partial class SponzaLoop
     // What the readout reads of a cell, in one 32-byte line (rtgi_cache.glsl's rtgiRecord): written by the resolve and the
     // blend, zeroed by the eviction. 32 bytes a slot (128 MB at 4 M).
     private GpuBufferHandle rtgiRecord;
+    // The cache's work counted by the training, the resolve and the blend (their tally), read and zeroed at the profile
+    // window (RtgiWork): 32 words.
+    private GpuBufferHandle rtgiStats;
+    // The eviction's count of slots held, a counter a sweep of its slices in turn (rtgi_evict.comp), and the share held past
+    // which it empties the old (--rtgi-evict-above; 0 always).
+    private GpuBufferHandle rtgiOccupancy;
+    private float rtgiEvictAbove = 0.8f;
+    private long rtgiStatsTraced;
     // --rtgi-filter-every N: a cell holding --rtgi-filter-settled samples (256) or more is blended one frame in N, its turn by
     // its slot (rtgi_filter.comp): 4 -- at 4x the rays the blend 8.5 ms a frame every frame, 2.9 on the rota (Crytek
     // Sponza, 2026-10-26). 1: every cell trained, every frame.
@@ -325,6 +333,7 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-near") is { } nf) rtgiNearField = MathF.Max(0f, nf);
         if (args.Float("rtgi-history") is { } hi) rtgiHistory = MathF.Max(1f, hi);
         if (args.Float("rtgi-max-age") is { } a) rtgiMaxAge = MathF.Max(1f, a);
+        if (args.Float("rtgi-evict-above") is { } ea) rtgiEvictAbove = Math.Clamp(ea, 0f, 1f);
         if (args.Int("rtgi-settle-frames") is { } sf) rtgiSettleFrames = Math.Max(0, sf);
         if (args.Float("rtgi-change-sigma") is { } cs) rtgiChangeSigma = MathF.Max(0.5f, cs);
         if (args.Float("rtgi-fast") is { } fa) rtgiFast = MathF.Max(1f, fa);
@@ -534,6 +543,8 @@ internal sealed partial class SponzaLoop
             rtgiBlurRadius = Own(device.CreateGpuBuffer(RtgiUnsureSize * 4, new byte[RtgiUnsureSize * 4], "sponza.rtgi.blur-radius"));
             rtgiHitInv = Own(device.CreateGpuBuffer(RtgiSlots * 4, new byte[RtgiSlots * 4], "sponza.rtgi.hit-inv"));
             rtgiRecord = Own(device.CreateGpuBuffer(RtgiSlots * 32, new byte[RtgiSlots * 32], "sponza.rtgi.record"));
+            rtgiStats = Own(device.CreateGpuBuffer(128, new byte[128], "sponza.rtgi.stats"));
+            rtgiOccupancy = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.rtgi.occupancy"));
             rtgiSeq = Own(device.CreateGpuBuffer(RtgiSlots * 4, new byte[RtgiSlots * 4], "sponza.rtgi.seq"));
             rtgiStands = Own(device.CreateGpuBuffer(RtgiSlots * 4, new byte[RtgiSlots * 4], "sponza.rtgi.stands"));
             rtgiGuideKeys = Own(device.CreateGpuBuffer(RtgiGuideSlots * 4, new byte[RtgiGuideSlots * 4], "sponza.rtgi.guide-keys"));
@@ -615,6 +626,7 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("GuideKeys", rtgiGuideKeys),
                     new ShaderBufferBinding("GuideAccum", rtgiGuideAccum),
                     new ShaderBufferBinding("RtgiPointOrigins", rtgiPointOriginsBuf[prev]),
+                    new ShaderBufferBinding("RtgiStats", rtgiStats),
                 }));
         // Path guiding: each guide cell's frame of samples into its bins.
         if (rtgiGuide > 0f)
@@ -693,6 +705,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiDirection", rtgiDirection),
                 new ShaderBufferBinding("RtgiHitInv", rtgiHitInv),
                 new ShaderBufferBinding("RtgiRecord", rtgiRecord),
+                new ShaderBufferBinding("RtgiStats", rtgiStats),
             }));
         // The cells just resolved, blended with their neighbours into what the readout and lookups read (a copy alone with
         // --rtgi-no-filter).
@@ -723,17 +736,25 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiStands", rtgiStands),
                 new ShaderBufferBinding("RtgiHitInv", rtgiHitInv),
                 new ShaderBufferBinding("RtgiRecord", rtgiRecord),
+                new ShaderBufferBinding("RtgiStats", rtgiStats),
             }));
-        // A sixteenth of the slots a frame: those no training reached for --rtgi-max-age frames emptied.
+        // A sixteenth of the slots a frame: those no training reached for --rtgi-max-age frames emptied, while more than
+        // --rtgi-evict-above of the slots are held.
         // The panel's reset: every slot at once, as untrained past its age (its frame pushed past every stamp).
         var slice = RtgiSlots / RtgiEvictSlices;
         var resetting = rtgiResetPending;
         rtgiResetPending = false;
         var evictCount = resetting ? RtgiSlots : slice;
+        var sliceIndex = (int)(rtgiFrameCount % RtgiEvictSlices);
+        var sweep = (rtgiFrameCount / RtgiEvictSlices) % 3u;
         graph.Dispatch(rtgiEvictPassHandle, new DispatchCommand(rtgiEvictPipeline, (evictCount + 63) / 64, 1, 1,
-            new ShaderUniform[] { new("uEvict", new Vector4Uniform(resetting
-                ? new Vector4(frameNumber + rtgiMaxAge + 2f, rtgiMaxAge, 0f, RtgiSlots)
-                : new Vector4(frameNumber, rtgiMaxAge, (int)(rtgiFrameCount % RtgiEvictSlices) * slice, slice))) },
+            new ShaderUniform[]
+            {
+                new("uEvict", new Vector4Uniform(resetting
+                    ? new Vector4(frameNumber + rtgiMaxAge + 2f, rtgiMaxAge, 0f, RtgiSlots)
+                    : new Vector4(frameNumber, rtgiMaxAge, sliceIndex * slice, slice))),
+                new("uPressure", new Vector4Uniform(new Vector4(sweep, resetting ? 0f : rtgiEvictAbove * RtgiSlots, !resetting && sliceIndex == 0 ? 1f : 0f, 0f))),
+            },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
             {
@@ -744,6 +765,9 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiDirection", rtgiDirection),
                 new ShaderBufferBinding("RtgiConfidence", rtgiConfidence),
                 new ShaderBufferBinding("RtgiRecord", rtgiRecord),
+                new ShaderBufferBinding("RtgiCells", rtgiCells),
+                new ShaderBufferBinding("RtgiStats", rtgiStats),
+                new ShaderBufferBinding("RtgiOccupancy", rtgiOccupancy),
             }));
 
         // S3: last frame's visible points (tile i is point i) into this frame's reservoirs, merged with the frame before's.
@@ -955,11 +979,12 @@ internal sealed partial class SponzaLoop
                 new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, rtgiNoGradient ? 0f : 1f, rtgiReadoutPlane ? 1f : 0f, 0f))),
                 new("uContact", new Vector4Uniform(new Vector4(rtgiContact ? 1f : 0f, 0.3f, 1.25f, rtgiView))),
                 new("uUnsure", new Vector4Uniform(new Vector4(rtgiDoneError, rtgiHalfRow, RtgiUnsureSize, RtgiPixelFootprint))),
-                new("uBlurAt", new Vector4Uniform(new Vector4(RtgiBlurNow, rtgiBlurHit, 0f, 0f))),
+                new("uBlurAt", new Vector4Uniform(new Vector4(RtgiBlurNow, rtgiBlurHit, rtgiFrameCount, 0f))),
             },
             buffers: new[]
             {
                 new ShaderBufferBinding("RtgiKeys", rtgiKeys), new ShaderBufferBinding("RtgiResolved", rtgiResolved),
+                new ShaderBufferBinding("RtgiStamps", rtgiStamps),
                 new ShaderBufferBinding("RtgiFiltered", rtgiFiltered), new ShaderBufferBinding("RtgiDirection", rtgiDirection),
                 new ShaderBufferBinding("RtgiMoments", rtgiMoments),
                 new ShaderBufferBinding("RtgiConfidence", rtgiConfidence),
@@ -1046,6 +1071,7 @@ internal sealed partial class SponzaLoop
         var moments = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(rtgiMoments, 0, count * 48).AsSpan());
         var confidence = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(rtgiConfidence, 0, count * 16).AsSpan());
         var seen = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(rtgiDoneCount, 0, 32).AsSpan()).ToArray();
+        var work = RtgiWork();
         device.WriteGpuBuffer(rtgiDoneCount, 0, new byte[32]);
         double done = 0;
         double cutsLight = 0;
@@ -1079,6 +1105,23 @@ internal sealed partial class SponzaLoop
         cutsLight *= Share;
         done *= Share;
         return string.Create(CultureInfo.InvariantCulture,
-            $"rtgi: ~{used:N0} of {RtgiSlots:N0} slots held ({100.0 * used / RtgiSlots:0.0}%), {trained:N0} trained, {samples / Math.Max(1, trained):0.0} samples a cell, {100.0 * done / Math.Max(1, trained):0.0}% of cells done, {100.0 * seen[1] / Math.Max(1u, seen[0]):0.0}% of the visible, history cut {cutsLight / Math.Max(1, trained):0.00} times a cell, mean indirect {energy / Math.Max(1, trained):0.000}; {bad:N0} not finite{firstBad}; {rtgiTraced:N0} frames traced; readout lookups {100.0 * seen[3] / Math.Max(1u, seen[2]):0.0}% missed ({seen[2] / (double)Math.Max(1u, seen[0]):0.0} a pixel), {100.0 * seen[5] / Math.Max(1u, seen[4]):0.0}% of pixels no blur");
+            $"rtgi: ~{used:N0} of {RtgiSlots:N0} slots held ({100.0 * used / RtgiSlots:0.0}%), {trained:N0} trained, {samples / Math.Max(1, trained):0.0} samples a cell, {100.0 * done / Math.Max(1, trained):0.0}% of cells done, {100.0 * seen[1] / Math.Max(1u, seen[0]):0.0}% of the visible, history cut {cutsLight / Math.Max(1, trained):0.00} times a cell, mean indirect {energy / Math.Max(1, trained):0.000}; {bad:N0} not finite{firstBad}; {rtgiTraced:N0} frames traced{work}; readout lookups {100.0 * seen[3] / Math.Max(1u, seen[2]):0.0}% missed ({seen[2] / (double)Math.Max(1u, seen[0]):0.0} a pixel), {100.0 * seen[5] / Math.Max(1u, seen[4]):0.0}% of pixels no blur");
+    }
+
+    // The cache's work a frame since the last window: points live, cell updates by level offset (0 the sample's own, then
+    // 1-4 up), cells newly listed by offset, the resolve's listed / rota-skipped / young / settled / settled that drifted,
+    // the blend's listed / skipped / blended. What a finest-level training (A) or change-driven work (B) would leave.
+    private string RtgiWork()
+    {
+        var w = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(rtgiStats, 0, 128).AsSpan()).ToArray();
+        device.WriteGpuBuffer(rtgiStats, 0, new byte[128]);
+        var frames = Math.Max(1L, rtgiTraced - rtgiStatsTraced);
+        rtgiStatsTraced = rtgiTraced;
+        string F(int i) => (w[i] / (double)frames).ToString("N0", CultureInfo.InvariantCulture);
+        return $"; work a frame: points {F(1)}, updates by offset {F(2)}/{F(3)}/{F(4)}/{F(5)}/{F(6)}, new listings {F(7)}/{F(8)}/{F(9)}/{F(10)}/{F(11)}; "
+            + $"resolve listed {F(12)}, rota-skipped {F(13)}, young {F(14)}, settled {F(15)} (drifted {F(16)}); "
+            + $"blend listed {F(18)}, skipped {F(19)}, blended {F(20)}; "
+            + $"evicted by level {F(21)}/{F(22)}/{F(23)}/{F(24)}/{F(25)}/{F(26)}, contact {F(27)}, holding 8+ {F(28)}; "
+            + $"created at own level {F(29)}, above {F(30)}, landings {F(31)}";
     }
 }

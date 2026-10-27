@@ -24,7 +24,8 @@ layout(set = 0, binding = 0) uniform RtgiReadout {
     vec4 uContact;       // x 1: contact detail on; yz the ratio's clamp; w the RTGI panel's view (0: the light)
     vec4 uUnsure;        // x the done threshold (relative error); y the uncertainty map's row (half-res pixels); z its size;
                          // w a full-res pixel's footprint per metre of distance
-    vec4 uBlurAt;        // x the blur's radius at most (full-res pixels; 0: none); y the share of the hit distance it may reach
+    vec4 uBlurAt;        // x the blur's radius at most (full-res pixels; 0: none); y the share of the hit distance it may reach;
+                         // z the cache's frame number (the keep-alive below)
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -55,6 +56,13 @@ layout(std430, set = 0, binding = 12) writeonly buffer RtgiBlurRadius { float rt
 // Each cell's light, direction, hit distance, how sure and how much it holds, in one 32-byte line (rtgi_cache.glsl): read
 // in place of the five buffers above, which the panel's views alone still read.
 layout(std430, set = 0, binding = 13) readonly buffer RtgiRecord { uvec4 rtgiRecord[]; };
+// The cells this view reads kept from eviction (rtgi_evict.comp empties those no training stamped for --rtgi-max-age
+// frames): a settled cell the placement no longer aims rays at was read here every frame, emptied at 1800 frames, and the
+// screen's cells came back unsure together -- placed on, retrained from nothing, a wave of young cells through the resolve
+// and the blend (a still Crytek Sponza view, frames 16.7 -> 25 ms for ~10 s every 30 s, 2026-10-27). A pixel in 64 a frame,
+// in turn, each of its cells stamped a frame back (rtgi_train.comp's keepAlive) where no training stamped it for 64 frames.
+layout(std430, set = 0, binding = 14) buffer RtgiStamps { uvec2 rtgiStamps[]; };
+
 
 // Blue (0) to green to red (1).
 vec3 heat(float t) {
@@ -66,6 +74,17 @@ vec3 heat(float t) {
 #define RTGI_NEAR u.uNearField.x
 #include "rtgi_cache.glsl"
 #include "half_guide.glsl"
+
+bool keeper = false;
+
+uint rtgiFindKept(uvec2 h, vec4 params) {
+    uint s = rtgiFind(h, params);
+    if (keeper && s != 0xFFFFFFFFu) {
+        uint frame = uint(u.uBlurAt.z), seen = rtgiStamps[s].x;
+        if (frame - seen > 64u) atomicCompSwap(rtgiStamps[s].x, seen, frame - 1u);
+    }
+    return s;
+}
 
 // Trilinear over the level's cells around p (their centres), w the weight found.
 uint lookups = 0u, misses = 0u;
@@ -98,7 +117,7 @@ vec4 readLevel(vec3 p, uint side, uint level, out float sky, out vec3 bvec, out 
         }
         ivec3 cc = c0 + o;
         if (plane) cc[axis] = cAxis;
-        uint s = rtgiFind(rtgiCellHash(cc, level, side, u.uParams), u.uParams);
+        uint s = rtgiFindKept(rtgiCellHash(cc, level, side, u.uParams), u.uParams);
         lookups++;
         if (s == 0xFFFFFFFFu) { misses++; continue; }
         uvec4 a = rtgiRecord[2u * s], c = rtgiRecord[2u * s + 1u];
@@ -132,7 +151,7 @@ vec2 readContact(vec3 p, uint side, uint level) {
     float v = 0.0, w = 0.0;
     for (int k = 0; k < 8; k++) {
         ivec3 o = ivec3(k & 1, (k >> 1) & 1, k >> 2);
-        uint s = rtgiFind(rtgiCellHash(c0 + o, level + 16u, side, u.uParams), u.uParams);
+        uint s = rtgiFindKept(rtgiCellHash(c0 + o, level + 16u, side, u.uParams), u.uParams);
         if (s == 0xFFFFFFFFu) continue;
         float held = rtgiResolved[2u * s + 1u].y;
         if (held < 0.5) continue;
@@ -146,6 +165,8 @@ vec2 readContact(vec3 p, uint side, uint level) {
 
 void main() {
     ivec2 h = ivec2(gl_FragCoord.xy);
+    // Each pixel of an 8x8 block in turn.
+    keeper = ((uint(h.x) & 7u) | ((uint(h.y) & 7u) << 3)) == (uint(u.uBlurAt.z) & 63u);
     ivec2 fullSize = textureSize(uSceneDepth, 0);
     ivec2 q = min(h * 2 + ivec2(u.uHalf.yz), fullSize - 1);
     float raw = texelFetch(uSceneDepth, q, 0).r;
@@ -170,7 +191,7 @@ void main() {
     uint level = uint(lf);
     float blurR = -1.0;
     if (unsureIn) {
-        uint sc = rtgiFind(rtgiCellHash(ivec3(floor(p / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
+        uint sc = rtgiFindKept(rtgiCellHash(ivec3(floor(p / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
         float unsure = 1.0;
         float rel = 1.0, invD = 0.0;
         if (sc != 0xFFFFFFFFu) {
@@ -225,7 +246,7 @@ void main() {
     // (2026-10-26): the bounce light lost every normal map. uNearField.y 0: none.
     // The visible share done: one half-res pixel in 16, its level's nearest cell.
     if (e.w > 0.0 && ((uint(h.x) & 3u) | ((uint(h.y) & 3u) << 2)) == 0u) {
-        uint sd = rtgiFind(rtgiCellHash(ivec3(floor(p / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
+        uint sd = rtgiFindKept(rtgiCellHash(ivec3(floor(p / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
         atomicAdd(doneCount[0], 1u);
         atomicAdd(doneCount[2], lookups);
         atomicAdd(doneCount[3], misses);
@@ -241,7 +262,7 @@ void main() {
     // distance, 5 cm (red) to 20 m (blue); 6 sky visibility; 7 sun visibility. No cell: magenta.
     int view = int(u.uContact.w + 0.5);
     if (view >= 1 && view <= 7) {
-        uint s = rtgiFind(rtgiCellHash(ivec3(floor(p / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
+        uint s = rtgiFindKept(rtgiCellHash(ivec3(floor(p / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
         vec3 c = vec3(1.0, 0.0, 1.0);
         if (s != 0xFFFFFFFFu && rtgiResolved[2u * s + 1u].y >= 0.5) {
             vec4 r1 = rtgiResolved[2u * s + 1u];

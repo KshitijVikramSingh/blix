@@ -37,8 +37,9 @@ void main() {
     ivec3 c = ivec3(floor(p / (0.25 * rtgiSize(level, u.uParams))));
     uint side = rtgiSide(n);
     uvec2 h = rtgiCellHash(c, level + 16u, side, u.uParams);
-    uint s = 0xFFFFFFFFu;
-    for (uint k = 0u; k < RTGI_PROBES; k++) {
+    // Held anywhere along its probes first (rtgi_train.comp's rtgiInsertAt).
+    uint s = rtgiFind(h, u.uParams);
+    for (uint k = 0u; s == 0xFFFFFFFFu && k < RTGI_PROBES; k++) {
         uint t = (h.x + k) & uint(u.uParams.z);
         uint prev = atomicCompSwap(rtgiKeys[t], 0u, h.y);
         if (prev == 0u) rtgiCells[t] = ivec4(c, int((level + 16u) * 6u + side));

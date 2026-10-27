@@ -1,4 +1,5 @@
 #version 450
+#extension GL_KHR_shader_subgroup_ballot : require
 
 // --rtgi (SponzaLoop.Rtgi.cs): each slot's frame of samples into what it holds -- a running mean whose history follows
 // the light (S2). Two means per cell: the slow one shown, up to uResolve.x samples, so a still light settles (a fixed 64
@@ -45,6 +46,14 @@ layout(std430, set = 0, binding = 8) buffer RtgiDirection { vec4 rtgiDirection[]
 layout(std430, set = 0, binding = 9) buffer RtgiHitInv { float rtgiHitInv[]; };
 // The readout's record (rtgi_cache.glsl): this pass's words.
 layout(std430, set = 0, binding = 10) buffer RtgiRecord { uvec4 rtgiRecord[]; };
+
+// The cache's work, counted for the profile (SponzaLoop.Rtgi.cs's RtgiWork): one atomic a subgroup, never a lane.
+layout(std430, set = 0, binding = 11) buffer RtgiStats { uint rtgiStats[32]; };
+void tally(uint slot, bool v) {
+    uint n = subgroupBallotBitCount(subgroupBallot(v));
+    if (subgroupElect() && n > 0u) atomicAdd(rtgiStats[slot], n);
+}
+
 layout(std430, set = 0, binding = 5) buffer RtgiStamps { uvec2 rtgiStamps[]; };
 layout(std430, set = 0, binding = 6) readonly buffer RtgiDirty { uint dirtyCount; uint dirtyPad[3]; uint dirty[]; };
 // The other parity's list: its count zeroed here for the next frame's training.
@@ -61,10 +70,12 @@ void main() {
     if (i >= min(dirtyCount, uint(u.uList.y))) return;
     uint s = dirty[i];
     if (rtgiKeys[s] == 0u) return;
+    tally(12u, true);
     // A settled cell (uRotaR.x samples) resolved one frame in uRotaR.y, its turn by its slot: its frame's samples stay in
     // the accumulator and the next resolve takes them all -- nothing lost, its light a frame older.
-    if (u.uRotaR.y > 1.5 && rtgiResolved[2u * s + 1u].y >= u.uRotaR.x && (s + uint(u.uRotaR.z)) % uint(u.uRotaR.y) != 0u)
-        return;
+    bool rotaSkip = u.uRotaR.y > 1.5 && rtgiResolved[2u * s + 1u].y >= u.uRotaR.x && (s + uint(u.uRotaR.z)) % uint(u.uRotaR.y) != 0u;
+    tally(13u, rotaSkip);
+    if (rotaSkip) return;
     uvec4 a0 = rtgiAccum4[4u * s], a1 = rtgiAccum4[4u * s + 1u], a2 = rtgiAccum4[4u * s + 2u], a3 = rtgiAccum4[4u * s + 3u];
     uint count = a0.w, sunTraced = a1.z;
     vec4 r0 = rtgiResolved[2u * s], r1 = rtgiResolved[2u * s + 1u];
@@ -81,6 +92,17 @@ void main() {
     if (count > 0u) {
         float n = float(count);
         vec3 mean = vec3(a0.xyz) / (RTGI_SCALE * n);
+        // The work counted: young or settled, and a settled cell whose frame of samples left its mean by more than the
+        // change bound -- what a resolve that skips the agreeing settled cells would still visit.
+        {
+            bool settled = r1.y >= u.uRotaR.x;
+            vec4 m0 = rtgiMoments[3u * s];
+            float drift = abs(dot(mean, vec3(0.2126, 0.7152, 0.0722)) - dot(r0.rgb, vec3(0.2126, 0.7152, 0.0722)));
+            float bound = u.uResolve.w * sqrt(max(m0.y - m0.x * m0.x, 0.0) / n) + u.uChange.z * dot(r0.rgb, vec3(0.2126, 0.7152, 0.0722));
+            tally(14u, !settled);
+            tally(15u, settled);
+            tally(16u, settled && drift > bound);
+        }
         float meanSq = float(a1.w) / (RTGI_LUM2_SCALE * n);
         float sky = float(a1.x) / n;
         vec3 frameB = vec3(ivec3(a2.xyz)) / (RTGI_SCALE * n);
