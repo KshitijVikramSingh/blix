@@ -341,7 +341,11 @@ internal sealed partial class SponzaLoop
             clipmapRested++;
             return;
         }
-        MarkIncidentDirty();   // the probes solve: what the incident pass reads where texels do not answer changes
+        // The probes solve: what the incident pass reads where texels do not answer changes. Not under --rtgi: the readout
+        // stands in for the incident pass, and nothing else marked dirty reads the probes -- the traced sun's kept masks
+        // (RtShadowKeep) were thrown away for two frames in every eight, each ~3.5 ms more (the shadow rays and their
+        // trace; Crytek Sponza 1080p's per-frame series, 2026-10-28).
+        if (!rtgi) MarkIncidentDirty();
         // Staged (ClipmapStaged): a wave in flight holds its blocks where they were when it started -- the slots it
         // picked must still be the cells it traced when it resolves -- so the clipmap follows the camera only as a wave
         // starts (frame A), and the wave's later phases run with its own origins, frame and seed.

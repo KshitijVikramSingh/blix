@@ -1632,6 +1632,8 @@ public sealed partial class VulkanGraphicsDevice
             return;
         }
 
+        ulong spanStart = ulong.MaxValue, spanEnd = 0;
+        OpenFrameSeries();
         foreach (var t in pending)
         {
             var startTicks = results[t.StartIndex - first];
@@ -1640,9 +1642,56 @@ public sealed partial class VulkanGraphicsDevice
             var deltaMs = deltaTicks * timestampPeriodNs / 1_000_000.0;
             pendingGpuTimings.Add(new VkGpuPassTiming(t.PassName, deltaMs, t.IssuedFrame));
             AccumulateGpuPassTotal(t.PassName, deltaMs);
+            framePassSeries?.WriteLine(string.Create(System.Globalization.CultureInfo.InvariantCulture,
+                $"{t.IssuedFrame},{t.PassName},{deltaMs:0.000},{(startTicks * timestampPeriodNs / 1_000_000.0):0.000}"));
+            spanStart = Math.Min(spanStart, startTicks);
+            spanEnd = Math.Max(spanEnd, endTicks);
+        }
+        // The frame's GPU span, its first pass's start to its last one's end (async passes and the native Metal work
+        // between them inside it): what a frame takes on the GPU, where the frame rate shows the display's pace instead
+        // (Crytek Sponza 1080p at a steady 8.4 ms, 2026-10-28). Under its own name with the passes, a frame each.
+        if (spanEnd > spanStart)
+        {
+            var spanMs = (spanEnd - spanStart) * timestampPeriodNs / 1_000_000.0;
+            AccumulateGpuPassTotal(FrameSpanName, spanMs);
+            WriteFrameSeries(pending[0].IssuedFrame, spanMs, spanStart * timestampPeriodNs / 1_000_000.0);
         }
         pending.Clear();
     }
+
+    /// <summary>The GPU timings' pseudo-pass holding each frame's span (first pass start to last pass end).</summary>
+    public const string FrameSpanName = "(frame span)";
+
+    // BLIX_FRAME_SERIES=DIR: each frame's GPU span, and when it began on the GPU, a line a frame (gpu-frames.csv):
+    // the rhythm a window's median hides -- frames of 4, 8 and 12 ms in turn read as one 8 (the user, 2026-10-28).
+    private StreamWriter? frameSeries;
+    private bool frameSeriesChecked;
+
+    private void OpenFrameSeries()
+    {
+        if (!frameSeriesChecked)
+        {
+            frameSeriesChecked = true;
+            if (Environment.GetEnvironmentVariable("BLIX_FRAME_SERIES") is { Length: > 0 } dir)
+            {
+                Directory.CreateDirectory(dir);
+                frameSeries = new StreamWriter(Path.Combine(dir, "gpu-frames.csv"));
+                frameSeries.WriteLine("gpu_frame,span_ms,start_ms");
+                framePassSeries = new StreamWriter(Path.Combine(dir, "gpu-passes.csv"));
+                framePassSeries.WriteLine("gpu_frame,pass,ms,start_ms");
+            }
+        }
+    }
+
+    private void WriteFrameSeries(int frame, double spanMs, double startMs)
+    {
+        if (frameSeries is null) return;
+        frameSeries.WriteLine(string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{frame},{spanMs:0.000},{startMs:0.000}"));
+        if (frame % 120 == 0) { frameSeries.Flush(); framePassSeries?.Flush(); }
+    }
+
+    // Beside it: each pass's time and start, a line a pass a frame (gpu-passes.csv).
+    private StreamWriter? framePassSeries;
 
     // A pass past the query slot's capacity is not timed; say so once rather than let its GPU time read as nothing.
     private void ReportQueryCap(string pass)

@@ -119,6 +119,7 @@ internal sealed partial class SponzaLoop
         profSections = new Dictionary<string, double>(StringComparer.Ordinal);
         profWindow.Add(frame);
         profSession.Add(frame);
+        WriteCpuFrameSeries(frame);
         if (profSession.Count > 200_000) profSession.RemoveRange(0, 100_000);
         if (profSpikesGpu)
         {
@@ -289,5 +290,28 @@ internal sealed partial class SponzaLoop
         GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: compact);
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] heap released: paused {(GC.GetTotalPauseDuration() - pause).TotalMilliseconds:0} ms; committed {GC.GetGCMemoryInfo().TotalCommittedBytes / 1048576.0:N0} MB{(compact ? " (compacting)" : "")}."));
+    }
+
+    // BLIX_FRAME_SERIES=DIR: each frame's interval and the host's wait, encode and submit/present, a line a frame
+    // (cpu-frames.csv; the device writes the GPU's span beside it, gpu-frames.csv).
+    private StreamWriter? cpuFrameSeries;
+    private bool cpuFrameSeriesChecked;
+
+    private void WriteCpuFrameSeries(ProfFrame frame)
+    {
+        if (!cpuFrameSeriesChecked)
+        {
+            cpuFrameSeriesChecked = true;
+            if (Environment.GetEnvironmentVariable("BLIX_FRAME_SERIES") is { Length: > 0 } dir)
+            {
+                Directory.CreateDirectory(dir);
+                cpuFrameSeries = new StreamWriter(Path.Combine(dir, "cpu-frames.csv"));
+                cpuFrameSeries.WriteLine("frame,interval_ms,wait_ms,encode_ms,submit_present_ms");
+            }
+        }
+        if (cpuFrameSeries is null) return;
+        cpuFrameSeries.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"{framesRendered},{frame.Interval:0.000},{frame.Wait:0.000},{frame.Encode:0.000},{frame.Present:0.000}"));
+        if (framesRendered % 120 == 0) cpuFrameSeries.Flush();
     }
 }

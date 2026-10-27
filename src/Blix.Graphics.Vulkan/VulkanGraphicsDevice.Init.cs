@@ -102,8 +102,17 @@ public sealed partial class VulkanGraphicsDevice
 
     private static readonly string[] ValidationLayers = { "VK_LAYER_KHRONOS_validation" };
 
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "setenv")]
+    private static extern int SetEnvNative(string name, string value, int overwrite);
+
     private void InitializeVulkan(IVkSurface windowSurface)
     {
+        // MoltenVK's semaphores as Metal events (MVK_CONFIG_VK_SEMAPHORE_SUPPORT_STYLE 2), unless set: its default left the
+        // frame's hand-off to the Metal tracer ~1.9 ms after the work it waits for ended, ~0.8 ms with events (Crytek
+        // Sponza's trace intervals, 2026-10-28). Natively, before the instance: MoltenVK reads its configuration with
+        // getenv, which .NET's own environment does not reach on macOS. Ignored elsewhere.
+        if (OperatingSystem.IsMacOS() && Environment.GetEnvironmentVariable("MVK_CONFIG_VK_SEMAPHORE_SUPPORT_STYLE") is null)
+            SetEnvNative("MVK_CONFIG_VK_SEMAPHORE_SUPPORT_STYLE", "2", 0);
         Vk = Vk.GetApi();
         validationEnabled = ShouldEnableValidation() && AreLayersAvailable(ValidationLayers);
 
