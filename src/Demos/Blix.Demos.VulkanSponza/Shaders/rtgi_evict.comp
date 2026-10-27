@@ -30,7 +30,7 @@ layout(std430, set = 0, binding = 7) buffer RtgiRecord { uvec4 rtgiRecord[]; };
 layout(std430, set = 0, binding = 8) readonly buffer RtgiCells { ivec4 rtgiCells[]; };
 // The cache's work counters (rtgi_train.comp): 21-26 the cells emptied by level (0-5, past 5 the last), 27 contact cells
 // (level 16 up), 28 those emptied holding 8 samples or more.
-layout(std430, set = 0, binding = 9) buffer RtgiStats { uint rtgiStats[32]; };
+layout(std430, set = 0, binding = 9) buffer RtgiStats { uint rtgiStats[64]; };
 
 void main() {
     uint i = gl_GlobalInvocationID.x;

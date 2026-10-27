@@ -255,6 +255,10 @@ void main() {
             if (blurR < 1.0) atomicAdd(doneCount[5], 1u);
         }
         if (sd != 0xFFFFFFFFu && unpackHalf2x16(rtgiRecord[2u * sd].z).y > 0.5) atomicAdd(doneCount[1], 1u);
+        // Its relative error under 1% (6) and 3% (7): how far from done the visible is.
+        float relD = sd != 0xFFFFFFFFu ? unpackHalf2x16(rtgiRecord[2u * sd].z).x : 1.0;
+        if (relD < 0.01) atomicAdd(doneCount[6], 1u);
+        if (relD < 0.03) atomicAdd(doneCount[7], 1u);
     }
     // The RTGI panel's views (uContact.w, SponzaLoop.RtgiDebug.cs), the pixel's own cell (its level's, nearest) painted
     // in place of its light: 1 done (green) or open (red), by the light; 2 how unsure, the blend's relative error, from

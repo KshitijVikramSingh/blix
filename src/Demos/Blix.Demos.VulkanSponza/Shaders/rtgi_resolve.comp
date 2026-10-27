@@ -1,5 +1,6 @@
 #version 450
 #extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
 
 // --rtgi (SponzaLoop.Rtgi.cs): each slot's frame of samples into what it holds -- a running mean whose history follows
 // the light (S2). Two means per cell: the slow one shown, up to uResolve.x samples, so a still light settles (a fixed 64
@@ -48,9 +49,14 @@ layout(std430, set = 0, binding = 9) buffer RtgiHitInv { float rtgiHitInv[]; };
 layout(std430, set = 0, binding = 10) buffer RtgiRecord { uvec4 rtgiRecord[]; };
 
 // The cache's work, counted for the profile (SponzaLoop.Rtgi.cs's RtgiWork): one atomic a subgroup, never a lane.
-layout(std430, set = 0, binding = 11) buffer RtgiStats { uint rtgiStats[32]; };
+layout(std430, set = 0, binding = 12) readonly buffer RtgiCells { ivec4 rtgiCells[]; };
+layout(std430, set = 0, binding = 11) buffer RtgiStats { uint rtgiStats[64]; };
 void tally(uint slot, bool v) {
     uint n = subgroupBallotBitCount(subgroupBallot(v));
+    if (subgroupElect() && n > 0u) atomicAdd(rtgiStats[slot], n);
+}
+void tallySum(uint slot, uint v) {
+    uint n = subgroupAdd(v);
     if (subgroupElect() && n > 0u) atomicAdd(rtgiStats[slot], n);
 }
 
@@ -82,7 +88,8 @@ void main() {
     // The sun turned since this cell last saw it: what it holds of it is stale, whether or not its samples have shown it
     // yet -- a known change, not one to wait for the fast mean to find (at 64 samples, ~10 s to settle a 20 degree change,
     // 2026-10-26). Taken when it is next trained (its epoch behind the sun's), not swept over every slot.
-    if (rtgiStamps[s].y != uint(u.uList.x)) {
+    bool epochCut = rtgiStamps[s].y != uint(u.uList.x);
+    if (epochCut) {
         r1.y = min(r1.y, u.uChange.w);
         r1.z = min(r1.z, r1.y);
         r1.w = min(r1.w, 4.0);
@@ -120,7 +127,9 @@ void main() {
         // The slow mean, or the fast one when they disagree; its history at most uAge.x of its age (r1.z, in samples).
         float age = r1.z + n;
         float held = min(r1.y + n, u.uResolve.x);
+        float uncapped = held;
         if (u.uAge.x > 0.0) held = min(held, max(u.uAge.x * age, u.uAge.y));
+        bool ageCapped = held < uncapped;
         float variance = max(m.y - m.x * m.x, 0.0);
         float bound = u.uResolve.w * sqrt(variance / max(fs.z, 1.0)) + u.uChange.z * max(lum(r0.rgb), lum(fast.rgb));
         bool disagree = r1.y > 0.5 && fs.z >= u.uChange.y && abs(lum(fast.rgb) - lum(r0.rgb)) > bound;
@@ -144,6 +153,25 @@ void main() {
             rtgiHitInv[s] = mix(rtgiHitInv[s], float(a3.y) / (256.0 * n), w);
         }
         rtgiDirection[s] = dir;
+        // Why a young cell is young (the busy phase: ~100k listed young a frame for 20-60 s, 2026-10-27): 32 held capped by
+        // its age, 33 cut by the fast mean this frame, 34 cut by the sun's epoch, 35-38 held under 8 / 32 / 128 / 256 after
+        // this frame, 39 its samples this frame (a sum), 40-45 by level, 46 disagreeing (running), 47 age past 1024.
+        {
+            bool young = held < u.uRotaR.x;
+            bool cut = m.w > rtgiMoments[3u * s].w;
+            uint level = uint(rtgiCells[s].w) / 6u;
+            for (uint l = 0u; l < 6u; l++) tally(40u + l, young && min(level, 5u) == l);
+            tally(32u, young && ageCapped);
+            tally(33u, young && cut);
+            tally(34u, young && epochCut);
+            tally(35u, young && held < 8.0);
+            tally(36u, young && held >= 8.0 && held < 32.0);
+            tally(37u, young && held >= 32.0 && held < 128.0);
+            tally(38u, young && held >= 128.0);
+            tallySum(39u, young ? count : 0u);
+            tally(46u, young && m.z > 0.5);
+            tally(47u, young && age >= 1024.0);
+        }
         r1.y = held;
         r1.z = age;
     }

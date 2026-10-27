@@ -31,6 +31,7 @@ layout(set = 0, binding = 0) uniform RtgiRays {
                          // within uBlock.z tiles but for a uBlock.y share drawn anywhere; hit points in strides); y the
                          // global share; z the window (tiles)
     vec4 uUnsureMap;     // x the uncertainty map's row (half-res pixels); y 1: written last frame (else depth asked); z its size
+    vec4 uBudget;        // x the relative error a visible point is spent toward (0: every point kept); y the share kept at least
     vec4 uSeq;           // x 1: a point's cosine direction from its cell's own low-discrepancy sequence (else hashed); y 1: a
                          // point that picked a done cell draws again rather than giving its ray back; z 1: a settled cell's points
                          // trace the sun 1 in 8
@@ -165,6 +166,19 @@ void main() {
             chosenDone = false;
         }
         if (!found) { none(i); return; }
+        // Spent by what it buys (uBudget.x): kept with probability (its pixel's relative error over the target)^2, at least
+        // uBudget.y -- each halving of a cell's error costs 4x the samples, so where the light is already within the
+        // target a ray buys little. Settled, a still Crytek Sponza view's visible light sat at 3-10% (22% of it under
+        // 3% after 50 s, 2026-10-27) and every point traced, trained and placed at ~20 ns each: 9 ms a frame at 4x the
+        // rays. Where the view opens up, a disocclusion, a sun turn, the error is high and every point kept.
+        if (u.uBudget.x > 0.0 && u.uUnsureMap.y > 0.5) {
+            uint at = uint(pick.y / 2) * uint(u.uUnsureMap.x) + uint(pick.x / 2);
+            if (pick.x / 2 < int(u.uUnsureMap.x) && at < uint(u.uUnsureMap.z)) {
+                float rel = rtgiUnsure[at];
+                float keep = rel < 0.0 ? 1.0 : clamp((rel / u.uBudget.x) * (rel / u.uBudget.x), u.uBudget.y, 1.0);
+                if (float(rtgiHash(hc ^ 0x5BD1E995u) & 0xFFFFu) / 65536.0 >= keep) { none(i); return; }
+            }
+        }
         // The chosen candidate's point and normal (a map's read may name a pixel whose depth turned to sky).
         float rawp = texelFetch(uSceneDepth, pick, 0).r;
         vec4 nsp = texelFetch(uPrepassNormal, pick, 0);

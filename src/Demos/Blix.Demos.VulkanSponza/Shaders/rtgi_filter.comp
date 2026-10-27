@@ -62,7 +62,7 @@ layout(std430, set = 0, binding = 9) readonly buffer RtgiHitInv { float rtgiHitI
 layout(std430, set = 0, binding = 10) buffer RtgiRecord { uvec4 rtgiRecord[]; };
 
 // The cache's work, counted for the profile (SponzaLoop.Rtgi.cs's RtgiWork): one atomic a subgroup, never a lane.
-layout(std430, set = 0, binding = 11) buffer RtgiStats { uint rtgiStats[32]; };
+layout(std430, set = 0, binding = 11) buffer RtgiStats { uint rtgiStats[64]; };
 void tally(uint slot, bool v) {
     uint n = subgroupBallotBitCount(subgroupBallot(v));
     if (subgroupElect() && n > 0u) atomicAdd(rtgiStats[slot], n);
