@@ -686,7 +686,9 @@ internal sealed partial class SponzaLoop
                 });
             for (var r = 0; r < trainReps; r++) graph.Dispatch(rtgiTrainPassHandle, train);
         }
-        if (rtgiBenching) return;
+        // The bench of the training ends the cache's frame here; of placement or the trace, goes on to them.
+        if (rtgiBenching && rtgiBenchPass == "train") return;
+        if (rtgiBenching) goto BenchPlacement;
         // Path guiding: each guide cell's frame of samples into its bins.
         if (rtgiGuide > 0f)
         graph.Dispatch(rtgiGuideResolvePassHandle, new DispatchCommand(rtgiGuideResolvePipeline, (RtgiGuideSlots + 63) / 64, 1, 1,
@@ -880,11 +882,12 @@ internal sealed partial class SponzaLoop
             rtgiGridViewProj = rtgiViewProj1;
         }
 
+    BenchPlacement:
         var tilesX = Math.Max(1, (int)MathF.Round(MathF.Sqrt(rtgiTiles * (float)width / height)));
         var tilesY = Math.Max(1, (rtgiTiles + tilesX - 1) / tilesX);
         // The visible points are as many tiles as the grid has (a whole grid, so every row is covered).
         Matrix4x4.Invert(viewProjJittered, out var invViewProj);
-        graph.Dispatch(rtgiRaysPassHandle, new DispatchCommand(rtgiRaysPipeline, groups, 1, 1,
+        var place = new DispatchCommand(rtgiRaysPipeline, groups, 1, 1,
             new ShaderUniform[]
             {
                 new("uInvViewProj", new Matrix4x4Uniform(invViewProj)),
@@ -925,7 +928,10 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiPointOrigins", rtgiPointOriginsBuf[cur]),
                 new ShaderBufferBinding("RtgiSeq", rtgiSeq),
                 new ShaderBufferBinding("RtgiUnsure", rtgiUnsure),
-            }));
+            });
+        // On the bench of placement, N times.
+        var placeReps = rtgiBenching && rtgiBenchPass == "rays" ? rtgiBenchReps : 1;
+        for (var r = 0; r < placeReps; r++) graph.Dispatch(rtgiRaysPassHandle, place);
 
         // This frame's contact rays (S4), into the same Metal group.
         var (halfW, halfH) = HalfLightingSize(width, height);
@@ -984,8 +990,16 @@ internal sealed partial class SponzaLoop
             if (spatial) t.EncodeShadow(sync, spatialOrigins, spatialOccluded, 0, spatialTiles, towardSun, seed ^ 0x2C1B3C6Du, statSlot: 3,
                 directions: spatialDirs);
         }
-        if (!TracerGroupsOn) graph.External(rtgiProbeTracePassHandle, sync => tracer.EncodeGroup(sync, () => Encode(sync, tracer)));
-        else DeferTracerBatch(Encode);
+        // On the bench of the trace, N times.
+        var traceReps = rtgiBenching && rtgiBenchPass == "trace" ? rtgiBenchReps : 1;
+        void EncodeAll(ExternalWorkSync sync, MetalRayTracer t)
+        {
+            for (var r = 0; r < traceReps; r++) Encode(sync, t);
+        }
+        if (!TracerGroupsOn) graph.External(rtgiProbeTracePassHandle, sync => tracer.EncodeGroup(sync, () => EncodeAll(sync, tracer)));
+        else DeferTracerBatch(EncodeAll);
+        // The bench: the frame stands still (its number, its buffers' parity).
+        if (rtgiBenching) return;
         rtgiGrid = (tilesX, tilesY);
         rtgiViewProj2 = rtgiViewProj1;
         rtgiViewProj1 = viewProjJittered;

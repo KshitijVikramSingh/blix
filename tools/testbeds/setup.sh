@@ -30,6 +30,19 @@ for scene in cornell cornell-panel thinwall crevices crevices-dark drapes sheets
     # The lightmap atlas (--lightmap), 4 cm texels.
     dotnet "$REPO/src/Blix.Tools.Cook/bin/Debug/net8.0/Blix.Tools.Cook.dll" lightmap "$COOKED/$scene" --write
 done
+# The cost ladder (blix ladder): what the GI cache's per-point work scales with, a step at a time (SponzaLoop.RtgiBench.cs).
+for scene in ladder-floor ladder-corner ladder-objects ladder-clutter ladder-grid; do
+    case "$scene" in
+        ladder-floor) extra=(--walls 0) ;;
+        ladder-corner) extra=(--walls 2) ;;
+        ladder-objects) extra=(--walls 2 --objects 2) ;;
+        ladder-clutter) extra=(--walls 2 --objects 2 --clutter 400) ;;
+        ladder-grid) extra=(--walls 2 --objects 2 --rooms 6) ;;
+    esac
+    "$REPO/blix" run --build ladder "${extra[@]}" --out "$SRC/$scene/$scene.gltf"
+    rm -rf "${COOKED:?}/$scene"
+    dotnet "$REPO/src/Blix.Tools.Cook/bin/Debug/net8.0/Blix.Tools.Cook.dll" asset "$SRC/$scene/$scene.gltf" --out "$COOKED/$scene"
+done
 # crevices-hashed: the dark crevices with no lightmap, so every texel is a hashed one (Sponza's trees and ivy are).
 rm -rf "${COOKED:?}/crevices-hashed"
 dotnet "$REPO/src/Blix.Tools.Cook/bin/Debug/net8.0/Blix.Tools.Cook.dll" asset "$SRC/crevices-dark/crevices-dark.gltf" --out "$COOKED/crevices-hashed"

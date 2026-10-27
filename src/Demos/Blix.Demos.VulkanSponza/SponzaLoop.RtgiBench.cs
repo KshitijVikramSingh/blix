@@ -3,7 +3,8 @@ using Blix.Core;
 
 namespace Blix.Demos.VulkanSponza;
 
-// --rtgi-bench N [--rtgi-bench-at F]: the cache's training measured alone, on a frozen cache. From post-load frame F
+// --rtgi-bench N [--rtgi-bench-at F] [--rtgi-bench-pass train|rays|trace]: one of the cache's per-point passes measured
+// alone, on a frozen cache (the training by default). From post-load frame F
 // (2400) the cache stops moving -- its frame number, so stamps and the dirty list stand still; no placement, no trace,
 // no resolve, blend or eviction, so the training re-reads the same points, rays and hits -- and the training is
 // dispatched N times a frame. Its GPU time (the pass's timestamps) over windows of RtgiBenchWindow frames, divided by
@@ -23,12 +24,19 @@ internal sealed partial class SponzaLoop
     private double rtgiBenchMsAt;
     private readonly List<double> rtgiBenchMs = new();
     private int[] rtgiBenchSweep = Array.Empty<int>();
+    // --rtgi-bench-pass train (default), rays (placement, rtgi_rays.comp) or trace (the Metal tracer's closest hits and
+    // the cache's sun rays). The trace by the frame's wall time (GPU-bound, no vsync): the tracer's own times are command
+    // buffers' spans, overlapping (43 ms of closest hits a frame in 17.5 ms frames); its sweep is the traces a frame
+    // (--rtgi-bench-sweep 1,5: the difference over 4 is one's cost).
+    private readonly System.Diagnostics.Stopwatch rtgiBenchClock = System.Diagnostics.Stopwatch.StartNew();
+    private string rtgiBenchPass = "train";
     private readonly Dictionary<int, List<double>> rtgiBenchSweepMs = new();
 
     private void ParseRtgiBench(AppArgs args)
     {
         if (args.Int("rtgi-bench") is { } n) rtgiBenchReps = Math.Max(1, n);
         if (args.Int("rtgi-bench-at") is { } at) rtgiBenchAt = Math.Max(1, at);
+        if (args.String("rtgi-bench-pass") is "train" or "rays" or "trace") rtgiBenchPass = args.String("rtgi-bench-pass")!;
         if (args.String("rtgi-bench-sweep") is { Length: > 0 } sweep)
             rtgiBenchSweep = sweep.Split(',').Select(b => int.Parse(b, CultureInfo.InvariantCulture)).ToArray();
     }
@@ -41,26 +49,39 @@ internal sealed partial class SponzaLoop
         {
             rtgiBenching = true;
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                $"[VulkanSponza] rtgi bench: the cache frozen at frame {postLoadFrames} ({RtgiPoints:N0} points), the training {rtgiBenchReps} times a frame."));
+                $"[VulkanSponza] rtgi bench: the cache frozen at frame {postLoadFrames} ({RtgiPoints:N0} points), {rtgiBenchPass} {rtgiBenchReps} times a frame."));
         }
-        return rtgiBenching ? rtgiBenchReps : 1;
+        return !rtgiBenching ? 1 : rtgiBenchPass == "train" ? rtgiBenchReps : 0;
     }
 
-    // Each frame: the training's GPU time over the window, a dispatch.
+    // The benched pass's GPU time so far: the pass's timestamps, or for the trace the wall clock.
+    private double BenchTotalMs()
+    {
+        if (rtgiBenchPass == "trace") return rtgiBenchClock.Elapsed.TotalMilliseconds;
+        var pass = rtgiBenchPass == "rays" ? "rtgi-rays" : "rtgi-train";
+        return host.Timing.GpuPassTotals.TryGetValue(pass, out var t) ? t.TotalMs : 0.0;
+    }
+
+    // Each frame: the benched pass's GPU time over the window, a dispatch.
     private void RtgiBenchTick()
     {
         if (!rtgiBenching) return;
         rtgiBenchFrame++;
         if (rtgiBenchFrame < RtgiBenchWarmup) return;
-        var totalMs = host.Timing.GpuPassTotals.TryGetValue("rtgi-train", out var t) ? t.TotalMs : 0.0;
+        var totalMs = BenchTotalMs();
         // The sweep's value for the window starting now (the timings lag the recording by a few frames: a window's first
         // RtgiBenchSettle frames are the last value's, and skipped).
         int window = (rtgiBenchFrame - RtgiBenchWarmup) / RtgiBenchWindow;
         int inWindow = (rtgiBenchFrame - RtgiBenchWarmup) % RtgiBenchWindow;
-        if (rtgiBenchSweep.Length > 0) rtgiTrainDouble = rtgiBenchSweep[window % rtgiBenchSweep.Length];
+        if (rtgiBenchSweep.Length > 0)
+        {
+            if (rtgiBenchPass == "trace") rtgiBenchReps = rtgiBenchSweep[window % rtgiBenchSweep.Length];
+            else rtgiTrainDouble = rtgiBenchSweep[window % rtgiBenchSweep.Length];
+        }
         if (inWindow == RtgiBenchSettle) { rtgiBenchMsAt = totalMs; return; }
         if (inWindow != 0 || window == 0) return;
-        var ms = (totalMs - rtgiBenchMsAt) / ((RtgiBenchWindow - RtgiBenchSettle) * (double)rtgiBenchReps);
+        // A dispatch's time; the trace's, a frame's.
+        var ms = (totalMs - rtgiBenchMsAt) / ((RtgiBenchWindow - RtgiBenchSettle) * (rtgiBenchPass == "trace" ? 1.0 : rtgiBenchReps));
         if (rtgiBenchSweep.Length > 0)
         {
             var value = rtgiBenchSweep[(window - 1) % rtgiBenchSweep.Length];
@@ -71,7 +92,7 @@ internal sealed partial class SponzaLoop
             {
                 var v = rtgiBenchSweepMs[b].OrderBy(x => x).ToArray();
                 Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                    $"[VulkanSponza] rtgi bench: training doubled {b,3}: {v[v.Length / 2]:0.000} ms a dispatch (median of {v.Length}; least {v[0]:0.000}, most {v[^1]:0.000})."));
+                    $"[VulkanSponza] rtgi bench: {rtgiBenchPass} variant {b,3}: {v[v.Length / 2]:0.000} ms a dispatch (median of {v.Length}; least {v[0]:0.000}, most {v[^1]:0.000})."));
             }
             host.RequestClose();
             return;
@@ -81,7 +102,7 @@ internal sealed partial class SponzaLoop
         var sorted = rtgiBenchMs.OrderBy(v => v).ToArray();
         var label = Environment.GetEnvironmentVariable("BLIX_RTGI_TRAIN_DOUBLE") is { Length: > 0 } d ? $", doubled {d}" : "";
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[VulkanSponza] rtgi bench: training {sorted[sorted.Length / 2]:0.000} ms a dispatch (median of {sorted.Length} windows of {RtgiBenchWindow} frames x {rtgiBenchReps}; least {sorted[0]:0.000}, most {sorted[^1]:0.000}){label}."));
+            $"[VulkanSponza] rtgi bench: {rtgiBenchPass} {sorted[sorted.Length / 2]:0.000} ms a dispatch (median of {sorted.Length} windows of {RtgiBenchWindow} frames x {rtgiBenchReps}; least {sorted[0]:0.000}, most {sorted[^1]:0.000}){label}."));
         host.RequestClose();
     }
 }

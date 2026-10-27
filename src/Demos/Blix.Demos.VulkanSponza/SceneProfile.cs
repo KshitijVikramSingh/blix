@@ -341,7 +341,37 @@ internal sealed record SceneProfile(
         StartPitch = 0f,
     };
 
-    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, CornellPanel, Drapes, SheetSlab, SheetShell, SheetShellThin, ThinWall, Crevices, CrevicesDark, CrevicesHashed, KhronosPlant, KhronosTeacup, KhronosTest, CrytekSponza, Jungle, SanMiguel };
+    /// <summary>The cost ladder (<c>blix ladder</c>, tools/testbeds/setup.sh): a floor, a corner, blocks, clutter, a grid of
+    /// corners -- one thing added a step, for what the GI cache's per-point work scales with (SponzaLoop.RtgiBench.cs). The
+    /// camera looks into the corner from across the floor; on the grid, down over all of it.</summary>
+    private static SceneProfile Ladder(string name, string title) => new(
+        Name: name,
+        Title: $"Vulkan cost ladder: {title}",
+        AssetsVariable: "BLIX_TESTBED_ASSETS",
+        SetupHint: "tools/testbeds/setup.sh generates and cooks it",
+        Packs: new ScenePack[] { new(name, Required: true) },
+        ProbeDirectory: "textures",
+        ProbeCandidates: Array.Empty<string>(),
+        FarPlane: 400f,
+        CascadeSplits: new[] { 0.1f, 10f, 40f, 150f },
+        SunDistance: 60f,
+        FogFar: 100f,
+        StartPosition: new Vector3(6f, 3f, 10f),
+        StartYaw: 0f,
+        StartPitch: -10f,
+        MoveSpeed: 5f);
+
+    public static readonly SceneProfile LadderFloor = Ladder("ladder-floor", "floor");
+    public static readonly SceneProfile LadderCorner = Ladder("ladder-corner", "corner");
+    public static readonly SceneProfile LadderObjects = Ladder("ladder-objects", "corner and blocks");
+    public static readonly SceneProfile LadderClutter = Ladder("ladder-clutter", "corner, blocks and clutter");
+    public static readonly SceneProfile LadderGrid = Ladder("ladder-grid", "6 x 6 corners") with
+    {
+        StartPosition = new Vector3(0f, 40f, 30f),
+        StartPitch = -40f,
+    };
+
+    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, CornellPanel, Drapes, SheetSlab, SheetShell, SheetShellThin, ThinWall, Crevices, CrevicesDark, CrevicesHashed, KhronosPlant, KhronosTeacup, KhronosTest, CrytekSponza, Jungle, SanMiguel, LadderFloor, LadderCorner, LadderObjects, LadderClutter, LadderGrid };
 
     /// <summary>The profile <c>--scene</c> names, Sponza when it names none.</summary>
     public static SceneProfile Named(string? name)

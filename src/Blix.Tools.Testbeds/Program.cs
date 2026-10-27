@@ -92,6 +92,57 @@ public static class Program
         return 0;
     }
 
+    /// <summary>
+    /// The cost ladder: one layout with switches, each step adding one thing the cache's per-point work could scale with --
+    /// a floor under the sky (most rays to the sky: few hit lookups), a corner (every ray hits, in few cells), blocks
+    /// (a little more scatter), clutter (many small boxes: the same cells, scattered), a grid of whole corners (the
+    /// working set grown at the same view). Run through the frozen bench (SponzaLoop.RtgiBench.cs) at the same points a
+    /// frame, the step that moves a pass's time says what it is bound by (2026-10-27).
+    /// </summary>
+    /// <remarks>
+    /// <c>--walls 0|2</c> the back (-Z) and left (-X) walls, 5 m, 0.2 m slabs; <c>--objects 0-2</c> blocks; <c>--clutter
+    /// N</c> boxes of 0.25 m over the floor (a fixed seed); <c>--rooms R</c> the whole corner repeated R x R, 26 m apart, into
+    /// -Z and both ways in X. The floor is a 24 m slab, matte white throughout.
+    /// </remarks>
+    [BlixApp("ladder", Summary = "write the cost ladder's floor / corner / blocks / clutter / grid of corners, as glTF: scenes for what the GI cache's per-point work scales with")]
+    public static int Ladder(AppArgs args)
+    {
+        var output = args.String("out") ?? "ladder.gltf";
+        var walls = args.Int("walls") ?? 2;
+        var objects = args.Int("objects") ?? 0;
+        var clutter = args.Int("clutter") ?? 0;
+        var rooms = args.Int("rooms") ?? 1;
+        if (walls is not (0 or 2) || objects is < 0 or > 2 || clutter < 0 || rooms < 1)
+            throw new AppArgsException("--walls 0 or 2, --objects 0 to 2, --clutter 0 or more, --rooms 1 or more.");
+        var white = Matte("white", new Vector3(0.73f, 0.73f, 0.73f));
+        var corner = new Mesh("corner");
+        var prim = corner.UsePrimitive(white);
+        const float half = 12f, wall = 5f, slab = 0.2f;
+        Box(prim, new Vector3(-half, -slab, -half), new Vector3(half, 0f, half));
+        if (walls == 2)
+        {
+            Box(prim, new Vector3(-half, 0f, -half), new Vector3(half, wall, -half + slab), bottom: false);
+            Box(prim, new Vector3(-half, 0f, -half + slab), new Vector3(-half + slab, wall, half), bottom: false);
+        }
+        if (objects >= 1) Box(prim, new Vector3(-5f, 0f, -7f), new Vector3(-3.5f, 2.5f, -5.5f), bottom: false);
+        if (objects >= 2) Box(prim, new Vector3(1f, 0f, -4f), new Vector3(2.5f, 1.2f, -2.5f), bottom: false);
+        var rng = new Random(20261027);
+        for (var i = 0; i < clutter; i++)
+        {
+            var x = -10f + 20f * rng.NextSingle();
+            var z = -10f + 16f * rng.NextSingle();
+            Box(prim, new Vector3(x, 0f, z), new Vector3(x + 0.25f, 0.25f, z + 0.25f), bottom: false);
+        }
+        var scene = new SceneBuilder();
+        for (var i = 0; i < rooms; i++)
+            for (var j = 0; j < rooms; j++)
+                scene.AddRigidMesh(corner, Matrix4x4.CreateTranslation(26f * i - 13f * (rooms - 1), 0f, -26f * j));
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!);
+        scene.ToGltf2().SaveGLTF(output);
+        Console.WriteLine($"ladder: {walls} walls, {objects} blocks, {clutter} boxes, {rooms} x {rooms} corners -> {output}");
+        return 0;
+    }
+
     /// <summary>A Khronos sample asset (glTF-Sample-Assets) placed in a testbed: the light through cloth and leaves judged on
     /// models others render too, against their reference images and the path trace.</summary>
     /// <remarks>
