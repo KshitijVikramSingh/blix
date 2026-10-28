@@ -71,6 +71,7 @@ RTGI shades a hit as `albedo x (E_ind + sun)`: an opaque diffuse surface. So, by
 | emission at a hit (a lamp lights the walls it faces) | built, unmeasured (scratch S1): the material table's emission (and the row's texture mean) added as `PI L_e` | rtgi_train.comp |
 | foliage | the tracer's per-hit alpha test is the ray's (atlas, stochastic BLEND); translucency is the sheet rows, so S1 | -- |
 | glass in the GI | rays pass a pane whole (`--ray-panes` stops a share, in grey); the tint is lost | see below |
+| glass's sun shadow | with `--ray-panes` the shadow ray met a pane by a coin per ray: a speckled shadow (material-room goblets, 2026-10-28). Built, measured on the bench only (static): the ray multiplies the panes' grey `(1 - F) T` as it crosses and the mask carries the result in bits 4-7, read as a fraction by the filter, fill, upsample and lit pass. Not yet checked in motion or on San Miguel | `docs/rtgi-glass-shadow.patch` (a scratch commit on bistro + this branch; the Metal part is `blix_shadow_cover`) |
 | RT reflections, RT refractions | not built | see below |
 
 **Glass tint in the GI.** The stopped-ray share is right in the mean; the colour is not. A ray that passes a pane should carry its tint (`T x base`, per channel) to whatever it reaches. In Metal's

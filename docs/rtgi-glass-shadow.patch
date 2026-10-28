@@ -1,0 +1,241 @@
+From 803594daed37b057db85fa83868859daee423a01 Mon Sep 17 00:00:00 2001
+From: KshitijVikramSingh <kshitijvikramsinghji@gmail.com>
+Date: Wed, 28 Oct 2026 19:04:09 +0530
+Subject: [PATCH] RT shadows: a glass pane attenuates the sun's shadow ray
+ (grey (1 - F) T) instead of a per-ray coin; the filter, fill, upsample and
+ lit pass read it as a fractional visibility (bits 4-7 of the mask word)
+
+---
+ src/Blix.Graphics.MetalHWX/native/blix_hwx.mm | 17 ++++++++++---
+ .../Shaders/lighting_upsample.frag            |  3 ++-
+ .../Shaders/lit_body.glsl                     |  3 ++-
+ .../Shaders/rt_shadow_fill.comp               |  5 ++--
+ .../Shaders/rt_shadow_filter.comp             | 19 +++++++++-----
+ .../SponzaLoop.RtShadows.cs                   | 25 +++++++++++++++++--
+ 6 files changed, 56 insertions(+), 16 deletions(-)
+
+diff --git a/src/Blix.Graphics.MetalHWX/native/blix_hwx.mm b/src/Blix.Graphics.MetalHWX/native/blix_hwx.mm
+index 3374a944..3caf3746 100644
+--- a/src/Blix.Graphics.MetalHWX/native/blix_hwx.mm
++++ b/src/Blix.Graphics.MetalHWX/native/blix_hwx.mm
+@@ -169,7 +169,9 @@ bool blix_coverage(uint primitive [[primitive_id]], uint geometry [[geometry_id]
+ // cosine between the ray and that sheet. Where the ray then reaches the sun, the sheet is sunlit there and glows on its
+ // far side, and blix_shadow turns that into the diffuse light the point receives from it (not a beam: the cloth
+ // scatters what it passes, 2026-10-15). Every other triangle as blix_coverage.
+-struct BlixShadowRay { uint seed; uint sheets; uint lastSheet; float nearest; float3 transmit; float cosine; };   // sheets 0: met as any other triangle
++// pane: the grey transmittance of the glass panes (--ray-panes rows marked with the word's top-byte bit 2) the ray has crossed so far -- a pane is not met, it attenuates, so the
++// sun through glass is a smooth fraction (1 - F) T luminance(base) instead of a coin per ray (a speckle the filter could only blur).
++struct BlixShadowRay { uint seed; uint sheets; uint lastSheet; float nearest; float3 transmit; float cosine; float pane; };   // sheets 0: met as any other triangle
+ 
+ // A sheet crossed this close to the ray's start is the cloth the ray left: a curtain is a coarse mesh shaded by smooth
+ // normals, and near the line where a fold turns from the sun the ray, lifted off its flat triangle along the smooth
+@@ -192,6 +194,11 @@ bool blix_shadow_cover(uint primitive [[primitive_id]], uint geometry [[geometry
+ {
+     uint row = blix_row(primRows, entryRows, instance, geometry, primitive);
+     uint through = rowTransmit[row];
++    // A glass pane (bit 2 of the top byte; the low byte its transmittance): multiplied in and passed, met only where almost nothing is left of the sun.
++    if (((through >> 24) & 2u) != 0u) {
++        r.pane *= float(through & 255u) * (1.0f / 255.0f);
++        return r.pane < 0.04f;
++    }
+     if (through != 0u && r.sheets != 0u && distance < BlixSheetMinDistance) return false;
+     if (through != 0u && r.sheets != 0u) {
+         // The nearest sheet crossed sets how far the glow is and how squarely the sun meets it (object space: the
+@@ -286,7 +293,7 @@ kernel void blix_shadow(device const float4* origins [[buffer(0)]],
+     isect.assume_geometry_type(geometry_type::triangle);
+     isect.accept_any_intersection(true);
+     if (o.w > 0.0f) {
+-        BlixShadowRay sr = { p.seedBase + i, p.flags & 8u, 0xFFFFFFFFu, INFINITY, float3(1.0f), 0.0f };
++        BlixShadowRay sr = { p.seedBase + i, p.flags & 8u, 0xFFFFFFFFu, INFINITY, float3(1.0f), 0.0f, 1.0f };
+         float3 direction = packed ? origins[2u * i + 1u].xyz : (p.flags & 2u) != 0u ? directions[i].xyz : p.direction.xyz;
+         auto res = isect.intersect(ray(o.xyz, direction, 0.0f, o.w), tlas, 0xFFu, table, sr);
+         // Occluded, and how far along the ray it met something (the upper 16 bits, a half): with per-ray directions the
+@@ -300,12 +307,14 @@ kernel void blix_shadow(device const float4* origins [[buffer(0)]],
+             float3 glow = sqrt(saturate(blix_sheet_light(sr.transmit, sr.cosine, sr.nearest)));
+             occluded[p.throughAt + (packed ? pixelOf[i] : i)] = pack_float_to_unorm4x8(float4(glow, 0.0f));
+         }
++        // Lit, but through glass: the sun's share left, in sixteenths of the attenuation (bits 4-7; rt_shadow_filter.comp reads it as a fractional visibility).
++        else if (sr.pane < 0.97f) word |= uint(clamp(round((1.0f - sr.pane) * 15.0f), 1.0f, 14.0f)) << 4;
+     }
+     else if (o.w < 0.0f) word |= 1u;
+     if (p.sky != 0u) {
+         float4 s = skyRays[i * 2u];
+         if (s.w > 0.0f) {
+-            BlixShadowRay sr = { p.seedBase + i + 0x68E31DA4u, 0u, 0xFFFFFFFFu, INFINITY, float3(1.0f), 0.0f };
++            BlixShadowRay sr = { p.seedBase + i + 0x68E31DA4u, 0u, 0xFFFFFFFFu, INFINITY, float3(1.0f), 0.0f, 1.0f };
+             auto res = isect.intersect(ray(s.xyz, skyRays[i * 2u + 1u].xyz, 0.0f, s.w), tlas, 0xFFu, table, sr);
+             if (res.type != intersection_type::none) word |= 2u;
+         }
+@@ -386,7 +395,7 @@ kernel void blix_trace(device const float4* rays [[buffer(0)]],
+         float3 hn = dot(n, d.xyz) > 0.0f ? -n : n;
+         // A sheet that transmits (flags 4: rowTransmit bound) lit on its far side: the shadow ray from that side, the
+         // sun there being the glow on this one (the consumer reads which side from n.l's sign).
+-        if (dot(hn, p.sun.xyz) <= 0.0f && (p.flags & 4u) != 0u && rowTransmit[sheetRow] != 0u) hn = -hn;
++        if (dot(hn, p.sun.xyz) <= 0.0f && (p.flags & 4u) != 0u && rowTransmit[sheetRow] != 0u && ((rowTransmit[sheetRow] >> 24) & 2u) == 0u) hn = -hn;
+         if (dot(hn, p.sun.xyz) > 0.0f) {
+             // The lift along the side's normal; sun.w < 0: at most half the room there (a short closest ray from the hit
+             // first, a quarter of a millimetre at least) -- lifted 1 cm, a hit inside a wall thinner than that shot its sun
+diff --git a/src/Demos/Blix.Demos.VulkanSponza/Shaders/lighting_upsample.frag b/src/Demos/Blix.Demos.VulkanSponza/Shaders/lighting_upsample.frag
+index ca59c32e..45355079 100644
+--- a/src/Demos/Blix.Demos.VulkanSponza/Shaders/lighting_upsample.frag
++++ b/src/Demos/Blix.Demos.VulkanSponza/Shaders/lighting_upsample.frag
+@@ -64,7 +64,8 @@ vec2 sunAt(ivec2 h) {
+     uint baked = rtShadowBaked[uint(h.y) * rtShadowHeader.x + uint(h.x)];
+     if (baked < 2u) return vec2(baked == 0u ? 1.0 : 0.0, 0.0);
+     uint word = rtShadowWords[uint(h.y) * rtShadowHeader.x + uint(h.x)];
+-    return (word & 1u) != 0u ? vec2(0.0, unpackHalf2x16(word >> 16).x) : vec2(1.0, 0.0);
++    // Lit through glass panes (bits 4-7, the Metal pass: the sun's attenuation in sixteenths): a fraction, not the open sun.
++    return (word & 1u) != 0u ? vec2(0.0, unpackHalf2x16(word >> 16).x) : vec2(1.0 - float((word >> 4) & 15u) * (1.0 / 15.0), 0.0);
+ }
+ 
+ // The surface weight of a half-res sample (as in main): its point's distance from q's plane and its normal's agreement.
+diff --git a/src/Demos/Blix.Demos.VulkanSponza/Shaders/lit_body.glsl b/src/Demos/Blix.Demos.VulkanSponza/Shaders/lit_body.glsl
+index 4dd676bd..00d95d11 100644
+--- a/src/Demos/Blix.Demos.VulkanSponza/Shaders/lit_body.glsl
++++ b/src/Demos/Blix.Demos.VulkanSponza/Shaders/lit_body.glsl
+@@ -168,7 +168,8 @@ float rtSunVisibility(vec2 fragCoord) {
+     uint word = rtShadowWords[px.y * rtShadowHeader.x + px.x];
+     // z 2: rt_shadow_filter.comp has written the penumbra's visibility into bits 8-15.
+     if (rtShadowHeader.z == 2u) return float((word >> 8) & 255u) / 255.0;
+-    return (word & 1u) != 0u ? 0.0 : 1.0;
++    // Bits 4-7: lit through glass panes, the sun's attenuation in sixteenths (the Metal shadow pass).
++    return (word & 1u) != 0u ? 0.0 : 1.0 - float((word >> 4) & 15u) * (1.0 / 15.0);
+ }
+ 
+ // The light sunlit sheets (curtains) send the pixel through them, a fraction of the sun's on it (the Metal pass's sheet
+diff --git a/src/Demos/Blix.Demos.VulkanSponza/Shaders/rt_shadow_fill.comp b/src/Demos/Blix.Demos.VulkanSponza/Shaders/rt_shadow_fill.comp
+index 3ba5f360..9b471794 100644
+--- a/src/Demos/Blix.Demos.VulkanSponza/Shaders/rt_shadow_fill.comp
++++ b/src/Demos/Blix.Demos.VulkanSponza/Shaders/rt_shadow_fill.comp
+@@ -79,7 +79,7 @@ void main() {
+     // Disoccluded, or no history: this frame's traced pixels in the 3x3 around it.
+     float tolerance = 0.005 + 0.004 * length(pQ - u.uCamera.xyz);
+     int onSurface = 0, blocked = 0;
+-    uint blockedWord = 1u, nearestWord = 0u, blockedAt = 0u, nearestAt = 0u;
++    uint blockedWord = 1u, nearestWord = 0u, blockedAt = 0u, nearestAt = 0u, paneWord = 0u;
+     float nearest = 1e9;
+     for (int dy = -1; dy <= 1; ++dy) {
+         for (int dx = -1; dx <= 1; ++dx) {
+@@ -97,10 +97,11 @@ void main() {
+             if (abs(dot(nQ, pT - pQ)) > tolerance || dot(nT.xyz, nT.xyz) < 1e-6 || dot(normalize(nT.xyz), nQ) < 0.8) continue;
+             onSurface++;
+             if ((word & 1u) != 0u) { blocked++; blockedWord = word; blockedAt = at; }
++            else if ((word & 0xF0u) != 0u) paneWord = word & 0xF0u;   // sun through glass here: the attenuation (bits 4-7) is the word's whole content
+         }
+     }
+     bool fromBlocked = onSurface != 0 && 2 * blocked > onSurface;
+-    uint word = onSurface == 0 ? nearestWord : fromBlocked ? blockedWord : 0u;
++    uint word = onSurface == 0 ? nearestWord : fromBlocked ? blockedWord : paneWord;
+     maskWords[index] = word & ~0xFF00u;
+     uint n = uint(size.x) * uint(size.y);
+     if ((word & 4u) != 0u) maskWords[n + index] = maskWords[n + (fromBlocked ? blockedAt : nearestAt)];
+diff --git a/src/Demos/Blix.Demos.VulkanSponza/Shaders/rt_shadow_filter.comp b/src/Demos/Blix.Demos.VulkanSponza/Shaders/rt_shadow_filter.comp
+index 53fd626c..7367a8b3 100644
+--- a/src/Demos/Blix.Demos.VulkanSponza/Shaders/rt_shadow_filter.comp
++++ b/src/Demos/Blix.Demos.VulkanSponza/Shaders/rt_shadow_filter.comp
+@@ -52,12 +52,18 @@ vec3 worldAt(ivec2 pixel, float raw) {
+     return w.xyz / w.w;
+ }
+ 
+-// 1 where the sun reached; the blocker's distance where it did not (0 when unknown: a baked answer, no ray).
++// How much of the sun a traced word let through: 0 blocked, 1 open, and between where the ray crossed glass panes (the Metal pass wrote the attenuation in sixteenths in bits 4-7, which
++// no pass rewrites, unlike bits 8-15: a neighbour group may have written those already).
++float visibilityOf(uint word) {
++    return (word & 1u) != 0u ? 0.0 : 1.0 - float((word >> 4) & 15u) * (1.0 / 15.0);
++}
++
++// The sun's share that reached; the blocker's distance where it did not (0 when unknown: a baked answer, no ray).
+ // p within MaxRadius of the group's pixels (every tap is).
+ vec2 tapAt(ivec2 p) {
+     ivec2 t = p - tileOrigin;
+     uint word = tile[t.y * Tile + t.x];
+-    return (word & 1u) != 0u ? vec2(0.0, unpackHalf2x16(word >> 16).x) : vec2(1.0, 0.0);
++    return (word & 1u) != 0u ? vec2(0.0, unpackHalf2x16(word >> 16).x) : vec2(visibilityOf(word), 0.0);
+ }
+ 
+ // The light a sheet sends the pixel, a fraction of the sun's (0 where the ray went through none). As tapAt.
+@@ -118,7 +124,7 @@ void main() {
+     uint index = uint(q.y) * uint(size.x) + uint(q.x);
+     ivec2 own2 = q - tileOrigin;
+     uint word = tile[own2.y * Tile + own2.x];
+-    float own = (word & 1u) != 0u ? 0.0 : 1.0;
++    float own = visibilityOf(word);
+     float result = own;
+     vec3 glow = vec3(0.0);
+ 
+@@ -158,19 +164,20 @@ void main() {
+         // The blocker: from rings of taps out to the widest a penumbra could reach here, the blocked ones' distances.
+         float blocker = own < 0.5 ? unpackHalf2x16(word >> 16).x : 0.0;
+         float blockers = blocker > 0.0 ? 1.0 : 0.0;
+-        int lit = int(own), taps = 1;
++        float lit = own;
++        int taps = 1;
+         // Two rings (4 px and the widest), so a thin shadow next to a lit pixel is still found.
+         for (int k = 0; k < 16; ++k) {
+             float a = float(k) * 0.785398163 + (k >= 8 ? 0.392699 : 0.0);
+             float ring = k < 8 ? 4.0 : float(MaxRadius);
+             ivec2 t = clamp(q + ivec2(round(vec2(cos(a), sin(a)) * ring)), ivec2(0), size - 1);
+             vec2 s = tapAt(t);
+-            lit += int(s.x);
++            lit += s.x;
+             taps++;
+             if (s.x < 0.5 && s.y > 0.0) { blocker += s.y; blockers += 1.0; }
+         }
+         // Everything around agrees (an umbra, or open sun): nothing to soften -- most of a frame stops here.
+-        if (lit != 0 && lit != taps && blockers > 0.0) {
++        if (lit > 1e-3 && lit < float(taps) - 1e-3 && blockers > 0.0) {
+             float widthPixels = 2.0 * u.uDisc.x * (blocker / blockers) / footprint;
+             float radius = min(widthPixels * 0.5, float(MaxRadius));
+             if (radius >= 0.75) {
+diff --git a/src/Demos/Blix.Demos.VulkanSponza/SponzaLoop.RtShadows.cs b/src/Demos/Blix.Demos.VulkanSponza/SponzaLoop.RtShadows.cs
+index c1a638b3..2dc9c34e 100644
+--- a/src/Demos/Blix.Demos.VulkanSponza/SponzaLoop.RtShadows.cs
++++ b/src/Demos/Blix.Demos.VulkanSponza/SponzaLoop.RtShadows.cs
+@@ -434,14 +434,15 @@ internal sealed partial class SponzaLoop
+         // Sheets that transmit (KHR_materials_diffuse_transmission, --cloth-transmission: the curtains): the sun's shadow
+         // rays go through them (MetalRayTracer.SetTransmit), so they are built non-opaque with the alpha-tested.
+         var rowTransmit = RtRowTransmit(surfaceWords, out rtSheetRows);
+-        if (rtSheetRows > 0)
++        var paneRows = RtRowPanes(rowTransmit);
++        if (rtSheetRows > 0 || paneRows > 0)
+         {
+             if (alphaTested.Length == 0) alphaTested = new bool[rowTransmit.Length];
+             for (var row = 0; row < rowTransmit.Length; row++) if (rowTransmit[row] != 0u) alphaTested[row] = true;
+         }
+         rtBuild = tracer.Build(rayGpuData, blocks, surfaceWords, alphaTested);
+         if (!rtCoverageCoin) tracer.SetAlpha(alphaMaterials, rowMaterial, raySurfaceBakeBuffers.First(b => b.Name == "BlixRayUvs").Buffer, rtAlphaMip);
+-        if (rtSheetRows > 0) tracer.SetTransmit(rowTransmit);
++        if (rtSheetRows > 0 || paneRows > 0) tracer.SetTransmit(rowTransmit);
+         if (rayAlphaPlan is not null) tracer.SetAlphaAtlas(rayGpuData.RowPlacements.Length, !rtShadowAlphaTexture);   // the other traces' per-hit alpha (SponzaLoop.RayAlpha.cs)
+         frameTracer = tracer;
+         Console.WriteLine(string.Create(Inv,
+@@ -449,6 +450,26 @@ internal sealed partial class SponzaLoop
+         return true;
+     }
+ 
++    // --ray-panes: the sun's shadow rays attenuate through a glass pane instead of meeting it by a coin (a speckle: one ray a pixel stops or passes). A pane's rows (a placement whose
++    // material stops a share PaneStops of the rays, SponzaLoop.RayPanes.cs) are marked in the transmit table with the top byte's bit 2 and the share that passes, 1 - stops, in the low byte
++    // (grey, as the GI has it); blix_shadow_cover multiplies it in as the ray crosses, and the filter reads the product as a fraction. A row that is also a sheet keeps the sheet's word.
++    private int RtRowPanes(uint[] rowTransmit)
++    {
++        var data = rayGpuData!;
++        var panes = 0;
++        for (var row = 0; row < rowTransmit.Length; row++)
++        {
++            if (rowTransmit[row] != 0u) continue;
++            var stops = rayPlacementMaterials[(int)data.RowPlacements[row]].PaneStops;
++            if (stops <= 0.001f || stops >= 0.999f) continue;
++            rowTransmit[row] = Math.Max(1u, (uint)Math.Clamp(MathF.Round((1f - stops) * 255f), 0f, 255f)) | 2u << 24;
++            panes++;
++        }
++        if (panes > 0)
++            Console.WriteLine(string.Create(Inv, $"[VulkanSponza] metal tracer: {panes:N0} triangles of glass panes -- the sun's shadow rays attenuate through them (grey (1 - F) T) rather than flipping a coin."));
++        return panes;
++    }
++
+     // Per triangle row, its placement's diffuse transmission as rgb8 (MetalRayTracer.SetTransmit; 0: none): the factor in
+     // the cloth's own hue, one colour a sheet -- its rows' mean albedo (the surface bake's, sRGB in the words' low bytes)
+     // over its brightest channel. Per triangle, the albedo printed the fabric's pattern into the light behind it, a
+-- 
+2.48.1
+
