@@ -15,15 +15,16 @@ COOKED="$BLIX_TESTBED_ASSETS"
 SRC="${BLIX_TESTBED_SRC:-${COOKED%/}-src}"
 K="$SRC/khronos"
 G="$SRC/material-gallery-parts"
-for g in leaves glass pane cloth candle; do
+for g in leaves glass tinted pane cloth candle; do
     uv run --with pillow --with numpy python3 "$REPO/tools/testbeds/material-room.py" "$G/$g" "$g" >/dev/null
 done
 m() { echo "$K/$1/$1.glb"; }
 # x, z on the floor, the room x, z in [-3, 3] with the open front at +z; the sun's shaft lands near (-0.7, -1.7).
 "$REPO/blix" run --build gallery \
-    --put "$G/leaves/material-room.gltf,1,-1.45,0,-1.2" \
-    --put "$G/cloth/material-room.gltf,1,-1.3,0,-2.3" \
-    --put "$G/glass/material-room.gltf,1,-0.1,0,-1.5" \
+    --put "$G/leaves/material-room.gltf,1,0.1,0,-0.8" \
+    --put "$G/cloth/material-room.gltf,1,-1.4,0,-2.4" \
+    --put "$G/tinted/material-room.gltf,1,-1.4,0,-1.5" \
+    --put "$G/glass/material-room.gltf,1,-0.05,0,-1.7" \
     --put "$G/pane/material-room.gltf,1,0.9,0,-2.2" \
     --put "$G/candle/material-room.gltf,1,1.9,0,-2.2" \
     --put "$(m DiffuseTransmissionPlant),1.5,-2.3,0,-2.2" \

@@ -12,7 +12,7 @@ One row of stations (the ground comes from `blix khronos --room ground`), each o
   cloth-sheen               a draped sheet with KHR_materials_sheen
   candle                    a cylinder with a BLEND material (San Miguel's one)
 
-  uv run --with pillow --with numpy python3 tools/testbeds/material-room.py OUT_DIR [leaves,glass,pane,cloth,candle]   # writes OUT_DIR/material-room.gltf (+ .bin, leaf.png)
+  uv run --with pillow --with numpy python3 tools/testbeds/material-room.py OUT_DIR [leaves,glass,tinted,pane,cloth,candle]   # writes OUT_DIR/material-room.gltf (+ .bin, leaf.png)
   (the optional list keeps only those stations, the first at x = 0: `blix gallery` places the groups apart in the Cornell room)
 
 Stations sit at x = 0, 1, 2, ... (spacing 1 m) on z = 0, facing +z; a camera at (3.5, 1.1, 5) looking -z sees them all. Place it with the existing `blix khronos --model` step
@@ -126,7 +126,7 @@ def leaf_texture(path):
 
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else "material-room"
-    only = sys.argv[2].split(",") if len(sys.argv) > 2 else None   # --only groups: leaves, glass, pane, cloth, candle (a gallery places them apart)
+    only = sys.argv[2].split(",") if len(sys.argv) > 2 else None   # --only groups: leaves, glass, tinted, pane, cloth, candle (a gallery places them apart)
     os.makedirs(out, exist_ok=True)
     leaf_texture(os.path.join(out, "leaf.png"))
     base = lambda c, r=0.5, m=0.0: {"baseColorFactor": [*c, 1], "roughnessFactor": r, "metallicFactor": m}
@@ -145,6 +145,9 @@ def main():
     m_gob_in = glass("goblet-inner", 0.3)
     m_car = glass("carafe", 0.37, (0.85, 1.0, 0.9))
     m_pane = glass("pane", 1.0)
+    m_tint_red = glass("tint-red", 0.9, (1.0, 0.08, 0.06))
+    m_tint_blue = glass("tint-blue", 0.9, (0.1, 0.25, 1.0))
+    m_tint_amber = glass("tint-amber", 0.9, (1.0, 0.6, 0.08))
     m_cloth = material("cloth-dt", pbr=base((0.85, 0.25, 0.2), 0.9), ext={"KHR_materials_diffuse_transmission": {"diffuseTransmissionFactor": 0.6, "diffuseTransmissionColorFactor": [1.0, 0.45, 0.35]}})
     m_sheen = material("cloth-sheen", pbr=base((0.2, 0.1, 0.35), 0.9), ext={"KHR_materials_sheen": {"sheenColorFactor": [0.9, 0.6, 1.0], "sheenRoughnessFactor": 0.4}})
     m_candle = material("candle", pbr=base((0.95, 0.9, 0.75), 0.5), alphaMode="BLEND")
@@ -167,6 +170,11 @@ def main():
     inner = [(r * 0.92, y + 0.008) for r, y in gob[3:]]
     inner = [(0.0, 0.03)] + [(0.012, 0.03)] + inner
     node("goblet-double-in", mesh(*lathe(inner), m_gob_in), (2.4, 0, 0))
+    # saturated glass, for the sun's colour through it (a coloured shadow): two goblets and an amber pane
+    node("tint-red", mesh(*lathe(gob), m_tint_red), (0.0, 0, 0))
+    node("tint-blue", mesh(*lathe(gob), m_tint_blue), (0.4, 0, 0))
+    pos, nrm, uv, idx = quad(0.4, 0.5)
+    node("tint-pane", mesh(pos, nrm, uv, idx, m_tint_amber), (0.95, 0.0, 0.0))
     car = [(0, 0), (0.07, 0), (0.08, 0.03), (0.085, 0.16), (0.06, 0.22), (0.025, 0.28), (0.022, 0.34), (0.03, 0.36)]
     node("carafe", mesh(*lathe(car), m_car), (2.8, 0, 0))
     node("carafe-in", mesh(*lathe([(r * 0.93, y + 0.006) for r, y in car[1:]]), m_car), (2.8, 0, 0))
@@ -183,7 +191,7 @@ def main():
     node("cloth-sheen", mesh(pos, nrm, uv, idx, m_sheen), (5.3, 0.15, 0))
     node("candle", mesh(*lathe([(0.02, 0), (0.02, 0.12)], 16), m_candle), (6.0, 0, 0))
 
-    groups = {"leaf": "leaves", "goblet": "glass", "carafe": "glass", "pane": "pane", "post": "pane", "cloth": "cloth", "candle": "candle"}
+    groups = {"leaf": "leaves", "goblet": "glass", "carafe": "glass", "pane": "pane", "post": "pane", "cloth": "cloth", "candle": "candle", "tint": "tinted"}
     if only:
         nodes[:] = [n for n in nodes if groups.get(n["name"].split("-")[0]) in only]
         x0 = min(n["translation"][0] for n in nodes)
