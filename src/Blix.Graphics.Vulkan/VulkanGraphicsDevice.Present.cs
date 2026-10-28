@@ -36,6 +36,19 @@ public sealed partial class VulkanGraphicsDevice
     private Semaphore presentTimeline;
     private ulong presentTimelineValue;
 
+    // Paced presents (VK_GOOGLE_display_timing; MoltenVK: presentDrawable:atTime:): each frame asked for one smoothed frame
+    // interval after the last, not the first vblank it finds. Uncapped frames a little slower than the refresh -- 8.7 ms
+    // moving at 120 Hz -- caught a vblank or missed it in turn: shown 8.3, 16.7, 8.3 ms, a 60/120 alternation, not a
+    // steady ~110 (the user, Crytek Sponza 1080p, 2026-10-28). A steady interval shows as one where the display refreshes
+    // adaptively (ProMotion). BLIX_PRESENT_PACE=off: the first vblank, as before.
+    private const string DisplayTimingExtension = "VK_GOOGLE_display_timing";
+    private bool displayTimingSupported, displayTimingEnabled;
+    private readonly bool presentPaceWanted = Environment.GetEnvironmentVariable("BLIX_PRESENT_PACE") != "off";
+    // The frames' arrival interval smoothed (ns), the last arrival, the last asked-for present time, the present id.
+    private double paceIntervalNs;
+    private long paceLastArrival, paceLastTarget;
+    private uint paceId;
+
     private Thread? presentThread;
     private readonly object presentLock = new();
     private bool presentStop;
@@ -241,9 +254,21 @@ public sealed partial class VulkanGraphicsDevice
         {
             presentLatestSlot = slot;
             presentLatestValue = value;
+            // The interval between finished frames, smoothed over ~16: the cadence the presents keep.
+            var now = PaceNow();
+            if (paceLastArrival != 0)
+            {
+                var gap = (double)(now - paceLastArrival);
+                paceIntervalNs = paceIntervalNs <= 0.0 ? gap : paceIntervalNs + (gap - paceIntervalNs) / 16.0;
+            }
+            paceLastArrival = now;
             Monitor.Pulse(presentLock);
         }
     }
+
+    // The clock the presents are asked against: MoltenVK takes the desired time as CACurrentMediaTime's, in nanoseconds --
+    // the host's uptime clock, which Stopwatch reads on macOS.
+    private static long PaceNow() => (long)(System.Diagnostics.Stopwatch.GetTimestamp() * (1e9 / System.Diagnostics.Stopwatch.Frequency));
 
     private unsafe void PresentLoop()
     {
@@ -365,6 +390,21 @@ public sealed partial class VulkanGraphicsDevice
                 PSwapchains = &swapchain,
                 PImageIndices = &image,
             };
+            PresentTimeGOOGLE time;
+            PresentTimesInfoGOOGLE times;
+            if (displayTimingEnabled)
+            {
+                // One interval after the last asked-for time, at most 50 ms between (a pause, a hitch: start over from now).
+                var now = PaceNow();
+                double interval;
+                lock (presentLock) interval = paceIntervalNs;
+                var target = paceLastTarget + (long)interval;
+                if (paceLastTarget == 0 || interval <= 0.0 || target < now - 50_000_000L || target > now + 50_000_000L) target = now;
+                paceLastTarget = target;
+                time = new PresentTimeGOOGLE { PresentID = ++paceId, DesiredPresentTime = (ulong)target };
+                times = new PresentTimesInfoGOOGLE { SType = StructureType.PresentTimesInfoGoogle, SwapchainCount = 1, PTimes = &time };
+                present.PNext = &times;
+            }
             var presented = KhrSwapchain.QueuePresent(PresentQueue, in present);
             if (presented == Result.ErrorOutOfDateKhr || presented == Result.SuboptimalKhr) needsRecreate = true;
             ring = (ring + 1) % PresentRing;

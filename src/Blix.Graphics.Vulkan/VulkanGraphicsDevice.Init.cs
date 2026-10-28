@@ -335,6 +335,7 @@ public sealed partial class VulkanGraphicsDevice
             var name = Marshal.PtrToStringUTF8((nint)ext.ExtensionName);
             if (name == "VK_KHR_portability_subset") PortabilitySubsetRequired = true;
             else if (name == MetalObjectsExtension) MetalObjectsEnabled = true;
+            else if (name == DisplayTimingExtension) displayTimingSupported = true;
         }
 
         if (!TryFindGraphicsAndPresentQueueFamily(PhysicalDevice, out var qf))
@@ -415,6 +416,7 @@ public sealed partial class VulkanGraphicsDevice
         var deviceExts = new List<string> { "VK_KHR_swapchain" };
         if (PortabilitySubsetRequired) deviceExts.Add("VK_KHR_portability_subset");
         if (MetalObjectsEnabled) deviceExts.Add(MetalObjectsExtension);
+        if (displayTimingSupported && presentPaceWanted) { deviceExts.Add(DisplayTimingExtension); displayTimingEnabled = true; }
         using var extNames = new Utf8ArrayPin(deviceExts);
 
         // Enable anisotropic filtering when the device offers it. Without it,
