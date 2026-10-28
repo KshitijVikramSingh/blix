@@ -943,7 +943,10 @@ internal sealed partial class SponzaLoop
                 RecordReference(incidentInvProj, incidentInvView, frame.Width, frame.Height);
                 RecordGpuReference();
                 RecordViewReference();
-                if (halfLightingNow && (RtgiReadoutReady || IncidentHalfPassNeeded()))
+                if (rtgi) UpdateScreenRest();
+                // A settled, still view's screen light every other frame (SponzaLoop.RtgiBudget.cs): the targets hold it.
+                if (screenRestNow) { }
+                else if (halfLightingNow && (RtgiReadoutReady || IncidentHalfPassNeeded()))
                 {
                     var (halfWidth, halfHeight) = HalfLightingSize(frame.Width, frame.Height);
                     // --rtgi: the cache, read every frame (it is still learning), in place of the incident pass.

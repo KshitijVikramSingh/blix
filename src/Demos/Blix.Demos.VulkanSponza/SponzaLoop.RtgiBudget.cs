@@ -172,3 +172,41 @@ internal sealed partial class SponzaLoop
         return s;
     }
 }
+
+// --rtgi-screen-every N (4; 1 off): on a settled, still view the screen's light -- the readout, its blur and the upsample,
+// ~1.2 ms a frame (Crytek Sponza 1080p: every 2nd frame -0.62 ms, every 4th -1.25, 7.43 -> 6.18 ms, the in-boot A/B,
+// 2026-10-28) -- every Nth frame; between, the lit pass reads
+// the incident targets as they were (as the incident pass's reuse did). Still: the camera and the sun as they were for two
+// frames; settled: the budget's needs under a quarter, none from the sun (the cache's new cells keep the visible's ~0.1).
+// Anything that moves, a sun change, the cache's error jumping, a truth dump or the first settle: every frame again.
+internal sealed partial class SponzaLoop
+{
+    private int rtgiScreenEvery = 4;
+    private int rtgiStillFrames;
+    private long rtgiScreenFrame;
+    private System.Numerics.Vector3 restLastPosition, restLastSun;
+    private float restLastYaw, restLastPitch;
+    private bool screenRestNow;
+
+    private void ParseScreenRest(AppArgs args)
+    {
+        if (args.Int("rtgi-screen-every") is { } every) rtgiScreenEvery = Math.Max(1, every);
+    }
+
+    // Before the half-res lighting is recorded: whether this frame skips it.
+    private void UpdateScreenRest()
+    {
+        var still = cameraPosition == restLastPosition && camera.Yaw == restLastYaw && camera.Pitch == restLastPitch && sunDirection == restLastSun;
+        rtgiStillFrames = still ? rtgiStillFrames + 1 : 0;
+        restLastPosition = cameraPosition;
+        restLastYaw = camera.Yaw;
+        restLastPitch = camera.Pitch;
+        restLastSun = sunDirection;
+        var settled = rtgiBudget && rtgiNeedVisible < 0.25f && rtgiNeedHits < 0.25f && rtgiNeedSun < 0.01f;
+        var eligible = rtgiScreenEvery > 1 && RtgiReadoutReady && !RtgiSettleNow && !RtgiDumpDue && !RtgiTemporalNow
+            && !gpuReference && !MoverActive && rtgiStillFrames >= 2 && settled;
+        if (Environment.GetEnvironmentVariable("BLIX_PROBE") == "screenrest") eligible &= AbArm == 1;
+        rtgiScreenFrame++;
+        screenRestNow = eligible && rtgiScreenFrame % rtgiScreenEvery != 0;
+    }
+}

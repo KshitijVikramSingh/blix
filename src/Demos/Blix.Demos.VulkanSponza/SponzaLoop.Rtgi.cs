@@ -362,6 +362,7 @@ internal sealed partial class SponzaLoop
     {
         rtgi = args.Flag("rtgi");
         ParseRtgiBudget(args);
+        ParseScreenRest(args);
         if (args.Flag("no-rtgi-settle")) rtgiSettleWanted = false;
         if (args.Int("rtgi-seed") is { } sd) rtgiSeed = (uint)Math.Max(0, sd);
         if (args.Float("rtgi-hit-sun") is { } hs) rtgiHitSun = MathF.Max(0f, hs);
@@ -1166,6 +1167,9 @@ internal sealed partial class SponzaLoop
     // tools/gi-model/rtgi_timeline.py to hold against a truth boot's trace.
     private string? rtgiDumpDir;
     private SortedSet<int> rtgiDumpFrames = new();
+
+    // A dump is due this frame: it reads the frame's own incident light (SponzaLoop.RtgiBudget.cs keeps the screen's light on).
+    private bool RtgiDumpDue => rtgiDumpDir is not null && rtgiDumpFrames.Count > 0 && postLoadFrames >= rtgiDumpFrames.Min;
 
     private void RtgiDumpIfDue()
     {
