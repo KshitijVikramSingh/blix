@@ -208,7 +208,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // it also resolves depth to a sampleable 1x target for GTAO; at 1x the original target is used.
     // The resolve rides the pass store rather than requiring another geometry pass.
     // Shared by projection, Hi-Z linearisation, and GTAO's background test.
-    private const float CameraNearPlane = 0.1f;
+    private float CameraNearPlane => scene.NearPlane;
     // The scene's (SceneProfile.FarPlane): a 30 m atrium and a 180 m street want different reaches.
     private float CameraFarPlane => scene.FarPlane;
     private Matrix4x4 cameraView;
@@ -951,7 +951,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
 
     private static CameraController SceneCamera(SceneProfile scene)
     {
-        var lens = new Camera3D { VerticalFieldOfView = MathF.PI / 3f, NearPlane = CameraNearPlane, FarPlane = scene.FarPlane };
+        var lens = new Camera3D { VerticalFieldOfView = MathF.PI / 3f, NearPlane = scene.NearPlane, FarPlane = scene.FarPlane };
         return new CameraController(lens)
         {
             Position = scene.StartPosition, Yaw = scene.StartYaw, Pitch = scene.StartPitch, MoveSpeed = scene.MoveSpeed,

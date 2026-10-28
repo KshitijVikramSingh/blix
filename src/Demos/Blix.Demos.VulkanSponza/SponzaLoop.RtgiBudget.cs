@@ -80,6 +80,21 @@ internal sealed partial class SponzaLoop
     }
 
     // Before RecordRtgi: this frame's visible and hit points.
+    // RTGI's GPU milliseconds since the last call: its graph passes (rtgi-*), the tracer's closest-hit batches and its shadow
+    // slot (3). -1 on the first call.
+    private double rtgiBudgetGpuLast = -1.0;
+    private float rtgiBudgetRtgiMs;
+    private float RtgiGpuMsSince()
+    {
+        var total = 0.0;
+        foreach (var (name, pass) in host.Timing.GpuPassTotals)
+            if (name.StartsWith("rtgi", StringComparison.Ordinal)) total += pass.TotalMs;
+        if (frameTracer is { } tracer) total += tracer.TraceStats.TotalGpuMs + tracer.ShadowStatsOf(3).TotalGpuMs;
+        var since = rtgiBudgetGpuLast < 0.0 || total < rtgiBudgetGpuLast ? -1.0 : total - rtgiBudgetGpuLast;
+        rtgiBudgetGpuLast = total;
+        return (float)since;
+    }
+
     private void UpdateRtgiBudget()
     {
         var on = rtgiBudget || (Environment.GetEnvironmentVariable("BLIX_PROBE") == "budget" && AbArm == 1);
@@ -148,14 +163,22 @@ internal sealed partial class SponzaLoop
         var frameMs = (float)rtgiBudgetFrameClock.Elapsed.TotalMilliseconds;
         rtgiBudgetFrameClock.Restart();
         rtgiBudgetFrameMs = rtgiBudgetFrameMs <= 0f ? frameMs : rtgiBudgetFrameMs + (Math.Clamp(frameMs, 0f, 50f) - rtgiBudgetFrameMs) / 16f;
-        // Over the ceiling with the spend above the floor already gone (a walk: new cells, shadows retraced, the screen's
-        // light every frame), the floor itself comes down to half; under it, the floor comes back first, then the rest.
+        // RTGI's own GPU time a frame, smoothed alike: its Vulkan passes, the Metal closest-hit traces and its shadow slot.
+        var rtgiMs = RtgiGpuMsSince();
+        if (rtgiMs >= 0f) rtgiBudgetRtgiMs = rtgiBudgetRtgiMs <= 0f ? rtgiMs : rtgiBudgetRtgiMs + (Math.Clamp(rtgiMs, 0f, 50f) - rtgiBudgetRtgiMs) / 16f;
+        // Over the ceiling, the spend above the floor goes first, always (the needs' extra); with it gone (a walk: new cells,
+        // shadows retraced, the screen's light every frame), the floor itself comes down to half -- only while that
+        // can reach the ceiling: the overshoot within half of RTGI's own time (all a halved floor saves). A frame over it for
+        // other reasons -- San Miguel's 12 ms still view, RTGI ~3 ms of it -- cut the light's learning to half for nothing,
+        // and the light settled slowly (the user, 2026-10-28): there the floor comes back, the extra still held off.
+        var cuttable = rtgiBudgetFrameMs - rtgiBudgetMs <= 0.5f * rtgiBudgetRtgiMs + 0.3f;
         if (rtgiBudgetMs > 0f)
         {
             if (rtgiBudgetFrameMs > rtgiBudgetMs)
             {
                 if (rtgiBudgetCap > 0f) rtgiBudgetCap = MathF.Max(0f, rtgiBudgetCap - 0.05f);
-                else rtgiBudgetFloorScale = MathF.Max(0.5f, rtgiBudgetFloorScale - 0.02f);
+                else if (cuttable) rtgiBudgetFloorScale = MathF.Max(0.5f, rtgiBudgetFloorScale - 0.02f);
+                else rtgiBudgetFloorScale = MathF.Min(1f, rtgiBudgetFloorScale + 0.005f);
             }
             else if (rtgiBudgetFrameMs < rtgiBudgetMs - 0.3f)
             {
@@ -193,7 +216,7 @@ internal sealed partial class SponzaLoop
     {
         if (!rtgiBudget || rtgiBudgetFrames == 0) return "";
         var s = string.Create(CultureInfo.InvariantCulture,
-            $"; budget: visible {rtgiBudgetSumTiles / rtgiBudgetFrames:N0}, hits {rtgiBudgetSumHits / rtgiBudgetFrames:N0} a frame (need now {rtgiNeedVisible:0.00} / {rtgiNeedHits:0.00}, cap {rtgiBudgetCap:0.00} floor {rtgiBudgetFloorScale:0.00} at {rtgiBudgetFrameMs:0.0} ms, unsettled {rtgiBudgetUnsettled:0.00}, error floor {rtgiBudgetErrFloor:0.000})");
+            $"; budget: visible {rtgiBudgetSumTiles / rtgiBudgetFrames:N0}, hits {rtgiBudgetSumHits / rtgiBudgetFrames:N0} a frame (need now {rtgiNeedVisible:0.00} / {rtgiNeedHits:0.00}, cap {rtgiBudgetCap:0.00} floor {rtgiBudgetFloorScale:0.00} at {rtgiBudgetFrameMs:0.0} ms (rtgi {rtgiBudgetRtgiMs:0.0}), unsettled {rtgiBudgetUnsettled:0.00}, error floor {rtgiBudgetErrFloor:0.000})");
         rtgiBudgetSumTiles = rtgiBudgetSumHits = 0;
         rtgiBudgetFrames = 0;
         return s;

@@ -290,7 +290,35 @@ void main() {
     vec4 e;
     float sky, nearCell, farShare;
     vec3 bv;
-    if (e0.w >= 0.05 && e1.w >= 0.05) { e = vec4(mix(e0.rgb, e1.rgb, t), 1.0); sky = mix(sky0, sky1, t); bv = mix(b0, b1, t); nearCell = mix(near0, near1, t); farShare = mix(far0, far1, t); }
+    if (u.uNearField.w > 0.5) {
+        // Each level by how much its cells hold (readLevel's w: the bilinear weights times held / 32, full at 1), over the
+        // level above it: a cell just placed or restarted (a sun epoch's cut) fades in over its parent's light, not in its
+        // place. readLevel's normalising takes the fade back wherever every cell around the point is young, and the finer
+        // level was taken whenever it held anything: its first draws showed as a bright spot that blended away as it filled,
+        // then another (the user, San Miguel, 2026-10-28). Filled cells (w 1) read as before.
+        float c0 = clamp(e0.w, 0.0, 1.0), c1 = clamp(e1.w, 0.0, 1.0);
+        vec4 e2 = vec4(0.0);
+        float sky2 = 0.0, near2 = 0.0, far2 = 0.0;
+        vec3 b2 = vec3(0.0);
+        if (c1 < 1.0 && level + 1u < top) e2 = readLevel(p, side, min(level + 2u, top), sky2, b2, near2, far2);
+        float c2 = e2.w >= 0.05 ? 1.0 : 0.0;
+        // The coarse estimate: the next level up over the one above it, by its own fill.
+        float k1 = c2 > 0.0 ? c1 : (c1 >= 0.05 ? 1.0 : 0.0);
+        float kc = k1 + (1.0 - k1) * c2;
+        if (kc > 0.0) {
+            vec3 ce = (e1.rgb * k1 + e2.rgb * (1.0 - k1) * c2) / kc;
+            float cs = (sky1 * k1 + sky2 * (1.0 - k1) * c2) / kc;
+            vec3 cb = (b1 * k1 + b2 * (1.0 - k1) * c2) / kc;
+            float cn = (near1 * k1 + near2 * (1.0 - k1) * c2) / kc, cf = (far1 * k1 + far2 * (1.0 - k1) * c2) / kc;
+            // The point's own level by its fill and its place between the two (rtgiLevelF): filled, mix(e0, e1, t).
+            float k0 = c0 >= 0.05 ? (1.0 - t) * c0 : 0.0;
+            e = vec4(mix(ce, e0.rgb, k0), 1.0);
+            sky = mix(cs, sky0, k0); bv = mix(cb, b0, k0); nearCell = mix(cn, near0, k0); farShare = mix(cf, far0, k0);
+        }
+        else if (c0 >= 0.05) { e = e0; sky = sky0; bv = b0; nearCell = near0; farShare = far0; }
+        else e = vec4(0.0);
+    }
+    else if (e0.w >= 0.05 && e1.w >= 0.05) { e = vec4(mix(e0.rgb, e1.rgb, t), 1.0); sky = mix(sky0, sky1, t); bv = mix(b0, b1, t); nearCell = mix(near0, near1, t); farShare = mix(far0, far1, t); }
     else if (e0.w >= 0.05) { e = e0; sky = sky0; bv = b0; nearCell = near0; farShare = far0; }
     else if (e1.w >= 0.05) { e = e1; sky = sky1; bv = b1; nearCell = near1; farShare = far1; }
     else e = readLevel(p, side, min(level + 2u, top), sky, bv, nearCell, farShare);

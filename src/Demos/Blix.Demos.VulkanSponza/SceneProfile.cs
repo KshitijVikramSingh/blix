@@ -37,7 +37,9 @@ internal sealed record SceneProfile(
     float StartYaw,
     float StartPitch,
     float MoveSpeed,
-    Vector2? DefaultSunDegrees = null)
+    Vector2? DefaultSunDegrees = null,
+    // The camera's near plane: the depth buffer is not reversed, so far / near sets the precision far away.
+    float NearPlane = 0.1f)
 {
     /// <summary>Intel Sponza (Khronos New Sponza): the atrium, ~30 m, and the packs it was built around.</summary>
     public static readonly SceneProfile Sponza = new(
@@ -326,6 +328,12 @@ internal sealed record SceneProfile(
         Packs = new ScenePack[] { new("jungle", Required: true) },
         StartPosition = new Vector3(572.5f, 1.7f, -766.5f),
         StartPitch = 0f,
+        // Its own reach: Crytek Sponza's (Sponza's 200 m) clipped everything past the first ridge of an 8.3 x 8.3 km world,
+        // and 3 km still cut the outer ridges, which came and went with small moves (the user, 2026-10-29): 12 km, the
+        // world's diagonal. The near plane 0.5 m with it: the depth isn't reversed, so far / near is the precision far
+        // away -- ~4 m at 6 km, against ~20 m at 0.1 m.
+        FarPlane = 12000f,
+        NearPlane = 0.5f,
     };
 
     /// <summary>San Miguel 2 (Guillermo M. Leal Llaguno; the McGuire Computer Graphics Archive, downloaded, never committed):

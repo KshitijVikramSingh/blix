@@ -111,6 +111,11 @@ internal sealed partial class SponzaLoop
     // The readout across the tangent plane's four cells, the cell holding the point along the normal (rtgi_readout.frag's
     // readLevel); --rtgi-readout-trilinear: the eight around the point, half of them in front of the surface or behind it.
     private bool rtgiReadoutPlane = true;
+    // --rtgi-level-fade: the readout's levels faded in by their fill over the level above (rtgi_readout.frag), a young or
+    // restarted cell under its parent's light, not its own first draws. San Miguel's still view's spots 0.32 -> 0.26% of
+    // pixels a frame, but a turn's truth 0.155 / 0.135 / 0.113 -> 0.162 / 0.139 / 0.118 (a young fine cell is noisy but
+    // nearer the truth than its parent): off (2026-10-28).
+    private bool rtgiLevelFade;
     // Placement in blocks (rtgi_rays.comp): a subgroup's points own an 8 x 4 block of tiles, their candidates within
     // --rtgi-block-window tiles (8) but for --rtgi-block-global of them (0.25) drawn anywhere; hit points in strides.
     // --rtgi-no-block: row by row, candidates anywhere.
@@ -400,6 +405,7 @@ internal sealed partial class SponzaLoop
         if (args.Flag("rtgi-no-train-table")) rtgiTrainTable = false;
         if (args.Flag("rtgi-no-pool")) rtgiPool = false;
         if (args.Flag("rtgi-readout-trilinear")) rtgiReadoutPlane = false;
+        if (args.Flag("rtgi-level-fade")) rtgiLevelFade = true;
         if (args.Flag("rtgi-no-block")) rtgiBlock = false;
         if (args.Float("rtgi-block-global") is { } bg) rtgiBlockGlobal = Math.Clamp(bg, 0f, 1f);
         if (args.Float("rtgi-block-window") is { } bw) rtgiBlockWindow = MathF.Max(1f, MathF.Round(bw));
@@ -1119,7 +1125,7 @@ internal sealed partial class SponzaLoop
                 // Within four full-res pixels' footprint of the point.
                 new("uReuse", new Vector4Uniform(new Vector4(reuse ? 1f : 0f, rtgiFrameCount & 3u, 4f * RtgiPixelFootprint, rtgiReusePrevSub.X + 2f * rtgiReusePrevSub.Y))),
                 new("uPrevCamera", new Vector4Uniform(new Vector4(rtgiReusePrevCamera, 0f))),
-                new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, rtgiNoGradient ? 0f : 1f, rtgiReadoutPlane ? 1f : 0f, 0f))),
+                new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, rtgiNoGradient ? 0f : 1f, rtgiReadoutPlane ? 1f : 0f, rtgiLevelFade ? 1f : 0f))),
                 new("uContact", new Vector4Uniform(new Vector4(rtgiContact ? 1f : 0f, 0.3f, 1.25f, rtgiView))),
                 new("uUnsure", new Vector4Uniform(new Vector4(rtgiDoneError, rtgiHalfRow, RtgiUnsureSize, RtgiPixelFootprint))),
                 new("uBlurAt", new Vector4Uniform(new Vector4(RtgiBlurNow, rtgiBlurHit, rtgiFrameCount, 0f))),

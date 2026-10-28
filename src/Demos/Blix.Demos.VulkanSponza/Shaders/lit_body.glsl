@@ -844,7 +844,10 @@ void main() {
         // (2026-10-22). uIncident.y 2: --material-ao-on-gi, the map as before.
         bool fieldOccludes = frame.uIncident.y > 0.5;
         float giAo = fieldOccludes && frame.uIncident.y < 1.5 ? 1.0 : ao;
-        bounce = incident * albedo / PI * (1.0 - metallic) * giAo * (fieldOccludes ? 1.0 : visibility);
+        // The diffuse share of it as the cube's diffuse has it (kD: (1 - F)(1 - metallic)): the specular sky below takes the
+        // reflected share F of the same light, and with (1 - metallic) alone here that share was counted twice -- a sky
+        // term on top of the sky, ~5-10% on rough stone where the sky is all the light (the shade), 2026-10-28.
+        bounce = incident * albedo / PI * kD * giAo * (fieldOccludes ? 1.0 : visibility);
     }
 
     // Sheen's own prefiltered environment, at the sheen roughness rather than the base one, times
