@@ -76,6 +76,7 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-budget-jump") is { } jump) rtgiBudgetJump = MathF.Max(1f, jump);
         if (args.Float("rtgi-budget-sun-tau") is { } st) rtgiBudgetSunTau = MathF.Max(0.01f, st);
         if (args.Float("rtgi-list-worth-moving") is { } lwm) rtgiListWorthMoving = MathF.Max(1f, lwm);
+        if (args.Int("rtgi-list-room-moving") is { } lrm) rtgiListRoomMoving = Math.Max(1024, lrm);
     }
 
     // Before RecordRtgi: this frame's visible and hit points.
@@ -179,6 +180,12 @@ internal sealed partial class SponzaLoop
     // and the blend 1.1 of a walking Crytek Sponza 1080p frame's extra ~5 ms (2026-10-28); at 2 a young cell is resolved
     // as its samples come in pairs and more.
     private float rtgiListWorthMoving = 2f, rtgiMotionNow;
+    // The cells the training may list this frame: the dirty list's room on a still view, down to --rtgi-list-room-moving
+    // (32,768) as the camera moves. A walk lists every young cell it trains, every frame; the rest wait, their samples kept
+    // in their accumulators, and are listed when next trained -- a young cell's light a frame or two later, where the
+    // resolve and the blend over all of them were ~1 ms of a walking Crytek Sponza 1080p frame (2026-10-28).
+    private int rtgiListRoomMoving = 32_768;
+    private int RtgiListRoomNow => (int)(RtgiDirtyRoom + (Math.Min(rtgiListRoomMoving, RtgiDirtyRoom) - RtgiDirtyRoom) * rtgiMotionNow);
     private float RtgiListWorthNow => rtgiListWorth + (MathF.Min(rtgiListWorthMoving, rtgiListWorth) - rtgiListWorth) * rtgiMotionNow;
 
     // The profile line's: the window's mean spend.

@@ -698,7 +698,7 @@ internal sealed partial class SponzaLoop
                     new("uSun", new Vector4Uniform(new Vector4(towardSun, 1f))),
                     new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 0f))),
                     new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, rtgiContactRadius, rtgiHitSun, rtgiPushUp ? 1 : rtgiTrainLevels))),
-                    new("uClamp", new Vector4Uniform(new Vector4(rtgiClampSigma, frameNumber, RtgiDirtyRoom, RtgiListWorthNow))),
+                    new("uClamp", new Vector4Uniform(new Vector4(rtgiClampSigma, frameNumber, RtgiListRoomNow, RtgiListWorthNow))),
                     new("uGuideTable", new Vector4Uniform(new Vector4(rtgiGuide > 0f ? RtgiGuideSlots - 1 : 0f, rtgiStaleHits ? 1f : 0f, rtgiSunEpoch, 0f))),
                     new("uTrain", new Vector4Uniform(new Vector4(rtgiCountUnknown ? 1f : 0f, rtgiNoCoarse ? 1f : 0f, rtgiBackfaceLit ? 1f : 0f, rtgiRequests ? rtgiHitPoints : 0f))),
                     new("uHitSun", new Vector4Uniform(new Vector4(rtgiTraceHitSun ? 1f : 0f, rtgiThin ? 1f : 0f, rtgiReadFirst ? 1f : 0f, rtgiListOnTurn ? rtgiFilterEvery : 0f))),
@@ -750,7 +750,7 @@ internal sealed partial class SponzaLoop
                     new("uParams", new Vector4Uniform(RtgiParams)),
                     new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, 0f))),
                     new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, 0f, 0f, 0f))),
-                    new("uList", new Vector4Uniform(new Vector4(frameNumber, RtgiDirtyRoom, rtgiContactRays, 0f))),
+                    new("uList", new Vector4Uniform(new Vector4(frameNumber, RtgiListRoomNow, rtgiContactRays, 0f))),
                 },
                 Array.Empty<ShaderTextureBinding>(),
                 Buffers: new[]
@@ -786,7 +786,8 @@ internal sealed partial class SponzaLoop
                         new ShaderBufferBinding("RtgiPushScratch", rtgiPushScratch),
                     }));
         // The cells trained this frame (the list's room dispatched; past its count each thread returns).
-        graph.Dispatch(rtgiResolvePassHandle, new DispatchCommand(rtgiResolvePipeline, (RtgiDirtyRoom + 63) / 64, 1, 1,
+        // Over the frame's list room (RtgiListRoomNow): the training listed no more.
+        graph.Dispatch(rtgiResolvePassHandle, new DispatchCommand(rtgiResolvePipeline, (RtgiListRoomNow + 63) / 64, 1, 1,
             new ShaderUniform[]
             {
                 new("uResolve", new Vector4Uniform(new Vector4(rtgiHistory, rtgiMaxAge, RtgiSlots, rtgiChangeSigma))),
@@ -814,7 +815,7 @@ internal sealed partial class SponzaLoop
             }));
         // The cells just resolved, blended with their neighbours into what the readout and lookups read (a copy alone with
         // --rtgi-no-filter).
-        graph.Dispatch(rtgiFilterPassHandle, new DispatchCommand(rtgiFilterPipeline, (RtgiDirtyRoom + 63) / 64, 1, 1,
+        graph.Dispatch(rtgiFilterPassHandle, new DispatchCommand(rtgiFilterPipeline, (RtgiListRoomNow + 63) / 64, 1, 1,
             new ShaderUniform[]
             {
                 new("uParams", new Vector4Uniform(RtgiParams)),
