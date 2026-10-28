@@ -752,7 +752,6 @@ void main() {
 
     // IBL uses the shading normal. (GTAO no longer writes a bent normal: nothing shaded with it.)
     vec3 cubeN   = N;
-    vec3 irradiance = frame.uAbFlags.z > 0.5 ? vec3(0.2) : texture(samplerCube(uIrradiance, uLinearClamp), cubeN).rgb;
 
     // --- The incident field (the probe clipmap) ------------------------------------------------
     // .a is the sky visibility the clipmap's probes see, supplying building-scale enclosure beyond
@@ -773,7 +772,13 @@ void main() {
     // Lambert: radiance out is albedo/PI times the irradiance in, as the direct sun has it. Every cache and the
     // irradiance cube hold irradiance E (PbrIblBaker integrates cos-weighted to E), so the /PI belongs here; shading
     // them as albedo * E made all indirect light PI times too bright against the sun (fixed 2026-10-21).
-    vec3 diffuseIBL = incidentOn ? vec3(0.0) : irradiance * albedo / PI * skyVisibility;
+    // The irradiance cube read only where it is used: with the field on (every --rtgi frame) its light is the field's, the
+    // read taken anyway ~0.09 ms of the IBL's 0.46 (Crytek Sponza 1080p, the in-boot A/B, 2026-10-28).
+    vec3 diffuseIBL = vec3(0.0);
+    if (!incidentOn) {
+        vec3 irradiance = frame.uAbFlags.z > 0.5 ? vec3(0.2) : texture(samplerCube(uIrradiance, uLinearClamp), cubeN).rgb;
+        diffuseIBL = irradiance * albedo / PI * skyVisibility;
+    }
 
     // Specular: prefiltered env at LOD = roughness × (mipCount - 1), times
     // the BRDF LUT integration (split-sum approximation of the specular term).
@@ -781,7 +786,15 @@ void main() {
     if (frame.uAbFlags.z < 0.5) {
         float lod = roughness * (frame.uEnvMipCount - 1.0);
         vec3 prefiltered = textureLod(samplerCube(uPrefilteredEnv, uLinearClamp), R, lod).rgb;
-        vec2 envBrdf = texture(sampler2D(uBrdfLut, uLinearClamp), vec2(NdotV, roughness)).rg;
+        // The split sum's scale and bias by Karis' analytic fit (Unreal's mobile EnvBRDFApprox), not the LUT's read: the read
+        // ~0.26 ms a frame (Crytek Sponza 1080p, the in-boot A/B, 2026-10-28). frame.uTexelShape.w 1 (--ibl-brdf-lut): the LUT.
+        vec2 envBrdf;
+        if (frame.uTexelShape.w > 0.5) envBrdf = texture(sampler2D(uBrdfLut, uLinearClamp), vec2(NdotV, roughness)).rg;
+        else {
+            vec4 envR = roughness * vec4(-1.0, -0.0275, -0.572, 0.022) + vec4(1.0, 0.0425, 1.04, -0.04);
+            float envA = min(envR.x * envR.x, exp2(-9.28 * NdotV)) * envR.x + envR.y;
+            envBrdf = vec2(-1.04, 1.04) * envA + envR.zw;
+        }
         // The reflected sky is the same sky. Not occluding it leaves a courtyard floor with a
         // mirror of an open horizon it cannot see.
         specularIBL = prefiltered * (F * envBrdf.x + envBrdf.y) * skyVisibility;

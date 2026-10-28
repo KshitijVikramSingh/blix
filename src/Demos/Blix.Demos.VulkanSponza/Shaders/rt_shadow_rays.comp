@@ -141,13 +141,20 @@ uint hash32(uint x) {
 
 void main() {
     uvec2 p = gl_GlobalInvocationID.xy;
+    bool first = p.x == 0u && p.y == 0u;
+    // Interleaved (uCompact.w): dispatched over this frame's pixel of each 2x2 alone -- a thread a traced pixel, where a
+    // thread a pixel read every pixel's depth and normal to send three in four home (SponzaLoop.RtShadows.cs).
+    if (u.uCompact.w > 0.5) {
+        uint ph = uint(u.uCompact.w) - 1u;
+        p = p * 2u + uvec2(ph & 1u, ph >> 1);
+    }
     if (p.x >= uint(u.uSize.x) || p.y >= uint(u.uSize.y)) return;
     uint index = p.y * uint(u.uSize.x) + p.x;
     bool packing = u.uCompact.x > 0.5;
     bool perPixel = u.uCompact.z > 0.5;
     // The header's z back to 1 (traced; rt_shadow_filter.comp sets 2 when it filters this frame's mask).
-    if (index == 0u) maskHeader.z = 1u;
-    if (packing && index == 0u) { counters[1u - uint(u.uCompact.y)] = 0u; counters[3] = 0u; }
+    if (first) maskHeader.z = 1u;
+    if (packing && first) { counters[1u - uint(u.uCompact.y)] = 0u; counters[3] = 0u; }
     // The full-res pixel this ray starts from.
     ivec2 fullSize = textureSize(uSceneDepth, 0);
     ivec2 q = u.uHalf.x > 0.5 ? min(ivec2(p) * 2 + ivec2(u.uHalf.yz), fullSize - 1) : ivec2(p);

@@ -23,7 +23,7 @@ internal sealed partial class SponzaLoop
     // The frame whose surface keys the history holds (RenderFrame records the copy only for a reader).
     private long surfaceKeyHistoryFrame = -10;
     private long incidentSkipped, incidentReused, incidentFull, incidentDirtyFrames;
-    private string IncidentReuseCounts() { var t = $"incident: skipped {incidentSkipped}, reused {incidentReused}, full {incidentFull} frames (dirty {incidentDirtyFrames}); shadow masks kept {rtShadowKept}"; incidentSkipped = incidentReused = incidentFull = incidentDirtyFrames = 0; rtShadowKept = 0; return t; }
+    private string IncidentReuseCounts() { var t = $"incident: skipped {incidentSkipped}, reused {incidentReused}, full {incidentFull} frames (dirty {incidentDirtyFrames}); shadow masks kept {rtShadowKept}, interleaved {rtShadowInterleaved} (history {rtShadowInterleavedHistory})"; incidentSkipped = incidentReused = incidentFull = incidentDirtyFrames = 0; rtShadowKept = rtShadowInterleaved = rtShadowInterleavedHistory = 0; return t; }
 
     private GraphicsPassBuilder IncidentReuseReads(GraphicsPassBuilder b)
     {

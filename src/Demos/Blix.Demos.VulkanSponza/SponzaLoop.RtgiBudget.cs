@@ -27,7 +27,7 @@ internal sealed partial class SponzaLoop
     // decoupled present) the spend above the floor is cut at once, under it by 0.3 ms it comes back slowly: a still view
     // holds the display's 120 rather than swinging between 90 and 120 at ~9.8 ms frames (the user, Crytek Sponza 1080p,
     // 2026-10-28), and a change spends what fits.
-    private float rtgiBudgetMs = 8f, rtgiBudgetCap = 1f, rtgiBudgetFrameMs;
+    private float rtgiBudgetMs = 8f, rtgiBudgetCap = 1f, rtgiBudgetFloorScale = 1f, rtgiBudgetFrameMs;
     private readonly Stopwatch rtgiBudgetFrameClock = Stopwatch.StartNew();
     // The floor: 80,000 visible and 24,000 from hits -- a settled Crytek Sponza 1080p 6.98 ms against 7.53 at 110,000 and
     // 32,000 (the in-boot A/B), the truth the same for the still view, a 90 degree turn and an instant sun jump within
@@ -75,6 +75,7 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-budget-tau") is { } tau) rtgiBudgetTau = MathF.Max(0.01f, tau);
         if (args.Float("rtgi-budget-jump") is { } jump) rtgiBudgetJump = MathF.Max(1f, jump);
         if (args.Float("rtgi-budget-sun-tau") is { } st) rtgiBudgetSunTau = MathF.Max(0.01f, st);
+        if (args.Float("rtgi-list-worth-moving") is { } lwm) rtgiListWorthMoving = MathF.Max(1f, lwm);
     }
 
     // Before RecordRtgi: this frame's visible and hit points.
@@ -98,6 +99,7 @@ internal sealed partial class SponzaLoop
         var turned = MathF.Acos(Math.Clamp(Vector3.Dot(forward, rtgiBudgetLastForward), -1f, 1f)) * 180f / MathF.PI;
         var moved = Vector3.Distance(cameraPosition, rtgiBudgetLastCamera);
         var motion = Math.Clamp(turned / dt / 90f + moved / dt / 2f, 0f, 1f);
+        rtgiMotionNow = MathF.Max(motion, rtgiMotionNow * MathF.Exp(-dt / rtgiBudgetTau));
         // The sun: any turn of it is a relight.
         var sun = Vector3.Dot(Vector3.Normalize(sunDirection), rtgiBudgetLastSun) < 0.99999f ? 1f : 0f;
         rtgiBudgetLastForward = forward;
@@ -145,15 +147,25 @@ internal sealed partial class SponzaLoop
         var frameMs = (float)rtgiBudgetFrameClock.Elapsed.TotalMilliseconds;
         rtgiBudgetFrameClock.Restart();
         rtgiBudgetFrameMs = rtgiBudgetFrameMs <= 0f ? frameMs : rtgiBudgetFrameMs + (Math.Clamp(frameMs, 0f, 50f) - rtgiBudgetFrameMs) / 16f;
+        // Over the ceiling with the spend above the floor already gone (a walk: new cells, shadows retraced, the screen's
+        // light every frame), the floor itself comes down to half; under it, the floor comes back first, then the rest.
         if (rtgiBudgetMs > 0f)
         {
-            if (rtgiBudgetFrameMs > rtgiBudgetMs) rtgiBudgetCap = MathF.Max(0f, rtgiBudgetCap - 0.05f);
-            else if (rtgiBudgetFrameMs < rtgiBudgetMs - 0.3f) rtgiBudgetCap = MathF.Min(1f, rtgiBudgetCap + 0.005f);
+            if (rtgiBudgetFrameMs > rtgiBudgetMs)
+            {
+                if (rtgiBudgetCap > 0f) rtgiBudgetCap = MathF.Max(0f, rtgiBudgetCap - 0.05f);
+                else rtgiBudgetFloorScale = MathF.Max(0.5f, rtgiBudgetFloorScale - 0.02f);
+            }
+            else if (rtgiBudgetFrameMs < rtgiBudgetMs - 0.3f)
+            {
+                if (rtgiBudgetFloorScale < 1f) rtgiBudgetFloorScale = MathF.Min(1f, rtgiBudgetFloorScale + 0.005f);
+                else rtgiBudgetCap = MathF.Min(1f, rtgiBudgetCap + 0.005f);
+            }
         }
         // The needs keep their own fall; the cap limits what they spend.
         var cap = rtgiBudgetMs > 0f ? rtgiBudgetCap : 1f;
-        var minTiles = Math.Min(rtgiBudgetMinTiles, rtgiTiles);
-        var minHits = Math.Min(rtgiBudgetMinHits, rtgiHitPoints);
+        var minTiles = (int)(Math.Min(rtgiBudgetMinTiles, rtgiTiles) * rtgiBudgetFloorScale);
+        var minHits = (int)(Math.Min(rtgiBudgetMinHits, rtgiHitPoints) * rtgiBudgetFloorScale);
         rtgiTilesNow = minTiles + (int)((rtgiTiles - minTiles) * MathF.Min(rtgiNeedVisible, cap));
         rtgiHitsNow = minHits + (int)((rtgiHitPoints - minHits) * MathF.Min(rtgiNeedHits, cap));
         rtgiBudgetSumTiles += rtgiTilesNow;
@@ -161,12 +173,20 @@ internal sealed partial class SponzaLoop
         rtgiBudgetFrames++;
     }
 
+    // The training's list worth this frame (rtgi_train.comp's listNow: a cell listed for the resolve and the blend once its
+    // pending samples times it reach those it holds): --rtgi-list-worth (8) on a still view, down to --rtgi-list-worth-moving
+    // (2) as the camera moves -- a walk makes new cells every frame, each listed on every sample while young, the resolve
+    // and the blend 1.1 of a walking Crytek Sponza 1080p frame's extra ~5 ms (2026-10-28); at 2 a young cell is resolved
+    // as its samples come in pairs and more.
+    private float rtgiListWorthMoving = 2f, rtgiMotionNow;
+    private float RtgiListWorthNow => rtgiListWorth + (MathF.Min(rtgiListWorthMoving, rtgiListWorth) - rtgiListWorth) * rtgiMotionNow;
+
     // The profile line's: the window's mean spend.
     private string RtgiBudgetWork()
     {
         if (!rtgiBudget || rtgiBudgetFrames == 0) return "";
         var s = string.Create(CultureInfo.InvariantCulture,
-            $"; budget: visible {rtgiBudgetSumTiles / rtgiBudgetFrames:N0}, hits {rtgiBudgetSumHits / rtgiBudgetFrames:N0} a frame (need now {rtgiNeedVisible:0.00} / {rtgiNeedHits:0.00}, cap {rtgiBudgetCap:0.00} at {rtgiBudgetFrameMs:0.0} ms, unsettled {rtgiBudgetUnsettled:0.00}, error floor {rtgiBudgetErrFloor:0.000})");
+            $"; budget: visible {rtgiBudgetSumTiles / rtgiBudgetFrames:N0}, hits {rtgiBudgetSumHits / rtgiBudgetFrames:N0} a frame (need now {rtgiNeedVisible:0.00} / {rtgiNeedHits:0.00}, cap {rtgiBudgetCap:0.00} floor {rtgiBudgetFloorScale:0.00} at {rtgiBudgetFrameMs:0.0} ms, unsettled {rtgiBudgetUnsettled:0.00}, error floor {rtgiBudgetErrFloor:0.000})");
         rtgiBudgetSumTiles = rtgiBudgetSumHits = 0;
         rtgiBudgetFrames = 0;
         return s;

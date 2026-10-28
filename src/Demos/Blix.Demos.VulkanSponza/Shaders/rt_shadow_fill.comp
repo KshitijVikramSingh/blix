@@ -13,6 +13,10 @@
 //
 // Every pixel's depth is written for the next frame's test. A traced pixel's word is left as traced. A word taken from
 // another pixel brings that pixel's sheet light with it (the mask's second plane: a ray through a curtain, bit 2).
+//
+// Half res (uHalf.x, RenderSettings.HalfResShadows): the mask's pixels are half-res, each standing for the full-res pixel
+// 2h + uHalf.yz -- its depth and normal read there, last frame's point found on the half-res grid. Interleaved whenever the
+// camera moves (the mask not kept, SponzaLoop.RtShadows.cs), at either resolution.
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -23,6 +27,7 @@ layout(set = 0, binding = 0) uniform RtShadowFill {
     vec4 uSize;          // xy the mask's size
     vec4 uFill;          // x this frame's traced pixel of each 2x2 (x + 2y); y 1: last frame's mask and depth are good;
                          // z 1: every pixel was traced (the depth alone written, for the next frame)
+    vec4 uHalf;          // x 1: the mask is half-res; yz the full-res pixel of its 2x2 each half-res pixel stands for
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -32,9 +37,14 @@ layout(std430, set = 0, binding = 4) readonly buffer RtShadowPrevMask { uvec4 pr
 layout(std430, set = 0, binding = 5) writeonly buffer RtShadowDepth { float depths[]; };
 layout(std430, set = 0, binding = 6) readonly buffer RtShadowPrevDepth { float prevDepths[]; };
 
-// The surface point at a pixel, and its depth (clip w) in this frame's view.
-vec4 surfaceAt(ivec2 pixel, float raw) {
-    vec2 ndc = (vec2(pixel) + 0.5) / u.uSize.xy * 2.0 - 1.0;
+// The full-res pixel a mask pixel stands for.
+ivec2 fullOf(ivec2 m) {
+    return u.uHalf.x > 0.5 ? min(m * 2 + ivec2(u.uHalf.yz), textureSize(uSceneDepth, 0) - 1) : m;
+}
+
+// The surface point at a mask pixel, and its depth (clip w) in this frame's view.
+vec4 surfaceAt(ivec2 m, float raw) {
+    vec2 ndc = (vec2(fullOf(m)) + 0.5) / vec2(textureSize(uSceneDepth, 0)) * 2.0 - 1.0;
     vec4 w = u.uInvViewProj * vec4(ndc, raw, 1.0);
     return vec4(w.xyz / w.w, 1.0 / w.w);
 }
@@ -44,8 +54,8 @@ void main() {
     ivec2 size = ivec2(u.uSize.xy);
     if (q.x >= size.x || q.y >= size.y) return;
     uint index = uint(q.y) * uint(size.x) + uint(q.x);
-    float raw = texelFetch(uSceneDepth, q, 0).r;
-    vec4 nSample = texelFetch(uPrepassNormal, q, 0);
+    float raw = texelFetch(uSceneDepth, fullOf(q), 0).r;
+    vec4 nSample = texelFetch(uPrepassNormal, fullOf(q), 0);
     bool surface = raw < 1.0 - 1e-6 && dot(nSample.xyz, nSample.xyz) >= 1e-6;
     vec4 here = surface ? surfaceAt(q, raw) : vec4(0.0);
     depths[index] = here.w;
@@ -58,8 +68,8 @@ void main() {
     if (u.uFill.y > 0.5) {
         vec4 clip = u.uPrevViewProj * vec4(pQ, 1.0);
         if (clip.w > 1e-4) {
-            vec2 prev = (clip.xy / clip.w * 0.5 + 0.5) * u.uSize.xy;
-            ivec2 pp = ivec2(floor(prev));
+            vec2 prev = (clip.xy / clip.w * 0.5 + 0.5) * vec2(textureSize(uSceneDepth, 0));
+            ivec2 pp = u.uHalf.x > 0.5 ? ivec2(floor((prev - u.uHalf.yz) * 0.5)) : ivec2(floor(prev));
             if (all(greaterThanEqual(pp, ivec2(0))) && all(lessThan(pp, size))) {
                 uint pi = uint(pp.y) * uint(size.x) + uint(pp.x);
                 float seen = prevDepths[pi];
@@ -86,14 +96,14 @@ void main() {
             ivec2 t = q + ivec2(dx, dy);
             if (any(lessThan(t, ivec2(0))) || any(greaterThanEqual(t, size))) continue;
             if (uint(t.x & 1) + 2u * uint(t.y & 1) != phase) continue;
-            float tRaw = texelFetch(uSceneDepth, t, 0).r;
+            float tRaw = texelFetch(uSceneDepth, fullOf(t), 0).r;
             if (tRaw >= 1.0 - 1e-6) continue;
             uint at = uint(t.y) * uint(size.x) + uint(t.x);
             uint word = maskWords[at];
             vec3 pT = surfaceAt(t, tRaw).xyz;
             float d = length(pT - pQ);
             if (d < nearest) { nearest = d; nearestWord = word; nearestAt = at; }
-            vec4 nT = texelFetch(uPrepassNormal, t, 0);
+            vec4 nT = texelFetch(uPrepassNormal, fullOf(t), 0);
             if (abs(dot(nQ, pT - pQ)) > tolerance || dot(nT.xyz, nT.xyz) < 1e-6 || dot(normalize(nT.xyz), nQ) < 0.8) continue;
             onSurface++;
             if ((word & 1u) != 0u) { blocked++; blockedWord = word; blockedAt = at; }

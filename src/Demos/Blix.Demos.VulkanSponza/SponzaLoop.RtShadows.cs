@@ -62,6 +62,8 @@ internal sealed partial class SponzaLoop
     private ShaderInterface rtShadowFillInterface = null!;
     private PassHandle rtShadowFillPassHandle;
     private PipelineHandle rtShadowFillPipeline;
+    private bool rtShadowMoveInterleave = true;
+    private long rtShadowInterleaved, rtShadowInterleavedHistory;
     private GpuBufferHandle[] rtShadowDepths = Array.Empty<GpuBufferHandle>();
     private int rtShadowPrevSlot = -1;
     private Matrix4x4 rtShadowPrevViewProj;
@@ -273,13 +275,19 @@ internal sealed partial class SponzaLoop
         var filterPenumbra = shadows.PenumbraFilter && !halfShadowsNow && SunDiscTangent > 0f;
         var discTangent = filterPenumbra ? 0f : SunDiscTangent;
         var directions = rtShadowDirections.Length > 0 ? rtShadowDirections[slot] : RtShadowPlaceholder;
-        // Interleaved: packed rays only, one per full-res pixel (no half res, no sky rays, no census reading every pixel's).
-        var interleave = shadows.Interleave && pack && !halfShadowsNow && sky is null && !RtPerPixel;
+        // Interleaved: packed rays only (no sky rays, no census reading every pixel's) -- always with ShadowsSettings.Interleave,
+        // and otherwise whenever the mask is not kept (a moving camera): a quarter of the pixels' rays a frame, the rest last
+        // frame's reprojected (rt_shadow_fill.comp; full or half res). A still view keeps its mask and traces none; a moving
+        // one traced every pixel, its rays pass and trace the frame's largest extra while walking Crytek Sponza 1080p
+        // (2026-10-28). --no-rt-shadow-move-interleave: every pixel traced while moving.
+        var interleave = (shadows.Interleave || rtShadowMoveInterleave) && pack && sky is null && !RtPerPixel;
         var historyGood = interleave && rtShadowPrevSlot >= 0 && rtShadowPrevSlot != slot && rtShadowPrevSun == towardSun;
         var phase = historyGood ? RtShadowPhases[rtShadowPhase++ & 3u] : 0u;
         var reach = rayReach;
         Matrix4x4.Invert(viewProjJittered, out var invViewProj);
-        graph.Dispatch(rtShadowRaysPassHandle, new DispatchCommand(rtShadowRaysPipeline, (width + 7) / 8, (height + 7) / 8, 1,
+        // Interleaved with history: a thread for each 2x2's traced pixel alone (rt_shadow_rays.comp).
+        var rayGrid = historyGood ? ((width + 1) / 2, (height + 1) / 2) : (width, height);
+        graph.Dispatch(rtShadowRaysPassHandle, new DispatchCommand(rtShadowRaysPipeline, (rayGrid.Item1 + 7) / 8, (rayGrid.Item2 + 7) / 8, 1,
             new ShaderUniform[]
             {
                 new("uInvViewProj", new Matrix4x4Uniform(invViewProj)),
@@ -349,6 +357,8 @@ internal sealed partial class SponzaLoop
         rtShadowFrames++;
         if (interleave)
         {
+            rtShadowInterleaved++;
+            if (historyGood) rtShadowInterleavedHistory++;
             var prev = historyGood ? rtShadowPrevSlot : slot;
             graph.Dispatch(rtShadowFillPassHandle, new DispatchCommand(rtShadowFillPipeline, (width + 7) / 8, (height + 7) / 8, 1,
                 new ShaderUniform[]
@@ -358,6 +368,7 @@ internal sealed partial class SponzaLoop
                     new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, 0f))),
                     new("uSize", new Vector4Uniform(new Vector4(width, height, 0f, 0f))),
                     new("uFill", new Vector4Uniform(new Vector4(phase, historyGood ? 1f : 0f, historyGood ? 0f : 1f, 0f))),
+                    new("uHalf", new Vector4Uniform(new Vector4(halfShadowsNow ? 1f : 0f, sub.X, sub.Y, 0f))),
                 },
                 new[]
                 {

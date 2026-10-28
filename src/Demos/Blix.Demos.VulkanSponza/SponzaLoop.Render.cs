@@ -550,11 +550,11 @@ internal sealed partial class SponzaLoop
             new("uClipOrigin3",      new Vector4Uniform(ClipmapOrigin(3))),
             // One component per --ab shading mode, live only during that mode's off-phase.
             new("uAbFlags",          new Vector4Uniform(new Vector4(
-                AbOffPhase && abMode == "textures" ? 1f : 0f,
-                AbOffPhase && abMode == "pbr"      ? 1f : 0f,
-                AbOffPhase && abMode == "ibl"      ? 1f : 0f,
-                AbOffPhase && abMode == "normal"   ? 1f : 0f))),
-            new("uTexelShape",       new Vector4Uniform(new Vector4(litShapesBound && IncidentFieldNow ? 1f : 0f, ambient.Enabled ? 1f : 0f, texelShapeNearest ? 1f : 0f, 0f))),
+                AbOffPhase && abMode == "textures" || ShaderProbe("textures") ? 1f : 0f,
+                AbOffPhase && abMode == "pbr"      || ShaderProbe("pbr") ? 1f : 0f,
+                AbOffPhase && abMode == "ibl"      || ShaderProbe("ibl") ? 1f : 0f,
+                AbOffPhase && abMode == "normal"   || ShaderProbe("normal") ? 1f : 0f))),
+            new("uTexelShape",       new Vector4Uniform(new Vector4(litShapesBound && IncidentFieldNow ? 1f : 0f, ambient.Enabled ? 1f : 0f, texelShapeNearest ? 1f : 0f, iblBrdfLut ? 1f : 0f))),
         };
         // The remaining //@tune uniforms (shadow slope scale, uVisualizeCascades) are appended by
         // name from the overlay panel — reflection lands each at its offset. The intensity and
@@ -969,7 +969,8 @@ internal sealed partial class SponzaLoop
         }
 
         var settling = RtgiSettleNow;
-        if (settling) graph.Pass(litPassHandle, _ => { }, clearColor: new GraphicsColor(0.03f, 0.04f, 0.06f, 1f));
+        var litProbe = Environment.GetEnvironmentVariable("BLIX_PROBE") is { } lp && AbArm == 1 ? lp : "";
+        if (settling || litProbe == "nolit") graph.Pass(litPassHandle, _ => { }, clearColor: new GraphicsColor(0.03f, 0.04f, 0.06f, 1f));
         else graph.Pass(litPassHandle, scope =>
         {
             // Opaque + Mask first (depth-test, no write — pre-pass wrote depth),
@@ -983,7 +984,7 @@ internal sealed partial class SponzaLoop
             var leanNow = LitLeanNow;
             foreach (var g in opaqueGroups)
             {
-                if (g.IsMask && SkipMaskDraws) continue;
+                if (g.IsMask && (SkipMaskDraws || litProbe == "nomask")) continue;
                 var pipeline = g.Pipeline;
                 if (skipPrepass)
                 {
@@ -996,7 +997,7 @@ internal sealed partial class SponzaLoop
                     if (pipeline == opaqueSolidPipeline) pipeline = lean ? opaqueSolidPipelineLean : opaqueSolidPipelineEarly;
                     else if (pipeline == opaqueDoubleSidedPipeline) pipeline = lean ? opaqueDoubleSidedPipelineLean : opaqueDoubleSidedPipelineEarly;
                 }
-                if (litFlat) pipeline = g.Pipeline == opaqueDoubleSidedPipeline ? flatPipeline : flatSolidPipeline;
+                if (litFlat || litProbe == "litflat") pipeline = g.Pipeline == opaqueDoubleSidedPipeline ? flatPipeline : flatSolidPipeline;
                 DrawSceneGroup(scope, occlusionNow ? SceneListCameraFinal : SceneListCamera, g, pipeline, perFrame, passBindings, g.Material);
             }
             // Sky after opaque, before blend. Fullscreen triangle; positions are
@@ -1805,6 +1806,10 @@ internal sealed partial class SponzaLoop
     // The lean build this frame (lit_lean.frag): none of its compiled-out branches can be taken -- no debug view, no fog,
     // and the sun's shadow from the traced mask (or no shadow), not the cascades' fallback. --no-lit-lean: never.
     private bool litLean = true;
+    // --ibl-brdf-lut: the specular IBL's split sum read from the LUT (lit_body.glsl), not Karis' analytic fit.
+    private bool iblBrdfLut;
+    // The in-boot A/B's arm for a lit-shader term (BLIX_PROBE=textures|pbr|ibl|normal, uAbFlags).
+    private bool ShaderProbe(string term) => AbArm == 1 && Environment.GetEnvironmentVariable("BLIX_PROBE") == term;
     private bool LitLeanNow => litLean && vizChannel <= 0f && !fog.Enabled
         && tunePanel.Value("uVisualizeAmbient") <= 0.5f && tunePanel.Value("uVisualizeCascades") <= 0.5f
         && (!rtShadowBound.Equals(default(GpuBufferHandle)) || !shadows.Enabled || abMode == "shadow" && AbOffPhase);

@@ -70,6 +70,7 @@ internal sealed partial class SponzaLoop
         materialAoOnGi = args.Flag("material-ao-on-gi");
         // --rt-shadow-full: every pixel traced every frame (ShadowsSettings.Interleave off).
         if (args.Flag("rt-shadow-full")) shadows.Interleave = false;
+        if (args.Flag("no-rt-shadow-move-interleave")) rtShadowMoveInterleave = false;
         if (args.Flag("ao-fullres")) aoScale = 1f;
         // The incident-light field ships on. --no-incident is a diagnostic: the lit pass then uses the open-sky
         // irradiance cube with sky visibility 1, no clipmap light at all.
@@ -154,6 +155,7 @@ internal sealed partial class SponzaLoop
         litEarlyZ = !args.Flag("no-lit-early-z");
         texelShapeNearest = !args.Flag("texel-shape-bilinear");
         litLean = !args.Flag("no-lit-lean");
+        iblBrdfLut = args.Flag("ibl-brdf-lut");
         incidentLean = !args.Flag("no-incident-lean");
         incidentSplit = args.Flag("incident-split");
         cascadesAlways = args.Flag("cascades-always");

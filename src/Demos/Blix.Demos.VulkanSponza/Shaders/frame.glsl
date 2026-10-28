@@ -100,6 +100,7 @@ layout(set = 0, binding = 0) uniform Frame {
     vec4  uClipOrigin3;
     // x 1 (--texel-h4): a lightmapped pixel carries its indirect light to its normal-mapped normal by the records' own
     // shapes per channel (lit.frag, lightmapShape), not the incident pass's luminance gradient. y 1: GTAO ran (0: --no-ao,
-    // its passes skipped -- the visibility one). Appended last.
+    // its passes skipped -- the visibility one). w 1 (--ibl-brdf-lut): the specular IBL's split sum from the LUT, not the
+    // analytic fit (lit_body.glsl). Appended last.
     vec4  uTexelShape;
 } frame;
