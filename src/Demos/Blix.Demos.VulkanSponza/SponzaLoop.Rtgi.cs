@@ -1209,11 +1209,12 @@ internal sealed partial class SponzaLoop
     private string RtgiCounts()
     {
         if (!RtgiReadoutReady || rtgiTraced < 2) return "";
-        // A thirty-second of the slots (hashed, so any run of them is a fair sample), scaled up: reading them all was ~670 MB
-        // at 8 M slots, a 400 ms hitch every profile window (San Miguel, 2026-10-26).
-        const int Share = 32;
+        // A 512th of the slots (hashed, so any run of them is a fair sample), scaled up: reading them all was ~670 MB at 8 M
+        // slots, a 400 ms hitch every profile window (San Miguel, 2026-10-26); a 32nd with the device drained first was ~13
+        // MB of large arrays every window, the full collections behind a walk's 30-40 ms frames (2026-10-28). Each read
+        // waits for its own copy; the counts are a sample, a frame's update racing them is no matter.
+        const int Share = 512;
         var count = RtgiSlots / Share;
-        device.WaitIdle();
         var keys = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(rtgiKeys, 0, count * 4).AsSpan());
         var resolved = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(rtgiResolved, 0, count * 32).AsSpan());
         var moments = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(rtgiMoments, 0, count * 48).AsSpan());

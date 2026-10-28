@@ -2188,9 +2188,9 @@ public sealed partial class VulkanGraphicsDevice
     private static GpuBufferHandle? GpuBufferNamed(IReadOnlyList<ShaderBufferBinding>? buffers, string? name)
     {
         if (buffers is null || name is null) return null;
-        foreach (var b in buffers)
+        for (var i = 0; i < buffers.Count; i++)
         {
-            if (string.Equals(b.Name, name, StringComparison.Ordinal)) return b.Buffer;
+            if (string.Equals(buffers[i].Name, name, StringComparison.Ordinal)) return buffers[i].Buffer;
         }
 
         return null;
@@ -2201,11 +2201,19 @@ public sealed partial class VulkanGraphicsDevice
     private static void RequireNamedBuffers(VkShaderProgramEntry prog, IReadOnlyList<ShaderBufferBinding>? buffers)
     {
         if (buffers is null) return;
-        foreach (var b in buffers)
+        var names = prog.StorageBufferNames;
+        if (names is null)
         {
-            var found = prog.Interface.Slots.Any(s =>
-                s.Type == ShaderResourceType.StorageBuffer && string.Equals(s.Name, b.Name, StringComparison.Ordinal));
-            if (!found)
+            names = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var s in prog.Interface.Slots)
+                if (s.Type == ShaderResourceType.StorageBuffer && s.Name is not null) names.Add(s.Name);
+            prog.StorageBufferNames = names;
+        }
+        // Indexed, not foreach: an IReadOnlyList's enumerator is an allocation a call.
+        for (var i = 0; i < buffers.Count; i++)
+        {
+            var b = buffers[i];
+            if (!names.Contains(b.Name))
             {
                 throw new InvalidOperationException(
                     $"A GPU buffer is bound to storage block '{b.Name}', which program '{prog.Name}' does not declare.");
@@ -2468,7 +2476,8 @@ public sealed partial class VulkanGraphicsDevice
             // silently swap two blocks between bindings.
             var dynamicCount = 0;
 
-            foreach (var slot in sr.Slots.OrderBy(x => x.Binding))
+            sr.SlotsByBinding ??= sr.Slots.OrderBy(x => x.Binding).ToArray();
+            foreach (var slot in sr.SlotsByBinding)
             {
                 if (slot.BlockLayout is not { } block) continue;
 
@@ -2659,6 +2668,20 @@ public sealed partial class VulkanGraphicsDevice
 
             var (baseName, index) = SplitArrayName(b);
             var element = index ?? b.ArrayIndex;
+            // Counted first; the list is built only for the error (a list a texture of every draw was most of the bind's
+            // allocations, with the rest of this path -- 2026-10-28).
+            var found = 0;
+            DescriptorSetSlot only = default;
+            for (var setIdx = 0; setIdx < prog.Sets.Length; setIdx++)
+            {
+                if (setIdx == MaterialOwnedSet || prog.Sets[setIdx] is not { } sr) continue;
+                if (ImageSlotNamed(sr, baseName) is { } slot) { found++; only = slot; }
+            }
+            if (found == 1)
+            {
+                RequireElementInRange(prog, baseName, element, only);
+                continue;
+            }
             var inSets = new List<(int Set, DescriptorSetSlot Slot)>();
             for (var setIdx = 0; setIdx < prog.Sets.Length; setIdx++)
             {
@@ -2740,9 +2763,18 @@ public sealed partial class VulkanGraphicsDevice
 
     // "uCascades[2]" is element 2 of uCascades. The index in the name and an explicit ArrayIndex
     // must not say two different things.
+    // An array element's name split once: "uCascadeShadowMaps[1]" cut on every bind of every draw was a string a call.
+    private static readonly Dictionary<string, (string BaseName, int Index)> splitNames = new(StringComparer.Ordinal);
+
     private static (string BaseName, int? Index) SplitArrayName(ShaderTextureBinding b)
     {
         var name = b.Name;
+        if (splitNames.TryGetValue(name, out var known))
+        {
+            if (b.ArrayIndex != 0 && b.ArrayIndex != known.Index)
+                throw new InvalidOperationException($"Texture '{name}' names element {known.Index} but its ArrayIndex is {b.ArrayIndex}. Say it once.");
+            return (known.BaseName, known.Index);
+        }
         var open = name.LastIndexOf('[');
         if (open <= 0 || !name.EndsWith(']')) return (name, null);
 
@@ -2758,7 +2790,9 @@ public sealed partial class VulkanGraphicsDevice
                 $"Texture '{name}' names element {index} but its ArrayIndex is {b.ArrayIndex}. Say it once.");
         }
 
-        return (name[..open], index);
+        var split = (name[..open], index);
+        splitNames[name] = split;
+        return split;
     }
 
     private static ShaderResourceType? ImageSlotTypeAtBinding(VkShaderSetResources sr, int binding)

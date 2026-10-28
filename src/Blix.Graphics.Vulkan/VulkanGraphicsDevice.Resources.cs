@@ -49,6 +49,9 @@ public sealed partial class VulkanGraphicsDevice
         // outlive its program, so this lifetime is strictly ⊇ every pipeline's.
         // Handle==0 means "not built yet".
         public PipelineLayout CachedLayout;
+        // The storage blocks the program declares, by name: built on the first bind (RequireNamedBuffers) -- the check
+        // ran a lambda over the interface's slots for every buffer of every draw and dispatch.
+        public HashSet<string>? StorageBufferNames;
     }
 
     internal sealed class VkShaderSetResources
@@ -60,6 +63,8 @@ public sealed partial class VulkanGraphicsDevice
         // draw's textures into a transient set per draw.
         public Dictionary<int, VkBufferEntry[]> BuffersPerBinding = new();
         public List<DescriptorSetSlot> Slots = new();
+        // Slots by binding, sorted once on the first bind (BindTransientDescriptorSets sorted them on every one).
+        public DescriptorSetSlot[]? SlotsByBinding;
     }
 
     internal sealed class VkPipelineEntry

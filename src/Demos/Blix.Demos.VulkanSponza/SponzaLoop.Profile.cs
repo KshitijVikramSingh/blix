@@ -45,6 +45,9 @@ internal sealed partial class SponzaLoop
 
     private readonly Stopwatch profFrameClock = new(), profWindowClock = new();
     private Dictionary<string, double> profSections = new(StringComparer.Ordinal);
+    // The window's bytes allocated by section, and in all (the process's, since the window began).
+    private readonly Dictionary<string, long> profSectionBytes = new(StringComparer.Ordinal);
+    private long profWindowBytes = -1, profWindowMainBytes;
     private readonly List<ProfFrame> profWindow = new(), profSession = new();
     private Dictionary<string, GpuPassTotal>? profGpuAtWindow;
     private Vector3 profLastCameraPosition;
@@ -66,13 +69,14 @@ internal sealed partial class SponzaLoop
     {
         private readonly SponzaLoop? owner;
         private readonly string name;
-        private readonly long start;
+        private readonly long start, startBytes;
 
         public ProfScope(SponzaLoop owner, string name)
         {
             this.owner = profileOn ? owner : null;
             this.name = name;
             start = profileOn ? Stopwatch.GetTimestamp() : 0;
+            startBytes = profileOn ? GC.GetAllocatedBytesForCurrentThread() : 0;
         }
 
         public void Dispose()
@@ -80,6 +84,10 @@ internal sealed partial class SponzaLoop
             if (owner is null) return;
             var ms = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
             owner.profSections[name] = owner.profSections.TryGetValue(name, out var had) ? had + ms : ms;
+            // The bytes the section allocated (the window's line: what the collector has to clear, full collections a
+            // walk's hitches -- 151 ms of pauses in 5 s walking Crytek Sponza, 2026-10-28).
+            var bytes = GC.GetAllocatedBytesForCurrentThread() - startBytes;
+            owner.profSectionBytes[name] = owner.profSectionBytes.TryGetValue(name, out var hadBytes) ? hadBytes + bytes : bytes;
         }
     }
 
@@ -204,6 +212,14 @@ internal sealed partial class SponzaLoop
             $"[profile]   host a frame: wait {frames.Average(f => f.Wait):0.0}, encode {frames.Average(f => f.Encode):0.0}, submit/present {frames.Average(f => f.Present):0.0} ms; gc pause {frames.Sum(f => f.GcPause):0} ms in all ({frames.Sum(f => f.Gen2)} full); clipmap rested {clipmapRested} frames so far; sections a frame (ms): {SectionMeans(frames, 10)}"));
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[profile]   gpu a frame (ms, {gpu.Sum(g => g.Ms):0.0} in all): {string.Join(", ", gpu.OrderByDescending(g => g.Ms).Take(12).Select(g => string.Create(CultureInfo.InvariantCulture, $"{g.Pass} {g.Ms:0.00}")))}"));
+        var allBytes = GC.GetTotalAllocatedBytes(false);
+        var mainBytes = GC.GetAllocatedBytesForCurrentThread();
+        if (profWindowBytes >= 0)
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[profile]   allocated a frame: {(allBytes - profWindowBytes) / 1024.0 / frames.Count:N0} KB in all, {(mainBytes - profWindowMainBytes) / 1024.0 / frames.Count:N0} on the main thread; by section (KB): {string.Join(", ", profSectionBytes.OrderByDescending(kv => kv.Value).Take(10).Select(kv => string.Create(CultureInfo.InvariantCulture, $"{kv.Key} {kv.Value / 1024.0 / frames.Count:N1}")))}"));
+        profWindowBytes = allBytes;
+        profWindowMainBytes = mainBytes;
+        profSectionBytes.Clear();
         // --metalfx: the temporal scaler's GPU time (SponzaLoop.MetalFx.cs).
         var metalFxLine = MetalFxProfile(frames.Count);
         if (metalFxLine.Length > 0) Console.WriteLine($"[profile]   {metalFxLine}");
