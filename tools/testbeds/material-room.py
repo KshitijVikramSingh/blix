@@ -12,7 +12,8 @@ One row of stations (the ground comes from `blix khronos --room ground`), each o
   cloth-sheen               a draped sheet with KHR_materials_sheen
   candle                    a cylinder with a BLEND material (San Miguel's one)
 
-  uv run --with pillow --with numpy python3 tools/testbeds/material-room.py OUT_DIR   # writes OUT_DIR/material-room.gltf (+ .bin, leaf.png)
+  uv run --with pillow --with numpy python3 tools/testbeds/material-room.py OUT_DIR [leaves,glass,pane,cloth,candle]   # writes OUT_DIR/material-room.gltf (+ .bin, leaf.png)
+  (the optional list keeps only those stations, the first at x = 0: `blix gallery` places the groups apart in the Cornell room)
 
 Stations sit at x = 0, 1, 2, ... (spacing 1 m) on z = 0, facing +z; a camera at (3.5, 1.1, 5) looking -z sees them all. Place it with the existing `blix khronos --model` step
 (setup.sh does this under BLIX_TESTBED_MATERIAL_ROOM=1).
@@ -47,6 +48,9 @@ def mesh(pos, nrm, uv, idx, material):
             "indices": add_accessor(idx, 5125, "SCALAR", 34963), "material": material}
     meshes.append({"primitives": [prim]})
     return len(meshes) - 1
+
+
+group_of = {}   # station name prefix -> the --only group it belongs to
 
 
 def node(name, m, t=(0, 0, 0), rot=None):
@@ -122,6 +126,7 @@ def leaf_texture(path):
 
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else "material-room"
+    only = sys.argv[2].split(",") if len(sys.argv) > 2 else None   # --only groups: leaves, glass, pane, cloth, candle (a gallery places them apart)
     os.makedirs(out, exist_ok=True)
     leaf_texture(os.path.join(out, "leaf.png"))
     base = lambda c, r=0.5, m=0.0: {"baseColorFactor": [*c, 1], "roughnessFactor": r, "metallicFactor": m}
@@ -178,6 +183,12 @@ def main():
     node("cloth-sheen", mesh(pos, nrm, uv, idx, m_sheen), (5.3, 0.15, 0))
     node("candle", mesh(*lathe([(0.02, 0), (0.02, 0.12)], 16), m_candle), (6.0, 0, 0))
 
+    groups = {"leaf": "leaves", "goblet": "glass", "carafe": "glass", "pane": "pane", "post": "pane", "cloth": "cloth", "candle": "candle"}
+    if only:
+        nodes[:] = [n for n in nodes if groups.get(n["name"].split("-")[0]) in only]
+        x0 = min(n["translation"][0] for n in nodes)
+        for n in nodes:
+            n["translation"][0] -= x0
     # the glTF puts a default sun-lit ground: the engine places it, so no lights here.
     g = {"asset": {"version": "2.0", "generator": "material-room.py"}, "scene": 0, "scenes": [{"nodes": list(range(len(nodes)))}],
          "nodes": nodes, "meshes": meshes, "materials": materials, "accessors": accessors, "bufferViews": views,

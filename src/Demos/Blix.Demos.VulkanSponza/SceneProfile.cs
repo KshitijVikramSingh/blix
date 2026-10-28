@@ -267,6 +267,15 @@ internal sealed record SceneProfile(
     public static readonly SceneProfile MaterialRoom = KhronosBsdf("material-room", "Vulkan material room", new Vector3(3f, 0.8f, 4.5f), 0f);
     public static readonly SceneProfile KhronosGlassVase = KhronosBsdf("khronos-glassvase", "Vulkan Khronos glass vase with flowers", new Vector3(0f, 0.5f, 1.5f), 0f);
     public static readonly SceneProfile HabelLeaves = KhronosBsdf("habel-leaves", "Vulkan Habel measured leaves", new Vector3(0.9f, 0.5f, 2.5f), 0f);
+    /// <summary>The Cornell room with every material sample at once (tools/testbeds/gallery.sh): the GI and the materials together.</summary>
+    public static readonly SceneProfile MaterialGallery = Cornell with
+    {
+        Name = "material-gallery",
+        Title = "Vulkan material gallery",
+        Packs = new ScenePack[] { new("material-gallery", Required: true) },
+        StartPosition = new Vector3(0f, 1.7f, 6.3f),
+        StartPitch = -8f,
+    };
     public static readonly SceneProfile KhronosLamp = KhronosBsdf("khronos-lamp", "Vulkan Khronos iridescent lamp", new Vector3(0f, 1.0f, 4f), 0f);
 
     /// <summary>Two rooms sharing a 0.1 m wall, one open to the sky, one sealed (<c>blix thinwall</c>): a leak scene.</summary>
@@ -349,7 +358,7 @@ internal sealed record SceneProfile(
         StartPitch = 5f,
     };
 
-    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, CornellPanel, Drapes, SheetSlab, SheetShell, SheetShellThin, ThinWall, Crevices, CrevicesDark, CrevicesHashed, KhronosPlant, KhronosTeacup, KhronosTest, KhronosAlpha, KhronosTransmission, KhronosDragon, KhronosCoat, KhronosAniso, KhronosSheen, KhronosIrid, KhronosLamp, MaterialRoom, KhronosGlassVase, HabelLeaves, CrytekSponza };
+    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, CornellPanel, Drapes, SheetSlab, SheetShell, SheetShellThin, ThinWall, Crevices, CrevicesDark, CrevicesHashed, KhronosPlant, KhronosTeacup, KhronosTest, KhronosAlpha, KhronosTransmission, KhronosDragon, KhronosCoat, KhronosAniso, KhronosSheen, KhronosIrid, KhronosLamp, MaterialRoom, MaterialGallery, KhronosGlassVase, HabelLeaves, CrytekSponza };
 
     /// <summary>The profile <c>--scene</c> names, Sponza when it names none.</summary>
     public static SceneProfile Named(string? name)
