@@ -131,11 +131,13 @@ internal sealed partial class SponzaLoop
         // Every second pixel each way: a quarter of the bytes (a full-resolution frame is 56 MB of floats), and a
         // probe-sized spot is many pixels wide.
         var pixels = device.ReadTexture(graph.GetColorTexture(target), out var fw, out var fh, out var format);
-        var (w, h) = (fw / 2, fh / 2);
+        // BLIX_DUMP_FULL=1: every pixel (a pattern at the pixel scale -- a 2x2 checker -- is gone at every second).
+        var step = Environment.GetEnvironmentVariable("BLIX_DUMP_FULL") == "1" ? 1 : 2;
+        var (w, h) = (fw / step, fh / step);
         var rgb = new float[w * h * 3];
         for (var o = 0; o < w * h; o++)
         {
-            var i = (o / w) * 2 * fw + (o % w) * 2;
+            var i = (o / w) * step * fw + (o % w) * step;
             if (format == TextureFormat.Rgba16F)
             {
                 for (var c = 0; c < 3; c++) rgb[o * 3 + c] = (float)BitConverter.ToHalf(pixels, i * 8 + c * 2);

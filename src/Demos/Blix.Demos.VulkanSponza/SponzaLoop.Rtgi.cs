@@ -1093,7 +1093,10 @@ internal sealed partial class SponzaLoop
             return;
         }
         // Reused from last frame's readout where it is there and the panel's views are off (they paint every pixel).
-        var reuse = rtgiReuse && rtgiView == 0 && rtgiReuseFrame == rtgiFrameCount - 1;
+        // Not while the camera moves (rtgiMotionNow): the cells the view reaches are filling and drifting, and the reused 16 x 16
+        // blocks against the fresh ones showed as a checkerboard turning in motion (the user, 2026-10-28) -- the settled-cells
+        // rule (rtgi_readout.frag) left a band of it. 0.16 ms a moving frame (Crytek Sponza 1080p, the walk A/B).
+        var reuse = rtgiReuse && rtgiView == 0 && rtgiReuseFrame == rtgiFrameCount - 1 && rtgiMotionNow <= 0f;
         graph.Pass(rtgiReadoutPassHandle, scope => fullscreen.Draw(
             scope, rtgiReadoutPipeline,
             new[]

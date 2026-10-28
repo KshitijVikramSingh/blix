@@ -100,6 +100,8 @@ uint rtgiFindKept(uvec2 h, vec4 params) {
 
 // Trilinear over the level's cells around p (their centres), w the weight found.
 uint lookups = 0u, misses = 0u;
+// Whether every cell the light was read from held a full fade's samples (32): the light the reuse below may keep.
+bool settledRead = true;
 
 vec4 readLevel(vec3 p, uint side, uint level, out float sky, out vec3 bvec, out float near, out float far) {
     float size = rtgiSize(level, u.uParams);
@@ -140,6 +142,7 @@ vec4 readLevel(vec3 p, uint side, uint level, out float sky, out vec3 bvec, out 
         // Weighted by what it holds too, full at 32 samples: a new cell (a landing just requested, a level just blended in,
         // one refilled) fades in under its neighbours rather than showing its first draw -- odd lights that came and went.
         float wk = b.x * b.y * b.z * clamp(held / 32.0, 1.0 / 32.0, 1.0);
+        if (held < 32.0) settledRead = false;
         vec2 rg = unpackHalf2x16(a.x), bs = unpackHalf2x16(a.y);
         vec2 dxy = unpackHalf2x16(c.x), dzn = unpackHalf2x16(c.y);
         e += vec3(rg, bs.x) * wk;
@@ -222,6 +225,7 @@ void main() {
             ivec2 halfSize = textureSize(uHistGuide, 0);
             float dist = length(p - u.uCamera.xyz);
             vec4 raw = vec4(0.0), grad = vec4(0.0), blurred = vec4(0.0);
+            float settled = 0.0;
             float wSum = 0.0;
             for (int k = 0; k < 4; k++) {
                 ivec2 j = j0 + ivec2(k & 1, k >> 1);
@@ -232,11 +236,16 @@ void main() {
                 if (dot(guideNormalOf(g), n) <= 0.95 || abs(dot(n, gp - p)) >= 0.01 * dist + 0.01 || length(gp - p) >= u.uReuse.z * dist) continue;
                 float w = ((k & 1) == 1 ? tj.x : 1.0 - tj.x) * ((k >> 1) == 1 ? tj.y : 1.0 - tj.y);
                 raw += texelFetch(uHistRaw, j, 0) * w;
-                grad += texelFetch(uHistGradient, j, 0) * w;
+                vec4 gj = texelFetch(uHistGradient, j, 0);
+                grad += gj * w;
+                settled += (gj.w > 0.5 ? 1.0 : 0.0) * w;
                 blurred += texelFetch(uHistBlurred, j, 0) * w;
                 wSum += w;
             }
-            if (wSum >= 0.5) {
+            // Only light read from settled cells (the gradient's w): a cell still learning changes frame to frame, and
+            // its reused 16 x 16 blocks against the fresh ones beside them showed as a checkerboard of squares turning
+            // through the four phases in motion (the user, Crytek Sponza's roof and dim corners, 2026-10-28).
+            if (wSum >= 0.5 && settled >= 0.999 * wSum) {
                 outIncident = raw / wSum;
                 outIncidentGradient = grad / wSum;
                 outReuse = blurred / wSum;
@@ -343,4 +352,6 @@ void main() {
         outIncident = vec4(c, sky);
     }
     if (e.w > 0.0 && u.uNearField.y > 0.5) outIncidentGradient = vec4((8.0 / 3.0) * (bv - dot(bv, n) * n), 0.0);
+    // w: the light came from settled cells alone (settledRead), for the next frame's reuse.
+    outIncidentGradient.w = e.w > 0.0 && settledRead ? 1.0 : 0.0;
 }
