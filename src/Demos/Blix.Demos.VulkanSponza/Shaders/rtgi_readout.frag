@@ -49,7 +49,7 @@ layout(std430, set = 0, binding = 8) readonly buffer RtgiConfidence { vec4 rtgiC
 // reads and zeroes them at the profile window.
 // z, w: the sampled pixels' cell lookups, and those that found no cell (a miss walks all RTGI_PROBES slots); [4], [5]
 // the sampled pixels with a blur radius, and those under a half-res pixel (the blur reads nothing for them).
-layout(std430, set = 0, binding = 9) buffer RtgiDoneCount { uint doneCount[8]; };
+layout(std430, set = 0, binding = 9) buffer RtgiDoneCount { uint doneCount[10]; };
 // Per half-res pixel: how unsure its cell is, for the next frame's ray placement (rtgi_rays.comp) -- read there for
 // a texel's price, where each candidate found its cell in the hash itself: 5.8 ms a frame at 4x the rays (Crytek
 // Sponza, 2026-10-26). The blend's relative error, at least the done threshold; a done cell an eighth of that; a cell
@@ -318,6 +318,8 @@ void main() {
         float relD = sd != 0xFFFFFFFFu ? unpackHalf2x16(rtgiRecord[2u * sd].z).x : 1.0;
         if (relD < 0.01) atomicAdd(doneCount[6], 1u);
         if (relD < 0.03) atomicAdd(doneCount[7], 1u);
+        // Its relative error summed (4096ths, at most 1): the screen's mean, the point budget's need (SponzaLoop.RtgiBudget.cs).
+        atomicAdd(doneCount[8], uint(clamp(relD, 0.0, 1.0) * 4096.0));
     }
     // The RTGI panel's views (uContact.w, SponzaLoop.RtgiDebug.cs), the pixel's own cell (its level's, nearest) painted
     // in place of its light: 1 done (green) or open (red), by the light; 2 how unsure, the blend's relative error, from

@@ -28,8 +28,13 @@ internal sealed partial class SponzaLoop
     // failing to find a slot).
     // --rtgi-tiles / --rtgi-hits: 292,000 visible points and 128,000 from last frame's hits a frame (4x the 73,000 / 32,000
     // before): with placement in blocks, Crytek Sponza 33.4 ms a frame against 29.4 at 1x; Cornell's noise left at 60
-    // frames 0.70% against 1.14%, at 16.5 ms against 8.7 -- better in the same second (2026-10-26).
-    private int rtgiTiles = 292_000, rtgiHitPoints = 128_000, rtgiSlotsLog2 = 22;
+    // frames 0.70% against 1.14%, at 16.5 ms against 8.7 -- better in the same second (2026-10-26). 220,000 visible since
+    // 2026-10-28: each point ~18 ns of a frame through placement, the trace and the training, 70% of 292,000 -1.55 ms (the
+    // in-boot A/B), and Crytek Sponza's truth 0.133 / 0.093 / 0.090 at frames 60 / 1200 / 3000 against 0.131 / 0.092 /
+    // 0.090 (~0.003 run to run). 64,000 from hits since 2026-10-28: half -1.03 ms, the still view's truth the same, a 90
+    // degree turn's the same, an instant sun jump's 0.186 / 0.114 / 0.086 at 30 / 120 / 600 frames after it against 0.178 /
+    // 0.110 / 0.087 (a real sun moves a few degrees at a time; the budget spends more on it, SponzaLoop.RtgiBudget.cs).
+    private int rtgiTiles = 220_000, rtgiHitPoints = 64_000, rtgiSlotsLog2 = 22;
     // Cells untrained for --rtgi-max-age frames are emptied: 1,800 (30 s at 60 fps; at 600 a walk back to a place left 10 s
     // before found it gone and re-settling, 2026-10-26).
     // Cells 5 cm, growing 0.5 cm a metre from the camera (doubling every ~10 m; at 1 cm, every ~5 m, mid-distance GI went
@@ -356,6 +361,7 @@ internal sealed partial class SponzaLoop
     private void ParseRtgi(Blix.Core.AppArgs args)
     {
         rtgi = args.Flag("rtgi");
+        ParseRtgiBudget(args);
         if (args.Int("rtgi-seed") is { } sd) rtgiSeed = (uint)Math.Max(0, sd);
         if (args.Float("rtgi-hit-sun") is { } hs) rtgiHitSun = MathF.Max(0f, hs);
         if (args.Flag("rtgi-no-trace-hit-sun")) rtgiTraceHitSun = false;
@@ -601,17 +607,20 @@ internal sealed partial class SponzaLoop
     {
         rtgiHalfRow = HalfLightingSize(width, height).Width;
         if (!rtgi || frameTracer is not { } tracer) return;
-        var n = RtgiPoints;
+        // This frame's spend (SponzaLoop.RtgiBudget.cs; the most without --rtgi-budget); the buffers are sized for the most.
+        var lastTotal = rtgiLastPointTotal;
+        var n = rtgiTilesNow + rtgiHitsNow;
         if (rtgiKeys.Equals(default(GpuBufferHandle)))
         {
+            var most = RtgiPoints;
             GpuBufferHandle[] Two(int bytes, string name) =>
                 Enumerable.Range(0, 2).Select(s => Own(device.CreateGpuBuffer(bytes, name: $"sponza.rtgi.{name}{s}"))).ToArray();
-            rtgiPointsBuf = Two(n * 32, "points");
-            rtgiPointOriginsBuf = Two(n * 48, "point-origins");
-            rtgiRaysBuf = Two(n * 32, "rays");
-            rtgiHitsBuf = Two(n * 48, "hits");
-            rtgiOriginsBuf = Two(n * 16, "origins");
-            rtgiOccludedBuf = Two(n * 4, "occluded");
+            rtgiPointsBuf = Two(most * 32, "points");
+            rtgiPointOriginsBuf = Two(most * 48, "point-origins");
+            rtgiRaysBuf = Two(most * 32, "rays");
+            rtgiHitsBuf = Two(most * 48, "hits");
+            rtgiOriginsBuf = Two(most * 16, "origins");
+            rtgiOccludedBuf = Two(most * 4, "occluded");
             // Three, in turn by frame (RtgiRequestSlot): the training appends to this frame's while the next frame's
             // placement, beside the async update (DeclareRtgiCachePasses), reads the one two frames back and empties the
             // one after.
@@ -624,14 +633,16 @@ internal sealed partial class SponzaLoop
             rtgiBlurRadius = Own(device.CreateGpuBuffer(RtgiUnsureSize * 4, new byte[RtgiUnsureSize * 4], "sponza.rtgi.blur-radius"));
             rtgiHitInv = Own(device.CreateGpuBuffer(RtgiSlots * 4, new byte[RtgiSlots * 4], "sponza.rtgi.hit-inv"));
             rtgiRecord = Own(device.CreateGpuBuffer(RtgiSlots * 32, new byte[RtgiSlots * 32], "sponza.rtgi.record"));
-            rtgiStats = Own(device.CreateGpuBuffer(256, new byte[256], "sponza.rtgi.stats"));
+            // Readable where it lies: the budget reads its counters each frame without a wait (SponzaLoop.RtgiBudget.cs).
+            rtgiStats = Own(device.CreateReadableGpuBuffer(256, "sponza.rtgi.stats"));
             rtgiOccupancy = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.rtgi.occupancy"));
             rtgiSeq = Own(device.CreateGpuBuffer(RtgiSlots * 4, new byte[RtgiSlots * 4], "sponza.rtgi.seq"));
             rtgiStands = Own(device.CreateGpuBuffer(RtgiSlots * 4, new byte[RtgiSlots * 4], "sponza.rtgi.stands"));
             rtgiGuideKeys = Own(device.CreateGpuBuffer(RtgiGuideSlots * 4, new byte[RtgiGuideSlots * 4], "sponza.rtgi.guide-keys"));
             rtgiGuideAccum = Own(device.CreateGpuBuffer(RtgiGuideSlots * 33 * 4, new byte[RtgiGuideSlots * 33 * 4], "sponza.rtgi.guide-accum"));
             rtgiGuideDist = Own(device.CreateGpuBuffer(RtgiGuideSlots * 9 * 16, new byte[RtgiGuideSlots * 9 * 16], "sponza.rtgi.guide-dist"));
-            rtgiDoneCount = Own(device.CreateGpuBuffer(32, new byte[32], "sponza.rtgi.done-count"));
+            // Readable where it lies: the budget reads the visible's error each frame without a wait (SponzaLoop.RtgiBudget.cs).
+            rtgiDoneCount = Own(device.CreateReadableGpuBuffer(40, "sponza.rtgi.done-count"));
             rtgiResolved = Own(device.CreateGpuBuffer(RtgiSlots * 32, new byte[RtgiSlots * 32], "sponza.rtgi.resolved"));
             rtgiPushScratch = Own(device.CreateGpuBuffer(16 + RtgiPushRoom * 16 * 4, new byte[16 + RtgiPushRoom * 16 * 4], "sponza.rtgi.push-scratch"));
             rtgiMoments = Own(device.CreateGpuBuffer(RtgiSlots * 48, new byte[RtgiSlots * 48], "sponza.rtgi.moments"));
@@ -915,17 +926,18 @@ internal sealed partial class SponzaLoop
         }
 
     BenchPlacement:
-        var tilesX = Math.Max(1, (int)MathF.Round(MathF.Sqrt(rtgiTiles * (float)width / height)));
-        var tilesY = Math.Max(1, (rtgiTiles + tilesX - 1) / tilesX);
+        var tilesX = Math.Max(1, (int)MathF.Round(MathF.Sqrt(rtgiTilesNow * (float)width / height)));
+        var tilesY = Math.Max(1, (rtgiTilesNow + tilesX - 1) / tilesX);
         // The visible points are as many tiles as the grid has (a whole grid, so every row is covered).
         Matrix4x4.Invert(viewProjJittered, out var invViewProj);
+        rtgiLastPointTotal = Math.Min(rtgiTilesNow, tilesX * tilesY) + rtgiHitsNow;
         var place = new DispatchCommand(rtgiRaysPipeline, groups, 1, 1,
             new ShaderUniform[]
             {
                 new("uInvViewProj", new Matrix4x4Uniform(invViewProj)),
                 new("uSize", new Vector4Uniform(new Vector4(width, height, tilesX, tilesY))),
                 new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, 0f))),
-                new("uCounts", new Vector4Uniform(new Vector4(Math.Min(rtgiTiles, tilesX * tilesY), rtgiHitPoints, RtgiRandomFrame, rayReach))),
+                new("uCounts", new Vector4Uniform(new Vector4(Math.Min(rtgiTilesNow, tilesX * tilesY), rtgiHitsNow, RtgiRandomFrame, rayReach))),
                 new("uSun", new Vector4Uniform(new Vector4(towardSun, rtgiTraced > 0 ? 1f : 0f))),
                 new("uParams", new Vector4Uniform(RtgiParams)),
                 new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, 0f, 0f, 0f))),
@@ -933,7 +945,7 @@ internal sealed partial class SponzaLoop
                 new("uAdapt", new Vector4Uniform(new Vector4(rtgiAdaptive, rtgiAdaptiveK, rtgiDoneError, rtgiTrickle))),
                 new("uSkip", new Vector4Uniform(new Vector4((rtgiBenching && rtgiBenchPass == "rays" ? (int)rtgiTrainDouble : 0) | (rtgiPool ? 0 : 16), 0, 0, 0))),
                 new("uBudget", new Vector4Uniform(new Vector4(rtgiBudgetError, rtgiBudgetFloor, rtgiSettledSamples, rtgiSettledKeep))),
-                new("uBlock", new Vector4Uniform(new Vector4(rtgiBlock ? 1f : 0f, rtgiBlockGlobal, rtgiBlockWindow, 0f))),
+                new("uBlock", new Vector4Uniform(new Vector4(rtgiBlock ? 1f : 0f, rtgiBlockGlobal, rtgiBlockWindow, lastTotal))),
                 new("uUnsureMap", new Vector4Uniform(new Vector4(rtgiHalfRow, rtgiUnsureWritten ? 1f : 0f, RtgiUnsureSize, 0f))),
                 new("uSeq", new Vector4Uniform(new Vector4(rtgiBlue ? 1f : 0f, rtgiRedraw ? 1f : 0f, rtgiSettledSun ? 1f : 0f, 0f))),
             },
@@ -1249,7 +1261,7 @@ internal sealed partial class SponzaLoop
         var frames = Math.Max(1L, rtgiTraced - rtgiStatsTraced);
         rtgiStatsTraced = rtgiTraced;
         string F(int i) => (w[i] / (double)frames).ToString("N0", CultureInfo.InvariantCulture);
-        return $"; work a frame: points {F(1)}, updates by offset {F(2)}/{F(3)}/{F(4)}/{F(5)}/{F(6)}, new listings {F(7)}/{F(8)}/{F(9)}/{F(10)}/{F(11)}; "
+        return RtgiBudgetWork() + $"; work a frame: points {F(1)}, updates by offset {F(2)}/{F(3)}/{F(4)}/{F(5)}/{F(6)}, new listings {F(7)}/{F(8)}/{F(9)}/{F(10)}/{F(11)}; "
             + $"resolve listed {F(12)}, rota-skipped {F(13)}, young {F(14)}, settled {F(15)} (drifted {F(16)}); "
             + $"blend listed {F(18)}, skipped {F(19)}, blended {F(20)}; "
             + $"evicted by level {F(21)}/{F(22)}/{F(23)}/{F(24)}/{F(25)}/{F(26)}, contact {F(27)}, holding 8+ {F(28)}; "

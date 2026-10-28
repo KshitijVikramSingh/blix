@@ -31,7 +31,8 @@ layout(set = 0, binding = 0) uniform RtgiRays {
                          // done cell's points keeps its ray (the validation trickle)
     vec4 uBlock;         // x 1: placement in blocks (a subgroup's 32 points own an 8 x 4 block of tiles, their candidates
                          // within uBlock.z tiles but for a uBlock.y share drawn anywhere; hit points in strides); y the
-                         // global share; z the window (tiles)
+                         // global share; z the window (tiles); w last frame's points, whose rays the hit points draw from
+                         // (0: as many as this frame's -- the budget changes the count, SponzaLoop.RtgiBudget.cs)
     vec4 uUnsureMap;     // x the uncertainty map's row (half-res pixels); y 1: written last frame (else depth asked); z its size
     vec4 uSkip;          // x measurement bits (the bench, SponzaLoop.RtgiBench.cs; each changes the points): 1 no adaptive
                          // candidates (the own tile only), 2 no cell lookup (no sun skip, no sequence), 4 no guide, 8 no hit
@@ -262,10 +263,11 @@ void main() {
             // A share of last frame's training rays, spread over all of them and turning each frame.
             // In blocks, in strides from a turning offset: neighbouring points take neighbouring rays (theirs came from one
             // block), so stay together.
-            uint k = (hash(i ^ frame * 0x632BE5ABu)) % total;
+            uint lastTotal = u.uBlock.w > 0.5 ? uint(u.uBlock.w) : total;
+            uint k = (hash(i ^ frame * 0x632BE5ABu)) % lastTotal;
             if (u.uBlock.x > 0.5) {
-                uint stride = max(1u, total / max(uint(u.uCounts.y), 1u));
-                k = (j * stride + hash(frame ^ 0x632BE5ABu) % stride) % total;
+                uint stride = max(1u, lastTotal / max(uint(u.uCounts.y), 1u));
+                k = (j * stride + hash(frame ^ 0x632BE5ABu) % stride) % lastTotal;
             }
             uvec4 h0 = prevHits[3u * k];
             // A hit on a surface's front (bit 2): a back face is inside something, nothing to train.

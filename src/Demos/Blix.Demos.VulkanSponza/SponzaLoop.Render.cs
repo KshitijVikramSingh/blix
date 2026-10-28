@@ -772,7 +772,11 @@ internal sealed partial class SponzaLoop
         using (Prof("rt-shadows")) RecordRtShadows(frame.Width, frame.Height);
         using (Prof("rtgi-probe")) RecordRtgiProbe(frame.Width, frame.Height);
         if (rtgi && !texelsUploaded) ApplySunChangeIfDue();
-        using (Prof("rtgi")) RecordRtgi(frame.Width, frame.Height);
+        using (Prof("rtgi"))
+        {
+            UpdateRtgiBudget();
+            RecordRtgi(frame.Width, frame.Height);
+        }
         RtgiDumpIfDue();
         CookTransportWhenReady();
         CookGiWhenLanded();

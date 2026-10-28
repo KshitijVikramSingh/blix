@@ -297,6 +297,16 @@ internal sealed partial class SponzaLoop
     private StreamWriter? cpuFrameSeries;
     private bool cpuFrameSeriesChecked;
 
+    // BLIX_AB=N: an in-boot A/B -- a probe's arm (AbArm, 0 or 1) turns every N frames from post-load frame 1800, both arms
+    // in one boot, the ~1 ms boot-to-boot swing out of the comparison; cpu-frames.csv's mark column says which arm each
+    // frame ran (tools: the job's inboot.py). Two boots of the same build measured 11.92 and 10.91 ms (2026-10-28). In
+    // the order A B B A: frames still speed up as the cache settles, and A B A B put the earlier, slower window in A every
+    // time -- an A/B with nothing changed read -0.95 ms.
+    private static readonly int abWindow = int.TryParse(Environment.GetEnvironmentVariable("BLIX_AB"), out var ab) ? ab : 0;
+    private int AbArm => abWindow > 0 && postLoadFrames >= 1800 && ((postLoadFrames - 1800) / abWindow % 4) is 1 or 2 ? 1 : 0;
+    // The series' mark: the arm, -1 before the A/B starts (the warm-up, in neither).
+    private int AbMark => abWindow <= 0 ? 0 : postLoadFrames < 1800 ? -1 : AbArm;
+
     private void WriteCpuFrameSeries(ProfFrame frame)
     {
         if (!cpuFrameSeriesChecked)
@@ -306,12 +316,12 @@ internal sealed partial class SponzaLoop
             {
                 Directory.CreateDirectory(dir);
                 cpuFrameSeries = new StreamWriter(Path.Combine(dir, "cpu-frames.csv"));
-                cpuFrameSeries.WriteLine("frame,interval_ms,wait_ms,encode_ms,submit_present_ms");
+                cpuFrameSeries.WriteLine("frame,interval_ms,wait_ms,encode_ms,submit_present_ms,mark");
             }
         }
         if (cpuFrameSeries is null) return;
         cpuFrameSeries.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"{framesRendered},{frame.Interval:0.000},{frame.Wait:0.000},{frame.Encode:0.000},{frame.Present:0.000}"));
+            $"{framesRendered},{frame.Interval:0.000},{frame.Wait:0.000},{frame.Encode:0.000},{frame.Present:0.000},{AbMark}"));
         if (framesRendered % 120 == 0) cpuFrameSeries.Flush();
     }
 }
