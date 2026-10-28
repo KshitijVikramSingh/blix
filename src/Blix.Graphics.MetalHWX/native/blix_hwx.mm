@@ -1559,10 +1559,15 @@ HWX_EXPORT int hwx_fx_encode(HwxContext* ctx, void* sharedEvent, uint64_t waitVa
         if (result == 0 && (UsageMissing(ctx, c, gFx.scaler.colorTextureUsage, "colour") || UsageMissing(ctx, d, gFx.scaler.depthTextureUsage, "depth")
                             || UsageMissing(ctx, m, gFx.scaler.motionTextureUsage, "motion") || UsageMissing(ctx, o, gFx.scaler.outputTextureUsage, "output")))
             result = 1;
-        // Its own command buffer, ordered on the frame's timeline: waits for the frame's work so far, signals the rest on.
+        // Ordered on the frame's timeline: a command buffer that only waits for the frame's work so far, then the scaler's
+        // own, which signals the rest on. The wait apart, the scaler's command buffer's GPU span is the scaler's alone --
+        // with the wait in it, the span held the frame's work before it too (6 ms read for the scaler, 2026-10-28).
+        id<MTLCommandBuffer> waitCb = [ctx->queue commandBuffer];
+        waitCb.label = @"blix-hwx metalfx wait";
+        [waitCb encodeWaitForEvent:event value:waitValue];
+        [waitCb commit];
         id<MTLCommandBuffer> cb = [ctx->queue commandBuffer];
         cb.label = @"blix-hwx metalfx";
-        [cb encodeWaitForEvent:event value:waitValue];
         if (result == 0) {
             id<MTLFXTemporalScaler> s = gFx.scaler;
             s.colorTexture = c;

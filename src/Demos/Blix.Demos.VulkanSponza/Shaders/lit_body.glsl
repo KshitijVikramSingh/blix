@@ -783,7 +783,10 @@ void main() {
     // Specular: prefiltered env at LOD = roughness × (mipCount - 1), times
     // the BRDF LUT integration (split-sum approximation of the specular term).
     vec3 specularIBL = vec3(0.0);
-    if (frame.uAbFlags.z < 0.5) {
+    // Not where the pixel sees almost no sky (corridors, under the arcades): the term is scaled by that visibility, so
+    // under 2% of it is left out, and the read and its maths with it -- 0.13 ms of the lit pass (Crytek Sponza 1080p,
+    // the in-boot A/B twice, 2026-10-28).
+    if (frame.uAbFlags.z < 0.5 && skyVisibility >= 0.02) {
         float lod = roughness * (frame.uEnvMipCount - 1.0);
         vec3 prefiltered = textureLod(samplerCube(uPrefilteredEnv, uLinearClamp), R, lod).rgb;
         // The split sum's scale and bias by Karis' analytic fit (Unreal's mobile EnvBRDFApprox), not the LUT's read: the read
