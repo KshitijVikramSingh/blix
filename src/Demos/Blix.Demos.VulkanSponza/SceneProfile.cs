@@ -273,8 +273,8 @@ internal sealed record SceneProfile(
         Name = "material-gallery",
         Title = "Vulkan material gallery",
         Packs = new ScenePack[] { new("material-gallery", Required: true) },
-        StartPosition = new Vector3(0f, 1.7f, 6.3f),
-        StartPitch = -8f,
+        StartPosition = new Vector3(0.2f, 1.4f, 3.8f),
+        StartPitch = -10f,
     };
     public static readonly SceneProfile KhronosLamp = KhronosBsdf("khronos-lamp", "Vulkan Khronos iridescent lamp", new Vector3(0f, 1.0f, 4f), 0f);
 
