@@ -38,7 +38,7 @@ dotnet "$REPO/src/Blix.Tools.Cook/bin/Debug/net8.0/Blix.Tools.Cook.dll" asset "$
 # khronos-teacup in the Cornell room's sunlit shaft, khronos-test on open ground (tools/testbeds/materials.sh judges them).
 if [[ "${BLIX_TESTBED_KHRONOS:-0}" == 1 ]]; then
     K="$SRC/khronos"
-    for m in DiffuseTransmissionPlant DiffuseTransmissionTeacup DiffuseTransmissionTest AlphaBlendModeTest TransmissionTest DragonAttenuation ClearCoatTest AnisotropyDiscTest SheenChair IridescenceSuzanne IridescenceLamp; do
+    for m in DiffuseTransmissionPlant DiffuseTransmissionTeacup DiffuseTransmissionTest AlphaBlendModeTest TransmissionTest DragonAttenuation ClearCoatTest AnisotropyDiscTest SheenChair IridescenceSuzanne IridescenceLamp GlassVaseFlowers; do
         if [[ ! -f "$K/$m/$m.glb" ]]; then
             mkdir -p "$K/$m"
             base="https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/$m"
@@ -65,6 +65,20 @@ if [[ "${BLIX_TESTBED_KHRONOS:-0}" == 1 ]]; then
     khronos khronos-sheen --model "$K/SheenChair/SheenChair.glb" --scale 1 --at 0,0,0 --rest --room ground
     khronos khronos-irid --model "$K/IridescenceSuzanne/IridescenceSuzanne.glb" --scale 1 --at 0,0,0 --rest --room ground
     khronos khronos-lamp --model "$K/IridescenceLamp/IridescenceLamp.glb" --scale 1 --at 0,0,0 --rest --room ground
+    # material-room: foliage cut-outs, thin glass, a pane, cloth and sheen in one row (tools/testbeds/material-room.py), the cheap bench for what the big scenes get wrong.
+    mkdir -p "$SRC/material-room-src"
+    uv run --with pillow --with numpy python3 "$REPO/tools/testbeds/material-room.py" "$SRC/material-room-src"
+    khronos material-room --model "$SRC/material-room-src/material-room.gltf" --scale 1 --at 0,0,0 --room ground
+    khronos khronos-glassvase --model "$K/GlassVaseFlowers/GlassVaseFlowers.glb" --scale 1 --at 0,0,0 --rest --room ground
+    # habel-leaves: Habel, Kusternig and Wimmer's measured leaves (TU Wien 2007; no licence stated, so downloaded here and never committed), as cut-out cards with their
+    # translucency colour (tools/testbeds/habel-leaves.py): foliage lit from the front and from behind, and the same leaf with its alpha dropped.
+    if [[ ! -d "$SRC/habel/Leaf_textures" ]]; then
+        mkdir -p "$SRC/habel"
+        curl -sSfL -o "$SRC/habel/leaf.zip" "https://www.cg.tuwien.ac.at/research/publications/2007/Habel_2007_RTT/Habel_2007_RTT-Leaf%20textures.zip"
+        unzip -o -q "$SRC/habel/leaf.zip" -d "$SRC/habel"
+    fi
+    uv run --with pillow --with numpy python3 "$REPO/tools/testbeds/habel-leaves.py" "$SRC/habel/Leaf_textures" "$SRC/habel-leaves-src"
+    khronos habel-leaves --model "$SRC/habel-leaves-src/habel-leaves.gltf" --scale 1 --at 0,0,0 --room ground
     # crytek-sponza: Khronos' Sponza (Crytek's; the CRYENGINE Limited License -- downloaded here, never committed), cooked as
     # it is: the atrium at ~262 k triangles, Sponza's layout for quick runs (SceneProfile.CrytekSponza).
     if [[ ! -f "$K/Sponza/Sponza.gltf" ]]; then
