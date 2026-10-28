@@ -69,10 +69,14 @@ public sealed partial class VulkanGraphicsDevice
     internal SwapchainKHR Swapchain { get; private set; }
     internal Format SwapchainFormat { get; private set; }
     internal Extent2D SwapchainExtent { get; private set; }
-    internal Silk.NET.Vulkan.RenderPass DefaultRenderPass { get; private set; }
+    // Each in two forms, ending in the layout the default target is handed on in: presented (PresentSrc) or copied by
+    // the present thread (TransferSrc, decoupledPresent). Only layouts differ, so either is compatible with pipelines
+    // made against the other.
+    internal Silk.NET.Vulkan.RenderPass DefaultRenderPass => decoupledPresent ? defaultRenderPassCopied : defaultRenderPassPresented;
     // LoadOp.Load variant — picked when a Pass(...) has empty ClearColors so
     // an overlay paints over the scene. Framebuffer-compatible with DefaultRenderPass.
-    internal Silk.NET.Vulkan.RenderPass OverlayRenderPass { get; private set; }
+    internal Silk.NET.Vulkan.RenderPass OverlayRenderPass => decoupledPresent ? overlayRenderPassCopied : overlayRenderPassPresented;
+    private Silk.NET.Vulkan.RenderPass defaultRenderPassPresented, defaultRenderPassCopied, overlayRenderPassPresented, overlayRenderPassCopied;
 
     private Image[] swapchainImages = Array.Empty<Image>();
     private ImageView[] swapchainImageViews = Array.Empty<ImageView>();
@@ -193,6 +197,7 @@ public sealed partial class VulkanGraphicsDevice
         CreateTransientDescriptorPools();
         CreateTransientArena();
         CreateUniformArena();
+        if (decoupledPresent) StartPresentThread();
     }
 
     private unsafe void CreateDepthBuffer()
@@ -355,6 +360,14 @@ public sealed partial class VulkanGraphicsDevice
             extent.Height = Math.Clamp((uint)defaultSurfaceHeight, caps.MinImageExtent.Height, caps.MaxImageExtent.Height);
         }
         SwapchainExtent = extent;
+        decoupledPresent = DecoupledPresentPossible;
+        if (decoupledPresent)
+        {
+            CreatePresentResources();
+            // The render loop no longer waits for the display, so the present thread can: FIFO, no tearing, the newest
+            // finished frame at each refresh.
+            chosenPresent = PresentModeKHR.FifoKhr;
+        }
 
         var imageCount = caps.MinImageCount + 1;
         if (caps.MaxImageCount > 0 && imageCount > caps.MaxImageCount) imageCount = caps.MaxImageCount;
@@ -368,7 +381,8 @@ public sealed partial class VulkanGraphicsDevice
             ImageColorSpace = chosenFormat.ColorSpace,
             ImageExtent = extent,
             ImageArrayLayers = 1,
-            ImageUsage = ImageUsageFlags.ColorAttachmentBit,
+            // Drawn to, or (decoupledPresent) copied into by the present thread.
+            ImageUsage = ImageUsageFlags.ColorAttachmentBit | (decoupledPresent ? ImageUsageFlags.TransferDstBit : 0),
             ImageSharingMode = SharingMode.Exclusive,
             PreTransform = caps.CurrentTransform,
             CompositeAlpha = CompositeAlphaFlagsKHR.OpaqueBitKhr,
@@ -398,10 +412,20 @@ public sealed partial class VulkanGraphicsDevice
             ThrowIfNotSuccess(Vk.CreateSemaphore(Device, in semInfo, null, &s), "vkCreateSemaphore(renderFinished)");
             perImageRenderFinished[i] = s;
         }
+        if (decoupledPresent) CreatePresentReady();
+        Console.WriteLine(decoupledPresent
+            ? $"[Vulkan] present: decoupled -- {BackbufferCount} backbuffers, copied and presented from family {PresentQueueFamily}'s queue on its own thread."
+            : "[Vulkan] present: from the render loop.");
     }
 
     private unsafe void CreateImageViews()
     {
+        // Decoupled: the default target is the backbuffers', never the swapchain's own images.
+        if (decoupledPresent)
+        {
+            CreateBackbuffers();
+            return;
+        }
         swapchainImageViews = new ImageView[swapchainImages.Length];
         for (var i = 0; i < swapchainImages.Length; i++)
         {
@@ -425,7 +449,15 @@ public sealed partial class VulkanGraphicsDevice
         }
     }
 
-    private unsafe void CreateDefaultRenderPass()
+    private void CreateDefaultRenderPass()
+    {
+        defaultRenderPassPresented = CreateDefaultRenderPass(ImageLayout.PresentSrcKhr);
+        defaultRenderPassCopied = CreateDefaultRenderPass(ImageLayout.TransferSrcOptimal);
+        overlayRenderPassPresented = CreateOverlayRenderPass(ImageLayout.PresentSrcKhr);
+        overlayRenderPassCopied = CreateOverlayRenderPass(ImageLayout.TransferSrcOptimal);
+    }
+
+    private unsafe Silk.NET.Vulkan.RenderPass CreateDefaultRenderPass(ImageLayout handedOn)
     {
         var attachments = stackalloc AttachmentDescription[2];
         attachments[0] = new AttachmentDescription
@@ -437,7 +469,7 @@ public sealed partial class VulkanGraphicsDevice
             StencilLoadOp = AttachmentLoadOp.DontCare,
             StencilStoreOp = AttachmentStoreOp.DontCare,
             InitialLayout = ImageLayout.Undefined,
-            FinalLayout = ImageLayout.PresentSrcKhr,
+            FinalLayout = handedOn,
         };
         attachments[1] = new AttachmentDescription
         {
@@ -477,9 +509,7 @@ public sealed partial class VulkanGraphicsDevice
         };
         Silk.NET.Vulkan.RenderPass rp;
         ThrowIfNotSuccess(Vk.CreateRenderPass(Device, in ci, null, &rp), "vkCreateRenderPass");
-        DefaultRenderPass = rp;
-
-        CreateOverlayRenderPass();
+        return rp;
     }
 
     private static SubpassDependency SharedSubpassDependency() => new SubpassDependency
@@ -494,7 +524,7 @@ public sealed partial class VulkanGraphicsDevice
         DstAccessMask = AccessFlags.ColorAttachmentReadBit | AccessFlags.ColorAttachmentWriteBit | AccessFlags.DepthStencilAttachmentWriteBit,
     };
 
-    private unsafe void CreateOverlayRenderPass()
+    private unsafe Silk.NET.Vulkan.RenderPass CreateOverlayRenderPass(ImageLayout handedOn)
     {
         // LoadOp.Load on color (paint over the scene); depth DontCare both
         // ways so overlay lines stay always-on-top. initialLayout matches
@@ -508,8 +538,8 @@ public sealed partial class VulkanGraphicsDevice
             StoreOp = AttachmentStoreOp.Store,
             StencilLoadOp = AttachmentLoadOp.DontCare,
             StencilStoreOp = AttachmentStoreOp.DontCare,
-            InitialLayout = ImageLayout.PresentSrcKhr,
-            FinalLayout = ImageLayout.PresentSrcKhr,
+            InitialLayout = handedOn,
+            FinalLayout = handedOn,
         };
         attachments[1] = new AttachmentDescription
         {
@@ -552,7 +582,7 @@ public sealed partial class VulkanGraphicsDevice
         };
         Silk.NET.Vulkan.RenderPass rp;
         ThrowIfNotSuccess(Vk.CreateRenderPass(Device, in ci, null, &rp), "vkCreateRenderPass(overlay)");
-        OverlayRenderPass = rp;
+        return rp;
     }
 
     private unsafe void CreateFramebuffers()
@@ -880,7 +910,9 @@ public sealed partial class VulkanGraphicsDevice
     // The frame's end with an async run: no commands, waiting for the main work's signal (the frame timeline) and the
     // run's (its own), signalling the frame timeline's end value and the slot's fence (a fence signals for its own batch:
     // the waits put every earlier batch under it).
-    private unsafe void SubmitFrameEnd(ulong mainDone, ulong asyncDone, ulong end, Fence fence)
+    // onAsync: on the async queue, after the run (its own order), waiting for the main work and signalling the fence alone
+    // -- no timeline value, which there would come after the graphics queue's later ones (a timeline only rises).
+    private unsafe void SubmitFrameEnd(ulong mainDone, ulong asyncDone, ulong end, Fence fence, bool onAsync)
     {
         var waits = stackalloc Semaphore[2] { frameTimeline, asyncTimeline };
         var waitValues = stackalloc ulong[2] { mainDone, asyncDone };
@@ -889,23 +921,23 @@ public sealed partial class VulkanGraphicsDevice
         var timelineInfo = new TimelineSemaphoreSubmitInfo
         {
             SType = StructureType.TimelineSemaphoreSubmitInfo,
-            WaitSemaphoreValueCount = 2,
+            WaitSemaphoreValueCount = onAsync ? 1u : 2u,
             PWaitSemaphoreValues = waitValues,
-            SignalSemaphoreValueCount = 1,
-            PSignalSemaphoreValues = &end,
+            SignalSemaphoreValueCount = onAsync ? 0u : 1u,
+            PSignalSemaphoreValues = onAsync ? null : &end,
         };
         var submit = new SubmitInfo
         {
             SType = StructureType.SubmitInfo,
             PNext = &timelineInfo,
-            WaitSemaphoreCount = 2,
+            WaitSemaphoreCount = onAsync ? 1u : 2u,
             PWaitSemaphores = waits,
             PWaitDstStageMask = waitStages,
             CommandBufferCount = 0,
-            SignalSemaphoreCount = 1,
-            PSignalSemaphores = &signal,
+            SignalSemaphoreCount = onAsync ? 0u : 1u,
+            PSignalSemaphores = onAsync ? null : &signal,
         };
-        ThrowIfNotSuccess(Vk.QueueSubmit(GraphicsQueue, 1, in submit, fence), "vkQueueSubmit(frame end)");
+        ThrowIfNotSuccess(Vk.QueueSubmit(onAsync ? AsyncQueue : GraphicsQueue, 1, in submit, fence), "vkQueueSubmit(frame end)");
     }
 
     // BLIX_ASYNC_COMPUTE=off: async passes run in place on the graphics queue (the A/B).
@@ -1058,16 +1090,25 @@ public sealed partial class VulkanGraphicsDevice
         DrainSlotTimings(currentFrame);
 
         uint imageIndex;
-        var acquire = KhrSwapchain.AcquireNextImage(
-            Device, Swapchain, ulong.MaxValue, f.ImageAvailable, default, &imageIndex);
-        if (acquire == Result.ErrorOutOfDateKhr)
+        // Decoupled: a backbuffer, not a swapchain image -- its last copy waited for on the GPU (VulkanGraphicsDevice.Present).
+        ulong backbufferCopyWait = 0;
+        if (decoupledPresent)
         {
-            needsRecreate = true;
-            return false;
+            imageIndex = (uint)TakeBackbufferSlot(out backbufferCopyWait);
         }
-        if (acquire != Result.Success && acquire != Result.SuboptimalKhr)
+        else
         {
-            ThrowIfNotSuccess(acquire, "vkAcquireNextImageKHR");
+            var acquire = KhrSwapchain.AcquireNextImage(
+                Device, Swapchain, ulong.MaxValue, f.ImageAvailable, default, &imageIndex);
+            if (acquire == Result.ErrorOutOfDateKhr)
+            {
+                needsRecreate = true;
+                return false;
+            }
+            if (acquire != Result.Success && acquire != Result.SuboptimalKhr)
+            {
+                ThrowIfNotSuccess(acquire, "vkAcquireNextImageKHR");
+            }
         }
 
         Vk.ResetFences(Device, 1, in f.InFlight);
@@ -1120,7 +1161,8 @@ public sealed partial class VulkanGraphicsDevice
         // Only the FIRST submission of the frame may wait on imageAvailable; the rest are ordered
         // behind it on the same queue and by their own fences. If isolation flushed at least once,
         // the final submit must not wait on it again — a semaphore is consumed by the wait.
-        var isolationFirstSubmit = true;
+        var isolationFirstSubmit = !decoupledPresent;
+        if (backbufferCopyWait != 0) pendingExtraWaits.Add((presentTimeline, backbufferCopyWait));
         // Async compute (ComputePassBuilder.Async): the run of async passes being recorded (its buffer), and the timeline
         // value the frame's last submission waits for once it is out.
         var asyncCmd = default(CommandBuffer);
@@ -1477,7 +1519,9 @@ public sealed partial class VulkanGraphicsDevice
         // the next acquire.
         // A join that never came still holds the frame: its fence must mean the Metal work is done too.
         if (pendingJoins is not null) foreach (var value in pendingJoins.Values) timelineWait = Math.Max(timelineWait, value);
-        var renderDone = perImageRenderFinished[imageIndex];
+        // Decoupled: nothing presents from here, so no render-done semaphore; the present thread waits on the frame timeline.
+        var renderDone = decoupledPresent ? default : perImageRenderFinished[imageIndex];
+        ulong written = 0;
         if (asyncDone != 0)
         {
             // With an async run out: the frame's main work goes out without waiting for it (present waits only for that,
@@ -1487,8 +1531,14 @@ public sealed partial class VulkanGraphicsDevice
             var mainDone = ++frameTimelineValue;
             SubmitFrameBatch(cmd, ref isolationFirstSubmit, ref timelineWait, f.ImageAvailable, signalTimeline: mainDone, renderDone,
                 fence: default, "vkQueueSubmit");
-            var end = ++frameTimelineValue;
-            SubmitFrameEnd(mainDone, asyncDone, end, f.InFlight);
+            // Chained on the main work (asyncChainOn), nothing waits for the frame's end but its fence: the end goes on the
+            // async queue, behind the run, signalling the fence alone. On the graphics queue its wait for the run held
+            // every later batch there -- the next frame's and the present thread's copy -- until the cache's update was
+            // done (the trace's command buffers, Crytek Sponza 1080p, 2026-10-28).
+            var onAsync = asyncChainOn && HasAsyncQueue;
+            var end = onAsync ? 0 : ++frameTimelineValue;
+            SubmitFrameEnd(mainDone, asyncDone, end, f.InFlight, onAsync);
+            written = mainDone;
             // The next frame chained on the main work alone (asyncChainOn): it starts while this run is out, its first
             // pass reading what the run writes waiting for it (AfterAsync). Else on the frame's end, run and all.
             if (ChainFrames) previousFrameEnd = asyncChainOn ? mainDone : end;
@@ -1498,9 +1548,17 @@ public sealed partial class VulkanGraphicsDevice
         {
             // No async run read them: the frame's end waits for this frame's async external work itself.
             pendingExtraWaits.AddRange(asyncExternalWaits);
-            var frameEnd = ChainFrames && frameTimeline.Handle != 0 ? ++frameTimelineValue : 0;
+            var frameEnd = (ChainFrames || decoupledPresent) && frameTimeline.Handle != 0 ? ++frameTimelineValue : 0;
             SubmitFrameBatch(cmd, ref isolationFirstSubmit, ref timelineWait, f.ImageAvailable, signalTimeline: frameEnd, renderDone, f.InFlight, "vkQueueSubmit");
-            if (frameEnd != 0) previousFrameEnd = frameEnd;
+            if (frameEnd != 0 && ChainFrames) previousFrameEnd = frameEnd;
+            written = frameEnd;
+        }
+
+        if (decoupledPresent)
+        {
+            PublishBackbuffer((int)imageIndex, written);
+            FinishFrame(waitMs, encodeMs, swSubmit);
+            return defaultPasses > 0;
         }
 
         var swapchain = Swapchain;
@@ -1523,6 +1581,12 @@ public sealed partial class VulkanGraphicsDevice
             ThrowIfNotSuccess(presentResult, "vkQueuePresentKHR");
         }
 
+        FinishFrame(waitMs, encodeMs, swSubmit);
+        return defaultPasses > 0;
+    }
+
+    private void FinishFrame(double waitMs, double encodeMs, long swSubmit)
+    {
         var submitPresentMs = Stopwatch.GetElapsedTime(swSubmit, Stopwatch.GetTimestamp()).TotalMilliseconds;
         EndFrameCount(waitMs, encodeMs, submitPresentMs);
 
@@ -1540,7 +1604,6 @@ public sealed partial class VulkanGraphicsDevice
         // advance — same slot, same GPU-completeness argument.
         ResetUniformArenaSlot();
         AdvanceTextureUploadSlot();
-        return defaultPasses > 0;
     }
 
     // Fires under DeviceWaitIdle once the new swapchain is up — subscribers
@@ -1549,6 +1612,7 @@ public sealed partial class VulkanGraphicsDevice
 
     private void RecreateSwapchain()
     {
+        StopPresentThread();
         Vk.DeviceWaitIdle(Device);
         DestroySwapchainResources();
         CreateSwapchain();
@@ -1557,6 +1621,7 @@ public sealed partial class VulkanGraphicsDevice
         // RenderPass + command pool + sync survive: format + queue family
         // don't change on resize. Framebuffers do — attachment views changed.
         CreateFramebuffers();
+        if (decoupledPresent) StartPresentThread();
         SwapchainRecreated?.Invoke();
     }
 
@@ -1601,6 +1666,8 @@ public sealed partial class VulkanGraphicsDevice
             }
         }
         perImageRenderFinished = Array.Empty<Semaphore>();
+        DestroyPresentReady();
+        DestroyBackbuffers();
         if (Swapchain.Handle != 0 && KhrSwapchain is not null)
         {
             KhrSwapchain.DestroySwapchain(Device, Swapchain, null);
@@ -1611,6 +1678,7 @@ public sealed partial class VulkanGraphicsDevice
     private unsafe void DestroySwapchain()
     {
         if (Vk is null || Device.Handle == 0) return;
+        StopPresentThread();
         Vk.DeviceWaitIdle(Device);
         for (var i = 0; i < frames.Length; i++)
         {
@@ -1642,16 +1710,10 @@ public sealed partial class VulkanGraphicsDevice
         }
         pendingTimingsPerSlot = Array.Empty<List<PendingPassTiming>>();
         DestroySwapchainResources();
-        if (DefaultRenderPass.Handle != 0)
-        {
-            Vk.DestroyRenderPass(Device, DefaultRenderPass, null);
-            DefaultRenderPass = default;
-        }
-        if (OverlayRenderPass.Handle != 0)
-        {
-            Vk.DestroyRenderPass(Device, OverlayRenderPass, null);
-            OverlayRenderPass = default;
-        }
+        foreach (var rp in new[] { defaultRenderPassPresented, defaultRenderPassCopied, overlayRenderPassPresented, overlayRenderPassCopied })
+            if (rp.Handle != 0) Vk.DestroyRenderPass(Device, rp, null);
+        defaultRenderPassPresented = defaultRenderPassCopied = overlayRenderPassPresented = overlayRenderPassCopied = default;
+        DestroyPresentResources();
     }
 
     internal void MarkSwapchainOutOfDate()

@@ -28,6 +28,11 @@ public sealed partial class VulkanGraphicsDevice
     internal bool HasAsyncQueue { get; private set; }
     private uint graphicsFamilyQueueCount = 1;
     private uint? asyncFamilyCandidate;
+    // A third family's queue that can present, for decoupled presentation's copy and present (VulkanGraphicsDevice.Present).
+    internal Queue PresentQueue { get; private set; }
+    internal uint PresentQueueFamily { get; private set; }
+    internal bool HasPresentQueue { get; private set; }
+    private uint? presentFamilyCandidate;
     private readonly bool asyncComputeWanted = Environment.GetEnvironmentVariable("BLIX_ASYNC_COMPUTE") != "off";
     internal uint GraphicsQueueFamily { get; private set; }
     internal bool PortabilitySubsetRequired { get; private set; }
@@ -363,6 +368,14 @@ public sealed partial class VulkanGraphicsDevice
                 asyncFamilyCandidate = null;
                 for (uint j = 0; j < count; j++)
                     if (j != i && (families[j].QueueFlags & QueueFlags.ComputeBit) != 0) { asyncFamilyCandidate = j; break; }
+                presentFamilyCandidate = null;
+                for (uint j = 0; j < count; j++)
+                {
+                    if (j == i || j == asyncFamilyCandidate || (families[j].QueueFlags & (QueueFlags.GraphicsBit | QueueFlags.TransferBit)) == 0) continue;
+                    Silk.NET.Core.Bool32 presents = false;
+                    KhrSurface.GetPhysicalDeviceSurfaceSupport(device, j, Surface, &presents);
+                    if (presents) { presentFamilyCandidate = j; break; }
+                }
                 return true;
             }
         }
@@ -373,7 +386,8 @@ public sealed partial class VulkanGraphicsDevice
     {
         var priority = 1.0f;
         var asyncFamily = asyncComputeWanted ? asyncFamilyCandidate : null;
-        var queueInfos = stackalloc DeviceQueueCreateInfo[2];
+        var queueInfos = stackalloc DeviceQueueCreateInfo[3];
+        var queueCount = 1u;
         queueInfos[0] = new DeviceQueueCreateInfo
         {
             SType = StructureType.DeviceQueueCreateInfo,
@@ -382,10 +396,18 @@ public sealed partial class VulkanGraphicsDevice
             PQueuePriorities = &priority,
         };
         if (asyncFamily is { } af)
-            queueInfos[1] = new DeviceQueueCreateInfo
+            queueInfos[queueCount++] = new DeviceQueueCreateInfo
             {
                 SType = StructureType.DeviceQueueCreateInfo,
                 QueueFamilyIndex = af,
+                QueueCount = 1,
+                PQueuePriorities = &priority,
+            };
+        if (presentFamilyCandidate is { } pf)
+            queueInfos[queueCount++] = new DeviceQueueCreateInfo
+            {
+                SType = StructureType.DeviceQueueCreateInfo,
+                QueueFamilyIndex = pf,
                 QueueCount = 1,
                 PQueuePriorities = &priority,
             };
@@ -480,7 +502,7 @@ public sealed partial class VulkanGraphicsDevice
         {
             SType = StructureType.DeviceCreateInfo,
             PNext = ChainModernFeatures(&modern),
-            QueueCreateInfoCount = asyncFamily is null ? 1u : 2u,
+            QueueCreateInfoCount = queueCount,
             PQueueCreateInfos = queueInfos,
             EnabledExtensionCount = (uint)deviceExts.Count,
             PpEnabledExtensionNames = extNames.Ptr,
@@ -503,6 +525,13 @@ public sealed partial class VulkanGraphicsDevice
             AsyncQueueFamily = family;
             HasAsyncQueue = true;
             Features |= GraphicsFeatures.AsyncCompute;
+        }
+        if (presentFamilyCandidate is { } presentFamily)
+        {
+            Vk.GetDeviceQueue(Device, presentFamily, 0, out var third);
+            PresentQueue = third;
+            PresentQueueFamily = presentFamily;
+            HasPresentQueue = true;
         }
         Console.WriteLine(HasAsyncQueue
             ? $"[Vulkan] async compute: family {AsyncQueueFamily}'s queue beside the graphics family {GraphicsQueueFamily}'s."
