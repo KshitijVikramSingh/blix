@@ -362,6 +362,7 @@ internal sealed partial class SponzaLoop
     {
         rtgi = args.Flag("rtgi");
         ParseRtgiBudget(args);
+        if (args.Flag("no-rtgi-settle")) rtgiSettleWanted = false;
         if (args.Int("rtgi-seed") is { } sd) rtgiSeed = (uint)Math.Max(0, sd);
         if (args.Float("rtgi-hit-sun") is { } hs) rtgiHitSun = MathF.Max(0f, hs);
         if (args.Flag("rtgi-no-trace-hit-sun")) rtgiTraceHitSun = false;

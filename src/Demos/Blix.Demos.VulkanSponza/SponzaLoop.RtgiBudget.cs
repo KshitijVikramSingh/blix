@@ -21,9 +21,28 @@ namespace Blix.Demos.VulkanSponza;
 // behind.
 internal sealed partial class SponzaLoop
 {
-    private bool rtgiBudget;
-    private int rtgiBudgetMinTiles = 110_000, rtgiBudgetMinHits = 32_000;
+    // On by default since 2026-10-28 (--rtgi-no-budget: the most every frame).
+    private bool rtgiBudget = true;
+    // --rtgi-budget-ms T (8; 0 off): the frame's ceiling. Over it (the frame interval's running mean -- GPU-bound since the
+    // decoupled present) the spend above the floor is cut at once, under it by 0.3 ms it comes back slowly: a still view
+    // holds the display's 120 rather than swinging between 90 and 120 at ~9.8 ms frames (the user, Crytek Sponza 1080p,
+    // 2026-10-28), and a change spends what fits.
+    private float rtgiBudgetMs = 8f, rtgiBudgetCap = 1f, rtgiBudgetFrameMs;
+    private readonly Stopwatch rtgiBudgetFrameClock = Stopwatch.StartNew();
+    // The floor: 80,000 visible and 24,000 from hits -- a settled Crytek Sponza 1080p 6.98 ms against 7.53 at 110,000 and
+    // 32,000 (the in-boot A/B), the truth the same for the still view, a 90 degree turn and an instant sun jump within
+    // 0.005 (2026-10-28).
+    private int rtgiBudgetMinTiles = 80_000, rtgiBudgetMinHits = 24_000;
     private float rtgiBudgetTau = 0.75f;
+    // --rtgi-budget-jump R: the visible's error needs points from R times its settled floor, all of them at 1.5 R. 2: a
+    // settled Crytek Sponza 7.52 ms against 8.35 at 1 and 9.21 at fixed points, the still view's and a turn's truth within
+    // 0.003 of 1's (2026-10-28).
+    private float rtgiBudgetJump = 2f;
+    // A sun or light change's need falls over --rtgi-budget-sun-tau seconds (3), the camera's over --rtgi-budget-tau: a
+    // relight takes the cells' histories longer than a turn takes the new cells -- at 0.75 an instant sun jump's truth
+    // 0.192 / 0.127 / 0.096 at 30 / 120 / 600 frames after it, at 3 0.184 / 0.116 / 0.089, fixed points 0.187 / 0.113 /
+    // 0.086 (2026-10-28).
+    private float rtgiBudgetSunTau = 3f, rtgiNeedSun;
     // This frame's spend, and the needs behind it.
     private int rtgiTilesNow, rtgiHitsNow;
     // Last frame's points (visible and hits): this frame's hit points draw from its rays, as many as there were.
@@ -45,20 +64,25 @@ internal sealed partial class SponzaLoop
 
     private void ParseRtgiBudget(AppArgs args)
     {
-        rtgiBudget = args.Flag("rtgi-budget");
+        if (args.Flag("rtgi-budget")) rtgiBudget = true;
+        if (args.Flag("rtgi-no-budget")) rtgiBudget = false;
+        if (args.Float("rtgi-budget-ms") is { } ms) rtgiBudgetMs = MathF.Max(0f, ms);
         if (args.Values("rtgi-budget-min", 2) is [var v, var h])
         {
             rtgiBudgetMinTiles = Math.Max(1, int.Parse(v, CultureInfo.InvariantCulture));
             rtgiBudgetMinHits = Math.Max(0, int.Parse(h, CultureInfo.InvariantCulture));
         }
         if (args.Float("rtgi-budget-tau") is { } tau) rtgiBudgetTau = MathF.Max(0.01f, tau);
+        if (args.Float("rtgi-budget-jump") is { } jump) rtgiBudgetJump = MathF.Max(1f, jump);
+        if (args.Float("rtgi-budget-sun-tau") is { } st) rtgiBudgetSunTau = MathF.Max(0.01f, st);
     }
 
     // Before RecordRtgi: this frame's visible and hit points.
     private void UpdateRtgiBudget()
     {
         var on = rtgiBudget || (Environment.GetEnvironmentVariable("BLIX_PROBE") == "budget" && AbArm == 1);
-        if (!on || rtgiStats.Equals(default(Blix.Graphics.GpuBufferHandle)))
+        // The first settle (SponzaLoop.RtgiSettle.cs) spends the most: the GPU is the cache's.
+        if (!on || RtgiSettleNow || rtgiStats.Equals(default(Blix.Graphics.GpuBufferHandle)))
         {
             rtgiTilesNow = rtgiTiles;
             rtgiHitsNow = rtgiHitPoints;
@@ -109,17 +133,29 @@ internal sealed partial class SponzaLoop
         {
             var mean = errNew / 4096f / seenNew;
             rtgiBudgetErrFloor = rtgiBudgetErrFloor < 0f || mean < rtgiBudgetErrFloor ? mean : rtgiBudgetErrFloor + (mean - rtgiBudgetErrFloor) * 0.002f;
-            unsettled = Math.Clamp((mean - rtgiBudgetErrFloor) / MathF.Max(0.5f * rtgiBudgetErrFloor, 1e-4f), 0f, 1f);
+            unsettled = Math.Clamp((mean - rtgiBudgetJump * rtgiBudgetErrFloor) / MathF.Max(0.5f * rtgiBudgetJump * rtgiBudgetErrFloor, 1e-4f), 0f, 1f);
         }
         rtgiBudgetUnsettled = unsettled;
 
         var fall = MathF.Exp(-dt / rtgiBudgetTau);
-        rtgiNeedVisible = MathF.Max(MathF.Max(motion, sun), MathF.Max(MathF.Max(madeVisible, unsettled), rtgiNeedVisible * fall));
-        rtgiNeedHits = MathF.Max(MathF.Max(sun, 0.5f * motion), MathF.Max(MathF.Max(madeHits, unsettled), rtgiNeedHits * fall));
+        rtgiNeedSun = MathF.Max(sun, rtgiNeedSun * MathF.Exp(-dt / rtgiBudgetSunTau));
+        rtgiNeedVisible = MathF.Max(MathF.Max(motion, rtgiNeedSun), MathF.Max(MathF.Max(madeVisible, unsettled), rtgiNeedVisible * fall));
+        rtgiNeedHits = MathF.Max(MathF.Max(rtgiNeedSun, 0.5f * motion), MathF.Max(MathF.Max(madeHits, unsettled), rtgiNeedHits * fall));
+        // The ceiling: the frame interval's running mean over ~16 frames against it.
+        var frameMs = (float)rtgiBudgetFrameClock.Elapsed.TotalMilliseconds;
+        rtgiBudgetFrameClock.Restart();
+        rtgiBudgetFrameMs = rtgiBudgetFrameMs <= 0f ? frameMs : rtgiBudgetFrameMs + (Math.Clamp(frameMs, 0f, 50f) - rtgiBudgetFrameMs) / 16f;
+        if (rtgiBudgetMs > 0f)
+        {
+            if (rtgiBudgetFrameMs > rtgiBudgetMs) rtgiBudgetCap = MathF.Max(0f, rtgiBudgetCap - 0.05f);
+            else if (rtgiBudgetFrameMs < rtgiBudgetMs - 0.3f) rtgiBudgetCap = MathF.Min(1f, rtgiBudgetCap + 0.005f);
+        }
+        // The needs keep their own fall; the cap limits what they spend.
+        var cap = rtgiBudgetMs > 0f ? rtgiBudgetCap : 1f;
         var minTiles = Math.Min(rtgiBudgetMinTiles, rtgiTiles);
         var minHits = Math.Min(rtgiBudgetMinHits, rtgiHitPoints);
-        rtgiTilesNow = minTiles + (int)((rtgiTiles - minTiles) * rtgiNeedVisible);
-        rtgiHitsNow = minHits + (int)((rtgiHitPoints - minHits) * rtgiNeedHits);
+        rtgiTilesNow = minTiles + (int)((rtgiTiles - minTiles) * MathF.Min(rtgiNeedVisible, cap));
+        rtgiHitsNow = minHits + (int)((rtgiHitPoints - minHits) * MathF.Min(rtgiNeedHits, cap));
         rtgiBudgetSumTiles += rtgiTilesNow;
         rtgiBudgetSumHits += rtgiHitsNow;
         rtgiBudgetFrames++;
@@ -130,7 +166,7 @@ internal sealed partial class SponzaLoop
     {
         if (!rtgiBudget || rtgiBudgetFrames == 0) return "";
         var s = string.Create(CultureInfo.InvariantCulture,
-            $"; budget: visible {rtgiBudgetSumTiles / rtgiBudgetFrames:N0}, hits {rtgiBudgetSumHits / rtgiBudgetFrames:N0} a frame (need now {rtgiNeedVisible:0.00} / {rtgiNeedHits:0.00}, unsettled {rtgiBudgetUnsettled:0.00}, error floor {rtgiBudgetErrFloor:0.000})");
+            $"; budget: visible {rtgiBudgetSumTiles / rtgiBudgetFrames:N0}, hits {rtgiBudgetSumHits / rtgiBudgetFrames:N0} a frame (need now {rtgiNeedVisible:0.00} / {rtgiNeedHits:0.00}, cap {rtgiBudgetCap:0.00} at {rtgiBudgetFrameMs:0.0} ms, unsettled {rtgiBudgetUnsettled:0.00}, error floor {rtgiBudgetErrFloor:0.000})");
         rtgiBudgetSumTiles = rtgiBudgetSumHits = 0;
         rtgiBudgetFrames = 0;
         return s;

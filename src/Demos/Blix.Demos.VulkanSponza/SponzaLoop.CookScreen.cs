@@ -138,7 +138,8 @@ internal sealed partial class SponzaLoop : IUiSource
         DrawTexelPicker();
         var loading = !sceneLoaded;
         var streaming = sceneLoaded && !fullyLoaded;
-        var cooking = CookScreenNow;
+        var settling = RtgiSettleNow;
+        var cooking = CookScreenNow || settling;
         // A live cook (the split light's, at boot or after a sun move): the same window over the scene, collapsible, opened
         // again each time a cook starts and otherwise left as the user leaves it.
         // Not a light change behind the frame (ChangeBehindFrame): its progress is the log's alone -- the window over the
@@ -152,7 +153,7 @@ internal sealed partial class SponzaLoop : IUiSource
         ImGui.SetNextWindowPos(io.DisplaySize * 0.5f, ImGuiCond.Always, new System.Numerics.Vector2(0.5f, 0.5f));
         ImGui.SetNextWindowSize(new System.Numerics.Vector2(MathF.Min(760f, io.DisplaySize.X - 32f), 0f), ImGuiCond.Always);
         if (opened) ImGui.SetNextWindowCollapsed(false, ImGuiCond.Always);
-        var title = loading ? "Loading" : streaming ? "Streaming textures" : "Cooking";
+        var title = loading ? "Loading" : streaming ? "Streaming textures" : settling ? "Settling the light" : "Cooking";
         var flags = ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoSavedSettings;
         if (!live) flags |= ImGuiWindowFlags.NoCollapse;
         if (!ImGui.Begin(title + "##progress-screen", flags))
@@ -160,7 +161,8 @@ internal sealed partial class SponzaLoop : IUiSource
             ImGui.End();
             return;
         }
-        ImGui.TextUnformatted(loading ? "Loading the scene." : streaming ? "Streaming the scene's textures; drawn flat until they are in."
+        if (settling) DrawRtgiSettle();
+        else ImGui.TextUnformatted(loading ? "Loading the scene." : streaming ? "Streaming the scene's textures; drawn flat until they are in."
             : live ? "Cooking the scene's light -- the scene stays up, its light landing as it is cooked, what is on screen first."
             : ReferenceCookingNow ? "Tracing the reference -- the scene is not drawn meanwhile (--ref-in-frame draws it)."
             : "Cooking the scene's light -- the scene is not drawn meanwhile (--no-cook-screen draws it).");

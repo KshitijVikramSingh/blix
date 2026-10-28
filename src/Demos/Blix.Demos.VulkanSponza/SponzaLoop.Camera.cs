@@ -56,7 +56,7 @@ internal sealed partial class SponzaLoop
         }
         // The camera is locked while a cook holds the screen (CookScreenNow): the screen keeps the last frame, and the view
         // it shows is where the scene comes back.
-        if (CookScreenNow)
+        if (CookScreenNow || RtgiSettleNow)
         {
             UpdateCamera();
             return;

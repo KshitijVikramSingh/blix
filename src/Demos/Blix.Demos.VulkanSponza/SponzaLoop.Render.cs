@@ -949,7 +949,8 @@ internal sealed partial class SponzaLoop
                     // --rtgi: the cache, read every frame (it is still learning), in place of the incident pass.
                     if (RtgiReadoutReady) RecordRtgiReadout();
                     else RecordIncidentClipmap(incidentInvProj, incidentInvView, halfWidth, halfHeight, frame.Width, frame.Height, half: true);
-                    RecordLightingUpsample(incidentInvProj, incidentInvView, frame.Height);
+                    // The first settle draws no light (SponzaLoop.RtgiSettle.cs): the readout for its map and error alone.
+                    if (!RtgiSettleNow) RecordLightingUpsample(incidentInvProj, incidentInvView, frame.Height);
                     if (RtgiTemporalNow) RecordRtgiTemporal();
                 }
                 else if (!halfLightingNow && IncidentPassNeeded())
@@ -964,7 +965,9 @@ internal sealed partial class SponzaLoop
             else graph.Pass(incidentPassHandle, _ => { });
         }
 
-        graph.Pass(litPassHandle, scope =>
+        var settling = RtgiSettleNow;
+        if (settling) graph.Pass(litPassHandle, _ => { }, clearColor: new GraphicsColor(0.03f, 0.04f, 0.06f, 1f));
+        else graph.Pass(litPassHandle, scope =>
         {
             // Opaque + Mask first (depth-test, no write — pre-pass wrote depth),
             // then Blend (depth-test only), so translucent surfaces composite
@@ -1005,7 +1008,7 @@ internal sealed partial class SponzaLoop
         }, clearColor: new GraphicsColor(0.05f, 0.07f, 0.10f, 1f));
 
         // Resolve before the graph executes, so the pass is recorded with the rest of the frame.
-        using (Prof("taa")) RecordTaaResolve();
+        if (!settling) using (Prof("taa")) RecordTaaResolve();
         // Last: this frame's surface keys become the next frame's history (after TAA and screen probes read it). Only for a
         // reader: the full-res incident pass's reuse, TAA, the screen probes -- under the half-res lighting with neither of
         // the others on, nothing read it and it was 0.85 ms a frame at 2880 x 1620 (2026-10-24).
@@ -1019,7 +1022,8 @@ internal sealed partial class SponzaLoop
         using (Prof("execute")) graph.Execute(commandList);
 
         RecordPresentPass(commandList);
-        sceneFrameDrawn = true;
+        TickRtgiSettle();
+        sceneFrameDrawn = !settling || sceneFrameDrawn;
         if (instantShowFrames > 0) instantShowFrames--;
         taaWrite = taaWriteNext;
         // The camera this frame's velocity was measured against becomes the next frame's "previous".
