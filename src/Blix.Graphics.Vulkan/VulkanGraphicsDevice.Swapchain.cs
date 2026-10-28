@@ -1167,6 +1167,11 @@ public sealed partial class VulkanGraphicsDevice
         // value the frame's last submission waits for once it is out.
         var asyncCmd = default(CommandBuffer);
         ulong asyncWait = 0, asyncDone = 0;
+        // The last frame's async external work (a Metal pass on its side timeline, RenderGraph.ExternalPass async) is waited
+        // for by this frame's first submission: its outputs are this frame's inputs (the RTGI trace's hits, the next
+        // placement's), and the frames' chain waits for the main work alone -- which never waited for it, the async run did.
+        // Done long before as a rule; without it a frame could read hits still being written.
+        pendingExtraWaits.AddRange(asyncExternalWaits);
         asyncExternalWaits.Clear();
         foreach (var pass in commandList.Passes)
         {

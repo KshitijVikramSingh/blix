@@ -6,8 +6,8 @@
 //
 //   last frame's word  where the pixel's surface was there last frame: its point reprojected into last frame's mask,
 //                      and the depth last frame saw there (RtShadowDepth, written here for every pixel) within a few
-//                      percent of the point's own -- not disoccluded. A pixel is retraced every fourth frame, so a
-//                      reused word is at most three frames old.
+//                      percent of the point's own -- not disoccluded -- unless this frame's traced pixels around it
+//                      on its surface all hold the other bit (the clamp, below: a reused word is not bounded in age).
 //   the neighbours     otherwise: the traced pixels around it on its own surface (plane and normal agree), blocked if
 //                      most of them are; with none on its surface, the nearest traced pixel's.
 //
@@ -86,10 +86,47 @@ void main() {
                     vec3 view = normalize(u.uCamera.xyz - pQ);
                     same = off <= (0.02 + 0.03 * (1.0 - abs(dot(nQ, view)))) * clip.w;
                 }
+                // The clamp: where this frame's traced pixels around it disagree with last frame's bit, the history may be
+                // a ghost -- each reuse takes the word from a different pixel, so a word can be passed on for many frames,
+                // and each hop rounds to the nearest pixel, the shadow trailing the camera's motion. Where every traced pixel
+                // around it on its surface holds the other bit, theirs is taken. Most pixels' neighbours all agree: the
+                // surface test runs only where one does not.
+                uint pw = prevWords[pi];
+                bool split = false;
+                if (same)
+                    for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {
+                        ivec2 t = q + ivec2(dx, dy);
+                        if (any(lessThan(t, ivec2(0))) || any(greaterThanEqual(t, size))) continue;
+                        if (uint(t.x & 1) + 2u * uint(t.y & 1) != phase) continue;
+                        if (((maskWords[uint(t.y) * uint(size.x) + uint(t.x)] ^ pw) & 1u) != 0u) split = true;
+                    }
+                if (split) {
+                    if (!normalRead) {
+                        vec4 nS = texelFetch(uPrepassNormal, fullOf(q), 0);
+                        if (dot(nS.xyz, nS.xyz) < 1e-6) return;
+                        nQ = normalize(nS.xyz);
+                        normalRead = true;
+                    }
+                    float tol = 0.005 + 0.004 * length(pQ - u.uCamera.xyz);
+                    int on = 0, agree = 0;
+                    for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {
+                        ivec2 t = q + ivec2(dx, dy);
+                        if (any(lessThan(t, ivec2(0))) || any(greaterThanEqual(t, size))) continue;
+                        if (uint(t.x & 1) + 2u * uint(t.y & 1) != phase) continue;
+                        float tRaw = texelFetch(uSceneDepth, fullOf(t), 0).r;
+                        if (tRaw >= 1.0 - 1e-6) continue;
+                        vec3 pT = surfaceAt(t, tRaw).xyz;
+                        vec4 nT = texelFetch(uPrepassNormal, fullOf(t), 0);
+                        if (abs(dot(nQ, pT - pQ)) > tol || dot(nT.xyz, nT.xyz) < 1e-6 || dot(normalize(nT.xyz), nQ) < 0.8) continue;
+                        on++;
+                        if (((maskWords[uint(t.y) * uint(size.x) + uint(t.x)] ^ pw) & 1u) == 0u) agree++;
+                    }
+                    if (on > 0 && agree == 0) same = false;
+                }
                 if (same) {
-                    maskWords[index] = prevWords[pi] & ~0xFF00u;
+                    maskWords[index] = pw & ~0xFF00u;
                     uint n = uint(size.x) * uint(size.y);
-                    if ((prevWords[pi] & 4u) != 0u) maskWords[n + index] = prevWords[n + pi];
+                    if ((pw & 4u) != 0u) maskWords[n + index] = prevWords[n + pi];
                     return;
                 }
             }

@@ -108,6 +108,19 @@ internal sealed partial class SponzaLoop
             var basePath = Path.ChangeExtension(shotPath, null) + $".f{dumpAt[dumpNext]}";
             WriteRgb(basePath + ".incident.rgb", incidentHandle);
             WriteRgb(basePath + ".resolved.rgb", render.Taa > 0f ? taaHandles[taaWrite] : hdrHandle);
+            // The traced sun's mask the last frame executed (its slot): a byte a pixel, 1 where blocked -- held against a run
+            // without the moving interleave (--no-rt-shadow-move-interleave) for what its reprojection got wrong.
+            if (rtShadowMasks.Length > 0)
+            {
+                device.WaitIdle();
+                var slots = rtShadowMasks.Length;
+                var last = (device.CurrentFrameSlot + slots - 1) % slots;
+                var (mw, mh) = rtShadowSize;
+                var words = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(rtShadowMasks[last], 16, mw * mh * 4).AsSpan());
+                var bits = new byte[mw * mh];
+                for (var i = 0; i < bits.Length; i++) bits[i] = (byte)(words[i] & 1u);
+                File.WriteAllBytes(basePath + $".rtmask.{mw}x{mh}.u8", bits);
+            }
             Console.WriteLine($"[VulkanSponza] dump at post-load frame {postLoadFrames} (asked {dumpAt[dumpNext]}), camera {camera.Position}");
             dumpNext++;
         }
