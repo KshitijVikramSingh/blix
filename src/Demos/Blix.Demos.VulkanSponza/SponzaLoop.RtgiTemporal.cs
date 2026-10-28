@@ -16,6 +16,10 @@ internal sealed partial class SponzaLoop
     // --rtgi-temporal-fast frames (6), --rtgi-temporal-clamp standard deviations (2; 0: none).
     private bool rtgiTemporal = true;
     private float rtgiTemporalFrames = 16f, rtgiTemporalFast = 6f, rtgiTemporalClamp = 2f;
+    // The frames held now: all of them on a settled, still view; down to 2 while the cache's light is changing -- a sun turn's
+    // need, the camera's motion (SponzaLoop.RtgiBudget.cs) -- as the cache relearns for seconds after the turn the reset was
+    // the start of, and 16 frames trailed it (a sun change's truth 0.228 against 0.165, 2026-10-29).
+    private float RtgiTemporalFramesNow => rtgiTemporalFrames + (MathF.Min(2f, rtgiTemporalFrames) - rtgiTemporalFrames) * Math.Clamp(MathF.Max(rtgiNeedSun, rtgiMotionNow), 0f, 1f);
     private GraphResourceHandle rtgiRawIncidentHandle, rtgiRawGradientHandle, rtgiStateHandle, rtgiHistoryHandle, rtgiHistoryStateHandle,
         rtgiFastHandle, rtgiFastHistoryHandle;
     private ShaderInterface rtgiTemporalInterface = null!, rtgiHistoryInterface = null!;
@@ -114,7 +118,7 @@ internal sealed partial class SponzaLoop
                 new("uPrevViewProj", new Matrix4x4Uniform(prevViewProj)),
                 new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, 0f))),
                 new("uPrevCamera", new Vector4Uniform(new Vector4(prevCamera, 0f))),
-                new("uParams", new Vector4Uniform(new Vector4(rtgiTemporalFrames, historyOk ? 1f : 0f, rtgiTemporalFast, rtgiTemporalClamp))),
+                new("uParams", new Vector4Uniform(new Vector4(RtgiTemporalFramesNow, historyOk ? 1f : 0f, rtgiTemporalFast, rtgiTemporalClamp))),
             }));
         graph.Pass(rtgiHistoryPassHandle, scope => fullscreen.Draw(
             scope, rtgiHistoryPipeline,

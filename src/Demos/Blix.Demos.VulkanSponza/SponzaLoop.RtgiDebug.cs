@@ -43,6 +43,7 @@ internal sealed partial class SponzaLoop
             }
             if (debug.Controls.Button("Reset cache")) rtgiResetPending = true;
             rtgiFrozen = debug.Controls.Toggle("Freeze (no rays, no training)", rtgiFrozen);
+            if (rtgiHybridBuilt) rtgiHybrid = debug.Controls.Toggle("Hybrid near field (--rtgi-hybrid)", rtgiHybrid);
             rtgiBlur = debug.Controls.Float("Blur (px at most, 0 off)", rtgiBlur, 0f, 32f);
             rtgiBlurHit = debug.Controls.Float("Blur reach (of hit distance)", rtgiBlurHit, 0f, 1f);
             rtgiHitPrior = debug.Controls.Float("Hit prior (0 off)", rtgiHitPrior, 0f, 2f);

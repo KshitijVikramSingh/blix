@@ -32,6 +32,9 @@ layout(set = 0, binding = 0) uniform RtgiReadout {
     vec4 uReuse;         // x 1: history to reuse; y this frame's fresh blocks (0-3); z how far a history pixel may sit from
                          // the point, per metre of distance; w the history's full-res pixel of its 2x2 (x + 2 y)
     vec4 uPrevCamera;    // xyz last frame's camera (the history guide's positions are relative to it)
+    vec4 uHybrid;        // --rtgi-hybrid: x 1 on; y the training's stamp this frame; z the samples' search radius (half-res
+                         // pixels); w the history's frames at most
+    vec4 uHybrid2;       // x the cell's weight against the pixel's own samples (a prior, in samples; 0 none)
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -74,6 +77,12 @@ layout(set = 0, binding = 15) uniform sampler2D uHistRaw;
 layout(set = 0, binding = 16) uniform sampler2D uHistGradient;
 layout(set = 0, binding = 17) uniform sampler2D uHistBlurred;
 layout(set = 0, binding = 18) uniform usampler2D uHistGuide;
+// --rtgi-hybrid: the training's samples by half-res pixel (rtgi_train.comp: three a pixel), and each pixel's near light and
+// escape share kept frame to frame (two a pixel: (rgb the near light, w the share of rays leaving past the contact radius),
+// (x the samples held)), last frame's read, this frame's written.
+layout(std430, set = 0, binding = 19) readonly buffer RtgiNearSamples { vec4 nearSamples[]; };
+layout(std430, set = 0, binding = 20) readonly buffer RtgiNearPrev { vec4 nearPrev[]; };
+layout(std430, set = 0, binding = 21) writeonly buffer RtgiNearCur { vec4 nearCur[]; };
 
 
 // Blue (0) to green to red (1).
@@ -176,6 +185,62 @@ vec2 readContact(vec3 p, uint side, uint level) {
         w += wk;
     }
     return vec2(w > 0.0 ? v / w : 0.0, w);
+}
+
+// --rtgi-hybrid: the pixel's own near field. This frame's samples within uHybrid.z half-res pixels of where the point sat
+// last frame (the samples' frame and the history's), each on its plane and facing, blended into its history there
+// (validated by last frame's guide as the reuse is), at most uHybrid.w frames deep: (near light, escape share), count.
+float hybridPrevRatio = -1.0;   // the pixel's ratio last frame (hybrid light over the cache's), -1 none
+vec4 hybridNear(vec3 p, vec3 n, float dist, bool store, uint at, out float count) {
+    ivec2 halfSize = textureSize(uHistGuide, 0);
+    uint row = uint(u.uUnsure.y), size = uint(u.uUnsure.z);
+    ivec2 c = ivec2(-1);
+    vec4 pc = u.uPrevViewProj * vec4(p, 1.0);
+    if (pc.w > 0.0) c = ivec2(floor((pc.xy / pc.w * 0.5 + 0.5) * vec2(textureSize(uSceneDepth, 0)) * 0.5));
+    float tol = 0.01 * dist + 0.01;
+    vec3 nsum = vec3(0.0);
+    float esum = 0.0, ns = 0.0;
+    int R = int(u.uHybrid.z);
+    for (int dy = -R; dy <= R; ++dy)
+        for (int dx = -R; dx <= R; ++dx) {
+            ivec2 q = c + ivec2(dx, dy);
+            if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, halfSize))) continue;
+            uint k = uint(q.y) * row + uint(q.x);
+            if (k >= size) continue;
+            vec4 s1 = nearSamples[3u * k + 1u];
+            if (s1.w != u.uHybrid.y || abs(dot(n, s1.xyz - p)) > tol) continue;
+            if (dot(nearSamples[3u * k + 2u].xyz, n) < 0.9) continue;
+            vec4 s0 = nearSamples[3u * k];
+            nsum += s0.rgb; esum += s0.w; ns += 1.0;
+        }
+    vec4 hm = vec4(0.0);
+    float hc = 0.0;
+    if (all(greaterThanEqual(c, ivec2(0))) && all(lessThan(c, halfSize))) {
+        uvec2 g = texelFetch(uHistGuide, c, 0).xy;
+        if (!guideSky(g)) {
+            vec3 gp = guidePosition(g, u.uPrevCamera.xyz);
+            uint k = uint(c.y) * row + uint(c.x);
+            if (k < size && dot(guideNormalOf(g), n) > 0.9 && abs(dot(n, gp - p)) < tol && length(gp - p) < 2.0 * u.uReuse.z * dist) {
+                hm = nearPrev[2u * k];
+                vec4 h1 = nearPrev[2u * k + 1u];
+                hc = h1.x;
+                hybridPrevRatio = hc > 0.0 ? h1.y : -1.0;
+            }
+        }
+    }
+    vec4 m = hm;
+    float cn = hc;
+    if (ns > 0.0) {
+        // The samples held counted in full, the blend at least one in uHybrid.w frames: a frame's samples move the pixel by
+        // their share of all held until that is under a frame's -- capped in samples, more rays a frame were a shorter
+        // history, and the contacts flickered more for them (2026-10-29).
+        vec4 est = vec4(nsum / ns, esum / ns);
+        cn = min(hc + ns, 65504.0);
+        m = hc > 0.0 ? mix(hm, est, max(ns / (hc + ns), 1.0 / u.uHybrid.w)) : est;
+    }
+    if (store) nearCur[2u * at] = m;
+    count = cn;
+    return m;
 }
 
 void main() {
@@ -328,6 +393,36 @@ void main() {
     // rtgi_contact_train.comp). A pixel more enclosed than its cell loses far light and gains the near surfaces' bounce.
     // Scaled whole by the visibility ratio, the creases read 6% dark (a crease's occluder lights it too); GTAO in either
     // place measured something else (18% bright), 2026-10-26.
+    // --rtgi-hybrid: the cache's far light, the pixel's own near field -- per ray, a surface met within the contact radius
+    // brings its own light, a ray past it the cell's mean far light per such ray (E x farShare / nearCell: the cache's
+    // light from past the radius over the share of its rays that left), faded in by the samples held
+    // (tools/gi-model/near_far_hybrid.py: Crytek 0.148 against the cache's 0.158, its darkest quarter 0.29 against 0.34).
+    if (u.uHybrid.x > 0.5 && e.w > 0.0) {
+        float held;
+        vec4 nm = hybridNear(p, n, length(p - u.uCamera.xyz), unsureIn, unsureAt, held);
+        if (held > 0.0) {
+            // Pulled toward the cell's own (its escape share and its near light: the cache's, from far more rays) as uHybrid2.x
+            // samples more: a pixel's few rays at a contact, a mid escape share, wobbled frame to frame -- the contacts' shading
+            // crawled (the user, Crytek Sponza, 2026-10-29); consistent evidence still shows.
+            float k = u.uHybrid2.x;
+            float v = (held * nm.w + k * nearCell) / max(held + k, 1e-6);
+            vec3 nearLight = (held * nm.rgb + k * e.rgb * (1.0 - farShare)) / max(held + k, 1e-6);
+            vec3 hyb = v * e.rgb * farShare / max(nearCell, 0.05) + nearLight;
+            // Applied as a ratio to the cache's light, the ratio itself averaged over the history's frames: the far term's
+            // farShare / nearCell is the cache's statistics this frame, and in a dark corridor's thinly trained cells their
+            // wobble, amplified by the division, crawled though the near samples were settled (the user's corridor:
+            // 128 frames' history did not help, 2026-10-29).
+            float le = dot(e.rgb, vec3(0.2126, 0.7152, 0.0722));
+            float rNow = le > 1e-7 ? dot(hyb, vec3(0.2126, 0.7152, 0.0722)) / le : 1.0;
+            float r = hybridPrevRatio >= 0.0 ? mix(hybridPrevRatio, rNow, 1.0 / u.uHybrid.w) : rNow;
+            r = mix(1.0, r, min(held / 4.0, 1.0));
+            if (unsureIn) nearCur[2u * unsureAt + 1u] = vec4(held, r, 0.0, 0.0);
+            e.rgb *= r;
+        } else if (unsureIn) nearCur[2u * unsureAt + 1u] = vec4(0.0);
+    } else if (u.uHybrid.x > 0.5 && unsureIn) {
+        nearCur[2u * unsureAt] = vec4(0.0);
+        nearCur[2u * unsureAt + 1u] = vec4(0.0);
+    }
     if (e.w > 0.0 && u.uContact.x > 0.5) {
         vec2 vc = readContact(p, side, level);
         if (vc.y >= 0.05) {

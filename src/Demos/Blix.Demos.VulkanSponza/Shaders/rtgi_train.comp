@@ -47,11 +47,17 @@ layout(set = 0, binding = 0) uniform RtgiTrain {
                          // 128 no hit lookup, 256 no flush device atomics, 512 no level finds (a slot from the hash), 1024
                          // no guide table, 2048 no level loop (its finds, table and flush), 4096 no keep-alive or stale check
                          // at a hit. Aggregation (the same light): 8192 the subgroup's rounds, 16384 each lane's own atomics
+    vec4 uCapture;       // --rtgi-capture (SponzaLoop.RtgiCapture.cs): x the pinned points (the first x); y this frame's slot; z the
+                         // slots (frames); 0 x: none
 } u;
 bool twice(uint b) { return (uint(u.uDouble.x) & b) != 0u; }
 // How a sample's words reach its cell (uFallback.w): 0 each lane's atomics, 1 the subgroup's rounds, 2 the workgroup's table.
 float aggregation() { return twice(16384u) ? 0.0 : twice(8192u) ? 1.0 : u.uFallback.w; }
 
+// --rtgi-capture: per slot (frame) and pinned point three words: its sample (rgb: PI x L_in x the weight; w: 4 live + 2 sky
+// + 1 counted), its hit (xyz; w the ray's weight), the hit's normal (xyz; w the distance, 1e30 a miss); then per point its
+// position and normal (the last frame's).
+layout(std430, set = 0, binding = 20) buffer RtgiCaptureOut { vec4 captureOut[]; };
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
 layout(std430, set = 0, binding = 2) readonly buffer RtgiPoints { vec4 points[]; };
 layout(std430, set = 0, binding = 3) readonly buffer RtgiRayBuffer { vec4 rays[]; };
@@ -412,6 +418,9 @@ void add(uint s, vec3 e, bool counted, bool sky, bool sunTraced, bool sunLit, bo
     else commit(s, w);
 }
 
+// --rtgi-capture: the sample's hit (xyz, w the ray's weight) and the hit's normal (xyz, w the distance; 0 0 0 1e30 a miss).
+vec4 captureHit = vec4(0.0), captureHitN = vec4(0.0);
+
 // The point's sample: false where it has none (past the frame's points, a point not live, a degenerate hit).
 bool pointSample(uint i, out vec4 p, out vec3 n, out vec3 e, out bool counted, out bool sky, out bool sunTraced, out bool sunLit,
                  out uint hd) {
@@ -428,6 +437,8 @@ bool pointSample(uint i, out vec4 p, out vec3 n, out vec3 e, out bool counted, o
     // The ray's weight against cosine sampling: cos / (PI x its pdf) -- 1 for a cosine ray, other for a guided one, 0 for
     // one that left below the surface (rtgi_rays.comp). Its sample is PI x L_in x it.
     float weight = points[2u * i + 1u].w;
+    captureHit = vec4(rays[2u * i].xyz + d * 1e4, weight);
+    captureHitN = vec4(0.0, 0.0, 0.0, 1e30);
     uvec4 h0 = hits[3u * i];
     nearWord = ((h0.w & 1u) == 0u || uintBitsToFloat(h0.x) > u.uNearField.y) ? weight * 256.0 : 0.0;
     sampleInvD = (h0.w & 1u) == 0u ? 1.0 / max(rays[2u * i + 1u].w, 1.0) : 1.0 / max(uintBitsToFloat(h0.x), 0.05);
@@ -442,6 +453,8 @@ bool pointSample(uint i, out vec4 p, out vec3 n, out vec3 e, out bool counted, o
         if (!(dot(nq, nq) > 1e-12)) return false;   // a degenerate triangle (rtgi_rays.comp): no sample
         nq = normalize(nq);
         if (dot(nq, d) > 0.0) nq = -nq;
+        captureHit.xyz = q;
+        captureHitN = vec4(nq, uintBitsToFloat(h0.x));
         bool fine;
         // The sun at the hit: its own ray where the trace shot one (uHitSun.x; hit flag 8 where it reached the sun), else
         // the hit cell's sun visibility -- a cell's mean over the floor it spans, sunlit and shadowed alike, where a ray up
@@ -492,6 +505,18 @@ void main() {
     bool counted, sky, sunTraced, sunLit;
     uint hd;
     bool live = pointSample(i, p, n, e, counted, sky, sunTraced, sunLit, hd);
+    uint captured = uint(u.uCapture.x);
+    if (i < captured) {
+        uint slot = 3u * (uint(u.uCapture.y) * captured + i);
+        captureOut[slot] = live ? vec4(e, 4.0 + (sky ? 2.0 : 0.0) + (counted ? 1.0 : 0.0)) : vec4(0.0);
+        captureOut[slot + 1u] = captureHit;
+        captureOut[slot + 2u] = captureHitN;
+        if (live) {
+            uint at = 3u * uint(u.uCapture.z) * captured + 2u * i;
+            captureOut[at] = vec4(p.xyz, 1.0);
+            captureOut[at + 1u] = vec4(n, 0.0);
+        }
+    }
     tally(1u, live);
     if (!table && !live) return;
     uint level = live ? rtgiLevel(p.xyz, u.uCamera.xyz, u.uParams) : 0u;

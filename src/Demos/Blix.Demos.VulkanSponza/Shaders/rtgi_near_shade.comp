@@ -1,0 +1,82 @@
+#version 450
+
+// --rtgi-hybrid (SponzaLoop.Rtgi.cs): the near rays' hits lit (rtgi_near_rays.comp placed them, the Metal batch traced
+// them closest-hit with each hit's sun), into the samples the readout gathers (rtgi_readout.frag hybridNear). A surface's
+// front met within the contact radius brings its light as the training's hits do (rtgi_train.comp): its albedo times its
+// cell's indirect light (the readout's record, its level or up to two coarser) and the sun where its sun ray reached it --
+// PI x L_in for the cosine ray. A back face met: the ray started inside something, dark. Nothing met that near: the ray
+// left, the pixel's share of the cache's far light (its weight, 1 for a cosine ray). Written at the pixel's half-res
+// index, stamped with the frame, beside the point and its normal.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform RtgiNearShade {
+    vec4 uParams;        // rtgiParams (rtgi_cache.glsl)
+    vec4 uCamera;        // xyz position
+    vec4 uSun;           // xyz toward the sun
+    vec4 uSunIrradiance; // rgb
+    vec4 uNear;          // x the contact radius; y this frame's stamp; z the slots; w the samples' slots (half-res pixels)
+    vec4 uNear2;         // x 1: each hit's own sun ray (its flag 8); 0: its cell's sun visibility, the cache's mean
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer RtgiKeys { uint rtgiKeys[]; };
+layout(std430, set = 0, binding = 2) readonly buffer RtgiRecord { uvec4 rtgiRecord[]; };
+layout(std430, set = 0, binding = 3) readonly buffer RtgiNearRayBuffer { vec4 nearRays[]; };
+layout(std430, set = 0, binding = 4) readonly buffer RtgiNearHits { uvec4 nearHits[]; };
+layout(std430, set = 0, binding = 5) readonly buffer RtgiNearInfo { vec4 nearInfo[]; };
+layout(std430, set = 0, binding = 6) writeonly buffer RtgiNearSamples { vec4 nearSamples[]; };
+layout(std430, set = 0, binding = 7) readonly buffer RtgiResolved { vec4 rtgiResolved[]; };
+
+#define RTGI_KEYS(i) rtgiKeys[i]
+#include "rtgi_cache.glsl"
+
+// The cell's indirect light at q facing n: its level's cell holding it, else a coarser one (two up at most); 0 none. Its
+// sun visibility (the share of its points that saw the sun, rtgi_resolve.comp) in sunVis.
+float sunVis = 0.0;
+vec3 cellLight(vec3 q, vec3 n) {
+    uint level = rtgiLevel(q, u.uCamera.xyz, u.uParams), side = rtgiSide(n);
+    uint top = uint(u.uParams.w);
+    for (uint l = level; l <= min(level + 2u, top); ++l) {
+        uint s = rtgiFind(rtgiCellHash(ivec3(floor(q / rtgiSize(l, u.uParams))), l, side, u.uParams), u.uParams);
+        if (s == 0xFFFFFFFFu) continue;
+        uvec4 a = rtgiRecord[2u * s], c = rtgiRecord[2u * s + 1u];
+        if (uintBitsToFloat(c.w) < 0.5) continue;
+        vec2 rg = unpackHalf2x16(a.x), bs = unpackHalf2x16(a.y);
+        sunVis = rtgiResolved[2u * s + 1u].x;
+        return vec3(rg, bs.x);
+    }
+    return vec3(0.0);
+}
+
+void main() {
+    uint slot = gl_GlobalInvocationID.x;
+    if (slot >= uint(u.uNear.z)) return;
+    vec4 info = nearInfo[2u * slot];
+    uint pix = floatBitsToUint(info.w);
+    if (pix >= uint(u.uNear.w)) return;
+    uvec4 h0 = nearHits[3u * slot];
+    float dist = uintBitsToFloat(h0.x);
+    vec4 sample0 = vec4(0.0, 0.0, 0.0, 1.0);   // left: the far light's share, weight 1
+    if ((h0.w & 1u) != 0u && dist <= u.uNear.x) {
+        sample0 = vec4(0.0);                    // met near: a back face (inside something) dark
+        if ((h0.w & 2u) != 0u) {
+            uvec4 h2 = nearHits[3u * slot + 2u];
+            vec3 nq = vec3(uintBitsToFloat(h2.x), uintBitsToFloat(h2.y), uintBitsToFloat(h2.z));
+            if (dot(nq, nq) > 1e-12) {
+                vec3 o = nearRays[2u * slot].xyz, d = nearRays[2u * slot + 1u].xyz;
+                nq = normalize(nq);
+                if (dot(nq, d) > 0.0) nq = -nq;
+                vec3 q = o + d * dist;
+                // The sun at the hit: its cell's visibility (the default) -- a near ray from a dark corridor's wall onto the
+                // sunlit strip on its floor brought the sun whole, one in many: those rare bright samples crawled in the dark
+                // (the user, Crytek Sponza, 2026-10-29) -- or (uNear2.x) the hit's own ray.
+                vec3 light = cellLight(q, nq);
+                float vis = u.uNear2.x > 0.5 ? ((h0.w & 8u) != 0u ? 1.0 : 0.0) : sunVis;
+                sample0 = vec4(unpackUnorm4x8(h2.w).rgb * (light + u.uSunIrradiance.rgb * max(dot(nq, u.uSun.xyz), 0.0) * vis), 0.0);
+            }
+        }
+    }
+    nearSamples[3u * pix] = sample0;
+    nearSamples[3u * pix + 1u] = vec4(info.xyz, u.uNear.y);
+    nearSamples[3u * pix + 2u] = nearInfo[2u * slot + 1u];
+}

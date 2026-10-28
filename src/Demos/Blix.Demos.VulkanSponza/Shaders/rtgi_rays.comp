@@ -43,8 +43,12 @@ layout(set = 0, binding = 0) uniform RtgiRays {
     vec4 uSeq;           // x 1: a point's cosine direction from its cell's own low-discrepancy sequence (else hashed); y 1: a
                          // point that picked a done cell draws again rather than giving its ray back; z 1: a settled cell's points
                          // trace the sun 1 in 8
+    vec4 uCapture;       // x the visible points pinned to the capture's pixels (--rtgi-capture, SponzaLoop.RtgiCapture.cs): the
+                         // first x, each at its own pixel every frame (0: none)
 } u;
 
+// --rtgi-capture: the pinned points' pixels (x | y << 16, full res).
+layout(std430, set = 0, binding = 20) readonly buffer RtgiCapturePixels { uint capturePixels[]; };
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
 layout(set = 0, binding = 2) uniform sampler2D uPrepassNormal;
 layout(std430, set = 0, binding = 3) readonly buffer RtgiPrevRays { vec4 prevRays[]; };
@@ -154,7 +158,17 @@ void main() {
     uint h = hash(i * 0x9E3779B9u ^ hash(frame));
     vec3 p, n;
     bool requestPoint = false;
-    if (i < visible) {
+    if (i < visible && i < uint(u.uCapture.x)) {
+        // Pinned (--rtgi-capture): its own pixel every frame, the point and its ray otherwise as any visible point's.
+        uint cp = capturePixels[i];
+        ivec2 pin = min(ivec2(cp & 0xFFFFu, cp >> 16), ivec2(u.uSize.xy) - 1);
+        float rawp = texelFetch(uSceneDepth, pin, 0).r;
+        vec4 nsp = texelFetch(uPrepassNormal, pin, 0);
+        if (rawp >= 1.0 - 1e-6 || dot(nsp.xyz, nsp.xyz) < 1e-6) { none(i); return; }
+        vec4 wp = u.uInvViewProj * vec4((vec2(pin) + 0.5) / u.uSize.xy * 2.0 - 1.0, rawp, 1.0);
+        p = wp.xyz / wp.w;
+        n = normalize(nsp.xyz);
+    } else if (i < visible) {
         uint tilesX = uint(u.uSize.z), tilesY = uint(u.uSize.w);
         vec2 tileSize = u.uSize.xy / u.uSize.zw;
         // In blocks (uBlock.x): point i's own tile in its subgroup's 8 x 4 block, and its candidates near it -- so the

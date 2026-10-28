@@ -1043,6 +1043,7 @@ internal sealed partial class SponzaLoop
         SampleSettle();
         AuditOcclusion();
         WriteWalkDumps();
+        WriteRtgiCapture();
         WriteLevelProbeDumps();
         SampleWatch();
         if (shotPath is { } path && !shotWritten && fullyLoaded && !AbOffPhase
