@@ -50,6 +50,7 @@ internal sealed partial class SponzaLoop
                 rtgiVolume = debug.Controls.Toggle("World volume (--rtgi-volume)", rtgiVolume);
                 rtgiVolumeRead = debug.Controls.Toggle("Volume: readout uses probes", rtgiVolumeRead);
                 if (rtgiNearCookBuilt) rtgiNearCook = debug.Controls.Toggle("Cooked near field (--rtgi-near-cook)", rtgiNearCook);
+                if (rtgiNearCookBuilt) rtgiSurfaceTrain = debug.Controls.Toggle("Cells trained over their own surface", rtgiSurfaceTrain);
                 rtgiVolumeNeighbours = debug.Controls.Toggle("Volume: neighbour test (traced)", rtgiVolumeNeighbours);
                 var geomCells = debug.Controls.Toggle("Cells sized by geometry (off: by camera distance)", rtgiVolumeCells > 0f);
                 rtgiVolumeCells = geomCells ? (rtgiVolumeCells > 0f ? rtgiVolumeCells : 0.1f) : 0f;

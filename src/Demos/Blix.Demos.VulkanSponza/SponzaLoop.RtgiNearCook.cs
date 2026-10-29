@@ -19,6 +19,9 @@ namespace Blix.Demos.VulkanSponza;
 internal sealed partial class SponzaLoop
 {
     private bool rtgiNearCook = true, rtgiNearCookBuilt, rtgiNearCookReady;
+    // The cache's visible points moved onto their cell's cooked surface (rtgi_rays.comp surfacePoint); the panel's switch,
+    // --rtgi-no-surface-train off.
+    private bool rtgiSurfaceTrain = true;
     private float rtgiNearCell = 0.05f;
     private int rtgiNearCookMost = 4_000_000;
     // Cells relit a frame at most, and the blend's weight of a frame.
@@ -49,6 +52,7 @@ internal sealed partial class SponzaLoop
     private void ParseRtgiNearCook(Blix.Core.AppArgs args)
     {
         if (args.Flag("rtgi-no-near-cook")) rtgiNearCook = false;
+        if (args.Flag("rtgi-no-surface-train")) rtgiSurfaceTrain = false;
         if (args.Float("rtgi-near-cell") is { } nc) rtgiNearCell = MathF.Max(0.01f, nc);
         if (args.Int("rtgi-near-cook-most") is { } most) rtgiNearCookMost = Math.Max(1024, most);
         if (args.Float("rtgi-near-blend") is { } nb) rtgiNearBlend = Math.Clamp(nb, 0.01f, 1f);

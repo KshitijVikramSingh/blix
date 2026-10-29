@@ -1084,6 +1084,7 @@ internal sealed partial class SponzaLoop
                 new("uCapture", new Vector4Uniform(RtgiCaptureUniform)),
                 new("uVolume", new Vector4Uniform(RtgiVolumeParams)),
                 new("uVolumeGeom", new Vector4Uniform(RtgiVolumeGeom)),
+                new("uNearCook", new Vector4Uniform(rtgiSurfaceTrain ? RtgiNearParams : Vector4.Zero)),
             },
             new[]
             {
@@ -1095,6 +1096,8 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiPrevRays", rtgiRaysBuf[prev]),
                 new ShaderBufferBinding("RtgiVolumeTable", RtgiVolTableOrDummy),
                 new ShaderBufferBinding("RtgiVolumeProbes", RtgiVolProbesOrDummy),
+                new ShaderBufferBinding("RtgiNearTable", RtgiNearTableOrDummy),
+                new ShaderBufferBinding("RtgiNearPoints", rtgiNearCookBuilt ? rtgiNearPoints : rtgiVolDummy),
                 new ShaderBufferBinding("RtgiCapturePixels", RtgiCapturePixelBuffer),
                 new ShaderBufferBinding("RtgiPrevHits", rtgiHitsBuf[prev]),
                 new ShaderBufferBinding("RtgiPoints", rtgiPointsBuf[cur]),

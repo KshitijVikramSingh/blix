@@ -25,6 +25,8 @@ layout(set = 0, binding = 0) uniform RtgiRays {
     vec4 uParams;        // rtgiParams (rtgi_cache.glsl)
     vec4 uVolume;        // --rtgi-volume: rtgi_volume.glsl's VOL_PARAMS (w 0: off), what sizes the cells
     vec4 uVolumeGeom;    // rtgi_volume.glsl's VOL_GEOM
+    vec4 uNearCook;      // --rtgi-near-cook: rtgi_nearcook.glsl's NEAR_PARAMS -- its cells the surface a visible point's
+                         // cell is trained over (surfacePoint)
     vec4 uNearField;     // x the near field's radius (RTGI_NEAR)
     vec4 uGuide;         // x the share of rays guided where a cell has learnt its light's way (0: none); y samples it must hold;
                          // z the lobe's concentration at most; w the guide table's slots - 1 (0: the lobe, no table)
@@ -92,6 +94,39 @@ layout(std430, set = 0, binding = 22) readonly buffer RtgiVolumeProbes { float v
 #include "rtgi_cache.glsl"
 #define GUIDE_KEYS(i) guideKeys[i]
 #include "rtgi_guide.glsl"
+layout(std430, set = 0, binding = 23) readonly buffer RtgiNearTable { uvec2 nearTable[]; };
+layout(std430, set = 0, binding = 24) readonly buffer RtgiNearPoints { vec4 nearPoints[]; };
+#define NEAR_PARAMS u.uNearCook
+#define NEAR_TABLE(i) nearTable[i]
+#include "rtgi_nearcook.glsl"
+
+// A visible point's cell trained over its own surface, not the part of it in view: a point drawn from the cooked surface
+// cells inside the cache cell (rtgi_nearcook.glsl: 5 cm, where the volume refined) in place of the pixel's -- a few draws
+// of a sub-cell of the cell's cube, the first a surface cell answers for (on the same side, in the same cache cell).
+// Trained from what the screen showed of it, a crevice's cell held the average of whatever part the camera saw: its light
+// moved with the view, and a corner leaked from some places and not others (the user, the crevices testbed, 2026-10-29).
+// None found (open ground: no cooked cells, the cache's cells big and flat): the pixel's own point.
+bool surfacePoint(inout vec3 p, inout vec3 n, uint h) {
+    if (NEAR_PARAMS.w < 0.5) return false;
+    uint lv = rtgiLevel(p, u.uCamera.xyz, u.uParams);
+    float size = rtgiSize(lv, u.uParams);
+    uint side = rtgiSide(n);
+    ivec3 cell = ivec3(floor(p / size));
+    uint subs = max(1u, uint(size / NEAR_PARAMS.x + 0.5));
+    for (uint k = 0u; k < 6u; k++) {
+        uint hk = nearHash(h ^ (k + 1u) * 0x9E3779B9u);
+        uvec3 sub = uvec3(hk % subs, (hk >> 10) % subs, (hk >> 20) % subs);
+        vec3 at = vec3(cell) * size + (vec3(sub) + 0.5) * (size / float(subs));
+        uint j = nearFind(ivec3(floor(at / NEAR_PARAMS.x)), side);
+        if (j == 0xFFFFFFFFu) continue;
+        vec3 q = nearPoints[2u * j].xyz;
+        if (ivec3(floor(q / size)) != cell) continue;
+        p = q;
+        n = nearPoints[2u * j + 1u].xyz;
+        return true;
+    }
+    return false;
+}
 
 uint hash(uint x) {
     x ^= x >> 16; x *= 0x7feb352du;
@@ -275,6 +310,7 @@ void main() {
         vec4 wp = u.uInvViewProj * vec4(ndcp, rawp, 1.0);
         p = wp.xyz / wp.w;
         n = normalize(nsp.xyz);
+        surfacePoint(p, n, h ^ 0x51ED270Bu);
     } else {
         if (u.uSun.w < 0.5) { none(i); return; }
         uint j = i - visible;
