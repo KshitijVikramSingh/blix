@@ -64,14 +64,27 @@ uint rtgiSide(vec3 n) {
 #ifndef RTGI_NEAR
 #define RTGI_NEAR 0.0
 #endif
+// RTGI_GEOM_SCALE(p): the cell's size the geometry asks for at p (rtgi_volume.glsl's volCellScale, includers with the
+// volume), <= 0 none -- then the camera's distance sizes it, as before. RTGI_FAR_GROW: with the geometry's size, the
+// camera's floor per metre of distance (0: none).
+#ifndef RTGI_FAR_GROW
+#define RTGI_FAR_GROW 0.0
+#endif
+float rtgiCellSize(vec3 p, vec3 camera, vec4 params) {
+    float dist = length(p - camera);
+#ifdef RTGI_GEOM_SCALE
+    float g = RTGI_GEOM_SCALE(p);
+    if (g > 0.0) return max(g, params.x + RTGI_FAR_GROW * dist);
+#endif
+    return params.x + params.y * max(dist - RTGI_NEAR, 0.0);
+}
+
 float rtgiLevelF(vec3 p, vec3 camera, vec4 params) {
-    float cell = params.x + params.y * max(length(p - camera) - RTGI_NEAR, 0.0);
-    return clamp(log2(cell / params.x), 0.0, params.w);
+    return clamp(log2(rtgiCellSize(p, camera, params) / params.x), 0.0, params.w);
 }
 
 uint rtgiLevel(vec3 p, vec3 camera, vec4 params) {
-    float cell = params.x + params.y * max(length(p - camera) - RTGI_NEAR, 0.0);
-    return uint(clamp(floor(log2(cell / params.x)), 0.0, params.w));
+    return uint(clamp(floor(log2(rtgiCellSize(p, camera, params) / params.x)), 0.0, params.w));
 }
 
 float rtgiSize(uint level, vec4 params) { return params.x * exp2(float(level)); }

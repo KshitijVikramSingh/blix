@@ -23,6 +23,8 @@ layout(set = 0, binding = 0) uniform RtgiRays {
     vec4 uCounts;        // x visible points, y points from last frame's hits, z the frame's number, w how far a ray goes
     vec4 uSun;           // xyz toward the sun; w 1 when last frame's rays and hits are there to read
     vec4 uParams;        // rtgiParams (rtgi_cache.glsl)
+    vec4 uVolume;        // --rtgi-volume: rtgi_volume.glsl's VOL_PARAMS (w 0: off), what sizes the cells
+    vec4 uVolumeGeom;    // rtgi_volume.glsl's VOL_GEOM
     vec4 uNearField;     // x the near field's radius (RTGI_NEAR)
     vec4 uGuide;         // x the share of rays guided where a cell has learnt its light's way (0: none); y samples it must hold;
                          // z the lobe's concentration at most; w the guide table's slots - 1 (0: the lobe, no table)
@@ -74,6 +76,17 @@ layout(std430, set = 0, binding = 14) readonly buffer RtgiConfidence { vec4 rtgi
 layout(std430, set = 0, binding = 15) readonly buffer GuideKeys { uint guideKeys[]; };
 layout(std430, set = 0, binding = 16) readonly buffer GuideDist { vec4 guideDist[]; };
 
+// --rtgi-volume (rtgi_volume.glsl): the probes whose cooked distances size the cache's cells.
+layout(std430, set = 0, binding = 21) readonly buffer RtgiVolumeTable { uvec2 volTable[]; };
+layout(std430, set = 0, binding = 22) readonly buffer RtgiVolumeProbes { float volProbes[]; };
+#define VOL_PARAMS u.uVolume
+#define VOL_GEOM u.uVolumeGeom
+#define VOL_TABLE(i) volTable[i]
+#define VOL_PROBES(i) volProbes[i]
+#define VOL_DEPTH(i) 0u
+#include "rtgi_volume.glsl"
+#define RTGI_GEOM_SCALE(p) volCellScale(p)
+#define RTGI_FAR_GROW u.uVolumeGeom.z
 #define RTGI_KEYS(i) rtgiKeys[i]
 #define RTGI_NEAR u.uNearField.x
 #include "rtgi_cache.glsl"

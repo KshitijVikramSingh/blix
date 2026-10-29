@@ -1,0 +1,67 @@
+#version 450
+
+// --rtgi-volume (SponzaLoop.RtgiVolume.cs): the listed probes' rays, into the Metal batch beside the cache's. Three kinds
+// (uVol2.x):
+//   0 training: uVol.y rays over the sphere a probe, a spherical Fibonacci set turned by the frame's random rotation,
+//     traced closest-hit with each hit's sun; rtgi_volume_update.comp lights them into the probe.
+//   1 the cook's first pass: the same set, unturned, from where the grid puts the probe; rtgi_volume_cook.comp moves it
+//     out of what it sits inside.
+//   2 the cook's second: per depth-map texel (rtgi_volume.glsl) uVol.y / 64 rays jittered over it, from where the probe
+//     was moved; rtgi_volume_cook.comp averages their distances into its depth map.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform RtgiVolumeRays {
+    vec4 uVolume;   // rtgi_volume.glsl's VOL_PARAMS
+    vec4 uVol;      // x the probes listed; y rays a probe; z a ray's reach (m); w the frame (its rotation)
+    vec4 uVol2;     // x the kind (above)
+} u;
+
+// Per listed probe: its id (brick x 64 + its place), its level, its global coordinate (16-bit, biased by 32768).
+layout(std430, set = 0, binding = 1) readonly buffer RtgiVolumeBatch { uvec4 batch[]; };
+// Per ray: origin (xyz, w 0), direction (xyz, w its reach), as rtgi_rays.comp's for the same trace.
+layout(std430, set = 0, binding = 2) writeonly buffer RtgiVolumeRayBuffer { vec4 volRays[]; };
+layout(std430, set = 0, binding = 3) readonly buffer RtgiVolumeProbes { float volProbes[]; };
+
+#define VOL_PARAMS u.uVolume
+#define VOL_GEOM vec4(0.0)
+#define VOL_TABLE(i) uvec2(0u)
+#define VOL_PROBES(i) volProbes[i]
+#define VOL_DEPTH(i) 0u
+#include "rtgi_volume.glsl"
+
+// A rotation from the frame: a random unit quaternion (Shoemake), applied to the Fibonacci set.
+vec3 rotate(vec4 q, vec3 v) { return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v); }
+
+void main() {
+    uint r = gl_GlobalInvocationID.x;
+    uint k = uint(u.uVol.y);
+    if (r >= uint(u.uVol.x) * k) return;
+    uvec4 b = batch[r / k];
+    uint level = b.y;
+    ivec3 c = ivec3(int(b.z & 0xFFFFu) - 32768, int(b.z >> 16) - 32768, int(b.w) - 32768);
+    uint kind = uint(u.uVol2.x);
+    vec3 o = volGridPosition(c, level) + (kind == 1u ? vec3(0.0) : volOffset(b.x));
+    uint j = r % k;
+    vec3 d;
+    if (kind == 2u) {
+        uint texel = j % VOL_TEXELS;
+        uint h = volHash(b.x * 0x9E3779B9u ^ j * 0x85EBCA77u);
+        vec2 jitter = vec2(float(h & 0xFFFFu), float(h >> 16)) / 65536.0;
+        d = volOctDecode((vec2(texel % VOL_SIDE, texel / VOL_SIDE) + jitter) / float(VOL_SIDE));
+    } else {
+        float fz = 1.0 - (2.0 * float(j) + 1.0) / float(k);
+        float rho = sqrt(max(0.0, 1.0 - fz * fz));
+        float phi = 2.39996323 * float(j);
+        d = vec3(cos(phi) * rho, fz, sin(phi) * rho);
+        if (kind == 0u) {
+            uint h1 = volHash(uint(u.uVol.w) * 0x9E3779B9u + 0x7F4A7C15u), h2 = volHash(h1 ^ 0x2545F491u), h3 = volHash(h2 ^ 0x68E31DA4u);
+            float x0 = float(h1 & 0xFFFFFFu) / 16777216.0, x1 = float(h2 & 0xFFFFFFu) / 16777216.0, x2 = float(h3 & 0xFFFFFFu) / 16777216.0;
+            float s1 = sqrt(1.0 - x0), s2 = sqrt(x0);
+            vec4 q = vec4(s1 * sin(6.2831853 * x1), s1 * cos(6.2831853 * x1), s2 * sin(6.2831853 * x2), s2 * cos(6.2831853 * x2));
+            d = normalize(rotate(q, d));
+        }
+    }
+    volRays[2u * r] = vec4(o, 0.0);
+    volRays[2u * r + 1u] = vec4(d, u.uVol.z);
+}

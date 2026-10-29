@@ -19,7 +19,22 @@ internal sealed partial class SponzaLoop
     // The frames held now: all of them on a settled, still view; down to 2 while the cache's light is changing -- a sun turn's
     // need, the camera's motion (SponzaLoop.RtgiBudget.cs) -- as the cache relearns for seconds after the turn the reset was
     // the start of, and 16 frames trailed it (a sun change's truth 0.228 against 0.165, 2026-10-29).
-    private float RtgiTemporalFramesNow => rtgiTemporalFrames + (MathF.Min(2f, rtgiTemporalFrames) - rtgiTemporalFrames) * Math.Clamp(MathF.Max(rtgiNeedSun, rtgiMotionNow), 0f, 1f);
+    // The camera's motion shortens it only with --rtgi-temporal-motion (the panel's "Temporal: short while moving"): the
+    // cache's cells are the geometry's now (SponzaLoop.RtgiVolume.cs), its light no longer changing as the camera moves, and
+    // two frames while moving left the half-res sample's turn through its 2x2 showing -- corners shimmering, dim areas
+    // wobbling as the camera moved (the user, the crevices testbed, 2026-10-29).
+    // While moving, --rtgi-temporal-moving frames (6; the panel's slider): the whole 16 smeared (the user, 2026-10-29).
+    private bool rtgiTemporalMotion;
+    private float rtgiTemporalMoving = 6f;
+    private float RtgiTemporalFramesNow
+    {
+        get
+        {
+            var held = rtgiTemporalFrames + (MathF.Min(rtgiTemporalMoving, rtgiTemporalFrames) - rtgiTemporalFrames) * Math.Clamp(rtgiMotionNow, 0f, 1f);
+            var shortNow = Math.Clamp(MathF.Max(rtgiNeedSun, rtgiTemporalMotion ? rtgiMotionNow : 0f), 0f, 1f);
+            return held + (MathF.Min(2f, held) - held) * shortNow;
+        }
+    }
     private GraphResourceHandle rtgiRawIncidentHandle, rtgiRawGradientHandle, rtgiStateHandle, rtgiHistoryHandle, rtgiHistoryStateHandle,
         rtgiFastHandle, rtgiFastHistoryHandle;
     private ShaderInterface rtgiTemporalInterface = null!, rtgiHistoryInterface = null!;
@@ -40,6 +55,8 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-temporal-frames") is { } f) rtgiTemporalFrames = MathF.Max(1f, f);
         if (args.Float("rtgi-temporal-fast") is { } ff) rtgiTemporalFast = MathF.Max(1f, ff);
         if (args.Float("rtgi-temporal-clamp") is { } tc) rtgiTemporalClamp = MathF.Max(0f, tc);
+        rtgiTemporalMotion = args.Flag("rtgi-temporal-motion");
+        if (args.Float("rtgi-temporal-moving") is { } tm) rtgiTemporalMoving = MathF.Max(1f, tm);
     }
 
     // Setup, after lighting-upsample: the raw upsample, the accumulation and the copy.
@@ -97,6 +114,8 @@ internal sealed partial class SponzaLoop
         Matrix4x4.Invert(viewProjJittered, out var invViewProj);
         var towardSun = -Vector3.Normalize(sunDirection);
         // A sun turn starts it over (the cache cuts its history then too).
+        // And the boot's settle drew no lit frame: its history is whatever the targets held, not a frame's.
+        if (RtgiSettleNow) rtgiTemporalHistory = false;
         var historyOk = rtgiTemporalHistory && Vector3.Dot(towardSun, rtgiTemporalSun) > MathF.Cos(0.02f * MathF.PI / 180f);
         var prevViewProj = rtgiTemporalPrevViewProj;
         var prevCamera = rtgiTemporalPrevCamera;

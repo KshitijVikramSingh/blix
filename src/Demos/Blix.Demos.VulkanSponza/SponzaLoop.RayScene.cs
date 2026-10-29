@@ -192,6 +192,7 @@ internal sealed partial class SponzaLoop
         // The GPU scene and the clipmap are the diffuse GI, so both are built whenever there is a scene.
         if (data is not null) BuildRayGpu(data);
         if (placements > 0) CreateClipmap();
+        if (placements > 0) StartRtgiVolumeBuild(scene);
         if (rayCheck && placements > 0) BuildRayCheck();
     }
 

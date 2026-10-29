@@ -39,7 +39,9 @@ internal sealed record SceneProfile(
     float MoveSpeed,
     Vector2? DefaultSunDegrees = null,
     // The camera's near plane: the depth buffer is not reversed, so far / near sets the precision far away.
-    float NearPlane = 0.1f)
+    float NearPlane = 0.1f,
+    // The display exposure it starts at (null: the default); --exposure overrides.
+    float? Exposure = null)
 {
     /// <summary>Intel Sponza (Khronos New Sponza): the atrium, ~30 m, and the packs it was built around.</summary>
     public static readonly SceneProfile Sponza = new(
@@ -315,6 +317,8 @@ internal sealed record SceneProfile(
         // records -- black where the camera saw the shell's inside (2026-10-23).
         StartPosition = new Vector3(-6f, 1.7f, 0f),
         StartPitch = 5f,
+        // 16: the bounce-lit galleries in plain view, where the GI's leaks, crawl and noise show (the user, 2026-10-29).
+        Exposure = 16f,
     };
 
     /// <summary>Intel's Jungle Ruins (Blender scene, 2024; downloaded to ~/Downloads/JungleRuins, never committed): exported

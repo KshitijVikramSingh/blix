@@ -56,6 +56,14 @@ internal sealed partial class SponzaLoop
     // sample, the shadowed areas' rare bright ones most -- mud that never settled (the user). Crytek Sponza settled: flicker
     // 1.6% -> 0.8%, error 0.100 -> 0.097 (2026-10-26). Changes are the cuts' (the sun's at once, the rest's net).
     private float rtgiHistory = 16384f, rtgiChangeSigma = 5f, rtgiFast = 64f, rtgiChangeFloor = 0.05f, rtgiChangeFrames = 3f;
+    // The fast mean's change test (rtgi_resolve.comp) only within --rtgi-change-window frames (600) of a known change -- the
+    // sun's turn (its epoch cuts what it lit directly; the test catches the bounces still moving after it) -- else off
+    // (--rtgi-change-always: on throughout, as before). On a still Crytek Sponza view, heavy-tailed light read as change:
+    // ~3,000 cells' histories cut a frame, every cell ~6 times, its noise never settling (the user, 2026-10-29).
+    private float rtgiChangeWindow = 600f;
+    private bool rtgiChangeAlways;
+    private float RtgiChangeFramesNow => rtgiChangeAlways || (rtgiHybridSunFrame != uint.MaxValue && rtgiFrameCount - rtgiHybridSunFrame < (uint)rtgiChangeWindow)
+        ? rtgiChangeFrames : 1e9f;
     // --rtgi-sun-cut N: on a frame the sun turns (0.02 degrees or more), every cell's light history capped to N samples
     // (and its sun visibility's to 4): a known change, not one for the fast mean to find. 0: none.
     private float rtgiSunCut = 32f;
@@ -179,6 +187,8 @@ internal sealed partial class SponzaLoop
     // rtgiHybrid the live switch (the RTGI panel's "Hybrid near field", for A/B on one view); rtgiHybridBuilt its buffers and
     // the training's samples, kept up while the switch is off so it turns on at once.
     private bool rtgiHybrid, rtgiHybridBuilt;
+    // --rtgi-pool [N]: the readout pools a pixel's light up to N coarser levels while they agree (rtgi_readout.frag; 4).
+    private float rtgiPoolLevels, rtgiPoolSigma = 1f;
     private float rtgiHybridRadius = 3f, rtgiHybridFrames = 64f, rtgiHybridPrior;
     // The frame the sun last turned: the near history short (8 frames) for 32 after it -- near hits carry the sun, and 64
     // frames' history lagged a sun change (its truth 0.191 / 0.123 against the cache's 0.183 / 0.118, 2026-10-29).
@@ -198,6 +208,10 @@ internal sealed partial class SponzaLoop
     private int rtgiHybridBlock = 2;
     // --rtgi-hybrid-hit-sun: each near hit's own sun ray, not its cell's sun visibility (the default).
     private bool rtgiHybridHitSun;
+    // --rtgi-hybrid-screen: the near field kept in a per-pixel history on the screen (as it was) rather than the world's near
+    // cells (rtgi_near_shade.comp): the screen's history cleared whenever the camera moved, and a crevice's edge took seconds
+    // to come back after each move (the user, 2026-10-29).
+    private bool rtgiHybridWorld = true;
     private int rtgiNearSlots;
     // Readouts run: the near history's ping-pong turns with them, not the frame -- the screen rest (SponzaLoop.RtgiBudget.cs)
     // skips the readout on three frames in four of a settled still view, and with it on, a frame's parity named a buffer no
@@ -343,7 +357,8 @@ internal sealed partial class SponzaLoop
     private GpuBufferHandle[] rtgiDirtyBufs = Array.Empty<GpuBufferHandle>();
     private uint rtgiSunEpoch;
     // A point's cells, and a deferred landing's origin's beside a request's (rtgi_train.comp).
-    private int RtgiDirtyRoom => (RtgiPoints + rtgiHitPoints) * rtgiTrainLevels + (rtgiContact ? rtgiContactRays : 0);
+    private int RtgiDirtyRoom => (RtgiPoints + rtgiHitPoints) * rtgiTrainLevels + (rtgiContact ? rtgiContactRays : 0)
+        + (rtgiHybrid && rtgiHybridWorld ? RtgiNearSlotsMost : 0);
     // The cells training lists itself (a sample one cell; the push-up's scratch, rtgi_pushup.comp).
     private int RtgiPushRoom => RtgiPoints + (rtgiContact ? rtgiContactRays : 0);
     // S4 contact detail (rtgi_contact_rays.comp, rtgi_contact_train.comp, rtgi_readout.frag): one half-res pixel in
@@ -424,6 +439,8 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-age-floor") is { } af) rtgiAgeFloor = MathF.Max(1f, af);
         if (args.Float("rtgi-change-floor") is { } cf) rtgiChangeFloor = MathF.Max(0f, cf);
         if (args.Float("rtgi-change-frames") is { } cfr) rtgiChangeFrames = MathF.Max(1f, cfr);
+        if (args.Float("rtgi-change-window") is { } cw) rtgiChangeWindow = MathF.Max(0f, cw);
+        rtgiChangeAlways = args.Flag("rtgi-change-always");
         if (args.Float("rtgi-sun-cut") is { } sc) rtgiSunCut = MathF.Max(0f, sc);
         if (args.Flag("rtgi-no-stale-hits")) rtgiStaleHits = false;
         if (args.Flag("rtgi-list-all")) rtgiListOnTurn = false;
@@ -503,11 +520,15 @@ internal sealed partial class SponzaLoop
         if (args.Int("rtgi-train-levels") is { } tl) rtgiTrainLevels = Math.Clamp(tl, 1, 8);
         if (args.Flag("rtgi-pushup")) rtgiPushUp = true;
         rtgiHybrid = rtgiHybridBuilt = args.Flag("rtgi-hybrid");
+        if (args.Flag("rtgi-pool")) rtgiPoolLevels = args.Float("rtgi-pool-levels") ?? 4f;
+        if (args.Float("rtgi-pool-sigma") is { } psg) rtgiPoolSigma = MathF.Max(0f, psg);
         if (args.Float("rtgi-hybrid-radius") is { } hr) rtgiHybridRadius = Math.Clamp(MathF.Round(hr), 0f, 6f);
         if (args.Float("rtgi-hybrid-frames") is { } hf) rtgiHybridFrames = MathF.Max(1f, hf);
         if (args.Float("rtgi-hybrid-prior") is { } hk) rtgiHybridPrior = MathF.Max(0f, hk);
         if (args.Int("rtgi-hybrid-block") is { } hb) rtgiHybridBlock = hb <= 2 ? 2 : 4;
         rtgiHybridHitSun = args.Flag("rtgi-hybrid-hit-sun");
+        if (args.Flag("rtgi-hybrid-screen")) rtgiHybridWorld = false;
+        ParseRtgiVolume(args);
         rtgiScreen = args.Flag("rtgi-screen");
         if (rtgiScreen) rtgi = true;
         if (args.Int("rtgi-screen-taps") is { } taps) rtgiScreenTaps = Math.Clamp(taps, 1, 64);
@@ -532,6 +553,7 @@ internal sealed partial class SponzaLoop
         rtgiTrainPassHandle = graph.ComputePass("rtgi-train").Async(rtgiAsync).Shader(rtgiTrainInterface).Handle;
         rtgiNearShadeInterface = reflect("rtgi_near_shade.comp");
         rtgiNearShadePassHandle = graph.ComputePass("rtgi-near-shade").Async(rtgiAsync).Shader(rtgiNearShadeInterface).Handle;
+        DeclareRtgiVolumeUpdatePass(reflect);
         rtgiContactTrainInterface = reflect("rtgi_contact_train.comp");
         rtgiContactTrainPassHandle = graph.ComputePass("rtgi-contact-train").Async(rtgiAsync).Shader(rtgiContactTrainInterface).Handle;
         // Declared here: passes run in declaration order (RenderGraph), and the push-up reads what training wrote before the
@@ -561,6 +583,7 @@ internal sealed partial class SponzaLoop
         rtgiNearRaysInterface = reflect("rtgi_near_rays.comp");
         rtgiNearRaysPassHandle = graph.ComputePass("rtgi-near-rays").AfterAsync().Shader(rtgiNearRaysInterface)
             .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
+        DeclareRtgiVolumeRaysPass(reflect);
         rtgiContactRaysInterface = reflect("rtgi_contact_rays.comp");
         rtgiContactRaysPassHandle = graph.ComputePass("rtgi-contact-rays").AfterAsync().Shader(rtgiContactRaysInterface)
             .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
@@ -629,6 +652,7 @@ internal sealed partial class SponzaLoop
         rtgiTrainPipeline = Compute("rtgi_train", rtgiTrainInterface, full32);
         rtgiNearRaysPipeline = Compute("rtgi_near_rays", rtgiNearRaysInterface);
         rtgiNearShadePipeline = Compute("rtgi_near_shade", rtgiNearShadeInterface);
+        CreateRtgiVolumePipelines(Compute, full32);
         rtgiResolvePipeline = Compute("rtgi_resolve", rtgiResolveInterface);
         rtgiEvictPipeline = Compute("rtgi_evict", rtgiEvictInterface);
         rtgiPushUpPipeline = Compute("rtgi_pushup", rtgiPushUpInterface);
@@ -695,6 +719,7 @@ internal sealed partial class SponzaLoop
             rtgiRecord = Own(device.CreateGpuBuffer(RtgiSlots * 32, new byte[RtgiSlots * 32], "sponza.rtgi.record"));
             // Readable where it lies: the budget reads its counters each frame without a wait (SponzaLoop.RtgiBudget.cs).
             rtgiStats = Own(device.CreateReadableGpuBuffer(256, "sponza.rtgi.stats"));
+            CreateRtgiVolumeDummy();
             rtgiOccupancy = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.rtgi.occupancy"));
             rtgiSeq = Own(device.CreateGpuBuffer(RtgiSlots * 4, new byte[RtgiSlots * 4], "sponza.rtgi.seq"));
             rtgiStands = Own(device.CreateGpuBuffer(RtgiSlots * 4, new byte[RtgiSlots * 4], "sponza.rtgi.stands"));
@@ -747,6 +772,14 @@ internal sealed partial class SponzaLoop
         var frameNumber = rtgiFrameCount + 1u;
         // On the bench (SponzaLoop.RtgiBench.cs) the training dispatched N times, the rest of the cache's frame skipped.
         var trainReps = RtgiTrainReps();
+        // --rtgi-volume: its probes' rays (placement time) and their update (with the training), this frame's both.
+        if (!rtgiBenching)
+        {
+            RecordRtgiVolumeRays(cur, n);
+            RecordRtgiVolumeVis(cur);
+            RecordRtgiNearCook(cur, towardSun);
+            RecordRtgiVolumeUpdate(cur, towardSun, sunTurned);
+        }
         if (rtgiTraced > 0)
         {
             var train = new DispatchCommand(rtgiTrainPipeline, groups, 1, 1,
@@ -761,9 +794,11 @@ internal sealed partial class SponzaLoop
                     new("uGuideTable", new Vector4Uniform(new Vector4(rtgiGuide > 0f ? RtgiGuideSlots - 1 : 0f, rtgiStaleHits ? 1f : 0f, rtgiSunEpoch, 0f))),
                     new("uTrain", new Vector4Uniform(new Vector4(rtgiCountUnknown ? 1f : 0f, rtgiNoCoarse ? 1f : 0f, rtgiBackfaceLit ? 1f : 0f, rtgiRequests ? rtgiHitPoints : 0f))),
                     new("uHitSun", new Vector4Uniform(new Vector4(rtgiTraceHitSun ? 1f : 0f, rtgiThin ? 1f : 0f, rtgiReadFirst ? 1f : 0f, rtgiListOnTurn ? rtgiFilterEvery : 0f))),
-                    new("uFallback", new Vector4Uniform(new Vector4(rtgiFallbackUp, rtgiContact || rtgiHybridBuilt ? 1f : 0f, rtgiDefer ? 1f : 0f, rtgiSubgroup ? (rtgiTrainTable ? 2f : 1f) : 0f))),
+                    new("uFallback", new Vector4Uniform(new Vector4(rtgiFallbackUp, rtgiContact || rtgiHybridBuilt || rtgiNearCook ? 1f : 0f, rtgiDefer ? 1f : 0f, rtgiSubgroup ? (rtgiTrainTable ? 2f : 1f) : 0f))),
                     new("uDouble", new Vector4Uniform(new Vector4(rtgiTrainDouble, 0f, 0f, 0f))),
                     new("uCapture", new Vector4Uniform(RtgiCaptureUniform)),
+                    new("uVolume", new Vector4Uniform(RtgiVolumeParams)),
+                    new("uVolumeGeom", new Vector4Uniform(RtgiVolumeGeom)),
                 },
                 new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
                 Buffers: new[]
@@ -786,6 +821,9 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("RtgiPointOrigins", rtgiPointOriginsBuf[cur]),
                     new ShaderBufferBinding("RtgiStats", rtgiStats),
                     new ShaderBufferBinding("RtgiRecord", rtgiRecord),
+                    new ShaderBufferBinding("RtgiVolumeTable", RtgiVolTableOrDummy),
+                    new ShaderBufferBinding("RtgiVolumeProbes", RtgiVolProbesOrDummy),
+                    new ShaderBufferBinding("RtgiVolumeDepth", RtgiVolDepthOrDummy),
                 });
             for (var r = 0; r < trainReps; r++) graph.Dispatch(rtgiTrainPassHandle, train);
             // The near rays traced with the hits this training reads (the same parity): lit into the readout's samples.
@@ -798,7 +836,9 @@ internal sealed partial class SponzaLoop
                         new("uSun", new Vector4Uniform(new Vector4(towardSun, 0f))),
                         new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 0f))),
                         new("uNear", new Vector4Uniform(new Vector4(rtgiContactRadius, frameNumber, rtgiNearSlots, RtgiUnsureSize))),
-                        new("uNear2", new Vector4Uniform(new Vector4(rtgiHybridHitSun ? 1f : 0f, 0f, 0f, 0f))),
+                        new("uNear2", new Vector4Uniform(new Vector4(rtgiHybridHitSun ? 1f : 0f, rtgiHybridWorld ? 1f : 0f, frameNumber, RtgiListRoomNow))),
+                        new("uVolume", new Vector4Uniform(RtgiVolumeParams)),
+                        new("uVolumeGeom", new Vector4Uniform(RtgiVolumeGeom)),
                     },
                     Array.Empty<ShaderTextureBinding>(),
                     Buffers: new[]
@@ -810,6 +850,11 @@ internal sealed partial class SponzaLoop
                         new ShaderBufferBinding("RtgiNearInfo", rtgiNearInfoBufs[cur]),
                         new ShaderBufferBinding("RtgiNearSamples", rtgiNearSamples),
                         new ShaderBufferBinding("RtgiResolved", rtgiResolved),
+                        new ShaderBufferBinding("RtgiVolumeTable", RtgiVolTableOrDummy),
+                        new ShaderBufferBinding("RtgiVolumeProbes", RtgiVolProbesOrDummy),
+                        new ShaderBufferBinding("RtgiAccum", rtgiAccum),
+                        new ShaderBufferBinding("RtgiCells", rtgiCells),
+                        new ShaderBufferBinding("RtgiDirty", rtgiDirtyBufs[cur]),
                     }));
         }
         // The bench of the training ends the cache's frame here; of placement or the trace, goes on to them.
@@ -875,7 +920,7 @@ internal sealed partial class SponzaLoop
             new ShaderUniform[]
             {
                 new("uResolve", new Vector4Uniform(new Vector4(rtgiHistory, rtgiMaxAge, RtgiSlots, rtgiChangeSigma))),
-                new("uChange", new Vector4Uniform(new Vector4(rtgiChangeFrames, rtgiFast, rtgiChangeFloor, rtgiSunCut))),
+                new("uChange", new Vector4Uniform(new Vector4(RtgiChangeFramesNow, rtgiFast, rtgiChangeFloor, rtgiSunCut))),
                 new("uAge", new Vector4Uniform(new Vector4(rtgiAge, rtgiAgeFloor, rtgiClampSigma, 0f))),
                 new("uList", new Vector4Uniform(new Vector4(rtgiSunEpoch, RtgiDirtyRoom, 0f, 0f))),
                 new("uRotaR", new Vector4Uniform(new Vector4(rtgiFilterSettled, rtgiListOnTurn ? 1f : rtgiResolveEvery, frameNumber, 0f))),
@@ -1037,6 +1082,8 @@ internal sealed partial class SponzaLoop
                 new("uUnsureMap", new Vector4Uniform(new Vector4(rtgiHalfRow, rtgiUnsureWritten ? 1f : 0f, RtgiUnsureSize, 0f))),
                 new("uSeq", new Vector4Uniform(new Vector4(rtgiBlue ? 1f : 0f, rtgiRedraw ? 1f : 0f, rtgiSettledSun ? 1f : 0f, 0f))),
                 new("uCapture", new Vector4Uniform(RtgiCaptureUniform)),
+                new("uVolume", new Vector4Uniform(RtgiVolumeParams)),
+                new("uVolumeGeom", new Vector4Uniform(RtgiVolumeGeom)),
             },
             new[]
             {
@@ -1046,6 +1093,8 @@ internal sealed partial class SponzaLoop
             Buffers: new[]
             {
                 new ShaderBufferBinding("RtgiPrevRays", rtgiRaysBuf[prev]),
+                new ShaderBufferBinding("RtgiVolumeTable", RtgiVolTableOrDummy),
+                new ShaderBufferBinding("RtgiVolumeProbes", RtgiVolProbesOrDummy),
                 new ShaderBufferBinding("RtgiCapturePixels", RtgiCapturePixelBuffer),
                 new ShaderBufferBinding("RtgiPrevHits", rtgiHitsBuf[prev]),
                 new ShaderBufferBinding("RtgiPoints", rtgiPointsBuf[cur]),
@@ -1146,6 +1195,15 @@ internal sealed partial class SponzaLoop
         var nearRayBuf = rtgiHybridBuilt ? rtgiNearRayBufs[cur] : default;
         var nearHitBuf = rtgiHybridBuilt ? rtgiNearHitBufs[cur] : default;
         var hitSunReach = rayReach;
+        var volRays = rtgiVolListedNow * rtgiVolRaysNow;
+        var volRayBuf = volRays > 0 ? rtgiVolRayBufs[cur] : default;
+        var volHitBuf = volRays > 0 ? rtgiVolHitBufs[cur] : default;
+        var visRays = rtgiVolVisNow && !rtgiBenching ? RtgiVolVisRoom * RtgiVolVisRays : 0;
+        var visRayBuf = visRays > 0 ? rtgiVolVisRays[cur] : default;
+        var visHitBuf = visRays > 0 ? rtgiVolVisHits[cur] : default;
+        var nearCookRays = rtgiNearCookCountNow * NearRays;
+        var nearCookRayBuf = nearCookRays > 0 ? rtgiNearCookRayBufs[cur] : default;
+        var nearCookHitBuf = nearCookRays > 0 ? rtgiNearCookHitBufs[cur] : default;
         var hitSunDisc = SunDiscTangent;
         void Encode(ExternalWorkSync sync, MetalRayTracer t)
         {
@@ -1155,6 +1213,10 @@ internal sealed partial class SponzaLoop
             if (nearSlots > 0 && nearHitSun) t.EncodeTrace(sync, nearRayBuf, 0, nearHitBuf, 0, nearSlots, seed ^ 0x3C6EF372u,
                 sun: new Vector4(towardSun, 0.01f), reach: hitSunReach, discTan: hitSunDisc);
             else if (nearSlots > 0) t.EncodeTrace(sync, nearRayBuf, 0, nearHitBuf, 0, nearSlots, seed ^ 0x3C6EF372u);
+            if (volRays > 0) t.EncodeTrace(sync, volRayBuf, 0, volHitBuf, 0, volRays, seed ^ 0x1B873593u,
+                sun: new Vector4(towardSun, 0.01f), reach: hitSunReach, discTan: hitSunDisc);
+            if (visRays > 0) t.EncodeTrace(sync, visRayBuf, 0, visHitBuf, 0, visRays, seed ^ 0x68E31DA4u);
+            if (nearCookRays > 0) t.EncodeTrace(sync, nearCookRayBuf, 0, nearCookHitBuf, 0, nearCookRays, seed ^ 0x7F4A7C15u);
             if (contact) t.EncodeShadow(sync, contactOrigins, contactOccluded, 0, contactRoom, towardSun, seed ^ 0x51ED270Bu, statSlot: 3,
                 limit: contactCount, directions: contactDirs);
             if (spatial) t.EncodeShadow(sync, spatialOrigins, spatialOccluded, 0, spatialTiles, towardSun, seed ^ 0x2C1B3C6Du, statSlot: 3,
@@ -1242,11 +1304,16 @@ internal sealed partial class SponzaLoop
                 // The stamp the samples it can see carry: the near shading's of the frame before (it runs on the async queue, which
                 // this pass waits on only for the last frame's work; this frame's counter is already one on).
                 new("uHybrid", new Vector4Uniform(new Vector4(rtgiHybrid ? 1f : 0f, rtgiFrameCount - 1u, rtgiHybridRadius, RtgiHybridFramesNow))),
-                new("uHybrid2", new Vector4Uniform(new Vector4(rtgiHybridPrior, 0f, 0f, 0f))),
+                new("uHybrid2", new Vector4Uniform(new Vector4(rtgiHybridPrior, rtgiHybridWorld ? 1f : 0f, 0f, 0f))),
+                new("uPool", new Vector4Uniform(new Vector4(rtgiPoolLevels, rtgiPoolSigma, 0f, 0f))),
                 new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, rtgiNoGradient ? 0f : 1f, rtgiReadoutPlane ? 1f : 0f, rtgiLevelFade ? 1f : 0f))),
                 new("uContact", new Vector4Uniform(new Vector4(rtgiContact && !rtgiHybrid ? 1f : 0f, 0.3f, 1.25f, rtgiView))),
                 new("uUnsure", new Vector4Uniform(new Vector4(rtgiDoneError, rtgiHalfRow, RtgiUnsureSize, RtgiPixelFootprint))),
                 new("uBlurAt", new Vector4Uniform(new Vector4(RtgiBlurNow, rtgiBlurHit, rtgiFrameCount, 0f))),
+                new("uVolume", new Vector4Uniform(RtgiVolumeParams)),
+                new("uVolumeGeom", new Vector4Uniform(RtgiVolumeGeom)),
+                new("uNearCook", new Vector4Uniform(RtgiNearParams)),
+                new("uVolume2", new Vector4Uniform(RtgiVolumeReadout)),
             },
             buffers: new[]
             {
@@ -1263,6 +1330,13 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiNearSamples", rtgiNearSamples),
                 new ShaderBufferBinding("RtgiNearPrev", rtgiNearBufs[(int)((rtgiReadouts + 1u) & 1u)]),
                 new ShaderBufferBinding("RtgiNearCur", rtgiNearBufs[(int)(rtgiReadouts & 1u)]),
+                new ShaderBufferBinding("RtgiVolumeTable", RtgiVolTableOrDummy),
+                new ShaderBufferBinding("RtgiVolumeProbes", RtgiVolProbesOrDummy),
+                new ShaderBufferBinding("RtgiVolumeDepth", RtgiVolDepthOrDummy),
+                new ShaderBufferBinding("RtgiVolumeCellVis", RtgiVolCellVisOrDummy),
+                new ShaderBufferBinding("RtgiVolumeVisRequests", RtgiVolVisRequestsNow),
+                new ShaderBufferBinding("RtgiNearTable", RtgiNearTableOrDummy),
+                new ShaderBufferBinding("RtgiNearLight", RtgiNearLightOrDummy),
             }));
         rtgiUnsureWritten = true;
         // Blurred by how sure the cache is, into the incident the upsample reads (rtgi_blur.frag; at 0 a copy).

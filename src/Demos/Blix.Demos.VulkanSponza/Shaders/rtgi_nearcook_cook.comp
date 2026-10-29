@@ -1,0 +1,59 @@
+#version 450
+
+// --rtgi-near-cook (rtgi_nearcook.glsl): the cook, a chunk of cells a frame. Kind 0 (placement time): each listed cell's
+// NEAR_RAYS rays, from its point lifted off its surface, to the contact radius, into the Metal batch (closest hit). Kind 1
+// (with the training): their hits into the cell's links and its escape share.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform RtgiNearCookCook {
+    vec4 uNearCook;  // rtgi_nearcook.glsl's NEAR_PARAMS
+    vec4 uCook;      // x the chunk's first cell; y its cells; z the contact radius (m); w the kind
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer RtgiNearPoints { vec4 nearPoints[]; };
+layout(std430, set = 0, binding = 2) buffer RtgiNearCookRays { vec4 cookRays[]; };
+layout(std430, set = 0, binding = 3) readonly buffer RtgiNearCookHits { uvec4 cookHits[]; };
+layout(std430, set = 0, binding = 4) buffer RtgiNearLinks { uvec2 nearLinks[]; };
+layout(std430, set = 0, binding = 5) buffer RtgiNearLight { vec4 nearLight[]; };
+
+#define NEAR_PARAMS u.uNearCook
+#define NEAR_TABLE(i) uvec2(0u)
+#include "rtgi_nearcook.glsl"
+
+void main() {
+    uint t = gl_GlobalInvocationID.x;
+    uint first = uint(u.uCook.x), cells = uint(u.uCook.y);
+    float radius = u.uCook.z;
+    if (u.uCook.w < 0.5) {
+        if (t >= cells * NEAR_RAYS) return;
+        uint i = first + t / NEAR_RAYS, k = t % NEAR_RAYS;
+        vec3 p = nearPoints[2u * i].xyz, n = nearPoints[2u * i + 1u].xyz;
+        cookRays[2u * t] = vec4(p + n * 0.01, 0.0);
+        cookRays[2u * t + 1u] = vec4(nearRayDir(i, k, n), radius);
+        return;
+    }
+    if (t >= cells) return;
+    uint i = first + t;
+    float left = 0.0;
+    for (uint k = 0u; k < NEAR_RAYS; k++) {
+        uint r = t * NEAR_RAYS + k;
+        uvec4 h0 = cookHits[3u * r];
+        float dist = uintBitsToFloat(h0.x);
+        uvec2 link = uvec2(0u);
+        if ((h0.w & 1u) != 0u && dist <= radius) {
+            uvec4 h2 = cookHits[3u * r + 2u];
+            vec3 nq = vec3(uintBitsToFloat(h2.x), uintBitsToFloat(h2.y), uintBitsToFloat(h2.z));
+            vec3 d = cookRays[2u * r + 1u].xyz;
+            nq = dot(nq, nq) > 1e-12 ? normalize(nq) : -d;
+            if (dot(nq, d) > 0.0) nq = -nq;
+            uvec2 o = uvec2(clamp(nearOctEncode(nq) * 255.0 + 0.5, 0.0, 255.0));
+            uint dq = uint(clamp(dist / radius, 0.0, 1.0) * 32767.0);
+            // A back face met: the ray started inside something -- dark (albedo 0).
+            uint albedo = (h0.w & 2u) != 0u ? h2.w : 0u;
+            link = uvec2(0x80000000u | (dq << 16) | (o.y << 8) | o.x, albedo);
+        } else left += 1.0;
+        nearLinks[i * NEAR_RAYS + k] = link;
+    }
+    nearLight[i] = vec4(0.0, 0.0, 0.0, left / float(NEAR_RAYS));
+}

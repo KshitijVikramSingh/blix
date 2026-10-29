@@ -1,0 +1,115 @@
+#version 450
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// --rtgi-volume (SponzaLoop.RtgiVolume.cs): this frame's probes' rays answered (rtgi_volume_rays.comp cast them, the Metal
+// batch traced them with each hit's sun), into the probes (rtgi_volume.glsl). A workgroup a probe, a subgroup of 32 lanes,
+// each lane its share of the probe's rays: a miss the sky's radiance; a surface's front met at q its outgoing radiance,
+// albedo / PI x (its indirect irradiance -- q's cache cell where one holds light, else the volume's own -- plus the sun
+// where its sun ray reached); a back face dark. Projected on L1 harmonics (4 PI / K
+// x L x Y), the sky's share: summed over the subgroup and blended into the probe by what it holds
+// (all of it at first, 1 / (uVol.w / K) of it once full). What it sees is the cook's (rtgi_volume_cook.comp), not learnt here.
+
+layout(local_size_x = 32) in;
+
+layout(set = 0, binding = 0) uniform RtgiVolumeUpdate {
+    vec4 uParams;        // rtgiParams (rtgi_cache.glsl)
+    vec4 uCamera;        // xyz position
+    vec4 uSun;           // xyz toward the sun; w the sky cube's lod
+    vec4 uSunIrradiance; // rgb
+    vec4 uVolume;        // rtgi_volume.glsl's VOL_PARAMS
+    vec4 uVolumeGeom;    // rtgi_volume.glsl's VOL_GEOM
+    vec4 uVol;           // x the probes listed; y rays a probe; z unused; w the rays a probe holds at most (fewer for a while
+                         // after the sun turns)
+} u;
+
+layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
+layout(std430, set = 0, binding = 2) readonly buffer RtgiVolumeBatch { uvec4 batch[]; };
+layout(std430, set = 0, binding = 3) readonly buffer RtgiVolumeRayBuffer { vec4 volRays[]; };
+layout(std430, set = 0, binding = 4) readonly buffer RtgiVolumeHits { uvec4 volHits[]; };
+layout(std430, set = 0, binding = 5) readonly buffer RtgiVolumeTable { uvec2 volTable[]; };
+layout(std430, set = 0, binding = 6) buffer RtgiVolumeProbes { float volProbes[]; };
+layout(std430, set = 0, binding = 7) readonly buffer RtgiKeys { uint rtgiKeys[]; };
+layout(std430, set = 0, binding = 8) readonly buffer RtgiRecord { uvec4 rtgiRecord[]; };
+layout(std430, set = 0, binding = 9) readonly buffer RtgiVolumeDepth { uint volDepth[]; };
+
+#define VOL_PARAMS u.uVolume
+#define VOL_GEOM u.uVolumeGeom
+#define VOL_TABLE(i) volTable[i]
+#define VOL_PROBES(i) volProbes[i]
+#define VOL_DEPTH(i) volDepth[i]
+#include "rtgi_volume.glsl"
+#define RTGI_GEOM_SCALE(p) volCellScale(p)
+#define RTGI_FAR_GROW u.uVolumeGeom.z
+#define RTGI_KEYS(i) rtgiKeys[i]
+#include "rtgi_cache.glsl"
+
+// The cache's indirect light at q facing n: its level's cell holding 8 samples or more, else a coarser one (two up at
+// most); w 0 none.
+vec4 cellLight(vec3 q, vec3 n) {
+    uint level = rtgiLevel(q, u.uCamera.xyz, u.uParams), side = rtgiSide(n);
+    uint top = uint(u.uParams.w);
+    for (uint l = level; l <= min(level + 2u, top); ++l) {
+        uint s = rtgiFind(rtgiCellHash(ivec3(floor(q / rtgiSize(l, u.uParams))), l, side, u.uParams), u.uParams);
+        if (s == 0xFFFFFFFFu) continue;
+        uvec4 a = rtgiRecord[2u * s], c = rtgiRecord[2u * s + 1u];
+        if (uintBitsToFloat(c.w) < 8.0) continue;
+        vec2 rg = unpackHalf2x16(a.x), bs = unpackHalf2x16(a.y);
+        return vec4(rg, bs.x, 1.0);
+    }
+    return vec4(0.0);
+}
+
+void main() {
+    uint probe = gl_WorkGroupID.x;
+    if (probe >= uint(u.uVol.x)) return;
+    uint lane = gl_SubgroupInvocationID;
+    uint k = uint(u.uVol.y);
+    uvec4 b = batch[probe];
+    uint id = b.x, level = b.y;
+    vec3 shR = vec3(0.0), shG = vec3(0.0), shB = vec3(0.0);   // Y1 (y, z, x) per channel
+    vec3 sh0 = vec3(0.0);
+    float sky = 0.0;
+    for (uint j = lane; j < k; j += 32u) {
+        uint r = probe * k + j;
+        vec3 d = volRays[2u * r + 1u].xyz;
+        uvec4 h0 = volHits[3u * r];
+        vec3 l = vec3(0.0);
+        if ((h0.w & 1u) == 0u) {
+            l = textureLod(uSkyRadiance, d, u.uSun.w).rgb;
+            sky += 1.0;
+        } else {
+            if ((h0.w & 2u) != 0u) {
+                uvec4 h2 = volHits[3u * r + 2u];
+                vec3 nq = vec3(uintBitsToFloat(h2.x), uintBitsToFloat(h2.y), uintBitsToFloat(h2.z));
+                if (dot(nq, nq) > 1e-12) {
+                    nq = normalize(nq);
+                    if (dot(nq, d) > 0.0) nq = -nq;
+                    vec3 q = volRays[2u * r].xyz + d * uintBitsToFloat(h0.x);
+                    vec4 e = cellLight(q, nq);
+                    if (e.w < 0.5) { float s; e = volumeAt(q, nq, s); }
+                    float vis = (h0.w & 8u) != 0u ? 1.0 : 0.0;
+                    vec3 eTotal = e.rgb + u.uSunIrradiance.rgb * max(dot(nq, u.uSun.xyz), 0.0) * vis;
+                    l = unpackUnorm4x8(h2.w).rgb * eTotal / 3.14159265;
+                }
+            }
+        }
+        if (any(isnan(l)) || any(isinf(l))) l = vec3(0.0);
+        sh0 += l * VOL_Y0;
+        vec3 y1 = VOL_Y1 * vec3(d.y, d.z, d.x);
+        shR += l.r * y1; shG += l.g * y1; shB += l.b * y1;
+    }
+    float norm = 4.0 * 3.14159265 / float(k);
+    sh0 = subgroupAdd(sh0) * norm;
+    shR = subgroupAdd(shR) * norm; shG = subgroupAdd(shG) * norm; shB = subgroupAdd(shB) * norm;
+    sky = subgroupAdd(sky) / float(k);
+    if (!subgroupElect()) return;
+    uint base = id * VOL_FLOATS;
+    float held = volProbes[base + VOL_HELD];
+    float a = float(k) / min(held + float(k), max(u.uVol.w, float(k)));
+    float batchSh[12] = float[12](sh0.r, shR.x, shR.y, shR.z, sh0.g, shG.x, shG.y, shG.z, sh0.b, shB.x, shB.y, shB.z);
+    for (uint c = 0u; c < 12u; c++) volProbes[base + VOL_SH + c] = mix(volProbes[base + VOL_SH + c], batchSh[c], a);
+    volProbes[base + VOL_SKY] = mix(volProbes[base + VOL_SKY], sky, a);
+    volProbes[base + VOL_HELD] = min(held + float(k), max(u.uVol.w, float(k)));
+    volProbes[base + VOL_FLAGS] = float(uint(volProbes[base + VOL_FLAGS]) | VOL_TRAINED);
+}

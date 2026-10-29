@@ -1,0 +1,86 @@
+#version 450
+
+// --rtgi-near-cook (rtgi_nearcook.glsl): each cooked cell's near light this frame -- over its NEAR_RAYS fixed rays, each
+// that met a surface brings that surface's light (albedo x (its cache cell's indirect light + the sun by that cell's sun
+// visibility): PI x L_in for the cosine ray, as the training's hits), each that left brings none (the far light, the
+// cache's, the readout adds). No rays: the surfaces it meets were cooked; only their light is read. Blended over a few
+// frames (uUpdate.z) against the cache cells' own frame-to-frame wobble. A share of the cells a frame (uUpdate.x, .y).
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform RtgiNearCookUpdate {
+    vec4 uParams;        // rtgiParams (rtgi_cache.glsl)
+    vec4 uCamera;        // xyz position
+    vec4 uSun;           // xyz toward the sun
+    vec4 uSunIrradiance; // rgb
+    vec4 uNearCook;      // rtgi_nearcook.glsl's NEAR_PARAMS
+    vec4 uUpdate;        // x the first cell this frame; y the cells; z the blend's weight of this frame; w the contact radius
+    vec4 uVolume;        // rtgi_volume.glsl's VOL_PARAMS (the cells' sizes)
+    vec4 uVolumeGeom;    // rtgi_volume.glsl's VOL_GEOM
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer RtgiNearPoints { vec4 nearPoints[]; };
+layout(std430, set = 0, binding = 2) readonly buffer RtgiNearLinks { uvec2 nearLinks[]; };
+layout(std430, set = 0, binding = 3) buffer RtgiNearLight { vec4 nearLight[]; };
+layout(std430, set = 0, binding = 4) readonly buffer RtgiKeys { uint rtgiKeys[]; };
+layout(std430, set = 0, binding = 5) readonly buffer RtgiRecord { uvec4 rtgiRecord[]; };
+layout(std430, set = 0, binding = 6) readonly buffer RtgiResolved { vec4 rtgiResolved[]; };
+layout(std430, set = 0, binding = 7) readonly buffer RtgiVolumeTable { uvec2 volTable[]; };
+layout(std430, set = 0, binding = 8) readonly buffer RtgiVolumeProbes { float volProbes[]; };
+
+#define NEAR_PARAMS u.uNearCook
+#define NEAR_TABLE(i) uvec2(0u)
+#include "rtgi_nearcook.glsl"
+#define VOL_PARAMS u.uVolume
+#define VOL_GEOM u.uVolumeGeom
+#define VOL_TABLE(i) volTable[i]
+#define VOL_PROBES(i) volProbes[i]
+#define VOL_DEPTH(i) 0u
+#include "rtgi_volume.glsl"
+#define RTGI_GEOM_SCALE(p) volCellScale(p)
+#define RTGI_FAR_GROW u.uVolumeGeom.z
+#define RTGI_KEYS(i) rtgiKeys[i]
+#include "rtgi_cache.glsl"
+
+// The cache's indirect light at q facing n: its level's cell holding light, else a coarser one (two up at most); w its sun
+// visibility, -1 none found.
+vec4 cellLight(vec3 q, vec3 n) {
+    uint level = rtgiLevel(q, u.uCamera.xyz, u.uParams), side = rtgiSide(n);
+    uint top = uint(u.uParams.w);
+    for (uint l = level; l <= min(level + 2u, top); ++l) {
+        uint s = rtgiFind(rtgiCellHash(ivec3(floor(q / rtgiSize(l, u.uParams))), l, side, u.uParams), u.uParams);
+        if (s == 0xFFFFFFFFu) continue;
+        uvec4 a = rtgiRecord[2u * s], c = rtgiRecord[2u * s + 1u];
+        if (uintBitsToFloat(c.w) < 0.5) continue;
+        vec2 rg = unpackHalf2x16(a.x), bs = unpackHalf2x16(a.y);
+        return vec4(rg, bs.x, rtgiResolved[2u * s + 1u].x);
+    }
+    return vec4(0.0, 0.0, 0.0, -1.0);
+}
+
+void main() {
+    uint t = gl_GlobalInvocationID.x;
+    if (t >= uint(u.uUpdate.y)) return;
+    uint i = uint(u.uUpdate.x) + t;
+    if (i >= uint(NEAR_PARAMS.z)) i -= uint(NEAR_PARAMS.z);
+    vec3 p = nearPoints[2u * i].xyz, n = nearPoints[2u * i + 1u].xyz;
+    vec3 sum = vec3(0.0);
+    float found = 0.0, met = 0.0;
+    for (uint k = 0u; k < NEAR_RAYS; k++) {
+        uvec2 link = nearLinks[i * NEAR_RAYS + k];
+        if ((link.x & 0x80000000u) == 0u) continue;
+        met += 1.0;
+        float dist = float((link.x >> 16) & 0x7FFFu) / 32767.0 * u.uUpdate.w;
+        vec3 q = p + n * 0.01 + nearRayDir(i, k, n) * dist;
+        vec3 nq = nearOctDecode(vec2(link.x & 0xFFu, (link.x >> 8) & 0xFFu) / 255.0);
+        vec4 c = cellLight(q, nq);
+        if (c.w < 0.0) continue;
+        found += 1.0;
+        sum += unpackUnorm4x8(link.y).rgb * (c.rgb + u.uSunIrradiance.rgb * max(dot(nq, u.uSun.xyz), 0.0) * c.w);
+    }
+    vec4 old = nearLight[i];
+    // Rays met whose surface the cache holds no light for yet: the others' mean for them (none: nothing this frame).
+    if (met > 0.0 && found < 0.5) return;
+    vec3 now = met > 0.0 ? sum / found * (met / float(NEAR_RAYS)) : vec3(0.0);
+    nearLight[i] = vec4(mix(old.rgb, now, u.uUpdate.z), old.w);
+}

@@ -49,6 +49,8 @@ layout(set = 0, binding = 0) uniform RtgiTrain {
                          // at a hit. Aggregation (the same light): 8192 the subgroup's rounds, 16384 each lane's own atomics
     vec4 uCapture;       // --rtgi-capture (SponzaLoop.RtgiCapture.cs): x the pinned points (the first x); y this frame's slot; z the
                          // slots (frames); 0 x: none
+    vec4 uVolume;        // --rtgi-volume: rtgi_volume.glsl's VOL_PARAMS (w 0: off)
+    vec4 uVolumeGeom;    // rtgi_volume.glsl's VOL_GEOM (the cells sized by the geometry)
 } u;
 bool twice(uint b) { return (uint(u.uDouble.x) & b) != 0u; }
 // How a sample's words reach its cell (uFallback.w): 0 each lane's atomics, 1 the subgroup's rounds, 2 the workgroup's table.
@@ -92,6 +94,18 @@ layout(std430, set = 0, binding = 18) buffer RtgiStats { uint rtgiStats[64]; };
 // The readout's record (rtgi_cache.glsl; the blend's light, the resolve's samples held and sun epoch): a hit's cell read
 // in one 32-byte line (irradianceAt).
 layout(std430, set = 0, binding = 19) readonly buffer RtgiRecord { uvec4 rtgiRecord[]; };
+// --rtgi-volume (rtgi_volume.glsl): the probes whose cooked distances size the cells (volCellScale).
+layout(std430, set = 0, binding = 21) readonly buffer RtgiVolumeTable { uvec2 volTable[]; };
+layout(std430, set = 0, binding = 22) readonly buffer RtgiVolumeProbes { float volProbes[]; };
+#define VOL_PARAMS u.uVolume
+#define VOL_GEOM u.uVolumeGeom
+#define VOL_TABLE(i) volTable[i]
+layout(std430, set = 0, binding = 23) readonly buffer RtgiVolumeDepth { uint volDepth[]; };
+#define VOL_PROBES(i) volProbes[i]
+#define VOL_DEPTH(i) volDepth[i]
+#include "rtgi_volume.glsl"
+#define RTGI_GEOM_SCALE(p) volCellScale(p)
+#define RTGI_FAR_GROW u.uVolumeGeom.z
 void tally(uint slot, bool v) {
     uint n = subgroupBallotBitCount(subgroupBallot(v));
     if (subgroupElect() && n > 0u) atomicAdd(rtgiStats[slot], n);
@@ -192,6 +206,9 @@ vec4 irradianceAt(vec3 q, vec3 nq, out bool fine, float sunAt) {
             if (s != 0xFFFFFFFFu && rtgiResolved[2u * s + 1u].y >= 0.5) { r0 = rtgiFiltered[s]; r1 = rtgiResolved[2u * s + 1u]; keepAlive(s); break; }
         }
     }
+    // No volume here: a landing given the probes' light trained it into the cell for good -- the volume's noise and its
+    // leaks with it, the darkest of Crytek Sponza 2x bright and shimmering 9% with the readout ignoring the volume
+    // (2026-10-29). The cache learns from what its rays reach; the volume is the readout's alone.
     if (r1.y < 0.5) return vec4(0.0);
     return vec4(r0.rgb + u.uNearField.z * u.uSunIrradiance.rgb * max(0.0, dot(nq, u.uSun.xyz)) * (sunAt >= 0.0 ? sunAt : r1.x), 1.0);
 }

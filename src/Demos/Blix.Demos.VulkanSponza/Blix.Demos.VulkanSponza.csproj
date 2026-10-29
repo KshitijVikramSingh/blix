@@ -80,6 +80,12 @@
     <GlslShader Include="Shaders\rtgi_contact_rays.comp" />
     <GlslShader Include="Shaders\rtgi_near_rays.comp" />
     <GlslShader Include="Shaders\rtgi_near_shade.comp" />
+    <GlslShader Include="Shaders\rtgi_volume_rays.comp" />
+    <GlslShader Include="Shaders\rtgi_volume_update.comp" />
+    <GlslShader Include="Shaders\rtgi_volume_cook.comp" />
+    <GlslShader Include="Shaders\rtgi_volume_vis.comp" />
+    <GlslShader Include="Shaders\rtgi_nearcook_cook.comp" />
+    <GlslShader Include="Shaders\rtgi_nearcook_update.comp" />
     <GlslShader Include="Shaders\rtgi_contact_train.comp" />
     <GlslShader Include="Shaders\rtgi_readout.frag" />
     <GlslShader Include="Shaders\rtgi_reservoir.comp" />

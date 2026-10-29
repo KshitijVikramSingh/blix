@@ -26,6 +26,9 @@ internal sealed partial class SponzaLoop
     private float rtgiSettleFirstError = -1f, rtgiSettleError = -1f;
     private uint rtgiSettleLastSeen, rtgiSettleLastErr;
     private readonly byte[] rtgiSettleSeen = new byte[36];
+    private int rtgiSettleVolumeFrames;
+    // The volume not yet what the cache's light should settle against: cooking, refining, or probes short of their passes.
+    private bool RtgiVolumeSettling => rtgiVolume && (!rtgiVolumeBuilt || !rtgiVolReady || rtgiVolUnder > 0);
 
     // Settling now: --rtgi, its first settle not done, the scene and its tracer up, no cook holding the screen.
     private bool RtgiSettleNow => rtgi && rtgiSettleWanted && !rtgiSettleDone && fullyLoaded && frameTracer is not null
@@ -36,6 +39,17 @@ internal sealed partial class SponzaLoop
     {
         if (!RtgiSettleNow || rtgiDoneCount.Equals(default(Blix.Graphics.GpuBufferHandle))) return;
         if (!rtgiSettleClock.IsRunning) rtgiSettleClock.Start();
+        // --rtgi-volume: the cache's light is judged only once the volume is cooked and every probe has had its first passes
+        // -- the cells are sized by it then (a cache settled before was sized by the camera, and started over), and young
+        // cells lean on it. At most RtgiSettleMaxFrames of waiting.
+        if (RtgiVolumeSettling && ++rtgiSettleVolumeFrames < RtgiSettleMaxFrames)
+        {
+            device.ReadMappedGpuBuffer(rtgiDoneCount, 0, rtgiSettleSeen);
+            var s0 = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(rtgiSettleSeen);
+            rtgiSettleLastSeen = s0[0];
+            rtgiSettleLastErr = s0[8];
+            return;
+        }
         device.ReadMappedGpuBuffer(rtgiDoneCount, 0, rtgiSettleSeen);
         var seen = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(rtgiSettleSeen);
         var seenNew = seen[0] - rtgiSettleLastSeen;
@@ -69,6 +83,9 @@ internal sealed partial class SponzaLoop
     private void DrawRtgiSettle()
     {
         ImGui.TextUnformatted("Settling the light -- the cache learns the scene's light with the GPU to itself; the scene comes up lit.");
+        if (RtgiVolumeSettling)
+            ImGui.TextUnformatted(string.Create(CultureInfo.InvariantCulture,
+                $"World volume: {(!rtgiVolumeBuilt ? "placing probes" : !rtgiVolReady ? $"cooking what each probe sees (round {rtgiVolRefineRound + 1})" : $"first passes, {rtgiVolPositions.Length - rtgiVolUnder:N0} of {rtgiVolPositions.Length:N0} probes")}"));
         var fallen = rtgiSettleFirstError > 0f && rtgiSettleError >= 0f ? 1f - rtgiSettleError / rtgiSettleFirstError : 0f;
         ImGui.ProgressBar(Math.Clamp(rtgiSettleCount / (float)RtgiSettleMaxFrames, 0f, 1f), new System.Numerics.Vector2(-1f, 0f),
             string.Create(CultureInfo.InvariantCulture,

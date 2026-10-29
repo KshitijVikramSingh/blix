@@ -63,9 +63,15 @@ void main() {
             if (all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0)))) {
                 vec4 state = texture(uHistoryState, uv);
                 float expected = length(p - u.uPrevCamera.xyz);
-                if (state.y > 0.5 && abs(state.x - expected) < 0.02 * expected + 0.02) {
-                    history = texture(uHistory, uv);
-                    fast = texture(uFastHistory, uv);
+                // Finite only: the history targets are not written before the first frame that keeps one (the boot's
+                // settle draws no lit frame), and their garbage passed the state test now and then -- NaN, mixed in at
+                // 15/16, kept every lit pixel black on a still camera until motion dropped the history (the user,
+                // Crytek Sponza, 2026-10-29).
+                vec4 hist = texture(uHistory, uv), fh = texture(uFastHistory, uv);
+                bool finite = !any(isnan(hist)) && !any(isinf(hist)) && !any(isnan(fh)) && !any(isinf(fh)) && !isnan(state.x);
+                if (finite && state.y > 0.5 && abs(state.x - expected) < 0.02 * expected + 0.02) {
+                    history = hist;
+                    fast = fh;
                     held = state.y;
                 }
             }
