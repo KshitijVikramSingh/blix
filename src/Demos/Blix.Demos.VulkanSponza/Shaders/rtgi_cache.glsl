@@ -24,6 +24,14 @@
 //   x the finest cell (m), y its growth per metre of distance, z slots - 1 (a power of two), w the top level.
 
 #define RTGI_PROBES 8u
+// Every cell grid's origin (the cache's at every level, the cooked near cells'): off the round coordinates scenes are
+// modelled on. At the world's origin a floor at y = 0, a wall on a 5 cm multiple, lay on a cell boundary, and a point
+// rebuilt from the depth buffer fell a hair either side as the view changed -- its cell, the cooked cell it read, chosen
+// at random: half the floor's samples in each of two cells, lookups missing in streaks that moved with the camera (the
+// user, the crevices testbed, 2026-10-30). Shared by all levels (a cell's parent is still its coordinates halved).
+#ifndef RTGI_ORIGIN
+#define RTGI_ORIGIN vec3(0.0137, 0.0271, 0.0419)
+#endif
 // A slot's accumulator words: indirect rgb, count, sky misses, sun reached, sun traced, luminance squared, and the
 // irradiance vector's three components (signed, two's complement in the uints: rtgi_train.comp), the near visibility's
 // weighted count, the luminance the escaping rays brought (the far light: rtgi_readout.frag's contact split), and the
@@ -97,9 +105,16 @@ bool rtgiSunSettled(float visibility, float rays) {
 }
 
 // The cell's two hashes: x the slot it starts probing at, y its key.
+// The region of the point a key is made for (rtgi_nearcook.glsl's nearRegion: the 2 m probe its cooked surface cell
+// reaches, 0 where none is cooked), part of every cell's key: the two sides of a thin wall reach different probes, so they
+// are different cells -- one cell held both rooms' floor where it ran under a wall, both faces of a crevice's lip, and
+// every blend and lookup that found it by its key carried the light across (the user, the crevices testbed's edges,
+// 2026-10-30). Set by each shader for the point it is keying (its cell's stored w, bits 8 up, for a cell's own).
+uint rtgiRegion = 0u;
+
 uvec2 rtgiCellHash(ivec3 c, uint level, uint side, vec4 params) {
-    uint a = rtgiHash(uint(c.x) * 0x9E3779B1u ^ rtgiHash(uint(c.y) * 0x85EBCA77u ^ rtgiHash(uint(c.z) * 0xC2B2AE3Du ^ (level * 6u + side))));
-    uint b = rtgiHash(a ^ 0x68E31DA4u ^ uint(c.x) * 0x1B873593u ^ uint(c.y) * 0xCC9E2D51u ^ uint(c.z) * 0x27D4EB2Fu) | 1u;
+    uint a = rtgiHash(uint(c.x) * 0x9E3779B1u ^ rtgiHash(uint(c.y) * 0x85EBCA77u ^ rtgiHash(uint(c.z) * 0xC2B2AE3Du ^ (level * 6u + side) ^ rtgiRegion * 0x632BE5ABu)));
+    uint b = rtgiHash(a ^ 0x68E31DA4u ^ uint(c.x) * 0x1B873593u ^ uint(c.y) * 0xCC9E2D51u ^ uint(c.z) * 0x27D4EB2Fu ^ rtgiRegion * 0x5BD1E995u) | 1u;
     return uvec2(a & uint(params.z), b);
 }
 

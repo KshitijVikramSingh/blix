@@ -98,6 +98,7 @@ layout(std430, set = 0, binding = 23) readonly buffer RtgiNearTable { uvec2 near
 layout(std430, set = 0, binding = 24) readonly buffer RtgiNearPoints { vec4 nearPoints[]; };
 #define NEAR_PARAMS u.uNearCook
 #define NEAR_TABLE(i) nearTable[i]
+#define NEAR_POINTS(i) nearPoints[i]
 #include "rtgi_nearcook.glsl"
 
 // A visible point's cell trained over its own surface, not the part of it in view: a point drawn from the cooked surface
@@ -111,16 +112,17 @@ bool surfacePoint(inout vec3 p, inout vec3 n, uint h) {
     uint lv = rtgiLevel(p, u.uCamera.xyz, u.uParams);
     float size = rtgiSize(lv, u.uParams);
     uint side = rtgiSide(n);
-    ivec3 cell = ivec3(floor(p / size));
+    ivec3 cell = ivec3(floor((p - RTGI_ORIGIN) / size));
     uint subs = max(1u, uint(size / NEAR_PARAMS.x + 0.5));
     for (uint k = 0u; k < 6u; k++) {
         uint hk = nearHash(h ^ (k + 1u) * 0x9E3779B9u);
         uvec3 sub = uvec3(hk % subs, (hk >> 10) % subs, (hk >> 20) % subs);
-        vec3 at = vec3(cell) * size + (vec3(sub) + 0.5) * (size / float(subs));
-        uint j = nearFind(ivec3(floor(at / NEAR_PARAMS.x)), side);
+        vec3 at = RTGI_ORIGIN + vec3(cell) * size + (vec3(sub) + 0.5) * (size / float(subs));
+        uint j = nearFind(ivec3(floor((at - RTGI_ORIGIN) / NEAR_PARAMS.x)), side);
         if (j == 0xFFFFFFFFu) continue;
+        if ((floatBitsToUint(nearPoints[2u * j].w) & NEAR_BURIED) != 0u) continue;
         vec3 q = nearPoints[2u * j].xyz;
-        if (ivec3(floor(q / size)) != cell) continue;
+        if (ivec3(floor((q - RTGI_ORIGIN) / size)) != cell) continue;
         p = q;
         n = nearPoints[2u * j + 1u].xyz;
         return true;
@@ -345,6 +347,7 @@ void main() {
             if (dot(n, d.xyz) > 0.0) n = -n;
         }
     }
+    rtgiRegion = nearRegion(p, rtgiSide(n));
     float lift = 0.01 + 0.001 * length(p - u.uCamera.xyz);
     vec3 o = p + n * lift;
     uint h2 = hash(h);
@@ -358,7 +361,7 @@ void main() {
     uint sc = 0xFFFFFFFFu;
     if ((u.uSeq.x > 0.5 || u.uSeq.z > 0.5) && (uint(u.uSkip.x) & 2u) == 0u) {
         uint lv = rtgiLevel(p, u.uCamera.xyz, u.uParams);
-        ch = rtgiCellHash(ivec3(floor(p / rtgiSize(lv, u.uParams))), lv, rtgiSide(n), u.uParams);
+        ch = rtgiCellHash(ivec3(floor((p - RTGI_ORIGIN) / rtgiSize(lv, u.uParams))), lv, rtgiSide(n), u.uParams);
         sc = rtgiFind(ch, u.uParams);
     }
     // The cell's sequence index (uSeq.x, below), its counter's old value: the top bit its sun settled (rtgi_resolve.comp
@@ -410,7 +413,7 @@ void main() {
     float gsum = 0.0;
     if (u.uGuide.x > 0.0 && u.uGuide.w > 0.0 && (uint(u.uSkip.x) & 4u) == 0u) {
         uint gl = min(rtgiLevel(p, u.uCamera.xyz, u.uParams) + 2u, uint(u.uParams.w));
-        gslot = guideFind(guideHash(ivec3(floor(p / rtgiSize(gl, u.uParams))), gl, gside, uint(u.uGuide.w)), uint(u.uGuide.w));
+        gslot = guideFind(guideHash(ivec3(floor((p - RTGI_ORIGIN) / rtgiSize(gl, u.uParams))), gl, gside, uint(u.uGuide.w)), uint(u.uGuide.w));
         if (gslot != 0xFFFFFFFFu) {
             vec4 meta = guideDist[9u * gslot + 8u];
             gsum = meta.y;

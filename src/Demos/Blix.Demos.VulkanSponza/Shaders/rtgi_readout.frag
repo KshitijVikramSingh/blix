@@ -105,6 +105,8 @@ layout(std430, set = 0, binding = 26) buffer RtgiVolumeVisRequests { uint visCou
 // --rtgi-near-cook (rtgi_nearcook.glsl): the cooked near cells, their table and light.
 layout(std430, set = 0, binding = 27) readonly buffer RtgiNearTable { uvec2 nearTable[]; };
 layout(std430, set = 0, binding = 28) readonly buffer RtgiNearLight { vec4 nearLight[]; };
+layout(std430, set = 0, binding = 29) readonly buffer RtgiNearPoints { vec4 nearPoints[]; };
+#define NEAR_POINTS(i) nearPoints[i]
 #define NEAR_PARAMS u.uNearCook
 #define NEAR_TABLE(i) nearTable[i]
 #include "rtgi_nearcook.glsl"
@@ -135,7 +137,7 @@ bool visKnown = false;
 uint visWord = 0u, visLevel0 = 0u;
 void cellVisFetch(vec3 p, vec3 n, uint side, uint level) {
     if (u.uVolume.w < 0.5) return;
-    uint sc = rtgiFind(rtgiCellHash(ivec3(floor(p / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
+    uint sc = rtgiFind(rtgiCellHash(ivec3(floor((p - RTGI_ORIGIN) / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
     if (sc == 0xFFFFFFFFu) return;
     uint key = rtgiKeys[sc];
     uvec2 v = cellVis[sc];
@@ -160,7 +162,7 @@ void cellVisFetch(vec3 p, vec3 n, uint side, uint level) {
 bool neighbourSeen(vec3 p, ivec3 cc, uint level, uint a0, uint a1, float size) {
     if (u.uVolume2.z < 0.5 || !visKnown || level < visLevel0 || level - visLevel0 > 2u) return true;
     uint base = 16u + (level - visLevel0) * 4u;
-    int d0 = cc[a0] - int(floor(p[a0] / size)), d1 = cc[a1] - int(floor(p[a1] / size));
+    int d0 = cc[a0] - int(floor((p[a0] - RTGI_ORIGIN[a0]) / size)), d1 = cc[a1] - int(floor((p[a1] - RTGI_ORIGIN[a1]) / size));
     if (d0 > 0 && (visWord & (1u << base)) == 0u) return false;
     if (d0 < 0 && (visWord & (1u << (base + 1u))) == 0u) return false;
     if (d1 > 0 && (visWord & (1u << (base + 2u))) == 0u) return false;
@@ -198,7 +200,7 @@ float readRel = 1.0;
 vec4 readLevel(vec3 p, uint side, uint level, out float sky, out vec3 bvec, out float near, out float far) {
     float relSum = 0.0;
     float size = rtgiSize(level, u.uParams);
-    vec3 f = p / size - 0.5;
+    vec3 f = (p - RTGI_ORIGIN) / size - 0.5;
     ivec3 c0 = ivec3(floor(f));
     vec3 t = f - vec3(c0);
     vec3 e = vec3(0.0);
@@ -214,7 +216,7 @@ vec4 readLevel(vec3 p, uint side, uint level, out float sky, out vec3 bvec, out 
     bool plane = u.uNearField.z > 0.5;
     uint axis = side >> 1u;
     uint a0 = (axis + 1u) % 3u, a1 = (axis + 2u) % 3u;
-    int cAxis = int(floor(p[axis] / size));
+    int cAxis = int(floor((p[axis] - RTGI_ORIGIN[axis]) / size));
     for (int k = 0; k < (plane ? 4 : 8); k++) {
         ivec3 o = ivec3(k & 1, (k >> 1) & 1, k >> 2);
         if (plane) {
@@ -256,7 +258,7 @@ vec4 readLevel(vec3 p, uint side, uint level, out float sky, out vec3 bvec, out 
 // each holds (full at 16): their near visibility, w the weight found.
 vec2 readContact(vec3 p, uint side, uint level) {
     float size = 0.25 * rtgiSize(level, u.uParams);
-    vec3 f = p / size - 0.5;
+    vec3 f = (p - RTGI_ORIGIN) / size - 0.5;
     ivec3 c0 = ivec3(floor(f));
     vec3 t = f - vec3(c0);
     float v = 0.0, w = 0.0;
@@ -282,7 +284,7 @@ vec2 readContact(vec3 p, uint side, uint level) {
 // samples held, weighed the same way.
 vec4 readNear(vec3 p, uint side, uint level, out float held) {
     float size = 0.25 * rtgiSize(level, u.uParams);
-    vec3 f = p / size - 0.5;
+    vec3 f = (p - RTGI_ORIGIN) / size - 0.5;
     ivec3 c0 = ivec3(floor(f));
     vec3 t = f - vec3(c0);
     vec4 acc = vec4(0.0);
@@ -303,17 +305,17 @@ vec4 readNear(vec3 p, uint side, uint level, out float held) {
     return w > 0.0 ? acc / w : vec4(0.0);
 }
 
-// --rtgi-near-cook: the cooked near cells around p on its surface (the tangent plane's four, bilinear; rtgi_nearcook.glsl):
-// rgb the near light per ray, w the escape share; found the weight found.
+// --rtgi-near-cook: the cooked near cells around p on its surface (the tangent plane's four, bilinear, those gathered and in
+// p's region; rtgi_nearcook.glsl): rgb their whole indirect irradiance (rtgi_nearcook_update.comp); found the weight found.
 vec4 readNearCooked(vec3 p, uint side, out float found) {
     found = 0.0;
     if (NEAR_PARAMS.w < 0.5) return vec4(0.0);
     float size = NEAR_PARAMS.x;
     uint axis = side >> 1u, a0 = (axis + 1u) % 3u, a1 = (axis + 2u) % 3u;
-    vec3 f = p / size - 0.5;
+    vec3 f = (p - RTGI_ORIGIN) / size - 0.5;
     ivec3 c0 = ivec3(floor(f));
     vec3 t = f - vec3(c0);
-    int cAxis = int(floor(p[axis] / size));
+    int cAxis = int(floor((p[axis] - RTGI_ORIGIN[axis]) / size));
     vec4 acc = vec4(0.0);
     for (int k = 0; k < 4; k++) {
         ivec3 cc = c0;
@@ -321,9 +323,11 @@ vec4 readNearCooked(vec3 p, uint side, out float found) {
         cc[a1] += k >> 1;
         cc[axis] = cAxis;
         uint i = nearFind(cc, side);
-        if (i == 0xFFFFFFFFu) continue;
+        if (i == 0xFFFFFFFFu || floatBitsToUint(nearPoints[2u * i + 1u].w) != rtgiRegion) continue;
+        vec4 nl = nearLight[i];
+        if (nl.w < 0.5) continue;
         float w = ((k & 1) == 1 ? t[a0] : 1.0 - t[a0]) * ((k >> 1) == 1 ? t[a1] : 1.0 - t[a1]);
-        acc += nearLight[i] * w;
+        acc += nl * w;
         found += w;
     }
     return found > 0.0 ? acc / found : vec4(0.0);
@@ -458,12 +462,13 @@ void main() {
         }
     }
     uint side = rtgiSide(n);
+    rtgiRegion = nearRegion(p, side);
     // The two levels around the point's, blended by where it sits between them (rtgiLevelF): no jump at a level's edge.
     float lf = rtgiLevelF(p, u.uCamera.xyz, u.uParams);
     uint level = uint(lf);
     float blurR = -1.0;
     if (unsureIn) {
-        uint sc = rtgiFindKept(rtgiCellHash(ivec3(floor(p / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
+        uint sc = rtgiFindKept(rtgiCellHash(ivec3(floor((p - RTGI_ORIGIN) / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
         float unsure = 1.0;
         float rel = 1.0, invD = 0.0;
         if (sc != 0xFFFFFFFFu) {
@@ -619,14 +624,21 @@ void main() {
         nearCur[2u * unsureAt] = vec4(0.0);
         nearCur[2u * unsureAt + 1u] = vec4(0.0);
     }
-    // --rtgi-near-cook: the cooked near field over the cache's far light -- per ray, a surface met within the contact radius
-    // brings its light (the cooked cell's), a ray past it the cell's far light per such ray (E x farShare / nearCell), as
-    // the hybrid's; faded in by how much of the point the cooked cells cover.
-    if (e.w > 0.0 && u.uHybrid.x < 0.5 && NEAR_PARAMS.w > 0.5) {
+    // --rtgi-near-cook: where a cooked cell lies, its own gathered irradiance in place of the cache's (faded in by how much
+    // of the point the cooked cells cover): the geometry's own answer at every crease and edge, no ratio of the cache's
+    // statistics in it.
+    if (u.uHybrid.x < 0.5 && NEAR_PARAMS.w > 0.5) {
         float found;
         vec4 nc = readNearCooked(p, side, found);
-        if (found > 0.05) {
-            vec3 cooked = nc.w * e.rgb * farShare / max(nearCell, 0.05) + nc.rgb;
+        if (found > 0.05 && NEAR_PARAMS.w > 1.5) {
+            e.rgb = e.w > 0.0 ? mix(e.rgb, nc.rgb, clamp(found, 0.0, 1.0)) : nc.rgb;
+            if (e.w <= 0.0) { sky = 0.0; bv = vec3(0.0); }
+            e.w = 1.0;
+        } else if (found > 0.05 && e.w > 0.0) {
+            // The near light over the cache's far light: per ray, a surface met brings the cooked light, one past the
+            // contact radius the cell's far light per such ray (E x farShare / nearCell).
+            float esc = nc.w - 1.0;
+            vec3 cooked = esc * e.rgb * farShare / max(nearCell, 0.05) + nc.rgb;
             e.rgb = mix(e.rgb, cooked, clamp(found, 0.0, 1.0));
         }
     }
@@ -644,7 +656,7 @@ void main() {
     // (2026-10-26): the bounce light lost every normal map. uNearField.y 0: none.
     // The visible share done: one half-res pixel in 16, its level's nearest cell.
     if (e.w > 0.0 && ((uint(h.x) & 3u) | ((uint(h.y) & 3u) << 2)) == 0u) {
-        uint sd = rtgiFindKept(rtgiCellHash(ivec3(floor(p / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
+        uint sd = rtgiFindKept(rtgiCellHash(ivec3(floor((p - RTGI_ORIGIN) / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
         atomicAdd(doneCount[0], 1u);
         atomicAdd(doneCount[2], lookups);
         atomicAdd(doneCount[3], misses);
@@ -665,6 +677,68 @@ void main() {
     // the done threshold (blue) to 16x it (red); 3 samples held, 1 to 16,384 on a log scale; 4 its level; 5 the mean hit
     // distance, 5 cm (red) to 20 m (blue); 6 sky visibility; 7 sun visibility. No cell: magenta.
     int view = int(u.uContact.w + 0.5);
+    // The cooked and world-space state, painted (SponzaLoop.RtgiDebug.cs's views 11-21): everything the light is made of
+    // but the screen's stages, each as the pixel reads it. Magenta: none.
+    if ((view >= 11 && view <= 21) || view == 24) {
+        vec3 c = vec3(1.0, 0.0, 1.0);
+        uint sc = rtgiFind(rtgiCellHash(ivec3(floor((p - RTGI_ORIGIN) / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
+        if (view == 11) {
+            // The pixel's cell: a colour by its key (its level's, its side's) -- its bounds, what it spans.
+            uvec2 hk = rtgiCellHash(ivec3(floor((p - RTGI_ORIGIN) / rtgiSize(level, u.uParams))), level, side, u.uParams);
+            uint hh = rtgiHash(hk.y);
+            c = vec3(hh & 255u, (hh >> 8) & 255u, (hh >> 16) & 255u) / 255.0 * 0.8 + 0.2;
+        } else if (view == 12) {
+            // Its size, the geometry's (5 cm blue to 1 m red, log); the camera's distance's where no probes are cooked: grey.
+            float g = volCellScale(p);
+            float size = rtgiCellSize(p, u.uCamera.xyz, u.uParams);
+            c = g > 0.0 ? heat(log2(size / 0.05) / log2(20.0)) : vec3(0.5);
+        } else if (view == 13 || view == 14) {
+            // Its own light, unblended (the resolve's), or blended (the record the readout reads): the cell alone, no neighbours.
+            if (sc != 0xFFFFFFFFu && rtgiResolved[2u * sc + 1u].y >= 0.5) {
+                if (view == 13) c = rtgiResolved[2u * sc].rgb;
+                else { uvec4 a = rtgiRecord[2u * sc]; c = vec3(unpackHalf2x16(a.x), unpackHalf2x16(a.y).x); }
+            }
+        } else if (view == 15) {
+            // Its traced reach at its own level: red +a0 blocked, green -a0, blue +a1, and yellow -a1 dimming it; grey all
+            // reached; magenta untraced.
+            if (visKnown) {
+                uint b = (visWord >> 16) & 15u;
+                c = b == 15u ? vec3(0.6) : vec3((b & 1u) == 0u ? 1.0 : 0.1, (b & 2u) == 0u ? 1.0 : 0.1, (b & 4u) == 0u ? 1.0 : 0.1) * ((b & 8u) == 0u ? 0.5 : 1.0);
+            }
+        } else if (view == 16 || view == 17 || view == 18) {
+            // The cooked near cell under the pixel: its colour by index, its escape share (white open, black enclosed), its
+            // near light.
+            uint ax = side >> 1u;
+            ivec3 cc = ivec3(floor((p - RTGI_ORIGIN) / max(NEAR_PARAMS.x, 1e-4)));
+            uint ni = NEAR_PARAMS.w > 0.5 ? nearFind(cc, side) : 0xFFFFFFFFu;
+            if (ni != 0xFFFFFFFFu) {
+                vec4 nl = nearLight[ni];
+                uint hh = rtgiHash(ni * 0x9E3779B9u);
+                c = view == 16 ? vec3(hh & 255u, (hh >> 8) & 255u, (hh >> 16) & 255u) / 255.0 : view == 17 ? vec3(nl.w) : nl.rgb;
+            }
+        } else if (view == 19) {
+            // The probes its cell was traced to: the level (blue 0.5 m ... red 8 m), dimmed by how many of the 8 its rays
+            // reached; magenta untraced, black no level.
+            if (visKnown) {
+                uint lv = (visWord >> 8) & 15u;
+                c = lv >= uint(VOL_PARAMS.y) ? vec3(0.0) : heat(float(lv) / max(VOL_PARAMS.y - 1.0, 1.0)) * (0.2 + 0.8 * float(bitCount(visWord & 0xFFu)) / 8.0);
+            }
+        } else if (view == 20) {
+            // The probes' harmonic mean distance at p (what sizes the cells), 5 cm blue to 5 m red, log.
+            float g = volCellScale(p);
+            if (g > 0.0) c = heat(log2(max(g / max(VOL_GEOM.x, 1e-4), 0.05) / 0.05) / log2(100.0));
+        } else if (view == 24) {
+            // Its region (rtgi_cache.glsl's rtgiRegion): a colour by it; grey region 0 (no cooked cell here).
+            uint hh = rtgiHash(rtgiRegion * 0x9E3779B9u);
+            c = rtgiRegion == 0u ? vec3(0.5) : vec3(hh & 255u, (hh >> 8) & 255u, (hh >> 16) & 255u) / 255.0;
+        } else {
+            // 21: how many samples its cell holds, 1 to 16,384 (log) -- where the light is thin.
+            if (sc != 0xFFFFFFFFu) c = heat(log2(max(rtgiResolved[2u * sc + 1u].y, 1.0)) / 14.0);
+        }
+        outIncident = vec4(c, sky);
+        outIncidentGradient = vec4(0.0);
+        return;
+    }
     // 10: the world volume's light alone (magenta where it has none).
     if (view == 10) {
         float vsky;
@@ -672,7 +746,7 @@ void main() {
         outIncident = vec4(v.w > 0.5 ? v.rgb : vec3(1.0, 0.0, 1.0), vsky);
     }
     if (view >= 1 && view <= 7) {
-        uint s = rtgiFindKept(rtgiCellHash(ivec3(floor(p / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
+        uint s = rtgiFindKept(rtgiCellHash(ivec3(floor((p - RTGI_ORIGIN) / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
         vec3 c = vec3(1.0, 0.0, 1.0);
         if (s != 0xFFFFFFFFu && rtgiResolved[2u * s + 1u].y >= 0.5) {
             vec4 r1 = rtgiResolved[2u * s + 1u];

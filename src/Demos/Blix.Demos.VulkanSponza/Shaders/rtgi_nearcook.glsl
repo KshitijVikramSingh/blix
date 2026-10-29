@@ -9,14 +9,21 @@
 // chunk, as the volume is.
 //
 // The includer declares NEAR_TABLE(i) (uvec2: key, cell) and NEAR_PARAMS (vec4: x the cell's size; y the table's slots -
-// 1; z the cells; w 1 on). Per cell: its point and side (vec4: xyz, w the side as bits), its normal (vec4); its links,
+// 1; z the cells; w 1 on, the near light over the cache's far light; 2 on, each cell's own full gather shown). Per cell: its point and side (vec4: xyz, w the side as bits), its normal (vec4); its links,
 // NEAR_RAYS uvec2 (x: bit 31 met, bits 16-30 the distance in 32768ths of the radius, bits 0-15 the normal octahedral 8:8;
 // y: the albedo, unorm 4x8); its light (vec4: rgb the near light, w the escape share).
 #ifndef RTGI_NEARCOOK_GLSL
 #define RTGI_NEARCOOK_GLSL
 
-#define NEAR_RAYS 16u
+#define NEAR_RAYS 32u
+#ifndef RTGI_ORIGIN
+#define RTGI_ORIGIN vec3(0.0137, 0.0271, 0.0419)
+#endif
 #define NEAR_PROBE_STEPS 8u
+// A cell's point's w (bits): its side (0-2), and NEAR_BURIED where its rays mostly met back faces -- sampled from a floor
+// running under the wall standing on it, inside the wall (rtgi_nearcook_cook.comp): no surface anything reaches. Left out
+// of every lookup and every training point.
+#define NEAR_BURIED 16u
 
 uint nearHash(uint x) {
     x ^= x >> 16; x *= 0x7feb352du;
@@ -58,6 +65,16 @@ vec3 nearRayDir(uint i, uint k, vec3 n) {
     vec3 b = cross(n, t);
     return normalize(t * (cos(phi) * sr) + b * (sin(phi) * sr) + n * sqrt(max(0.0, 1.0 - r1)));
 }
+
+// The region of a point (rtgi_cache.glsl's rtgiRegion): its cooked cell's (the normal's w, rtgi_nearcook_cook.comp's
+// third pass: 1 + the 2 m probe it reaches), 0 where none is cooked. The includer declares NEAR_POINTS(i) for it.
+#ifdef NEAR_POINTS
+uint nearRegion(vec3 p, uint side) {
+    if (NEAR_PARAMS.w < 0.5) return 0u;
+    uint j = nearFind(ivec3(floor((p - RTGI_ORIGIN) / NEAR_PARAMS.x)), side);
+    return j == 0xFFFFFFFFu ? 0u : floatBitsToUint(NEAR_POINTS(2u * j + 1u).w);
+}
+#endif
 
 vec2 nearOctEncode(vec3 v) {
     v /= abs(v.x) + abs(v.y) + abs(v.z);

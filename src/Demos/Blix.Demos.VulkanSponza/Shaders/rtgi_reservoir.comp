@@ -61,7 +61,7 @@ vec3 unpackNormal(float f) {
 }
 
 uvec2 cellAt(vec3 p, vec3 n, uint level) {
-    return rtgiCellHash(ivec3(floor(p / rtgiSize(level, u.uParams))), level, rtgiSide(n), u.uParams);
+    return rtgiCellHash(ivec3(floor((p - RTGI_ORIGIN) / rtgiSize(level, u.uParams))), level, rtgiSide(n), u.uParams);
 }
 
 // The light leaving a sample: the sky's along its direction, or its surface's from the cache (w 0: no cell holds it yet).

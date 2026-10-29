@@ -51,6 +51,7 @@ layout(set = 0, binding = 0) uniform RtgiTrain {
                          // slots (frames); 0 x: none
     vec4 uVolume;        // --rtgi-volume: rtgi_volume.glsl's VOL_PARAMS (w 0: off)
     vec4 uVolumeGeom;    // rtgi_volume.glsl's VOL_GEOM (the cells sized by the geometry)
+    vec4 uNearCook;      // rtgi_nearcook.glsl's NEAR_PARAMS (the cells' regions)
 } u;
 bool twice(uint b) { return (uint(u.uDouble.x) & b) != 0u; }
 // How a sample's words reach its cell (uFallback.w): 0 each lane's atomics, 1 the subgroup's rounds, 2 the workgroup's table.
@@ -120,6 +121,12 @@ void sink(bool never) { if (never) atomicAdd(rtgiStats[63], 1u); }
 #define RTGI_KEYS(i) rtgiKeys[i]
 #define RTGI_NEAR u.uNearField.x
 #include "rtgi_cache.glsl"
+layout(std430, set = 0, binding = 24) readonly buffer RtgiNearTable { uvec2 nearTable[]; };
+layout(std430, set = 0, binding = 25) readonly buffer RtgiNearPoints { vec4 nearPoints[]; };
+#define NEAR_PARAMS u.uNearCook
+#define NEAR_TABLE(i) nearTable[i]
+#define NEAR_POINTS(i) nearPoints[i]
+#include "rtgi_nearcook.glsl"
 #define GUIDE_KEYS(i) guideKeys[i]
 #include "rtgi_guide.glsl"
 
@@ -128,11 +135,12 @@ void sink(bool never) { if (never) atomicAdd(rtgiStats[63], 1u); }
 uint rtgiInsertHashed(uvec2 h, ivec4 cell);
 
 uint rtgiInsertAt(vec3 p, vec3 n, uint level) {
-    ivec3 c = ivec3(floor(p / rtgiSize(level, u.uParams)));
+    ivec3 c = ivec3(floor((p - RTGI_ORIGIN) / rtgiSize(level, u.uParams)));
     uint side = rtgiSide(n);
+    rtgiRegion = nearRegion(p, side);
     uvec2 h = rtgiCellHash(c, level, side, u.uParams);
     if (twice(512u)) return h.x & uint(u.uParams.z);
-    return rtgiInsertHashed(h, ivec4(c, int(level * 6u + side)));
+    return rtgiInsertHashed(h, ivec4(c, int((level * 6u + side) | (rtgiRegion << 8))));
 }
 
 // Cell (its coordinates, level * 6 + side) of hash h found or made.
@@ -155,7 +163,8 @@ uint rtgiInsertHashed(uvec2 h, ivec4 cell) {
 }
 
 uvec2 cellAt(vec3 p, vec3 n, uint level) {
-    return rtgiCellHash(ivec3(floor(p / rtgiSize(level, u.uParams))), level, rtgiSide(n), u.uParams);
+    rtgiRegion = nearRegion(p, rtgiSide(n));
+    return rtgiCellHash(ivec3(floor((p - RTGI_ORIGIN) / rtgiSize(level, u.uParams))), level, rtgiSide(n), u.uParams);
 }
 
 // q's outgoing radiance times PI over its albedo: E_ind + direct sun, from its cell once it holds 8 samples, else the cell
@@ -542,7 +551,7 @@ void main() {
     if (live && counted && u.uGuideTable.x > 0.0 && !twice(1024u)) {
         uint gl = min(level + 2u, uint(u.uParams.w));
         uint gside = rtgiSide(n);
-        uvec2 gh = guideHash(ivec3(floor(p.xyz / rtgiSize(gl, u.uParams))), gl, gside, uint(u.uGuideTable.x));
+        uvec2 gh = guideHash(ivec3(floor((p.xyz - RTGI_ORIGIN) / rtgiSize(gl, u.uParams))), gl, gside, uint(u.uGuideTable.x));
         uint g = 0xFFFFFFFFu;
         for (uint k = 0u; k < GUIDE_PROBES; k++) {
             uint gs = (gh.x + k) & uint(u.uGuideTable.x);
@@ -584,7 +593,7 @@ void main() {
         if (!table && !here) continue;
         if (twice(2048u)) continue;
         if (twice(2u) && here) {
-            ivec3 cn = ivec3(floor(p.xyz / rtgiSize(level + k, u.uParams))) + ivec3(1, 0, 0);
+            ivec3 cn = ivec3(floor((p.xyz - RTGI_ORIGIN) / rtgiSize(level + k, u.uParams))) + ivec3(1, 0, 0);
             sink(rtgiFind(rtgiCellHash(cn, level + k, rtgiSide(n), u.uParams), u.uParams) == 0xFFFFFFFEu);
         }
         // Finding the levels above once a workgroup instead (the table keyed by the cell's hash, the flush's thread

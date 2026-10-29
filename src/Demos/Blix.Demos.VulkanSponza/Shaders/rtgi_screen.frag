@@ -50,7 +50,7 @@ vec3 unpackNormal(float f) {
 // The cache at p (rtgi_readout.frag's): trilinear over the level's cells, w the weight found.
 vec4 readLevel(vec3 p, uint side, uint level, out float sky) {
     float size = rtgiSize(level, u.uParams);
-    vec3 f = p / size - 0.5;
+    vec3 f = (p - RTGI_ORIGIN) / size - 0.5;
     ivec3 c0 = ivec3(floor(f));
     vec3 t = f - vec3(c0);
     vec3 e = vec3(0.0);

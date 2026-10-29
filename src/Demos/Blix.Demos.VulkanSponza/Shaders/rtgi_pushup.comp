@@ -44,7 +44,8 @@ void main() {
     if (rtgiKeys[s] == 0u) return;
     if (scratch[RTGI_ACC * i + 3u] == 0u && scratch[RTGI_ACC * i + 6u] == 0u) return;
     ivec4 cell = rtgiCells[s];
-    uint level = uint(cell.w) / 6u, side = uint(cell.w) % 6u;
+    uint level = (uint(cell.w) & 0xFFu) / 6u, side = (uint(cell.w) & 0xFFu) % 6u;
+    rtgiRegion = uint(cell.w) >> 8;
     uint frame = uint(u.uPush.w);
     for (uint d = 1u; d < uint(u.uPush.y) && level + d <= uint(u.uParams.w); d++) {
         ivec3 c = cell.xyz >> int(d);
@@ -55,7 +56,7 @@ void main() {
         for (uint k = 0u; t == 0xFFFFFFFFu && k < RTGI_PROBES; k++) {
             uint q = (h.x + k) & uint(u.uParams.z);
             uint prev = atomicCompSwap(rtgiKeys[q], 0u, h.y);
-            if (prev == 0u) { rtgiCells[q] = ivec4(c, int((level + d) * 6u + side)); rtgiAccum[RTGI_ACC * q + 14u] = 0u; rtgiAccum[RTGI_ACC * q + 15u] = 0u; }
+            if (prev == 0u) { rtgiCells[q] = ivec4(c, int(((level + d) * 6u + side) | (rtgiRegion << 8))); rtgiAccum[RTGI_ACC * q + 14u] = 0u; rtgiAccum[RTGI_ACC * q + 15u] = 0u; }
             if (prev == 0u || prev == h.y) { t = q; break; }
         }
         if (t == 0xFFFFFFFFu) continue;

@@ -30,7 +30,10 @@ internal sealed partial class SponzaLoop
     private RayQueryScene.Instance[] rtgiVolInstances = Array.Empty<RayQueryScene.Instance>();
     private Task<NearCookLayout>? rtgiNearBuild;
     private int rtgiNearCells, rtgiNearTableSlots, rtgiNearCookCursor, rtgiNearUpdateCursor;
-    private int rtgiNearCookFirstNow, rtgiNearCookCountNow;
+    private int rtgiNearCookFirstNow, rtgiNearCookCountNow, rtgiNearCookRaysNow;
+    // The cook's second pass: each cell's region (rtgi_nearcook_cook.comp kinds 2 and 3; rtgi_cache.glsl's rtgiRegion).
+    private bool rtgiNearRegionPass;
+    private const int NearRegionLevel = 2;
     private uint rtgiNearCookFrom;
     private readonly System.Diagnostics.Stopwatch rtgiNearCookClock = new();
     private GpuBufferHandle rtgiNearTable, rtgiNearPoints, rtgiNearLinks, rtgiNearLightBuf;
@@ -39,15 +42,20 @@ internal sealed partial class SponzaLoop
     private PassHandle rtgiNearCookRaysPassHandle, rtgiNearCookPassHandle, rtgiNearUpdatePassHandle;
     private PipelineHandle rtgiNearCookPipeline, rtgiNearUpdatePipeline;
     private const int RtgiNearCookChunk = 32768;
-    private const int NearRays = 16;
+    private const int NearRays = 32;
+    private static readonly Vector3 NearGridOrigin = new(0.0137f, 0.0271f, 0.0419f);
 
     private sealed record NearCookLayout(Vector4[] Points, uint[] Table, int Slots, double Ms);
 
     private bool RtgiNearCookOn => rtgiNearCook && rtgiNearCookReady;
     // rtgi_nearcook.glsl's NEAR_PARAMS.
-    private Vector4 RtgiNearParams => new(rtgiNearCell, Math.Max(rtgiNearTableSlots, 1) - 1, rtgiNearCells, RtgiNearCookOn ? 1f : 0f);
+    private Vector4 RtgiNearParams => new(rtgiNearCell, Math.Max(rtgiNearTableSlots, 1) - 1, rtgiNearCells, RtgiNearCookOn ? (rtgiNearGather ? 2f : 1f) : 0f);
+    // The panel's "Cooked near: full gather": each cell's own 32-ray gather shown (rtgi_nearcook_update.comp), else its near
+    // light over the cache's far light (the default: the gather patchy, 2026-10-30).
+    private bool rtgiNearGather;
     private GpuBufferHandle RtgiNearTableOrDummy => rtgiNearCookBuilt ? rtgiNearTable : rtgiVolDummy;
     private GpuBufferHandle RtgiNearLightOrDummy => rtgiNearCookBuilt ? rtgiNearLightBuf : rtgiVolDummy;
+    private GpuBufferHandle RtgiNearPointsOrDummy => rtgiNearCookBuilt ? rtgiNearPoints : rtgiVolDummy;
 
     private void ParseRtgiNearCook(Blix.Core.AppArgs args)
     {
@@ -161,7 +169,9 @@ internal sealed partial class SponzaLoop
                     if (u + v > 1f) continue;
                     var p = a + (b - a) * u + (c - a) * v;
                     if (!Inside(p)) continue;
-                    var key = ((int)MathF.Floor(p.X / cell), (int)MathF.Floor(p.Y / cell), (int)MathF.Floor(p.Z / cell), side);
+                    // rtgi_cache.glsl's RTGI_ORIGIN: the grid off the round coordinates surfaces sit on.
+                    var g = (p - NearGridOrigin) / cell;
+                    var key = ((int)MathF.Floor(g.X), (int)MathF.Floor(g.Y), (int)MathF.Floor(g.Z), side);
                     local.TryGetValue(key, out var e);
                     local[key] = (e.P + p, e.N + nrm, e.Count + 1);
                 }
@@ -231,6 +241,8 @@ internal sealed partial class SponzaLoop
         {
             new("uNearCook", new Vector4Uniform(RtgiNearParams)),
             new("uCook", new Vector4Uniform(new Vector4(rtgiNearCookFirstNow, rtgiNearCookCountNow, rtgiContactRadius, kind))),
+            new("uVolume", new Vector4Uniform(RtgiVolumeParams)),
+            new("uRegion", new Vector4Uniform(new Vector4(NearRegionLevel, 0f, 0f, 0f))),
         },
         Array.Empty<ShaderTextureBinding>(),
         Buffers: new[]
@@ -240,6 +252,8 @@ internal sealed partial class SponzaLoop
             new ShaderBufferBinding("RtgiNearCookHits", rtgiNearCookHitBufs[cur]),
             new ShaderBufferBinding("RtgiNearLinks", rtgiNearLinks),
             new ShaderBufferBinding("RtgiNearLight", rtgiNearLightBuf),
+            new ShaderBufferBinding("RtgiVolumeTable", RtgiVolTableOrDummy),
+            new ShaderBufferBinding("RtgiVolumeProbes", RtgiVolProbesOrDummy),
         });
 
     // Placement time: the next chunk's rays (traced in the Metal batch: RtgiNearCookRaysNow); with the training their
@@ -255,10 +269,17 @@ internal sealed partial class SponzaLoop
         {
             rtgiNearCookFirstNow = rtgiNearCookCursor;
             rtgiNearCookCountNow = Math.Min(RtgiNearCookChunk, rtgiNearCells - rtgiNearCookCursor);
-            graph.Dispatch(rtgiNearCookRaysPassHandle, NearCookDispatch(cur, 0, rtgiNearCookCountNow * NearRays));
-            graph.Dispatch(rtgiNearCookPassHandle, NearCookDispatch(cur, 1, rtgiNearCookCountNow));
+            var region = rtgiNearRegionPass;
+            rtgiNearCookRaysNow = rtgiNearCookCountNow * (region ? 8 : NearRays);
+            graph.Dispatch(rtgiNearCookRaysPassHandle, NearCookDispatch(cur, region ? 2 : 0, rtgiNearCookRaysNow));
+            graph.Dispatch(rtgiNearCookPassHandle, NearCookDispatch(cur, region ? 3 : 1, rtgiNearCookCountNow));
             rtgiNearCookCursor += rtgiNearCookCountNow;
-            if (rtgiNearCookCursor >= rtgiNearCells)
+            if (rtgiNearCookCursor >= rtgiNearCells && !region)
+            {
+                rtgiNearRegionPass = true;
+                rtgiNearCookCursor = 0;
+            }
+            else if (rtgiNearCookCursor >= rtgiNearCells)
             {
                 rtgiNearCookReady = true;
                 Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
@@ -292,6 +313,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiResolved", rtgiResolved),
                 new ShaderBufferBinding("RtgiVolumeTable", RtgiVolTableOrDummy),
                 new ShaderBufferBinding("RtgiVolumeProbes", RtgiVolProbesOrDummy),
+                new ShaderBufferBinding("RtgiNearTable", RtgiNearTableOrDummy),
             }));
     }
 }

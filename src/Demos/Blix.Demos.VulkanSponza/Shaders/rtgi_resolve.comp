@@ -162,7 +162,7 @@ void main() {
         {
             bool young = held < u.uRotaR.x;
             bool cut = m.w > rtgiMoments[3u * s].w;
-            uint level = uint(rtgiCells[s].w) / 6u;
+            uint level = (uint(rtgiCells[s].w) & 0xFFu) / 6u;
             for (uint l = 0u; l < 6u; l++) tally(40u + l, young && min(level, 5u) == l);
             tally(32u, young && ageCapped);
             tally(33u, young && cut);

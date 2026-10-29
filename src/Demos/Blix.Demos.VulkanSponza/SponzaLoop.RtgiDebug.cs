@@ -12,6 +12,11 @@ internal sealed partial class SponzaLoop
         "Light", "Done (green) / open (red)", "Unsure (done threshold to 16x)", "Samples held (1 to 16,384, log)",
         "Cell level", "Hit distance (5 cm red to 20 m blue)", "Sky visibility", "Sun visibility", "Light before the blur",
         "Blur radius", "World volume alone (--rtgi-volume)",
+        "Cell ID (colour per cache cell)", "Cell size (geometry; 5 cm blue - 1 m red)", "Cell raw light (unblended)",
+        "Cell blended light (the record)", "Cell traced reach (grey all reached; magenta untraced)", "Cooked near: cell ID",
+        "Cooked near: gathered (white)", "Cooked near: near light", "Cell's probe level / probes reached",
+        "Probe harmonic distance (5 cm - 5 m)", "Cell samples held (log)", "Fix-up pixels (magenta)",
+        "Temporal history held (blue 0 - red 16)", "Cell region (grey: none cooked)",
     };
 
     // The view (rtgi_readout.frag's uContact.w, rtgi_blur.frag's uHalf.x): 0 the light; 1-7 a cell's state; 8 the light
@@ -25,7 +30,7 @@ internal sealed partial class SponzaLoop
     private string rtgiPanelCounts = "", rtgiPanelMetal = "";
 
     // The blur as the view wants it: off while a cell's state or the unblurred light is painted.
-    private float RtgiBlurNow => rtgiView is (>= 1 and <= 8) or 10 ? 0f : rtgiBlur;
+    private float RtgiBlurNow => rtgiView is (>= 1 and <= 8) or >= 10 ? 0f : rtgiBlur;
 
     private void RtgiControls(DebugContext debug)
     {
@@ -50,7 +55,10 @@ internal sealed partial class SponzaLoop
                 rtgiVolume = debug.Controls.Toggle("World volume (--rtgi-volume)", rtgiVolume);
                 rtgiVolumeRead = debug.Controls.Toggle("Volume: readout uses probes", rtgiVolumeRead);
                 if (rtgiNearCookBuilt) rtgiNearCook = debug.Controls.Toggle("Cooked near field (--rtgi-near-cook)", rtgiNearCook);
+                if (rtgiNearCookBuilt) rtgiNearGather = debug.Controls.Toggle("Cooked near: full gather (off: over the cache)", rtgiNearGather);
                 if (rtgiNearCookBuilt) rtgiSurfaceTrain = debug.Controls.Toggle("Cells trained over their own surface", rtgiSurfaceTrain);
+                rtgiFilterReach = debug.Controls.Toggle("Blend: traced reach", rtgiFilterReach);
+                rtgiFilterWide = MathF.Round(debug.Controls.Float("Blend: 5x5 under samples (0 off)", rtgiFilterWide, 0f, 4096f));
                 rtgiVolumeNeighbours = debug.Controls.Toggle("Volume: neighbour test (traced)", rtgiVolumeNeighbours);
                 var geomCells = debug.Controls.Toggle("Cells sized by geometry (off: by camera distance)", rtgiVolumeCells > 0f);
                 rtgiVolumeCells = geomCells ? (rtgiVolumeCells > 0f ? rtgiVolumeCells : 0.1f) : 0f;

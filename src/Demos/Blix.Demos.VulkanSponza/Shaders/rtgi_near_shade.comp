@@ -26,6 +26,7 @@ layout(set = 0, binding = 0) uniform RtgiNearShade {
     vec4 uNear;          // x the contact radius; y this frame's stamp; z the slots; w the samples' slots (half-res pixels)
     vec4 uVolume;        // --rtgi-volume: rtgi_volume.glsl's VOL_PARAMS (w 0: off), what sizes the cells
     vec4 uVolumeGeom;    // rtgi_volume.glsl's VOL_GEOM
+    vec4 uNearCook;      // rtgi_nearcook.glsl's NEAR_PARAMS (the regions)
     vec4 uNear2;         // x 1: each hit's own sun ray (its flag 8); 0: its cell's sun visibility, the cache's mean; y 1: into
                          // the near cells too; z the frame's number (the resolve's list); w the dirty list's room
 } u;
@@ -51,17 +52,24 @@ layout(std430, set = 0, binding = 9) readonly buffer RtgiVolumeProbes { float vo
 #include "rtgi_volume.glsl"
 #define RTGI_GEOM_SCALE(p) volCellScale(p)
 #define RTGI_FAR_GROW u.uVolumeGeom.z
+layout(std430, set = 0, binding = 13) readonly buffer RtgiNearTable { uvec2 nearTable[]; };
+layout(std430, set = 0, binding = 14) readonly buffer RtgiNearPoints { vec4 nearPoints[]; };
+#define NEAR_PARAMS u.uNearCook
+#define NEAR_TABLE(i) nearTable[i]
+#define NEAR_POINTS(i) nearPoints[i]
 #define RTGI_KEYS(i) rtgiKeys[i]
 #include "rtgi_cache.glsl"
+#include "rtgi_nearcook.glsl"
 
 // The cell's indirect light at q facing n: its level's cell holding it, else a coarser one (two up at most); 0 none. Its
 // sun visibility (the share of its points that saw the sun, rtgi_resolve.comp) in sunVis.
 float sunVis = 0.0;
 vec3 cellLight(vec3 q, vec3 n) {
+    rtgiRegion = nearRegion(q, rtgiSide(n));
     uint level = rtgiLevel(q, u.uCamera.xyz, u.uParams), side = rtgiSide(n);
     uint top = uint(u.uParams.w);
     for (uint l = level; l <= min(level + 2u, top); ++l) {
-        uint s = rtgiFind(rtgiCellHash(ivec3(floor(q / rtgiSize(l, u.uParams))), l, side, u.uParams), u.uParams);
+        uint s = rtgiFind(rtgiCellHash(ivec3(floor((q - RTGI_ORIGIN) / rtgiSize(l, u.uParams))), l, side, u.uParams), u.uParams);
         if (s == 0xFFFFFFFFu) continue;
         uvec4 a = rtgiRecord[2u * s], c = rtgiRecord[2u * s + 1u];
         if (uintBitsToFloat(c.w) < 0.5) continue;
@@ -75,14 +83,15 @@ vec3 cellLight(vec3 q, vec3 n) {
 // The sample into the point's near cell (made if not held), listed once a frame for the resolve.
 void nearCellAdd(vec3 p, vec3 n, vec4 sample0, uint slot) {
     uint level = rtgiLevel(p, u.uCamera.xyz, u.uParams);
-    ivec3 c = ivec3(floor(p / (0.25 * rtgiSize(level, u.uParams))));
+    ivec3 c = ivec3(floor((p - RTGI_ORIGIN) / (0.25 * rtgiSize(level, u.uParams))));
     uint side = rtgiSide(n);
+    rtgiRegion = nearRegion(p, side);
     uvec2 h = rtgiCellHash(c, level + 24u, side, u.uParams);
     uint s = rtgiFind(h, u.uParams);
     for (uint k = 0u; s == 0xFFFFFFFFu && k < RTGI_PROBES; k++) {
         uint t = (h.x + k) & uint(u.uParams.z);
         uint prev = atomicCompSwap(rtgiKeys[t], 0u, h.y);
-        if (prev == 0u) { rtgiCells[t] = ivec4(c, int((level + 24u) * 6u + side)); rtgiAccum[RTGI_ACC * t + 14u] = 0u; rtgiAccum[RTGI_ACC * t + 15u] = 0u; }
+        if (prev == 0u) { rtgiCells[t] = ivec4(c, int(((level + 24u) * 6u + side) | (rtgiRegion << 8))); rtgiAccum[RTGI_ACC * t + 14u] = 0u; rtgiAccum[RTGI_ACC * t + 15u] = 0u; }
         if (prev == 0u || prev == h.y) { s = t; break; }
     }
     if (s == 0xFFFFFFFFu) return;

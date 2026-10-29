@@ -144,6 +144,7 @@ internal sealed partial class SponzaLoop
                 new("uVolume", new Vector4Uniform(RtgiVolumeParams)),
                 new("uVolumeGeom", new Vector4Uniform(RtgiVolumeGeom)),
                 new("uNearCook", new Vector4Uniform(RtgiNearParams)),
+                new("uDebug", new Vector4Uniform(new Vector4(rtgiView, 0f, 0f, 0f))),
             },
             buffers: new[]
             {
@@ -153,6 +154,8 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiVolumeProbes", RtgiVolProbesOrDummy),
                 new ShaderBufferBinding("RtgiNearTable", RtgiNearTableOrDummy),
                 new ShaderBufferBinding("RtgiNearLight", RtgiNearLightOrDummy),
+                new ShaderBufferBinding("RtgiVolumeCellVis", RtgiVolCellVisOrDummy),
+                new ShaderBufferBinding("RtgiNearPoints", RtgiNearPointsOrDummy),
             }));
         graph.Pass(rtgiHistoryPassHandle, scope => fullscreen.Draw(
             scope, rtgiHistoryPipeline,

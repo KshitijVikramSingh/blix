@@ -2,16 +2,23 @@
 
 // --rtgi-near-cook (rtgi_nearcook.glsl): the cook, a chunk of cells a frame. Kind 0 (placement time): each listed cell's
 // NEAR_RAYS rays, from its point lifted off its surface, to the contact radius, into the Metal batch (closest hit). Kind 1
-// (with the training): their hits into the cell's links and its escape share.
+// (with the training): their hits into the cell's links and its escape share. Kinds 2 and 3, a second pass over every
+// cell: a ray from its point to each of the 8 probes of the volume's 2 m level around it, then its region -- 1 + the
+// nearest it reached (0: none) -- into its normal's w (rtgi_nearcook.glsl's nearRegion; rtgi_cache.glsl's rtgiRegion:
+// the two sides of a thin wall, reaching different probes, keyed apart).
 
 layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) uniform RtgiNearCookCook {
     vec4 uNearCook;  // rtgi_nearcook.glsl's NEAR_PARAMS
     vec4 uCook;      // x the chunk's first cell; y its cells; z the contact radius (m); w the kind
+    vec4 uVolume;    // rtgi_volume.glsl's VOL_PARAMS (kinds 2 and 3); x the level the regions are probes of
+    vec4 uRegion;    // x the volume's level the regions are drawn from
 } u;
 
-layout(std430, set = 0, binding = 1) readonly buffer RtgiNearPoints { vec4 nearPoints[]; };
+layout(std430, set = 0, binding = 1) buffer RtgiNearPoints { vec4 nearPoints[]; };
+layout(std430, set = 0, binding = 6) readonly buffer RtgiVolumeTable { uvec2 volTable[]; };
+layout(std430, set = 0, binding = 7) readonly buffer RtgiVolumeProbes { float volProbes[]; };
 layout(std430, set = 0, binding = 2) buffer RtgiNearCookRays { vec4 cookRays[]; };
 layout(std430, set = 0, binding = 3) readonly buffer RtgiNearCookHits { uvec4 cookHits[]; };
 layout(std430, set = 0, binding = 4) buffer RtgiNearLinks { uvec2 nearLinks[]; };
@@ -20,11 +27,55 @@ layout(std430, set = 0, binding = 5) buffer RtgiNearLight { vec4 nearLight[]; };
 #define NEAR_PARAMS u.uNearCook
 #define NEAR_TABLE(i) uvec2(0u)
 #include "rtgi_nearcook.glsl"
+#define VOL_PARAMS vec4(u.uVolume.xyz, 1.0)
+#define VOL_GEOM vec4(0.0)
+#define VOL_TABLE(i) volTable[i]
+#define VOL_PROBES(i) volProbes[i]
+#define VOL_DEPTH(i) 0u
+#include "rtgi_volume.glsl"
 
 void main() {
     uint t = gl_GlobalInvocationID.x;
     uint first = uint(u.uCook.x), cells = uint(u.uCook.y);
     float radius = u.uCook.z;
+    uint kind = uint(u.uCook.w + 0.5);
+    uint rl = uint(u.uRegion.x);
+    if (kind == 2u) {
+        if (t >= cells * 8u) return;
+        uint i = first + t / 8u, k = t % 8u;
+        vec3 p = nearPoints[2u * i].xyz, n = nearPoints[2u * i + 1u].xyz;
+        vec3 o = p + n * 0.01, q;
+        cookRays[2u * t] = vec4(o, 0.0);
+        cookRays[2u * t + 1u] = vec4(0.0, 1.0, 0.0, 1e-6);
+        if (volProbeAt(p, rl, k, q) == 0xFFFFFFFFu) return;
+        vec3 d = q - o;
+        float len = length(d);
+        if (len > 1e-3) cookRays[2u * t + 1u] = vec4(d / len, max(len - 0.01, 1e-3));
+        return;
+    }
+    if (kind == 3u) {
+        if (t >= cells) return;
+        uint i = first + t;
+        vec3 p = nearPoints[2u * i].xyz;
+        // Region 0 where it reaches every live probe around it: nothing near it to keep apart, and keyed by probe it broke
+        // open floors into patches at every probe's reach (the user: the light broke where the regions did, 2026-10-30).
+        // Else the lowest probe it reaches, so the cells along one side of a wall agree.
+        uint best = 0xFFFFFFFFu, live = 0u, reached = 0u;
+        for (uint k = 0u; k < 8u; k++) {
+            uint r = t * 8u + k;
+            vec3 q;
+            uint id = volProbeAt(p, rl, k, q);
+            if (id == 0xFFFFFFFFu) continue;
+            live++;
+            vec4 d = cookRays[2u * r + 1u];
+            if (d.w <= 1e-5 || (cookHits[3u * r].w & 1u) != 0u) continue;
+            reached++;
+            best = min(best, id);
+        }
+        uint region = reached == live || best == 0xFFFFFFFFu ? 0u : best + 1u;
+        nearPoints[2u * i + 1u].w = uintBitsToFloat(region);
+        return;
+    }
     if (u.uCook.w < 0.5) {
         if (t >= cells * NEAR_RAYS) return;
         uint i = first + t / NEAR_RAYS, k = t % NEAR_RAYS;
@@ -35,7 +86,7 @@ void main() {
     }
     if (t >= cells) return;
     uint i = first + t;
-    float left = 0.0;
+    float left = 0.0, backs = 0.0;
     for (uint k = 0u; k < NEAR_RAYS; k++) {
         uint r = t * NEAR_RAYS + k;
         uvec4 h0 = cookHits[3u * r];
@@ -51,9 +102,16 @@ void main() {
             uint dq = uint(clamp(dist / radius, 0.0, 1.0) * 32767.0);
             // A back face met: the ray started inside something -- dark (albedo 0).
             uint albedo = (h0.w & 2u) != 0u ? h2.w : 0u;
+            if ((h0.w & 2u) == 0u) backs += 1.0;
             link = uvec2(0x80000000u | (dq << 16) | (o.y << 8) | o.x, albedo);
         } else left += 1.0;
         nearLinks[i * NEAR_RAYS + k] = link;
     }
-    nearLight[i] = vec4(0.0, 0.0, 0.0, left / float(NEAR_RAYS));
+    // Its light not gathered yet (w 0: rtgi_nearcook_update.comp sets it 1 with its first). Buried (most rays on back faces:
+    // its point inside something): marked, its light -1 for good -- trained from, those points started rays inside the wall
+    // a floor ran under, black, and every edge where one thing stood on another darkened as the cells' history filled
+    // (the user, the crevices testbed, 2026-10-30).
+    bool buried = backs > 0.5 * float(NEAR_RAYS);
+    if (buried) nearPoints[2u * i].w = uintBitsToFloat(floatBitsToUint(nearPoints[2u * i].w) | NEAR_BURIED);
+    nearLight[i] = buried ? vec4(0.0, 0.0, 0.0, -1.0) : vec4(0.0);
 }

@@ -621,6 +621,7 @@ internal sealed partial class SponzaLoop
                 new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 0f))),
                 new("uVolume", new Vector4Uniform(RtgiVolumeParams)),
                 new("uVolumeGeom", new Vector4Uniform(RtgiVolumeGeom)),
+                new("uNearCook", new Vector4Uniform(RtgiNearParams)),
                 new("uVol", new Vector4Uniform(new Vector4(rtgiVolListedNow, rtgiVolumeRays, 0f, history))),
             },
             new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
@@ -634,6 +635,8 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiKeys", rtgiKeys),
                 new ShaderBufferBinding("RtgiRecord", rtgiRecord),
                 new ShaderBufferBinding("RtgiVolumeDepth", rtgiVolDepthBuf),
+                new ShaderBufferBinding("RtgiNearTable", RtgiNearTableOrDummy),
+                new ShaderBufferBinding("RtgiNearPoints", RtgiNearPointsOrDummy),
             }));
     }
 }

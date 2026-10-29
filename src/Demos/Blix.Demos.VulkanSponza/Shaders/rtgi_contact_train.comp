@@ -33,7 +33,7 @@ void main() {
     if (i >= min(contactCount, uint(u.uList.z))) return;
     vec3 p = contactPoints[2u * i].xyz, n = contactPoints[2u * i + 1u].xyz;
     uint level = rtgiLevel(p, u.uCamera.xyz, u.uParams);
-    ivec3 c = ivec3(floor(p / (0.25 * rtgiSize(level, u.uParams))));
+    ivec3 c = ivec3(floor((p - RTGI_ORIGIN) / (0.25 * rtgiSize(level, u.uParams))));
     uint side = rtgiSide(n);
     uvec2 h = rtgiCellHash(c, level + 16u, side, u.uParams);
     // Held anywhere along its probes first (rtgi_train.comp's rtgiInsertAt).

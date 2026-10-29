@@ -20,7 +20,8 @@
 layout(location = 0) in vec2 vUv;
 layout(location = 0) out vec4 outIncident;
 layout(location = 1) out vec4 outIncidentGradient;
-layout(location = 2) out vec4 outState;   // x the point's distance from this frame's camera, y frames held
+layout(location = 2) out vec4 outState;   // x the point's distance from this frame's camera, y frames held, zw its normal
+                                          // (octahedral)
 layout(location = 3) out vec4 outFast;    // the fast history: rgb, its luminance's square
 
 layout(set = 0, binding = 0) uniform RtgiTemporal {
@@ -35,6 +36,8 @@ layout(set = 0, binding = 0) uniform RtgiTemporal {
     vec4 uVolume;        // rtgi_volume.glsl's VOL_PARAMS
     vec4 uVolumeGeom;    // rtgi_volume.glsl's VOL_GEOM
     vec4 uNearCook;      // rtgi_nearcook.glsl's NEAR_PARAMS
+    vec4 uDebug;         // x the RTGI panel's view: 22 the fix-up's pixels magenta; 23 the history's frames held (0 rejected:
+                         // blue, 16 red); 11-21 (the readout's): a fix-up pixel black
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uRaw;
@@ -51,6 +54,9 @@ layout(std430, set = 0, binding = 10) readonly buffer RtgiVolumeTable { uvec2 vo
 layout(std430, set = 0, binding = 11) readonly buffer RtgiVolumeProbes { float volProbes[]; };
 layout(std430, set = 0, binding = 12) readonly buffer RtgiNearTable { uvec2 nearTable[]; };
 layout(std430, set = 0, binding = 13) readonly buffer RtgiNearLight { vec4 nearLight[]; };
+// The cells' traced reach (rtgi_volume_vis.comp), as the readout reads it: the fix-up leaves out the same neighbours.
+layout(std430, set = 0, binding = 14) readonly buffer RtgiVolumeCellVis { uvec2 cellVis[]; };
+layout(std430, set = 0, binding = 15) readonly buffer RtgiNearPoints { vec4 nearPoints[]; };
 
 #define VOL_PARAMS u.uVolume
 #define VOL_GEOM u.uVolumeGeom
@@ -65,7 +71,38 @@ layout(std430, set = 0, binding = 13) readonly buffer RtgiNearLight { vec4 nearL
 #include "rtgi_cache.glsl"
 #define NEAR_PARAMS u.uNearCook
 #define NEAR_TABLE(i) nearTable[i]
+#define NEAR_POINTS(i) nearPoints[i]
 #include "rtgi_nearcook.glsl"
+
+// The pixel's own cell's traced reach (rtgi_readout.frag's cellVisFetch, read alone: the readout asks for it): its
+// neighbours a ray from its point reached, at its level and the two coarser. Without it the fix-up blended the cell past
+// a junction -- a comb of light along the crevices testbed's wall edges, there from one place and not a step away (the
+// user, 2026-10-29).
+bool visKnown = false;
+uint visWord = 0u, visLevel0 = 0u;
+void fixVis(vec3 p, uint side, uint level) {
+    if (u.uVolume.w < 0.5) return;
+    vec4 params = u.uCacheParams;
+    uint sc = rtgiFind(rtgiCellHash(ivec3(floor((p - RTGI_ORIGIN) / rtgiSize(level, params))), level, side, params), params);
+    if (sc == 0xFFFFFFFFu) return;
+    uvec2 v = cellVis[sc];
+    if (v.x != rtgiKeys[sc] || (v.y & 0x1000u) == 0u) return;
+    visKnown = true;
+    visWord = v.y;
+    visLevel0 = level;
+}
+bool neighbourSeen(vec3 p, ivec3 cc, uint level, uint a0, uint a1, float size) {
+    int d0 = cc[a0] - int(floor((p[a0] - RTGI_ORIGIN[a0]) / size)), d1 = cc[a1] - int(floor((p[a1] - RTGI_ORIGIN[a1]) / size));
+    // Not traced (the readout asks only at its half-res points): its own cell alone, never a blind neighbour.
+    if (!visKnown) return u.uVolume.w < 0.5 || (d0 == 0 && d1 == 0);
+    if (level < visLevel0 || level - visLevel0 > 2u) return true;
+    uint base = 16u + (level - visLevel0) * 4u;
+    if (d0 > 0 && (visWord & (1u << base)) == 0u) return false;
+    if (d0 < 0 && (visWord & (1u << (base + 1u))) == 0u) return false;
+    if (d1 > 0 && (visWord & (1u << (base + 2u))) == 0u) return false;
+    if (d1 < 0 && (visWord & (1u << (base + 3u))) == 0u) return false;
+    return true;
+}
 
 // One level's cells on p's surface (the tangent plane's four, bilinear, weighed by what each holds), as
 // rtgi_readout.frag's readLevel: x-z the light, w the weight; sky, the near visibility and the far share beside.
@@ -73,10 +110,10 @@ vec4 fixLevel(vec3 p, uint side, uint level, out float sky, out float near, out 
     vec4 params = u.uCacheParams;
     float size = rtgiSize(level, params);
     uint axis = side >> 1u, a0 = (axis + 1u) % 3u, a1 = (axis + 2u) % 3u;
-    vec3 f = p / size - 0.5;
+    vec3 f = (p - RTGI_ORIGIN) / size - 0.5;
     ivec3 c0 = ivec3(floor(f));
     vec3 t = f - vec3(c0);
-    int cAxis = int(floor(p[axis] / size));
+    int cAxis = int(floor((p[axis] - RTGI_ORIGIN[axis]) / size));
     vec3 e = vec3(0.0);
     float w = 0.0;
     sky = 0.0; near = 0.0; far = 0.0;
@@ -85,6 +122,7 @@ vec4 fixLevel(vec3 p, uint side, uint level, out float sky, out float near, out 
         cc[a0] += k & 1;
         cc[a1] += k >> 1;
         cc[axis] = cAxis;
+        if (!neighbourSeen(p, cc, level, a0, a1, size)) continue;
         uint s = rtgiFind(rtgiCellHash(cc, level, side, params), params);
         if (s == 0xFFFFFFFFu) continue;
         uvec4 a = rtgiRecord[2u * s], c = rtgiRecord[2u * s + 1u];
@@ -107,9 +145,11 @@ vec4 fixLevel(vec3 p, uint side, uint level, out float sky, out float near, out 
 vec4 fixUp(vec3 p, vec3 n) {
     vec4 params = u.uCacheParams;
     uint side = rtgiSide(n);
+    rtgiRegion = nearRegion(p, side);
     float lf = rtgiLevelF(p, u.uCamera.xyz, params);
     uint level = uint(lf);
     float t = lf - float(level);
+    fixVis(p, side, level);
     float s0, s1, n0, n1, f0, f1;
     vec4 e0 = fixLevel(p, side, level, s0, n0, f0);
     vec4 e1 = level < uint(params.w) ? fixLevel(p, side, level + 1u, s1, n1, f1) : vec4(0.0);
@@ -119,16 +159,16 @@ vec4 fixUp(vec3 p, vec3 n) {
     else if (e1.w >= 0.05) { e = e1.rgb; sky = s1; nearCell = n1; farShare = f1; }
     else {
         vec4 e2 = fixLevel(p, side, min(level + 2u, uint(params.w)), sky, nearCell, farShare);
-        if (e2.w < 0.05) return vec4(0.0, 0.0, 0.0, 1.0);
         e = e2.rgb;
+        if (e2.w < 0.05) { e = vec3(-1.0); sky = 1.0; }
     }
     if (NEAR_PARAMS.w > 0.5) {
         float size = NEAR_PARAMS.x;
         uint axis = side >> 1u, a0 = (axis + 1u) % 3u, a1 = (axis + 2u) % 3u;
-        vec3 f = p / size - 0.5;
+        vec3 f = (p - RTGI_ORIGIN) / size - 0.5;
         ivec3 c0 = ivec3(floor(f));
         vec3 tt = f - vec3(c0);
-        int cAxis = int(floor(p[axis] / size));
+        int cAxis = int(floor((p[axis] - RTGI_ORIGIN[axis]) / size));
         vec4 acc = vec4(0.0);
         float found = 0.0;
         for (int k = 0; k < 4; k++) {
@@ -137,20 +177,27 @@ vec4 fixUp(vec3 p, vec3 n) {
             cc[a1] += k >> 1;
             cc[axis] = cAxis;
             uint i = nearFind(cc, side);
-            if (i == 0xFFFFFFFFu) continue;
+            if (i == 0xFFFFFFFFu || floatBitsToUint(nearPoints[2u * i + 1u].w) != rtgiRegion) continue;
+            vec4 nl = nearLight[i];
+            if (nl.w < 0.5) continue;
             float w = ((k & 1) == 1 ? tt[a0] : 1.0 - tt[a0]) * ((k >> 1) == 1 ? tt[a1] : 1.0 - tt[a1]);
-            acc += nearLight[i] * w;
+            acc += nl * w;
             found += w;
         }
-        if (found > 0.05) {
-            vec4 nc = acc / found;
-            e = mix(e, nc.w * e * farShare / max(nearCell, 0.05) + nc.rgb, clamp(found, 0.0, 1.0));
-        }
+        vec4 nc = found > 0.05 ? acc / found : vec4(0.0);
+        if (found > 0.05 && NEAR_PARAMS.w > 1.5) e = e.r < -0.5 ? nc.rgb : mix(e, nc.rgb, clamp(found, 0.0, 1.0));
+        else if (found > 0.05 && e.r >= -0.5)
+            e = mix(e, (nc.w - 1.0) * e * farShare / max(nearCell, 0.05) + nc.rgb, clamp(found, 0.0, 1.0));
     }
+    if (e.r < -0.5) return vec4(0.0, 0.0, 0.0, 1.0);
     return vec4(e, sky);
 }
 
 float lum(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+vec3 heat(float t) {
+    t = clamp(t, 0.0, 1.0);
+    return clamp(vec3(1.5 - abs(4.0 * t - 3.0), 1.5 - abs(4.0 * t - 2.0), 1.5 - abs(4.0 * t - 1.0)), 0.0, 1.0);
+}
 
 void main() {
     ivec2 q = ivec2(gl_FragCoord.xy);
@@ -163,6 +210,9 @@ void main() {
         vec4 ns = texelFetch(uPrepassNormal, q, 0);
         vec3 nf = dot(ns.xyz, ns.xyz) > 1e-6 ? normalize(ns.xyz) : vec3(0.0, 1.0, 0.0);
         raw = fixUp(wf.xyz / wf.w, nf);
+        int dv = int(u.uDebug.x + 0.5);
+        if (dv == 22) raw = vec4(1.0, 0.0, 1.0, 1.0);
+        else if ((dv >= 11 && dv <= 21) || dv == 24) raw = vec4(0.0, 0.0, 0.0, 1.0);
     }
     ivec2 size = textureSize(uSceneDepth, 0);
     float rawLum = lum(raw.rgb);
@@ -171,6 +221,8 @@ void main() {
     vec4 w = u.uInvViewProj * vec4(ndc, depth, 1.0);
     vec3 p = w.xyz / w.w;
     float dist = length(p - u.uCamera.xyz);
+    vec4 nsHere = texelFetch(uPrepassNormal, q, 0);
+    vec3 nHere = dot(nsHere.xyz, nsHere.xyz) > 1e-6 ? normalize(nsHere.xyz) : vec3(0.0, 1.0, 0.0);
     float held = 0.0;
     vec4 history = raw;
     vec4 fast = vec4(raw.rgb, rawLum * rawLum);
@@ -186,8 +238,17 @@ void main() {
                 // 15/16, kept every lit pixel black on a still camera until motion dropped the history (the user,
                 // Crytek Sponza, 2026-10-29).
                 vec4 hist = texture(uHistory, uv), fh = texture(uFastHistory, uv);
+                // The same surface's, by its normal too: by the distance alone, at a junction the other wall's history (at
+                // the same distance) was taken -- its light carried over the edge, a comb along the crevices testbed's
+                // corners, and the opposing faces of a gap trading theirs (2026-10-29).
+                vec2 hn = state.zw * 2.0 - 1.0;
+                vec3 nPrev = vec3(hn, 1.0 - abs(hn.x) - abs(hn.y));
+                float tt = max(-nPrev.z, 0.0);
+                nPrev.x += nPrev.x >= 0.0 ? -tt : tt;
+                nPrev.y += nPrev.y >= 0.0 ? -tt : tt;
+                bool sameFacing = dot(normalize(nPrev), nHere) > 0.9;
                 bool finite = !any(isnan(hist)) && !any(isinf(hist)) && !any(isnan(fh)) && !any(isinf(fh)) && !isnan(state.x);
-                if (finite && state.y > 0.5 && abs(state.x - expected) < 0.02 * expected + 0.02) {
+                if (finite && sameFacing && state.y > 0.5 && abs(state.x - expected) < 0.02 * expected + 0.02) {
                     history = hist;
                     fast = fh;
                     held = state.y;
@@ -211,6 +272,12 @@ void main() {
     }
     held = min(held + 1.0, u.uParams.x);
     outIncident = mix(history, raw, 1.0 / held);
+    int dv2 = int(u.uDebug.x + 0.5);
+    // Views: the readout's and the fix-up's shown as they are (no history); 23 the frames the history held.
+    if ((dv2 >= 11 && dv2 <= 22) || dv2 == 24) outIncident = raw;
+    if (dv2 == 23) outIncident = vec4(heat(min(held - 1.0, 16.0) / 16.0), raw.a);
     outFast = fast;
-    outState = vec4(dist, held, 0.0, 0.0);
+    vec3 on = nHere / (abs(nHere.x) + abs(nHere.y) + abs(nHere.z));
+    vec2 oe = on.z >= 0.0 ? on.xy : (1.0 - abs(on.yx)) * vec2(on.x >= 0.0 ? 1.0 : -1.0, on.y >= 0.0 ? 1.0 : -1.0);
+    outState = vec4(dist, held, oe * 0.5 + 0.5);
 }

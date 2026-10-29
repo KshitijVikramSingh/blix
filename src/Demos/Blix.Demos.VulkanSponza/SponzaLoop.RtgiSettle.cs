@@ -28,7 +28,10 @@ internal sealed partial class SponzaLoop
     private readonly byte[] rtgiSettleSeen = new byte[36];
     private int rtgiSettleVolumeFrames;
     // The volume not yet what the cache's light should settle against: cooking, refining, or probes short of their passes.
-    private bool RtgiVolumeSettling => rtgiVolume && (!rtgiVolumeBuilt || !rtgiVolReady || rtgiVolUnder > 0);
+    // The near field's cook too: its regions key the cells (rtgi_cache.glsl's rtgiRegion), and a settle ended before them
+    // trained cells the regions then left behind -- the scene came up unsettled (the crevices testbed, 2026-10-30).
+    private bool RtgiVolumeSettling => rtgiVolume && (!rtgiVolumeBuilt || !rtgiVolReady || rtgiVolUnder > 0
+        || (rtgiNearCook && !rtgiNearCookReady));
 
     // Settling now: --rtgi, its first settle not done, the scene and its tracer up, no cook holding the screen.
     private bool RtgiSettleNow => rtgi && rtgiSettleWanted && !rtgiSettleDone && fullyLoaded && frameTracer is not null

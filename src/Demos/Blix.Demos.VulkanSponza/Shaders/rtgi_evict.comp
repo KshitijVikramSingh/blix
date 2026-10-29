@@ -48,7 +48,7 @@ void main() {
     if (u.uPressure.y > 0.0 && float(rtgiHeld[(sweep + 2u) % 3u]) <= u.uPressure.y) return;
     uint frame = uint(u.uEvict.x);
     if (((frame - rtgiAccum[16u * s + 14u]) & 0xFFFFFFu) <= uint(u.uEvict.y)) return;
-    uint level = uint(rtgiCells[s].w) / 6u;
+    uint level = (uint(rtgiCells[s].w) & 0xFFu) / 6u;
     atomicAdd(rtgiStats[level >= 16u ? 27u : 21u + min(level, 5u)], 1u);
     if (rtgiResolved[2u * s + 1u].y >= 8.0) atomicAdd(rtgiStats[28], 1u);
     rtgiKeys[s] = 0u;

@@ -46,7 +46,7 @@ void main() {
     vec3 p = w.xyz / w.w;
     vec3 n = normalize(ns.xyz);
     uint level = rtgiLevel(p, u.uCamera.xyz, u.uParams);
-    uint s = rtgiFind(rtgiCellHash(ivec3(floor(p / rtgiSize(level, u.uParams))), level, rtgiSide(n), u.uParams), u.uParams);
+    uint s = rtgiFind(rtgiCellHash(ivec3(floor((p - RTGI_ORIGIN) / rtgiSize(level, u.uParams))), level, rtgiSide(n), u.uParams), u.uParams);
     if (s == 0xFFFFFFFFu || rtgiResolved[2u * s + 1u].y < 8.0 || rtgiDirection[s].w >= u.uContact.w) return;
     uint k = atomicAdd(contactCount, 1u);
     if (k >= uint(u.uContact.y)) return;

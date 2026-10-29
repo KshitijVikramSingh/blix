@@ -19,6 +19,7 @@ layout(set = 0, binding = 0) uniform RtgiVolumeUpdate {
     vec4 uSunIrradiance; // rgb
     vec4 uVolume;        // rtgi_volume.glsl's VOL_PARAMS
     vec4 uVolumeGeom;    // rtgi_volume.glsl's VOL_GEOM
+    vec4 uNearCook;      // rtgi_nearcook.glsl's NEAR_PARAMS (the regions)
     vec4 uVol;           // x the probes listed; y rays a probe; z unused; w the rays a probe holds at most (fewer for a while
                          // after the sun turns)
 } u;
@@ -41,16 +42,23 @@ layout(std430, set = 0, binding = 9) readonly buffer RtgiVolumeDepth { uint volD
 #include "rtgi_volume.glsl"
 #define RTGI_GEOM_SCALE(p) volCellScale(p)
 #define RTGI_FAR_GROW u.uVolumeGeom.z
+layout(std430, set = 0, binding = 10) readonly buffer RtgiNearTable { uvec2 nearTable[]; };
+layout(std430, set = 0, binding = 11) readonly buffer RtgiNearPoints { vec4 nearPoints[]; };
+#define NEAR_PARAMS u.uNearCook
+#define NEAR_TABLE(i) nearTable[i]
+#define NEAR_POINTS(i) nearPoints[i]
 #define RTGI_KEYS(i) rtgiKeys[i]
 #include "rtgi_cache.glsl"
+#include "rtgi_nearcook.glsl"
 
 // The cache's indirect light at q facing n: its level's cell holding 8 samples or more, else a coarser one (two up at
 // most); w 0 none.
 vec4 cellLight(vec3 q, vec3 n) {
+    rtgiRegion = nearRegion(q, rtgiSide(n));
     uint level = rtgiLevel(q, u.uCamera.xyz, u.uParams), side = rtgiSide(n);
     uint top = uint(u.uParams.w);
     for (uint l = level; l <= min(level + 2u, top); ++l) {
-        uint s = rtgiFind(rtgiCellHash(ivec3(floor(q / rtgiSize(l, u.uParams))), l, side, u.uParams), u.uParams);
+        uint s = rtgiFind(rtgiCellHash(ivec3(floor((q - RTGI_ORIGIN) / rtgiSize(l, u.uParams))), l, side, u.uParams), u.uParams);
         if (s == 0xFFFFFFFFu) continue;
         uvec4 a = rtgiRecord[2u * s], c = rtgiRecord[2u * s + 1u];
         if (uintBitsToFloat(c.w) < 8.0) continue;

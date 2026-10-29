@@ -43,6 +43,8 @@ layout(set = 0, binding = 0) uniform RtgiFilter {
                     // its slot), 1: every frame; z a young cell's (1: every frame)
     vec4 uDone;     // x the frame's number; y frames between drift checks; z the relative error under which a cell is
                     // done; w the dark floor (absolute luminance the error is measured against at least)
+    vec4 uReach;    // --rtgi-volume's traced reach (cellReach): x 1 on; y the samples under which the blend widens to 5 x 5;
+                    // z the outer ring's weight
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer RtgiKeys { uint rtgiKeys[]; };
@@ -63,6 +65,32 @@ layout(std430, set = 0, binding = 10) buffer RtgiRecord { uvec4 rtgiRecord[]; };
 
 // The cache's work, counted for the profile (SponzaLoop.Rtgi.cs's RtgiWork): one atomic a subgroup, never a lane.
 layout(std430, set = 0, binding = 11) buffer RtgiStats { uint rtgiStats[64]; };
+// Per slot, its point's traced reach along its surface (rtgi_volume_vis.comp: the key it was traced for, bits 16-27 the
+// neighbours a ray reached at one, two and four cells' length).
+layout(std430, set = 0, binding = 12) readonly buffer RtgiVolumeCellVis { uvec2 cellVis[]; };
+
+// Whether the cell may take the neighbour (a, b) cells away along its plane's two axes (the filter's ua, va): a ray from
+// its point reached that way, that far (rtgi_volume_vis.comp; a diagonal both ways) -- so the blend stops at a corner, a
+// junction, the ceiling a wall meets (the leaks the readout's neighbour test stopped, 2026-10-29). Not traced yet, or the
+// reach off: as before, every neighbour.
+uint reachWord = 0u;
+bool reachKnown = false;
+bool reachable(uint axis, int a, int b) {
+    if (!reachKnown) return true;
+    // The vis rays' axes: a0 = axis + 1, a1 = axis + 2 (mod 3); the filter's ua is y for the x side, else x; va z, but y
+    // for the z side.
+    uint uaAxis = axis == 0u ? 1u : 0u, vaAxis = axis == 2u ? 1u : 2u;
+    uint a0 = (axis + 1u) % 3u;
+    int steps[2] = int[2](a, b);
+    uint axes[2] = uint[2](uaAxis, vaAxis);
+    for (int k = 0; k < 2; k++) {
+        int st = steps[k];
+        if (st == 0) continue;
+        uint base = 16u + (abs(st) >= 2 ? 4u : 0u) + (axes[k] == a0 ? 0u : 2u) + (st > 0 ? 0u : 1u);
+        if ((reachWord & (1u << base)) == 0u) return false;
+    }
+    return true;
+}
 void tally(uint slot, bool v) {
     uint n = subgroupBallotBitCount(subgroupBallot(v));
     if (subgroupElect() && n > 0u) atomicAdd(rtgiStats[slot], n);
@@ -96,7 +124,9 @@ void main() {
     // Under 8 samples every frame: a slot's blend is what its last occupant left until it is blended (eviction clears it not).
     if (u.uRota.z > 1.5 && held >= 8.0 && held < u.uRota.x && (s + uint(u.uDone.x)) % uint(u.uRota.z) != 0u) return;
     ivec4 cell = rtgiCells[s];
-    uint level = uint(cell.w) / 6u, side = uint(cell.w) % 6u;
+    uint level = (uint(cell.w) & 0xFFu) / 6u, side = (uint(cell.w) & 0xFFu) % 6u;
+    // Its neighbours and parents found in its own region (rtgi_cache.glsl's rtgiRegion): never across a thin wall.
+    rtgiRegion = uint(cell.w) >> 8;
     // The cell's own spread: its samples' variance (the moments, over the fast window) over what it holds.
     vec4 m = rtgiMoments[3u * s];
     float sigma = sqrt(max(m.y - m.x * m.x, 0.0) / max(held, 1.0));
@@ -113,13 +143,22 @@ void main() {
     float varSelf = max(m.y - m.x * m.x, 0.0);
     float poolVar = varSelf * wSelf, poolW = wSelf;
     {
+        if (u.uReach.x > 0.5) {
+            uvec2 v = cellVis[s];
+            reachKnown = v.x == rtgiKeys[s] && (v.y & 0x1000u) != 0u;
+            reachWord = v.y;
+        }
+        // Few samples (uReach.y): the next ring too, 5 x 5 -- the far ends of a crevice, a patch of cells all short of
+        // samples together, blotched where a 3 x 3 drew only on each other (the user, 2026-10-29). Only where traced.
+        int r = reachKnown && held < u.uReach.y ? 2 : 1;
         // The two axes in the side's plane.
         uint axis = side / 2u;
         ivec3 ua = axis == 0u ? ivec3(0, 1, 0) : ivec3(1, 0, 0);
         ivec3 va = axis == 2u ? ivec3(0, 1, 0) : ivec3(0, 0, 1);
-        for (int a = -1; a <= 1; a++) {
-            for (int b = -1; b <= 1; b++) {
+        for (int a = -r; a <= r; a++) {
+            for (int b = -r; b <= r; b++) {
                 if (a == 0 && b == 0) continue;
+                if (!reachable(axis, a, b)) continue;
                 uint t = rtgiFind(rtgiCellHash(cell.xyz + ua * a + va * b, level, side, u.uParams), u.uParams);
                 if (t == 0xFFFFFFFFu) continue;
                 vec4 r1 = rtgiResolved[2u * t + 1u];
@@ -129,7 +168,7 @@ void main() {
                 float ln = lum(rn.rgb);
                 float sigmaN2 = max(mn.y - mn.x * mn.x, 0.0) / max(r1.y, 1.0);
                 float d = (ln - l0) / (u.uFilter.z * sqrt(sigma * sigma + sigmaN2) + 0.1 * max(l0, ln) + 1e-5);
-                float pw = min(r1.y, 64.0) * ((a == 0 || b == 0) ? 1.0 : 0.7) * exp(-0.5 * d * d);
+                float pw = min(r1.y, 64.0) * ((a == 0 || b == 0) ? 1.0 : 0.7) * (max(abs(a), abs(b)) == 2 ? u.uReach.z : 1.0) * exp(-0.5 * d * d);
                 poolVar += max(mn.y - mn.x * mn.x, 0.0) * pw;
                 poolW += pw;
                 float w = share * pw;
