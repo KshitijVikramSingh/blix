@@ -37,6 +37,12 @@ layout(std430, set = 0, binding = 9) readonly buffer RtgiNearTable { uvec2 nearT
 #define NEAR_PARAMS u.uNearCook
 #define NEAR_TABLE(i) nearTable[i]
 #define NEAR_POINTS(i) nearPoints[i]
+// The cooked cells' regions by level and their links (rtgi_nearcook_cook.comp; rtgi_cache.glsl's rtgiRegion).
+layout(std430, set = 0, binding = 10) readonly buffer RtgiNearRegions { uint nearRegions[]; };
+#define NEAR_REGIONS(i) nearRegions[i]
+#define RTGI_REGION_OF 1
+layout(std430, set = 0, binding = 11) readonly buffer RtgiNearAdj { uint nearAdj[]; };
+#define NEAR_ADJ(i) nearAdj[i]
 #include "rtgi_nearcook.glsl"
 #define VOL_PARAMS u.uVolume
 #define VOL_GEOM u.uVolumeGeom
@@ -115,7 +121,7 @@ void main() {
         uint sq = rtgiSide(nq);
         uint j = nearFind(ivec3(floor((q - RTGI_ORIGIN) / NEAR_PARAMS.x)), sq);
         // (In the gather alone: over the cache, a cell's light is its near part only, not the surface's whole.)
-        if (gather && j != 0xFFFFFFFFu && floatBitsToUint(nearPoints[2u * j + 1u].w) == rtgiRegion) {
+        if (gather && j != 0xFFFFFFFFu) {
             vec4 nl = nearLight[j];
             if (nl.w > 0.5) { eq = nl.rgb; have = true; }
         }

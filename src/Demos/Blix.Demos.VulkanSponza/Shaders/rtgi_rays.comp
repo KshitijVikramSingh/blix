@@ -91,6 +91,10 @@ layout(std430, set = 0, binding = 22) readonly buffer RtgiVolumeProbes { float v
 #define RTGI_FAR_GROW u.uVolumeGeom.z
 #define RTGI_KEYS(i) rtgiKeys[i]
 #define RTGI_NEAR u.uNearField.x
+// The cooked cells' regions by level and their links (rtgi_nearcook_cook.comp; rtgi_cache.glsl's rtgiRegion).
+layout(std430, set = 0, binding = 25) readonly buffer RtgiNearRegions { uint nearRegions[]; };
+#define NEAR_REGIONS(i) nearRegions[i]
+#define RTGI_REGION_OF 1
 #include "rtgi_cache.glsl"
 #define GUIDE_KEYS(i) guideKeys[i]
 #include "rtgi_guide.glsl"

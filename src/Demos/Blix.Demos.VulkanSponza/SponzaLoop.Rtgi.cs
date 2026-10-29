@@ -832,6 +832,7 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("RtgiVolumeDepth", RtgiVolDepthOrDummy),
                     new ShaderBufferBinding("RtgiNearTable", RtgiNearTableOrDummy),
                     new ShaderBufferBinding("RtgiNearPoints", RtgiNearPointsOrDummy),
+                    new ShaderBufferBinding("RtgiNearRegions", RtgiNearRegionsOrDummy),
                 });
             for (var r = 0; r < trainReps; r++) graph.Dispatch(rtgiTrainPassHandle, train);
             // The near rays traced with the hits this training reads (the same parity): lit into the readout's samples.
@@ -866,6 +867,7 @@ internal sealed partial class SponzaLoop
                         new ShaderBufferBinding("RtgiDirty", rtgiDirtyBufs[cur]),
                         new ShaderBufferBinding("RtgiNearTable", RtgiNearTableOrDummy),
                         new ShaderBufferBinding("RtgiNearPoints", RtgiNearPointsOrDummy),
+                    new ShaderBufferBinding("RtgiNearRegions", RtgiNearRegionsOrDummy),
                     }));
         }
         // The bench of the training ends the cache's frame here; of placement or the trace, goes on to them.
@@ -1111,6 +1113,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiVolumeProbes", RtgiVolProbesOrDummy),
                 new ShaderBufferBinding("RtgiNearTable", RtgiNearTableOrDummy),
                 new ShaderBufferBinding("RtgiNearPoints", rtgiNearCookBuilt ? rtgiNearPoints : rtgiVolDummy),
+                new ShaderBufferBinding("RtgiNearRegions", RtgiNearRegionsOrDummy),
                 new ShaderBufferBinding("RtgiCapturePixels", RtgiCapturePixelBuffer),
                 new ShaderBufferBinding("RtgiPrevHits", rtgiHitsBuf[prev]),
                 new ShaderBufferBinding("RtgiPoints", rtgiPointsBuf[cur]),
@@ -1354,6 +1357,8 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiNearTable", RtgiNearTableOrDummy),
                 new ShaderBufferBinding("RtgiNearLight", RtgiNearLightOrDummy),
                 new ShaderBufferBinding("RtgiNearPoints", RtgiNearPointsOrDummy),
+                    new ShaderBufferBinding("RtgiNearRegions", RtgiNearRegionsOrDummy),
+                    new ShaderBufferBinding("RtgiNearAdj", RtgiNearAdjOrDummy),
             }));
         rtgiUnsureWritten = true;
         // Blurred by how sure the cache is, into the incident the upsample reads (rtgi_blur.frag; at 0 a copy).

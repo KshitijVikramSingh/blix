@@ -109,6 +109,12 @@ layout(std430, set = 0, binding = 29) readonly buffer RtgiNearPoints { vec4 near
 #define NEAR_POINTS(i) nearPoints[i]
 #define NEAR_PARAMS u.uNearCook
 #define NEAR_TABLE(i) nearTable[i]
+// The cooked cells' regions by level and their links (rtgi_nearcook_cook.comp; rtgi_cache.glsl's rtgiRegion).
+layout(std430, set = 0, binding = 30) readonly buffer RtgiNearRegions { uint nearRegions[]; };
+#define NEAR_REGIONS(i) nearRegions[i]
+#define RTGI_REGION_OF 1
+layout(std430, set = 0, binding = 31) readonly buffer RtgiNearAdj { uint nearAdj[]; };
+#define NEAR_ADJ(i) nearAdj[i]
 #include "rtgi_nearcook.glsl"
 #define VOL_PROBES(i) volProbes[i]
 #define VOL_DEPTH(i) volDepth[i]
@@ -323,7 +329,7 @@ vec4 readNearCooked(vec3 p, uint side, out float found) {
         cc[a1] += k >> 1;
         cc[axis] = cAxis;
         uint i = nearFind(cc, side);
-        if (i == 0xFFFFFFFFu || floatBitsToUint(nearPoints[2u * i + 1u].w) != rtgiRegion) continue;
+        if (i == 0xFFFFFFFFu || !nearLinked(rtgiRegion - 1u, i, side)) continue;
         vec4 nl = nearLight[i];
         if (nl.w < 0.5) continue;
         float w = ((k & 1) == 1 ? t[a0] : 1.0 - t[a0]) * ((k >> 1) == 1 ? t[a1] : 1.0 - t[a1]);
@@ -714,7 +720,10 @@ void main() {
             if (ni != 0xFFFFFFFFu) {
                 vec4 nl = nearLight[ni];
                 uint hh = rtgiHash(ni * 0x9E3779B9u);
-                c = view == 16 ? vec3(hh & 255u, (hh >> 8) & 255u, (hh >> 16) & 255u) / 255.0 : view == 17 ? vec3(nl.w) : nl.rgb;
+                // 17: buried red, cooked but never gathered blue, gathered white (by its open share).
+                c = view == 16 ? vec3(hh & 255u, (hh >> 8) & 255u, (hh >> 16) & 255u) / 255.0
+                  : view == 17 ? (nl.w < -0.5 ? vec3(1.0, 0.1, 0.1) : nl.w < 0.5 ? vec3(0.1, 0.2, 1.0) : vec3(0.3 + 0.7 * clamp(nl.w - 1.0, 0.0, 1.0)))
+                  : nl.rgb;
             }
         } else if (view == 19) {
             // The probes its cell was traced to: the level (blue 0.5 m ... red 8 m), dimmed by how many of the 8 its rays
@@ -729,8 +738,9 @@ void main() {
             if (g > 0.0) c = heat(log2(max(g / max(VOL_GEOM.x, 1e-4), 0.05) / 0.05) / log2(100.0));
         } else if (view == 24) {
             // Its region (rtgi_cache.glsl's rtgiRegion): a colour by it; grey region 0 (no cooked cell here).
-            uint hh = rtgiHash(rtgiRegion * 0x9E3779B9u);
-            c = rtgiRegion == 0u ? vec3(0.5) : vec3(hh & 255u, (hh >> 8) & 255u, (hh >> 16) & 255u) / 255.0;
+            uint rg = rtgiRegionFor(level);
+            uint hh = rtgiHash(rg * 0x9E3779B9u);
+            c = rg == 0u ? vec3(0.5) : vec3(hh & 255u, (hh >> 8) & 255u, (hh >> 16) & 255u) / 255.0;
         } else {
             // 21: how many samples its cell holds, 1 to 16,384 (log) -- where the light is thin.
             if (sc != 0xFFFFFFFFu) c = heat(log2(max(rtgiResolved[2u * sc + 1u].y, 1.0)) / 14.0);

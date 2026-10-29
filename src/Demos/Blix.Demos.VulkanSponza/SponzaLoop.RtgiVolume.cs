@@ -637,6 +637,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiVolumeDepth", rtgiVolDepthBuf),
                 new ShaderBufferBinding("RtgiNearTable", RtgiNearTableOrDummy),
                 new ShaderBufferBinding("RtgiNearPoints", RtgiNearPointsOrDummy),
+                new ShaderBufferBinding("RtgiNearRegions", RtgiNearRegionsOrDummy),
             }));
     }
 }

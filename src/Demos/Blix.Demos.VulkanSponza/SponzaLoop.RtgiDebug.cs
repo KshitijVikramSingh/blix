@@ -14,7 +14,7 @@ internal sealed partial class SponzaLoop
         "Blur radius", "World volume alone (--rtgi-volume)",
         "Cell ID (colour per cache cell)", "Cell size (geometry; 5 cm blue - 1 m red)", "Cell raw light (unblended)",
         "Cell blended light (the record)", "Cell traced reach (grey all reached; magenta untraced)", "Cooked near: cell ID",
-        "Cooked near: gathered (white)", "Cooked near: near light", "Cell's probe level / probes reached",
+        "Cooked near: state (red buried, blue ungathered)", "Cooked near: near light", "Cell's probe level / probes reached",
         "Probe harmonic distance (5 cm - 5 m)", "Cell samples held (log)", "Fix-up pixels (magenta)",
         "Temporal history held (blue 0 - red 16)", "Cell region (grey: none cooked)",
     };

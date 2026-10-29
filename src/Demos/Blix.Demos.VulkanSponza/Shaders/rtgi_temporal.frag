@@ -68,6 +68,12 @@ layout(std430, set = 0, binding = 15) readonly buffer RtgiNearPoints { vec4 near
 #define RTGI_FAR_GROW u.uVolumeGeom.z
 #define RTGI_KEYS(i) rtgiKeys[i]
 #define RTGI_NEAR u.uNearField.x
+// The cooked cells' regions by level and their links (rtgi_nearcook_cook.comp; rtgi_cache.glsl's rtgiRegion).
+layout(std430, set = 0, binding = 16) readonly buffer RtgiNearRegions { uint nearRegions[]; };
+#define NEAR_REGIONS(i) nearRegions[i]
+#define RTGI_REGION_OF 1
+layout(std430, set = 0, binding = 17) readonly buffer RtgiNearAdj { uint nearAdj[]; };
+#define NEAR_ADJ(i) nearAdj[i]
 #include "rtgi_cache.glsl"
 #define NEAR_PARAMS u.uNearCook
 #define NEAR_TABLE(i) nearTable[i]
@@ -177,7 +183,7 @@ vec4 fixUp(vec3 p, vec3 n) {
             cc[a1] += k >> 1;
             cc[axis] = cAxis;
             uint i = nearFind(cc, side);
-            if (i == 0xFFFFFFFFu || floatBitsToUint(nearPoints[2u * i + 1u].w) != rtgiRegion) continue;
+            if (i == 0xFFFFFFFFu || !nearLinked(rtgiRegion - 1u, i, side)) continue;
             vec4 nl = nearLight[i];
             if (nl.w < 0.5) continue;
             float w = ((k & 1) == 1 ? tt[a0] : 1.0 - tt[a0]) * ((k >> 1) == 1 ? tt[a1] : 1.0 - tt[a1]);

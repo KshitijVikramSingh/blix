@@ -120,6 +120,10 @@ void sink(bool never) { if (never) atomicAdd(rtgiStats[63], 1u); }
 
 #define RTGI_KEYS(i) rtgiKeys[i]
 #define RTGI_NEAR u.uNearField.x
+// The cooked cells' regions by level and their links (rtgi_nearcook_cook.comp; rtgi_cache.glsl's rtgiRegion).
+layout(std430, set = 0, binding = 26) readonly buffer RtgiNearRegions { uint nearRegions[]; };
+#define NEAR_REGIONS(i) nearRegions[i]
+#define RTGI_REGION_OF 1
 #include "rtgi_cache.glsl"
 layout(std430, set = 0, binding = 24) readonly buffer RtgiNearTable { uvec2 nearTable[]; };
 layout(std430, set = 0, binding = 25) readonly buffer RtgiNearPoints { vec4 nearPoints[]; };
@@ -140,7 +144,7 @@ uint rtgiInsertAt(vec3 p, vec3 n, uint level) {
     rtgiRegion = nearRegion(p, side);
     uvec2 h = rtgiCellHash(c, level, side, u.uParams);
     if (twice(512u)) return h.x & uint(u.uParams.z);
-    return rtgiInsertHashed(h, ivec4(c, int((level * 6u + side) | (rtgiRegion << 8))));
+    return rtgiInsertHashed(h, ivec4(c, int((level * 6u + side) | (rtgiRegionFor(level) << 8))));
 }
 
 // Cell (its coordinates, level * 6 + side) of hash h found or made.

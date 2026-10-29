@@ -68,11 +68,56 @@ vec3 nearRayDir(uint i, uint k, vec3 n) {
 
 // The region of a point (rtgi_cache.glsl's rtgiRegion): its cooked cell's (the normal's w, rtgi_nearcook_cook.comp's
 // third pass: 1 + the 2 m probe it reaches), 0 where none is cooked. The includer declares NEAR_POINTS(i) for it.
+// The 8 neighbours of a cooked cell across its surface (along the side's two other axes), ordered so a neighbour's way
+// back is k ^ 1; a cell's links (NEAR_ADJ: bit k, a clear ray to that neighbour's point, rtgi_nearcook_cook.comp).
+const ivec2 NEAR_RING[8] = ivec2[8](ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1), ivec2(1, 1), ivec2(-1, -1), ivec2(1, -1), ivec2(-1, 1));
+// The cache levels whose cubes the regions are found in (5 cm to 1.6 m); coarser, region 0.
+#define NEAR_LEVELS 6u
+
 #ifdef NEAR_POINTS
+// The point's cooked cell, 1 + its index (0 none): its own -- or, that one missing or buried (a cell straddling a
+// junction, a sliver of it above the floor), the next toward the visible surface (from the cell's middle toward the point,
+// along the surface, one cell).
 uint nearRegion(vec3 p, uint side) {
     if (NEAR_PARAMS.w < 0.5) return 0u;
-    uint j = nearFind(ivec3(floor((p - RTGI_ORIGIN) / NEAR_PARAMS.x)), side);
-    return j == 0xFFFFFFFFu ? 0u : floatBitsToUint(NEAR_POINTS(2u * j + 1u).w);
+    float size = NEAR_PARAMS.x;
+    ivec3 c = ivec3(floor((p - RTGI_ORIGIN) / size));
+    uint j = nearFind(c, side);
+    if (j != 0xFFFFFFFFu && (floatBitsToUint(NEAR_POINTS(2u * j).w) & NEAR_BURIED) == 0u) return j + 1u;
+    uint axis = side >> 1u, a0 = (axis + 1u) % 3u, a1 = (axis + 2u) % 3u;
+    vec3 off = (p - RTGI_ORIGIN) / size - (vec3(c) + 0.5);
+    ivec3 cc = c;
+    if (abs(off[a0]) >= abs(off[a1])) cc[a0] += off[a0] >= 0.0 ? 1 : -1;
+    else cc[a1] += off[a1] >= 0.0 ? 1 : -1;
+    uint k = nearFind(cc, side);
+    if (k != 0xFFFFFFFFu && (floatBitsToUint(NEAR_POINTS(2u * k).w) & NEAR_BURIED) == 0u) return k + 1u;
+    return j != 0xFFFFFFFFu ? j + 1u : 0u;
+}
+#endif
+#ifndef RTGI_REGION_DECLARED
+#define RTGI_REGION_DECLARED
+uint rtgiRegion = 0u;
+#endif
+#ifdef NEAR_REGIONS
+// rtgi_cache.glsl's hook: the point's cooked cell's region at a level.
+uint nearRegionOfLevel(uint level) {
+    if (rtgiRegion == 0u || level >= NEAR_LEVELS || NEAR_PARAMS.w < 0.5) return 0u;
+    return NEAR_REGIONS((rtgiRegion - 1u) * NEAR_LEVELS + level);
+}
+#endif
+#if defined(NEAR_ADJ) && defined(NEAR_POINTS)
+// Whether cooked cell i may be blended with cell own (the point's): the same, or its neighbour across the surface with a
+// clear ray between them -- the 5 cm near light never taken from across a wall.
+bool nearLinked(uint own, uint i, uint side) {
+    if (own == i) return true;
+    if (own == 0xFFFFFFFFu) return false;
+    float size = NEAR_PARAMS.x;
+    ivec3 co = ivec3(floor((NEAR_POINTS(2u * own).xyz - RTGI_ORIGIN) / size));
+    ivec3 ci = ivec3(floor((NEAR_POINTS(2u * i).xyz - RTGI_ORIGIN) / size));
+    uint axis = side >> 1u, a0 = (axis + 1u) % 3u, a1 = (axis + 2u) % 3u;
+    ivec2 d = ivec2(ci[a0] - co[a0], ci[a1] - co[a1]);
+    for (uint k = 0u; k < 8u; k++) if (NEAR_RING[k] == d) return (NEAR_ADJ(own) & (1u << k)) != 0u;
+    return false;
 }
 #endif
 

@@ -13,8 +13,15 @@ layout(set = 0, binding = 0) uniform RtgiNearCookCook {
     vec4 uNearCook;  // rtgi_nearcook.glsl's NEAR_PARAMS
     vec4 uCook;      // x the chunk's first cell; y its cells; z the contact radius (m); w the kind
     vec4 uVolume;    // rtgi_volume.glsl's VOL_PARAMS (kinds 2 and 3); x the level the regions are probes of
-    vec4 uRegion;    // x the volume's level the regions are drawn from
+    vec4 uRegion;    // x the volume's level the regions are drawn from; y the links' round; z the rounds
+    vec4 uConn;      // x 1: the labels' first pass (each its own index); y the cube hash's slots - 1
 } u;
+// Per cell, its candidate points (one sample per 4 x 4 sub-square of it across its surface, w 1 where it had one): kinds 4
+// and 5 test each with 8 rays and keep the one meeting no back face, nearest the cell's middle, as its point -- the
+// mean of its samples fell under a wall standing on part of it (SponzaLoop.RtgiNearCook.cs).
+#define NEAR_CANDIDATES 16u
+#define NEAR_CHOOSE_RAYS 8u
+layout(std430, set = 0, binding = 8) readonly buffer RtgiNearCandidates { vec4 nearCandidates[]; };
 
 layout(std430, set = 0, binding = 1) buffer RtgiNearPoints { vec4 nearPoints[]; };
 layout(std430, set = 0, binding = 6) readonly buffer RtgiVolumeTable { uvec2 volTable[]; };
@@ -24,9 +31,34 @@ layout(std430, set = 0, binding = 3) readonly buffer RtgiNearCookHits { uvec4 co
 layout(std430, set = 0, binding = 4) buffer RtgiNearLinks { uvec2 nearLinks[]; };
 layout(std430, set = 0, binding = 5) buffer RtgiNearLight { vec4 nearLight[]; };
 
+// The regions (kinds 6-10, after the links): each cell's links to its 8 neighbours across its surface (a clear ray
+// between their points), its piece's label at each of NEAR_LEVELS cube sizes (the lowest cell index reached along links
+// within the cube, propagated a pass at a time), each cube's lowest label (a hash of cubes), and its regions: 0 for the
+// piece holding the cube's lowest, 1 + its label for any other.
+layout(std430, set = 0, binding = 9) buffer RtgiNearAdj { uint nearAdj[]; };
+layout(std430, set = 0, binding = 10) buffer RtgiNearLabels { uint nearLabels[]; };
+layout(std430, set = 0, binding = 11) buffer RtgiNearRegions { uint nearRegions[]; };
+layout(std430, set = 0, binding = 12) buffer RtgiNearCubes { uvec2 nearCubes[]; };
+layout(std430, set = 0, binding = 13) readonly buffer RtgiNearTable { uvec2 nearTable[]; };
+
 #define NEAR_PARAMS u.uNearCook
-#define NEAR_TABLE(i) uvec2(0u)
+#define NEAR_TABLE(i) nearTable[i]
 #include "rtgi_nearcook.glsl"
+
+// A live (not buried) cell's neighbour k across its surface, or 0xFFFFFFFF.
+uint nearNeighbour(uint i, uint k) {
+    vec3 p = nearPoints[2u * i].xyz;
+    uint side = floatBitsToUint(nearPoints[2u * i].w) & 7u;
+    ivec3 c = ivec3(floor((p - RTGI_ORIGIN) / NEAR_PARAMS.x));
+    uint axis = side >> 1u, a0 = (axis + 1u) % 3u, a1 = (axis + 2u) % 3u;
+    c[a0] += NEAR_RING[k].x;
+    c[a1] += NEAR_RING[k].y;
+    uint j = nearFind(c, side);
+    if (j == 0xFFFFFFFFu || (floatBitsToUint(nearPoints[2u * j].w) & NEAR_BURIED) != 0u) return 0xFFFFFFFFu;
+    return j;
+}
+ivec3 nearCube(uint i, uint level) { return ivec3(floor((nearPoints[2u * i].xyz - RTGI_ORIGIN) / (NEAR_PARAMS.x * exp2(float(level))))); }
+bool nearLive(uint i) { return (floatBitsToUint(nearPoints[2u * i].w) & NEAR_BURIED) == 0u; }
 #define VOL_PARAMS vec4(u.uVolume.xyz, 1.0)
 #define VOL_GEOM vec4(0.0)
 #define VOL_TABLE(i) volTable[i]
@@ -39,6 +71,110 @@ void main() {
     uint first = uint(u.uCook.x), cells = uint(u.uCook.y);
     float radius = u.uCook.z;
     uint kind = uint(u.uCook.w + 0.5);
+    if (kind == 6u) {
+        // A ray from the cell's point to each live neighbour's, both lifted off their surface.
+        if (t >= cells * 8u) return;
+        uint i = first + t / 8u, k = t % 8u;
+        cookRays[2u * t] = vec4(0.0);
+        cookRays[2u * t + 1u] = vec4(0.0, 1.0, 0.0, 1e-6);
+        if (!nearLive(i)) return;
+        uint j = nearNeighbour(i, k);
+        if (j == 0xFFFFFFFFu) return;
+        vec3 o = nearPoints[2u * i].xyz + nearPoints[2u * i + 1u].xyz * 0.01;
+        vec3 q = nearPoints[2u * j].xyz + nearPoints[2u * j + 1u].xyz * 0.01;
+        float len = length(q - o);
+        if (len < 1e-4) return;
+        cookRays[2u * t] = vec4(o, 0.0);
+        cookRays[2u * t + 1u] = vec4((q - o) / len, max(len - 0.002, 1e-4));
+        return;
+    }
+    if (kind == 7u) {
+        if (t >= cells) return;
+        uint i = first + t, mask = 0u;
+        for (uint k = 0u; k < 8u; k++) {
+            uint r = t * 8u + k;
+            if (cookRays[2u * r + 1u].w > 1e-5 && (cookHits[3u * r].w & 1u) == 0u) mask |= 1u << k;
+        }
+        nearAdj[i] = mask;
+        return;
+    }
+    if (kind == 8u) {
+        // A pass of the labels: each level's the lowest of its own and its linked neighbours' (both ways) in its cube.
+        if (t >= cells) return;
+        uint i = first + t;
+        for (uint l = 0u; l < NEAR_LEVELS; l++) {
+            uint lab = u.uConn.x > 0.5 ? i : nearLabels[i * NEAR_LEVELS + l];
+            if (u.uConn.x < 0.5 && nearLive(i)) {
+                ivec3 cube = nearCube(i, l);
+                for (uint k = 0u; k < 8u; k++) {
+                    if ((nearAdj[i] & (1u << k)) == 0u) continue;
+                    uint j = nearNeighbour(i, k);
+                    if (j == 0xFFFFFFFFu || (nearAdj[j] & (1u << (k ^ 1u))) == 0u || nearCube(j, l) != cube) continue;
+                    lab = min(lab, nearLabels[j * NEAR_LEVELS + l]);
+                }
+            }
+            nearLabels[i * NEAR_LEVELS + l] = lab;
+        }
+        return;
+    }
+    if (kind == 9u || kind == 10u) {
+        // 9: each cube's lowest label (its key claimed, the lowest kept); 10: the regions.
+        if (t >= cells) return;
+        uint i = first + t;
+        uint side = floatBitsToUint(nearPoints[2u * i].w) & 7u;
+        for (uint l = 0u; l < NEAR_LEVELS; l++) {
+            if (!nearLive(i)) { if (kind == 10u) nearRegions[i * NEAR_LEVELS + l] = 0u; continue; }
+            ivec3 cube = nearCube(i, l);
+            uint ha = nearHash(uint(cube.x) * 0x9E3779B1u ^ nearHash(uint(cube.y) * 0x85EBCA77u ^ nearHash(uint(cube.z) * 0xC2B2AE3Du ^ (side + 8u * l + 0x51Fu))));
+            uvec2 h = uvec2(ha, nearHash(ha ^ 0x2545F491u ^ uint(cube.x) * 0x1B873593u ^ uint(cube.y) * 0xCC9E2D51u) | 1u);
+            uint mask = uint(u.uConn.y);
+            uint lab = nearLabels[i * NEAR_LEVELS + l];
+            uint slot = 0xFFFFFFFFu;
+            for (uint k = 0u; k < 32u; k++) {
+                uint s = (h.x + k) & mask;
+                if (kind == 9u) {
+                    uint prev = atomicCompSwap(nearCubes[s].x, 0u, h.y);
+                    if (prev == 0u || prev == h.y) { slot = s; break; }
+                } else if (nearCubes[s].x == h.y) { slot = s; break; }
+                else if (nearCubes[s].x == 0u) break;
+            }
+            if (slot == 0xFFFFFFFFu) { if (kind == 10u) nearRegions[i * NEAR_LEVELS + l] = 0u; continue; }
+            if (kind == 9u) atomicMin(nearCubes[slot].y, lab);
+            else nearRegions[i * NEAR_LEVELS + l] = lab == nearCubes[slot].y ? 0u : lab + 1u;
+        }
+        return;
+    }
+    if (kind == 4u) {
+        if (t >= cells * NEAR_CANDIDATES * NEAR_CHOOSE_RAYS) return;
+        uint i = first + t / (NEAR_CANDIDATES * NEAR_CHOOSE_RAYS);
+        uint c = (t / NEAR_CHOOSE_RAYS) % NEAR_CANDIDATES, r = t % NEAR_CHOOSE_RAYS;
+        vec4 cand = nearCandidates[NEAR_CANDIDATES * i + c];
+        vec3 n = nearPoints[2u * i + 1u].xyz;
+        cookRays[2u * t] = vec4(cand.xyz + n * 0.01, 0.0);
+        cookRays[2u * t + 1u] = vec4(nearRayDir(i, r * (NEAR_RAYS / NEAR_CHOOSE_RAYS), n), cand.w > 0.5 ? radius : 1e-6);
+        return;
+    }
+    if (kind == 5u) {
+        if (t >= cells) return;
+        uint i = first + t;
+        vec3 mid = nearPoints[2u * i].xyz;
+        uint best = 0xFFFFFFFFu;
+        float bestBacks = 1e30, bestD = 1e30;
+        for (uint c = 0u; c < NEAR_CANDIDATES; c++) {
+            vec4 cand = nearCandidates[NEAR_CANDIDATES * i + c];
+            if (cand.w < 0.5) continue;
+            float backs = 0.0;
+            for (uint r = 0u; r < NEAR_CHOOSE_RAYS; r++) {
+                uint ray = (t * NEAR_CANDIDATES + c) * NEAR_CHOOSE_RAYS + r;
+                uvec4 h0 = cookHits[3u * ray];
+                if ((h0.w & 1u) != 0u && (h0.w & 2u) == 0u) backs += 1.0;
+            }
+            float dm = length(cand.xyz - mid);
+            if (backs < bestBacks || (backs == bestBacks && dm < bestD)) { bestBacks = backs; bestD = dm; best = c; }
+        }
+        if (best != 0xFFFFFFFFu) nearPoints[2u * i].xyz = nearCandidates[NEAR_CANDIDATES * i + best].xyz;
+        return;
+    }
     uint rl = uint(u.uRegion.x);
     if (kind == 2u) {
         if (t >= cells * 8u) return;
@@ -112,6 +248,7 @@ void main() {
     // a floor ran under, black, and every edge where one thing stood on another darkened as the cells' history filled
     // (the user, the crevices testbed, 2026-10-30).
     bool buried = backs > 0.5 * float(NEAR_RAYS);
+
     if (buried) nearPoints[2u * i].w = uintBitsToFloat(floatBitsToUint(nearPoints[2u * i].w) | NEAR_BURIED);
     nearLight[i] = buried ? vec4(0.0, 0.0, 0.0, -1.0) : vec4(0.0);
 }

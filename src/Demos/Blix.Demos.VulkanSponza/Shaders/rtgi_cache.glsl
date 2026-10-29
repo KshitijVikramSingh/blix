@@ -105,16 +105,34 @@ bool rtgiSunSettled(float visibility, float rays) {
 }
 
 // The cell's two hashes: x the slot it starts probing at, y its key.
-// The region of the point a key is made for (rtgi_nearcook.glsl's nearRegion: the 2 m probe its cooked surface cell
-// reaches, 0 where none is cooked), part of every cell's key: the two sides of a thin wall reach different probes, so they
-// are different cells -- one cell held both rooms' floor where it ran under a wall, both faces of a crevice's lip, and
-// every blend and lookup that found it by its key carried the light across (the user, the crevices testbed's edges,
-// 2026-10-30). Set by each shader for the point it is keying (its cell's stored w, bits 8 up, for a cell's own).
+// The region in every cell's key. With the cooked near field (RTGI_REGION_OF defined: rtgi_nearcook.glsl's
+// nearRegionOfLevel), rtgiRegion is the point's cooked cell (1 + its index, rtgi_nearcook.glsl's nearRegion; 0 none), and
+// the region is that cell's at the key's level: within each cube of that level, the cooked cells joined along their
+// surface by clear rays are one piece, and every piece but the one holding the cube's lowest cell is a region of its own
+// (rtgi_nearcook_cook.comp) -- the two sides of a thin wall, a floor running under it, kept apart; an open surface one
+// piece, region 0, no seam. One cell held both rooms' floor where it ran under a wall, and every blend and lookup that
+// found it by its key carried the light across (the user, the crevices testbed's edges, 2026-10-30). Without it (the
+// shaders that key a stored cell's neighbours: rtgi_filter.comp, rtgi_pushup.comp), rtgiRegion is the region itself
+// (the cell's stored w, bits 8 up).
+#ifndef RTGI_REGION_DECLARED
+#define RTGI_REGION_DECLARED
 uint rtgiRegion = 0u;
+#endif
+#ifdef RTGI_REGION_OF
+uint nearRegionOfLevel(uint level);
+#endif
+uint rtgiRegionFor(uint level) {
+#ifdef RTGI_REGION_OF
+    return nearRegionOfLevel(level);
+#else
+    return rtgiRegion;
+#endif
+}
 
 uvec2 rtgiCellHash(ivec3 c, uint level, uint side, vec4 params) {
-    uint a = rtgiHash(uint(c.x) * 0x9E3779B1u ^ rtgiHash(uint(c.y) * 0x85EBCA77u ^ rtgiHash(uint(c.z) * 0xC2B2AE3Du ^ (level * 6u + side) ^ rtgiRegion * 0x632BE5ABu)));
-    uint b = rtgiHash(a ^ 0x68E31DA4u ^ uint(c.x) * 0x1B873593u ^ uint(c.y) * 0xCC9E2D51u ^ uint(c.z) * 0x27D4EB2Fu ^ rtgiRegion * 0x5BD1E995u) | 1u;
+    uint region = rtgiRegionFor(level);
+    uint a = rtgiHash(uint(c.x) * 0x9E3779B1u ^ rtgiHash(uint(c.y) * 0x85EBCA77u ^ rtgiHash(uint(c.z) * 0xC2B2AE3Du ^ (level * 6u + side) ^ region * 0x632BE5ABu)));
+    uint b = rtgiHash(a ^ 0x68E31DA4u ^ uint(c.x) * 0x1B873593u ^ uint(c.y) * 0xCC9E2D51u ^ uint(c.z) * 0x27D4EB2Fu ^ region * 0x5BD1E995u) | 1u;
     return uvec2(a & uint(params.z), b);
 }
 

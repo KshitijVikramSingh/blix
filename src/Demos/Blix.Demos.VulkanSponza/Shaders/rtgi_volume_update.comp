@@ -48,6 +48,10 @@ layout(std430, set = 0, binding = 11) readonly buffer RtgiNearPoints { vec4 near
 #define NEAR_TABLE(i) nearTable[i]
 #define NEAR_POINTS(i) nearPoints[i]
 #define RTGI_KEYS(i) rtgiKeys[i]
+// The cooked cells' regions by level and their links (rtgi_nearcook_cook.comp; rtgi_cache.glsl's rtgiRegion).
+layout(std430, set = 0, binding = 12) readonly buffer RtgiNearRegions { uint nearRegions[]; };
+#define NEAR_REGIONS(i) nearRegions[i]
+#define RTGI_REGION_OF 1
 #include "rtgi_cache.glsl"
 #include "rtgi_nearcook.glsl"
 
