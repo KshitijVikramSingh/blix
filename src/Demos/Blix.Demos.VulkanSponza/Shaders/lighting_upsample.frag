@@ -35,7 +35,8 @@ layout(set = 0, binding = 0) uniform LightingUpsample {
     mat4 uInvView;
     vec4 uHalf;            // x 1: the shadows are half-res too (carry the mask); yz: the full-res pixel of its 2x2 this frame's half-res samples stand for; w the tangent of
                            // the sun's angular radius (0: a point sun, no penumbra filter)
-    vec4 uPixel;           // x a full-res pixel's angular size (radians at the centre of the view)
+    vec4 uPixel;           // x a full-res pixel's angular size (radians at the centre of the view); y 1: a pixel no sample is on
+                           // the surface of is marked (rgb -1) for its own lookup (rtgi_temporal.frag's fix-up)
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uIncidentHalf;
@@ -136,7 +137,12 @@ void main() {
             bestGradient = sampleGradient;
         }
     }
-    if (total > 1e-4) {
+    if (sampled == 0 && u.uPixel.y > 0.5) {
+        // Marked: the nearest sample is another surface's light (a crevice's other face, its lip) -- stippled through the
+        // crevices testbed's gaps (the user, 2026-10-29).
+        outIncident = vec4(-1.0, -1.0, -1.0, 1.0);
+        outIncidentGradient = vec4(0.0, 0.0, 0.0, bestGradient.w);
+    } else if (total > 1e-4) {
         outIncident = incident / total;
         outIncidentGradient = gradient / total;
     } else {

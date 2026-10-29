@@ -80,7 +80,7 @@ internal sealed partial class SponzaLoop
             .Target(incidentGradientHandle, LoadOp.Clear, StoreOp.Store)
             .Target(rtgiStateHandle, LoadOp.Clear, StoreOp.Store)
             .Target(rtgiFastHandle, LoadOp.Clear, StoreOp.Store)
-            .Read(rtgiRawIncidentHandle).Read(rtgiRawGradientHandle).Read(SampleableSceneDepth)
+            .Read(rtgiRawIncidentHandle).Read(rtgiRawGradientHandle).Read(SampleableSceneDepth).Read(SampleablePrepassNormal)
             .ReadHistory(rtgiHistoryHandle).ReadHistory(rtgiHistoryStateHandle).ReadHistory(rtgiFastHistoryHandle)
             .Shader(rtgiTemporalInterface).Handle;
         rtgiHistoryInterface = reflect("present.vert", "rtgi_history.frag");
@@ -129,6 +129,7 @@ internal sealed partial class SponzaLoop
                 new ShaderTextureBinding("uHistory", graph.GetColorTexture(rtgiHistoryHandle)),
                 new ShaderTextureBinding("uHistoryState", graph.GetColorTexture(rtgiHistoryStateHandle)),
                 new ShaderTextureBinding("uFastHistory", graph.GetColorTexture(rtgiFastHistoryHandle)),
+                new ShaderTextureBinding("uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
             },
             pushConstants: null,
             uniforms: new ShaderUniform[]
@@ -138,6 +139,20 @@ internal sealed partial class SponzaLoop
                 new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, 0f))),
                 new("uPrevCamera", new Vector4Uniform(new Vector4(prevCamera, 0f))),
                 new("uParams", new Vector4Uniform(new Vector4(RtgiTemporalFramesNow, historyOk ? 1f : 0f, rtgiTemporalFast, rtgiTemporalClamp))),
+                new("uCacheParams", new Vector4Uniform(RtgiParams)),
+                new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, 0f, 0f, 0f))),
+                new("uVolume", new Vector4Uniform(RtgiVolumeParams)),
+                new("uVolumeGeom", new Vector4Uniform(RtgiVolumeGeom)),
+                new("uNearCook", new Vector4Uniform(RtgiNearParams)),
+            },
+            buffers: new[]
+            {
+                new ShaderBufferBinding("RtgiKeys", rtgiKeys),
+                new ShaderBufferBinding("RtgiRecord", rtgiRecord),
+                new ShaderBufferBinding("RtgiVolumeTable", RtgiVolTableOrDummy),
+                new ShaderBufferBinding("RtgiVolumeProbes", RtgiVolProbesOrDummy),
+                new ShaderBufferBinding("RtgiNearTable", RtgiNearTableOrDummy),
+                new ShaderBufferBinding("RtgiNearLight", RtgiNearLightOrDummy),
             }));
         graph.Pass(rtgiHistoryPassHandle, scope => fullscreen.Draw(
             scope, rtgiHistoryPipeline,

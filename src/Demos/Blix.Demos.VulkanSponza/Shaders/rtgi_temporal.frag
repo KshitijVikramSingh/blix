@@ -30,6 +30,11 @@ layout(set = 0, binding = 0) uniform RtgiTemporal {
     vec4 uPrevCamera;    // xyz last frame's position
     vec4 uParams;        // x frames held at most; y 1 when the history may be read; z the fast history's frames; w the
                          // clamp's standard deviations (0: no clamp)
+    vec4 uCacheParams;   // rtgiParams (rtgi_cache.glsl), for the fix-up
+    vec4 uNearField;     // x RTGI_NEAR
+    vec4 uVolume;        // rtgi_volume.glsl's VOL_PARAMS
+    vec4 uVolumeGeom;    // rtgi_volume.glsl's VOL_GEOM
+    vec4 uNearCook;      // rtgi_nearcook.glsl's NEAR_PARAMS
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uRaw;
@@ -38,6 +43,112 @@ layout(set = 0, binding = 3) uniform sampler2D uSceneDepth;
 layout(set = 0, binding = 4) uniform sampler2D uHistory;
 layout(set = 0, binding = 5) uniform sampler2D uHistoryState;
 layout(set = 0, binding = 6) uniform sampler2D uFastHistory;
+layout(set = 0, binding = 7) uniform sampler2D uPrepassNormal;
+// The fix-up's cache (a pixel the upsample found no sample of its surface for: lighting_upsample.frag marks it rgb -1).
+layout(std430, set = 0, binding = 8) readonly buffer RtgiKeys { uint rtgiKeys[]; };
+layout(std430, set = 0, binding = 9) readonly buffer RtgiRecord { uvec4 rtgiRecord[]; };
+layout(std430, set = 0, binding = 10) readonly buffer RtgiVolumeTable { uvec2 volTable[]; };
+layout(std430, set = 0, binding = 11) readonly buffer RtgiVolumeProbes { float volProbes[]; };
+layout(std430, set = 0, binding = 12) readonly buffer RtgiNearTable { uvec2 nearTable[]; };
+layout(std430, set = 0, binding = 13) readonly buffer RtgiNearLight { vec4 nearLight[]; };
+
+#define VOL_PARAMS u.uVolume
+#define VOL_GEOM u.uVolumeGeom
+#define VOL_TABLE(i) volTable[i]
+#define VOL_PROBES(i) volProbes[i]
+#define VOL_DEPTH(i) 0u
+#include "rtgi_volume.glsl"
+#define RTGI_GEOM_SCALE(p) volCellScale(p)
+#define RTGI_FAR_GROW u.uVolumeGeom.z
+#define RTGI_KEYS(i) rtgiKeys[i]
+#define RTGI_NEAR u.uNearField.x
+#include "rtgi_cache.glsl"
+#define NEAR_PARAMS u.uNearCook
+#define NEAR_TABLE(i) nearTable[i]
+#include "rtgi_nearcook.glsl"
+
+// One level's cells on p's surface (the tangent plane's four, bilinear, weighed by what each holds), as
+// rtgi_readout.frag's readLevel: x-z the light, w the weight; sky, the near visibility and the far share beside.
+vec4 fixLevel(vec3 p, uint side, uint level, out float sky, out float near, out float far) {
+    vec4 params = u.uCacheParams;
+    float size = rtgiSize(level, params);
+    uint axis = side >> 1u, a0 = (axis + 1u) % 3u, a1 = (axis + 2u) % 3u;
+    vec3 f = p / size - 0.5;
+    ivec3 c0 = ivec3(floor(f));
+    vec3 t = f - vec3(c0);
+    int cAxis = int(floor(p[axis] / size));
+    vec3 e = vec3(0.0);
+    float w = 0.0;
+    sky = 0.0; near = 0.0; far = 0.0;
+    for (int k = 0; k < 4; k++) {
+        ivec3 cc = c0;
+        cc[a0] += k & 1;
+        cc[a1] += k >> 1;
+        cc[axis] = cAxis;
+        uint s = rtgiFind(rtgiCellHash(cc, level, side, params), params);
+        if (s == 0xFFFFFFFFu) continue;
+        uvec4 a = rtgiRecord[2u * s], c = rtgiRecord[2u * s + 1u];
+        float held = uintBitsToFloat(c.w);
+        if (held < 0.5) continue;
+        float wk = ((k & 1) == 1 ? t[a0] : 1.0 - t[a0]) * ((k >> 1) == 1 ? t[a1] : 1.0 - t[a1]) * clamp(held / 32.0, 1.0 / 32.0, 1.0);
+        vec2 rg = unpackHalf2x16(a.x), bs = unpackHalf2x16(a.y);
+        e += vec3(rg, bs.x) * wk;
+        sky += bs.y * wk;
+        near += unpackHalf2x16(c.y).y * wk;
+        far += unpackHalf2x16(c.z).x * wk;
+        w += wk;
+    }
+    if (w > 0.0) { e /= w; sky /= w; near /= w; far /= w; }
+    return vec4(e, w);
+}
+
+// The fix-up: the pixel's own light from the cache at full resolution (its level and the next, blended as the readout
+// blends them; the cooked near field over it), where the upsample had none of its surface.
+vec4 fixUp(vec3 p, vec3 n) {
+    vec4 params = u.uCacheParams;
+    uint side = rtgiSide(n);
+    float lf = rtgiLevelF(p, u.uCamera.xyz, params);
+    uint level = uint(lf);
+    float t = lf - float(level);
+    float s0, s1, n0, n1, f0, f1;
+    vec4 e0 = fixLevel(p, side, level, s0, n0, f0);
+    vec4 e1 = level < uint(params.w) ? fixLevel(p, side, level + 1u, s1, n1, f1) : vec4(0.0);
+    vec3 e; float sky, nearCell, farShare;
+    if (e0.w >= 0.05 && e1.w >= 0.05) { e = mix(e0.rgb, e1.rgb, t); sky = mix(s0, s1, t); nearCell = mix(n0, n1, t); farShare = mix(f0, f1, t); }
+    else if (e0.w >= 0.05) { e = e0.rgb; sky = s0; nearCell = n0; farShare = f0; }
+    else if (e1.w >= 0.05) { e = e1.rgb; sky = s1; nearCell = n1; farShare = f1; }
+    else {
+        vec4 e2 = fixLevel(p, side, min(level + 2u, uint(params.w)), sky, nearCell, farShare);
+        if (e2.w < 0.05) return vec4(0.0, 0.0, 0.0, 1.0);
+        e = e2.rgb;
+    }
+    if (NEAR_PARAMS.w > 0.5) {
+        float size = NEAR_PARAMS.x;
+        uint axis = side >> 1u, a0 = (axis + 1u) % 3u, a1 = (axis + 2u) % 3u;
+        vec3 f = p / size - 0.5;
+        ivec3 c0 = ivec3(floor(f));
+        vec3 tt = f - vec3(c0);
+        int cAxis = int(floor(p[axis] / size));
+        vec4 acc = vec4(0.0);
+        float found = 0.0;
+        for (int k = 0; k < 4; k++) {
+            ivec3 cc = c0;
+            cc[a0] += k & 1;
+            cc[a1] += k >> 1;
+            cc[axis] = cAxis;
+            uint i = nearFind(cc, side);
+            if (i == 0xFFFFFFFFu) continue;
+            float w = ((k & 1) == 1 ? tt[a0] : 1.0 - tt[a0]) * ((k >> 1) == 1 ? tt[a1] : 1.0 - tt[a1]);
+            acc += nearLight[i] * w;
+            found += w;
+        }
+        if (found > 0.05) {
+            vec4 nc = acc / found;
+            e = mix(e, nc.w * e * farShare / max(nearCell, 0.05) + nc.rgb, clamp(found, 0.0, 1.0));
+        }
+    }
+    return vec4(e, sky);
+}
 
 float lum(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 
@@ -46,6 +157,13 @@ void main() {
     vec4 raw = texelFetch(uRaw, q, 0);
     outIncidentGradient = texelFetch(uRawGradient, q, 0);
     float depth = texelFetch(uSceneDepth, q, 0).r;
+    if (raw.r < -0.5 && depth < 1.0 - 1e-6) {
+        vec2 ndcF = (vec2(q) + 0.5) / vec2(textureSize(uSceneDepth, 0)) * 2.0 - 1.0;
+        vec4 wf = u.uInvViewProj * vec4(ndcF, depth, 1.0);
+        vec4 ns = texelFetch(uPrepassNormal, q, 0);
+        vec3 nf = dot(ns.xyz, ns.xyz) > 1e-6 ? normalize(ns.xyz) : vec3(0.0, 1.0, 0.0);
+        raw = fixUp(wf.xyz / wf.w, nf);
+    }
     ivec2 size = textureSize(uSceneDepth, 0);
     float rawLum = lum(raw.rgb);
     if (depth >= 1.0 - 1e-6) { outIncident = raw; outState = vec4(0.0); outFast = vec4(raw.rgb, rawLum * rawLum); return; }
