@@ -36,8 +36,8 @@ layout(set = 0, binding = 0) uniform RtgiTemporal {
     vec4 uVolume;        // rtgi_volume.glsl's VOL_PARAMS
     vec4 uVolumeGeom;    // rtgi_volume.glsl's VOL_GEOM
     vec4 uNearCook;      // rtgi_nearcook.glsl's NEAR_PARAMS
-    vec4 uDebug;         // x the RTGI panel's view: 22 the fix-up's pixels magenta; 23 the history's frames held (0 rejected:
-                         // blue, 16 red); 11-21 (the readout's): a fix-up pixel black
+    vec4 uDebug;         // x the RTGI panel's view: 21 the fix-up's pixels magenta; 22 the history's frames held (0 rejected:
+                         // blue, 16 red); 10-20 and 23 (the readout's): a fix-up pixel black
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uRaw;
@@ -219,8 +219,8 @@ void main() {
         vec3 nf = dot(ns.xyz, ns.xyz) > 1e-6 ? normalize(ns.xyz) : vec3(0.0, 1.0, 0.0);
         raw = fixUp(wf.xyz / wf.w, nf);
         int dv = int(u.uDebug.x + 0.5);
-        if (dv == 22) raw = vec4(1.0, 0.0, 1.0, 1.0);
-        else if ((dv >= 11 && dv <= 21) || dv == 24) raw = vec4(0.0, 0.0, 0.0, 1.0);
+        if (dv == 21) raw = vec4(1.0, 0.0, 1.0, 1.0);
+        else if ((dv >= 10 && dv <= 20) || dv == 23) raw = vec4(0.0, 0.0, 0.0, 1.0);
     }
     ivec2 size = textureSize(uSceneDepth, 0);
     float rawLum = lum(raw.rgb);
@@ -281,9 +281,9 @@ void main() {
     held = min(held + 1.0, u.uParams.x);
     outIncident = mix(history, raw, 1.0 / held);
     int dv2 = int(u.uDebug.x + 0.5);
-    // Views: the readout's and the fix-up's shown as they are (no history); 23 the frames the history held.
-    if ((dv2 >= 11 && dv2 <= 22) || dv2 == 24) outIncident = raw;
-    if (dv2 == 23) outIncident = vec4(heat(min(held - 1.0, 16.0) / 16.0), raw.a);
+    // Views: the readout's and the fix-up's shown as they are (no history); 22 the frames the history held.
+    if ((dv2 >= 10 && dv2 <= 21) || dv2 == 23) outIncident = raw;
+    if (dv2 == 22) outIncident = vec4(heat(min(held - 1.0, 16.0) / 16.0), raw.a);
     outFast = fast;
     vec3 on = nHere / (abs(nHere.x) + abs(nHere.y) + abs(nHere.z));
     vec2 oe = on.z >= 0.0 ? on.xy : (1.0 - abs(on.yx)) * vec2(on.x >= 0.0 ? 1.0 : -1.0, on.y >= 0.0 ? 1.0 : -1.0);

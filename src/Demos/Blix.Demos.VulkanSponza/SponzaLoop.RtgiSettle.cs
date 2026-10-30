@@ -27,11 +27,10 @@ internal sealed partial class SponzaLoop
     private uint rtgiSettleLastSeen, rtgiSettleLastErr;
     private readonly byte[] rtgiSettleSeen = new byte[36];
     private int rtgiSettleVolumeFrames;
-    // The volume not yet what the cache's light should settle against: cooking, refining, or probes short of their passes.
-    // The near field's cook too: its regions key the cells (rtgi_cache.glsl's rtgiRegion), and a settle ended before them
+    // The volume not yet what the cache's light should settle against: placing, cooking or refining its probes (they size
+    // the cells). The near field's cook too: its regions key the cells (rtgi_cache.glsl's rtgiRegion), and a settle ended before them
     // trained cells the regions then left behind -- the scene came up unsettled (the crevices testbed, 2026-10-30).
-    private bool RtgiVolumeSettling => rtgiVolume && (!rtgiVolumeBuilt || !rtgiVolReady || rtgiVolUnder > 0
-        || (rtgiNearCook && !rtgiNearCookReady));
+    private bool RtgiVolumeSettling => rtgiVolume && (!rtgiVolumeBuilt || !rtgiVolReady || (rtgiNearCook && !rtgiNearCookReady));
 
     // Settling now: --rtgi, its first settle not done, the scene and its tracer up, no cook holding the screen.
     private bool RtgiSettleNow => rtgi && rtgiSettleWanted && !rtgiSettleDone && fullyLoaded && frameTracer is not null
@@ -42,9 +41,9 @@ internal sealed partial class SponzaLoop
     {
         if (!RtgiSettleNow || rtgiDoneCount.Equals(default(Blix.Graphics.GpuBufferHandle))) return;
         if (!rtgiSettleClock.IsRunning) rtgiSettleClock.Start();
-        // --rtgi-volume: the cache's light is judged only once the volume is cooked and every probe has had its first passes
-        // -- the cells are sized by it then (a cache settled before was sized by the camera, and started over), and young
-        // cells lean on it. At most RtgiSettleMaxFrames of waiting.
+        // --rtgi-volume: the cache's light is judged only once the volume is cooked and refined, and the near field cooked
+        // -- the cells are sized and keyed by them then (a cache settled before was sized by the camera, and started over).
+        // At most RtgiSettleMaxFrames of waiting.
         if (RtgiVolumeSettling && ++rtgiSettleVolumeFrames < RtgiSettleMaxFrames)
         {
             device.ReadMappedGpuBuffer(rtgiDoneCount, 0, rtgiSettleSeen);
@@ -88,7 +87,7 @@ internal sealed partial class SponzaLoop
         ImGui.TextUnformatted("Settling the light -- the cache learns the scene's light with the GPU to itself; the scene comes up lit.");
         if (RtgiVolumeSettling)
             ImGui.TextUnformatted(string.Create(CultureInfo.InvariantCulture,
-                $"World volume: {(!rtgiVolumeBuilt ? "placing probes" : !rtgiVolReady ? $"cooking what each probe sees (round {rtgiVolRefineRound + 1})" : $"first passes, {rtgiVolPositions.Length - rtgiVolUnder:N0} of {rtgiVolPositions.Length:N0} probes")}"));
+                $"World volume: {(!rtgiVolumeBuilt ? "placing probes" : !rtgiVolReady ? $"cooking what each probe sees (round {rtgiVolRefineRound + 1})" : "cooking the near field")}"));
         var fallen = rtgiSettleFirstError > 0f && rtgiSettleError >= 0f ? 1f - rtgiSettleError / rtgiSettleFirstError : 0f;
         ImGui.ProgressBar(Math.Clamp(rtgiSettleCount / (float)RtgiSettleMaxFrames, 0f, 1f), new System.Numerics.Vector2(-1f, 0f),
             string.Create(CultureInfo.InvariantCulture,

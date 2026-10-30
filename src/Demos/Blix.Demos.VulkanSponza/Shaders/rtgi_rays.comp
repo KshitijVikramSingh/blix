@@ -6,13 +6,8 @@
 // tile of a grid over the screen, at a pixel of its tile (a new one each frame), from the pre-pass's depth and normal.
 // The rest are where last frame's training rays landed (a different share each frame), so the cells one bounce from
 // the screen -- and, through those, the next -- are trained too: a path grows a vertex a frame through the cache.
-// Each point gets a ray (CLOSEST: what it sees) and a sun shadow ray (none where it faces away from the sun).
-//
-// Guided: the ray is cosine-distributed, or -- with probability uGuide.x where the point's cell has learnt which way its
-// light comes from (its irradiance vector, rtgi_resolve.comp: one-sided enough, uGuide.y samples held) -- drawn from a
-// von Mises-Fisher lobe around that way, tighter the more one-sided. Its weight against cosine sampling (cos / (PI x the
-// mixture's pdf), 0 below the surface) goes with the point for the training to scale its sample by: unbiased. In a room
-// lit through an arch most cosine rays find the walls; the guided ones the arch (San Miguel settled over a long time).
+// Each point gets a cosine-distributed ray (CLOSEST: what it sees) and a sun shadow ray (none where it faces away from the
+// sun).
 
 layout(local_size_x = 64) in;
 
@@ -29,8 +24,6 @@ layout(set = 0, binding = 0) uniform RtgiRays {
                          // cell is trained over (surfacePoint)
     vec4 uNearField;     // x the near field's radius (RTGI_NEAR); y of the hit points, how many are cooked cells' points near
                          // the camera instead (--rtgi-near-train, the list RtgiNearList); z the list's turning offset
-    vec4 uGuide;         // x the share of rays guided where a cell has learnt its light's way (0: none); y samples it must hold;
-                         // z the lobe's concentration at most; w the guide table's slots - 1 (0: the lobe, no table)
     vec4 uAdapt;         // x the share of visible points placed by uncertainty (0: every tile its own); y tiles weighed for each;
                          // z the relative error a cell is done under (the blend's, rtgi_filter.comp); w 1 in this many of a
                          // done cell's points keeps its ray (the validation trickle)
@@ -40,14 +33,13 @@ layout(set = 0, binding = 0) uniform RtgiRays {
                          // (0: as many as this frame's -- the budget changes the count, SponzaLoop.RtgiBudget.cs)
     vec4 uUnsureMap;     // x the uncertainty map's row (half-res pixels); y 1: written last frame (else depth asked); z its size
     vec4 uSkip;          // x measurement bits (the bench, SponzaLoop.RtgiBench.cs; each changes the points): 1 no adaptive
-                         // candidates (the own tile only), 2 no cell lookup (no sun skip, no sequence), 4 no guide, 8 no hit
+                         // candidates (the own tile only), 2 no cell lookup (no sun skip, no sequence), 8 no hit
                          // points, 16 each candidate read by its own lane (no pool; also --rtgi-no-pool), 64 no settled
                          // sun (every point traces its sun)
     vec4 uBudget;        // x the relative error a visible point is spent toward (0: every point kept); y the share kept at least;
                          // z the samples past which a visible point's cell is settled (0: off); w the share of its points kept
     vec4 uSeq;           // x 1: a point's cosine direction from its cell's own low-discrepancy sequence (else hashed); y 1: a
-                         // point that picked a done cell draws again rather than giving its ray back; z 1: a settled cell's points
-                         // trace the sun 1 in 8
+                         // settled cell's points trace the sun 1 in 8
     vec4 uCapture;       // x the visible points pinned to the capture's pixels (--rtgi-capture, SponzaLoop.RtgiCapture.cs): the
                          // first x, each at its own pixel every frame (0: none)
 } u;
@@ -71,8 +63,6 @@ layout(std430, set = 0, binding = 7) writeonly buffer RtgiShadowOrigins { vec4 o
 layout(std430, set = 0, binding = 8) readonly buffer RtgiRequests { uint requestCount; uint requestPad[3]; vec4 requests[]; };
 // The other parity's requests: its count zeroed here for the next frame's train.
 layout(std430, set = 0, binding = 9) buffer RtgiNextRequests { uint nextRequestCount; uint nextPad[3]; vec4 nextRequests[]; };
-// Per point: a deferred landing's origin, copied from its request (rtgi_train.comp reads it next frame); w 0 for the rest.
-layout(std430, set = 0, binding = 17) writeonly buffer RtgiPointOrigins { vec4 pointOrigins[]; };
 // Per slot: how far along its direction sequence the cell is (the next index), bumped by each point in it.
 layout(std430, set = 0, binding = 18) buffer RtgiSeq { uint rtgiSeq[]; };
 // Per half-res pixel, how unsure its cell is (rtgi_readout.frag, last frame).
@@ -82,8 +72,6 @@ layout(std430, set = 0, binding = 11) readonly buffer RtgiResolved { vec4 rtgiRe
 layout(std430, set = 0, binding = 12) readonly buffer RtgiDirection { vec4 rtgiDirection[]; };
 layout(std430, set = 0, binding = 13) readonly buffer RtgiMoments { vec4 rtgiMoments[]; };
 layout(std430, set = 0, binding = 14) readonly buffer RtgiConfidence { vec4 rtgiConfidence[]; };
-layout(std430, set = 0, binding = 15) readonly buffer GuideKeys { uint guideKeys[]; };
-layout(std430, set = 0, binding = 16) readonly buffer GuideDist { vec4 guideDist[]; };
 
 // --rtgi-volume (rtgi_volume.glsl): the probes whose cooked distances size the cache's cells.
 layout(std430, set = 0, binding = 21) readonly buffer RtgiVolumeTable { uvec2 volTable[]; };
@@ -106,8 +94,6 @@ layout(std430, set = 0, binding = 26) readonly buffer RtgiNearScaleTable { uvec2
 #define NEAR_SCALE(i) nearScaleTable[i]
 #define RTGI_REGION_OF 1
 #include "rtgi_cache.glsl"
-#define GUIDE_KEYS(i) guideKeys[i]
-#include "rtgi_guide.glsl"
 layout(std430, set = 0, binding = 23) readonly buffer RtgiNearTable { uvec2 nearTable[]; };
 layout(std430, set = 0, binding = 24) readonly buffer RtgiNearPoints { vec4 nearPoints[]; };
 #define NEAR_PARAMS u.uNearCook
@@ -203,7 +189,7 @@ ivec2 tilePixel(uint tile, uint hc, uint tilesX, vec2 tileSize) {
 
 // The subgroup's pool (uBlock.x, the map written, not uSkip 16): each lane reads one candidate besides its own tile, and
 // a point weighs the others' -- drawn as its own were, about a tile of the same 8 x 4 block -- by shuffle. Each point read
-// its uAdapt.y candidates and as many again on a redraw, scattered over the map: placement 1.78 ms a dispatch, 0.62 of it
+// its uAdapt.y candidates (and as many again when it drew again), scattered over the map: placement 1.78 ms a dispatch, 0.62 of it
 // the candidates (Crytek Sponza 1080p, the bench, 2026-10-28).
 #define POOL 8u
 uint poolQ[POOL];
@@ -233,7 +219,6 @@ void main() {
         }
     }
     if (i >= total) return;
-    pointOrigins[3u * i + 2u] = vec4(0.0);
     uint frame = uint(u.uCounts.z);
     uint h = hash(i * 0x9E3779B9u ^ hash(frame));
     vec3 p, n;
@@ -273,58 +258,46 @@ void main() {
         bool found = false, chosenDone = false;
         ivec2 pick = ivec2(0);
         uint hc = h;
-        // Frozen (uSeq.y): a point whose pick was a done cell, its ray not kept for the trickle, draws again from as many
-        // more tiles, done cells out -- the ray spent where the light is still open, not given back.
-        for (uint round = 0u; round < 2u; round++) {
-            for (uint c = 0u; c < candidates; c++) {
-                // The pool's: every candidate but the first round's own tile.
-                uint e = round == 0u ? c - 1u : candidates - 1u + c;
-                if (pooled && adaptive && (c != 0u || round != 0u) && e < POOL) {
-                    if (poolU[e] < 0.0) continue;
-                    float unsure = poolU[e];
-                    bool done = unsure < 0.5 * u.uAdapt.z;
-                    if (round == 1u && done) continue;
-                    wsum += unsure;
-                    hc = rtgiHash(hc ^ 0x68E31DA4u);
-                    if (float(hc & 0xFFFFFFu) / 16777216.0 * wsum < unsure) {
-                        pick = ivec2(poolQ[e] & 0xFFFFu, poolQ[e] >> 16); found = true; chosenDone = done;
-                    }
-                    continue;
-                }
-                uint tile = own;
-                if (c != 0u || round != 0u) tile = drawTile(hc, own, tilesX, tilesY, visible);
-                hc = rtgiHash(hc ^ 0x2545F491u);
-                // How unsure its cell is: last frame's readout's map (rtgi_readout.frag) at its half-res pixel -- the
-                // blend's relative error, at least the done threshold; a done cell an eighth of that; the sky -1. Read
-                // for a texel's price, where each candidate found its cell in the hash itself (5.8 ms a frame at 4x the
-                // rays, Crytek Sponza). Not adaptive, or off the map: 1, its depth asked.
-                ivec2 qc = tilePixel(tile, hc, tilesX, tileSize);
-                float unsure = 1.0;
-                bool done = false;
-                uint at = uint(qc.y / 2) * uint(u.uUnsureMap.x) + uint(qc.x / 2);
-                if (adaptive && u.uUnsureMap.y > 0.5 && qc.x / 2 < int(u.uUnsureMap.x) && at < uint(u.uUnsureMap.z)) {
-                    unsure = rtgiUnsure[at];
-                    if (unsure < 0.0) continue;
-                    done = unsure < 0.5 * u.uAdapt.z;
-                } else {
-                    float rawc = texelFetch(uSceneDepth, qc, 0).r;
-                    vec4 nsc = texelFetch(uPrepassNormal, qc, 0);
-                    if (rawc >= 1.0 - 1e-6 || dot(nsc.xyz, nsc.xyz) < 1e-6) continue;
-                }
-                if (round == 1u && done) continue;
+        for (uint c = 0u; c < candidates; c++) {
+            // The pool's: every candidate but the own tile.
+            uint e = c - 1u;
+            if (pooled && adaptive && c != 0u && e < POOL) {
+                if (poolU[e] < 0.0) continue;
+                float unsure = poolU[e];
+                bool done = unsure < 0.5 * u.uAdapt.z;
                 wsum += unsure;
                 hc = rtgiHash(hc ^ 0x68E31DA4u);
-                if (float(hc & 0xFFFFFFu) / 16777216.0 * wsum < unsure) { pick = qc; found = true; chosenDone = done; }
+                if (float(hc & 0xFFFFFFu) / 16777216.0 * wsum < unsure) {
+                    pick = ivec2(poolQ[e] & 0xFFFFu, poolQ[e] >> 16); found = true; chosenDone = done;
+                }
+                continue;
             }
-            // Every candidate done: the GPU's rays given back (or drawn again), one in uAdapt.w kept to notice what
-            // changes.
-            bool giveBack = chosenDone && rtgiHash(hc ^ 0x1B873593u) % uint(u.uAdapt.w) != 0u;
-            if (!giveBack) break;
-            if (round == 1u || u.uSeq.y < 0.5) { none(i); return; }
-            wsum = 0.0;
-            found = false;
-            chosenDone = false;
+            uint tile = own;
+            if (c != 0u) tile = drawTile(hc, own, tilesX, tilesY, visible);
+            hc = rtgiHash(hc ^ 0x2545F491u);
+            // How unsure its cell is: last frame's readout's map (rtgi_readout.frag) at its half-res pixel -- the
+            // blend's relative error, at least the done threshold; a done cell an eighth of that; the sky -1. Read
+            // for a texel's price, where each candidate found its cell in the hash itself (5.8 ms a frame at 4x the
+            // rays, Crytek Sponza). Not adaptive, or off the map: 1, its depth asked.
+            ivec2 qc = tilePixel(tile, hc, tilesX, tileSize);
+            float unsure = 1.0;
+            bool done = false;
+            uint at = uint(qc.y / 2) * uint(u.uUnsureMap.x) + uint(qc.x / 2);
+            if (adaptive && u.uUnsureMap.y > 0.5 && qc.x / 2 < int(u.uUnsureMap.x) && at < uint(u.uUnsureMap.z)) {
+                unsure = rtgiUnsure[at];
+                if (unsure < 0.0) continue;
+                done = unsure < 0.5 * u.uAdapt.z;
+            } else {
+                float rawc = texelFetch(uSceneDepth, qc, 0).r;
+                vec4 nsc = texelFetch(uPrepassNormal, qc, 0);
+                if (rawc >= 1.0 - 1e-6 || dot(nsc.xyz, nsc.xyz) < 1e-6) continue;
+            }
+            wsum += unsure;
+            hc = rtgiHash(hc ^ 0x68E31DA4u);
+            if (float(hc & 0xFFFFFFu) / 16777216.0 * wsum < unsure) { pick = qc; found = true; chosenDone = done; }
         }
+        // Every candidate done: the GPU's rays given back, one in uAdapt.w kept to notice what changes.
+        if (chosenDone && rtgiHash(hc ^ 0x1B873593u) % uint(u.uAdapt.w) != 0u) { none(i); return; }
         if (!found) { none(i); return; }
         // Spent by what it buys (uBudget.x): kept with probability (its pixel's relative error over the target)^2, at least
         // uBudget.y -- each halving of a cell's error costs 4x the samples, so where the light is already within the
@@ -354,11 +327,8 @@ void main() {
         uint asked = min(requestCount, uint(u.uCounts.y));
         if (j < asked) {
             requestPoint = true;
-            p = requests[5u * j].xyz;
-            n = requests[5u * j + 1u].xyz;
-            pointOrigins[3u * i] = requests[5u * j + 2u];
-            pointOrigins[3u * i + 1u] = requests[5u * j + 3u];
-            pointOrigins[3u * i + 2u] = requests[5u * j + 4u];
+            p = requests[2u * j].xyz;
+            n = requests[2u * j + 1u].xyz;
         } else if (j - asked < uint(u.uNearField.y) && nearListCount > 0u) {
             // A cooked cell near the camera, in turn (--rtgi-near-train): its cache cells trained over their own surface before
             // the camera faces them. Trained only from the screen, a dead end's cells first seen as the camera walked in held
@@ -400,10 +370,10 @@ void main() {
     // so neighbours do not line up -- each point in the cell the next index. A cell's directions cover its hemisphere
     // evenly over frames instead of clumping by chance: smooth light's error falls faster than 1 / sqrt(samples). NRD
     // assumes its input sampled so (blue noise, a sequence shorter than its history).
-    // The point's own cell: its direction sequence (below) and whether its sun is settled (uSeq.z).
+    // The point's own cell: its direction sequence (below) and whether its sun is settled (uSeq.y).
     uvec2 ch = uvec2(0u);
     uint sc = 0xFFFFFFFFu;
-    if ((u.uSeq.x > 0.5 || u.uSeq.z > 0.5) && (uint(u.uSkip.x) & 2u) == 0u) {
+    if ((u.uSeq.x > 0.5 || u.uSeq.y > 0.5) && (uint(u.uSkip.x) & 2u) == 0u) {
         uint lv = rtgiLevel(p, u.uCamera.xyz, u.uParams);
         ch = rtgiCellHash(ivec3(floor((p - rtgiOrigin(rtgiSide(n))) / rtgiSize(lv, u.uParams))), lv, rtgiSide(n), u.uParams);
         sc = rtgiFind(ch, u.uParams);
@@ -412,15 +382,15 @@ void main() {
     // keeps it), the rest the next index.
     uint seq = 0xFFFFFFFFu;
     if (u.uSeq.x > 0.5 && sc != 0xFFFFFFFFu) seq = atomicAdd(rtgiSeq[sc], 1u);
-    // Settled sun (uSeq.z): a cell whose sun visibility is known within 0.02 (binomial, from 64 rays at least) gets 1 sun
+    // Settled sun (uSeq.y): a cell whose sun visibility is known within 0.02 (binomial, from 64 rays at least) gets 1 sun
     // ray in 8 -- the rest told so (points' w 2: rtgi_train.comp adds no sun word). Every training point traced its sun:
     // the shadow traces 9.3 -> 13.7 ms a frame from 1x to 4x the rays (Crytek Sponza, 2026-10-26), on cells long since
     // known lit or shadowed. A sun turn cuts a cell's sun history to 4 rays (rtgi_resolve.comp), and it traces again. A
-    // request's point (a deferred landing's light needs its sun) always traces. Settled from the sequence's counter, read
+    // request's point always traces. Settled from the sequence's counter, read
     // by its atomic anyway: the cell's record read for it was 0.18 of placement's 1.63 ms a dispatch (Crytek Sponza 1080p,
     // the bench, 2026-10-28).
     bool skipSun = false;
-    if (u.uSeq.z > 0.5 && sc != 0xFFFFFFFFu && !requestPoint && (uint(u.uSkip.x) & 64u) == 0u) {
+    if (u.uSeq.y > 0.5 && sc != 0xFFFFFFFFu && !requestPoint && (uint(u.uSkip.x) & 64u) == 0u) {
         bool settled;
         if (seq != 0xFFFFFFFFu) settled = (seq >> 31) != 0u;
         else {
@@ -448,50 +418,9 @@ void main() {
     vec3 t = normalize(abs(n.y) < 0.99 ? cross(n, vec3(0.0, 1.0, 0.0)) : cross(n, vec3(1.0, 0.0, 0.0)));
     vec3 b = cross(n, t);
     vec3 d = normalize(t * (cos(phi) * s) + b * (sin(phi) * s) + n * sqrt(max(0.0, 1.0 - r2)));
-    // The guide: the learnt distribution of the point's guide cell (rtgi_guide.glsl: 32 bins by the light through them),
-    // where it holds uGuide.y samples -- a bin drawn by its light, a direction uniformly within it, with probability
-    // uGuide.x, else cosine. A single lobe about the cell's mean light direction aimed between a room's openings and its
-    // sunlit floor, never at either (Cornell's noise 1.50% against 1.57% unguided, 2026-10-26).
-    float pg = 0.0;
-    uint gslot = 0xFFFFFFFFu, gside = rtgiSide(n);
-    float gsum = 0.0;
-    if (u.uGuide.x > 0.0 && u.uGuide.w > 0.0 && (uint(u.uSkip.x) & 4u) == 0u) {
-        uint gl = min(rtgiLevel(p, u.uCamera.xyz, u.uParams) + 2u, uint(u.uParams.w));
-        gslot = guideFind(guideHash(ivec3(floor((p - rtgiOrigin(gside)) / rtgiSize(gl, u.uParams))), gl, gside, uint(u.uGuide.w)), uint(u.uGuide.w));
-        if (gslot != 0xFFFFFFFFu) {
-            vec4 meta = guideDist[9u * gslot + 8u];
-            gsum = meta.y;
-            if (meta.x >= u.uGuide.y && gsum > 1e-7) pg = u.uGuide.x;
-        }
-    }
-    uint h3 = hash(h2 ^ 0xA511E9B3u);
-    if (pg > 0.0 && float(h3 & 0xFFFFu) / 65536.0 < pg) {
-        // A bin by its light, then a direction uniform within it.
-        float pick = float(hash(h3) & 0xFFFFFFu) / 16777216.0 * gsum;
-        uint k = GUIDE_BINS - 1u;
-        float acc = 0.0;
-        for (uint v = 0u; v < 8u; v++) {
-            vec4 bins = guideDist[9u * gslot + v];
-            for (uint c = 0u; c < 4u; c++) {
-                acc += bins[c];
-                if (pick < acc) { k = 4u * v + c; v = 8u; break; }
-            }
-        }
-        uint h4 = hash(h3 ^ 0x68E31DA4u);
-        d = guideSample(k, gside, float(h4 & 0xFFFFu) / 65536.0, float(h4 >> 16) / 65536.0);
-    }
-    float cosd = dot(d, n);
-    float weight = 1.0;
-    if (pg > 0.0) {
-        float pdfCos = max(cosd, 0.0) / 3.14159265359;
-        int bin = guideBin(d, gside);
-        float pdfGuide = 0.0;
-        if (bin >= 0) pdfGuide = guideDist[9u * gslot + uint(bin) / 4u][uint(bin) % 4u] / gsum / GUIDE_BIN_SOLID_ANGLE;
-        float pdf = (1.0 - pg) * pdfCos + pg * pdfGuide;
-        weight = cosd > 0.0 && pdf > 0.0 ? pdfCos / pdf : 0.0;
-    }
     points[2u * i] = vec4(p, skipSun ? 2.0 : 1.0);
-    points[2u * i + 1u] = vec4(n, weight);
+    // w: the ray's weight against cosine sampling, 1 (rtgi_train.comp scales its sample by it).
+    points[2u * i + 1u] = vec4(n, 1.0);
     rays[2u * i] = vec4(o, 0.0);
     rays[2u * i + 1u] = vec4(d, u.uCounts.w);
     origins[i] = vec4(o, dot(n, u.uSun.xyz) > 0.0 && !skipSun ? u.uCounts.w : 0.0);

@@ -27,7 +27,7 @@ layout(set = 0, binding = 0) uniform RtgiFilter {
     vec4 uFilter;   // x samples at which the neighbours' share starts to fall; y at which it is gone; z luminance sigmas;
                     // w the dirty list's room
     vec4 uParent;   // x the samples the parent stands for (0: no parent); y the top level; z the neighbours' share at least;
-                    // w 1: the blend is what is shown (--rtgi-denoise), else the cell's own light (the blend only judging)
+                    // w 1: the blend is what is shown, else the cell's own light (--rtgi-no-filter: the blend only judging)
     vec4 uFilter2;  // x 1: the parent's blend (the cascade), else its raw light; y the standard errors within which the
                     // cell agrees with its parent (0: the parent weighs uParent.x alone); z the share of the light they may
                     // differ by besides; w the samples the parent may weigh at most

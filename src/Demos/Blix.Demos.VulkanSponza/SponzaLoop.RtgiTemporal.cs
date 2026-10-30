@@ -17,21 +17,20 @@ internal sealed partial class SponzaLoop
     private bool rtgiTemporal = true;
     private float rtgiTemporalFrames = 16f, rtgiTemporalFast = 6f, rtgiTemporalClamp = 2f;
     // The frames held now: all of them on a settled, still view; down to 2 while the cache's light is changing -- a sun turn's
-    // need, the camera's motion (SponzaLoop.RtgiBudget.cs) -- as the cache relearns for seconds after the turn the reset was
-    // the start of, and 16 frames trailed it (a sun change's truth 0.228 against 0.165, 2026-10-29).
-    // The camera's motion shortens it only with --rtgi-temporal-motion (the panel's "Temporal: short while moving"): the
-    // cache's cells are the geometry's now (SponzaLoop.RtgiVolume.cs), its light no longer changing as the camera moves, and
-    // two frames while moving left the half-res sample's turn through its 2x2 showing -- corners shimmering, dim areas
-    // wobbling as the camera moved (the user, the crevices testbed, 2026-10-29).
-    // While moving, --rtgi-temporal-moving frames (6; the panel's slider): the whole 16 smeared (the user, 2026-10-29).
-    private bool rtgiTemporalMotion;
+    // need (SponzaLoop.RtgiBudget.cs) -- as the cache relearns for seconds after the turn the reset was the start of, and 16
+    // frames trailed it (a sun change's truth 0.228 against 0.165, 2026-10-29).
+    // The camera's motion does not shorten it to 2: the cache's cells are the geometry's now (SponzaLoop.RtgiVolume.cs),
+    // its light no longer changing as the camera moves, and two frames while moving left the half-res sample's turn through
+    // its 2x2 showing -- corners shimmering, dim areas wobbling as the camera moved (the user, the crevices testbed,
+    // 2026-10-29). While moving, --rtgi-temporal-moving frames (6; the panel's slider): the whole 16 smeared (the user,
+    // 2026-10-29).
     private float rtgiTemporalMoving = 6f;
     private float RtgiTemporalFramesNow
     {
         get
         {
             var held = rtgiTemporalFrames + (MathF.Min(rtgiTemporalMoving, rtgiTemporalFrames) - rtgiTemporalFrames) * Math.Clamp(rtgiMotionNow, 0f, 1f);
-            var shortNow = Math.Clamp(MathF.Max(rtgiNeedSun, rtgiTemporalMotion ? rtgiMotionNow : 0f), 0f, 1f);
+            var shortNow = Math.Clamp(rtgiNeedSun, 0f, 1f);
             return held + (MathF.Min(2f, held) - held) * shortNow;
         }
     }
@@ -55,7 +54,6 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-temporal-frames") is { } f) rtgiTemporalFrames = MathF.Max(1f, f);
         if (args.Float("rtgi-temporal-fast") is { } ff) rtgiTemporalFast = MathF.Max(1f, ff);
         if (args.Float("rtgi-temporal-clamp") is { } tc) rtgiTemporalClamp = MathF.Max(0f, tc);
-        rtgiTemporalMotion = args.Flag("rtgi-temporal-motion");
         if (args.Float("rtgi-temporal-moving") is { } tm) rtgiTemporalMoving = MathF.Max(1f, tm);
     }
 

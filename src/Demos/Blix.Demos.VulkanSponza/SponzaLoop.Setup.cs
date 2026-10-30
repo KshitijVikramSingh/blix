@@ -184,7 +184,6 @@ internal sealed partial class SponzaLoop
         }
         // --rt-shadows: the lit pass's sun shadows traced on Apple's ray tracing hardware (SponzaLoop.RtShadows).
         rtShadows = args.Flag("rt-shadows");
-        ParseRtgiProbe(args);
         ParseRtgi(args);
         // GTAO off under --rtgi unless --ao: the cache's light holds its own occlusion (the bounce never took GTAO), and
         // GTAO occluded the sky's specular reflection a second time over the sky visibility that already held it --
@@ -873,8 +872,9 @@ internal sealed partial class SponzaLoop
             .Read(SampleableSceneDepth).Read(SampleablePrepassNormal)
             // The atlas texel a pixel shows, for the lightlets' sun records (rt_shadow_rays.comp).
             .Read(lightmapEnabled ? lightmapTexelHandle : surfaceKeyHandle).Handle;
-        // --rtgi-probe (S0): its rays before the traced shadows' group that takes their batches.
-        DeclareRtgiProbePasses(stage => Reflect(stage));
+        // The cache's rays traced in a Metal pass of their own before the sun's, where neither async compute nor the tracer
+        // groups take them (SponzaLoop.Rtgi.cs).
+        rtgiInlineTracePassHandle = graph.ExternalPass("rtgi-inline-trace");
         DeclareRtgiComputePasses(stage => Reflect(stage));
         rtShadowTracePassHandle = graph.ExternalPass("rt-shadow-trace");
         // The cache's rays (SponzaLoop.Rtgi.cs): traced after the sun's, which the lit pass waits for, and read only by the
@@ -1335,7 +1335,6 @@ internal sealed partial class SponzaLoop
         var rayViewSpv = File.ReadAllBytes(Path.Combine(shaderDir, "ray_view.comp.spv"));
         rayViewPipeline = Own(device.CreateComputePipeline(
             Own(device.CreateComputeShaderProgramFromSpv(rayViewSpv, rayViewInterface, "ray_view")), "ray_view"));
-        CreateRtgiProbePipelines(shaderDir);
         rtShadowRaysPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "rt_shadow_rays.comp.spv")), rtShadowRaysInterface, "rt_shadow_rays")), "rt_shadow_rays"));
         rtShadowFilterPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(

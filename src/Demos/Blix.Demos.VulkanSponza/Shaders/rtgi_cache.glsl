@@ -48,7 +48,7 @@ vec3 rtgiOrigin(uint side) {
 #endif
 // A slot's accumulator words: indirect rgb, count, sky misses, sun reached, sun traced, luminance squared, and the
 // irradiance vector's three components (signed, two's complement in the uints: rtgi_train.comp), the near visibility's
-// weighted count, the luminance the escaping rays brought (the far light: rtgi_readout.frag's contact split), and the
+// weighted count, the luminance the escaping rays brought (the far light: rtgi_readout.frag's cooked near field), and the
 // rays' inverse hit distances (256ths; a miss at the ray's reach) -- how near the geometry around the cell is. Fourteen
 // words used (RTGI_WORDS), the stride 16: a cell's frame in one 64-byte line, read and cleared as four uvec4s
 // (rtgi_resolve.comp) and its atomics on one line.
@@ -134,7 +134,7 @@ bool rtgiSunSettled(float visibility, float rays) {
 // (rtgi_nearcook_cook.comp) -- the two sides of a thin wall, a floor running under it, kept apart; an open surface one
 // piece, region 0, no seam. One cell held both rooms' floor where it ran under a wall, and every blend and lookup that
 // found it by its key carried the light across (the user, the crevices testbed's edges, 2026-10-30). Without it (the
-// shaders that key a stored cell's neighbours: rtgi_filter.comp, rtgi_pushup.comp), rtgiRegion is the region itself
+// shaders that key a stored cell's neighbours: rtgi_filter.comp), rtgiRegion is the region itself
 // (the cell's stored w, bits 8 up).
 #ifndef RTGI_REGION_DECLARED
 #define RTGI_REGION_DECLARED

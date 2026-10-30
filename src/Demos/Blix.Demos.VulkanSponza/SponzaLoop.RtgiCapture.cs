@@ -10,7 +10,7 @@ namespace Blix.Demos.VulkanSponza;
 // --rtgi-capture DIR --rtgi-capture-pixels FILE [--rtgi-capture-at N] [--rtgi-capture-frames F]: the final gather's samples,
 // for tools/gi-model/final_gather.py to model a per-pixel gather and its denoising against the cache as displayed. The
 // first K visible points are pinned to FILE's pixels (one "x y" a line, full-res; K at most the frame's visible points), each
-// tracing its ray every frame as any visible point does -- cosine or guided, its hit lit by the sun traced there and the
+// tracing its ray every frame as any visible point does -- cosine, its hit lit by the sun traced there and the
 // cache there (rtgi_train.comp's pointSample): one bounce of a gather. From post-load frame N (600) for F frames (512),
 // each frame's sample per point -- three rgba: rgb PI x L_in x the ray's weight, w 4 live + 2 sky + 1 counted (+ 8 a back face hit, + 16 its hit cell held no light); the hit and the
 // ray's weight; the hit's normal and distance (1e30 a miss) -- then the points' positions and normals: DIR/capture.f32

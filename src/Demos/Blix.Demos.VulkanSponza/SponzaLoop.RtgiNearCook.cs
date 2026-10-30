@@ -12,8 +12,8 @@ namespace Blix.Demos.VulkanSponza;
 // contacts -- elsewhere the near field is the far light), the triangles are sampled into --rtgi-near-cell (5 cm) surface
 // cells by side; each traces 16 fixed cosine rays to the contact radius once, in chunks through the RTGI Metal batch, and
 // keeps its escape share and what each ray met. Each frame (a share of the cells) its near light is those surfaces' cache
-// light (rtgi_nearcook_update.comp); the readout puts it over the cache's far light. The near rays per pixel
-// (--rtgi-hybrid) kept a history on the screen, cleared as the camera moved, a crease seconds coming back; the user asked
+// light (rtgi_nearcook_update.comp); the readout puts it over the cache's far light. The hybrid near field
+// before it (its own near rays per pixel, since removed) kept a history on the screen, cleared as the camera moved, a crease seconds coming back; the user asked
 // for it worked ahead, with the chunks, as the volume is (2026-10-29). Streamed worlds: a chunk's cells and their links
 // would come and go with it -- one load here, every cell resident.
 internal sealed partial class SponzaLoop

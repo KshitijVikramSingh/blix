@@ -248,7 +248,6 @@ internal sealed partial class SponzaLoop
             profMetalShadowMs = shadow.TotalGpuMs; profMetalShadows = shadow.Dispatches;
         }
         Console.WriteLine($"[profile]   {IncidentReuseCounts()}");
-        if (RtgiProbeCounts() is { Length: > 0 } rtgiCounts) Console.WriteLine($"[profile]   {rtgiCounts}");
         if (RtgiCounts() is { Length: > 0 } rtgiCache)
         {
             Console.WriteLine($"[profile]   {rtgiCache}");

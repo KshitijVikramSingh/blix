@@ -7,13 +7,9 @@ using Blix.Graphics;
 
 namespace Blix.Demos.VulkanSponza;
 
-// --rtgi-volume: the world's light as a sparse volume of probes (rtgi_volume.glsl), trained at a fixed share of the cache's
-// rays whatever the camera does -- the probes nearest where the camera is heading first, every probe in turn after -- so
-// the light of a surface the camera reaches is roughly there before it does. The screen-driven cache trains only what
-// is seen, and a walk outran it: Bistro's wall 20% blotchy and a quarter dark for 5 s after the walk stopped, clean only
-// at 15 s, though a boot there was clean (the cook screen's settle trained that view at the full budget) (the user,
-// 2026-10-29). The cache keeps the detail; the volume is what it starts from (rtgi_readout.frag: young or unsure cells
-// lean on it), never what it trains on.
+// --rtgi-volume: a sparse volume of probes (rtgi_volume.glsl) whose cooked geometry -- not light -- sizes the cache's cells
+// and gives the cells' traced visibility (rtgi_volume_vis.comp) its probes to reach. The probes once learnt light too, for
+// young cells to lean on; the readout leaked and blotched with it, and nothing reads it now.
 //
 // Laid out for a streamed world (Jungle at full scale: 8.65 M foliage instances, terrain to 12 km, streaming, LOD,
 // billboards): probes in bricks of 4 x 4 x 4 at levels 0.5, 1, 2, 4, 8 m (--rtgi-volume-spacing the 2 m), bricks where the
@@ -28,35 +24,20 @@ namespace Blix.Demos.VulkanSponza;
 // tighter than a probe's spacing (inside a thin wall, moved far, a gap narrower than a spacing), the next level's probes
 // around it (2 m -> 1 m -> 0.5 m), and the cook again. The harmonic mean distances size the cache's cells
 // (rtgi_volume.glsl's volCellScale, --rtgi-volume-cells). The volume is read, and sizes the cells, only once all that is
-// done. The camera decides which probes train first, never which a point reads nor how big its cell is (the user,
-// 2026-10-29: the cache's cells sized by the camera's distance crawled as it moved; leaks through Crytek's walls).
+// done. The camera never decides how big a point's cell is (the user, 2026-10-29: the cache's cells sized by the camera's
+// distance crawled as it moved; leaks through Crytek's walls).
 //
-// Each frame the CPU lists --rtgi-volume-share (0.25) of the cache's rays' worth of probes, --rtgi-volume-rays (32) each:
-// half to the probes within --rtgi-volume-radius (48 m) of where the camera will be in a second, nearest first, until each
-// holds --rtgi-volume-target passes; the rest (and whatever that half leaves) to every probe in turn.
-// rtgi_volume_rays.comp casts them, the RTGI Metal batch traces them, rtgi_volume_update.comp folds them in.
+// Each cook frame the CPU lists a chunk of probes; rtgi_volume_rays.comp casts their rays, the RTGI Metal batch traces
+// them, rtgi_volume_cook.comp folds them in.
 internal sealed partial class SponzaLoop
 {
     // Levels: level l's probes VolFinest x 2^l apart; the 2 m and 8 m placed from the triangles, the finer two refined.
     private const int VolLevels = 5, VolPlacedFine = 2, VolPlacedCoarse = 4;
     private bool rtgiVolume, rtgiVolumeBuilt;
     private float rtgiVolumeSpacing = 2f;
-    private float rtgiVolumeShare = 0.25f;
-    private int rtgiVolumeRays = 32;
-    private float rtgiVolumeRadius = 48f;
-    private int rtgiVolumeTarget = 32;
     private int rtgiVolumeMost = 4_000_000;
-    // The readout's trust in the volume: its light's relative error as a cache cell's would be (the volume's weight
-    // against a cell's is that over the cell's relative error, squared).
-    private float rtgiVolumeTrust = 0.3f;
     // A probe whose rays meet back faces past this share is inside something (left out of every lookup).
     private float rtgiVolumeBackShare = 0.3f;
-    // The rays a probe holds at most (its history), and for --rtgi-volume-sun-frames after the sun turns. A dark gallery's
-    // light is heavy-tailed (a rare ray onto the sunlit floor carries most of it): held to 1,024 rays, each pass moved a
-    // probe by 1/32 of a 32-ray draw's ~90% noise, and it shimmered forever (the user, Crytek Sponza at exposure 16,
-    // 2026-10-29); at 16,384 a pass moves it 1/512 as far.
-    private float rtgiVolumeHistory = 16384f, rtgiVolumeSunHistory = 96f;
-    private int rtgiVolumeSunFrames = 60;
     // --rtgi-volume-refine N: rounds of refinement; --rtgi-volume-refine-move / -gap: the move and the gap (spacings) that ask
     // for it.
     private int rtgiVolumeRefine = 2;
@@ -66,31 +47,17 @@ internal sealed partial class SponzaLoop
     private float rtgiVolumeCells = 0.1f, rtgiVolumeCellMax = 1f, rtgiVolumeFarGrow;
 
     // The probes, per level their global coordinates (VolKey); per probe in layout order its batch entry (id, level,
-    // coordinate bits), its place, how many passes it has had, the frame it was last listed. The non-coarse probes'
-    // indices apart, for the near half.
+    // coordinate bits) and its place.
     private HashSet<long>[] rtgiVolSets = Array.Empty<HashSet<long>>();
     private uint[] rtgiVolEntries = Array.Empty<uint>();
     private Vector3[] rtgiVolPositions = Array.Empty<Vector3>();
-    private ushort[] rtgiVolPasses = Array.Empty<ushort>();
-    private uint[] rtgiVolListed = Array.Empty<uint>();
-    private int[] rtgiVolFine = Array.Empty<int>();
     private int rtgiVolBricks, rtgiVolTableSlots;
-    private int rtgiVolCursor;
-    // Probes under RtgiVolSettlePasses passes: the boot's settle waits for none (SponzaLoop.RtgiSettle.cs).
-    private int rtgiVolUnder;
-    private const int RtgiVolSettlePasses = 8;
-    // The near list: the fine probes within the radius of the focus, nearest first; remade as the focus moves.
-    private int[] rtgiVolNear = Array.Empty<int>();
-    private Vector3 rtgiVolNearFocus = new(float.NaN);
-    private int rtgiVolNearAge;
-    private Vector3 rtgiVolLastCamera = new(float.NaN), rtgiVolVelocity;
-    private uint rtgiVolSunFrame = uint.MaxValue;
     private Task<HashSet<long>[]>? rtgiVolBuild;
     private double rtgiVolPlaceMs;
 
     private GpuBufferHandle rtgiVolTableBuf, rtgiVolProbesBuf, rtgiVolDepthBuf, rtgiVolRefineBuf;
     // The cook (rtgi_volume_cook.comp): 0 moving the probes, 1 their depth maps, 2 done; the next probe to list; the frame
-    // it started. This frame's kind of rays (rtgi_volume_rays.comp: 0 training, 1 and 2 the cook's) and rays a probe.
+    // it started. This frame's kind of rays (rtgi_volume_rays.comp: 1 and 2, the cook's passes) and rays a probe.
     private int rtgiVolCookStage, rtgiVolCookCursor;
     private uint rtgiVolCookFrom;
     private readonly System.Diagnostics.Stopwatch rtgiVolCookClock = new();
@@ -100,17 +67,19 @@ internal sealed partial class SponzaLoop
     private bool rtgiVolReady;
     private int rtgiVolKindNow, rtgiVolRaysNow;
     private const int RtgiVolMoveRays = 256, RtgiVolDepthRays = 512;
+    // The cook's rays a frame at most (the ray buffers' room): 2,048 probes' first pass, 1,024 probes' second.
+    private const int RtgiVolRayRoom = 524_288;
     private ShaderInterface rtgiVolCookInterface = null!;
     private PassHandle rtgiVolCookPassHandle;
     private PipelineHandle rtgiVolCookPipeline;
     private GpuBufferHandle[] rtgiVolBatchBufs = Array.Empty<GpuBufferHandle>(), rtgiVolRayBufs = Array.Empty<GpuBufferHandle>(),
         rtgiVolHitBufs = Array.Empty<GpuBufferHandle>();
-    private ShaderInterface rtgiVolRaysInterface = null!, rtgiVolUpdateInterface = null!;
-    private PassHandle rtgiVolRaysPassHandle, rtgiVolUpdatePassHandle;
-    private PipelineHandle rtgiVolRaysPipeline, rtgiVolUpdatePipeline;
+    private ShaderInterface rtgiVolRaysInterface = null!;
+    private PassHandle rtgiVolRaysPassHandle;
+    private PipelineHandle rtgiVolRaysPipeline;
     private int rtgiVolListedNow;
     private int rtgiVolBatchSlot;
-    private const int RtgiVolBatchMost = 16384;
+    private const int RtgiVolBatchMost = RtgiVolRayRoom / RtgiVolMoveRays;
     // Cells' traced visibility (rtgi_volume_vis.comp): per cache slot its key and mask; the readout's requests, two in turn
     // (the readout writes one, the next frame's passes trace and empty it); 8 rays a request and their hits.
     private const int RtgiVolVisRoom = 8192;
@@ -131,11 +100,9 @@ internal sealed partial class SponzaLoop
     private Vector4 RtgiVolumeParams => new(VolFinest, VolLevels, Math.Max(rtgiVolTableSlots, 1) - 1, RtgiVolOn ? 1f : 0f);
     // Its VOL_GEOM: the cache's cells sized by the geometry (x 0: by the camera).
     private Vector4 RtgiVolumeGeom => new(RtgiVolOn ? rtgiVolumeCells : 0f, rtgiVolumeCellMax, rtgiVolumeFarGrow, VolPlacedFine);
-    // The panel's A/B switches: the traced neighbour test, the probes read at all.
-    // The probes' light in the readout off by default: Crytek Sponza leaked and blotched with it, the cells' traced
-    // visibility notwithstanding (the user's A/B, 2026-10-29); the volume sizes the cells and gates the settle.
+    // The panel's A/B switch: the traced neighbour test.
     private bool rtgiVolumeNeighbours = true;
-    private Vector4 RtgiVolumeReadout => new(rtgiVolumeTrust, RtgiVolVisRoom, rtgiVolumeNeighbours ? 1f : 0f, 0f);
+    private Vector4 RtgiVolumeReadout => new(0f, RtgiVolVisRoom, rtgiVolumeNeighbours ? 1f : 0f, 0f);
     private GpuBufferHandle RtgiVolCellVisOrDummy => rtgiVolumeBuilt ? rtgiVolCellVis : rtgiVolDummy;
     // The requests the readout writes this frame (the next frame's RecordRtgiVolumeVis traces them).
     private GpuBufferHandle RtgiVolVisRequestsNow => rtgiVolumeBuilt ? rtgiVolVisRequests[(int)(rtgiFrameCount & 1u)] : rtgiVolDummy;
@@ -148,14 +115,8 @@ internal sealed partial class SponzaLoop
     {
         rtgiVolume = args.Flag("rtgi-volume");
         if (args.Float("rtgi-volume-spacing") is { } sp) rtgiVolumeSpacing = MathF.Max(0.25f, sp);
-        if (args.Float("rtgi-volume-share") is { } sh) rtgiVolumeShare = Math.Clamp(sh, 0f, 4f);
-        if (args.Int("rtgi-volume-rays") is { } rr) rtgiVolumeRays = Math.Clamp((rr + 31) / 32 * 32, 32, 256);
-        if (args.Float("rtgi-volume-radius") is { } rad) rtgiVolumeRadius = MathF.Max(0f, rad);
-        if (args.Int("rtgi-volume-target") is { } tg) rtgiVolumeTarget = Math.Clamp(tg, 1, 60000);
         if (args.Int("rtgi-volume-most") is { } most) rtgiVolumeMost = Math.Max(1024, most);
-        if (args.Float("rtgi-volume-trust") is { } tr) rtgiVolumeTrust = MathF.Max(0.01f, tr);
         if (args.Float("rtgi-volume-back") is { } bk) rtgiVolumeBackShare = Math.Clamp(bk, 0.01f, 1f);
-        if (args.Float("rtgi-volume-history") is { } hi) rtgiVolumeHistory = MathF.Max(32f, hi);
         if (args.Int("rtgi-volume-refine") is { } rf) rtgiVolumeRefine = Math.Clamp(rf, 0, VolPlacedFine);
         if (args.Float("rtgi-volume-refine-move") is { } rm) rtgiVolumeRefineMove = MathF.Max(0f, rm);
         if (args.Float("rtgi-volume-refine-gap") is { } rg) rtgiVolumeRefineGap = MathF.Max(0f, rg);
@@ -270,10 +231,8 @@ internal sealed partial class SponzaLoop
         rtgiVolVisRaysPassHandle = graph.ComputePass("rtgi-volume-vis-rays").AfterAsync().Shader(rtgiVolVisInterface).Handle;
     }
 
-    private void DeclareRtgiVolumeUpdatePass(Func<string, ShaderInterface> reflect)
+    private void DeclareRtgiVolumeAsyncPasses(Func<string, ShaderInterface> reflect)
     {
-        rtgiVolUpdateInterface = reflect("rtgi_volume_update.comp");
-        rtgiVolUpdatePassHandle = graph.ComputePass("rtgi-volume-update").Async(rtgiAsync).Shader(rtgiVolUpdateInterface).Handle;
         rtgiVolCookInterface = reflect("rtgi_volume_cook.comp");
         rtgiVolCookPassHandle = graph.ComputePass("rtgi-volume-cook").Async(rtgiAsync).Shader(rtgiVolCookInterface).Handle;
         rtgiVolVisPassHandle = graph.ComputePass("rtgi-volume-vis").Async(rtgiAsync).Shader(rtgiVolVisInterface).Handle;
@@ -284,7 +243,6 @@ internal sealed partial class SponzaLoop
     private void CreateRtgiVolumePipelines(Func<string, ShaderInterface, ComputePipelineOptions, PipelineHandle> compute, ComputePipelineOptions full32)
     {
         rtgiVolRaysPipeline = compute("rtgi_volume_rays", rtgiVolRaysInterface, ComputePipelineOptions.None);
-        rtgiVolUpdatePipeline = compute("rtgi_volume_update", rtgiVolUpdateInterface, full32);
         rtgiVolCookPipeline = compute("rtgi_volume_cook", rtgiVolCookInterface, full32);
         rtgiVolVisPipeline = compute("rtgi_volume_vis", rtgiVolVisInterface, ComputePipelineOptions.None);
         CreateRtgiNearCookPipelines(compute);
@@ -302,7 +260,7 @@ internal sealed partial class SponzaLoop
         if (rtgiVolumeBuilt || rtgiVolBuild is not { IsCompleted: true } task) return;
         rtgiVolSets = task.Result;
         rtgiVolBuild = Task.FromResult(Array.Empty<HashSet<long>>());
-        var rays = RtgiVolBatchMost * rtgiVolumeRays;
+        var rays = RtgiVolRayRoom;
         rtgiVolBatchBufs = Enumerable.Range(0, 3).Select(k => Own(device.CreateReadableGpuBuffer(RtgiVolBatchMost * 16, $"sponza.rtgi.volume-batch{k}"))).ToArray();
         rtgiVolRayBufs = Enumerable.Range(0, 2).Select(k => Own(device.CreateGpuBuffer(rays * 32, name: $"sponza.rtgi.volume-rays{k}"))).ToArray();
         rtgiVolHitBufs = Enumerable.Range(0, 2).Select(k => Own(device.CreateGpuBuffer(rays * 48, name: $"sponza.rtgi.volume-hits{k}"))).ToArray();
@@ -320,7 +278,6 @@ internal sealed partial class SponzaLoop
     {
         var entries = new List<uint>();
         var positions = new List<Vector3>();
-        var fine = new List<int>();
         var perLevel = new int[VolLevels];
         var brickIndex = new Dictionary<(int, int, int, int), int>();
         for (var l = 0; l < VolLevels; l++)
@@ -338,7 +295,6 @@ internal sealed partial class SponzaLoop
                 var bk = (x >> 2, y >> 2, z >> 2, l);
                 if (!brickIndex.TryGetValue(bk, out var brick)) { brick = brickIndex.Count; brickIndex.Add(bk, brick); }
                 var id = (uint)(brick * 64 + (x & 3) + 4 * (y & 3) + 16 * (z & 3));
-                if (l <= VolPlacedFine) fine.Add(positions.Count);
                 entries.Add(id); entries.Add((uint)l);
                 entries.Add((uint)(x + 32768) | ((uint)(y + 32768) << 16)); entries.Add((uint)(z + 32768));
                 positions.Add((new Vector3(x, y, z) + new Vector3(0.5f) + VolJitter) * s);
@@ -376,14 +332,6 @@ internal sealed partial class SponzaLoop
         var probesN = positions.Count;
         rtgiVolEntries = entries.ToArray();
         rtgiVolPositions = positions.ToArray();
-        rtgiVolFine = fine.ToArray();
-        rtgiVolPasses = new ushort[probesN];
-        rtgiVolUnder = probesN;
-        rtgiVolListed = new uint[probesN];
-        Array.Fill(rtgiVolListed, uint.MaxValue);
-        rtgiVolNear = Array.Empty<int>();
-        rtgiVolNearFocus = new Vector3(float.NaN);
-        rtgiVolCursor = 0;
         rtgiVolBricks = brickIndex.Count;
         rtgiVolTableSlots = slots;
         var probeBytes = (long)rtgiVolBricks * 64 * 24 * 4;
@@ -429,66 +377,13 @@ internal sealed partial class SponzaLoop
         return true;
     }
 
-    // This frame's probes listed into the batch ring: the near half (nearest the focus with passes under the target), then
-    // every probe in turn. Returns the count.
-    private int ListRtgiVolumeProbes(int rays)
-    {
-        var probes = rtgiVolPositions.Length;
-        if (probes == 0) return 0;
-        if (rtgiVolCookStage < 2) return ListRtgiVolumeCook(probes);
-        // The boot's settle: the GPU is the light's alone, the probes trained at the cache's whole budget.
-        var share = RtgiSettleNow ? MathF.Max(rtgiVolumeShare, 1f) : rtgiVolumeShare;
-        var want = Math.Min((int)(share * rays / rtgiVolumeRays), Math.Min(RtgiVolBatchMost, probes));
-        if (want <= 0) return 0;
-        var frame = rtgiFrameCount;
-        // Where the camera is heading: its velocity, smoothed, a second on.
-        if (!float.IsNaN(rtgiVolLastCamera.X))
-            rtgiVolVelocity = Vector3.Lerp(rtgiVolVelocity, (cameraPosition - rtgiVolLastCamera) * 60f, 0.1f);
-        rtgiVolLastCamera = cameraPosition;
-        var focus = cameraPosition + rtgiVolVelocity;
-        if (float.IsNaN(rtgiVolNearFocus.X) || Vector3.Distance(focus, rtgiVolNearFocus) > 0.05f * rtgiVolumeRadius + 1f || ++rtgiVolNearAge > 120)
-        {
-            rtgiVolNearFocus = focus;
-            rtgiVolNearAge = 0;
-            var r2 = rtgiVolumeRadius * rtgiVolumeRadius;
-            rtgiVolNear = rtgiVolFine.Where(i => Vector3.DistanceSquared(rtgiVolPositions[i], focus) <= r2)
-                .OrderBy(i => Vector3.DistanceSquared(rtgiVolPositions[i], focus)).ToArray();
-        }
-        var list = new uint[want * 4];
-        var count = 0;
-        void Take(int i)
-        {
-            rtgiVolListed[i] = frame;
-            if (rtgiVolPasses[i] < ushort.MaxValue) rtgiVolPasses[i]++;
-            if (rtgiVolPasses[i] == RtgiVolSettlePasses) rtgiVolUnder--;
-            Array.Copy(rtgiVolEntries, i * 4, list, count * 4, 4);
-            count++;
-        }
-        var nearWant = want / 2;
-        foreach (var i in rtgiVolNear)
-        {
-            if (count >= nearWant) break;
-            if (rtgiVolPasses[i] < rtgiVolumeTarget && rtgiVolListed[i] != frame) Take(i);
-        }
-        // Probes still under the settle's passes before the rest's turn (each pass of the cursor brings them up anyway).
-        for (var k = 0; k < probes && count < want; k++)
-        {
-            var i = rtgiVolCursor;
-            rtgiVolCursor = (rtgiVolCursor + 1) % probes;
-            if (rtgiVolListed[i] != frame) Take(i);
-        }
-        rtgiVolBatchSlot = (rtgiVolBatchSlot + 1) % 3;
-        device.WriteMappedGpuBuffer(rtgiVolBatchBufs[rtgiVolBatchSlot], 0, MemoryMarshal.AsBytes(list.AsSpan(0, count * 4)));
-        return count;
-    }
-
     // The cook's next chunk: as many probes as the ray buffers hold at this pass's rays a probe, in order.
     private int ListRtgiVolumeCook(int probes)
     {
         if (rtgiVolCookStage == 0 && rtgiVolCookCursor == 0) { rtgiVolCookFrom = rtgiFrameCount; rtgiVolCookClock.Restart(); }
         rtgiVolKindNow = rtgiVolCookStage + 1;
         rtgiVolRaysNow = rtgiVolCookStage == 0 ? RtgiVolMoveRays : RtgiVolDepthRays;
-        var chunk = Math.Min(RtgiVolBatchMost * rtgiVolumeRays / rtgiVolRaysNow, probes - rtgiVolCookCursor);
+        var chunk = Math.Min(RtgiVolRayRoom / rtgiVolRaysNow, probes - rtgiVolCookCursor);
         var list = new uint[chunk * 4];
         Array.Copy(rtgiVolEntries, rtgiVolCookCursor * 4, list, 0, chunk * 4);
         rtgiVolBatchSlot = (rtgiVolBatchSlot + 1) % 3;
@@ -511,8 +406,8 @@ internal sealed partial class SponzaLoop
         return chunk;
     }
 
-    // Placement time: the probes listed and their rays cast (the Metal batch traces them, RtgiVolumeEncode).
-    private void RecordRtgiVolumeRays(int cur, int rays)
+    // Placement time, while the volume cooks: the chunk's probes listed and their rays cast (the Metal batch traces them).
+    private void RecordRtgiVolumeRays(int cur)
     {
         rtgiVolListedNow = 0;
         if (!rtgiVolume) return;
@@ -529,17 +424,15 @@ internal sealed partial class SponzaLoop
                     $"[VulkanSponza] rtgi volume: ready -- {rtgiVolPositions.Length:N0} probes; the cache's cells sized by the geometry ({rtgiVolumeCells:0.###} x the harmonic mean distance, at most {rtgiVolumeCellMax:0.##} m{(rtgiVolumeCells > 0f ? "" : ": off, by the camera's distance")})."));
             }
         }
-        if (!rtgiVolReady && rtgiVolCookStage >= 2) return;
-        rtgiVolKindNow = 0;
-        rtgiVolRaysNow = rtgiVolumeRays;
-        rtgiVolListedNow = ListRtgiVolumeProbes(rays);
+        if (rtgiVolReady || rtgiVolCookStage >= 2 || rtgiVolPositions.Length == 0) return;
+        rtgiVolListedNow = ListRtgiVolumeCook(rtgiVolPositions.Length);
         if (rtgiVolListedNow == 0) return;
         var n = rtgiVolListedNow * rtgiVolRaysNow;
         graph.Dispatch(rtgiVolRaysPassHandle, new DispatchCommand(rtgiVolRaysPipeline, (n + 63) / 64, 1, 1,
             new ShaderUniform[]
             {
                 new("uVolume", new Vector4Uniform(RtgiVolumeParams)),
-                new("uVol", new Vector4Uniform(new Vector4(rtgiVolListedNow, rtgiVolRaysNow, rayReach, RtgiRandomFrame))),
+                new("uVol", new Vector4Uniform(new Vector4(rtgiVolListedNow, rtgiVolRaysNow, rayReach, 0f))),
                 new("uVol2", new Vector4Uniform(new Vector4(rtgiVolKindNow, 0f, 0f, 0f))),
             },
             Array.Empty<ShaderTextureBinding>(),
@@ -579,66 +472,26 @@ internal sealed partial class SponzaLoop
         graph.Dispatch(rtgiVolVisClearPassHandle, Vis(2, 1));
     }
 
-    // The update, with the training (async): the listed probes' hits folded in, or the cook's.
-    private void RecordRtgiVolumeUpdate(int cur, Vector3 towardSun, bool sunTurned)
+    // With the training (async): the cook's chunk's hits folded into its probes.
+    private void RecordRtgiVolumeCook(int cur)
     {
         if (!rtgiVolumeBuilt || rtgiVolListedNow == 0) return;
-        if (rtgiVolKindNow > 0)
-        {
-            graph.Dispatch(rtgiVolCookPassHandle, new DispatchCommand(rtgiVolCookPipeline, rtgiVolListedNow, 1, 1,
-                new ShaderUniform[]
-                {
-                    new("uVolume", new Vector4Uniform(RtgiVolumeParams with { X = VolFinest })),
-                    new("uVol", new Vector4Uniform(new Vector4(rtgiVolListedNow, rtgiVolRaysNow, rtgiVolumeBackShare, rtgiVolKindNow))),
-                    new("uVol2", new Vector4Uniform(new Vector4(rtgiVolumeRefineMove, rtgiVolumeRefineGap, 1f, 0f))),
-                },
-                Array.Empty<ShaderTextureBinding>(),
-                Buffers: new[]
-                {
-                    new ShaderBufferBinding("RtgiVolumeBatch", rtgiVolBatchBufs[rtgiVolBatchSlot]),
-                    new ShaderBufferBinding("RtgiVolumeRayBuffer", rtgiVolRayBufs[cur]),
-                    new ShaderBufferBinding("RtgiVolumeHits", rtgiVolHitBufs[cur]),
-                    new ShaderBufferBinding("RtgiVolumeProbes", rtgiVolProbesBuf),
-                    new ShaderBufferBinding("RtgiVolumeDepth", rtgiVolDepthBuf),
-                    new ShaderBufferBinding("RtgiVolumeRefine", rtgiVolRefineBuf),
-                }));
-            return;
-        }
-        if (sunTurned)
-        {
-            rtgiVolSunFrame = rtgiFrameCount;
-            // Every probe owed its passes again: the near ones first.
-            Array.Clear(rtgiVolPasses);
-            rtgiVolUnder = rtgiVolPasses.Length;
-        }
-        var history = rtgiVolSunFrame != uint.MaxValue && rtgiFrameCount - rtgiVolSunFrame < (uint)rtgiVolumeSunFrames ? rtgiVolumeSunHistory : rtgiVolumeHistory;
-        graph.Dispatch(rtgiVolUpdatePassHandle, new DispatchCommand(rtgiVolUpdatePipeline, rtgiVolListedNow, 1, 1,
+        graph.Dispatch(rtgiVolCookPassHandle, new DispatchCommand(rtgiVolCookPipeline, rtgiVolListedNow, 1, 1,
             new ShaderUniform[]
             {
-                new("uParams", new Vector4Uniform(RtgiParams)),
-                new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, 0f))),
-                new("uSun", new Vector4Uniform(new Vector4(towardSun, 1f))),
-                new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 0f))),
-                new("uVolume", new Vector4Uniform(RtgiVolumeParams)),
-                new("uVolumeGeom", new Vector4Uniform(RtgiVolumeGeom)),
-                new("uNearCook", new Vector4Uniform(RtgiNearParams)),
-                new("uVol", new Vector4Uniform(new Vector4(rtgiVolListedNow, rtgiVolumeRays, 0f, history))),
+                new("uVolume", new Vector4Uniform(RtgiVolumeParams with { X = VolFinest })),
+                new("uVol", new Vector4Uniform(new Vector4(rtgiVolListedNow, rtgiVolRaysNow, rtgiVolumeBackShare, rtgiVolKindNow))),
+                new("uVol2", new Vector4Uniform(new Vector4(rtgiVolumeRefineMove, rtgiVolumeRefineGap, 1f, 0f))),
             },
-            new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
+            Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
             {
                 new ShaderBufferBinding("RtgiVolumeBatch", rtgiVolBatchBufs[rtgiVolBatchSlot]),
                 new ShaderBufferBinding("RtgiVolumeRayBuffer", rtgiVolRayBufs[cur]),
                 new ShaderBufferBinding("RtgiVolumeHits", rtgiVolHitBufs[cur]),
-                new ShaderBufferBinding("RtgiVolumeTable", rtgiVolTableBuf),
                 new ShaderBufferBinding("RtgiVolumeProbes", rtgiVolProbesBuf),
-                new ShaderBufferBinding("RtgiKeys", rtgiKeys),
-                new ShaderBufferBinding("RtgiRecord", rtgiRecord),
                 new ShaderBufferBinding("RtgiVolumeDepth", rtgiVolDepthBuf),
-                new ShaderBufferBinding("RtgiNearTable", RtgiNearTableOrDummy),
-                new ShaderBufferBinding("RtgiNearPoints", RtgiNearPointsOrDummy),
-                new ShaderBufferBinding("RtgiNearRegions", RtgiNearRegionsOrDummy),
-                new ShaderBufferBinding("RtgiNearScaleTable", RtgiNearScaleTableOrDummy),
+                new ShaderBufferBinding("RtgiVolumeRefine", rtgiVolRefineBuf),
             }));
     }
 }
