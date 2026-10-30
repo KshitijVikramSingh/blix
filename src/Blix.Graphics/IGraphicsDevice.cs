@@ -344,4 +344,8 @@ public interface IGraphicsDevice : IDisposable
 
     // A memory barrier before every graphics pass, where the device inserts one; an A/B may turn it off.
     bool ExplicitPassBarriers { get => true; set { } }
+
+    // Buffer barriers between dispatches emitted and avoided since the last call, for a profile. A device that does not
+    // track buffer hazards says none of either.
+    (long Emitted, long Skipped) TakeBufferBarrierCounts() => (0, 0);
 }

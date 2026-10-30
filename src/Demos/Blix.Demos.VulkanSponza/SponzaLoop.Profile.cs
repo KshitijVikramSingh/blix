@@ -223,13 +223,13 @@ internal sealed partial class SponzaLoop
         // --metalfx: the temporal scaler's GPU time (SponzaLoop.MetalFx.cs).
         var metalFxLine = MetalFxProfile(frames.Count);
         if (metalFxLine.Length > 0) Console.WriteLine($"[profile]   {metalFxLine}");
-        // Buffer barriers between dispatches (VulkanGraphicsDevice.BufferHazards.cs): emitted where a hazard was, skipped
-        // where none.
-        if (device is Blix.Graphics.Vulkan.VulkanGraphicsDevice vk)
+        // Buffer barriers between dispatches (the Vulkan device's BufferHazards): emitted where a hazard was, skipped
+        // where none. A device that tracks none reports zeros, and the line is left out.
         {
-            var (emitted, skipped) = vk.TakeBufferBarrierCounts();
-            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                $"[profile]   buffer barriers a frame: {emitted / (double)Math.Max(frames.Count, 1):0.0} emitted, {skipped / (double)Math.Max(frames.Count, 1):0.0} skipped"));
+            var (emitted, skipped) = device.TakeBufferBarrierCounts();
+            if (emitted + skipped > 0)
+                Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                    $"[profile]   buffer barriers a frame: {emitted / (double)Math.Max(frames.Count, 1):0.0} emitted, {skipped / (double)Math.Max(frames.Count, 1):0.0} skipped"));
         }
         if (frameTracer is { } tracer)
         {
