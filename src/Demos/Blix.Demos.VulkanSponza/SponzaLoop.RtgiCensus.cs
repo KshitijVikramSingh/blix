@@ -61,7 +61,12 @@ internal sealed partial class SponzaLoop
     private const int CensusRays = 64;
     // The size field's passes (m between samples), coarse first; a pass below refines where the one above found a size
     // under CensusRefineFactor of its own spacing (or buried): its samples too far apart for the cells there.
-    private static readonly float[] CensusPassSpacing = { 2f, 0.5f, 0.25f };
+    // 0.125 since 2026-10-31, only where a 0.25 m sample's side is dropped (under a wall, over the void): at 0.25 an 8 cm gap
+    // between two walls had a sample or none, its floor sized and cooked from the floor outside the walls (crevices' front
+    // gap). Refined by size as the passes above, 0.125 and a 0.0625 pass took Crytek Sponza's size field from 1.6 to 10 s
+    // and its cells past a minute.
+    private static readonly float[] CensusPassSpacing = { 2f, 0.5f, 0.25f, 0.125f };
+    private const int CensusDeadOnlyFrom = 2;
     private const float CensusRefineFactor = 2f;
     // A side over the void: more than CensusVoidShare of its rays escaped with a direction below -CensusVoidDown in y.
     private const float CensusVoidDown = 0.1f, CensusVoidShare = 0.5f;
@@ -445,7 +450,7 @@ internal sealed partial class SponzaLoop
             pass.Buried[i] = back > CensusBuriedShare * CensusRays;
             pass.Void[i] = (pass.Results[4 * i + 3] >> 16) > CensusVoidShare * CensusRays;
             pass.Dead[i] = !pass.Alpha[i] && (pass.Buried[i] || pass.Void[i]);
-            pass.Refine[i] = refines && (pass.Buried[i] || pass.Size[i] < CensusRefineFactor * pass.Spacing);
+            pass.Refine[i] = refines && (pass.Index >= CensusDeadOnlyFrom ? pass.Dead[i] : pass.Buried[i] || pass.Size[i] < CensusRefineFactor * pass.Spacing);
             bad += pass.Results[4 * i + 3] & 0xFFFFu;
         }
         pass.Bad = bad;

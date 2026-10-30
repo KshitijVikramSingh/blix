@@ -19,12 +19,14 @@ internal sealed partial class SponzaLoop
         "Temporal history held (blue 0 - red 16)", "Cell region (grey: none cooked)",
         "Cooked near: far term (escape share x far light per ray)", "Cooked near: the cache's light under it",
         "Cooked cell (red buried, yellow junction, green own level, blue ancestor; white its training points, black ring its representative)",
+        "World position (diagnostic, for dumps)", "Level, region, cooked size (diagnostic, for dumps)",
     };
 
     // The view (rtgi_readout.frag's uView.x, rtgi_blur.frag's uHalf.x, rtgi_temporal.frag's uDebug.x): 0 the light; 1-7 a
     // cell's state; 8 the light unblurred; 9 the blur's radius; 10 on the cooked and world-space state (RtgiViewNames;
     // renumbered 2026-10-30 when the world volume's two views went: 18-23 were 20-25, 24 is new).
-    private int rtgiView;
+    // BLIX_RTGI_VIEW=N: the view from the start (dumps of a view, --rtgi-dump).
+    private int rtgiView = int.TryParse(Environment.GetEnvironmentVariable("BLIX_RTGI_VIEW"), out var bv) ? bv : 0;
     // The Show channel before a view took it (a view is shown as the raw bounce radiance, no albedo on it).
     private int rtgiShowBefore = -1;
     // Freeze: no rays, no training -- the cache held as it is, still read. Reset: every slot emptied next frame.

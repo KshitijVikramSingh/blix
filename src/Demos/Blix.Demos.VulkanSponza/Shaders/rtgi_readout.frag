@@ -388,6 +388,19 @@ void main() {
     int view = int(u.uView.x + 0.5);
     // The cooked and world-space state, painted (SponzaLoop.RtgiDebug.cs's views 10-18, 21 and 24): everything the light is
     // made of but the screen's stages, each as the pixel reads it. Magenta: none.
+    // 26: the point's continuous level (r), the region at its level (g), the cooked size (b), for dumps.
+    if (view == 26) {
+        uint ck0 = cookCellAt(p, side, level), ck1 = cookCellAt(p, side, min(level + 1u, uint(u.uParams.w)));
+        outIncident = vec4(lf + 1.0, float(rtgiRegionFor(level)) + 1.0, (ck0 != COOK_NONE ? 2.0 : 1.0) + (ck1 != COOK_NONE ? 2.0 : 0.0), 1.0);
+        outIncidentGradient = vec4(0.0);
+        return;
+    }
+    // 25: the point's world position + 10 m (rgb), for an offline look at a dump (BLIX_RTGI_VIEW, --rtgi-dump).
+    if (view == 25) {
+        outIncident = vec4(p + 10.0, 1.0);   // offset: the upsample reads rgb below -0.5 as "no sample"
+        outIncidentGradient = vec4(0.0);
+        return;
+    }
     if ((view >= 10 && view <= 18) || view == 21 || view == 24) {
         vec3 c = vec3(1.0, 0.0, 1.0);
         uint sc = rtgiFind(rtgiCellHash(ivec3(floor((p - rtgiOrigin(side)) / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);

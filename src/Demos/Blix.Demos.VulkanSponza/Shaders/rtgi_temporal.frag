@@ -188,7 +188,7 @@ void main() {
         raw = fixUp(wf.xyz / wf.w, nf);
         int dv = int(u.uDebug.x + 0.5);
         if (dv == 19) raw = vec4(1.0, 0.0, 1.0, 1.0);
-        else if ((dv >= 10 && dv <= 18) || dv == 21 || dv == 24) raw = vec4(0.0, 0.0, 0.0, 1.0);
+        else if ((dv >= 10 && dv <= 18) || dv == 21 || dv >= 24) raw = vec4(0.0, 0.0, 0.0, 1.0);
     }
     ivec2 size = textureSize(uSceneDepth, 0);
     float rawLum = lum(raw.rgb);
@@ -250,7 +250,7 @@ void main() {
     outIncident = mix(history, raw, 1.0 / held);
     int dv2 = int(u.uDebug.x + 0.5);
     // Views: the readout's and the fix-up's shown as they are (no history); 20 the frames the history held.
-    if ((dv2 >= 10 && dv2 <= 19) || dv2 == 21 || dv2 == 24) outIncident = raw;
+    if ((dv2 >= 10 && dv2 <= 19) || dv2 == 21 || dv2 >= 24) outIncident = raw;
     if (dv2 == 20) outIncident = vec4(heat(min(held - 1.0, 16.0) / 16.0), raw.a);
     outFast = fast;
     vec3 on = nHere / (abs(nHere.x) + abs(nHere.y) + abs(nHere.z));

@@ -31,6 +31,7 @@ layout(set = 0, binding = 0) uniform RtgiCookPass {
     vec4 uConn;    // x 1: the labels' first pass; y the cube hash's slots - 1; z the share of a candidate's rays on back
                    // faces past which it is buried
     vec4 uNear;    // kinds 14 and 15: xyz the camera, w the reach (m)
+    vec4 uCache;   // kind 16: rtgiParams (rtgi_cache.glsl)
 } u;
 
 // The size field's samples (xyz the point, w its normal octahedral, packSnorm2x16 as bits) and results (per sample: x the
@@ -70,7 +71,17 @@ layout(std430, set = 0, binding = 17) readonly buffer RtgiCookScale { uvec2 cook
 #define COOK_TABLE(i) cookTable[i]
 #define COOK_POINTS(i) cookPoints[i]
 #define COOK_SCALE(i) cookScale[i]
+#define COOK_REGIONS(i) cookRegions[i]
 #include "rtgi_cook.glsl"
+// Kind 16 (BLIX_RTGI_OUTLIERS, SponzaLoop.RtgiCook.cs's outlier scan): each cooked cell's cache cell read -- its resolved
+// light and samples, its blended light and region (two vec4s a cell into RtgiCookScan; -1 not held).
+layout(std430, set = 0, binding = 18) readonly buffer RtgiKeys { uint rtgiKeys[]; };
+layout(std430, set = 0, binding = 19) readonly buffer RtgiResolved { vec4 rtgiResolved[]; };
+layout(std430, set = 0, binding = 20) readonly buffer RtgiRecord { uvec4 rtgiRecord[]; };
+layout(std430, set = 0, binding = 21) buffer RtgiCookScan { vec4 cookScan[]; };
+#define RTGI_KEYS(i) rtgiKeys[i]
+#define RTGI_REGION_OF 1
+#include "rtgi_cache.glsl"
 
 uint cookSideOf(vec3 n) {
     vec3 a = abs(n);
@@ -338,6 +349,23 @@ void main() {
             if (kind == 9u) atomicMin(cookCubes[slot].y, lab);
             else cookRegions[i * NEAR_LEVELS + l] = lab == cookCubes[slot].y ? 0u : lab + 1u;
         }
+        return;
+    }
+    if (kind == 16u) {
+        if (t >= count) return;
+        uint i = first + t;
+        uint bits = cookBits(i), side = bits & 7u, level = (bits >> 8) & 15u;
+        vec3 p = cookPoints[2u * i].xyz;
+        rtgiRegion = nearRegion(p, side);
+        uint s = rtgiFind(rtgiCellHash(cookCoords(p, side, level), level, side, u.uCache), u.uCache);
+        vec4 o0 = vec4(-1.0), o1 = vec4(-1.0, -1.0, -1.0, float(rtgiRegionFor(level)));
+        if (s != COOK_NONE) {
+            o0 = vec4(rtgiResolved[2u * s].rgb, rtgiResolved[2u * s + 1u].y);
+            uvec4 a = rtgiRecord[2u * s];
+            o1.xyz = vec3(unpackHalf2x16(a.x), unpackHalf2x16(a.y).x);
+        }
+        cookScan[2u * i] = o0;
+        cookScan[2u * i + 1u] = o1;
         return;
     }
     if (kind == 14u) { if (t == 0u) nearListCount = 0u; return; }
