@@ -12,6 +12,43 @@ and does not replace those terms.
 | `meshoptimizer` by Arseny Kapoulkine | MIT | [`third_party/meshoptimizer/LICENSE.md`](third_party/meshoptimizer/LICENSE.md) |
 | `xatlas` by Jonathan Young (from thekla_atlas, Thekla Inc. and NVIDIA) | MIT | [`third_party/xatlas/LICENSE`](third_party/xatlas/LICENSE) |
 
+## Derived source
+
+Ported rather than vendored: no file from these works is in the repository, but their arithmetic is, so their notices are
+reproduced here.
+
+| Component | Where it is used | License |
+| --- | --- | --- |
+| GT Tone Mapping ("GT7") sample implementation by Polyphony Digital Inc., from the SIGGRAPH 2025 talk "Driving Toward Reality: Physically Based Tone Mapping" ([course page](https://blog.selfshadow.com/publications/s2025-shading-course/)) | `src/Blix.Shaders/gt7.glsl`, `src/Blix.Graphics.Images/Tonemap.cs` (the GT7 methods), `lab/tonemap/tmlab/gt7.py` | MIT, below |
+
+The GT7 curve, its ICtCp chroma handling and its frame-buffer units follow that sample. Blix adds an eighth curve parameter
+(`shoulderTail`, where 0 is the published shoulder exactly), a luminance-preserving gamut map, the entry points, and fitted
+parameter sets, which are Blix's own work under Blix's license.
+
+```text
+MIT License
+
+Copyright (c) 2025 Polyphony Digital Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ## Direct package dependencies
 
 | Package family | License | Project |

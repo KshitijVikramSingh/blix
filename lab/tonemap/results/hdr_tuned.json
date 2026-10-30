@@ -1,0 +1,75 @@
+{
+ "what": "GT7 tone mapping tuned for HDR displays: the published seven parameters plus shoulder_tail (ours; 0 is the published curve exactly), one set for every display peak.",
+ "chosen": "highlight floor 0.30, picked by eye on the author's 1600-nit XDR display from sheets at 0.15, 0.20, 0.30, 0.40 (2026-10-25)",
+ "params": {
+  "alpha": 0.15621056826459623,
+  "gray_point": 0.5402913664890294,
+  "linear_section": 0.24963355980503166,
+  "toe_strength": 1.2796703282230928,
+  "blend_ratio": 0.9729387028290382,
+  "fade_start": 0.8754402249595312,
+  "fade_end": 1.259119177021612,
+  "shoulder_tail": 2.2595158994699425
+ },
+ "fit": {
+  "peaks_nits": [
+   400,
+   1000,
+   1600,
+   4000
+  ],
+  "highlight_floor": 0.3,
+  "starts": 24,
+  "seed": 3,
+  "anchor_scene_white_nits": 250,
+  "objective_terms": {
+   "lin": 0.003238900978256245,
+   "shoulder": 0.000229657001536749,
+   "hue": 0.059691788885509356,
+   "chroma": 0.05168672054646102,
+   "highlight": 4.455735094393983e-05,
+   "penalty": 0.0
+  },
+  "note": "an 8-start run at this floor landed in a local minimum; use many starts. Fitted on synthetic sweeps only; the captures were scored afterwards."
+ },
+ "at_1000_nits": {
+  "grey_percent_of_peak_at_scene_k_x_peak": {
+   "0.5": 42.4,
+   "1": 58.4,
+   "2": 71.9,
+   "4": 82.5,
+   "10": 92.8
+  },
+  "baseline_grey_percent": {
+   "0.5": 49.8,
+   "1": 83.5,
+   "2": 100.0,
+   "4": 100.0,
+   "10": 100.0
+  },
+  "emissive_captures": {
+   "hue_shift_deg": [
+    2.85,
+    0.35
+   ],
+   "colour_kept_percent": [
+    61.9,
+    65.7
+   ],
+   "pixels_at_peak_percent": [
+    5.0,
+    0.0
+   ],
+   "delta_e_itp_vs_aces2": [
+    7.44,
+    7.67
+   ],
+   "order": "[baseline GT7, tuned]"
+  },
+  "lit_captures_delta_e_itp_vs_aces2": [
+   3.9,
+   4.21
+  ]
+ },
+ "use": "GT7Params(**json['params']) with GT7ToneMapping.hdr_display(peak_nits, params), peak 250..10000"
+}

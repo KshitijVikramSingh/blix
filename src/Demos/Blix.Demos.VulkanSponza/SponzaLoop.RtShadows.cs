@@ -37,6 +37,9 @@ internal sealed partial class SponzaLoop
     // measured, the test costs what the coin does, within 1% (Sponza, 2880x1620, a frame each in one process).
     // The lit pass's trace counts its GPU time in the tracer's shadow slot 1 (0: the deferred batches, 3: RTGI's).
     private const int RtShadowStatSlot = 1;
+    // --rt-alpha-texture: the shadow tables sample the material textures at full resolution instead of reading the alpha atlas
+    // (SponzaLoop.RayAlpha.cs), where authored BLEND is the stochastic stop every other ray takes.
+    private bool rtShadowAlphaTexture;
     private ShaderInterface rtShadowRaysInterface = null!;
     private PassHandle rtShadowRaysPassHandle, rtShadowTracePassHandle, rtShadowFilterPassHandle;
     private PipelineHandle rtShadowRaysPipeline, rtShadowFilterPipeline;
@@ -402,6 +405,7 @@ internal sealed partial class SponzaLoop
         rtBuild = tracer.Build(rayGpuData, blocks, surfaceWords, alphaTested);
         tracer.SetAlpha(alphaMaterials, rowMaterial, raySurfaceBakeBuffers.First(b => b.Name == "BlixRayUvs").Buffer, 0f);
         if (rtSheetRows > 0) tracer.SetTransmit(rowTransmit);
+        if (rayAlphaPlan is not null) tracer.SetAlphaAtlas(rayGpuData.RowPlacements.Length, !rtShadowAlphaTexture);   // the other traces' per-hit alpha (SponzaLoop.RayAlpha.cs)
         frameTracer = tracer;
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] metal tracer: {rtBuild.Value.SolidTriangles + rtBuild.Value.PartialTriangles:N0} triangles ({rtBuild.Value.PartialTriangles:N0} partly covered, alpha-tested by {alphaMaterials.Count} materials' textures) in {rtBuild.Value.Hierarchies} bottom-level structures, built in {rtBuild.Value.CpuPrepareMs + rtBuild.Value.BlasGpuMs + rtBuild.Value.CompactTlasGpuMs:0} ms; {rtBuild.Value.CompactedBytes / 1048576.0:0} MB."));

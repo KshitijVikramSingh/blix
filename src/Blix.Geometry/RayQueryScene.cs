@@ -394,9 +394,15 @@ public sealed partial class RayQueryScene
         return false;
     }
 
+    /// <summary>
+    /// The alpha trailer (<see cref="RayAlphaAtlas"/>: the words from the triangle count on, read back from the surface words), or null: with it a
+    /// partly covered triangle is met by the material's alpha at the point hit, as the GPU's traversals meet it; without, by the coin.
+    /// </summary>
+    public uint[]? AlphaTrailer { get; set; }
+
     private RayCoverageKey CoverageKey(uint seed, int entry) => entries[entry].IsRegion
-        ? new RayCoverageKey(seed, 0, entries[entry].OwnerPlacement, entries[entry].OwnerTriangle)
-        : new RayCoverageKey(seed, (uint)entries[entry].Placement);
+        ? new RayCoverageKey(seed, 0, entries[entry].OwnerPlacement, entries[entry].OwnerTriangle, AlphaTrailer, entries[entry].Uvs)
+        : new RayCoverageKey(seed, (uint)entries[entry].Placement, null, null, AlphaTrailer, entries[entry].Uvs);
 
     private ShearedRay Local(in Ray ray, int entry) => entries[entry].IsRegion
         ? new ShearedRay(ray.Origin, ray.Direction)

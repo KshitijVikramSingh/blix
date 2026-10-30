@@ -129,7 +129,7 @@ public sealed class MetalRayTracer : IDisposable
                 var w = triangles[row * 4 + 3];
                 var key = region ? ((ulong)owners[w * 2] << 32) | (owners[w * 2 + 1] & 0x7FFFFFFFu) : w;
                 if (!seen.Add(key)) { duplicates[h]++; continue; }
-                var coverage = surfaceWords[row] >> 24;
+                var coverage = RayQueryGpuData.CoverageByte(surfaceWords[row]);   // 0, 16..240 (sixteenths), 255 solid: the word's top byte also carries the roughness level
                 if (coverage == 0) uncovered[h]++;
                 else (coverage == 255 && (tested.Length == 0 || !tested[row]) ? s : p).Add((uint)row);
             }
@@ -239,6 +239,18 @@ public sealed class MetalRayTracer : IDisposable
         HwxNative.hwx_use_queue(ctx, deviceQueue ? device.ExportMetalCommandQueue() : 0);
     }
 
+    /// <summary>
+    /// From now on this tracer submits on <paramref name="other"/>'s command queue: tracers whose in-frame passes share the
+    /// frame's timeline must run in the order the frame encodes them, which one serial queue guarantees and two do not
+    /// (VulkanSponza's BSDF reference tracer beside the frame's, SponzaLoop.ReferenceMaterials.cs).
+    /// </summary>
+    public void ShareQueueWith(MetalRayTracer other)
+    {
+        ObjectDisposedException.ThrowIf(ctx == 0, this);
+        ObjectDisposedException.ThrowIf(other.ctx == 0, other);
+        HwxNative.hwx_share_queue(ctx, other.ctx);
+    }
+
     /// <summary>The device's GPU memory in MB: allocated by every client (Vulkan's included), and the working set Metal
     /// recommends staying under before it pages.</summary>
     public unsafe (double AllocatedMb, double RecommendedMb) Memory
@@ -285,6 +297,20 @@ public sealed class MetalRayTracer : IDisposable
             if (HwxNative.hwx_set_alpha(ctx, tp, cp, fp, (uint)materials.Count, rp, (uint)rowMaterial.Length, device.ExportMetalBuffer(uvs), mip) != 0)
                 throw new InvalidOperationException($"Metal alpha test: {Error}");
         }
+    }
+
+    /// <summary>
+    /// From now on every trace but the shadow pass's own (its tables take the coin until <see cref="SetAlpha"/>) meets a partly covered triangle
+    /// where its material's alpha passes at the point hit, read from the trailer of <see cref="Blix.Geometry.RayAlphaAtlas"/> on the surface
+    /// words (<paramref name="rows"/> words in: the triangle count) -- the software traversal's per-hit test, test for test. With
+    /// <paramref name="shadows"/> the tables <see cref="SetAlpha"/> gave textures to (the sun's shadows, the lightlet bake) read the atlas too, so
+    /// authored BLEND is stochastic in shadow as in every other ray; they keep the coin where <see cref="SetAlpha"/> was not called.
+    /// </summary>
+    public void SetAlphaAtlas(int rows, bool shadows = false)
+    {
+        ObjectDisposedException.ThrowIf(ctx == 0, this);
+        if (HwxNative.hwx_set_alpha_atlas(ctx, (uint)rows, shadows ? 1 : 0) != 0)
+            throw new InvalidOperationException($"Metal alpha atlas: {Error}");
     }
 
     /// <summary>
@@ -356,14 +382,14 @@ public sealed class MetalRayTracer : IDisposable
     /// <param name="sun">Optional: each hit's own sun ray too, as <see cref="Trace"/>'s (direction, lift), with
     /// <paramref name="reach"/> and <paramref name="discTan"/>.</param>
     public unsafe void EncodeTrace(ExternalWorkSync sync, GpuBufferHandle rays, long raysOffset, GpuBufferHandle hits, long hitsOffset,
-        int count, uint seedBase, GpuBufferHandle? limit = null, long limitOffset = 0, Vector4? sun = null, float reach = 0f, float discTan = 0f)
+        int count, uint seedBase, GpuBufferHandle? limit = null, long limitOffset = 0, Vector4? sun = null, float reach = 0f, float discTan = 0f, bool instances = false)
     {
         ObjectDisposedException.ThrowIf(ctx == 0, this);
         var s = sun ?? Vector4.Zero;
         HwxNative.hwx_encode_trace(ctx, sync.MetalSharedEvent, sync.WaitValue, sync.SignalValue,
             device.ExportMetalBuffer(rays), (ulong)raysOffset, device.ExportMetalBuffer(hits), (ulong)hitsOffset,
             (uint)Math.Max(count, 0), seedBase, limit is { } l ? device.ExportMetalBuffer(l) : 0, (ulong)limitOffset,
-            sun.HasValue ? (float*)&s : null, reach, discTan);
+            sun.HasValue ? (float*)&s : null, reach, discTan, instances ? 1 : 0);
     }
 
     /// <summary>

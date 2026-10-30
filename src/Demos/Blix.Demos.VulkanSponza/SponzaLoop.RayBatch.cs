@@ -60,14 +60,14 @@ internal sealed partial class SponzaLoop
     // deferred: the answers are read on a later frame, so the batch can wait for the frame's tracer group
     // (SponzaLoop.TracerGroup.cs) instead of a trip to Metal of its own.
     private void RecordClosestBatch(RayBatchPasses passes, GpuBufferHandle rays, GpuBufferHandle hits, int count, uint seedBase,
-        GpuBufferHandle? limit = null, bool deferred = false)
+        MetalRayTracer? on = null, GpuBufferHandle? limit = null, bool deferred = false, bool instances = false)
     {
         if (count <= 0) return;
-        if (FrameRaysOnHardware && (EnsureFrameTracer() ? frameTracer : null) is { } tracer)
+        if (FrameRaysOnHardware && (on ?? (EnsureFrameTracer() ? frameTracer : null)) is { } tracer)
         {
-            if (deferred && TracerGroupsOn)
-                DeferTracerBatch((sync, t) => t.EncodeTrace(sync, rays, 0, hits, 0, count, seedBase, limit));
-            else graph.External(passes.Hardware, sync => tracer.EncodeTrace(sync, rays, 0, hits, 0, count, seedBase, limit));
+            if (deferred && TracerGroupsOn && ReferenceEquals(tracer, frameTracer))
+                DeferTracerBatch((sync, t) => t.EncodeTrace(sync, rays, 0, hits, 0, count, seedBase, limit, instances: instances));
+            else graph.External(passes.Hardware, sync => tracer.EncodeTrace(sync, rays, 0, hits, 0, count, seedBase, limit, instances: instances));
             return;
         }
         var declared = batchClosestInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();

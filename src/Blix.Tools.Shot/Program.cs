@@ -916,6 +916,10 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     /// </remarks>
     public void Debug(DebugContext debug)
     {
+        // --no-gizmos: the grid, sun arrow and bounds are drawn into the scene target, so a capture holds them. Left out,
+        // the target is the lit stage alone (tonemap lab: they are not radiance, and they skew per-pixel statistics).
+        if (args.Flag("no-gizmos")) return;
+
         debug.State.DepthTestDrawing = !xray;
 
         // <b>Whichever target is being read back.</b> A --viewport capture that drew its gizmos into
@@ -1113,6 +1117,8 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         }
 
         var rgba = new byte[width * height * 4];
+        // BLIX_SHOT_HDR=1: the radiance as read, before exposure and tonemap, beside the PNG as a PFM (tonemap lab).
+        var hdr = Environment.GetEnvironmentVariable("BLIX_SHOT_HDR") == "1" ? new float[width * height * 3] : null;
         var lit = 0;
         for (var i = 0; i < width * height; i++)
         {
@@ -1120,6 +1126,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             var r = (float)BitConverter.ToHalf(pixels, src);
             var g = (float)BitConverter.ToHalf(pixels, src + 2);
             var b = (float)BitConverter.ToHalf(pixels, src + 4);
+            if (hdr is not null) { hdr[i * 3] = r; hdr[i * 3 + 1] = g; hdr[i * 3 + 2] = b; }
 
             // The same curves the present shader runs — blix_tonemap, all four of them — applied
             // here instead, then an sRGB encode because the swapchain's sRGB format does that in
@@ -1144,6 +1151,13 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         }
 
         PngWriter.WriteRgba8(path, rgba, width, height);
+        if (hdr is not null)
+        {
+            var pfm = Path.ChangeExtension(path, ".pfm");
+            PfmWriter.WriteRgb(pfm, hdr, width, height);
+            File.WriteAllText(Path.ChangeExtension(path, ".pfm.json"), string.Create(CultureInfo.InvariantCulture,
+                $"{{\"source\":\"studio\",\"width\":{width},\"height\":{height},\"format\":\"Rgba16F\",\"exposure\":{renderer.Look.Exposure},\"tonemap_mode\":\"{renderer.Look.TonemapMode}\",\"primaries\":\"linear sRGB / Rec.709 (assumed)\",\"pfm\":\"{Path.GetFileName(pfm)}\"}}"));
+        }
 
         // How much of the picture is not black, so a reader can tell a capture of the scene from a
         // capture of the debug lines alone. The stage's sky and ground fill every frame, so a

@@ -39,10 +39,11 @@ internal sealed partial class SponzaLoop
         ?? Math.Clamp((int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)Math.Max(1, GpuReferenceTarget / ReferenceLaneMostPaths)), 256, ReferenceLanesAuto);
     private ShaderInterface referenceWaveInterface = null!;
     private PipelineHandle referenceWavePipeline;
-    private PassHandle referenceWaveStepPass, referenceWaveShadePass, referenceWaveResolvePass;
+    private PassHandle referenceWaveStepPass, referenceWaveShadePass, referenceWaveResolvePass, referenceWaveResolve2Pass, referenceWaveResolve3Pass;
     // The reference's sun rays are traced as closest rays, anything met shade (reference_wave.comp, BatchSunRays): the
-    // paths' own trace, independent of the frame's shadow kernel and its sheets.
-    private RayBatchPasses referenceClosestBatch, referenceSunBatch;
+    // paths' own trace, independent of the frame's shadow kernel and its sheets. --ref-bsdf takes the sun on through thin
+    // panes in two more rounds (referenceSunBatch2, 3).
+    private RayBatchPasses referenceClosestBatch, referenceSunBatch, referenceSunBatch2, referenceSunBatch3;
     // --ref-lift M: how far off a hit a reference path, and its sun ray, go on (reference_wave.comp; 1 mm). It was 1 cm:
     // the teacup's saucer stands 1.9 cm over the floor, and the floor under it read 0.33 there against 0.18 at 1 mm and
     // 0.16 at 0.2 mm -- converged by 1 mm, every other face of the saucer unchanged; the sheet slab's floor within 0.3%
@@ -58,7 +59,7 @@ internal sealed partial class SponzaLoop
     /// points have one (gateWave).</summary>
     private sealed class ReferenceWave
     {
-        public GpuBufferHandle Points, Lanes, Sums, Rays, Hits, SunRays, SunHits;
+        public GpuBufferHandle Points, Lanes, Sums, Rays, Hits, SunRays, SunHits, Medium;
         public int PointCount, LanesPerPoint, Quota;
         public uint Dispatch;
         public int Count => PointCount * LanesPerPoint;
@@ -115,6 +116,7 @@ internal sealed partial class SponzaLoop
         w.Hits = Own(device.CreateGpuBuffer(lanes * 48, new byte[lanes * 48], $"sponza.{name}.hits"));
         w.SunRays = Own(device.CreateGpuBuffer(lanes * 32, new byte[lanes * 32], $"sponza.{name}.sun-rays"));
         w.SunHits = Own(device.CreateGpuBuffer(lanes * 48, new byte[lanes * 48], $"sponza.{name}.sun-hits"));
+        w.Medium = Own(device.CreateGpuBuffer(lanes * 4, new byte[lanes * 4], $"sponza.{name}.medium"));
         return w;
     }
 
@@ -195,6 +197,14 @@ internal sealed partial class SponzaLoop
     {
         var count = w.Count;
         if (count == 0) return;
+        // The BSDF reference: its own tracer (the panes in it), its tables once the surface bake has run; the wave waits for both.
+        var bsdf = refBsdf;
+        MetalRayTracer? on = null;   // the frame's tracer, or the BSDF reference's own (the panes in it)
+        if (bsdf)
+        {
+            if (!EnsureReferenceMaterials() || EnsureReferenceTracer() is not { } own) return;
+            on = own;
+        }
         var frameSeed = w.Dispatch * 0x9E3779B9u + (uint)refSeed * 7919u;
         var declared = referenceWaveInterface.Slots.Select(sl => sl.Name).Where(nm => nm is not null).ToHashSet();
         DispatchCommand Wave(int mode) => new(referenceWavePipeline, (count + 63) / 64, 1, 1,
@@ -204,7 +214,8 @@ internal sealed partial class SponzaLoop
                 new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, refSky))),
                 new("uParams", new Vector4Uniform(new Vector4(mode, refBounces, w.Quota, w.LanesPerPoint))),
                 new("uCount", new Vector4Uniform(new Vector4(count, w.Dispatch + (uint)refSeed * 7919u, refSunDisc ? SunDiscTangent : 0f,
-                    (SheetRowsBuffer is not null ? 1f : 0f) + 2f))),
+                    // bit 0: thin sheets (ReferenceSheets); bit 1: the sun's rays as closest rays (always, now); bit 2: the glTF BSDF (--ref-bsdf).
+                    (SheetRowsBuffer is not null ? 1f : 0f) + 2f + (bsdf ? 4f : 0f)))),
                 new("uLift", new Vector4Uniform(new Vector4(refLift, 0f, 0f, 0f))),
             },
             new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
@@ -214,16 +225,40 @@ internal sealed partial class SponzaLoop
                 .Append(new ShaderBufferBinding("ReferenceLaneSums", w.Sums))
                 .Append(new ShaderBufferBinding("BatchRays", w.Rays))
                 .Append(new ShaderBufferBinding("BatchHits", w.Hits))
-                // With no sheets in the scene the binding is filled and unread (uCount.w 0).
+                // With no sheets in the scene the binding is filled and unread (uCount.w bit 0 clear).
                 .Append(new ShaderBufferBinding("ReferenceSheets", SheetRowsBuffer ?? w.SunHits))
                 .Append(new ShaderBufferBinding("BatchSunRays", w.SunRays))
                 .Append(new ShaderBufferBinding("BatchSunHits", w.SunHits))
+                .Concat(bsdf ? new[]
+                {
+                    new ShaderBufferBinding("ReferenceMedium", w.Medium),
+                    new ShaderBufferBinding("ReferenceMaterialRows", referenceMaterialRows),
+                    new ShaderBufferBinding("ReferenceMaterialTable", referenceMaterialTable),
+                    new ShaderBufferBinding("ReferenceRowMr", rayMrRows),
+                    new ShaderBufferBinding("ReferenceUvs", raySurfaceBakeBuffers.First(b => b.Name == "BlixRayUvs").Buffer),
+                } : new[]
+                {
+                    // Declared by the shader, read only in the BSDF mode: bound to something so the dispatch is complete.
+                    new ShaderBufferBinding("ReferenceMedium", w.Medium),
+                    new ShaderBufferBinding("ReferenceMaterialRows", w.Medium),
+                    new ShaderBufferBinding("ReferenceMaterialTable", w.Sums),
+                    new ShaderBufferBinding("ReferenceRowMr", w.Medium),
+                    new ShaderBufferBinding("ReferenceUvs", w.Medium),
+                })
                 .Where(b => declared.Contains(b.Name)).ToArray());
         graph.Dispatch(referenceWaveStepPass, Wave(0));
-        RecordClosestBatch(referenceClosestBatch, w.Rays, w.Hits, count, frameSeed);
+        RecordClosestBatch(referenceClosestBatch, w.Rays, w.Hits, count, frameSeed, on, instances: bsdf);
         graph.Dispatch(referenceWaveShadePass, Wave(1));
-        RecordClosestBatch(referenceSunBatch, w.SunRays, w.SunHits, count, frameSeed ^ 0x5bd1e995u);
+        RecordClosestBatch(referenceSunBatch, w.SunRays, w.SunHits, count, frameSeed ^ 0x5bd1e995u, on, instances: bsdf);
         graph.Dispatch(referenceWaveResolvePass, Wave(2));
+        if (bsdf)
+        {
+            // A thin pane in the sun's way: the light goes on through it, and each further round takes it past one more (three panes in all, then the last stops at anything).
+            RecordClosestBatch(referenceSunBatch2, w.SunRays, w.SunHits, count, frameSeed ^ 0x5bd1e995u, on, instances: bsdf);
+            graph.Dispatch(referenceWaveResolve2Pass, Wave(2));
+            RecordClosestBatch(referenceSunBatch3, w.SunRays, w.SunHits, count, frameSeed ^ 0x5bd1e995u, on, instances: bsdf);
+            graph.Dispatch(referenceWaveResolve3Pass, Wave(3));
+        }
         w.Dispatch++;
     }
 

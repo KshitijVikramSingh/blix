@@ -4661,10 +4661,12 @@ static ShaderInterface MinimalShader() => new(new[]
 
         // The selector's thresholds are a convention restated in both files, and restating is how
         // the two come to disagree.
-        t.Expect("BD.2 the mode thresholds still read 0.5 / 1.5 / 2.5 in the shader",
+        t.Expect("BD.2 the mode thresholds still read 0.5 / 1.5 / 2.5 / 3.5 / 4.5 in the shader",
             glsl.Contains("mode < 0.5", StringComparison.Ordinal)
             && glsl.Contains("mode < 1.5", StringComparison.Ordinal)
-            && glsl.Contains("mode < 2.5", StringComparison.Ordinal),
+            && glsl.Contains("mode < 2.5", StringComparison.Ordinal)
+            && glsl.Contains("mode < 3.5", StringComparison.Ordinal)
+            && glsl.Contains("mode < 4.5", StringComparison.Ordinal),
             "blix_tonemap's selector changed shape");
     }
 
@@ -4694,10 +4696,59 @@ static ShaderInterface MinimalShader() => new(new[]
     // one curve answering for all four, and four modes that agree with each other is exactly what
     // that looks like from the outside.
     var hdr = new Vector3(0.6f, 0.35f, 0.12f);
-    var picked = new[] { 0f, 1f, 2f, 3f }.Select(m => Tonemap.Apply(hdr, m).X).ToArray();
-    t.Expect("BD.7 the four modes give four different answers",
-        picked.Distinct().Count() == 4,
+    var picked = new[] { 0f, 1f, 2f, 3f, 4f, 5f }.Select(m => Tonemap.Apply(hdr, m).X).ToArray();
+    t.Expect("BD.7 the six modes give six different answers",
+        picked.Distinct().Count() == 6,
         string.Join(", ", picked.Select(v => v.ToString("0.0000"))));
+
+    // <b>GT7's numbers are generated, and both copies are held to the generated text and to the python's answers.</b>
+    // gt7_params.glsl and Gt7Presets.Generated.cs come from lab/tonemap/tools/generate_gt7_constants.py (nobody types a GT7
+    // parameter here); gt7_golden.json is what lab/tonemap/tmlab/gt7.py returns for a fixed set of inputs. The shader's arithmetic is
+    // compared with the python's per pixel by the lab's own tests (tests/test_glsl_parity.py, test_gamut.py); here the C# twin is.
+    var paramsPath = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "Blix.Shaders", "gt7_params.glsl");
+    var paramsGlsl = File.Exists(paramsPath) ? File.ReadAllText(paramsPath) : null;
+    t.Expect("BD.8 CONTROL gt7_params.glsl was actually read", paramsGlsl is { Length: > 200 }, paramsGlsl is null ? $"not found at {Path.GetFullPath(paramsPath)}" : "");
+    if (paramsGlsl is not null)
+    {
+        foreach (var (name, p) in new[] { ("PUBLISHED", Gt7Presets.Published), ("TUNED", Gt7Presets.Tuned) })
+        {
+            var m = Regex.Match(paramsGlsl, $@"BLIX_GT7_{name} = Gt7Params\(([^)]*)\)");
+            var parts = m.Success ? m.Groups[1].Value.Split(',').Select(x => float.Parse(x, System.Globalization.CultureInfo.InvariantCulture)).ToArray() : Array.Empty<float>();
+            var want = new[] { p.Alpha, p.GrayPoint, p.LinearSection, p.ToeStrength, p.BlendRatio, p.FadeStart, p.FadeEnd, p.ShoulderTail };
+            t.Expect($"BD.9 the {name} parameter set in gt7_params.glsl equals Gt7Presets.{name}",
+                parts.Length == 10 && want.Zip(parts).All(z => MathF.Abs(z.First - z.Second) <= 1e-7f * MathF.Max(1f, MathF.Abs(z.First))),
+                m.Success ? $"glsl: {string.Join(", ", parts)}" : "constructor not found");
+        }
+    }
+
+    var goldenPath = Path.Combine(AppContext.BaseDirectory, "fixtures", "gt7_golden.json");
+    t.Expect("BD.10 CONTROL gt7_golden.json was actually read", File.Exists(goldenPath), $"not found at {goldenPath}");
+    if (File.Exists(goldenPath))
+    {
+        using var golden = System.Text.Json.JsonDocument.Parse(File.ReadAllText(goldenPath));
+        var root = golden.RootElement;
+        var inputs = root.GetProperty("inputs").EnumerateArray().Select(r => r.EnumerateArray().Select(v => v.GetSingle()).ToArray()).ToArray();
+        var peak = root.GetProperty("hdr_peak_nits").GetSingle();
+        var white = root.GetProperty("sdr_white_nits").GetSingle();
+        foreach (var (key, f) in new (string, Func<Vector3, Vector3>)[]
+        {
+            ("sdr_published", v => Tonemap.Gt7Sdr(v, Gt7Presets.Published)),
+            ("sdr_tuned", v => Tonemap.Gt7Sdr(v, Gt7Presets.Tuned)),
+            ($"hdr{(int)peak}_published", v => Tonemap.Gt7Hdr(v, Gt7Presets.Published, peak, white)),
+            ($"hdr{(int)peak}_tuned", v => Tonemap.Gt7Hdr(v, Gt7Presets.Tuned, peak, white)),
+        })
+        {
+            var want = root.GetProperty("outputs").GetProperty(key).EnumerateArray().Select(r => r.EnumerateArray().Select(v => v.GetSingle()).ToArray()).ToArray();
+            var worst = 0f;
+            for (var i = 0; i < inputs.Length; i++)
+            {
+                var got = f(new Vector3(inputs[i][0], inputs[i][1], inputs[i][2]));
+                worst = MathF.Max(worst, MathF.Max(MathF.Abs(got.X - want[i][0]) - 1e-3f * MathF.Abs(want[i][0]),
+                    MathF.Max(MathF.Abs(got.Y - want[i][1]) - 1e-3f * MathF.Abs(want[i][1]), MathF.Abs(got.Z - want[i][2]) - 1e-3f * MathF.Abs(want[i][2]))));
+            }
+            t.Expect($"BD.11 Tonemap.{key} matches gt7.py on {inputs.Length} inputs (float32 against float64: 5e-4 absolute plus 1e-3 relative)", worst <= 5e-4f, $"worst excess over 1e-3 relative: {worst:0.000000}");
+        }
+    }
 }
 
 // ============================================================================
@@ -6659,7 +6710,7 @@ static ShaderInterface MinimalShader() => new(new[]
         var scene = RayQueryScene.Build(placements, regionTriangles: 12000);
         var packed = RayQueryGpuData.Pack(scene);
         var surfaces = new uint[packed.RowPlacements.Length];
-        for (var r = 0; r < surfaces.Length; r++) surfaces[r] = (uint)(r % 3 == 0 ? 255 : rng.Next(256)) << 24 | 0xFFFFFFu;
+        for (var r = 0; r < surfaces.Length; r++) surfaces[r] = RayQueryGpuData.Pack(255, 255, 255, r % 3 == 0 ? 16 : rng.Next(17), rng.Next(8));
         packed.ApplyCoverage(surfaces);
 
         (float T, int Inst, int Tri)? Walk(Ray ray, uint seed)
@@ -6690,7 +6741,7 @@ static ShaderInterface MinimalShader() => new(new[]
                         var at = (int)row * 4;
                         var p0 = packed.Positions[packed.Triangles[at]]; var p1 = packed.Positions[packed.Triangles[at + 1]]; var p2 = packed.Positions[packed.Triangles[at + 2]];
                         if (RayTests.Triangle(local, new Vector3(p0.X, p0.Y, p0.Z), new Vector3(p1.X, p1.Y, p1.Z), new Vector3(p2.X, p2.Y, p2.Z), 0f, t, out var th, out _, out _)
-                            && RayTests.Covered((byte)(surfaces[row] >> 24), seed,
+                            && RayTests.Covered(RayQueryGpuData.CoverageByte(surfaces[row]), seed,
                                 inst.Placement != RayQueryGpuData.RegionPlacement ? inst.Placement : packed.Owners[packed.Triangles[at + 3] * 2],
                                 inst.Placement != RayQueryGpuData.RegionPlacement ? packed.Triangles[at + 3] : packed.Owners[packed.Triangles[at + 3] * 2 + 1] & 0x7FFFFFFFu))
                         {
@@ -6802,6 +6853,237 @@ static ShaderInterface MinimalShader() => new(new[]
     t.ExpectTrue("BY.6 a device without GraphicsFeatures.MetalObjects says so", (plain.Features & GraphicsFeatures.MetalObjects) == 0);
     t.ExpectThrows("BY.6 and refuses to export a Metal device", () => plain.ExportMetalDevice(), mustMention: "MetalObjects");
     t.ExpectThrows("BY.6 or a Metal buffer", () => plain.ExportMetalBuffer(default), mustMention: "MetalObjects");
+}
+
+// ============================================================================
+// Section BZ — the diffuse lobe is EON, and the shader's EON answers to the lab's.
+// ============================================================================
+//
+// <b>The fixed Lambert lobe (albedo / pi) is gone from the lit path; the lobe is EON</b> (Portsmouth, Kutz, Hill 2025, the energy-preserving
+// Oren-Nayar), in Blix.Shaders/diffuse_eon.glsl. The reference is lab/bsdf/bsdflab/eon.py, held to the paper's claims by the lab's own tests
+// (Lambert at r = 0, reciprocity, a white surface conserves energy at every roughness) and to the shader per pixel by lab/bsdf/tests/test_eon_gpu.py
+// (the TonemapLab demo renders the GLSL's answers). This section is the engine's side, in the same arrangement as Section BE: a TEST-LOCAL C# twin
+// (EonTwin; shipping a second evaluator is what the shader-vocabulary rule forbids) held to golden values the python generates
+// (fixtures/eon_golden.json) and to the shader's text, so a constant that drifts in one file is a failure and not a picture.
+{
+    var eonPath = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "Blix.Shaders", "diffuse_eon.glsl");
+    var eonGlsl = File.Exists(eonPath) ? File.ReadAllText(eonPath) : null;
+    t.Expect("BZ.0 CONTROL diffuse_eon.glsl was actually read", eonGlsl is { Length: > 500 } && eonGlsl.Contains("blix_eonBrdf", StringComparison.Ordinal),
+        eonGlsl is null ? $"not found at {Path.GetFullPath(eonPath)}" : $"{eonGlsl.Length} chars");
+
+    if (eonGlsl is not null)
+    {
+        foreach (var literal in new[] { "0.5 - 2.0 / (3.0 * BLIX_PI)", "2.0 / 3.0 - 28.0 / (15.0 * BLIX_PI)",
+                     "0.0571085289", "0.491881867", "-0.332181442", "0.0714429953" })
+            t.Expect($"BZ.1 the paper's constant {literal} still appears in diffuse_eon.glsl", eonGlsl.Contains(literal, StringComparison.Ordinal),
+                "the shader's EON no longer matches the paper's constants (and so the twin)");
+    }
+
+    var goldenPath = Path.Combine(AppContext.BaseDirectory, "fixtures", "eon_golden.json");
+    t.Expect("BZ.2 CONTROL eon_golden.json was actually read", File.Exists(goldenPath), $"not found at {goldenPath}");
+    if (File.Exists(goldenPath))
+    {
+        using var golden = System.Text.Json.JsonDocument.Parse(File.ReadAllText(goldenPath));
+        float[] Rgb(System.Text.Json.JsonElement e) => e.EnumerateArray().Select(v => v.GetSingle()).ToArray();
+        var worstF = 0f;
+        var nF = 0;
+        foreach (var c in golden.RootElement.GetProperty("f_eon_times_pi").EnumerateArray())
+        {
+            var rho = Rgb(c.GetProperty("rho"));
+            var want = Rgb(c.GetProperty("pi_f"));
+            var got = EonTwin.Brdf(new Vector3(rho[0], rho[1], rho[2]), c.GetProperty("r").GetSingle(), c.GetProperty("n_dot_l").GetSingle(),
+                c.GetProperty("n_dot_v").GetSingle(), c.GetProperty("l_dot_v").GetSingle()) * MathF.PI;
+            worstF = MathF.Max(worstF, MathF.Max(MathF.Abs(got.X - want[0]) / MathF.Max(want[0], 0.05f),
+                MathF.Max(MathF.Abs(got.Y - want[1]) / MathF.Max(want[1], 0.05f), MathF.Abs(got.Z - want[2]) / MathF.Max(want[2], 0.05f))));
+            nF++;
+        }
+        t.Expect($"BZ.3 the C# twin's f_EON matches the python's on {nF} (rho, r, angles) cases", nF > 100 && worstF < 2e-4f, $"worst relative error {worstF:0.000000}");
+
+        var worstA = 0f;
+        var nA = 0;
+        foreach (var c in golden.RootElement.GetProperty("albedo").EnumerateArray())
+        {
+            var rho = Rgb(c.GetProperty("rho"));
+            var want = Rgb(c.GetProperty("albedo"));
+            var got = EonTwin.Albedo(new Vector3(rho[0], rho[1], rho[2]), c.GetProperty("r").GetSingle(), c.GetProperty("n_dot_v").GetSingle());
+            worstA = MathF.Max(worstA, MathF.Max(MathF.Abs(got.X - want[0]), MathF.Max(MathF.Abs(got.Y - want[1]), MathF.Abs(got.Z - want[2]))));
+            nA++;
+        }
+        t.Expect($"BZ.4 and its directional albedo (Eq. 20) on {nA} cases", nA > 50 && worstA < 2e-5f, $"worst absolute error {worstA:0.000000}");
+
+        var worstH = 0f;
+        var nH = 0;
+        foreach (var c in golden.RootElement.GetProperty("hemispherical_albedo").EnumerateArray())
+        {
+            var rho = Rgb(c.GetProperty("rho"));
+            var want = Rgb(c.GetProperty("hemispherical_albedo"));
+            var got = EonTwin.HemisphericalAlbedo(new Vector3(rho[0], rho[1], rho[2]), c.GetProperty("r").GetSingle());
+            worstH = MathF.Max(worstH, MathF.Max(MathF.Abs(got.X - want[0]), MathF.Max(MathF.Abs(got.Y - want[1]), MathF.Abs(got.Z - want[2]))));
+            nH++;
+        }
+        t.Expect($"BZ.4 and the hemispherical albedo the transport bakes, on {nH} cases", nH > 10 && worstH < 2e-5f, $"worst absolute error {worstH:0.000000}");
+    }
+
+    // The properties the paper claims, on the twin: Lambert at r = 0, and nothing lost on a white surface at any roughness.
+    var lambertWorst = 0f;
+    foreach (var (mi, mo, ld) in new[] { (0.9f, 0.9f, 0.81f), (0.3f, 0.8f, 0.2f), (0.05f, 0.5f, -0.1f) })
+        lambertWorst = MathF.Max(lambertWorst, MathF.Abs(EonTwin.Brdf(new Vector3(0.6f), 0f, mi, mo, ld).X - 0.6f / MathF.PI));
+    t.Expect("BZ.5 at r = 0 the lobe is Lambert exactly", lambertWorst < 1e-6f, $"worst {lambertWorst}");
+
+    var energyWorst = 0f;
+    foreach (var r in new[] { 0.3f, 0.7f, 1.0f })
+        foreach (var muO in new[] { 0.1f, 0.5f, 0.9f })
+            energyWorst = MathF.Max(energyWorst, MathF.Abs(EonTwin.NumericAlbedo(1f, r, muO) - 1f));
+    t.Expect("BZ.6 a white surface reflects all of the light at every roughness (quadrature, 8e-3: the paper's quartic fit)", energyWorst < 8e-3f, $"worst deviation {energyWorst:0.0000}");
+
+    // The wiring: the lit shader asks EON for the sun, the irradiance cache and the sky, and no Lambert expression is left beside them.
+    var litPath = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "Demos", "Blix.Demos.VulkanSponza", "Shaders", "lit_body.glsl");
+    var lit = File.Exists(litPath) ? File.ReadAllText(litPath) : null;
+    t.Expect("BZ.7 CONTROL lit_body.glsl was actually read", lit is { Length: > 5000 }, lit is null ? $"not found at {Path.GetFullPath(litPath)}" : $"{lit.Length} chars");
+    if (lit is not null)
+    {
+        t.Expect("BZ.8 the lit shader includes diffuse_eon.glsl and calls both of its entry points",
+            lit.Contains("diffuse_eon.glsl", StringComparison.Ordinal) && lit.Contains("blix_eonBrdf", StringComparison.Ordinal)
+            && lit.Contains("blix_eonAlbedo", StringComparison.Ordinal), "the lit path no longer evaluates EON");
+        t.Expect("BZ.9 and no fixed Lambert expression is left in the diffuse terms (sun, sheet glow, sky, bounce)",
+            !lit.Contains("kDsun * albedo / PI", StringComparison.Ordinal) && !lit.Contains("incident * albedo / PI", StringComparison.Ordinal)
+            && !lit.Contains("irradiance * albedo / PI", StringComparison.Ordinal), "a fixed albedo / PI diffuse term is back");
+    }
+
+    // The surface word's top byte carries the coverage (sixteenths, bits 4..0) and the diffuse roughness level (bits 7..5); the decoders agree.
+    t.Expect("BZ.13 the unbaked word is solid and the packer round-trips coverage, roughness level and albedo bytes",
+        RayQueryGpuData.CoverageByte(RayQueryGpuData.SolidWhite) == 255
+        && Enumerable.Range(0, 17).All(c => Enumerable.Range(0, 8).All(l =>
+            RayQueryGpuData.Pack(10, 20, 30, c, l) is var w && RayQueryGpuData.CoverageSixteenths(w) == c && RayQueryGpuData.Roughness(w) == RayQueryGpuData.SurfaceRoughness[l]
+            && (w & 0xFF) == 10 && ((w >> 8) & 0xFF) == 20 && ((w >> 16) & 0xFF) == 30
+            && RayQueryGpuData.CoverageByte(w) == (c >= 16 ? 255 : c * 16))),
+        "the surface word's packing and decoding disagree");
+    t.Expect("BZ.14 the roughness table matches the shader's and the Metal tracer's, and the nearest level is the one stored",
+        RayQueryGpuData.SurfaceRoughness.Length == 8
+        && RayQueryGpuData.RoughnessLevel(0.0f) == 0 && RayQueryGpuData.RoughnessLevel(1.0f) == 7 && RayQueryGpuData.RoughnessLevel(0.62f) == 3 && RayQueryGpuData.RoughnessLevel(0.66f) == 4,
+        string.Join(", ", RayQueryGpuData.SurfaceRoughness));
+    foreach (var (file, text) in new[] { ("ray_query.glsl", "0.0, 0.2, 0.4, 0.55, 0.7, 0.8, 0.9, 1.0"), ("blix_hwx.mm", "0.0f, 0.2f, 0.4f, 0.55f, 0.7f, 0.8f, 0.9f, 1.0f") })
+    {
+        var path = file == "ray_query.glsl" ? Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "Blix.Shaders", file)
+                                            : Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "Blix.Graphics.MetalHWX", "native", file);
+        t.Expect($"BZ.15 {file} carries the same eight roughness levels", File.Exists(path) && File.ReadAllText(path).Contains(text, StringComparison.Ordinal), $"not found or different: {path}");
+    }
+
+    // The transport: the rays' surface bake stores EON's hemispherical albedo (the fraction of arriving light a patch sends back, whichever way), so every
+    // bounce (the patch solve, the gather's hits, the probes, both references) loses what the roughness loses. Two dispatch sites bake surfaces; both must say so.
+    var demo = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "Demos", "Blix.Demos.VulkanSponza");
+    var bakeShader = File.Exists(Path.Combine(demo, "Shaders", "ray_surface_bake.comp")) ? File.ReadAllText(Path.Combine(demo, "Shaders", "ray_surface_bake.comp")) : null;
+    t.Expect("BZ.10 CONTROL ray_surface_bake.comp was actually read", bakeShader is { Length: > 1000 }, bakeShader is null ? "not found" : $"{bakeShader.Length} chars");
+    if (bakeShader is not null)
+        t.Expect("BZ.11 the surface bake stores EON's hemispherical albedo at the material's diffuse roughness",
+            bakeShader.Contains("diffuse_eon.glsl", StringComparison.Ordinal) && bakeShader.Contains("blix_eonHemisphericalAlbedo", StringComparison.Ordinal)
+            && bakeShader.Contains("uMetallicRoughness", StringComparison.Ordinal), "the transport's albedo is the base colour again");
+    foreach (var site in new[] { "SponzaLoop.RayScene.cs" })   // the bake scene (SponzaLoop.BakeScene.cs) went with the texel GI
+    {
+        var source = File.Exists(Path.Combine(demo, site)) ? File.ReadAllText(Path.Combine(demo, site)) : "";
+        t.Expect($"BZ.12 {site} dispatches the bake with the diffuse inputs",
+            source.Contains("BakeDiffuse(material)", StringComparison.Ordinal) && source.Contains("BakeMetallicRoughness(material)", StringComparison.Ordinal),
+            "a surface-bake dispatch omits uDiffuse or uMetallicRoughness (the shader would read an unbound uniform and texture)");
+    }
+
+    // The rays' per-hit alpha test (RayAlphaAtlas): the trailer's layout, its bilinear lookup, and the three twins that read it.
+    {
+        var uvs = new[] { new Vector2(0f, 0f), new Vector2(1f, 0f), new Vector2(0f, 1f) };
+        var plan = RayAlphaAtlas.Build(new uint[] { 0u, RayAlphaAtlas.None }, new[] { new RayAlphaAtlas.Material(4, 2, 0.5f) }, uvs);
+        var words = plan.Words;
+        t.Expect("CA.1 the trailer's header names its tables", RayAlphaAtlas.IsTrailer(words) && words[1] == 2 && words[2] == 1 && words[3] == 3
+            && words[(int)words[4]] == 0u && words[(int)words[4] + 1] == RayAlphaAtlas.None && words[7] == (uint)plan.AtlasStart(0),
+            string.Join(" ", words.Take(8)));
+        // An 4x2 alpha: the left half 0, the right half 255 (bytes row by row, four to a word, low byte first).
+        words[plan.AtlasStart(0)] = 0xFF_FF_00_00u;
+        words[plan.AtlasStart(0) + 1] = 0xFF_FF_00_00u;
+        t.Expect("CA.2 texel centres read their own byte, the edge between them the mean",
+            MathF.Abs(RayAlphaAtlas.Alpha(words, 0, new Vector2(0.125f, 0.25f))) < 1e-6f
+            && MathF.Abs(RayAlphaAtlas.Alpha(words, 0, new Vector2(0.875f, 0.25f)) - 1f) < 1e-6f
+            && MathF.Abs(RayAlphaAtlas.Alpha(words, 0, new Vector2(0.5f, 0.25f)) - 0.5f) < 1e-6f,
+            $"{RayAlphaAtlas.Alpha(words, 0, new Vector2(0.125f, 0.25f))} {RayAlphaAtlas.Alpha(words, 0, new Vector2(0.875f, 0.25f))} {RayAlphaAtlas.Alpha(words, 0, new Vector2(0.5f, 0.25f))}");
+        t.Expect("CA.3 the texture wraps, as glTF's default sampler does",
+            MathF.Abs(RayAlphaAtlas.Alpha(words, 0, new Vector2(1.875f, 0.25f)) - 1f) < 1e-6f && MathF.Abs(RayAlphaAtlas.Alpha(words, 0, new Vector2(-0.125f, 0.25f)) - 1f) < 1e-6f
+            && RayAlphaAtlas.Passes(words, 0, new Vector2(0.875f, 0.25f)) && !RayAlphaAtlas.Passes(words, 0, new Vector2(0.125f, 0.25f)),
+            "a coordinate outside 0..1 read the wrong texel");
+        t.Expect("CA.4 the vertex coordinates interpolate as the shaders do",
+            RayAlphaAtlas.UvAt(words, 0, 1, 2, new Vector2(0.25f, 0.5f)) == new Vector2(0.25f, 0.5f), RayAlphaAtlas.UvAt(words, 0, 1, 2, new Vector2(0.25f, 0.5f)).ToString());
+        var geometry = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..");
+        foreach (var (file, path, texts) in new[]
+        {
+            ("ray_query.glsl", Path.Combine(geometry, "Blix.Shaders", "ray_query.glsl"), new[] { "0xA17A0001u", "trailer + blix_surfaces[trailer + 5u] + material * 4u", "uv0 * (1.0 - bc.x - bc.y) + uv1 * bc.x + uv2 * bc.y", "blix_triangles.length()", "(blix_surfaces[at + 3u] & 1u) != 0u", "blix_pcg(seed + blix_pcg(placement * 0x9E3779B9u + triangle)) >> 8u" }),
+            ("blix_hwx.mm", Path.Combine(geometry, "Blix.Graphics.MetalHWX", "native", "blix_hwx.mm"), new[] { "0xA17A0001u", "trailer + surfaces[trailer + 5u] + material * 4u", "uv0 * (1.0f - bary.x - bary.y) + uv1 * bary.x + uv2 * bary.y", "alpha.enabled == 2u", "alpha.enabled == 1u", "(surfaces[at + 3u] & 1u) != 0u", "blix_pcg(seed + blix_pcg(placement * 0x9E3779B9u + triangle)) >> 8u" }),
+        })
+        {
+            var source = File.Exists(path) ? File.ReadAllText(path) : "";
+            t.Expect($"CA.5 {file} reads the trailer as RayAlphaAtlas lays it out", RayAlphaAtlas.Magic == 0xA17A0001u && texts.All(x => source.Contains(x, StringComparison.Ordinal)),
+                $"missing: {string.Join(" | ", texts.Where(x => !source.Contains(x, StringComparison.Ordinal)))}");
+        }
+        // The CPU's traversal meets a partly covered triangle by the same alpha: a quad of two triangles, half cut, on one placement.
+        {
+            var bvh = TriangleBvh.Build(new[] { new Vector3(0, 0, 0), new Vector3(1, 0, 0), new Vector3(0, 1, 0) }, new uint[] { 0, 1, 2 });
+            bvh.Coverage = new byte[] { 128 };
+            var ray = new ShearedRay(new Vector3(0.1f, 0.1f, 1f), new Vector3(0, 0, -1));
+            var keyCoin = new RayCoverageKey(1, 0);
+            var keyAlpha = new RayCoverageKey(1, 0, null, null, words, uvs);
+            // The triangle's uv at the hit (0.1, 0.1) is (0.1, 0.1): the cut-out half of the alpha. At (0.9, 0.05) it is the kept half.
+            var cut = bvh.Closest(ray, 0f, 10f, keyAlpha, out _, out _, out _, out _);
+            var kept = bvh.Closest(new ShearedRay(new Vector3(0.9f, 0.05f, 1f), new Vector3(0, 0, -1)), 0f, 10f, keyAlpha, out _, out _, out _, out _);
+            t.Expect("CA.6 the CPU traversal meets a partly covered triangle by the alpha at the hit, not by the coin", !cut && kept,
+                $"cut-out side hit {cut}, kept side hit {kept}");
+            _ = keyCoin;
+        }
+        // Authored BLEND: a ray is stopped with the probability of the alpha, against its own number for the triangle (the number the shaders hash alike).
+        {
+            var blend = RayAlphaAtlas.Build(new uint[] { 0u }, new[] { new RayAlphaAtlas.Material(1, 1, 0.5f, Stochastic: true) }, uvs);
+            blend.Words[blend.AtlasStart(0)] = 0x80u;   // alpha 128/255
+            var passed = 0;
+            for (uint seed = 0; seed < 8192; seed++)
+                if (RayAlphaAtlas.Passes(blend.Words, 0, new Vector2(0.3f, 0.3f), RayAlphaAtlas.Random(seed, 0, 7))) passed++;
+            var share = passed / 8192f;
+            blend.Words[blend.AtlasStart(0)] = 0u;
+            var none = RayAlphaAtlas.Passes(blend.Words, 0, new Vector2(0.3f, 0.3f), RayAlphaAtlas.Random(1, 0, 7));
+            t.Expect("CA.7 a stochastic material passes in proportion to its alpha, and never where it is 0", MathF.Abs(share - 128f / 255f) < 0.03f && !none,
+                $"passed {share:0.000} of rays at alpha {128f / 255f:0.000}; alpha 0 passed {none}");
+        }
+    }
+}
+
+// The material layers' twins (lab/bsdf): the python is the reference, bsdf_gltf.glsl and iridescence.glsl follow it, and the lit shader reads the material the scene writes. None of this needs a
+// GPU: the numbers a twin must share, and the names the C# and the shader must agree on, are text. (tests/test_gltf_gpu.py holds the GLSL to the python per pixel, on the GPU.)
+{
+    var shaders = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "Blix.Shaders");
+    var lab = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "lab", "bsdf", "bsdflab");
+    var demoDir = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "Demos", "Blix.Demos.VulkanSponza");
+    string Read(string path) => File.Exists(path) ? File.ReadAllText(path) : "";
+    var film = Read(Path.Combine(shaders, "iridescence.glsl"));
+    var filmPy = Read(Path.Combine(lab, "gltf_bsdf.py"));
+    var literal = new System.Text.RegularExpressions.Regex(@"\d+\.\d+e[+-]?\d+");
+    double[] Constants(string text) => literal.Matches(text).Select(m => double.Parse(m.Value, System.Globalization.CultureInfo.InvariantCulture)).Order().ToArray();
+    var glslFilm = Constants(film);
+    var pyFilm = Constants(filmPy[filmPy.IndexOf("def _sensitivity", StringComparison.Ordinal)..filmPy.IndexOf("def _smoothstep", StringComparison.Ordinal)]);
+    t.Expect("CB.1 the thin film's sensitivity constants are the python's", glslFilm.Length >= 10 && glslFilm.SequenceEqual(pyFilm),
+        $"glsl {string.Join(" ", glslFilm)} | python {string.Join(" ", pyFilm)}");
+    var bsdf = Read(Path.Combine(shaders, "bsdf_gltf.glsl"));
+    foreach (var (glsl, py, what) in new[]
+    {
+        ("0.25 * m.clearcoat", "0.25 * m.clearcoat", "the coat's lobe weight"),
+        ("0.3 * max(m.sheenColor.x", "0.3 * max(m.sheen_color)", "the sheen's lobe weight"),
+        ("1.0 / 24.0", "SHEEN_QUADRATURE = (24, 16)", "the sheen albedo's grid"),
+        ("clamp(ior * 2.0 - 2.0, 0.0, 1.0)", "np.clip(self.ior * 2.0 - 2.0, 0.0, 1.0)", "the thin sheet's roughness scale"),
+        ("0.04 + 0.96 * pow(1.0 - clamp(wo.z, 0.0, 1.0), 5.0)", "0.04 + 0.96 * (1.0 - np.clip(wo[..., 2], 0.0, 1.0)) ** 5", "the coat's Fresnel toward the view"),
+    })
+        t.Expect($"CB.2 the BSDF twin and the python agree on {what}", bsdf.Contains(glsl, StringComparison.Ordinal) && filmPy.Contains(py, StringComparison.Ordinal),
+            $"glsl has it: {bsdf.Contains(glsl, StringComparison.Ordinal)}; python has it: {filmPy.Contains(py, StringComparison.Ordinal)}");
+    // The lit shader reads every uniform the scene writes into the material block, and the passes' texture list names what the shader declares.
+    var lit = Read(Path.Combine(demoDir, "Shaders", "lit_body.glsl"));
+    var scene = Read(Path.Combine(demoDir, "SponzaLoop.Scene.cs"));
+    var written = System.Text.RegularExpressions.Regex.Matches(scene, "SetUniform\\(binding: 0, \"(u[A-Za-z0-9]+)\"").Select(m => m.Groups[1].Value).Distinct().ToArray();
+    var missing = written.Where(u => !System.Text.RegularExpressions.Regex.IsMatch(lit, "\\b" + u + "\\b")).ToArray();
+    t.Expect("CB.3 every uniform the scene writes into the material is declared by the lit shader", written.Length > 8 && missing.Length == 0, $"missing: {string.Join(", ", missing)}");
+    var setup = Read(Path.Combine(demoDir, "SponzaLoop.Setup.cs"));
+    var behind = Enumerable.Range(0, 5).Where(k => !lit.Contains($"uBehind{k};", StringComparison.Ordinal) || !setup.Contains($"\"uBehind{k}\"", StringComparison.Ordinal)).ToArray();
+    t.Expect("CB.4 the scene-behind textures are declared by the lit shader and bound by the pass list", behind.Length == 0, $"levels without both: {string.Join(", ", behind)}");
 }
 
 t.PrintSummary();
@@ -7007,6 +7289,75 @@ sealed class RecordingDevice : IGraphicsDevice
     public void DestroyRenderSurface(RenderSurfaceHandle handle) => throw No();
     public ResourceRegistrySnapshot SnapshotResources() => throw No();
     public void Dispose() { }
+}
+
+/// <summary>
+/// A TEST-LOCAL C# twin of Blix.Shaders/diffuse_eon.glsl (EON, Portsmouth, Kutz, Hill 2025), for Section BZ. Test-local on purpose: the
+/// shader is the one evaluator, and this exists so the paper's claims and the python's values are assertable without a GPU.
+/// </summary>
+static class EonTwin
+{
+    private const float Pi = 3.14159265359f;
+    private static readonly float C1 = 0.5f - 2.0f / (3.0f * Pi);
+    private static readonly float C2 = 2.0f / 3.0f - 28.0f / (15.0f * Pi);
+
+    public static float E(float mu, float r)
+    {
+        var m = 1.0f - Math.Clamp(mu, 0f, 1f);
+        var gOverPi = m * (0.0571085289f + m * (0.491881867f + m * (-0.332181442f + m * 0.0714429953f)));
+        return (1.0f + r * gOverPi) / (1.0f + C1 * r);
+    }
+
+    public static float AvgE(float r) => (1.0f + C2 * r) / (1.0f + C1 * r);
+
+    public static Vector3 Brdf(Vector3 rho, float r, float nDotL, float nDotV, float lDotV)
+    {
+        var muI = Math.Clamp(nDotL, 0f, 1f);
+        var muO = Math.Clamp(nDotV, 1e-4f, 1f);
+        var s = lDotV - muI * muO;
+        var sOverT = s > 0f ? s / MathF.Max(MathF.Max(muI, muO), 1e-7f) : s;
+        var a = 1.0f / (1.0f + C1 * r);
+        var fSs = rho / Pi * a * (1.0f + r * sOverT);
+        var avgE = AvgE(r);
+        var rhoMs = rho * rho * avgE / (Vector3.One - rho * (1.0f - avgE));
+        var shape = MathF.Max(1e-7f, 1.0f - E(muI, r)) * MathF.Max(1e-7f, 1.0f - E(muO, r)) / MathF.Max(1e-7f, 1.0f - avgE);
+        return fSs + rhoMs / Pi * shape;
+    }
+
+    public static Vector3 Albedo(Vector3 rho, float r, float nDotV)
+    {
+        var muO = Math.Clamp(nDotV, 1e-4f, 1f);
+        var e = E(muO, r);
+        var avgE = AvgE(r);
+        var rhoMs = rho * rho * avgE / (Vector3.One - rho * (1.0f - avgE));
+        return rho * e + rhoMs * (1.0f - e);
+    }
+
+    public static Vector3 HemisphericalAlbedo(Vector3 rho, float r)
+    {
+        var avgE = AvgE(r);
+        var rhoMs = rho * rho * avgE / (Vector3.One - rho * (1.0f - avgE));
+        return rho * avgE + rhoMs * (1.0f - avgE);
+    }
+
+    /// <summary>The integral of f cos over the hemisphere by the midpoint rule in (mu, phi): the albedo as the BRDF itself gives it.</summary>
+    public static float NumericAlbedo(float rho, float r, float muO, int n = 256)
+    {
+        var sinO = MathF.Sqrt(1f - muO * muO);
+        var sum = 0.0;
+        for (var i = 0; i < n; i++)
+        {
+            var muI = (i + 0.5f) / n;
+            var sinI = MathF.Sqrt(1f - muI * muI);
+            for (var j = 0; j < n; j++)
+            {
+                var phi = (j + 0.5f) * 2f * Pi / n;
+                var lDotV = sinI * sinO * MathF.Cos(phi) + muI * muO;
+                sum += Brdf(new Vector3(rho), r, muI, muO, lDotV).X * muI;
+            }
+        }
+        return (float)(sum * (1.0 / n) * (2.0 * Math.PI / n));
+    }
 }
 
 /// <summary>Reflection handed to the generator in memory, as the compiler hands it an AdditionalFile.</summary>

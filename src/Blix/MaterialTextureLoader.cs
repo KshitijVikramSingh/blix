@@ -19,7 +19,10 @@ public readonly record struct MaterialTextures(
     // KHR_materials_diffuse_transmission's factor texture: its ALPHA times diffuseTransmissionFactor is the share of the
     // diffuse light that goes through (the spec; OpenPBR's thin-walled subsurface splits the same way). Linear, WHITE by
     // default: an absent texture leaves the factor as authored.
-    TextureHandle DiffuseTransmission);
+    TextureHandle DiffuseTransmission,
+    // KHR_materials_volume's thickness texture: its G channel times thicknessFactor is the thickness, in metres. Linear, WHITE by default: an absent texture
+    // leaves the factor as authored.
+    TextureHandle Thickness);
 
 // Engine glTF texture loader — the asset-pipeline half of material handling:
 // read/decode/upload/dedup/stream a material's textures into GPU handles. Owns
@@ -125,7 +128,8 @@ public sealed class MaterialTextureLoader : IDisposable
         // multiplier that changes nothing), and one texture rather than a second identical one.
         Resolve(material?.Ext.DiffuseTransmissionColorTexture, fallbackAlbedo, TextureFormat.Rgba8Srgb,
                 "diffuse-transmission colour"),
-        Resolve(material?.Ext.DiffuseTransmissionTexture, defaultAo, TextureFormat.Rgba8, "diffuse-transmission"));
+        Resolve(material?.Ext.DiffuseTransmissionTexture, defaultAo, TextureFormat.Rgba8, "diffuse-transmission"),
+        Resolve(material?.Ext.ThicknessTexture, defaultAo, TextureFormat.Rgba8, "thickness"));
 
     /// <summary>Every material on the defaults (white albedo, flat normal, ...), nothing uploaded: a renderer's cost
     /// without its textures' bandwidth and memory. Set before the first <see cref="Load"/>.</summary>

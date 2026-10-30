@@ -50,6 +50,9 @@ layout(set = 0, binding = 0) uniform Frame {
     //   z  skip the specular IBL lookups and the split-sum. Prices IBL whole.
     //   w  skip the normal map sample and the tangent-space transform.
     vec4  uAbFlags;
+    // The diffuse lobe. x: 1 EON (the energy-preserving Oren-Nayar, Blix.Shaders/diffuse_eon.glsl), 0 the old fixed Lambert (--diffuse lambert, or
+    // --ab diffuse's off phase). y: the scale from the material's roughness to the diffuse roughness r (r = roughness * y, clamped to 0..1).
+    vec4  uDiffuseModel;
     // --viz N: write one of the shading inputs instead of the lit colour. The normal path is the
     // hardest thing here to be sure about by reading code — a double-sided sheet whose back face
     // lights from the wrong hemisphere looks exactly like a material problem — so it is worth being

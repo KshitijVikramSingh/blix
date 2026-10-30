@@ -69,7 +69,7 @@ internal static unsafe class HwxNative
     [DllImport(Library)]
     public static extern unsafe int hwx_encode_trace(nint ctx, nint sharedEvent, ulong waitValue, ulong signalValue,
         nint rays, ulong raysOffset, nint hits, ulong hitsOffset, uint count, uint seedBase, nint limit, ulong limitOffset,
-        float* sun, float reach, float discTan);
+        float* sun, float reach, float discTan, int instances);
 
     [DllImport(Library)]
     public static extern int hwx_group_begin(nint ctx, nint sharedEvent, ulong waitValue);
@@ -88,6 +88,9 @@ internal static unsafe class HwxNative
     public static extern void hwx_trace_stats(nint ctx, ulong* dispatches, ulong* totalGpuNs, ulong* lastGpuNs, ulong* failures);
 
     [DllImport(Library)]
+    public static extern int hwx_set_alpha_atlas(nint ctx, uint rows, int shadows);
+
+    [DllImport(Library)]
     public static extern int hwx_set_transmit(nint ctx, uint* rowTransmit, uint rowCount);
 
     [DllImport(Library)]
@@ -96,6 +99,9 @@ internal static unsafe class HwxNative
 
     [DllImport(Library)]
     public static extern void hwx_use_queue(nint ctx, nint queue);
+
+    [DllImport(Library)]
+    public static extern void hwx_share_queue(nint ctx, nint from);
 
     [DllImport(Library)]
     public static extern void hwx_memory(nint ctx, ulong* allocated, ulong* recommended);

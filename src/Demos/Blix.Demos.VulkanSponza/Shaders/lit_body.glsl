@@ -42,6 +42,8 @@ layout(early_fragment_tests) in;
 #endif
 
 #include "sheen.glsl"
+#include "iridescence.glsl"
+#include "diffuse_eon.glsl"
 #include "noise.glsl"
 #include "coverage.glsl"
 
@@ -71,6 +73,19 @@ layout(early_fragment_tests) in;
 // Roughness/metallic are sampled from the MR texture × per-material factors.
 
 #include "frame.glsl"
+
+// The diffuse lobe, in one place: EON, or Lambert for the A/B (--diffuse lambert, --ab diffuse). A lobe for a light from a KNOWN direction (the
+// sun), and an albedo for light arriving from everywhere (an irradiance cache, the sky): radiance out is E / PI * albedo, which EON makes depend on
+// the view angle and Lambert does not.
+vec3 blixDiffuseLobe(vec3 rho, float r, float NdotL, float NdotV, float LdotV)
+{
+    return frame.uDiffuseModel.x > 0.5 ? blix_eonBrdf(rho, r, NdotL, NdotV, LdotV) : rho / BLIX_PI;
+}
+
+vec3 blixDiffuseAlbedo(vec3 rho, float r, float NdotV)
+{
+    return frame.uDiffuseModel.x > 0.5 ? blix_eonAlbedo(rho, r, NdotV) : rho;
+}
 
 layout(set = 1, binding = 0) uniform textureCube uIrradiance;
 layout(set = 1, binding = 1) uniform textureCube uPrefilteredEnv;
@@ -105,6 +120,14 @@ layout(set = 1, binding = 18) uniform texture2D uPrepassNormalViz;
 // and samplers".
 //@sampler LinearClamp
 layout(set = 1, binding = 19) uniform sampler uLinearClamp;
+
+// The scene as a pane sees what is behind it: the lit pass's colour before the frosted and thick panes, and four halvings of it (full, 1/2, 1/4, 1/8, 1/16 of the frame),
+// the blur a rough pane reads at (lit_glass_backdrop.frag; SponzaLoop.GlassBackdrop.cs). Bound to a placeholder everywhere else.
+layout(set = 1, binding = 40) uniform texture2D uBehind0;
+layout(set = 1, binding = 41) uniform texture2D uBehind1;
+layout(set = 1, binding = 42) uniform texture2D uBehind2;
+layout(set = 1, binding = 43) uniform texture2D uBehind3;
+layout(set = 1, binding = 44) uniform texture2D uBehind4;
 
 // The sun's visibility traced on Apple's ray tracing hardware (SponzaLoop.RtShadows): a header (width,
 // height, 1 while live -- 2 once rt_shadow_filter.comp has filtered it --, 0), then one word per pixel: 1 where the sun
@@ -173,6 +196,12 @@ layout(set = 2, binding = 0) uniform Material {
     vec4 uMaterialParams2;
     vec4 uSheenColor;              // KHR_materials_sheen colour factor; w 1: KHR_materials_unlit
     vec4 uDiffuseTransmissionColor;// KHR_materials_diffuse_transmission colour; w 1: the colour texture's hue (--cloth-transmission)
+    vec4 uMaterialParams3;         // x the diffuse roughness override (--material diffuse-roughness), or -1: the roughness below decides;
+                                   // y KHR_materials_clearcoat factor, z its roughness
+    vec4 uMaterialParams4;         // x the ior (KHR_materials_ior), y the volume's thickness in metres (0: thin-walled), z KHR_materials_specular's factor
+    vec4 uAttenuation;             // rgb KHR_materials_volume's attenuation coefficient per metre, -ln(colour) / distance
+    vec4 uMaterialParams5;         // KHR_materials_iridescence: x the factor, y the film's ior, z its thickness in nm; w KHR_materials_anisotropy's strength
+    vec4 uSpecularColor;           // rgb KHR_materials_specular's colour factor; w the anisotropy's rotation (radians, from the tangent)
 } mat;
 
 layout(set = 2, binding = 1) uniform sampler2D uAlbedo;
@@ -192,6 +221,8 @@ layout(set = 2, binding = 5) uniform sampler2D uOcclusion;
 layout(set = 2, binding = 6) uniform sampler2D uDiffuseTransmissionColorTex;
 // Its factor texture: the alpha times diffuseTransmissionFactor is the share that goes through (white by default).
 layout(set = 2, binding = 7) uniform sampler2D uDiffuseTransmissionTex;
+// KHR_materials_volume's thickness texture (G, linear), multiplying the factor beside it: a glass pane's thickness where it varies over the surface.
+layout(set = 2, binding = 8) uniform sampler2D uThicknessTex;
 
 layout(location = 0) in vec3 vNormalWorld;
 layout(location = 1) in vec2 vUv;
@@ -206,8 +237,8 @@ layout(location = 0) out vec4 outColor;
 // Roughness-aware Fresnel-Schlick that softens edges as surfaces roughen
 // (otherwise rough metals over-glow at grazing angles where the split-sum
 // approximation breaks down). Used for the wide IBL reflection cone.
-vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
-    return F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness, vec3 F90) {
+    return F0 + (max(vec3(1.0 - roughness) * F90, F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
 // --- Cook-Torrance terms for direct (analytic) sun specular --------------
@@ -236,8 +267,18 @@ float geometrySmith(float NdotV, float NdotL, float roughness) {
 
 // Standard Schlick Fresnel for the sharp analytic highlight (the roughness-
 // aware variant above is for the wide IBL cone, not a punctual light).
-vec3 fresnelSchlick(float cosTheta, vec3 F0) {
-    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+vec3 fresnelSchlick(float cosTheta, vec3 F0, vec3 F90) {
+    return F0 + (F90 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+// KHR_materials_anisotropy's GGX (lab/bsdf gltf_bsdf.py's aniso_d and aniso_lambda): alphas along the anisotropy direction and across it, D G2 / (4 NL NV) with the
+// height-correlated Smith the python and the BSDF twin use. h, l and v are in the frame whose x axis is the anisotropy direction and z the normal.
+float anisoSpecular(vec3 h, vec3 l, vec3 v, float ax, float ay) {
+    float d = (h.x / ax) * (h.x / ax) + (h.y / ay) * (h.y / ay) + h.z * h.z;
+    float D = 1.0 / (PI * ax * ay * d * d);
+    float lamL = 0.5 * (sqrt(1.0 + (ax * ax * l.x * l.x + ay * ay * l.y * l.y) / max(l.z * l.z, 1e-12)) - 1.0);
+    float lamV = 0.5 * (sqrt(1.0 + (ax * ax * v.x * v.x + ay * ay * v.y * v.y) / max(v.z * v.z, 1e-12)) - 1.0);
+    return D / (1.0 + lamL + lamV) / max(4.0 * l.z * v.z, 1e-3);
 }
 
 void main() {
@@ -331,7 +372,27 @@ void main() {
     // Material metalness is consumed as authored. Asset conformance belongs in source data or the
     // cook, not as a per-pixel threshold in the renderer.
 
-    vec3 F0 = mix(vec3(0.04), albedo, metallic);
+    // KHR_materials_ior and KHR_materials_specular (the BSDF's fresnels): the dielectric's f0 is the ior's, tinted by the specular colour and scaled by the factor, and its f90 is
+    // the factor; a metal's is the base colour and 1. At the defaults (ior 1.5, specular 1) it is the 0.04 and 1 this shader always had. The textures are not read.
+    float dielectricIor = mat.uMaterialParams4.x;
+    float dielectricF0Ior = (dielectricIor - 1.0) / (dielectricIor + 1.0);
+    vec3 dielectricF0 = min(dielectricF0Ior * dielectricF0Ior * mat.uSpecularColor.rgb, vec3(1.0)) * mat.uMaterialParams4.z;
+    vec3 F0 = mix(dielectricF0, albedo, metallic);
+    vec3 F90 = mix(vec3(mat.uMaterialParams4.z), vec3(1.0), metallic);
+    // KHR_materials_iridescence: a thin film's Fresnel (iridescence.glsl) in place of Schlick's, weighed by the factor, in the sun's lobe and the sky's. Factors only (the thickness
+    // texture is not read: the maximum stands); a branch most pixels never take. The film is evaluated on the mixed F0, not mixed from a dielectric's and a metal's as the
+    // BSDF reference does it: the two part only where metallic is fractional.
+    float irid = LIT_RARE(true) ? mat.uMaterialParams5.x : 0.0;
+    // KHR_materials_anisotropy: the specular lobe's roughness stretched along a direction in the surface (the authored tangent turned by the rotation): the sun's highlight
+    // with the GGX the BSDF twin has (anisoSpecular), the sky's with the Khronos viewer's bent normal. Factors only (the anisotropy texture is not read).
+    float anisotropy = LIT_RARE(true) ? mat.uMaterialParams5.w : 0.0;
+    vec3 anisoDir = T, anisoCross = B;
+    if (anisotropy > 0.0) {
+        vec3 t0 = normalize(T - N * dot(N, T));
+        float rot = mat.uSpecularColor.w;
+        anisoDir = normalize(cos(rot) * t0 + sin(rot) * cross(N, t0));
+        anisoCross = cross(N, anisoDir);
+    }
 
     vec3 V = normalize(frame.uCameraPos - vWorldPos);
     float NdotV = max(dot(N, V), 0.0);
@@ -356,10 +417,19 @@ void main() {
         // not read here: a pane deep inside a room reflects the sky it cannot see (its occlusion along R is to come).
         float glassSky = 1.0;
         vec3 envRefl = textureLod(samplerCube(uPrefilteredEnv, uLinearClamp), R, lod).rgb * glassSky;
-        float fresnel = 0.04 + 0.96 * pow(clamp(1.0 - NdotV, 0.0, 1.0), 5.0);
-        // No opacity floor: this branch models Fresnel reflection over the background, without
-        // refraction or absorption. Clean head-on glass is therefore nearly transparent.
-        float glassAlpha = mix(albedo4.a, fresnel, transmission);
+        // The pane's two lights, as the BSDF reference has them (gltf_bsdf.py, thin-walled): the Fresnel share of the environment reflects off it, and the rest of
+        // what is behind goes through, times the base colour (KHR_materials_transmission) and, with a volume thickness, Beer-Lambert's attenuation along the
+        // refracted chord (KHR_materials_volume; the bending itself needs the scene behind, which a forward pass does not have, so a solid shows what is behind it
+        // unbent). A material with transmission under 1 keeps its remainder as the base's diffuse lit by the sky alone.
+        float glassIor = mat.uMaterialParams4.x;
+        float glassF0 = (glassIor - 1.0) / (glassIor + 1.0);
+        glassF0 *= glassF0 * mat.uMaterialParams4.z;
+        float fresnel = glassF0 + (1.0 - glassF0) * pow(clamp(1.0 - NdotV, 0.0, 1.0), 5.0);
+        float cosThrough = sqrt(max(1.0 - (1.0 - NdotV * NdotV) / (glassIor * glassIor), 0.0));
+        // KHR_materials_volume's thickness is in the mesh's coordinate space (the attenuation distance in the world's): times the placement's scale, which the vertex stage's
+        // tangent (the model's linear part times the authored tangent) carries. The dragon's thickness 2.27 sits on a node scaled 0.25: 0.57 m, not 2.27.
+        float glassThickness = mat.uMaterialParams4.y * texture(uThicknessTex, uv).g * length(vTangentWorld);
+        vec3 glassAtten = exp(-mat.uAttenuation.rgb * glassThickness / max(cosThrough, 0.05));
         // Handle diagnostics before the early return so transmissive surfaces remain inspectable.
         if (frame.uVizChannel > 0.5) {
             float vis = glassSky;
@@ -369,13 +439,55 @@ void main() {
             outColor = vec4(c, 1.0);
             return;
         }
+#if defined(LIT_GLASS_BACKDROP)
+        // What is behind the pane: for a solid (a thickness) the view refracts in and is taken where it would leave, at the screen position of that exit point (the spec's
+        // thickness model, a screen-space stand-in for the bending); blurred by the pane's own roughness (scaled by its ior as the BSDF's thin sheet is), along the
+        // chain of halvings. Replaces the pixel: the pane's reflection and the base's remainder are added here, not by a second draw.
+        vec2 screenUv = gl_FragCoord.xy / frame.uScreenSize;
+        vec2 behindUv = screenUv;
+        if (glassThickness > 0.0) {
+            vec3 refracted = refract(-V, N, 1.0 / glassIor);
+            vec4 exitClip = frame.uViewProjUnjittered * vec4(vWorldPos + normalize(refracted) * glassThickness, 1.0);
+            if (exitClip.w > 1e-4) behindUv = clamp(exitClip.xy / exitClip.w * 0.5 + 0.5, vec2(0.001), vec2(0.999));
+        }
+        float transmissionRoughness = clamp(roughness * clamp(glassIor * 2.0 - 2.0, 0.0, 1.0), 0.0, 1.0);
+        float behindLevel = transmissionRoughness * 4.0;
+        vec3 behindLow = vec3(0.0), behindHigh = vec3(0.0);
+        int levelLow = int(floor(behindLevel));
+        {
+            vec3 s0 = texture(sampler2D(uBehind0, uLinearClamp), behindUv).rgb, s1 = texture(sampler2D(uBehind1, uLinearClamp), behindUv).rgb,
+                 s2 = texture(sampler2D(uBehind2, uLinearClamp), behindUv).rgb, s3 = texture(sampler2D(uBehind3, uLinearClamp), behindUv).rgb,
+                 s4 = texture(sampler2D(uBehind4, uLinearClamp), behindUv).rgb;
+            behindLow = levelLow == 0 ? s0 : levelLow == 1 ? s1 : levelLow == 2 ? s2 : levelLow == 3 ? s3 : s4;
+            behindHigh = levelLow == 0 ? s1 : levelLow == 1 ? s2 : levelLow == 2 ? s3 : s4;
+        }
+        vec3 behind = mix(behindLow, behindHigh, behindLevel - float(levelLow));
+        vec3 skyDiffuseB = texture(samplerCube(uIrradiance, uLinearClamp), N).rgb * glassSky * albedo / PI;
+        outColor = vec4(behind * ((1.0 - fresnel) * transmission * albedo * glassAtten) + fresnel * envRefl + (1.0 - transmission) * (1.0 - fresnel) * skyDiffuseB, 1.0);
+#elif defined(LIT_GLASS_FILTER)
+        // The first draw: what is behind, filtered (blended Multiply: destination times this).
+        outColor = vec4((1.0 - fresnel) * transmission * albedo * glassAtten, 1.0);
+#elif defined(LIT_GLASS_REFLECT)
+        // The second: what the pane adds (blended Additive): its reflection, and the base's remainder lit by the sky.
+        vec3 skyDiffuse = texture(samplerCube(uIrradiance, uLinearClamp), N).rgb * glassSky * albedo / PI;
+        outColor = vec4(fresnel * envRefl + (1.0 - transmission) * (1.0 - fresnel) * skyDiffuse, 1.0);
+#else
+        // No opacity floor: this branch models Fresnel reflection over the background, without
+        // refraction or absorption. Clean head-on glass is therefore nearly transparent.
+        float glassAlpha = mix(albedo4.a, fresnel, transmission);
         outColor = vec4(envRefl, glassAlpha);
+#endif
         return;
     }
 #endif
 
     // --- Direct sun: Cook-Torrance (diffuse + analytic specular) --------
     vec3 L = -normalize(frame.uSunDirection);
+    // The diffuse lobe is EON, not Lambert: its roughness follows the material's (glTF has one roughness), and its albedo toward the eye is what the
+    // indirect terms below multiply the irradiance by. At diffuse roughness 0 both are exactly Lambert's.
+    float diffuseRoughness = mat.uMaterialParams3.x >= 0.0 ? clamp(mat.uMaterialParams3.x, 0.0, 1.0) : clamp(roughness * frame.uDiffuseModel.y, 0.0, 1.0);
+    vec3 diffuseAlbedoEye = blixDiffuseAlbedo(albedo, diffuseRoughness, NdotV);
+    vec3 diffuseSun = blixDiffuseLobe(albedo, diffuseRoughness, max(dot(N, L), 0.0), NdotV, dot(L, V));
     vec3 H = normalize(V + L);
     float NdotL = max(dot(N, L), 0.0);
     // The triangle's own plane (the world position's screen derivatives, turned to the shading side), for the terminator.
@@ -412,8 +524,14 @@ void main() {
     if (frame.uAbFlags.y < 0.5) {
         float Dsun = distributionGGX(NdotH, roughness);
         float Gsun = geometrySmith(NdotV, NdotL, roughness);
-        Fsun = fresnelSchlick(VdotH, F0);
+        Fsun = fresnelSchlick(VdotH, F0, F90);
+        if (irid > 0.0) Fsun = mix(Fsun, blix_iridescenceFresnel(1.0, mat.uMaterialParams5.y, VdotH, mat.uMaterialParams5.z, F0), irid);
         sunSpecular = (Dsun * Gsun * Fsun) / max(4.0 * NdotV * NdotL, 1e-3);
+        if (anisotropy > 0.0) {
+            float aBase = roughness * roughness;
+            sunSpecular = Fsun * anisoSpecular(vec3(dot(H, anisoDir), dot(H, anisoCross), NdotH), vec3(dot(L, anisoDir), dot(L, anisoCross), NdotL),
+                                               vec3(dot(V, anisoDir), dot(V, anisoCross), NdotV), mix(aBase, 1.0, anisotropy * anisotropy), aBase);
+        }
     }
 
     // Energy split: diffuse keeps only the non-reflected fraction (1 - F) and vanishes on metals
@@ -509,15 +627,16 @@ void main() {
     // with sheen.glsl, which says in as many words that the factor is what the BASE layer is
     // multiplied by. On the curtains it read as a rim slightly too dim under direct sun and a
     // fabric slightly too bright, which is the size of mistake that survives being looked at.
-    vec3 direct = ((kDsun * albedo / PI * transScale + sunSpecular) * NdotL * frame.uSunIrradiance * sunShadow * terminatorFront
-                   + kDsun * albedo / PI * transScale * sheetGlow * max(dot(Nsmooth, L), 0.0) * frame.uSunIrradiance
+    vec3 direct = ((kDsun * diffuseSun * transScale + sunSpecular) * NdotL * frame.uSunIrradiance * sunShadow * terminatorFront
+                   + kDsun * diffuseSun * transScale * sheetGlow * max(dot(Nsmooth, L), 0.0) * frame.uSunIrradiance
                    + sunTransmission) * sheenScale
                 + sunSheen;
 
     // --- IBL: split-sum diffuse + specular ------------------------------
     // Diffuse: irradiance cube × albedo, modulated by (1 - F) and (1 - metallic)
     // (metallics have no diffuse contribution).
-    vec3 F = fresnelSchlickRoughness(NdotV, F0, roughness);
+    vec3 F = fresnelSchlickRoughness(NdotV, F0, roughness, F90);
+    if (irid > 0.0) F = mix(F, blix_iridescenceFresnel(1.0, mat.uMaterialParams5.y, NdotV, mat.uMaterialParams5.z, F0), irid);
     vec3 kS = F;
     vec3 kD = (vec3(1.0) - kS) * (1.0 - metallic);
 
@@ -540,7 +659,14 @@ void main() {
     // the in-boot A/B twice, 2026-10-28).
     if (frame.uAbFlags.z < 0.5 && skyVisibility >= 0.02) {
         float lod = roughness * (frame.uEnvMipCount - 1.0);
-        vec3 prefiltered = textureLod(samplerCube(uPrefilteredEnv, uLinearClamp), R, lod).rgb;
+        vec3 reflectionDir = R;
+        if (anisotropy > 0.0) {
+            // The Khronos viewer's: the normal bent toward the direction the lobe is stretched along, in proportion to how anisotropic the lobe is.
+            vec3 anisoNormal = cross(cross(anisoDir, V), anisoDir);
+            float bend = 1.0 - anisotropy * (1.0 - roughness);
+            reflectionDir = reflect(-V, normalize(mix(anisoNormal, N, bend * bend * bend * bend)));
+        }
+        vec3 prefiltered = textureLod(samplerCube(uPrefilteredEnv, uLinearClamp), reflectionDir, lod).rgb;
         // The split sum's scale and bias by Karis' analytic fit (Unreal's mobile EnvBRDFApprox), not the LUT's read: the read
         // ~0.26 ms a frame (Crytek Sponza 1080p, the in-boot A/B, 2026-10-28). frame.uIblBrdfLut 1 (--ibl-brdf-lut): the LUT.
         vec2 envBrdf;
@@ -552,7 +678,7 @@ void main() {
         }
         // The reflected sky is the same sky. Not occluding it leaves a courtyard floor with a
         // mirror of an open horizon it cannot see.
-        specularIBL = prefiltered * (F * envBrdf.x + envBrdf.y) * skyVisibility;
+        specularIBL = prefiltered * (F * envBrdf.x + F90 * envBrdf.y) * skyVisibility;
     }
 
     // The field's light is added to the sum, reflected with the same albedo response as diffuse IBL.
@@ -588,7 +714,7 @@ void main() {
         // The diffuse share of it as the cube's diffuse has it (kD: (1 - F)(1 - metallic)): the specular sky below takes the
         // reflected share F of the same light, and with (1 - metallic) alone here that share was counted twice -- a sky
         // term on top of the sky, ~5-10% on rough stone where the sky is all the light (the shade), 2026-10-28.
-        bounce = incident * albedo / PI * kD * giAo;
+        bounce = incident * diffuseAlbedoEye / PI * kD * giAo;
     }
 
     // Sheen's own prefiltered environment, at the sheen roughness rather than the base one, times
@@ -624,7 +750,32 @@ void main() {
     // --- Emissive ------------------------------------------------------
     vec3 emissive = texture(uEmissive, uv).rgb * mat.uEmissiveFactor.rgb * mat.uEmissiveFactor.a;
 
-    vec3 color = direct + ambient + emissive;
+    // --- Clear coat (KHR_materials_clearcoat) ----------------------------------------------------------------------------------------------
+    // A smooth GGX layer of ior 1.5 over everything beneath it, as the BSDF reference has it (lab/bsdf gltf_bsdf.py): the base -- diffuse, specular, sheen, the
+    // bounce, the emission -- is darkened by the coat's Fresnel reflectance toward the VIEW, and the coat adds its own highlight (the sun's, F at the half vector)
+    // and its reflection of the sky (the prefiltered environment at the coat's roughness, the split-sum LUT with F0 0.04). Factors only: the coat's textures and its
+    // normal map are not read. A branch most pixels never take: the lean build compiles it out.
+    float coat = LIT_RARE(true) ? mat.uMaterialParams3.y : 0.0;
+    vec3 coatLight = vec3(0.0);
+    float coatScale = 1.0;
+    if (coat > 0.0) {
+        float coatRoughness = clamp(mat.uMaterialParams3.z, 0.04, 1.0);
+        float coatFresnelView = 0.04 + 0.96 * pow(clamp(1.0 - NdotV, 0.0, 1.0), 5.0);
+        coatScale = 1.0 - coat * coatFresnelView;
+        float coatD = distributionGGX(NdotH, coatRoughness);
+        float coatG = geometrySmith(NdotV, NdotL, coatRoughness);
+        float coatF = 0.04 + 0.96 * pow(clamp(1.0 - VdotH, 0.0, 1.0), 5.0);
+        coatLight = vec3(coat * coatD * coatG * coatF / max(4.0 * NdotV * NdotL, 1e-3)) * NdotL * frame.uSunIrradiance * sunShadow * terminatorFront;
+        if (frame.uAbFlags.z < 0.5) {
+            float coatLod = coatRoughness * (frame.uEnvMipCount - 1.0);
+            vec3 coatEnv = textureLod(samplerCube(uPrefilteredEnv, uLinearClamp), R, coatLod).rgb;
+            vec2 coatBrdf = texture(sampler2D(uBrdfLut, uLinearClamp), vec2(NdotV, coatRoughness)).rg;
+            // Occluded as the base's specular sky is (skyVisibility and the material's occlusion; GTAO's specular occlusion is gone with GTAO).
+            coatLight += coat * coatEnv * (0.04 * coatBrdf.x + coatBrdf.y) * skyVisibility * ao;
+        }
+    }
+
+    vec3 color = (direct + ambient + emissive) * coatScale + coatLight;
     // KHR_materials_unlit: the base colour, unshaded -- the spec's whole model (DiffuseTransmissionTest's labels and its
     // swatches read black before, 2026-10-22).
     bool unlit = mat.uSheenColor.w > 0.5;

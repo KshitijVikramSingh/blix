@@ -480,6 +480,8 @@ internal sealed partial class SponzaLoop
                 AbOffPhase && abMode == "ibl"      || ShaderProbe("ibl") ? 1f : 0f,
                 AbOffPhase && abMode == "normal"   || ShaderProbe("normal") ? 1f : 0f))),
             new("uIblBrdfLut",       new FloatUniform(iblBrdfLut ? 1f : 0f)),
+            // The diffuse lobe: EON (x 1) or the old fixed Lambert (x 0), and the scale from the material's roughness to the diffuse roughness.
+            new("uDiffuseModel",     new Vector4Uniform(new Vector4(DiffuseEonNow ? 1f : 0f, diffuseRoughnessScale, 0f, 0f))),
         };
         // The remaining //@tune uniforms (uForceOpaqueCutout, uNoBounceTerm) are appended by name
         // from the overlay panel — reflection lands each at its offset. The intensity and material
@@ -650,11 +652,30 @@ internal sealed partial class SponzaLoop
             fullscreen.Draw(scope, skyPipeline, skyBindings, uniforms: perFrame);
             // Blend (glass), depth-test only, after opaque + sky. One indirect
             // draw per (pipeline, material) group, same as opaque.
+            glassBackdropGroups.Clear();
             foreach (var g in blendGroups)
             {
+                // A rough or thick pane waits for the scene-behind chain (SponzaLoop.GlassBackdrop.cs), drawn in the pass after this one.
+                if (glassBackdropDeclared && glassBackdropMaterials.Contains(g.Material)) { glassBackdropGroups.Add(g); continue; }
+                // The pane's two draws: the scene behind filtered, then its reflection added (Program.cs, blendSolidPipeline).
                 DrawSceneGroup(scope, SceneListBlend, g, g.Pipeline, perFrame, passBindings, g.Material);
+                DrawSceneGroup(scope, SceneListBlend, g, g.Pipeline == blendDoubleSidedPipeline ? glassReflectDoubleSidedPipeline : glassReflectSolidPipeline,
+                    perFrame, passBindings, g.Material);
             }
         }, clearColor: new GraphicsColor(0.05f, 0.07f, 0.10f, 1f));
+
+        // The rough and thick panes: the scene so far copied and halved (the chain), then drawn over it with the chain bound (SponzaLoop.GlassBackdrop.cs).
+        if (glassBackdropGroups.Count > 0)
+        {
+            RecordGlassBehind();
+            var glassBindings = GlassBackdropBindings();
+            graph.Pass(glassBackdropPass, scope =>
+            {
+                foreach (var g in glassBackdropGroups)
+                    DrawSceneGroup(scope, SceneListBlend, g, g.Pipeline == blendDoubleSidedPipeline ? glassBackdropDoubleSidedPipeline : glassBackdropSolidPipeline,
+                        perFrame, glassBindings, g.Material);
+            });
+        }
 
         // Resolve before the graph executes, so the pass is recorded with the rest of the frame.
         if (!settling) using (Prof("taa")) RecordTaaResolve();

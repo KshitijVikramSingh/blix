@@ -16,8 +16,10 @@
 //   BlixRayPositions  every hierarchy's vertex positions, end to end
 //   BlixRayOwners     per region triangle: its placement, and its index in that placement's mesh with the high
 //                     bit set when the merge swapped v1 and v2 to undo a mirror
-//   BlixRaySurfaces   per triangle row: its albedo (sRGB, low three bytes) and how much of it is there (top byte,
-//                     255 solid), baked from its material; a partly covered triangle is met by chance
+//   BlixRaySurfaces   per triangle row, baked from its material: its albedo (sRGB, low three bytes: the albedo a BOUNCE keeps,
+//                     which for the EON diffuse lobe is its hemispherical albedo, see diffuse_eon.glsl) and the top byte: bits 4..0 how
+//                     much of the triangle is there, in sixteenths (16 or more: solid, which 0xFFFFFFFF, the unbaked word, is), bits
+//                     7..5 the diffuse roughness level it was baked at (BLIX_SURFACE_ROUGHNESS); a partly covered triangle is met by chance
 //
 // A trace takes a seed: the caller's name for the ray, which with the entry and the triangle decides whether a
 // partly covered triangle is met (RayTests.Covered, the same integer hash). Over many rays a leaf card is met in
@@ -69,10 +71,39 @@ uint blix_pcg(uint v) {
 // The coin is keyed on the triangle's identity in the scene (its placement and its index in that placement's mesh),
 // so a triangle referenced twice flips one coin: an instance's is its placement and the triangle's own index (the
 // triangle record's w); a region's comes from the owner row (w), mirror bit masked. Solid rows never ask.
-bool blix_covered(uint row, uint seed, uint entryIndex, uint record) {
-    uint coverage = blix_surfaces[row] >> 24u;
-    if (coverage == 255u) return true;
-    if (coverage == 0u) return false;
+// The per-hit alpha test (Blix.Geometry's RayAlphaAtlas): a partly covered triangle of a cut-out material is met where the material's
+// alpha, read at the point hit, passes its cutoff -- as the raster's alpha test decides it. The data is a trailer on the surface words
+// (from word `rows`, the triangle block's length): the alpha bytes of every such material at a capped resolution, and the coordinates.
+// Without a trailer, or for a material without an entry, the coin below decides.
+const uint BLIX_ALPHA_MAGIC = 0xA17A0001u;
+const uint BLIX_ALPHA_NONE = 0xFFFFFFFFu;
+
+// The material's alpha at uv: bilinear over its bytes, the texture wrapping (RayAlphaAtlas.Alpha).
+float blix_alphaAt(uint trailer, uint material, vec2 uv) {
+    uint at = trailer + blix_surfaces[trailer + 5u] + material * 4u;
+    uint offset = trailer + blix_surfaces[at];
+    uint size = blix_surfaces[at + 1u];
+    int w = int(size & 0xFFFFu), h = int(size >> 16u);
+    vec2 p = (uv - floor(uv)) * vec2(float(w), float(h)) - 0.5;
+    ivec2 i0 = ivec2(floor(p));
+    vec2 t = p - vec2(i0);
+    float texel[4];
+    for (int k = 0; k < 4; ++k) {
+        int x = ((i0.x + (k & 1)) % w + w) % w;
+        int y = ((i0.y + (k >> 1)) % h + h) % h;
+        uint index = uint(y * w + x);
+        texel[k] = float((blix_surfaces[offset + (index >> 2u)] >> ((index & 3u) * 8u)) & 255u) * (1.0 / 255.0);
+    }
+    return mix(mix(texel[0], texel[1], t.x), mix(texel[2], texel[3], t.x), t.y);
+}
+
+// A triangle's coverage, met or not. `tri` are its vertex indices and `bc` the hit's barycentrics of v1 and v2 (what the alpha test reads).
+bool blix_covered(uint row, uint seed, uint entryIndex, uvec4 tri, vec2 bc) {
+    // The coverage in sixteenths (the top byte's low five bits), as the byte the coin is compared with: sixteenths * 16 (solid: 255).
+    uint sixteenths = (blix_surfaces[row] >> 24u) & 31u;
+    if (sixteenths >= 16u) return true;
+    if (sixteenths == 0u) return false;
+    uint record = tri.w;
     uint placement = blix_instances[entryIndex].info.y;
     uint triangle = record;
     if (placement == 0xFFFFFFFFu) {
@@ -80,6 +111,24 @@ bool blix_covered(uint row, uint seed, uint entryIndex, uint record) {
         placement = owner.x;
         triangle = owner.y & 0x7FFFFFFFu;
     }
+    uint trailer = uint(blix_triangles.length());
+    if (uint(blix_surfaces.length()) > trailer + 8u && blix_surfaces[trailer] == BLIX_ALPHA_MAGIC && placement < blix_surfaces[trailer + 1u]) {
+        uint material = blix_surfaces[trailer + blix_surfaces[trailer + 4u] + placement];
+        if (material != BLIX_ALPHA_NONE) {
+            uint uvTable = trailer + blix_surfaces[trailer + 6u];
+            vec2 uv0 = uintBitsToFloat(uvec2(blix_surfaces[uvTable + tri.x * 2u], blix_surfaces[uvTable + tri.x * 2u + 1u]));
+            vec2 uv1 = uintBitsToFloat(uvec2(blix_surfaces[uvTable + tri.y * 2u], blix_surfaces[uvTable + tri.y * 2u + 1u]));
+            vec2 uv2 = uintBitsToFloat(uvec2(blix_surfaces[uvTable + tri.z * 2u], blix_surfaces[uvTable + tri.z * 2u + 1u]));
+            vec2 uv = uv0 * (1.0 - bc.x - bc.y) + uv1 * bc.x + uv2 * bc.y;
+            uint at = trailer + blix_surfaces[trailer + 5u] + material * 4u;
+            float alpha = blix_alphaAt(trailer, material, uv);
+            // Authored BLEND (flags bit 0): the alpha is the odds the ray is stopped, against this ray's number for the triangle.
+            if ((blix_surfaces[at + 3u] & 1u) != 0u)
+                return alpha > float(blix_pcg(seed + blix_pcg(placement * 0x9E3779B9u + triangle)) >> 8u) * (1.0 / 16777216.0);
+            return alpha >= uintBitsToFloat(blix_surfaces[at + 2u]);
+        }
+    }
+    uint coverage = sixteenths * 16u;
     return (blix_pcg(seed + blix_pcg(placement * 0x9E3779B9u + triangle)) >> 24u) < coverage;
 }
 
@@ -92,9 +141,15 @@ struct BlixRayHit {
     // World-space geometric normal of the triangle hit, unit length, on its authored front (the side frontFace
     // names): what shading a hit needs and rayQuery leaves to the caller.
     vec3 normal;
-    // Linear albedo baked for the triangle hit (its material's texture over the triangle, times its factor).
+    // Linear albedo baked for the triangle hit (its material's texture over the triangle, times its factor): what a bounce keeps.
     vec3 albedo;
+    // The diffuse roughness the albedo was baked at (a level of BLIX_SURFACE_ROUGHNESS): 0 for a Lambert bake. With it a caller recovers the
+    // material's own albedo (diffuse_eon.glsl, blix_eonBaseFromHemispherical) and evaluates the BRDF itself.
+    float roughness;
 };
+
+// The eight diffuse roughness levels the surface word's top byte indexes (bits 7..5), nearest-level quantised by the bake. Spaced where materials sit.
+const float BLIX_SURFACE_ROUGHNESS[8] = float[8](0.0, 0.2, 0.4, 0.55, 0.7, 0.8, 0.9, 1.0);
 
 // RayTests.BoxExitWidening: 1 + 2 * gamma(3), gamma(n) = n * 2^-24 / (1 - n * 2^-24).
 const float BLIX_BOX_EXIT_WIDENING = 1.0 + 2.0 * (3.0 * 5.9604645e-8 / (1.0 - 3.0 * 5.9604645e-8));
@@ -180,7 +235,7 @@ bool blix_traceMesh(BlixShearedRay r, uint root, float tMin, inout float tMax, u
                 float th; vec2 bc; bool front;
                 if (blix_rayTriangle(r, blix_positions[tri.x].xyz, blix_positions[tri.y].xyz, blix_positions[tri.z].xyz,
                                      tMin, tMax, th, bc, front)
-                    && blix_covered(node.index + k, seed, entryIndex, tri.w)) {
+                    && blix_covered(node.index + k, seed, entryIndex, tri, bc)) {
                     tMax = th;
                     triangle = tri.w;
                     barycentrics = bc;
@@ -224,7 +279,7 @@ bool blix_anyInMesh(BlixShearedRay r, uint root, float tMin, float tMax, uint se
             float th; vec2 bc; bool front;
             if (blix_rayTriangle(r, blix_positions[tri.x].xyz, blix_positions[tri.y].xyz, blix_positions[tri.z].xyz,
                                  tMin, tMax, th, bc, front)
-                && blix_covered(node.index + k, seed, entryIndex, tri.w)) return true;
+                && blix_covered(node.index + k, seed, entryIndex, tri, bc)) return true;
         }
     }
     return false;
@@ -299,6 +354,7 @@ bool blix_traceClosest(vec3 origin, vec3 direction, float tMin, float tMax, uint
     // sRGB-encoded albedo bytes back to linear (the bake stores them encoded for precision in the darks).
     vec3 srgb = unpackUnorm4x8(blix_surfaces[hitRow]).rgb;
     hit.albedo = mix(srgb / 12.92, pow((srgb + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), srgb));
+    hit.roughness = BLIX_SURFACE_ROUGHNESS[blix_surfaces[hitRow] >> 29u];
     // Resolve the entry to the placement: an instance is one; a region's owner row names it (RayQueryScene.Closest).
     uint placement = blix_instances[hit.instance].info.y;
     if (placement != 0xFFFFFFFFu) {
