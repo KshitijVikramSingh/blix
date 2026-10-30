@@ -53,6 +53,10 @@ layout(set = 0, binding = 0) uniform RtgiRays {
 
 // --rtgi-capture: the pinned points' pixels (x | y << 16, full res).
 layout(std430, set = 0, binding = 20) readonly buffer RtgiCapturePixels { uint capturePixels[]; };
+// --rtgi-capture: after the samples and the points (rtgi_train.comp), six vec4s a pinned point -- the cell its pixel reads
+// and the cell its moved point trains, each: the point and the region at its level; the normal and the level; the cell's
+// resolved light and the samples it holds (-1: no cell).
+layout(std430, set = 0, binding = 27) writeonly buffer RtgiCaptureOut { vec4 captureOut[]; };
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
 layout(set = 0, binding = 2) uniform sampler2D uPrepassNormal;
 layout(std430, set = 0, binding = 3) readonly buffer RtgiPrevRays { vec4 prevRays[]; };
@@ -143,6 +147,16 @@ bool surfacePoint(inout vec3 p, inout vec3 n, uint h) {
     return false;
 }
 
+void captureCell(vec3 p, vec3 n, uint at) {
+    uint side = rtgiSide(n);
+    rtgiRegion = nearRegion(p, side);
+    uint lv = rtgiLevel(p, u.uCamera.xyz, u.uParams);
+    uint sc = rtgiFind(rtgiCellHash(ivec3(floor((p - RTGI_ORIGIN) / rtgiSize(lv, u.uParams))), lv, side, u.uParams), u.uParams);
+    captureOut[at] = vec4(p, float(rtgiRegionFor(lv)));
+    captureOut[at + 1u] = vec4(n, float(lv));
+    captureOut[at + 2u] = sc != 0xFFFFFFFFu ? vec4(rtgiResolved[2u * sc].rgb, rtgiResolved[2u * sc + 1u].y) : vec4(-1.0);
+}
+
 uint hash(uint x) {
     x ^= x >> 16; x *= 0x7feb352du;
     x ^= x >> 15; x *= 0x846ca68bu;
@@ -231,6 +245,11 @@ void main() {
         vec4 wp = u.uInvViewProj * vec4((vec2(pin) + 0.5) / u.uSize.xy * 2.0 - 1.0, rawp, 1.0);
         p = wp.xyz / wp.w;
         n = normalize(nsp.xyz);
+        // Moved onto its cell's cooked surface as any visible point is: the capture is what the cell trains on.
+        uint at = (3u * uint(u.uCapture.z) + 2u) * uint(u.uCapture.x) + 6u * i;
+        captureCell(p, n, at);
+        surfacePoint(p, n, h ^ 0x51ED270Bu);
+        captureCell(p, n, at + 3u);
     } else if (i < visible) {
         uint tilesX = uint(u.uSize.z), tilesY = uint(u.uSize.w);
         vec2 tileSize = u.uSize.xy / u.uSize.zw;

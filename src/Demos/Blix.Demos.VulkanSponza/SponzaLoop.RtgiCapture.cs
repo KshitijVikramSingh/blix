@@ -12,9 +12,10 @@ namespace Blix.Demos.VulkanSponza;
 // first K visible points are pinned to FILE's pixels (one "x y" a line, full-res; K at most the frame's visible points), each
 // tracing its ray every frame as any visible point does -- cosine or guided, its hit lit by the sun traced there and the
 // cache there (rtgi_train.comp's pointSample): one bounce of a gather. From post-load frame N (600) for F frames (512),
-// each frame's sample per point -- three rgba: rgb PI x L_in x the ray's weight, w 4 live + 2 sky + 1 counted; the hit and the
+// each frame's sample per point -- three rgba: rgb PI x L_in x the ray's weight, w 4 live + 2 sky + 1 counted (+ 8 a back face hit, + 16 its hit cell held no light); the hit and the
 // ray's weight; the hit's normal and distance (1e30 a miss) -- then the points' positions and normals: DIR/capture.f32
-// (float32 rgba, F x K x 3 then 2 x K) and DIR/capture.json. The cache trains on as ever around
+// (float32 rgba, F x K x 3 then 2 x K, then 6 x K: rtgi_rays.comp's captureCell, the pixel's cell and the moved point's)
+// and DIR/capture.json. The cache trains on as ever around
 // them. Hold the camera still (--cam), the dumps' window.
 internal sealed partial class SponzaLoop
 {
@@ -54,7 +55,7 @@ internal sealed partial class SponzaLoop
         var words = new uint[k];
         for (var i = 0; i < rtgiCapturePixels.Length; i++) words[i] = (uint)rtgiCapturePixels[i].X | ((uint)rtgiCapturePixels[i].Y << 16);
         rtgiCapturePixelBuf = Own(device.CreateGpuBuffer(k * 4, MemoryMarshal.AsBytes(words.AsSpan()).ToArray(), "sponza.rtgi.capture-pixels"));
-        var bytes = (3 * rtgiCaptureFrames + 2) * k * 16;
+        var bytes = (3 * rtgiCaptureFrames + 2 + 6) * k * 16;
         rtgiCaptureOut = Own(device.CreateGpuBuffer(bytes, new byte[bytes], "sponza.rtgi.capture"));
     }
 
@@ -68,7 +69,7 @@ internal sealed partial class SponzaLoop
         rtgiCaptureWritten = true;
         device.WaitIdle();
         var k = Math.Max(1, rtgiCapturePixels.Length);
-        var data = device.ReadGpuBuffer(RtgiCaptureOutBuffer, 0, (3 * rtgiCaptureFrames + 2) * k * 16);
+        var data = device.ReadGpuBuffer(RtgiCaptureOutBuffer, 0, (3 * rtgiCaptureFrames + 2 + 6) * k * 16);
         Directory.CreateDirectory(rtgiCaptureDir);
         File.WriteAllBytes(Path.Combine(rtgiCaptureDir, "capture.f32"), data);
         File.WriteAllText(Path.Combine(rtgiCaptureDir, "capture.json"), JsonSerializer.Serialize(new

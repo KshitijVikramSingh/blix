@@ -1118,6 +1118,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiNearRegions", RtgiNearRegionsOrDummy),
                 new ShaderBufferBinding("RtgiNearScaleTable", RtgiNearScaleTableOrDummy),
                 new ShaderBufferBinding("RtgiCapturePixels", RtgiCapturePixelBuffer),
+                new ShaderBufferBinding("RtgiCaptureOut", RtgiCaptureOutBuffer),
                 new ShaderBufferBinding("RtgiPrevHits", rtgiHitsBuf[prev]),
                 new ShaderBufferBinding("RtgiPoints", rtgiPointsBuf[cur]),
                 new ShaderBufferBinding("RtgiRayBuffer", rtgiRaysBuf[cur]),

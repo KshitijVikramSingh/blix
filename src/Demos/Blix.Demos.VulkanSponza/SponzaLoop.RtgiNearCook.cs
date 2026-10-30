@@ -89,6 +89,26 @@ internal sealed partial class SponzaLoop
     // each cell's mean inverse distance (two halves), averaged NearScalePasses times over its linked neighbours, then by
     // 5 cm cube into a table of the near table's slots (rtgi_nearcook.glsl's nearScaleAt).
     private const int NearScalePasses = 4;
+    // BLIX_RTGI_NEAR_PROBE="x,y,z": once cooked, the cooked cells within 6 cm of the point written to the log -- their point,
+    // side and flags, candidates, light (the crevices testbed's black strips, 2026-10-30).
+    private bool rtgiNearProbePending;
+    private void ProbeRtgiNearCells()
+    {
+        var at = Environment.GetEnvironmentVariable("BLIX_RTGI_NEAR_PROBE")!.Split(',').Select(v => float.Parse(v, CultureInfo.InvariantCulture)).ToArray();
+        var q = new Vector3(at[0], at[1], at[2]);
+        device.WaitIdle();
+        var pts = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(rtgiNearPoints, 0, rtgiNearCells * 32)).ToArray();
+        var cands = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(rtgiNearCandidates, 0, rtgiNearCells * NearCandidates * 16)).ToArray();
+        var light = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(rtgiNearLightBuf, 0, rtgiNearCells * 16)).ToArray();
+        for (var i = 0; i < rtgiNearCells; i++)
+        {
+            var p = new Vector3(pts[2 * i].X, pts[2 * i].Y, pts[2 * i].Z);
+            if (Vector3.Distance(p, q) > 0.06f) continue;
+            var w = BitConverter.SingleToUInt32Bits(pts[2 * i].W);
+            var cs = string.Join(" ", Enumerable.Range(0, NearCandidates).Select(c => cands[NearCandidates * i + c]).Where(c => c.W > 0.5f).Select(c => $"({c.X:0.0000},{c.Y:0.0000},{c.Z:0.0000})"));
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] near cell {i}: p=({p.X:0.0000},{p.Y:0.0000},{p.Z:0.0000}) side {w & 7} buried {(w & 16) != 0} n=({pts[2 * i + 1].X:0.00},{pts[2 * i + 1].Y:0.00},{pts[2 * i + 1].Z:0.00}) light w {light[i].W:0.00}; candidates {cs}"));
+        }
+    }
     private GpuBufferHandle rtgiNearScale, rtgiNearScaleTable;
     private int rtgiNearScalePass;
     private GpuBufferHandle RtgiNearScaleTableOrDummy => rtgiNearCookBuilt ? rtgiNearScaleTable : rtgiVolDummy;
@@ -186,6 +206,25 @@ internal sealed partial class SponzaLoop
                     if (set.Contains(VolKey(x + (k & 1), y + ((k >> 1) & 1), z + (k >> 2)))) return true;
             }
             return false;
+        }
+        // BLIX_RTGI_LOW_VERTS: the traced triangles' distinct vertex heights near the ground (0.1 mm), by the side the
+        // triangle faces -- whether walls sit on the floor as the source has them (the user, crevices, 2026-10-30).
+        if (Environment.GetEnvironmentVariable("BLIX_RTGI_LOW_VERTS") is { Length: > 0 })
+        {
+            var low = new SortedDictionary<(double, string), int>();
+            foreach (var inst in instances)
+            {
+                var pos = inst.Mesh.Positions; var idx = inst.Mesh.Indices;
+                for (var t = 0; t + 2 < idx.Length; t += 3)
+                {
+                    var a = Vector3.Transform(pos[idx[t]], inst.World); var b = Vector3.Transform(pos[idx[t + 1]], inst.World); var c = Vector3.Transform(pos[idx[t + 2]], inst.World);
+                    var nn = Vector3.Normalize(Vector3.Cross(b - a, c - a));
+                    var face = MathF.Abs(nn.Y) > 0.9f ? (nn.Y > 0 ? "+y" : "-y") : "side";
+                    foreach (var v in new[] { a, b, c })
+                        if (MathF.Abs(v.Y) < 0.1f) { var key = (Math.Round(v.Y, 4), face); low[key] = low.GetValueOrDefault(key) + 1; }
+                }
+            }
+            Console.WriteLine($"[VulkanSponza] rtgi low verts ({instances.Length} instances): " + string.Join(", ", low.Select(kv => $"y={kv.Key.Item1:0.0000} {kv.Key.Item2} x{kv.Value}")));
         }
         var cells = new ConcurrentDictionary<(int, int, int, uint), NearAcc>();
         var h = cell * 0.25f;
@@ -422,11 +461,13 @@ internal sealed partial class SponzaLoop
             rtgiNearConnecting = false;
             {
                 rtgiNearCookReady = true;
+                rtgiNearProbePending = Environment.GetEnvironmentVariable("BLIX_RTGI_NEAR_PROBE") is { Length: > 0 };
                 Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                     $"[VulkanSponza] rtgi near cook: {rtgiNearCells:N0} cells traced ({rtgiNearCells * (long)NearRays / 1e6:0.0} M rays) in {rtgiFrameCount - rtgiNearCookFrom + 1} frames, {rtgiNearCookClock.Elapsed.TotalSeconds:0.0} s."));
             }
             return;
         }
+        if (rtgiNearProbePending && rtgiFrameCount > rtgiNearCookFrom + 4) { rtgiNearProbePending = false; ProbeRtgiNearCells(); }
         var count = Math.Min(rtgiNearCells, rtgiNearUpdateMost);
         var first = rtgiNearUpdateCursor;
         rtgiNearUpdateCursor = (rtgiNearUpdateCursor + count) % rtgiNearCells;

@@ -21,6 +21,12 @@ layout(set = 0, binding = 0) uniform RtgiNearCookCook {
 // and 5 test each with 8 rays and keep the one meeting no back face, nearest the cell's middle, as its point -- the
 // mean of its samples fell under a wall standing on part of it (SponzaLoop.RtgiNearCook.cs).
 #define NEAR_CANDIDATES 16u
+// How far the test and cook rays go (m): far enough to meet whatever closes round the point. To the contact radius only, a
+// candidate inside a hollow block (the crevices testbed's walls are closed shells standing on the floor, the floor running
+// under them) saw nothing in half its directions -- open, as far as the count went: a floor cell's point chosen under the
+// wall beside it, never marked buried, its training rays (long) 91% on the wall's inside -- a black strip along every wall's
+// foot from the first frame (the user, 2026-10-30). Links still only within the radius.
+#define NEAR_TEST_REACH 64.0
 #define NEAR_CHOOSE_RAYS 8u
 layout(std430, set = 0, binding = 8) readonly buffer RtgiNearCandidates { vec4 nearCandidates[]; };
 
@@ -200,7 +206,7 @@ void main() {
         vec4 cand = nearCandidates[NEAR_CANDIDATES * i + c];
         vec3 n = nearPoints[2u * i + 1u].xyz;
         cookRays[2u * t] = vec4(cand.xyz + n * 0.01, 0.0);
-        cookRays[2u * t + 1u] = vec4(nearRayDir(i, r * (NEAR_RAYS / NEAR_CHOOSE_RAYS), n), cand.w > 0.5 ? radius : 1e-6);
+        cookRays[2u * t + 1u] = vec4(nearRayDir(i, r * (NEAR_RAYS / NEAR_CHOOSE_RAYS), n), cand.w > 0.5 ? NEAR_TEST_REACH : 1e-6);
         return;
     }
     if (kind == 5u) {
@@ -266,7 +272,7 @@ void main() {
         uint i = first + t / NEAR_RAYS, k = t % NEAR_RAYS;
         vec3 p = nearPoints[2u * i].xyz, n = nearPoints[2u * i + 1u].xyz;
         cookRays[2u * t] = vec4(p + n * 0.01, 0.0);
-        cookRays[2u * t + 1u] = vec4(nearRayDir(i, k, n), radius);
+        cookRays[2u * t + 1u] = vec4(nearRayDir(i, k, n), NEAR_TEST_REACH);
         return;
     }
     if (t >= cells) return;
@@ -277,6 +283,8 @@ void main() {
         uvec4 h0 = cookHits[3u * r];
         float dist = uintBitsToFloat(h0.x);
         uvec2 link = uvec2(0u);
+        // A back face met at any distance: the ray started inside something.
+        if ((h0.w & 1u) != 0u && (h0.w & 2u) == 0u) backs += 1.0;
         if ((h0.w & 1u) != 0u && dist <= radius) {
             uvec4 h2 = cookHits[3u * r + 2u];
             vec3 nq = vec3(uintBitsToFloat(h2.x), uintBitsToFloat(h2.y), uintBitsToFloat(h2.z));
@@ -287,7 +295,6 @@ void main() {
             uint dq = uint(clamp(dist / radius, 0.0, 1.0) * 32767.0);
             // A back face met: the ray started inside something -- dark (albedo 0).
             uint albedo = (h0.w & 2u) != 0u ? h2.w : 0u;
-            if ((h0.w & 2u) == 0u) backs += 1.0;
             link = uvec2(0x80000000u | (dq << 16) | (o.y << 8) | o.x, albedo);
         } else left += 1.0;
         nearLinks[i * NEAR_RAYS + k] = link;

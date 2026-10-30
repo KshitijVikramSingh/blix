@@ -231,6 +231,7 @@ vec4 irradianceAt(vec3 q, vec3 nq, out bool fine, float sunAt) {
 
 vec4 dither;
 vec3 sampleDir;
+float captureFlags; // --rtgi-capture: 8 its hit a back face (read dark), 16 its hit's cell held no light
 float nearWord;   // this sample's near visibility, weighted (256ths): it left past the contact radius
 float sampleInvD; // 1 / how far its ray went (a miss: its reach)
 
@@ -476,6 +477,8 @@ bool pointSample(uint i, out vec4 p, out vec3 n, out vec3 e, out bool counted, o
     nearWord = ((h0.w & 1u) == 0u || uintBitsToFloat(h0.x) > u.uNearField.y) ? weight * 256.0 : 0.0;
     sampleInvD = (h0.w & 1u) == 0u ? 1.0 / max(rays[2u * i + 1u].w, 1.0) : 1.0 / max(uintBitsToFloat(h0.x), 0.05);
     counted = true;
+    captureFlags = 0.0;
+    if ((h0.w & 1u) != 0u && (h0.w & 2u) == 0u) captureFlags += 8.0;
     if ((h0.w & 1u) == 0u) {
         e = 3.14159265359 * textureLod(uSkyRadiance, d, u.uSun.w).rgb;
         sky = true;
@@ -516,6 +519,7 @@ bool pointSample(uint i, out vec4 p, out vec3 n, out vec3 e, out bool counted, o
                 requests[5u * r + 4u] = vec4(d, deferred ? 1.0 : 0.0);
             }
         }
+        if (eq.w < 0.5) captureFlags += 16.0;
         counted = !deferred && (eq.w > 0.5 || u.uTrain.x > 0.5);
         e = unpackUnorm4x8(h2.w).rgb * eq.rgb;
     }
@@ -541,7 +545,7 @@ void main() {
     uint captured = uint(u.uCapture.x);
     if (i < captured) {
         uint slot = 3u * (uint(u.uCapture.y) * captured + i);
-        captureOut[slot] = live ? vec4(e, 4.0 + (sky ? 2.0 : 0.0) + (counted ? 1.0 : 0.0)) : vec4(0.0);
+        captureOut[slot] = live ? vec4(e, 4.0 + (sky ? 2.0 : 0.0) + (counted ? 1.0 : 0.0) + captureFlags) : vec4(0.0);
         captureOut[slot + 1u] = captureHit;
         captureOut[slot + 2u] = captureHitN;
         if (live) {
