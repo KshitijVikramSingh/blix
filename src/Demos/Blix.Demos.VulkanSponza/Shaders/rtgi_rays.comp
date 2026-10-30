@@ -18,12 +18,9 @@ layout(set = 0, binding = 0) uniform RtgiRays {
     vec4 uCounts;        // x visible points, y points from last frame's hits, z the frame's number, w how far a ray goes
     vec4 uSun;           // xyz toward the sun; w 1 when last frame's rays and hits are there to read
     vec4 uParams;        // rtgiParams (rtgi_cache.glsl)
-    vec4 uVolume;        // the world volume: rtgi_volume.glsl's VOL_PARAMS (w 0: off), what sizes the cells
-    vec4 uVolumeGeom;    // rtgi_volume.glsl's VOL_GEOM
-    vec4 uNearCook;      // the cooked near field: rtgi_nearcook.glsl's NEAR_PARAMS -- its cells the surface a visible point's
-                         // cell is trained over (surfacePoint)
     vec4 uNearField;     // x the near field's radius (RTGI_NEAR); y of the hit points, how many are cooked cells' points near
-                         // the camera instead (--rtgi-near-train, the list RtgiNearList); z the list's turning offset
+                         // the camera instead (--rtgi-near-train, the list RtgiNearList); z the list's turning offset; w 1: a
+                         // visible point's cell trained over its cooked point (surfacePoint)
     vec4 uAdapt;         // x the share of visible points placed by uncertainty (0: every tile its own); y tiles weighed for each;
                          // z the relative error a cell is done under (the blend's, rtgi_filter.comp); w 1 in this many of a
                          // done cell's points keeps its ray (the validation trickle)
@@ -42,6 +39,9 @@ layout(set = 0, binding = 0) uniform RtgiRays {
                          // settled cell's points trace the sun 1 in 8
     vec4 uCapture;       // x the visible points pinned to the capture's pixels (--rtgi-capture, SponzaLoop.RtgiCapture.cs): the
                          // first x, each at its own pixel every frame (0: none)
+    vec4 uCook;          // the cooked cell set: rtgi_cook.glsl's COOK_PARAMS (w 0: not cooked yet) -- what sizes and keys the
+                         // cells, and the points their cells are trained from
+    vec4 uCookCounts;    // rtgi_cook.glsl's COOK_COUNTS
 } u;
 
 // --rtgi-capture: the pinned points' pixels (x | y << 16, full res).
@@ -50,7 +50,7 @@ layout(std430, set = 0, binding = 20) readonly buffer RtgiCapturePixels { uint c
 // and the cell its moved point trains, each: the point and the region at its level; the normal and the level; the cell's
 // resolved light and the samples it holds (-1: no cell).
 layout(std430, set = 0, binding = 27) writeonly buffer RtgiCaptureOut { vec4 captureOut[]; };
-// --rtgi-near-train: the live cooked cells within reach of the camera (rtgi_nearcook_cook.comp kind 15, every few frames).
+// --rtgi-near-train: the live own-level cooked cells within reach of the camera (rtgi_cook.comp kind 15, every few frames).
 layout(std430, set = 0, binding = 28) readonly buffer RtgiNearList { uint nearListCount; uint nearListPad[3]; uint nearList[]; };
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
 layout(set = 0, binding = 2) uniform sampler2D uPrepassNormal;
@@ -73,67 +73,49 @@ layout(std430, set = 0, binding = 12) readonly buffer RtgiDirection { vec4 rtgiD
 layout(std430, set = 0, binding = 13) readonly buffer RtgiMoments { vec4 rtgiMoments[]; };
 layout(std430, set = 0, binding = 14) readonly buffer RtgiConfidence { vec4 rtgiConfidence[]; };
 
-// RTGI's world volume (rtgi_volume.glsl): the probes whose cooked distances size the cache's cells.
-layout(std430, set = 0, binding = 21) readonly buffer RtgiVolumeTable { uvec2 volTable[]; };
-layout(std430, set = 0, binding = 22) readonly buffer RtgiVolumeProbes { float volProbes[]; };
-#define VOL_PARAMS u.uVolume
-#define VOL_GEOM u.uVolumeGeom
-#define VOL_TABLE(i) volTable[i]
-#define VOL_PROBES(i) volProbes[i]
-#define VOL_DEPTH(i) 0u
-#include "rtgi_volume.glsl"
-#define RTGI_GEOM_SCALE(p) volCellScale(p)
-#define RTGI_FAR_GROW u.uVolumeGeom.z
 #define RTGI_KEYS(i) rtgiKeys[i]
 #define RTGI_NEAR u.uNearField.x
-// The cooked cells' regions by level and their links (rtgi_nearcook_cook.comp; rtgi_cache.glsl's rtgiRegion).
-layout(std430, set = 0, binding = 25) readonly buffer RtgiNearRegions { uint nearRegions[]; };
-#define NEAR_REGIONS(i) nearRegions[i]
-// The cooked cells' cell sizes by 5 cm cube (rtgi_nearcook.glsl's nearScaleAt; rtgi_cache.glsl's rtgiCellSize).
-layout(std430, set = 0, binding = 26) readonly buffer RtgiNearScaleTable { uvec2 nearScaleTable[]; };
-#define NEAR_SCALE(i) nearScaleTable[i]
+// The cooked cell set (rtgi_cook.glsl): its size table sizes the cells, its level-0 cells' regions key them, its cells'
+// points are where a visible point's cell trains from.
+layout(std430, set = 0, binding = 23) readonly buffer RtgiCookTable { uvec2 cookTable[]; };
+layout(std430, set = 0, binding = 24) readonly buffer RtgiCookPoints { vec4 cookPoints[]; };
+layout(std430, set = 0, binding = 25) readonly buffer RtgiCookRegions { uint cookRegions[]; };
+layout(std430, set = 0, binding = 26) readonly buffer RtgiCookScale { uvec2 cookScale[]; };
+#define COOK_PARAMS u.uCook
+#define COOK_COUNTS u.uCookCounts
+#define COOK_TABLE(i) cookTable[i]
+#define COOK_POINTS(i) cookPoints[i]
+#define COOK_REGIONS(i) cookRegions[i]
+#define COOK_SCALE(i) cookScale[i]
 #define RTGI_REGION_OF 1
 #include "rtgi_cache.glsl"
-layout(std430, set = 0, binding = 23) readonly buffer RtgiNearTable { uvec2 nearTable[]; };
-layout(std430, set = 0, binding = 24) readonly buffer RtgiNearPoints { vec4 nearPoints[]; };
-#define NEAR_PARAMS u.uNearCook
-#define NEAR_TABLE(i) nearTable[i]
-#define NEAR_POINTS(i) nearPoints[i]
-#include "rtgi_nearcook.glsl"
+#include "rtgi_cook.glsl"
 
-// A visible point's cell trained over its own surface, not the part of it in view: a point drawn from the cooked surface
-// cells inside the cache cell (rtgi_nearcook.glsl: 5 cm, where the volume refined) in place of the pixel's -- a few draws
-// of a sub-cell of the cell's cube, the first a surface cell answers for (on the same side, in the same cache cell).
-// Trained from what the screen showed of it, a crevice's cell held the average of whatever part the camera saw: its light
-// moved with the view, and a corner leaked from some places and not others (the user, the crevices testbed, 2026-10-29).
-// None found (open ground: no cooked cells, the cache's cells big and flat): the pixel's own point.
-bool surfacePoint(inout vec3 p, inout vec3 n, uint h) {
-    if (NEAR_PARAMS.w < 0.5) return false;
+// A visible point's cell trained over its own surface, not the part of it in view: from the cooked point of the cache cell
+// at the pixel's level (rtgi_cook.glsl: one per cooked cell, on its own surface piece, inside-tested at junctions) in place
+// of the pixel's -- the same for every pixel of the cell. Trained from what the screen showed of it, a crevice's cell held
+// the average of whatever part the camera saw: its light moved with the view, and a corner leaked from some places and
+// not others (the user, the crevices testbed, 2026-10-29). The near cook's way drew random 5 cm sub-cells of the cache
+// cell and kept the first a cooked cell answered for: most draws missed in a big cell. Only where the cooked point is of
+// the pixel's region at that level (rtgi_cook.comp's pieces: a cache cell keyed by a piece is trained over that piece -- a
+// cooked cell holds one piece's point, and the other piece's pixels keep their own). None (not cooked, buried, another
+// piece, --rtgi-no-surface-train): the pixel's own point.
+bool surfacePoint(inout vec3 p, inout vec3 n) {
+    if (COOK_PARAMS.w < 0.5 || u.uNearField.w < 0.5) return false;
     uint lv = rtgiLevel(p, u.uCamera.xyz, u.uParams);
-    float size = rtgiSize(lv, u.uParams);
     uint side = rtgiSide(n);
-    ivec3 cell = ivec3(floor((p - rtgiOrigin(side)) / size));
-    uint subs = max(1u, uint(size / NEAR_PARAMS.x + 0.5));
-    // Only cells of the point's own region at its level (rtgi_nearcook_cook.comp's pieces): a cache cell keyed by a piece
-    // is trained over that piece. Drawn from any, a piece split off at a junction was trained only when a draw happened
-    // to land in it -- its cell thin of samples, short dark dashes along the crevices testbed's creases (2026-10-30).
-    uint own = nearRegion(p, side);
-    uint want = own != 0u && lv < NEAR_LEVELS ? nearRegions[(own - 1u) * NEAR_LEVELS + lv] : 0u;
-    for (uint k = 0u; k < 6u; k++) {
-        uint hk = nearHash(h ^ (k + 1u) * 0x9E3779B9u);
-        uvec3 sub = uvec3(hk % subs, (hk >> 10) % subs, (hk >> 20) % subs);
-        vec3 at = rtgiOrigin(side) + vec3(cell) * size + (vec3(sub) + 0.5) * (size / float(subs));
-        uint j = nearFind(ivec3(floor((at - rtgiOrigin(side)) / NEAR_PARAMS.x)), side);
-        if (j == 0xFFFFFFFFu) continue;
-        if ((floatBitsToUint(nearPoints[2u * j].w) & NEAR_BURIED) != 0u) continue;
-        if ((lv < NEAR_LEVELS ? nearRegions[j * NEAR_LEVELS + lv] : 0u) != want) continue;
-        vec3 q = nearPoints[2u * j].xyz;
-        if (ivec3(floor((q - rtgiOrigin(side)) / size)) != cell) continue;
-        p = q;
-        n = nearPoints[2u * j + 1u].xyz;
-        return true;
+    uint j = cookCellAt(p, side, lv);
+    if (j == COOK_NONE) return false;
+    vec3 q = COOK_POINTS(2u * j).xyz;
+    if (lv < NEAR_LEVELS) {
+        uint own = nearRegion(p, side), at = nearRegion(q, side);
+        uint want = own != 0u ? COOK_REGIONS((own - 1u) * NEAR_LEVELS + lv) : 0u;
+        uint got = at != 0u ? COOK_REGIONS((at - 1u) * NEAR_LEVELS + lv) : 0u;
+        if (want != got) return false;
     }
-    return false;
+    p = q;
+    n = COOK_POINTS(2u * j + 1u).xyz;
+    return true;
 }
 
 void captureCell(vec3 p, vec3 n, uint at) {
@@ -236,7 +218,7 @@ void main() {
         // Moved onto its cell's cooked surface as any visible point is: the capture is what the cell trains on.
         uint at = (3u * uint(u.uCapture.z) + 2u) * uint(u.uCapture.x) + 6u * i;
         captureCell(p, n, at);
-        surfacePoint(p, n, h ^ 0x51ED270Bu);
+        surfacePoint(p, n);
         captureCell(p, n, at + 3u);
     } else if (i < visible) {
         uint tilesX = uint(u.uSize.z), tilesY = uint(u.uSize.w);
@@ -320,7 +302,7 @@ void main() {
         vec4 wp = u.uInvViewProj * vec4(ndcp, rawp, 1.0);
         p = wp.xyz / wp.w;
         n = normalize(nsp.xyz);
-        surfacePoint(p, n, h ^ 0x51ED270Bu);
+        surfacePoint(p, n);
     } else {
         if (u.uSun.w < 0.5) { none(i); return; }
         uint j = i - visible;
@@ -335,8 +317,8 @@ void main() {
             // nothing, and the readout faded each in over its parent -- twice its size, the wider and brighter light, its size
             // steps showing -- bright for a second or two (the user, the crevices testbed, 2026-10-30).
             uint e = nearList[(uint(u.uNearField.z) + j - asked) % nearListCount];
-            p = nearPoints[2u * e].xyz;
-            n = nearPoints[2u * e + 1u].xyz;
+            p = cookPoints[2u * e].xyz;
+            n = cookPoints[2u * e + 1u].xyz;
         } else {
             if ((uint(u.uSkip.x) & 8u) != 0u) { none(i); return; }
             // A share of last frame's training rays, spread over all of them and turning each frame.

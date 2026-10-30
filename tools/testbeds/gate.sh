@@ -10,7 +10,7 @@
 # were a suspect for the run-to-run noise); tools/testbeds/gate.py turns the logs into the verdict (targets and ratchets: see
 # there). Exit 0 when every ratchet holds. Logs stay in the directory printed at the end.
 #
-# Usage: tools/testbeds/gate.sh [extra demo flags...]   e.g. --rtgi-no-volume to price a change against the bars
+# Usage: tools/testbeds/gate.sh [extra demo flags...]   e.g. --rtgi-no-near-cook to price a change against the bars
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 if [[ -z "${BLIX_TESTBED_ASSETS:-}" ]]; then

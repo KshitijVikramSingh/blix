@@ -33,11 +33,11 @@ layout(set = 0, binding = 0) uniform RtgiTemporal {
                          // clamp's standard deviations (0: no clamp)
     vec4 uCacheParams;   // rtgiParams (rtgi_cache.glsl), for the fix-up
     vec4 uNearField;     // x RTGI_NEAR
-    vec4 uVolume;        // rtgi_volume.glsl's VOL_PARAMS
-    vec4 uVolumeGeom;    // rtgi_volume.glsl's VOL_GEOM
-    vec4 uNearCook;      // rtgi_nearcook.glsl's NEAR_PARAMS
-    vec4 uDebug;         // x the RTGI panel's view: 21 the fix-up's pixels magenta; 22 the history's frames held (0 rejected:
-                         // blue, 16 red); 10-20 and 23 (the readout's): a fix-up pixel black
+    vec4 uCook;          // rtgi_cook.glsl's COOK_PARAMS
+    vec4 uCookCounts;    // rtgi_cook.glsl's COOK_COUNTS
+    vec4 uDebug;         // x the RTGI panel's view: 19 the fix-up's pixels magenta; 20 the history's frames held (0 rejected:
+                         // blue, 16 red); 10-18, 21 and 24 (the readout's): a fix-up pixel black; y 1: the cooked neighbour
+                         // masks (as the readout's uCookRead.x)
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uRaw;
@@ -50,67 +50,34 @@ layout(set = 0, binding = 7) uniform sampler2D uPrepassNormal;
 // The fix-up's cache (a pixel the upsample found no sample of its surface for: lighting_upsample.frag marks it rgb -1).
 layout(std430, set = 0, binding = 8) readonly buffer RtgiKeys { uint rtgiKeys[]; };
 layout(std430, set = 0, binding = 9) readonly buffer RtgiRecord { uvec4 rtgiRecord[]; };
-layout(std430, set = 0, binding = 10) readonly buffer RtgiVolumeTable { uvec2 volTable[]; };
-layout(std430, set = 0, binding = 11) readonly buffer RtgiVolumeProbes { float volProbes[]; };
-layout(std430, set = 0, binding = 12) readonly buffer RtgiNearTable { uvec2 nearTable[]; };
-layout(std430, set = 0, binding = 13) readonly buffer RtgiNearLight { vec4 nearLight[]; };
-// The cells' traced reach (rtgi_volume_vis.comp), as the readout reads it: the fix-up leaves out the same neighbours.
-layout(std430, set = 0, binding = 14) readonly buffer RtgiVolumeCellVis { uvec2 cellVis[]; };
-layout(std430, set = 0, binding = 15) readonly buffer RtgiNearPoints { vec4 nearPoints[]; };
-
-#define VOL_PARAMS u.uVolume
-#define VOL_GEOM u.uVolumeGeom
-#define VOL_TABLE(i) volTable[i]
-#define VOL_PROBES(i) volProbes[i]
-#define VOL_DEPTH(i) 0u
-#include "rtgi_volume.glsl"
-#define RTGI_GEOM_SCALE(p) volCellScale(p)
-#define RTGI_FAR_GROW u.uVolumeGeom.z
+// The cooked cell set (rtgi_cook.glsl), as the readout reads it: the fix-up leaves out the same neighbours.
+layout(std430, set = 0, binding = 10) readonly buffer RtgiCookTable { uvec2 cookTable[]; };
+layout(std430, set = 0, binding = 11) readonly buffer RtgiCookPoints { vec4 cookPoints[]; };
+layout(std430, set = 0, binding = 12) readonly buffer RtgiCookRegions { uint cookRegions[]; };
+layout(std430, set = 0, binding = 13) readonly buffer RtgiCookScale { uvec2 cookScale[]; };
+layout(std430, set = 0, binding = 14) readonly buffer RtgiNearLight { vec4 nearLight[]; };
+#define COOK_PARAMS u.uCook
+#define COOK_COUNTS u.uCookCounts
+#define COOK_TABLE(i) cookTable[i]
+#define COOK_POINTS(i) cookPoints[i]
+#define COOK_REGIONS(i) cookRegions[i]
+#define COOK_SCALE(i) cookScale[i]
+#define RTGI_REGION_OF 1
+#include "rtgi_cook.glsl"
 #define RTGI_KEYS(i) rtgiKeys[i]
 #define RTGI_NEAR u.uNearField.x
-// The cooked cells' regions by level and their links (rtgi_nearcook_cook.comp; rtgi_cache.glsl's rtgiRegion).
-layout(std430, set = 0, binding = 16) readonly buffer RtgiNearRegions { uint nearRegions[]; };
-#define NEAR_REGIONS(i) nearRegions[i]
-// The cooked cells' cell sizes by 5 cm cube (rtgi_nearcook.glsl's nearScaleAt; rtgi_cache.glsl's rtgiCellSize).
-layout(std430, set = 0, binding = 18) readonly buffer RtgiNearScaleTable { uvec2 nearScaleTable[]; };
-#define NEAR_SCALE(i) nearScaleTable[i]
-#define RTGI_REGION_OF 1
-layout(std430, set = 0, binding = 17) readonly buffer RtgiNearAdj { uint nearAdj[]; };
-#define NEAR_ADJ(i) nearAdj[i]
 #include "rtgi_cache.glsl"
-#define NEAR_PARAMS u.uNearCook
-#define NEAR_TABLE(i) nearTable[i]
-#define NEAR_POINTS(i) nearPoints[i]
-#include "rtgi_nearcook.glsl"
 
-// The pixel's own cell's traced reach (rtgi_readout.frag's cellVisFetch, read alone: the readout asks for it): its
-// neighbours a ray from its point reached, at its level and the two coarser. Without it the fix-up blended the cell past
+// The pixel's cell's cooked neighbours (rtgi_readout.frag's neighbourSeen): without them the fix-up blended the cell past
 // a junction -- a comb of light along the crevices testbed's wall edges, there from one place and not a step away (the
 // user, 2026-10-29).
-bool visKnown = false;
-uint visWord = 0u, visLevel0 = 0u;
-void fixVis(vec3 p, uint side, uint level) {
-    if (u.uVolume.w < 0.5) return;
-    vec4 params = u.uCacheParams;
-    uint sc = rtgiFind(rtgiCellHash(ivec3(floor((p - rtgiOrigin(side)) / rtgiSize(level, params))), level, side, params), params);
-    if (sc == 0xFFFFFFFFu) return;
-    uvec2 v = cellVis[sc];
-    if (v.x != rtgiKeys[sc] || (v.y & 0x1000u) == 0u) return;
-    visKnown = true;
-    visWord = v.y;
-    visLevel0 = level;
-}
-bool neighbourSeen(vec3 p, ivec3 cc, uint level, uint a0, uint a1, float size) {
-    int d0 = cc[a0] - int(floor((p[a0] - 0.0) / size)), d1 = cc[a1] - int(floor((p[a1] - 0.0) / size));
-    // Not traced (the readout asks only at its half-res points): its own cell alone, never a blind neighbour.
-    if (!visKnown) return u.uVolume.w < 0.5 || (d0 == 0 && d1 == 0);
-    if (level < visLevel0 || level - visLevel0 > 2u) return true;
-    uint base = 16u + (level - visLevel0) * 4u;
-    if (d0 > 0 && (visWord & (1u << base)) == 0u) return false;
-    if (d0 < 0 && (visWord & (1u << (base + 1u))) == 0u) return false;
-    if (d1 > 0 && (visWord & (1u << (base + 2u))) == 0u) return false;
-    if (d1 < 0 && (visWord & (1u << (base + 3u))) == 0u) return false;
-    return true;
+bool neighbourSeen(vec3 p, uint side, ivec3 cc, uint level) {
+    if (u.uDebug.y < 0.5) return true;
+    uint own = cookCellAt(p, side, level);
+    if (own == COOK_NONE) return true;
+    ivec3 co = cookCoords(p, side, level);
+    uint axis = side >> 1u, a0 = (axis + 1u) % 3u, a1 = (axis + 2u) % 3u;
+    return cookReaches(own, cc[a0] - co[a0], cc[a1] - co[a1]);
 }
 
 // One level's cells on p's surface (the tangent plane's four, bilinear, weighed by what each holds), as
@@ -131,7 +98,7 @@ vec4 fixLevel(vec3 p, uint side, uint level, out float sky, out float near, out 
         cc[a0] += k & 1;
         cc[a1] += k >> 1;
         cc[axis] = cAxis;
-        if (!neighbourSeen(p, cc, level, a0, a1, size)) continue;
+        if (!neighbourSeen(p, side, cc, level)) continue;
         uint s = rtgiFind(rtgiCellHash(cc, level, side, params), params);
         if (s == 0xFFFFFFFFu) continue;
         uvec4 a = rtgiRecord[2u * s], c = rtgiRecord[2u * s + 1u];
@@ -158,7 +125,6 @@ vec4 fixUp(vec3 p, vec3 n) {
     float lf = rtgiLevelF(p, u.uCamera.xyz, params);
     uint level = uint(lf);
     float t = lf - float(level);
-    fixVis(p, side, level);
     float s0, s1, n0, n1, f0, f1;
     vec4 e0 = fixLevel(p, side, level, s0, n0, f0);
     vec4 e1 = level < uint(params.w) ? fixLevel(p, side, level + 1u, s1, n1, f1) : vec4(0.0);
@@ -171,8 +137,10 @@ vec4 fixUp(vec3 p, vec3 n) {
         e = e2.rgb;
         if (e2.w < 0.05) { e = vec3(-1.0); sky = 1.0; }
     }
-    if (NEAR_PARAMS.w > 0.5) {
-        float size = NEAR_PARAMS.x;
+    if (COOK_PARAMS.w > 0.5 && COOK_COUNTS.y > 0.5) {
+        float size = COOK_PARAMS.x;
+        uint own = rtgiRegion - 1u;
+        ivec3 co = own != COOK_NONE ? cookCoords(COOK_POINTS(2u * own).xyz, side, 0u) : ivec3(0);
         uint axis = side >> 1u, a0 = (axis + 1u) % 3u, a1 = (axis + 2u) % 3u;
         vec3 f = (p - rtgiOrigin(side)) / size - 0.5;
         ivec3 c0 = ivec3(floor(f));
@@ -185,8 +153,8 @@ vec4 fixUp(vec3 p, vec3 n) {
             cc[a0] += k & 1;
             cc[a1] += k >> 1;
             cc[axis] = cAxis;
-            uint i = nearFind(cc, side);
-            if (i == 0xFFFFFFFFu || !nearLinked(rtgiRegion - 1u, i, side)) continue;
+            uint i = cookFind(cc, 0u, side);
+            if (i == COOK_NONE || i >= uint(COOK_COUNTS.y) || !cookLinked(own, co, i, cc, side)) continue;
             vec4 nl = nearLight[i];
             if (nl.w < 0.5) continue;
             float w = ((k & 1) == 1 ? tt[a0] : 1.0 - tt[a0]) * ((k >> 1) == 1 ? tt[a1] : 1.0 - tt[a1]);
@@ -219,8 +187,8 @@ void main() {
         vec3 nf = dot(ns.xyz, ns.xyz) > 1e-6 ? normalize(ns.xyz) : vec3(0.0, 1.0, 0.0);
         raw = fixUp(wf.xyz / wf.w, nf);
         int dv = int(u.uDebug.x + 0.5);
-        if (dv == 21) raw = vec4(1.0, 0.0, 1.0, 1.0);
-        else if ((dv >= 10 && dv <= 20) || dv == 23) raw = vec4(0.0, 0.0, 0.0, 1.0);
+        if (dv == 19) raw = vec4(1.0, 0.0, 1.0, 1.0);
+        else if ((dv >= 10 && dv <= 18) || dv == 21 || dv == 24) raw = vec4(0.0, 0.0, 0.0, 1.0);
     }
     ivec2 size = textureSize(uSceneDepth, 0);
     float rawLum = lum(raw.rgb);
@@ -281,9 +249,9 @@ void main() {
     held = min(held + 1.0, u.uParams.x);
     outIncident = mix(history, raw, 1.0 / held);
     int dv2 = int(u.uDebug.x + 0.5);
-    // Views: the readout's and the fix-up's shown as they are (no history); 22 the frames the history held.
-    if ((dv2 >= 10 && dv2 <= 21) || dv2 == 23) outIncident = raw;
-    if (dv2 == 22) outIncident = vec4(heat(min(held - 1.0, 16.0) / 16.0), raw.a);
+    // Views: the readout's and the fix-up's shown as they are (no history); 20 the frames the history held.
+    if ((dv2 >= 10 && dv2 <= 19) || dv2 == 21 || dv2 == 24) outIncident = raw;
+    if (dv2 == 20) outIncident = vec4(heat(min(held - 1.0, 16.0) / 16.0), raw.a);
     outFast = fast;
     vec3 on = nHere / (abs(nHere.x) + abs(nHere.y) + abs(nHere.z));
     vec2 oe = on.z >= 0.0 ? on.xy : (1.0 - abs(on.yx)) * vec2(on.x >= 0.0 ? 1.0 : -1.0, on.y >= 0.0 ? 1.0 : -1.0);

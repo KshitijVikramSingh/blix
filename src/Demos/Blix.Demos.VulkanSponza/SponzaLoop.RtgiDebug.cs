@@ -12,16 +12,18 @@ internal sealed partial class SponzaLoop
         "Light", "Done (green) / open (red)", "Unsure (done threshold to 16x)", "Samples held (1 to 16,384, log)",
         "Cell level", "Hit distance (5 cm red to 20 m blue)", "Sky visibility", "Sun visibility", "Light before the blur",
         "Blur radius",
-        "Cell ID (colour per cache cell)", "Cell size (geometry; 5 cm blue - 1 m red)", "Cell raw light (unblended)",
-        "Cell blended light (the record)", "Cell traced reach (grey all reached; magenta untraced)", "Cooked near: cell ID",
-        "Cooked near: state (red buried, blue ungathered)", "Cooked near: near light", "Cell's probe level / probes reached",
-        "Probe harmonic distance (5 cm - 5 m)", "Cell samples held (log)", "Fix-up pixels (magenta)",
+        "Cell ID (colour per cache cell)", "Cell size (cooked; 5 cm blue - 1 m red, grey not cooked)", "Cell raw light (unblended)",
+        "Cell blended light (the record)", "Cell cooked neighbours (grey all clear; magenta not cooked)", "Cooked L0 cell ID",
+        "Cooked L0 cell state (red buried, grey no near field, blue ungathered)", "Cooked near: near light",
+        "Cell samples held (log)", "Fix-up pixels (magenta)",
         "Temporal history held (blue 0 - red 16)", "Cell region (grey: none cooked)",
         "Cooked near: far term (escape share x far light per ray)", "Cooked near: the cache's light under it",
+        "Cooked cell (red buried, yellow junction, green own level, blue ancestor; white its point)",
     };
 
     // The view (rtgi_readout.frag's uView.x, rtgi_blur.frag's uHalf.x, rtgi_temporal.frag's uDebug.x): 0 the light; 1-7 a
-    // cell's state; 8 the light unblurred; 9 the blur's radius; 10 on the cooked and world-space state (RtgiViewNames).
+    // cell's state; 8 the light unblurred; 9 the blur's radius; 10 on the cooked and world-space state (RtgiViewNames;
+    // renumbered 2026-10-30 when the world volume's two views went: 18-23 were 20-25, 24 is new).
     private int rtgiView;
     // The Show channel before a view took it (a view is shown as the raw bounce radiance, no albedo on it).
     private int rtgiShowBefore = -1;
@@ -48,16 +50,13 @@ internal sealed partial class SponzaLoop
             }
             if (debug.Controls.Button("Reset cache")) rtgiResetPending = true;
             rtgiFrozen = debug.Controls.Toggle("Freeze (no rays, no training)", rtgiFrozen);
-            if (rtgiVolumeBuilt)
+            if (rtgiCookReady)
             {
-                rtgiVolume = debug.Controls.Toggle("World volume (--rtgi-no-volume off)", rtgiVolume);
-                if (rtgiNearCookBuilt) rtgiNearCook = debug.Controls.Toggle("Cooked near field (--rtgi-no-near-cook off)", rtgiNearCook);
-                if (rtgiNearCookBuilt) rtgiSurfaceTrain = debug.Controls.Toggle("Cells trained over their own surface", rtgiSurfaceTrain);
-                rtgiFilterReach = debug.Controls.Toggle("Blend: traced reach", rtgiFilterReach);
+                rtgiNearCook = debug.Controls.Toggle("Cooked near field (--rtgi-no-near-cook off)", rtgiNearCook);
+                rtgiSurfaceTrain = debug.Controls.Toggle("Cells trained from their cooked point", rtgiSurfaceTrain);
+                rtgiCookNeighbours = debug.Controls.Toggle("Readout: cooked neighbour masks", rtgiCookNeighbours);
+                rtgiFilterReach = debug.Controls.Toggle("Blend: cooked reach", rtgiFilterReach);
                 rtgiFilterWide = MathF.Round(debug.Controls.Float("Blend: 5x5 under samples (0 off)", rtgiFilterWide, 0f, 4096f));
-                rtgiVolumeNeighbours = debug.Controls.Toggle("Volume: neighbour test (traced)", rtgiVolumeNeighbours);
-                var geomCells = debug.Controls.Toggle("Cells sized by geometry (off: by camera distance)", rtgiVolumeCells > 0f);
-                rtgiVolumeCells = geomCells ? (rtgiVolumeCells > 0f ? rtgiVolumeCells : 0.1f) : 0f;
             }
             rtgiBlur = debug.Controls.Float("Blur (px at most, 0 off)", rtgiBlur, 0f, 32f);
             if (rtgiTemporal) rtgiTemporalMoving = MathF.Round(debug.Controls.Float("Temporal: frames while moving", rtgiTemporalMoving, 1f, 16f));

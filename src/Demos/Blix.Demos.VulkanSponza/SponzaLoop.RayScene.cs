@@ -10,7 +10,7 @@ namespace Blix.Demos.VulkanSponza;
 
 // The scene under CPU ray-query hierarchies (Blix.Geometry), built at load over every primitive's full-detail
 // triangles: regions over the placements of meshes used once, an instance per placement of a mesh used more. Always
-// built: RTGI's volume and the frame's traced passes are built from it. Stage 3's measure of whether a load-time build fits these scenes, and what a CPU ray costs in them.
+// built: RTGI's cook and the frame's traced passes are built from it. Stage 3's measure of whether a load-time build fits these scenes, and what a CPU ray costs in them.
 internal sealed partial class SponzaLoop
 {
     private RayQueryScene? rayQueries;
@@ -119,7 +119,7 @@ internal sealed partial class SponzaLoop
     }
 
     // The ray scene's build and its packing for the GPU, in the background (TryFinishLoad waits on the task, the window
-    // going on); FinishRayScene, on the frame thread, uploads it and starts RTGI's volume.
+    // going on); FinishRayScene, on the frame thread, uploads it and starts RTGI's cook (SponzaLoop.RtgiCook.cs).
     private Task<(RayQueryScene Scene, RayQueryGpuData? Data, double BuildMs, int Meshes, int Placements)>? rayBuildTask;
 
     private void StartRayScene(RayMesh[] meshes, List<RayQueryScene.Instance> instances)
@@ -189,10 +189,9 @@ internal sealed partial class SponzaLoop
         var nodes = rayQueries.MeshNodeCount;
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] ray scene: {placements:N0} placements of {meshCount:N0} meshes as {rayQueries.RegionCount:N0} regions (at most {rayRegionTriangles:N0} triangles) and {rayQueries.InstanceEntryCount:N0} instances, {rayQueries.StoredTriangleCount:N0} triangles stored, built in {buildMs:0} ms on {Environment.ProcessorCount} threads in the background; {nodes:N0} nodes ({nodes * BvhNode.SizeInBytes / 1048576.0:0.0} MB), top level {rayQueries.Nodes.Length:N0}."));
-        // The GPU scene and RTGI's volume are the diffuse GI's, so both are built whenever there is a scene.
+        // The GPU scene and RTGI's cook are the diffuse GI's, so both are built whenever there is a scene.
         if (data is not null) BuildRayGpu(data);
-        if (placements > 0) StartRtgiVolumeBuild(scene);
-        if (placements > 0) StartRtgiCensus(scene);
+        if (placements > 0) StartRtgiCook(scene);
     }
 
     // The ray scene on the GPU, for whatever traces it (the Metal tracer's build, the GPU reference, RTGI): the packed

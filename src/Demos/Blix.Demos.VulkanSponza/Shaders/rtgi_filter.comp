@@ -43,8 +43,10 @@ layout(set = 0, binding = 0) uniform RtgiFilter {
                     // its slot), 1: every frame; z a young cell's (1: every frame)
     vec4 uDone;     // x the frame's number; y frames between drift checks; z the relative error under which a cell is
                     // done; w the dark floor (absolute luminance the error is measured against at least)
-    vec4 uReach;    // the world volume's traced reach (cellReach): x 1 on; y the samples under which the blend widens to 5 x 5;
-                    // z the outer ring's weight
+    vec4 uReach;    // the cooked reach (reachable): x 1 on; y the samples under which the blend widens to 5 x 5; z the outer
+                    // ring's weight
+    vec4 uCook;     // rtgi_cook.glsl's COOK_PARAMS
+    vec4 uCookCounts; // rtgi_cook.glsl's COOK_COUNTS
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer RtgiKeys { uint rtgiKeys[]; };
@@ -65,31 +67,36 @@ layout(std430, set = 0, binding = 10) buffer RtgiRecord { uvec4 rtgiRecord[]; };
 
 // The cache's work, counted for the profile (SponzaLoop.Rtgi.cs's RtgiWork): one atomic a subgroup, never a lane.
 layout(std430, set = 0, binding = 11) buffer RtgiStats { uint rtgiStats[64]; };
-// Per slot, its point's traced reach along its surface (rtgi_volume_vis.comp: the key it was traced for, bits 16-27 the
-// neighbours a ray reached at one, two and four cells' length).
-layout(std430, set = 0, binding = 12) readonly buffer RtgiVolumeCellVis { uvec2 cellVis[]; };
+// The cooked cell set (rtgi_cook.glsl): each cooked cell's neighbours across its surface a ray from its point reached
+// (rtgi_cook.comp kinds 4, 5), the same for every pixel and every frame.
+layout(std430, set = 0, binding = 12) readonly buffer RtgiCookTable { uvec2 cookTable[]; };
+layout(std430, set = 0, binding = 13) readonly buffer RtgiCookPoints { vec4 cookPoints[]; };
+#define COOK_PARAMS u.uCook
+#define COOK_COUNTS u.uCookCounts
+#define COOK_TABLE(i) cookTable[i]
+#define COOK_POINTS(i) cookPoints[i]
+#include "rtgi_cook.glsl"
 
-// Whether the cell may take the neighbour (a, b) cells away along its plane's two axes (the filter's ua, va): a ray from
-// its point reached that way, that far (rtgi_volume_vis.comp; a diagonal both ways) -- so the blend stops at a corner, a
-// junction, the ceiling a wall meets (the leaks the readout's neighbour test stopped, 2026-10-29). Not traced yet, or the
-// reach off: as before, every neighbour.
-uint reachWord = 0u;
-bool reachKnown = false;
-bool reachable(uint axis, int a, int b) {
-    if (!reachKnown) return true;
-    // The vis rays' axes: a0 = axis + 1, a1 = axis + 2 (mod 3); the filter's ua is y for the x side, else x; va z, but y
-    // for the z side.
-    uint uaAxis = axis == 0u ? 1u : 0u, vaAxis = axis == 2u ? 1u : 2u;
-    uint a0 = (axis + 1u) % 3u;
-    int steps[2] = int[2](a, b);
-    uint axes[2] = uint[2](uaAxis, vaAxis);
-    for (int k = 0; k < 2; k++) {
-        int st = steps[k];
-        if (st == 0) continue;
-        uint base = 16u + (abs(st) >= 2 ? 4u : 0u) + (axes[k] == a0 ? 0u : 2u) + (st > 0 ? 0u : 1u);
-        if ((reachWord & (1u << base)) == 0u) return false;
-    }
-    return true;
+// Whether the cell may take the neighbour d3 away along its plane (the filter's ua, va): its cooked cell's ray to that
+// neighbour's point was clear -- two cells away, through the cooked neighbour on the way (the diagonal first) -- so the
+// blend stops at a corner, a junction, the ceiling a wall meets (the leaks the readout's neighbour test stops). The cell
+// not cooked (dynamic geometry, a region's other piece without its own cooked point), or the reach off: every neighbour,
+// as before.
+uint reachOwn = COOK_NONE;
+bool reachable(ivec3 base, uint level, uint side, ivec3 d3) {
+    if (reachOwn == COOK_NONE) return true;
+    uint axis = side >> 1u, a0 = (axis + 1u) % 3u, a1 = (axis + 2u) % 3u;
+    int d0 = d3[a0], d1 = d3[a1];
+    int s0 = sign(d0), s1 = sign(d1);
+    if (!cookReaches(reachOwn, s0, s1)) return false;
+    int r0 = d0 - s0, r1 = d1 - s1;
+    if (r0 == 0 && r1 == 0) return true;
+    ivec3 mid = base;
+    mid[a0] += s0;
+    mid[a1] += s1;
+    uint m = cookFind(mid, level, side);
+    if (m == COOK_NONE || !cookLive(m)) return false;
+    return cookReaches(m, r0, r1);
 }
 void tally(uint slot, bool v) {
     uint n = subgroupBallotBitCount(subgroupBallot(v));
@@ -143,14 +150,11 @@ void main() {
     float varSelf = max(m.y - m.x * m.x, 0.0);
     float poolVar = varSelf * wSelf, poolW = wSelf;
     {
-        if (u.uReach.x > 0.5) {
-            uvec2 v = cellVis[s];
-            reachKnown = v.x == rtgiKeys[s] && (v.y & 0x1000u) != 0u;
-            reachWord = v.y;
-        }
+        if (u.uReach.x > 0.5) reachOwn = cookFind(cell.xyz, level, side);
+        if (reachOwn != COOK_NONE && !cookLive(reachOwn)) reachOwn = COOK_NONE;
         // Few samples (uReach.y): the next ring too, 5 x 5 -- the far ends of a crevice, a patch of cells all short of
-        // samples together, blotched where a 3 x 3 drew only on each other (the user, 2026-10-29). Only where traced.
-        int r = reachKnown && held < u.uReach.y ? 2 : 1;
+        // samples together, blotched where a 3 x 3 drew only on each other (the user, 2026-10-29). Only where cooked.
+        int r = reachOwn != COOK_NONE && held < u.uReach.y ? 2 : 1;
         // The two axes in the side's plane.
         uint axis = side / 2u;
         ivec3 ua = axis == 0u ? ivec3(0, 1, 0) : ivec3(1, 0, 0);
@@ -158,7 +162,7 @@ void main() {
         for (int a = -r; a <= r; a++) {
             for (int b = -r; b <= r; b++) {
                 if (a == 0 && b == 0) continue;
-                if (!reachable(axis, a, b)) continue;
+                if (!reachable(cell.xyz, level, side, ua * a + va * b)) continue;
                 uint t = rtgiFind(rtgiCellHash(cell.xyz + ua * a + va * b, level, side, u.uParams), u.uParams);
                 if (t == 0xFFFFFFFFu) continue;
                 vec4 r1 = rtgiResolved[2u * t + 1u];

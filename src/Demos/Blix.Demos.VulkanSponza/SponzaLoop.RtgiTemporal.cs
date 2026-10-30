@@ -19,7 +19,7 @@ internal sealed partial class SponzaLoop
     // The frames held now: all of them on a settled, still view; down to 2 while the cache's light is changing -- a sun turn's
     // need (SponzaLoop.RtgiBudget.cs) -- as the cache relearns for seconds after the turn the reset was the start of, and 16
     // frames trailed it (a sun change's truth 0.228 against 0.165, 2026-10-29).
-    // The camera's motion does not shorten it to 2: the cache's cells are the geometry's now (SponzaLoop.RtgiVolume.cs),
+    // The camera's motion does not shorten it to 2: the cache's cells are the geometry's now (SponzaLoop.RtgiCook.cs),
     // its light no longer changing as the camera moves, and two frames while moving left the half-res sample's turn through
     // its 2x2 showing -- corners shimmering, dim areas wobbling as the camera moved (the user, the crevices testbed,
     // 2026-10-29). While moving, --rtgi-temporal-moving frames (6; the panel's slider): the whole 16 smeared (the user,
@@ -139,24 +139,19 @@ internal sealed partial class SponzaLoop
                 new("uParams", new Vector4Uniform(new Vector4(RtgiTemporalFramesNow, historyOk ? 1f : 0f, rtgiTemporalFast, rtgiTemporalClamp))),
                 new("uCacheParams", new Vector4Uniform(RtgiParams)),
                 new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, 0f, 0f, 0f))),
-                new("uVolume", new Vector4Uniform(RtgiVolumeParams)),
-                new("uVolumeGeom", new Vector4Uniform(RtgiVolumeGeom)),
-                new("uNearCook", new Vector4Uniform(RtgiNearParams)),
-                new("uDebug", new Vector4Uniform(new Vector4(rtgiView, 0f, 0f, 0f))),
+                new("uCook", new Vector4Uniform(CookParams)),
+                new("uCookCounts", new Vector4Uniform(CookCounts)),
+                new("uDebug", new Vector4Uniform(new Vector4(rtgiView, rtgiCookNeighbours ? 1f : 0f, 0f, 0f))),
             },
             buffers: new[]
             {
                 new ShaderBufferBinding("RtgiKeys", rtgiKeys),
                 new ShaderBufferBinding("RtgiRecord", rtgiRecord),
-                new ShaderBufferBinding("RtgiVolumeTable", RtgiVolTableOrDummy),
-                new ShaderBufferBinding("RtgiVolumeProbes", RtgiVolProbesOrDummy),
-                new ShaderBufferBinding("RtgiNearTable", RtgiNearTableOrDummy),
-                new ShaderBufferBinding("RtgiNearLight", RtgiNearLightOrDummy),
-                new ShaderBufferBinding("RtgiVolumeCellVis", RtgiVolCellVisOrDummy),
-                new ShaderBufferBinding("RtgiNearPoints", RtgiNearPointsOrDummy),
-                new ShaderBufferBinding("RtgiNearRegions", RtgiNearRegionsOrDummy),
-                new ShaderBufferBinding("RtgiNearScaleTable", RtgiNearScaleTableOrDummy),
-                new ShaderBufferBinding("RtgiNearAdj", RtgiNearAdjOrDummy),
+                new ShaderBufferBinding("RtgiCookTable", CookTableOrDummy),
+                new ShaderBufferBinding("RtgiCookPoints", CookPointsOrDummy),
+                new ShaderBufferBinding("RtgiCookRegions", CookRegionsOrDummy),
+                new ShaderBufferBinding("RtgiCookScale", CookScaleOrDummy),
+                new ShaderBufferBinding("RtgiNearLight", NearLightOrDummy),
             }));
         graph.Pass(rtgiHistoryPassHandle, scope => fullscreen.Draw(
             scope, rtgiHistoryPipeline,

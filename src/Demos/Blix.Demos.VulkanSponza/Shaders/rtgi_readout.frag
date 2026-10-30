@@ -31,10 +31,9 @@ layout(set = 0, binding = 0) uniform RtgiReadout {
     vec4 uReuse;         // x 1: history to reuse; y this frame's fresh blocks (0-3); z how far a history pixel may sit from
                          // the point, per metre of distance; w the history's full-res pixel of its 2x2 (x + 2 y)
     vec4 uPrevCamera;    // xyz last frame's camera (the history guide's positions are relative to it)
-    vec4 uVolume;        // the world volume: rtgi_volume.glsl's VOL_PARAMS (w 0: off)
-    vec4 uVolumeGeom;    // rtgi_volume.glsl's VOL_GEOM (the cells sized by the geometry)
-    vec4 uNearCook;      // the cooked near field: rtgi_nearcook.glsl's NEAR_PARAMS (w 0: off)
-    vec4 uVolume2;       // y the visibility requests' room; z 1: neighbours left out where their traced ray was blocked
+    vec4 uCook;          // the cooked cell set: rtgi_cook.glsl's COOK_PARAMS (w 0: not cooked yet)
+    vec4 uCookCounts;    // rtgi_cook.glsl's COOK_COUNTS (y the near field's cells: 0 off)
+    vec4 uCookRead;      // x 1: neighbours left out where the cooked ray to them was blocked
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -77,41 +76,21 @@ layout(set = 0, binding = 15) uniform sampler2D uHistRaw;
 layout(set = 0, binding = 16) uniform sampler2D uHistGradient;
 layout(set = 0, binding = 17) uniform sampler2D uHistBlurred;
 layout(set = 0, binding = 18) uniform usampler2D uHistGuide;
-// RTGI's world volume (rtgi_volume.glsl): the world's probes, whose cooked geometry sizes the cells and whose visibility the
-// cells' traced reach is tested against.
-layout(std430, set = 0, binding = 22) readonly buffer RtgiVolumeTable { uvec2 volTable[]; };
-layout(std430, set = 0, binding = 23) readonly buffer RtgiVolumeProbes { float volProbes[]; };
-#define VOL_PARAMS u.uVolume
-#define VOL_GEOM u.uVolumeGeom
-#define VOL_TABLE(i) volTable[i]
-layout(std430, set = 0, binding = 24) readonly buffer RtgiVolumeDepth { uint volDepth[]; };
-// Per cache slot, which probes and neighbours its point sees (rtgi_volume_vis.comp: the key it was traced for, and the mask),
-// and the requests for cells not traced yet.
-layout(std430, set = 0, binding = 25) buffer RtgiVolumeCellVis { uvec2 cellVis[]; };
-layout(std430, set = 0, binding = 26) buffer RtgiVolumeVisRequests { uint visCount; uint visPad[3]; vec4 visRequests[]; };
-// The cooked near field (rtgi_nearcook.glsl): the cooked near cells, their table and light.
-layout(std430, set = 0, binding = 27) readonly buffer RtgiNearTable { uvec2 nearTable[]; };
-layout(std430, set = 0, binding = 28) readonly buffer RtgiNearLight { vec4 nearLight[]; };
-layout(std430, set = 0, binding = 29) readonly buffer RtgiNearPoints { vec4 nearPoints[]; };
-#define NEAR_POINTS(i) nearPoints[i]
-#define NEAR_PARAMS u.uNearCook
-#define NEAR_TABLE(i) nearTable[i]
-// The cooked cells' regions by level and their links (rtgi_nearcook_cook.comp; rtgi_cache.glsl's rtgiRegion).
-layout(std430, set = 0, binding = 30) readonly buffer RtgiNearRegions { uint nearRegions[]; };
-#define NEAR_REGIONS(i) nearRegions[i]
-// The cooked cells' cell sizes by 5 cm cube (rtgi_nearcook.glsl's nearScaleAt; rtgi_cache.glsl's rtgiCellSize).
-layout(std430, set = 0, binding = 32) readonly buffer RtgiNearScaleTable { uvec2 nearScaleTable[]; };
-#define NEAR_SCALE(i) nearScaleTable[i]
+// The cooked cell set (rtgi_cook.glsl): what sizes and keys the cells, each cell's cooked neighbours, the level-0 junction
+// cells' near light.
+layout(std430, set = 0, binding = 22) readonly buffer RtgiCookTable { uvec2 cookTable[]; };
+layout(std430, set = 0, binding = 23) readonly buffer RtgiCookPoints { vec4 cookPoints[]; };
+layout(std430, set = 0, binding = 24) readonly buffer RtgiCookRegions { uint cookRegions[]; };
+layout(std430, set = 0, binding = 25) readonly buffer RtgiCookScale { uvec2 cookScale[]; };
+layout(std430, set = 0, binding = 26) readonly buffer RtgiNearLight { vec4 nearLight[]; };
+#define COOK_PARAMS u.uCook
+#define COOK_COUNTS u.uCookCounts
+#define COOK_TABLE(i) cookTable[i]
+#define COOK_POINTS(i) cookPoints[i]
+#define COOK_REGIONS(i) cookRegions[i]
+#define COOK_SCALE(i) cookScale[i]
 #define RTGI_REGION_OF 1
-layout(std430, set = 0, binding = 31) readonly buffer RtgiNearAdj { uint nearAdj[]; };
-#define NEAR_ADJ(i) nearAdj[i]
-#include "rtgi_nearcook.glsl"
-#define VOL_PROBES(i) volProbes[i]
-#define VOL_DEPTH(i) volDepth[i]
-#include "rtgi_volume.glsl"
-#define RTGI_GEOM_SCALE(p) volCellScale(p)
-#define RTGI_FAR_GROW u.uVolumeGeom.z
-
+#include "rtgi_cook.glsl"
 
 // Blue (0) to green to red (1).
 vec3 heat(float t) {
@@ -126,44 +105,18 @@ vec3 heat(float t) {
 
 bool keeper = false;
 
-// The pixel's cell's traced visibility (rtgi_volume_vis.comp), fetched once a pixel (cellVisFetch): visKnown when it is
-// traced, visWord its mask, visLevel0 the cache level it was traced at. Not traced yet: the cell asked for, once (its key
-// claimed in its visibility word).
-bool visKnown = false;
-uint visWord = 0u, visLevel0 = 0u;
-void cellVisFetch(vec3 p, vec3 n, uint side, uint level) {
-    if (u.uVolume.w < 0.5) return;
-    uint sc = rtgiFind(rtgiCellHash(ivec3(floor((p - rtgiOrigin(side)) / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
-    if (sc == 0xFFFFFFFFu) return;
-    uint key = rtgiKeys[sc];
-    uvec2 v = cellVis[sc];
-    if (v.x != key) {
-        if (atomicCompSwap(cellVis[sc].x, v.x, key) != v.x) return;
-        cellVis[sc].y = 0u;
-        uint r = atomicAdd(visCount, 1u);
-        if (r >= uint(u.uVolume2.y)) { cellVis[sc].x = 0u; return; }
-        uint lv = min(volVisLevel(p), 15u);
-        visRequests[2u * r] = vec4(p, uintBitsToFloat(sc));
-        visRequests[2u * r + 1u] = vec4(n, uintBitsToFloat(lv | (level << 8) | (side << 16)));
-        return;
-    }
-    if ((v.y & 0x1000u) == 0u) return;
-    visKnown = true;
-    visWord = v.y;
-    visLevel0 = level;
-}
-
-// Whether the readout may blend cell cc (at a level) into point p's light: its neighbour's ray reached it (cellVisFetch),
-// or it was not traced.
-bool neighbourSeen(vec3 p, ivec3 cc, uint level, uint a0, uint a1, float size) {
-    if (u.uVolume2.z < 0.5 || !visKnown || level < visLevel0 || level - visLevel0 > 2u) return true;
-    uint base = 16u + (level - visLevel0) * 4u;
-    int d0 = cc[a0] - int(floor((p[a0] - 0.0) / size)), d1 = cc[a1] - int(floor((p[a1] - 0.0) / size));
-    if (d0 > 0 && (visWord & (1u << base)) == 0u) return false;
-    if (d0 < 0 && (visWord & (1u << (base + 1u))) == 0u) return false;
-    if (d1 > 0 && (visWord & (1u << (base + 2u))) == 0u) return false;
-    if (d1 < 0 && (visWord & (1u << (base + 3u))) == 0u) return false;
-    return true;
+// Whether the readout may blend cell cc (at a level) into point p's light: the cooked cell holding p at that level reached
+// it (rtgi_cook.glsl's neighbour mask: a ray between the two cells' points, traced once at cook -- the same for every
+// pixel, both ways alike). The first-reader pixel's own rays (the volume's, since removed) decided it before: a cell's
+// mask depended on which pixel asked first, a checkerboard that changed with the camera. Not cooked there (or the
+// panel's switch off): every neighbour.
+bool neighbourSeen(vec3 p, uint side, ivec3 cc, uint level) {
+    if (u.uCookRead.x < 0.5) return true;
+    uint own = cookCellAt(p, side, level);
+    if (own == COOK_NONE) return true;
+    ivec3 co = cookCoords(p, side, level);
+    uint axis = side >> 1u, a0 = (axis + 1u) % 3u, a1 = (axis + 2u) % 3u;
+    return cookReaches(own, cc[a0] - co[a0], cc[a1] - co[a1]);
 }
 
 uint rtgiFindKept(uvec2 h, vec4 params) {
@@ -207,7 +160,7 @@ vec4 readLevel(vec3 p, uint side, uint level, out float sky, out vec3 bvec, out 
         o[a1] = k >> 1;
         ivec3 cc = c0 + o;
         cc[axis] = cAxis;
-        if (!neighbourSeen(p, cc, level, a0, a1, size)) continue;
+        if (!neighbourSeen(p, side, cc, level)) continue;
         uint s = rtgiFindKept(rtgiCellHash(cc, level, side, u.uParams), u.uParams);
         lookups++;
         if (s == 0xFFFFFFFFu) { misses++; continue; }
@@ -235,12 +188,15 @@ vec4 readLevel(vec3 p, uint side, uint level, out float sky, out vec3 bvec, out 
     return vec4(e, w);
 }
 
-// The cooked near field: the cooked near cells around p on its surface (the tangent plane's four, bilinear, those gathered and in
-// p's region; rtgi_nearcook.glsl): rgb their whole indirect irradiance (rtgi_nearcook_update.comp); found the weight found.
+// The cooked near field: the level-0 junction cells around p on its surface (the tangent plane's four, bilinear, those
+// gathered and linked to p's own level-0 cell; rtgi_cook.glsl): rgb their whole indirect irradiance
+// (rtgi_nearcook_update.comp); found the weight found.
 vec4 readNearCooked(vec3 p, uint side, out float found) {
     found = 0.0;
-    if (NEAR_PARAMS.w < 0.5) return vec4(0.0);
-    float size = NEAR_PARAMS.x;
+    if (COOK_PARAMS.w < 0.5 || COOK_COUNTS.y < 0.5) return vec4(0.0);
+    float size = COOK_PARAMS.x;
+    uint own = rtgiRegion - 1u;
+    ivec3 co = own != COOK_NONE ? cookCoords(COOK_POINTS(2u * own).xyz, side, 0u) : ivec3(0);
     uint axis = side >> 1u, a0 = (axis + 1u) % 3u, a1 = (axis + 2u) % 3u;
     vec3 f = (p - rtgiOrigin(side)) / size - 0.5;
     ivec3 c0 = ivec3(floor(f));
@@ -252,8 +208,8 @@ vec4 readNearCooked(vec3 p, uint side, out float found) {
         cc[a0] += k & 1;
         cc[a1] += k >> 1;
         cc[axis] = cAxis;
-        uint i = nearFind(cc, side);
-        if (i == 0xFFFFFFFFu || !nearLinked(rtgiRegion - 1u, i, side)) continue;
+        uint i = cookFind(cc, 0u, side);
+        if (i == COOK_NONE || i >= uint(COOK_COUNTS.y) || !cookLinked(own, co, i, cc, side)) continue;
         vec4 nl = nearLight[i];
         if (nl.w < 0.5) continue;
         float w = ((k & 1) == 1 ? t[a0] : 1.0 - t[a0]) * ((k >> 1) == 1 ? t[a1] : 1.0 - t[a1]);
@@ -371,7 +327,6 @@ void main() {
     float sky0, sky1;
     vec3 b0, b1;
     float near0, near1, far0, far1;
-    cellVisFetch(p, n, side, level);
     vec4 e0 = readLevel(p, side, level, sky0, b0, near0, far0);
     vec4 e1 = level < top ? readLevel(p, side, level + 1u, sky1, b1, near1, far1) : vec4(0.0);
     vec4 e;
@@ -383,7 +338,7 @@ void main() {
     else e = readLevel(p, side, min(level + 2u, top), sky, bv, nearCell, farShare);
     // The cooked near field: where a cooked cell lies, its near light over the cache's far light (faded in by how much of the
     // point the cooked cells cover).
-    if (NEAR_PARAMS.w > 0.5) {
+    if (COOK_PARAMS.w > 0.5 && COOK_COUNTS.y > 0.5) {
         float found;
         vec4 nc = readNearCooked(p, side, found);
         if (found > 0.05 && e.w > 0.0) {
@@ -392,10 +347,10 @@ void main() {
             float esc = nc.w - 1.0;
             vec3 farPer = e.rgb * farShare / max(nearCell, 0.05);
             vec3 cooked = esc * farPer + nc.rgb;
-            // Views 24 and 25 (SponzaLoop.RtgiDebug.cs): its far term alone (esc x far per ray), the cache's light under it.
+            // Views 22 and 23 (SponzaLoop.RtgiDebug.cs): its far term alone (esc x far per ray), the cache's light under it.
             int dv = int(u.uView.x + 0.5);
-            if (dv == 24) e.rgb = esc * farPer;
-            else if (dv != 25) e.rgb = mix(e.rgb, cooked, clamp(found, 0.0, 1.0));
+            if (dv == 22) e.rgb = esc * farPer;
+            else if (dv != 23) e.rgb = mix(e.rgb, cooked, clamp(found, 0.0, 1.0));
         }
     }
     outIncident = e.w > 0.0 ? vec4(e.rgb, sky) : vec4(0.0, 0.0, 0.0, 1.0);
@@ -420,26 +375,29 @@ void main() {
         if (relD < 0.03) atomicAdd(doneCount[7], 1u);
         // Its relative error summed (4096ths, at most 1): the screen's mean, the point budget's need (SponzaLoop.RtgiBudget.cs).
         atomicAdd(doneCount[8], uint(clamp(relD, 0.0, 1.0) * 4096.0));
+        // Cooked, but its cell sized by the camera's distance: a point the cook's size table does not cover.
+        if (COOK_PARAMS.w > 0.5 && !(cookScaleAt(p) > 0.0)) atomicAdd(doneCount[9], 1u);
     }
     // The RTGI panel's views (uView.x, SponzaLoop.RtgiDebug.cs), the pixel's own cell (its level's, nearest) painted
     // in place of its light: 1 done (green) or open (red), by the light; 2 how unsure, the blend's relative error, from
     // the done threshold (blue) to 16x it (red); 3 samples held, 1 to 16,384 on a log scale; 4 its level; 5 the mean hit
     // distance, 5 cm (red) to 20 m (blue); 6 sky visibility; 7 sun visibility. No cell: magenta.
     int view = int(u.uView.x + 0.5);
-    // The cooked and world-space state, painted (SponzaLoop.RtgiDebug.cs's views 10-20 and 23): everything the light is
+    // The cooked and world-space state, painted (SponzaLoop.RtgiDebug.cs's views 10-18, 21 and 24): everything the light is
     // made of but the screen's stages, each as the pixel reads it. Magenta: none.
-    if ((view >= 10 && view <= 20) || view == 23) {
+    if ((view >= 10 && view <= 18) || view == 21 || view == 24) {
         vec3 c = vec3(1.0, 0.0, 1.0);
         uint sc = rtgiFind(rtgiCellHash(ivec3(floor((p - rtgiOrigin(side)) / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
+        uint cooked = cookCellAt(p, side, level);
         if (view == 10) {
             // The pixel's cell: a colour by its key (its level's, its side's) -- its bounds, what it spans.
             uvec2 hk = rtgiCellHash(ivec3(floor((p - rtgiOrigin(side)) / rtgiSize(level, u.uParams))), level, side, u.uParams);
             uint hh = rtgiHash(hk.y);
             c = vec3(hh & 255u, (hh >> 8) & 255u, (hh >> 16) & 255u) / 255.0 * 0.8 + 0.2;
         } else if (view == 11) {
-            // Its size, the geometry's (5 cm blue to 1 m red, log): the cooked cells' where there are some, the probes'
-            // elsewhere; the camera's distance's where neither is cooked: grey.
-            float g = max(nearScaleAt(p), volCellScale(p));
+            // Its size, the cook's (5 cm blue to 1 m red, log); grey where the cook's size table does not cover the point
+            // (the camera's distance sizes it there).
+            float g = cookScaleAt(p);
             float size = rtgiCellSize(p, u.uCamera.xyz, u.uParams);
             c = g > 0.0 ? heat(log2(size / 0.05) / log2(20.0)) : vec3(0.5);
         } else if (view == 12 || view == 13) {
@@ -449,44 +407,48 @@ void main() {
                 else { uvec4 a = rtgiRecord[2u * sc]; c = vec3(unpackHalf2x16(a.x), unpackHalf2x16(a.y).x); }
             }
         } else if (view == 14) {
-            // Its traced reach at its own level: red +a0 blocked, green -a0, blue +a1, and yellow -a1 dimming it; grey all
-            // reached; magenta untraced.
-            if (visKnown) {
-                uint b = (visWord >> 16) & 15u;
-                c = b == 15u ? vec3(0.6) : vec3((b & 1u) == 0u ? 1.0 : 0.1, (b & 2u) == 0u ? 1.0 : 0.1, (b & 4u) == 0u ? 1.0 : 0.1) * ((b & 8u) == 0u ? 0.5 : 1.0);
+            // Its cooked neighbours at its own level (the ring's 8, a ray between the points): grey all reached; else red
+            // +a0 blocked, green -a0, blue +a1, and dimmed for -a1 (the four along the axes); white no neighbour along the
+            // axes reached; magenta not cooked.
+            if (cooked != COOK_NONE) {
+                uint adj = cookAdj(cooked);
+                if ((adj & COOK_ADJ_TRACED) == 0u) c = vec3(0.0, 0.0, 0.0);
+                else if ((adj & 255u) == 255u) c = vec3(0.6);
+                else if ((adj & 15u) == 0u) c = vec3(1.0);
+                else c = vec3((adj & 1u) == 0u ? 1.0 : 0.1, (adj & 2u) == 0u ? 1.0 : 0.1, (adj & 4u) == 0u ? 1.0 : 0.1) * ((adj & 8u) == 0u ? 0.5 : 1.0);
             }
         } else if (view == 15 || view == 16 || view == 17) {
-            // The cooked near cell under the pixel: its colour by index, its escape share (white open, black enclosed), its
-            // near light.
-            uint ax = side >> 1u;
-            ivec3 cc = ivec3(floor((p - rtgiOrigin(side)) / max(NEAR_PARAMS.x, 1e-4)));
-            uint ni = NEAR_PARAMS.w > 0.5 ? nearFind(cc, side) : 0xFFFFFFFFu;
-            if (ni != 0xFFFFFFFFu) {
-                vec4 nl = nearLight[ni];
+            // The level-0 cooked cell under the pixel: its colour by index; its state (red buried, dark grey no near field --
+            // not a junction, blue near field never gathered, white gathered, by its open share); its near light.
+            ivec3 cc = cookCoords(p, side, 0u);
+            uint ni = cookFind(cc, 0u, side);
+            if (ni != COOK_NONE) {
                 uint hh = rtgiHash(ni * 0x9E3779B9u);
-                // 16: buried red, cooked but never gathered blue, gathered white (by its open share).
-                c = view == 15 ? vec3(hh & 255u, (hh >> 8) & 255u, (hh >> 16) & 255u) / 255.0
-                  : view == 16 ? (nl.w < -0.5 ? vec3(1.0, 0.1, 0.1) : nl.w < 0.5 ? vec3(0.1, 0.2, 1.0) : vec3(0.3 + 0.7 * clamp(nl.w - 1.0, 0.0, 1.0)))
-                  : nl.rgb;
+                bool nearCell = ni < uint(COOK_COUNTS.y);
+                vec4 nl = nearCell ? nearLight[ni] : vec4(0.0);
+                if (view == 15) c = vec3(hh & 255u, (hh >> 8) & 255u, (hh >> 16) & 255u) / 255.0;
+                else if (view == 16) c = !cookLive(ni) || nl.w < -0.5 ? vec3(1.0, 0.1, 0.1) : !nearCell ? vec3(0.15) : nl.w < 0.5 ? vec3(0.1, 0.2, 1.0) : vec3(0.3 + 0.7 * clamp(nl.w - 1.0, 0.0, 1.0));
+                else c = nearCell ? nl.rgb : vec3(0.0);
             }
-        } else if (view == 18) {
-            // The probes its cell was traced to: the level (blue 0.5 m ... red 8 m), dimmed by how many of the 8 its rays
-            // reached; magenta untraced, black no level.
-            if (visKnown) {
-                uint lv = (visWord >> 8) & 15u;
-                c = lv >= uint(VOL_PARAMS.y) ? vec3(0.0) : heat(float(lv) / max(VOL_PARAMS.y - 1.0, 1.0)) * (0.2 + 0.8 * float(bitCount(visWord & 0xFFu)) / 8.0);
-            }
-        } else if (view == 19) {
-            // The probes' harmonic mean distance at p (what sizes the cells), 5 cm blue to 5 m red, log.
-            float g = volCellScale(p);
-            if (g > 0.0) c = heat(log2(max(g / max(VOL_GEOM.x, 1e-4), 0.05) / 0.05) / log2(100.0));
-        } else if (view == 23) {
-            // Its region (rtgi_cache.glsl's rtgiRegion): a colour by it; grey region 0 (no cooked cell here).
+        } else if (view == 21) {
+            // Its region (rtgi_cache.glsl's rtgiRegion): a colour by it; grey region 0 (no cooked cell here, or the cube's
+            // first piece).
             uint rg = rtgiRegionFor(level);
             uint hh = rtgiHash(rg * 0x9E3779B9u);
             c = rg == 0u ? vec3(0.5) : vec3(hh & 255u, (hh >> 8) & 255u, (hh >> 16) & 255u) / 255.0;
+        } else if (view == 24) {
+            // The cooked cell at the pixel's level: red buried, yellow a junction (inside-tested at levels 0 and 1), green
+            // its surface's own level, blue an ancestor of finer cells only; brighter at the cell's cooked point (within
+            // 1 cm); magenta none.
+            uint ci = cookFind(cookCoords(p, side, level), level, side);
+            if (ci != COOK_NONE) {
+                uint bits = cookBits(ci);
+                c = (bits & NEAR_BURIED) != 0u ? vec3(0.9, 0.1, 0.1) : (bits & COOK_JUNCTION) != 0u ? vec3(0.8, 0.7, 0.1)
+                  : (bits & COOK_OWN) != 0u ? vec3(0.15, 0.6, 0.2) : vec3(0.15, 0.3, 0.8);
+                if (distance(COOK_POINTS(2u * ci).xyz, p) < 0.01) c = vec3(1.0);
+            }
         } else {
-            // 20: how many samples its cell holds, 1 to 16,384 (log) -- where the light is thin.
+            // 18: how many samples its cell holds, 1 to 16,384 (log) -- where the light is thin.
             if (sc != 0xFFFFFFFFu) c = heat(log2(max(rtgiResolved[2u * sc + 1u].y, 1.0)) / 14.0);
         }
         outIncident = vec4(c, sky);

@@ -13,7 +13,9 @@ namespace Blix.Demos.VulkanSponza;
 
 // --rtgi-census [--rtgi-census-out DIR]: a measurement, not GI. The cache is to be cooked per world chunk -- its cells'
 // layout from the geometry alone, the light real-time -- and what to ship, what to rebuild at load and what to work out
-// at run time, and the chunks' size, are to be chosen from numbers (2026-10-30). Once the ray scene is up the census:
+// at run time, and the chunks' size, are to be chosen from numbers (2026-10-30). Its rules became the cook's
+// (SponzaLoop.RtgiCook.cs, step 1a, 2026-10-30): the census now runs the cook's first stages -- geometry, size field,
+// cells, the code here shared -- and reports from them:
 //
 //   geometry  the static instances' triangles, their world area and bounds, and which are alpha-tested (on a worker).
 //             Every surface is taken on both sides, and each side kept or dropped by its own samples: buried (most of
@@ -27,35 +29,31 @@ namespace Blix.Demos.VulkanSponza;
 //             spacing, or buried) -- a running sum of area along each run of triangles (or of a triangle's pieces in
 //             the refined regions) drops a sample at a random point where it crosses the next spacing^2, so tiny
 //             triangles share them; every triangle's area counts once a side. Each sample traces CensusRays
-//             cosine rays through the Metal batch (rtgi_census.comp, a chunk a frame): its harmonic hit distance
-//             (escapes adding nothing to the sum, as the near cook's sizes do), its back-face share (over half:
+//             cosine rays through the Metal batch (rtgi_cook.comp kinds 0, 1; a chunk a frame): its harmonic hit distance
+//             (escapes adding nothing to the sum), its back-face share (over half:
 //             buried, inside something; an alpha-tested triangle's back face counts as a front), its rays escaping
 //             downward, its nearest hit, and from them the cache's cell size, clamp(0.1 x harmonic, 5 cm, the cache's
 //             top level)
-//   cells     every triangle, each side, sampled again at half its local cell size: in pieces, each
-//             with a lattice at the finest pass's spacing found near it, each lattice point's nearest sample from the
-//             finest pass that has one near on the same side (by hash grids, searched outward where none is); each
-//             point's cell at its own level (its lattice point's sample's size; none where that side is dropped) and
-//             every level above
-//             it -- the cells a cooked cache would hold, by level, those that are some surface's own (finest) level,
-//             and the junction cells among them: another surface within min(1.5 cell sizes, 0.375 m) of the point (its
-//             sample's nearest hit), the only ones the cook's inside test is for (on a worker)
+//   cells     the cook's (SponzaLoop.RtgiCook.cs BuildCookCells): every triangle, each side, in pieces, each with a
+//             lattice at the finest pass's spacing found near it, each lattice point's nearest sample from the finest
+//             pass that has one near on the same side (by hash grids, searched outward where none is); points a quarter
+//             of the local size apart, each point's cell at the level the cooked size table gives it (the smallest
+//             size in its cube; none where that side is dropped) and every level above it -- the cells the cooked cache
+//             holds, by level, those that are some surface's own (finest) level, and the junction cells among them:
+//             another surface within min(1.5 cell sizes, 0.375 m) of the point (its sample's nearest hit), the only
+//             ones the cook's inside test is for (on a worker)
 //   pricing   bytes and rays by the per-item costs below, the times at the measured trace rate, whole and per chunk of
 //             16, 32 and 64 m; the runtime bytes at today's slot, at a proposed compact resident record (all cells, and
 //             the chunks within 32 / 64 m of the start camera) plus a transient training pool
 //
 // written to DIR/<scene>.json and .txt, a line to the log, and the demo closes. The cache is left untrained meanwhile
-// (RecordRtgi), the world volume and the near cook off (ParseRtgiCensus): the trace's time is the census's own. Nothing
-// here runs without the flag. Approximations: cells keyed by coordinates and side alone (no regions); the cell grid's
+// (RecordRtgi: the cook alone on the GPU), so the trace's time is the census's own. The report runs only with the flag. Approximations: cells keyed by coordinates and side alone (no regions); the cell grid's
 // origin as rtgi_cache.glsl's; the ray scene's meshes (its LOD) are the geometry; past --rtgi-census-most samples (12 M)
 // a pass's samples are a random share of its full set, each standing for the rest's area.
 internal sealed partial class SponzaLoop
 {
     private bool rtgiCensus;
     private string rtgiCensusOut = "census";
-    // Samples a frame (64 rays each: 1 M rays at 16,384, the near cook's chunk) and the most traced in a pass.
-    private int rtgiCensusChunk = 16384;
-    private long rtgiCensusMost = 12_000_000;
     // --rtgi-census-cell-share F: the cells counted over a random share of the triangle runs and scaled up by 1 / F
     // (1: all). The jungle's count, whole, outgrew a 16 GB machine.
     private float rtgiCensusCellShare = 1f;
@@ -88,13 +86,13 @@ internal sealed partial class SponzaLoop
     private const int CensusPieceLattices = 8;
     private const int CensusNeighbourRays = 8;       // rays a cell: its neighbours' visibility
     private const int CensusNearRays = 32;           // rays a level-0 cell: the near transfer (optional)
-    // The cache's GPU bytes a slot today (SponzaLoop.Rtgi.cs RecordRtgi, SponzaLoop.RtgiVolume.cs): keys 4, accum 64
-    // (RTGI_ACC 16 words), direction 16, confidence 16, hit-inv 4, record 32, seq 4, stands 4, resolved 32, moments 48,
-    // stamps 8, cells 16, filtered 16, the volume's cell visibility 8.
+    // The cache's GPU bytes a slot today (SponzaLoop.Rtgi.cs RecordRtgi): keys 4, accum 64 (RTGI_ACC 16 words), direction
+    // 16, confidence 16, hit-inv 4, record 32, seq 4, stands 4, resolved 32, moments 48, stamps 8, cells 16, filtered 16
+    // (the world volume's cell visibility, 8, went with it, 2026-10-30).
     private static readonly (string Name, int Bytes)[] CensusSlotBytes =
     {
         ("keys", 4), ("accum", 64), ("direction", 16), ("confidence", 16), ("hit-inv", 4), ("record", 32), ("seq", 4),
-        ("stands", 4), ("resolved", 32), ("moments", 48), ("stamps", 8), ("cells", 16), ("filtered", 16), ("volume-cell-vis", 8),
+        ("stands", 4), ("resolved", 32), ("moments", 48), ("stamps", 8), ("cells", 16), ("filtered", 16),
     };
     // The proposed compact resident record (bits): what the readout, the hit lookups and the blend read every frame,
     // and the history that must outlive a training frame. The training's scratch -- the frame's accumulator (64 B), the
@@ -121,72 +119,39 @@ internal sealed partial class SponzaLoop
     };
     private const int CensusPoolSlots = 262_144;
 
-    private Task<CensusGeometry>? rtgiCensusGeometryBuild;
-    private CensusGeometry? rtgiCensusGeometry;
-    // The pass being built (on a worker: the previous pass's results taken up, the next's samples placed) and those done.
-    private Task<CensusPass?>? rtgiCensusPassBuild;
-    private CensusPass? rtgiCensusPass;
-    private readonly List<CensusPass> rtgiCensusPasses = new();
     private Task<string>? rtgiCensusReport;
-    // 0 waiting for the geometry, 1 waiting for a pass's samples, 2 tracing, 3 draining, 4 counting the cells, 5 done.
-    private int rtgiCensusStage, rtgiCensusCursor, rtgiCensusDrain, rtgiCensusDynamic;
-    private uint rtgiCensusParity;
-    private int rtgiCensusCapacity, rtgiCensusPlacements;
-    private GpuBufferHandle rtgiCensusSamples, rtgiCensusResults, rtgiCensusSidedBuf;
-    private GpuBufferHandle[] rtgiCensusRayBufs = Array.Empty<GpuBufferHandle>(), rtgiCensusHitBufs = Array.Empty<GpuBufferHandle>();
-    private ShaderInterface rtgiCensusInterface = null!;
-    private PassHandle rtgiCensusRaysPassHandle, rtgiCensusReducePassHandle;
-    private PipelineHandle rtgiCensusPipeline;
-    private readonly System.Diagnostics.Stopwatch rtgiCensusClock = new();
-    private MetalShadowStats rtgiCensusTraceFrom;
 
     private void ParseRtgiCensus(AppArgs args)
     {
         rtgiCensus = args.Flag("rtgi-census");
         if (args.String("rtgi-census-out") is { Length: > 0 } dir) rtgiCensusOut = dir;
-        if (args.Int("rtgi-census-chunk") is { } chunk) rtgiCensusChunk = Math.Clamp(chunk, 1024, 65536);
-        if (args.Long("rtgi-census-most") is { } most) rtgiCensusMost = Math.Max(65536, most);
+        if (args.Long("rtgi-census-most") is { } most) rtgiCookMost = Math.Max(65536, most);
         if (args.Float("rtgi-census-buried-share") is { } buriedShare) CensusBuriedShare = Math.Clamp(buriedShare, 0.05f, 1f);
         if (args.Float("rtgi-census-cell-share") is { } cellShare) rtgiCensusCellShare = Math.Clamp(cellShare, 0.001f, 1f);
-        if (!rtgiCensus) return;
-        // Alone on the GPU: the volume's and the near cook's rays would share the trace's time.
-        rtgiVolume = false;
-        rtgiNearCook = false;
     }
 
-    // Setup, beside the cache's placement: the rays' kind, before the trace.
-    private void DeclareRtgiCensusRaysPass(Func<string, ShaderInterface> reflect)
+    // The cook's cells stage done under --rtgi-census: the report from them on a worker; the demo closes once written.
+    private void StartCensusReport(CookCells cells)
     {
-        if (!rtgiCensus) return;
-        rtgiCensusInterface = reflect("rtgi_census.comp");
-        rtgiCensusRaysPassHandle = graph.ComputePass("rtgi-census-rays").AfterAsync().Shader(rtgiCensusInterface).Handle;
+        var geom = cookGeometry!;
+        var passes = cookPasses.ToArray();
+        var name = scene.Name;
+        var dir = rtgiCensusOut;
+        var dynamic = cookDynamic;
+        var cell = rtgiCell;
+        var start = scene.StartPosition;
+        DebugProgress.Begin("rtgi census: report", 0);
+        rtgiCensusReport = Task.Run(() => WriteCensusReport(name, dir, geom, passes, dynamic, cell, start, cells));
     }
 
-    // Setup, with the cache's update: the hits' reduction, after the trace.
-    private void DeclareRtgiCensusReducePass()
+    // Each frame under --rtgi-census: the report written, logged, and the demo closed.
+    private void TickRtgiCensus()
     {
-        if (!rtgiCensus) return;
-        rtgiCensusReducePassHandle = graph.ComputePass("rtgi-census-reduce").Async(rtgiAsync).Shader(rtgiCensusInterface).Handle;
-    }
-
-    private void CreateRtgiCensusPipeline(Func<string, ShaderInterface, PipelineHandle> compute)
-    {
-        if (rtgiCensus) rtgiCensusPipeline = compute("rtgi_census", rtgiCensusInterface);
-    }
-
-    // FinishRayScene: the static instances and every placement's two-sided triangles, on a worker.
-    private void StartRtgiCensus(RayQueryScene scene)
-    {
-        if (!rtgiCensus || rtgiCensusGeometryBuild is not null) return;
-        // The scene's instances are its placements, in rayPlacementMaterials' order (the hits' placement index).
-        var placements = scene.Instances.ToArray();
-        var kept = Enumerable.Range(0, placements.Length).Where(i => !placements[i].Dynamic).ToArray();
-        var alpha = Enumerable.Range(0, placements.Length).Select(i => i < rayPlacementMaterials.Count && rayPlacementMaterials[i].AlphaCutoff > 0f).ToArray();
-        var flagged = Enumerable.Range(0, placements.Length).Select(i => i < rayPlacementDoubleSided.Count && rayPlacementDoubleSided[i]).ToArray();
-        rtgiCensusDynamic = placements.Length - kept.Length;
-        rtgiCensusPlacements = placements.Length;
-        DebugProgress.Begin("rtgi census: geometry", 0);
-        rtgiCensusGeometryBuild = Task.Run(() => BuildCensusGeometry(placements, kept, alpha, flagged));
+        if (rtgiCensusReport is not { IsCompleted: true } report) return;
+        rtgiCensusReport = null;
+        DebugProgress.End("rtgi census: report");
+        Console.WriteLine(report.IsFaulted ? $"[VulkanSponza] rtgi census: failed: {report.Exception}" : report.Result);
+        host.RequestClose();
     }
 
     // The census's geometry: the static instances, per instance whether its material is alpha-tested (and, for the
@@ -485,157 +450,6 @@ internal sealed partial class SponzaLoop
         pass.Grid = new CensusGrid(pass.Pos, pass.Side, pass.Effective);
     }
 
-    private DispatchCommand CensusDispatch(int cur, int kind, int first, int count, int threads) => new(rtgiCensusPipeline, (threads + 63) / 64, 1, 1,
-        new ShaderUniform[]
-        {
-            new("uChunk", new Vector4Uniform(new Vector4(first, count, CensusReach, kind))),
-            new("uNear", new Vector4Uniform(new Vector4(CensusNear, CensusLift, rtgiCensusPlacements, CensusVoidDown))),
-        },
-        Array.Empty<ShaderTextureBinding>(),
-        Buffers: new[]
-        {
-            new ShaderBufferBinding("RtgiCensusSamples", rtgiCensusSamples),
-            new ShaderBufferBinding("RtgiCensusRays", rtgiCensusRayBufs[cur]),
-            new ShaderBufferBinding("RtgiCensusHits", rtgiCensusHitBufs[cur]),
-            new ShaderBufferBinding("RtgiCensusResults", rtgiCensusResults),
-            new ShaderBufferBinding("RtgiCensusSided", rtgiCensusSidedBuf),
-        });
-
-    // A pass's samples onto the GPU: into the buffers held when they fit, else new ones.
-    private void UploadCensusPass(CensusPass pass)
-    {
-        var n = Math.Max(pass.Pos.Length, 1);
-        var bytes = MemoryMarshal.AsBytes(pass.Gpu.AsSpan());
-        if (n <= rtgiCensusCapacity)
-        {
-            if (bytes.Length > 0) device.WriteGpuBuffer(rtgiCensusSamples, 0, bytes);
-            return;
-        }
-        rtgiCensusCapacity = n;
-        rtgiCensusSamples = Own(device.CreateGpuBuffer(n * 16, bytes.Length > 0 ? bytes.ToArray() : new byte[16], "sponza.rtgi.census-samples"));
-        rtgiCensusResults = Own(device.CreateGpuBuffer(n * 16, new byte[n * 16], "sponza.rtgi.census-results"));
-    }
-
-    // RecordRtgi, in place of the cache's frame: the census's stage this frame.
-    private void RecordRtgiCensus(MetalRayTracer tracer)
-    {
-        if (rtgiCensusStage == 0)
-        {
-            if (rtgiCensusGeometryBuild is not { IsCompleted: true } build) return;
-            DebugProgress.End("rtgi census: geometry");
-            var geom = rtgiCensusGeometry = build.Result;
-            rtgiCensusSidedBuf = Own(device.CreateGpuBuffer(geom.SidedBits.Length * 4, MemoryMarshal.AsBytes(geom.SidedBits.AsSpan()).ToArray(), "sponza.rtgi.census-sided"));
-            var rays = rtgiCensusChunk * CensusRays;
-            rtgiCensusRayBufs = Enumerable.Range(0, 2).Select(k => Own(device.CreateGpuBuffer(rays * 32, name: $"sponza.rtgi.census-rays{k}"))).ToArray();
-            rtgiCensusHitBufs = Enumerable.Range(0, 2).Select(k => Own(device.CreateGpuBuffer(rays * 48, name: $"sponza.rtgi.census-hits{k}"))).ToArray();
-            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                $"[VulkanSponza] rtgi census: {geom.Triangles:N0} triangles ({rtgiCensusDynamic} dynamic instances left out), {geom.Area:N0} m2 a side; alpha-tested {geom.ByAlpha.Tris:N0} triangles, {geom.ByAlpha.Area:N0} m2 (the double-sided flag's {geom.ByFlag.Area:N0} m2), in {geom.Ms:0} ms."));
-            var most = rtgiCensusMost;
-            rtgiCensusPassBuild = Task.Run<CensusPass?>(() => BuildCensusPass(geom, 0, Array.Empty<CensusPass>(), most));
-            DebugProgress.Begin("rtgi census: size field", 0);
-            rtgiCensusStage = 1;
-            return;
-        }
-        var census = rtgiCensusGeometry!;
-        if (rtgiCensusStage == 1)
-        {
-            if (rtgiCensusPassBuild is not { IsCompleted: true } build) return;
-            var pass = build.Result;
-            if (pass is null)
-            {
-                // No pass left: the cells.
-                DebugProgress.End("rtgi census: size field");
-                var passes = rtgiCensusPasses.ToArray();
-                var name = scene.Name;
-                var dir = rtgiCensusOut;
-                var dynamic = rtgiCensusDynamic;
-                var cell = rtgiCell;
-                var start = scene.StartPosition;
-                var cellShare = rtgiCensusCellShare;
-                DebugProgress.Begin("rtgi census: cells", 0);
-                rtgiCensusReport = Task.Run(() => WriteCensusReport(name, dir, census, passes, dynamic, cell, start, cellShare));
-                rtgiCensusStage = 4;
-                return;
-            }
-            rtgiCensusPass = pass;
-            UploadCensusPass(pass);
-            pass.Gpu = Array.Empty<Vector4>();
-            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                $"[VulkanSponza] rtgi census: size pass {pass.Index} at {pass.Spacing:0.##} m: {pass.Full:N0} samples, {pass.Pos.Length:N0} traced (share {pass.Keep:0.####}), placed in {pass.Ms:0} ms."));
-            rtgiCensusCursor = 0;
-            rtgiCensusDrain = 0;
-            rtgiCensusTraceFrom = tracer.TraceStats;
-            rtgiCensusClock.Restart();
-            rtgiCensusStage = 2;
-            return;
-        }
-        var current = rtgiCensusPass!;
-        if (rtgiCensusStage == 2)
-        {
-            var cur = (int)(rtgiCensusParity++ & 1u);
-            var first = rtgiCensusCursor;
-            var count = Math.Min(rtgiCensusChunk, current.Pos.Length - first);
-            if (count > 0)
-            {
-                var rays = count * CensusRays;
-                graph.Dispatch(rtgiCensusRaysPassHandle, CensusDispatch(cur, 0, first, count, rays));
-                var rayBuf = rtgiCensusRayBufs[cur];
-                var hitBuf = rtgiCensusHitBufs[cur];
-                var seed = unchecked((uint)first * 0x9E3779B9u + 0x2545F491u + (uint)current.Index * 0x85EBCA77u);
-                void EncodeAll(ExternalWorkSync sync, MetalRayTracer t) => t.EncodeTrace(sync, rayBuf, 0, hitBuf, 0, rays, seed);
-                // As the cache's own trace goes (RecordRtgi).
-                if (rtgiAsync && (device.Features & GraphicsFeatures.AsyncCompute) != 0)
-                    graph.External(rtgiTracePassHandle, sync => tracer.EncodeGroup(sync, () => EncodeAll(sync, tracer)));
-                else if (!TracerGroupsOn) graph.External(rtgiInlineTracePassHandle, sync => tracer.EncodeGroup(sync, () => EncodeAll(sync, tracer)));
-                else DeferTracerBatch(EncodeAll);
-                graph.Dispatch(rtgiCensusReducePassHandle, CensusDispatch(cur, 1, first, count, count));
-                rtgiCensusCursor += count;
-                current.Frames++;
-            }
-            if (rtgiCensusCursor >= current.Pos.Length) rtgiCensusStage = 3;
-            return;
-        }
-        if (rtgiCensusStage == 3)
-        {
-            if (++rtgiCensusDrain < 3) return;
-            device.WaitIdle();
-            current.WallMs = rtgiCensusClock.Elapsed.TotalMilliseconds;
-            var stats = tracer.TraceStats;
-            current.GpuMs = stats.TotalGpuMs - rtgiCensusTraceFrom.TotalGpuMs;
-            var n = current.Pos.Length;
-            var results = new uint[4 * n];
-            const int piece = 1 << 26;
-            for (long off = 0; off < 16L * n; off += piece)
-            {
-                var len = (int)Math.Min(piece, 16L * n - off);
-                MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(rtgiCensusResults, (int)off, len).AsSpan()).CopyTo(results.AsSpan((int)(off / 4)));
-            }
-            current.Results = results;
-            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                $"[VulkanSponza] rtgi census: size pass {current.Index}: {(long)n * CensusRays / 1e6:0.0} M rays in {current.Frames} frames, {current.WallMs / 1000:0.0} s wall, {current.GpuMs:0} ms the trace's GPU time."));
-            rtgiCensusPasses.Add(current);
-            // On a worker: this pass's results taken up, the next pass's samples placed from them (or none left).
-            var done = rtgiCensusPasses.ToArray();
-            var most = rtgiCensusMost;
-            var finest = rtgiCell;
-            var topSize = rtgiCell * MathF.Pow(2f, RtgiTopLevel);
-            rtgiCensusPassBuild = Task.Run<CensusPass?>(() =>
-            {
-                TakeCensusResults(current, finest, topSize);
-                return done.Length < CensusPassSpacing.Length ? BuildCensusPass(census, done.Length, done, most) : null;
-            });
-            rtgiCensusStage = 1;
-            return;
-        }
-        if (rtgiCensusStage == 4 && rtgiCensusReport is { IsCompleted: true } report)
-        {
-            DebugProgress.End("rtgi census: cells");
-            rtgiCensusStage = 5;
-            Console.WriteLine(report.IsFaulted ? $"[VulkanSponza] rtgi census: failed: {report.Exception}" : report.Result);
-            host.RequestClose();
-        }
-    }
-
     // A pass's samples' grid for the nearest: cells of its traced spacing, the samples sorted by cell.
     private sealed class CensusGrid
     {
@@ -732,22 +546,15 @@ internal sealed partial class SponzaLoop
         return keys;
     }
 
-    // A worker's list of a level's keys compacted in place once long (duplicates across its runs' edges).
-    private static void CensusCompact(List<long> list)
-    {
-        var keys = CensusSortUnique(list.ToArray(), list.Count);
-        list.Clear();
-        list.AddRange(keys);
-    }
-
     private sealed class CensusChunk
     {
         public double Cells, Own, Fine, Level0, Junction, Coarse;
     }
 
     private static string WriteCensusReport(string sceneName, string dir, CensusGeometry census, CensusPass[] passes,
-        int dynamicCount, float finest, Vector3 start, float cellShare)
+        int dynamicCount, float finest, Vector3 start, CookCells cooked)
     {
+        var cellShare = cooked.Share;
         var instances = census.Instances;
         var levels = RtgiTopLevel + 1;
         var topSize = finest * MathF.Pow(2f, RtgiTopLevel);
@@ -793,211 +600,14 @@ internal sealed partial class SponzaLoop
                 areaInBand[b] += a;
             }
         }
-        // The finest pass's sample near a point: one facing its side within 1.5 of a pass's traced spacing, else the first
-        // pass's nearest facing it (searched outward to 8 cells). A side takes its size, and whether it is kept, from its
-        // own samples: another side's first doubled the crevices testbed's cells (the floor's points took the wall's).
-        int FinestNear(Vector3 q, uint side, Vector3 normal)
-        {
-            for (var p = lastPass; p > 0; p--)
-            {
-                var (j, d2) = passes[p].Grid!.Nearest(q, side, 1, sameOnly: true, normal: normal);
-                var reach = 1.5f * passes[p].Effective;
-                if (j >= 0 && d2 <= reach * reach) return offsets[p] + j;
-            }
-            var (j0, _) = passes[0].Grid!.Nearest(q, side, 8, sameOnly: true, normal: normal);
-            return j0 >= 0 ? j0 : -1;
-        }
-
-        // The cells: every triangle (each side of a two-sided one) in pieces at half its local size, each point's cell at
-        // its own level (its lattice point's sample's size), a junction cell where that sample's nearest hit is within
-        // min(CensusJunctionReach cell sizes, CensusJunctionMost); the levels above from those by halving their
-        // coordinates. The cells as sorted arrays of keys, not sets: the jungle's hundreds of millions in HashSets (24+ B
-        // each, and a merge's copy) took 22 GB of a 16 GB machine. Each run's points de-duplicated in a small set, the
-        // worker's list compacted as it grows, the lists sorted together at the end.
-        var clock = System.Diagnostics.Stopwatch.StartNew();
-        var parts = Enumerable.Range(0, levels).Select(_ => new List<List<long>>()).ToArray();
-        long points = 0, pointsBuried = 0, latticeFilled = 0, latticeNone = 0;
-        var gate = new object();
-        // Short runs: a run of big triangles at 2.5 cm is minutes of one worker's.
-        var work = CensusWork(instances, 1024);
-        // Under --rtgi-census-cell-share, a random share of the runs (each count below scaled by 1 / the share).
-        if (cellShare < 1f)
-        {
-            var shareBits = (uint)(cellShare * uint.MaxValue);
-            work = work.Where((_, w) => NearHash((uint)w * 0x27D4EB2Fu + 0x165667B1u) <= shareBits).ToArray();
-        }
+        // The cells: the cook's (SponzaLoop.RtgiCook.cs's cells stage) -- every surface point's cell at the level the cooked
+        // size table gives it, and every level above; own-level ones flagged junction where the point's sample met a
+        // surface within min(CensusJunctionReach cell sizes, CensusJunctionMost).
+        var all = cooked.All;
+        var own = cooked.Own;
         var scale = 1.0 / cellShare;
-        var done = 0;
-        Parallel.ForEach(work, () => (Sets: Enumerable.Range(0, levels).Select(_ => new HashSet<long>()).ToArray(),
-            Lists: Enumerable.Range(0, levels).Select(_ => new List<long>()).ToArray(), Compacted: new int[levels],
-            Points: 0L, Buried: 0L, Filled: 0L, None: 0L), (item, _, local) =>
-        {
-            var inst = instances[item.Inst];
-            var sets = local.Sets;
-            long pts = 0, bur = 0, filled = 0, none = 0;
-            var stack = new Stack<(Vector3 A, Vector3 B, Vector3 C, int Level)>();
-            for (var t = item.First; t < item.First + item.Count; t++)
-            {
-                var (ta, tb, tc) = CensusTriangle(inst, t);
-                var tcross = Vector3.Cross(tb - ta, tc - ta);
-                var tlen = tcross.Length();
-                if (!(tlen > 1e-12f)) continue;
-                var nrm = tcross / tlen;
-                for (var face = 0; face < 2; face++)
-                {
-                    var faceNormal = face == 0 ? nrm : -nrm;
-                    var side = NearSide(faceNormal);
-                    var origin = NearGridOrigin(side);
-                    // In pieces no edge longer than CensusPieceLattices lattice steps of the pass at hand: whole, one 1 km2
-                    // terrain triangle of the jungle's was one worker's for most of an hour. A piece whose lattice finds a
-                    // finer pass's samples is taken again at that pass's spacing.
-                    stack.Push((ta, tb, tc, 0));
-                    while (stack.TryPop(out var piece))
-                    {
-                        var (pa, pb, pc, level) = piece;
-                        var lat = passes[level].Effective;
-                        if (CensusLongest(pa, pb, pc) > CensusPieceLattices * lat)
-                        {
-                            var (h0, h1) = CensusBisect(pa, pb, pc);
-                            stack.Push((h0.Item1, h0.Item2, h0.Item3, level));
-                            stack.Push((h1.Item1, h1.Item2, h1.Item3, level));
-                            continue;
-                        }
-                        var len = Vector3.Cross(pb - pa, pc - pa).Length();
-                        if (!(len > 1e-12f)) continue;
-                        // Rows parallel to the longest edge, points along each (the corners included).
-                        Vector3 ea = pa, eb = pb, apex = pc;
-                        float ab = (pb - pa).LengthSquared(), bc = (pc - pb).LengthSquared(), ca = (pa - pc).LengthSquared();
-                        if (bc >= ab && bc >= ca) { ea = pb; eb = pc; apex = pa; }
-                        else if (ca >= ab && ca >= bc) { ea = pc; eb = pa; apex = pb; }
-                        var baseLen = (eb - ea).Length();
-                        var height = len / MathF.Max(baseLen, 1e-9f);
-                        // The lattice: its points' finest samples, and the local size the smallest live one's. A lattice
-                        // point with none near takes its row's nearest that has one, or the nearest row's.
-                        var rows0 = Math.Max(1, (int)MathF.Ceiling(height / lat));
-                        var lattice = new int[rows0 + 1][];
-                        var least = topSize;
-                        var anyRow = -1;
-                        var finer = false;
-                        for (var r = 0; r <= rows0; r++)
-                        {
-                            var f = r / (float)rows0;
-                            var p0 = ea + (apex - ea) * f;
-                            var p1 = eb + (apex - eb) * f;
-                            var m = (int)MathF.Ceiling((1f - f) * baseLen / lat);
-                            var row = lattice[r] = new int[m + 1];
-                            var rowHas = false;
-                            for (var k = 0; k <= m; k++)
-                            {
-                                var j = row[k] = FinestNear(m == 0 ? p0 : p0 + (p1 - p0) * (k / (float)m), side, faceNormal);
-                                if (j < 0) continue;
-                                rowHas = true;
-                                if (passOf[j] > level) finer = true;
-                                if (!dead[j]) least = MathF.Min(least, size[j]);
-                            }
-                            if (rowHas) anyRow = r;
-                        }
-                        if (finer && level < lastPass)
-                        {
-                            stack.Push((pa, pb, pc, level + 1));
-                            continue;
-                        }
-                        if (anyRow < 0) none++;
-                        else
-                            for (var r = 0; r <= rows0; r++)
-                            {
-                                var row = lattice[r];
-                                if (row.Any(j => j >= 0))
-                                {
-                                    for (var k = 0; k < row.Length; k++)
-                                    {
-                                        if (row[k] >= 0) continue;
-                                        for (var d = 1; d < row.Length; d++)
-                                        {
-                                            if (k - d >= 0 && row[k - d] >= 0) { row[k] = row[k - d]; break; }
-                                            if (k + d < row.Length && row[k + d] >= 0) { row[k] = row[k + d]; break; }
-                                        }
-                                        filled++;
-                                    }
-                                    continue;
-                                }
-                                var from = lattice[anyRow];
-                                for (var d = 1; d <= rows0; d++)
-                                {
-                                    if (r - d >= 0 && lattice[r - d].Any(j => j >= 0)) { from = lattice[r - d]; break; }
-                                    if (r + d <= rows0 && lattice[r + d].Any(j => j >= 0)) { from = lattice[r + d]; break; }
-                                }
-                                for (var k = 0; k < row.Length; k++) row[k] = from[(int)MathF.Round(k / (float)Math.Max(1, row.Length - 1) * (from.Length - 1))];
-                                filled += row.Length;
-                            }
-                        // Then the points half the local size apart.
-                        var h = 0.5f * least;
-                        var rows = Math.Max(1, (int)MathF.Ceiling(height / h));
-                        for (var r = 0; r <= rows; r++)
-                        {
-                            var f = r / (float)rows;
-                            var p0 = ea + (apex - ea) * f;
-                            var p1 = eb + (apex - eb) * f;
-                            var m = (int)MathF.Ceiling((1f - f) * baseLen / h);
-                            var row = lattice[(int)MathF.Round(f * rows0)];
-                            for (var k = 0; k <= m; k++)
-                            {
-                                var along = m == 0 ? 0f : k / (float)m;
-                                var j = row[(int)MathF.Round(along * (row.Length - 1))];
-                                if (j >= 0 && dead[j]) { bur++; continue; }
-                                // No sample anywhere near (none within 8 coarse cells): open, the top.
-                                var l = LevelOf(j >= 0 ? size[j] : topSize);
-                                var cs = SizeOfLevel(l);
-                                var g = (p0 + (p1 - p0) * along - origin) / cs;
-                                var junctionHere = j >= 0 && nearest[j] < MathF.Min(CensusJunctionReach * cs, CensusJunctionMost);
-                                sets[l].Add(CensusCellKey((int)MathF.Floor(g.X), (int)MathF.Floor(g.Y), (int)MathF.Floor(g.Z), side) | (junctionHere ? 1L : 0L));
-                                pts++;
-                            }
-                        }
-                    }
-                }
-            }
-            for (var l = 0; l < levels; l++)
-            {
-                local.Lists[l].AddRange(sets[l]);
-                sets[l].Clear();
-                // Compacted when it has doubled since last (at least 2 M keys): near its unique size, at a log's cost.
-                if (local.Lists[l].Count > Math.Max(1 << 21, 2 * local.Compacted[l])) { CensusCompact(local.Lists[l]); local.Compacted[l] = local.Lists[l].Count; }
-            }
-            var finished = Interlocked.Increment(ref done);
-            DebugProgress.Set("rtgi census: cells", finished, work.Length);
-            return (sets, local.Lists, local.Compacted, local.Points + pts, local.Buried + bur, local.Filled + filled, local.None + none);
-        }, local =>
-        {
-            lock (gate)
-            {
-                for (var l = 0; l < levels; l++) parts[l].Add(local.Lists[l]);
-                points += local.Points;
-                pointsBuried += local.Buried;
-                latticeFilled += local.Filled;
-                latticeNone += local.None;
-            }
-        });
-        // Each level's own cells (flag: a junction), then every level's cells (flag: own-level), its parents from the
-        // level below's.
-        var own = new long[levels][];
-        for (var l = 0; l < levels; l++)
-        {
-            var keys = new long[parts[l].Sum(q => (long)q.Count)];
-            var at = 0;
-            foreach (var q in parts[l]) { q.CopyTo(keys, at); at += q.Count; q.Clear(); q.TrimExcess(); }
-            own[l] = CensusSortUnique(keys, keys.Length);
-        }
-        var all = new long[levels][];
-        for (var l = 0; l < levels; l++)
-        {
-            var below = l > 0 ? all[l - 1].Length : 0;
-            var keys = new long[below + own[l].Length];
-            for (var i = 0; i < below; i++) keys[i] = CensusParent(all[l - 1][i]);
-            for (var i = 0; i < own[l].Length; i++) keys[below + i] = (own[l][i] & ~1L) | 1L;
-            all[l] = CensusSortUnique(keys, keys.Length);
-        }
-        var enumerateMs = clock.Elapsed.TotalMilliseconds;
+        long points = cooked.Counts.Points, pointsBuried = cooked.Counts.Buried, latticeFilled = cooked.Counts.Filled, latticeNone = cooked.Counts.None;
+        var enumerateMs = cooked.TableMs + cooked.EnumerateMs;
 
         // The totals priced.
         var cellsAt = all.Select(s => (long)(s.Length * scale)).ToArray();

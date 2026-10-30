@@ -67,12 +67,8 @@
     <GlslShader Include="Shaders\rtgi_resolve.comp" />
     <GlslShader Include="Shaders\rtgi_evict.comp" />
     <GlslShader Include="Shaders\rtgi_filter.comp" />
-    <GlslShader Include="Shaders\rtgi_volume_rays.comp" />
-    <GlslShader Include="Shaders\rtgi_volume_cook.comp" />
-    <GlslShader Include="Shaders\rtgi_volume_vis.comp" />
-    <GlslShader Include="Shaders\rtgi_nearcook_cook.comp" />
+    <GlslShader Include="Shaders\rtgi_cook.comp" />
     <GlslShader Include="Shaders\rtgi_nearcook_update.comp" />
-    <GlslShader Include="Shaders\rtgi_census.comp" />
     <GlslShader Include="Shaders\rtgi_readout.frag" />
     <GlslShader Include="Shaders\rtgi_temporal.frag" />
     <GlslShader Include="Shaders\rtgi_history.frag" />

@@ -431,9 +431,13 @@ The exact graph continues to move. The important current research areas are:
 - sun shadows traced on Apple's ray tracing hardware (Metal, inside the frame
   on the device's timeline), alpha-tested foliage and light through thin
   sheets; without a Metal tracer the sun is unshadowed and there is no GI;
-- RTGI, the only GI: a world radiance cache trained by hardware rays, with a
-  cooked world volume and near field sizing and keying its cells, read at half
-  resolution into an incident-light field and upsampled along depth and normals;
+- RTGI, the only GI: a world radiance cache trained by hardware rays, its cells
+  cooked from the geometry at load (a cook job behind the cook screen: a size
+  field sampled by area over both sides of every surface, the cells at the level
+  it asks for with one inside-tested point each, their neighbours' visibility
+  traced once, connectivity regions, and a near field at the junction cells),
+  read at half resolution into an incident-light field and upsampled along depth
+  and normals;
 - TAA (off by default) and MetalFX's temporal scaler (`--metalfx`);
 - extended material work including sheen and diffuse transmission, the latter
   read per material from its factor and textures (and, for the rays, per

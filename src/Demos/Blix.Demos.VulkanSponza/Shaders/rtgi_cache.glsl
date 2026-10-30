@@ -1,5 +1,5 @@
 // RTGI (S1 of the GI redesign, SponzaLoop.Rtgi.cs): the world radiance cache's cells. A cell is a cube of world space
-// at a level -- base size times 2^level, the level chosen by the distance from the camera -- and the side a surface in it
+// at a level -- base size times 2^level, the level the cook's size table gives the point (rtgiCellSize) -- and the side a surface in it
 // faces (the normal's dominant axis and sign, six). Two hashes of (cell, level, side): the first picks the slot, linear
 // probing over RTGI_PROBES slots; the second is the key held in it (never 0, which marks an empty slot).
 //
@@ -26,7 +26,7 @@
 #define RTGI_PROBES 8u
 #ifndef RTGI_ORIGIN_DEFINED
 #define RTGI_ORIGIN_DEFINED
-// Every cell grid's origin (the cache's at every level, the cooked near cells') for a side: the round coordinates along the
+// Every cell grid's origin (the cache's at every level, the cooked cells') for a side: the round coordinates along the
 // surface, and RTGI_KEY_INSET back along its normal. A floor at y = 0 lay on a cell boundary and a point rebuilt from the
 // depth buffer fell a hair either side as the view changed -- half the floor's samples in each of two cells, lookups
 // missing in streaks that moved with the camera (the user, the crevices testbed, 2026-10-30). The grid moved off the round
@@ -42,7 +42,7 @@ vec3 rtgiOrigin(uint side) {
     o[side >> 1u] = (side & 1u) == 0u ? RTGI_KEY_INSET : -RTGI_KEY_INSET;
     return o;
 }
-// The cooked cells' cell sizes' table (rtgi_nearcook.glsl's nearScaleAt) is by position alone, any side: off the round
+// The cooked size table (rtgi_cook.glsl's cookScaleAt) is by position alone, any side: off the round
 // coordinates on every axis, so no surface lies on its boundaries.
 #define NEAR_SCALE_ORIGIN vec3(0.0137, 0.0271, 0.0419)
 #endif
@@ -86,25 +86,18 @@ uint rtgiSide(vec3 n) {
 #ifndef RTGI_NEAR
 #define RTGI_NEAR 0.0
 #endif
-// RTGI_GEOM_SCALE(p): the cell's size the geometry asks for at p (rtgi_volume.glsl's volCellScale, includers with the
-// volume), <= 0 none -- then the camera's distance sizes it, as before. RTGI_FAR_GROW: with the geometry's size, the
-// camera's floor per metre of distance (0: none).
-#ifndef RTGI_FAR_GROW
-#define RTGI_FAR_GROW 0.0
-#endif
-#ifdef NEAR_SCALE
-float nearScaleAt(vec3 p);
+// COOK_SCALE (includers with the cooked cell set, rtgi_cook.glsl): the cell's size the cook asks for at p (cookScaleAt),
+// -1 where the cook covered nothing -- then the camera's distance sizes it, as before the cook. Sized by the camera's
+// distance, a surface changed cells as the camera moved -- the light crawled and settled again, and read differently from
+// each place (the user, Crytek Sponza, 2026-10-29).
+#ifdef COOK_SCALE
+float cookScaleAt(vec3 p);
 #endif
 float rtgiCellSize(vec3 p, vec3 camera, vec4 params) {
     float dist = length(p - camera);
-#ifdef RTGI_GEOM_SCALE
-    // The cooked cells' own (rtgi_nearcook.glsl's nearScaleAt) where there are some, else the probes'.
-    float g = -1.0;
-#ifdef NEAR_SCALE
-    g = nearScaleAt(p);
-#endif
-    if (!(g > 0.0)) g = RTGI_GEOM_SCALE(p);
-    if (g > 0.0) return max(g, params.x + RTGI_FAR_GROW * dist);
+#ifdef COOK_SCALE
+    float g = cookScaleAt(p);
+    if (g > 0.0) return max(g, params.x);
 #endif
     return params.x + params.y * max(dist - RTGI_NEAR, 0.0);
 }
@@ -127,11 +120,10 @@ bool rtgiSunSettled(float visibility, float rays) {
 }
 
 // The cell's two hashes: x the slot it starts probing at, y its key.
-// The region in every cell's key. With the cooked near field (RTGI_REGION_OF defined: rtgi_nearcook.glsl's
-// nearRegionOfLevel), rtgiRegion is the point's cooked cell (1 + its index, rtgi_nearcook.glsl's nearRegion; 0 none), and
-// the region is that cell's at the key's level: within each cube of that level, the cooked cells joined along their
-// surface by clear rays are one piece, and every piece but the one holding the cube's lowest cell is a region of its own
-// (rtgi_nearcook_cook.comp) -- the two sides of a thin wall, a floor running under it, kept apart; an open surface one
+// The region in every cell's key. With the cooked cell set (RTGI_REGION_OF defined: rtgi_cook.glsl's nearRegionOfLevel),
+// rtgiRegion is the point's level-0 cooked cell (1 + its index, rtgi_cook.glsl's nearRegion; 0 none), and the region is
+// that cell's at the key's level: within each cube of that level, the level-0 cells joined along their surface by clear
+// rays are one piece, and every piece but the one holding the cube's lowest cell is a region of its own (rtgi_cook.comp) -- the two sides of a thin wall, a floor running under it, kept apart; an open surface one
 // piece, region 0, no seam. One cell held both rooms' floor where it ran under a wall, and every blend and lookup that
 // found it by its key carried the light across (the user, the crevices testbed's edges, 2026-10-30). Without it (the
 // shaders that key a stored cell's neighbours: rtgi_filter.comp), rtgiRegion is the region itself

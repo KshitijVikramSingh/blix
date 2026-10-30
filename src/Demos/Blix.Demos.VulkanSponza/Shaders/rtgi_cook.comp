@@ -1,0 +1,343 @@
+#version 450
+
+// RTGI's cook (SponzaLoop.RtgiCook.cs; the cooked cell set, rtgi_cook.glsl): its GPU stages, a chunk a frame through the
+// RTGI Metal batch (each kind of rays traced between its two dispatches). uChunk.w the kind:
+//   0, 1    the size field (also the census's, SponzaLoop.RtgiCensus.cs): each surface sample's COOK_SIZE_RAYS cosine rays,
+//           lifted off its surface, then their hits reduced to its sum of inverse distances (escapes add nothing), its
+//           nearest hit, and its counts of rays that met a surface, a back face, one within uMore.w, an alpha-tested
+//           triangle's back face (a leaf's other side, counted as a front: RtgiCookSided), and escaped downward (direction
+//           y below -uMore.z: into the void under the world)
+//   2, 3    the inside test of the level-0 and level-1 junction cells: COOK_CANDIDATES candidate points each (on the cell's
+//           own surface piece), COOK_CHOOSE_RAYS rays from each, then the candidate meeting the fewest back faces (strict:
+//           an alpha-tested triangle's counts as a front), nearest the cell's middle; buried where even it met more than
+//           uConn.z of its rays on back faces
+//   4, 5    each cell's 8 neighbours across its surface at its level: a ray between the two points, both lifted 1 cm, its
+//           bit set where clear (rtgi_cook.glsl's neighbour mask) -- once, for every pixel alike
+//   6, 7    the near field of the level-0 junction cells: NEAR_RAYS rays each to the contact radius (uMore.w), then their
+//           links (met: distance, normal, albedo), the escape share; buried where most met back faces
+//   8-10    the regions: label passes (each level-0 cell's label at each of NEAR_LEVELS cube sizes, the lowest reached
+//           along clear neighbour rays within the cube), each cube's lowest label, each cell's regions
+//   14, 15  the live own-level cells within uNear.w of the camera listed (rtgi_rays.comp's near-train points)
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform RtgiCookPass {
+    vec4 uCook;    // rtgi_cook.glsl's COOK_PARAMS
+    vec4 uCounts;  // rtgi_cook.glsl's COOK_COUNTS
+    vec4 uChunk;   // x the chunk's first item; y its items; z the rays' reach (m); w the kind
+    vec4 uMore;    // x the lift off the surface (m); y the placements (RtgiCookSided); z the void's downward y; w the near
+                   // distance and the contact radius (m)
+    vec4 uConn;    // x 1: the labels' first pass; y the cube hash's slots - 1; z the share of a candidate's rays on back
+                   // faces past which it is buried
+    vec4 uNear;    // kinds 14 and 15: xyz the camera, w the reach (m)
+} u;
+
+// The size field's samples (xyz the point, w its normal octahedral, packSnorm2x16 as bits) and results (per sample: x the
+// sum of 1 / distance; y met | back << 8 | near << 16 | alpha-tested back << 24; z the nearest hit; w hits whose triangle
+// lay past their placement's (0) | escaping downward << 16).
+layout(std430, set = 0, binding = 1) readonly buffer RtgiCookSamples { vec4 cookSamples[]; };
+layout(std430, set = 0, binding = 4) buffer RtgiCookResults { uvec4 cookResults[]; };
+// The chunk's rays (two vec4s a ray: origin and t-min, direction and reach) and the Metal batch's hits (three uvec4s a
+// ray: [0].x the distance's bits, [0].w bit 0 met, bit 1 front face; [1].x the placement met, [1].y its triangle;
+// [2].xyz the normal, [2].w the albedo).
+layout(std430, set = 0, binding = 2) buffer RtgiCookRays { vec4 cookRays[]; };
+layout(std430, set = 0, binding = 3) readonly buffer RtgiCookHits { uvec4 cookHits[]; };
+// Per placement p (uMore.y of them): [p] its first bit, [p + 1] one past its last; then a bit a triangle, 1 where it is
+// alpha-tested (SponzaLoop.RtgiCensus.cs BuildCensusGeometry).
+layout(std430, set = 0, binding = 5) readonly buffer RtgiCookSided { uint cookSided[]; };
+// The inside test's cells, COOK_ITEM vec4s each: [0] the cell's middle (xyz) and its normal (w, as the samples'); then its
+// candidates (xyz; w 1 where there is one). Its result a cell: the candidate chosen | 256 buried.
+layout(std430, set = 0, binding = 6) readonly buffer RtgiCookCandidates { vec4 cookCandidates[]; };
+layout(std430, set = 0, binding = 7) buffer RtgiCookChosen { uint cookChosen[]; };
+layout(std430, set = 0, binding = 8) readonly buffer RtgiCookTable { uvec2 cookTable[]; };
+layout(std430, set = 0, binding = 9) buffer RtgiCookPoints { vec4 cookPoints[]; };
+layout(std430, set = 0, binding = 10) buffer RtgiNearLinks { uvec2 nearLinks[]; };
+layout(std430, set = 0, binding = 11) buffer RtgiNearLight { vec4 nearLight[]; };
+layout(std430, set = 0, binding = 12) buffer RtgiCookLabels { uint cookLabels[]; };
+layout(std430, set = 0, binding = 13) buffer RtgiCookRegions { uint cookRegions[]; };
+layout(std430, set = 0, binding = 14) buffer RtgiCookCubes { uvec2 cookCubes[]; };
+layout(std430, set = 0, binding = 15) buffer RtgiNearList { uint nearListCount; uint nearListPad[3]; uint nearList[]; };
+// Per near link, where its hit lies in the cooked set (kind 7): bits 0-27 the hit's level-0 cooked cell + 1 (its region:
+// rtgi_cook.glsl's nearRegion; 0 none), bits 28-31 its cache level (the size table's; 15 not covered) -- each frame's relight
+// (rtgi_nearcook_update.comp) reads them, not the tables (a crease's links are most of a frame's lookups otherwise).
+layout(std430, set = 0, binding = 16) buffer RtgiNearHits { uint nearHits[]; };
+layout(std430, set = 0, binding = 17) readonly buffer RtgiCookScale { uvec2 cookScale[]; };
+
+#define COOK_PARAMS u.uCook
+#define COOK_COUNTS u.uCounts
+#define COOK_TABLE(i) cookTable[i]
+#define COOK_POINTS(i) cookPoints[i]
+#define COOK_SCALE(i) cookScale[i]
+#include "rtgi_cook.glsl"
+
+uint cookSideOf(vec3 n) {
+    vec3 a = abs(n);
+    if (a.x >= a.y && a.x >= a.z) return n.x >= 0.0 ? 0u : 1u;
+    if (a.y >= a.z) return n.y >= 0.0 ? 2u : 3u;
+    return n.z >= 0.0 ? 4u : 5u;
+}
+
+#define COOK_SIZE_RAYS 64u
+#define COOK_CANDIDATES 16u
+#define COOK_CHOOSE_RAYS 8u
+#define COOK_ITEM (COOK_CANDIDATES + 1u)
+
+vec3 cookOctDecode(vec2 e) {
+    vec3 n = vec3(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
+    if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    return normalize(n);
+}
+vec3 cookNormalOf(float w) { return cookOctDecode(unpackSnorm2x16(floatBitsToUint(w))); }
+
+// Ray k of size sample i: cosine about n, an 8 x 8 stratified set shifted by the sample's own offset.
+vec3 cookSizeRayDir(uint i, uint k, vec3 n) {
+    uint h = cookHashU(i * 0x9E3779B1u + 0x51u);
+    float j1 = float(h & 0xFFFFu) / 65536.0, j2 = float(h >> 16) / 65536.0;
+    float r1 = (float(k & 7u) + j1) / 8.0, r2 = (float(k >> 3) + j2) / 8.0;
+    float phi = 6.28318530718 * r1, r = sqrt(r2);
+    vec3 l = vec3(r * cos(phi), r * sin(phi), sqrt(max(0.0, 1.0 - r2)));
+    // Frisvad's basis about n.
+    float s = n.z >= 0.0 ? 1.0 : -1.0;
+    float a = -1.0 / (s + n.z), b = n.x * n.y * a;
+    vec3 t1 = vec3(1.0 + s * n.x * n.x * a, s * b, -s * n.x);
+    vec3 t2 = vec3(b, s + n.y * n.y * a, -n.y);
+    return normalize(t1 * l.x + t2 * l.y + n * l.z);
+}
+
+// Whether ray r's hit was on an alpha-tested triangle (its back face a front); bad set where the index ran past.
+bool cookAlphaTested(uint r, inout uint bad) {
+    uint placements = uint(u.uMore.y);
+    uvec4 h1 = cookHits[3u * r + 1u];
+    if (h1.x >= placements) return false;
+    uint first = cookSided[h1.x], count = cookSided[h1.x + 1u] - first;
+    if (h1.y >= count) { bad++; return false; }
+    uint b = first + h1.y;
+    return ((cookSided[placements + 1u + (b >> 5u)] >> (b & 31u)) & 1u) != 0u;
+}
+
+void nullRay(uint t) {
+    cookRays[2u * t] = vec4(0.0);
+    cookRays[2u * t + 1u] = vec4(0.0, 1.0, 0.0, 1e-6);
+}
+
+// A live cell's neighbour k across its surface at its level, or COOK_NONE.
+uint cookNeighbour(uint i, uint k) {
+    uint bits = cookBits(i);
+    uint side = bits & 7u, level = (bits >> 8) & 15u;
+    ivec3 c = cookCoords(cookPoints[2u * i].xyz, side, level);
+    uint axis = side >> 1u, a0 = (axis + 1u) % 3u, a1 = (axis + 2u) % 3u;
+    c[a0] += NEAR_RING[k].x;
+    c[a1] += NEAR_RING[k].y;
+    uint j = cookFind(c, level, side);
+    return j != COOK_NONE && cookLive(j) ? j : COOK_NONE;
+}
+ivec3 cookCube(uint i, uint level) {
+    return ivec3(floor((cookPoints[2u * i].xyz - rtgiOrigin(cookBits(i) & 7u)) / (COOK_PARAMS.x * exp2(float(level)))));
+}
+
+void main() {
+    uint t = gl_GlobalInvocationID.x;
+    uint first = uint(u.uChunk.x), count = uint(u.uChunk.y);
+    uint kind = uint(u.uChunk.w + 0.5);
+    float reach = u.uChunk.z;
+    if (kind == 0u) {
+        if (t >= count * COOK_SIZE_RAYS) return;
+        uint i = first + t / COOK_SIZE_RAYS, k = t % COOK_SIZE_RAYS;
+        vec4 s = cookSamples[i];
+        vec3 n = cookNormalOf(s.w);
+        cookRays[2u * t] = vec4(s.xyz + n * u.uMore.x, 0.0);
+        cookRays[2u * t + 1u] = vec4(cookSizeRayDir(i, k, n), reach);
+        return;
+    }
+    if (kind == 1u) {
+        if (t >= count) return;
+        float inv = 0.0, nearest = 1e30;
+        uint met = 0u, backs = 0u, near = 0u, sidedBacks = 0u, bad = 0u, down = 0u;
+        for (uint k = 0u; k < COOK_SIZE_RAYS; k++) {
+            uint r = t * COOK_SIZE_RAYS + k;
+            uvec4 h0 = cookHits[3u * r];
+            if ((h0.w & 1u) == 0u) {
+                if (cookRays[2u * r + 1u].y < -u.uMore.z) down++;
+                continue;
+            }
+            float d = uintBitsToFloat(h0.x);
+            met++;
+            bool alpha = cookAlphaTested(r, bad);
+            if ((h0.w & 2u) == 0u) {
+                if (alpha) sidedBacks++;
+                else backs++;
+            }
+            if (d <= u.uMore.w) near++;
+            nearest = min(nearest, d);
+            inv += 1.0 / max(d, 1e-3);
+        }
+        cookResults[first + t] = uvec4(floatBitsToUint(inv), met | (backs << 8) | (near << 16) | (sidedBacks << 24), floatBitsToUint(nearest), bad | (down << 16));
+        return;
+    }
+    if (kind == 2u) {
+        if (t >= count * COOK_CANDIDATES * COOK_CHOOSE_RAYS) return;
+        uint item = first + t / (COOK_CANDIDATES * COOK_CHOOSE_RAYS);
+        uint c = (t / COOK_CHOOSE_RAYS) % COOK_CANDIDATES, r = t % COOK_CHOOSE_RAYS;
+        vec4 head = cookCandidates[COOK_ITEM * item];
+        vec4 cand = cookCandidates[COOK_ITEM * item + 1u + c];
+        vec3 n = cookNormalOf(head.w);
+        cookRays[2u * t] = vec4(cand.xyz + n * u.uMore.x, 0.0);
+        cookRays[2u * t + 1u] = vec4(nearRayDir(item, r * (NEAR_RAYS / COOK_CHOOSE_RAYS), n), cand.w > 0.5 ? reach : 1e-6);
+        return;
+    }
+    if (kind == 3u) {
+        if (t >= count) return;
+        uint item = first + t;
+        vec3 mid = cookCandidates[COOK_ITEM * item].xyz;
+        uint best = 0u, bad = 0u;
+        float bestBacks = 1e30, bestD = 1e30;
+        for (uint c = 0u; c < COOK_CANDIDATES; c++) {
+            vec4 cand = cookCandidates[COOK_ITEM * item + 1u + c];
+            if (cand.w < 0.5) continue;
+            float backs = 0.0;
+            for (uint r = 0u; r < COOK_CHOOSE_RAYS; r++) {
+                uint ray = (t * COOK_CANDIDATES + c) * COOK_CHOOSE_RAYS + r;
+                uvec4 h0 = cookHits[3u * ray];
+                if ((h0.w & 1u) != 0u && (h0.w & 2u) == 0u && !cookAlphaTested(ray, bad)) backs += 1.0;
+            }
+            float dm = length(cand.xyz - mid);
+            if (backs < bestBacks || (backs == bestBacks && dm < bestD)) { bestBacks = backs; bestD = dm; best = c; }
+        }
+        bool buried = bestBacks > u.uConn.z * float(COOK_CHOOSE_RAYS) && bestBacks < 1e29;
+        cookChosen[item] = best | (buried ? 256u : 0u);
+        return;
+    }
+    if (kind == 4u) {
+        if (t >= count * 8u) return;
+        uint i = first + t / 8u, k = t % 8u;
+        nullRay(t);
+        if (!cookLive(i)) return;
+        uint j = cookNeighbour(i, k);
+        if (j == COOK_NONE) return;
+        vec3 o = cookPoints[2u * i].xyz + cookPoints[2u * i + 1u].xyz * 0.01;
+        vec3 q = cookPoints[2u * j].xyz + cookPoints[2u * j + 1u].xyz * 0.01;
+        float len = length(q - o);
+        if (len < 1e-4) return;
+        cookRays[2u * t] = vec4(o, 0.0);
+        cookRays[2u * t + 1u] = vec4((q - o) / len, max(len - 0.002, 1e-4));
+        return;
+    }
+    if (kind == 5u) {
+        if (t >= count) return;
+        uint i = first + t, mask = COOK_ADJ_TRACED;
+        for (uint k = 0u; k < 8u; k++) {
+            uint r = t * 8u + k;
+            if (cookRays[2u * r + 1u].w > 1e-5 && (cookHits[3u * r].w & 1u) == 0u) mask |= 1u << k;
+        }
+        cookPoints[2u * i + 1u].w = uintBitsToFloat(mask);
+        return;
+    }
+    if (kind == 6u) {
+        if (t >= count * NEAR_RAYS) return;
+        uint i = first + t / NEAR_RAYS, k = t % NEAR_RAYS;
+        if (!cookLive(i)) { nullRay(t); return; }
+        vec3 p = cookPoints[2u * i].xyz, n = cookPoints[2u * i + 1u].xyz;
+        cookRays[2u * t] = vec4(p + n * 0.01, 0.0);
+        cookRays[2u * t + 1u] = vec4(nearRayDir(i, k, n), reach);
+        return;
+    }
+    if (kind == 7u) {
+        if (t >= count) return;
+        uint i = first + t;
+        float radius = u.uMore.w;
+        if (!cookLive(i)) { nearLight[i] = vec4(0.0, 0.0, 0.0, -1.0); return; }
+        float backs = 0.0;
+        for (uint k = 0u; k < NEAR_RAYS; k++) {
+            uint r = t * NEAR_RAYS + k;
+            uvec4 h0 = cookHits[3u * r];
+            float dist = uintBitsToFloat(h0.x);
+            uvec2 link = uvec2(0u);
+            // A back face met at any distance: the ray started inside something.
+            if ((h0.w & 1u) != 0u && (h0.w & 2u) == 0u) backs += 1.0;
+            if ((h0.w & 1u) != 0u && dist <= radius) {
+                uvec4 h2 = cookHits[3u * r + 2u];
+                vec3 nq = vec3(uintBitsToFloat(h2.x), uintBitsToFloat(h2.y), uintBitsToFloat(h2.z));
+                vec3 d = cookRays[2u * r + 1u].xyz;
+                nq = dot(nq, nq) > 1e-12 ? normalize(nq) : -d;
+                if (dot(nq, d) > 0.0) nq = -nq;
+                uvec2 o = uvec2(clamp(nearOctEncode(nq) * 255.0 + 0.5, 0.0, 255.0));
+                uint dq = uint(clamp(dist / radius, 0.0, 1.0) * 32767.0);
+                // A back face met: the ray started inside something -- dark (albedo 0).
+                uint albedo = (h0.w & 2u) != 0u ? h2.w : 0u;
+                link = uvec2(0x80000000u | (dq << 16) | (o.y << 8) | o.x, albedo);
+                // Where the hit lies, as the relight will ask it: from the point its link decodes to.
+                vec3 nd = nearOctDecode(vec2(o) / 255.0);
+                vec3 q = cookRays[2u * r].xyz + d * (float(dq) / 32767.0 * radius);
+                uint region = min(nearRegion(q, cookSideOf(nd)), 0x0FFFFFFFu);
+                float g = cookScaleAt(q);
+                uint level = g > 0.0 ? uint(clamp(floor(log2(max(g, COOK_PARAMS.x) / COOK_PARAMS.x)), 0.0, 10.0)) : 15u;
+                nearHits[i * NEAR_RAYS + k] = region | (level << 28);
+            }
+            nearLinks[i * NEAR_RAYS + k] = link;
+        }
+        // Its light not gathered yet (w 0: rtgi_nearcook_update.comp sets it 1 with its first). Buried (most rays on back
+        // faces: its point inside something): marked, its light -1 for good -- trained from, those points started rays
+        // inside the wall a floor ran under, black, and every edge where one thing stood on another darkened as the
+        // cells' history filled (the user, the crevices testbed, 2026-10-30).
+        bool buried = backs > 0.5 * float(NEAR_RAYS);
+        if (buried) cookPoints[2u * i].w = uintBitsToFloat(cookBits(i) | NEAR_BURIED);
+        nearLight[i] = buried ? vec4(0.0, 0.0, 0.0, -1.0) : vec4(0.0);
+        return;
+    }
+    if (kind == 8u) {
+        // A pass of the labels: each level's the lowest of its own and its linked neighbours' (both ways) in its cube.
+        if (t >= count) return;
+        uint i = first + t;
+        for (uint l = 0u; l < NEAR_LEVELS; l++) {
+            uint lab = u.uConn.x > 0.5 ? i : cookLabels[i * NEAR_LEVELS + l];
+            if (u.uConn.x < 0.5 && cookLive(i)) {
+                ivec3 cube = cookCube(i, l);
+                uint adj = cookAdj(i);
+                for (uint k = 0u; k < 8u; k++) {
+                    if ((adj & (1u << k)) == 0u) continue;
+                    uint j = cookNeighbour(i, k);
+                    if (j == COOK_NONE || (cookAdj(j) & (1u << (k ^ 1u))) == 0u || cookCube(j, l) != cube) continue;
+                    lab = min(lab, cookLabels[j * NEAR_LEVELS + l]);
+                }
+            }
+            cookLabels[i * NEAR_LEVELS + l] = lab;
+        }
+        return;
+    }
+    if (kind == 9u || kind == 10u) {
+        // 9: each cube's lowest label (its key claimed, the lowest kept); 10: the regions.
+        if (t >= count) return;
+        uint i = first + t;
+        uint side = cookBits(i) & 7u;
+        for (uint l = 0u; l < NEAR_LEVELS; l++) {
+            if (!cookLive(i)) { if (kind == 10u) cookRegions[i * NEAR_LEVELS + l] = 0u; continue; }
+            ivec3 cube = cookCube(i, l);
+            uint ha = cookHashU(uint(cube.x) * 0x9E3779B1u ^ cookHashU(uint(cube.y) * 0x85EBCA77u ^ cookHashU(uint(cube.z) * 0xC2B2AE3Du ^ (side + 8u * l + 0x51Fu))));
+            uvec2 h = uvec2(ha, cookHashU(ha ^ 0x2545F491u ^ uint(cube.x) * 0x1B873593u ^ uint(cube.y) * 0xCC9E2D51u) | 1u);
+            uint mask = uint(u.uConn.y);
+            uint lab = cookLabels[i * NEAR_LEVELS + l];
+            uint slot = COOK_NONE;
+            for (uint k = 0u; k < 32u; k++) {
+                uint s = (h.x + k) & mask;
+                if (kind == 9u) {
+                    uint prev = atomicCompSwap(cookCubes[s].x, 0u, h.y);
+                    if (prev == 0u || prev == h.y) { slot = s; break; }
+                } else if (cookCubes[s].x == h.y) { slot = s; break; }
+                else if (cookCubes[s].x == 0u) break;
+            }
+            if (slot == COOK_NONE) { if (kind == 10u) cookRegions[i * NEAR_LEVELS + l] = 0u; continue; }
+            if (kind == 9u) atomicMin(cookCubes[slot].y, lab);
+            else cookRegions[i * NEAR_LEVELS + l] = lab == cookCubes[slot].y ? 0u : lab + 1u;
+        }
+        return;
+    }
+    if (kind == 14u) { if (t == 0u) nearListCount = 0u; return; }
+    if (kind == 15u) {
+        if (t >= count) return;
+        uint i = first + t;
+        uint bits = cookBits(i);
+        if ((bits & NEAR_BURIED) != 0u || (bits & COOK_OWN) == 0u || distance(cookPoints[2u * i].xyz, u.uNear.xyz) > u.uNear.w) return;
+        nearList[atomicAdd(nearListCount, 1u)] = i;
+        return;
+    }
+}

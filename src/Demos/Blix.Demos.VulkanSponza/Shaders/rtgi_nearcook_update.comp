@@ -1,10 +1,11 @@
 #version 450
 
-// The cooked near field (rtgi_nearcook.glsl): each cooked cell's near light this frame, over its own NEAR_RAYS fixed cosine rays
-// (PI x L_in each): a ray that met a surface within the contact radius brings that surface's light from the cache -- albedo
-// x (its indirect irradiance plus the sun by its cell's sun visibility); one that left brings nothing here, the readout
-// putting the cache's far light over it (rtgi_readout.frag). No rays: the cook traced them; only light is read. Blended
-// over a few frames (uUpdate.z), a share of the cells a frame (uUpdate.x, .y).
+// The cooked near field (rtgi_cook.glsl: the level-0 junction cells, the first COOK_COUNTS.y): each one's near light this
+// frame, over its own NEAR_RAYS fixed cosine rays (PI x L_in each): a ray that met a surface within the contact radius
+// brings that surface's light from the cache -- albedo x (its indirect irradiance plus the sun by its cell's sun
+// visibility); one that left brings nothing here, the readout putting the cache's far light over it (rtgi_readout.frag).
+// No rays: the cook traced them (rtgi_cook.comp kinds 6, 7); only light is read. Blended over a few frames (uUpdate.z), a
+// share of the cells a frame (uUpdate.x, .y).
 
 layout(local_size_x = 64) in;
 
@@ -13,50 +14,40 @@ layout(set = 0, binding = 0) uniform RtgiNearCookUpdate {
     vec4 uCamera;        // xyz position
     vec4 uSun;           // xyz toward the sun
     vec4 uSunIrradiance; // rgb
-    vec4 uNearCook;      // rtgi_nearcook.glsl's NEAR_PARAMS
+    vec4 uCook;          // rtgi_cook.glsl's COOK_PARAMS
+    vec4 uCookCounts;    // rtgi_cook.glsl's COOK_COUNTS
     vec4 uUpdate;        // x the first cell this frame; y the cells; z the blend's weight of this frame; w the contact radius
-    vec4 uVolume;        // rtgi_volume.glsl's VOL_PARAMS (the cells' sizes)
-    vec4 uVolumeGeom;    // rtgi_volume.glsl's VOL_GEOM
+    vec4 uNearField;     // x the near field's radius (rtgi_cache.glsl's RTGI_NEAR)
 } u;
 
-layout(std430, set = 0, binding = 1) readonly buffer RtgiNearPoints { vec4 nearPoints[]; };
-layout(std430, set = 0, binding = 2) readonly buffer RtgiNearLinks { uvec2 nearLinks[]; };
-layout(std430, set = 0, binding = 3) buffer RtgiNearLight { vec4 nearLight[]; };
-layout(std430, set = 0, binding = 4) readonly buffer RtgiKeys { uint rtgiKeys[]; };
-layout(std430, set = 0, binding = 5) readonly buffer RtgiRecord { uvec4 rtgiRecord[]; };
-layout(std430, set = 0, binding = 6) readonly buffer RtgiResolved { vec4 rtgiResolved[]; };
-layout(std430, set = 0, binding = 7) readonly buffer RtgiVolumeTable { uvec2 volTable[]; };
-layout(std430, set = 0, binding = 8) readonly buffer RtgiVolumeProbes { float volProbes[]; };
-layout(std430, set = 0, binding = 9) readonly buffer RtgiNearTable { uvec2 nearTable[]; };
+layout(std430, set = 0, binding = 1) readonly buffer RtgiCookTable { uvec2 cookTable[]; };
+layout(std430, set = 0, binding = 2) readonly buffer RtgiCookPoints { vec4 cookPoints[]; };
+layout(std430, set = 0, binding = 3) readonly buffer RtgiCookRegions { uint cookRegions[]; };
+layout(std430, set = 0, binding = 4) readonly buffer RtgiCookScale { uvec2 cookScale[]; };
+layout(std430, set = 0, binding = 5) readonly buffer RtgiNearLinks { uvec2 nearLinks[]; };
+layout(std430, set = 0, binding = 6) buffer RtgiNearLight { vec4 nearLight[]; };
+layout(std430, set = 0, binding = 7) readonly buffer RtgiKeys { uint rtgiKeys[]; };
+layout(std430, set = 0, binding = 8) readonly buffer RtgiRecord { uvec4 rtgiRecord[]; };
+layout(std430, set = 0, binding = 9) readonly buffer RtgiResolved { vec4 rtgiResolved[]; };
+// Per link, its hit's level-0 cooked cell + 1 and cache level (rtgi_cook.comp kind 7: worked out once at cook).
+layout(std430, set = 0, binding = 10) readonly buffer RtgiNearHits { uint nearHits[]; };
 
-#define NEAR_PARAMS u.uNearCook
-#define NEAR_TABLE(i) nearTable[i]
-#define NEAR_POINTS(i) nearPoints[i]
-// The cooked cells' regions by level and their links (rtgi_nearcook_cook.comp; rtgi_cache.glsl's rtgiRegion).
-layout(std430, set = 0, binding = 10) readonly buffer RtgiNearRegions { uint nearRegions[]; };
-#define NEAR_REGIONS(i) nearRegions[i]
-// The cooked cells' cell sizes by 5 cm cube (rtgi_nearcook.glsl's nearScaleAt; rtgi_cache.glsl's rtgiCellSize).
-layout(std430, set = 0, binding = 12) readonly buffer RtgiNearScaleTable { uvec2 nearScaleTable[]; };
-#define NEAR_SCALE(i) nearScaleTable[i]
+#define COOK_PARAMS u.uCook
+#define COOK_COUNTS u.uCookCounts
+#define COOK_TABLE(i) cookTable[i]
+#define COOK_POINTS(i) cookPoints[i]
+#define COOK_REGIONS(i) cookRegions[i]
+#define COOK_SCALE(i) cookScale[i]
 #define RTGI_REGION_OF 1
-layout(std430, set = 0, binding = 11) readonly buffer RtgiNearAdj { uint nearAdj[]; };
-#define NEAR_ADJ(i) nearAdj[i]
-#include "rtgi_nearcook.glsl"
-#define VOL_PARAMS u.uVolume
-#define VOL_GEOM u.uVolumeGeom
-#define VOL_TABLE(i) volTable[i]
-#define VOL_PROBES(i) volProbes[i]
-#define VOL_DEPTH(i) 0u
-#include "rtgi_volume.glsl"
-#define RTGI_GEOM_SCALE(p) volCellScale(p)
-#define RTGI_FAR_GROW u.uVolumeGeom.z
+#include "rtgi_cook.glsl"
 #define RTGI_KEYS(i) rtgiKeys[i]
+#define RTGI_NEAR u.uNearField.x
 #include "rtgi_cache.glsl"
 
 // The cache's indirect light at q facing n: its level's cell holding light, else a coarser one (two up at most); w its sun
 // visibility, -1 none found.
-vec4 cellLightKeyed(vec3 q, vec3 n) {
-    uint level = rtgiLevel(q, u.uCamera.xyz, u.uParams), side = rtgiSide(n);
+vec4 cellLightKeyed(vec3 q, vec3 n, uint level) {
+    uint side = rtgiSide(n);
     uint top = uint(u.uParams.w);
     for (uint l = level; l <= min(level + 2u, top); ++l) {
         uint s = rtgiFind(rtgiCellHash(ivec3(floor((q - rtgiOrigin(side)) / rtgiSize(l, u.uParams))), l, side, u.uParams), u.uParams);
@@ -72,10 +63,13 @@ vec4 cellLightKeyed(vec3 q, vec3 n) {
 // q's cell under its own region, else under the unsplit key (region 0): a hit right at a junction resolves to a region its
 // pieces split there that no training point keys alike -- a cell never trained, and a cooked cell all of whose rays met
 // it never gathered (the blue dashes along the crevices testbed's edges, 2026-10-30).
-vec4 cellLight(vec3 q, vec3 n) {
-    rtgiRegion = nearRegion(q, rtgiSide(n));
-    vec4 c = cellLightKeyed(q, n);
-    if (c.w < 0.0 && rtgiRegion != 0u) { rtgiRegion = 0u; c = cellLightKeyed(q, n); }
+// Its region and level the cook's (hit: rtgi_cook.comp kind 7), the level asked here only where the size table had none.
+vec4 cellLight(vec3 q, vec3 n, uint hit) {
+    rtgiRegion = hit & 0x0FFFFFFFu;
+    uint level = hit >> 28;
+    if (level > 10u) level = rtgiLevel(q, u.uCamera.xyz, u.uParams);
+    vec4 c = cellLightKeyed(q, n, level);
+    if (c.w < 0.0 && rtgiRegion != 0u) { rtgiRegion = 0u; c = cellLightKeyed(q, n, level); }
     return c;
 }
 
@@ -83,9 +77,9 @@ void main() {
     uint t = gl_GlobalInvocationID.x;
     if (t >= uint(u.uUpdate.y)) return;
     uint i = uint(u.uUpdate.x) + t;
-    if (i >= uint(NEAR_PARAMS.z)) i -= uint(NEAR_PARAMS.z);
-    vec4 pw = nearPoints[2u * i], nw = nearPoints[2u * i + 1u];
-    if ((floatBitsToUint(pw.w) & NEAR_BURIED) != 0u) return;
+    if (i >= uint(COOK_COUNTS.y)) i -= uint(COOK_COUNTS.y);
+    vec4 pw = cookPoints[2u * i], nw = cookPoints[2u * i + 1u];
+    if ((floatBitsToUint(pw.w) & NEAR_BURIED) != 0u || nearLight[i].w < -0.5) return;
     vec3 p = pw.xyz, n = nw.xyz;
     // Per ray: a surface met within the contact radius brings its cache light (albedo x (its indirect irradiance plus the
     // sun by its sun visibility)); one that left brings nothing here -- the readout puts the cache's far light over it.
@@ -99,7 +93,7 @@ void main() {
         float dist = float((link.x >> 16) & 0x7FFFu) / 32767.0 * u.uUpdate.w;
         vec3 q = p + n * 0.01 + d * dist;
         vec3 nq = nearOctDecode(vec2(link.x & 0xFFu, (link.x >> 8) & 0xFFu) / 255.0);
-        vec4 c = cellLight(q, nq);
+        vec4 c = cellLight(q, nq, nearHits[i * NEAR_RAYS + k]);
         if (c.w < 0.0) continue;
         sum += unpackUnorm4x8(link.y).rgb * (c.rgb + u.uSunIrradiance.rgb * max(dot(nq, u.uSun.xyz), 0.0) * c.w);
         found += 1.0;
