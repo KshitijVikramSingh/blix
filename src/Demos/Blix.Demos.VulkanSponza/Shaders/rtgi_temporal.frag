@@ -71,6 +71,9 @@ layout(std430, set = 0, binding = 15) readonly buffer RtgiNearPoints { vec4 near
 // The cooked cells' regions by level and their links (rtgi_nearcook_cook.comp; rtgi_cache.glsl's rtgiRegion).
 layout(std430, set = 0, binding = 16) readonly buffer RtgiNearRegions { uint nearRegions[]; };
 #define NEAR_REGIONS(i) nearRegions[i]
+// The cooked cells' cell sizes by 5 cm cube (rtgi_nearcook.glsl's nearScaleAt; rtgi_cache.glsl's rtgiCellSize).
+layout(std430, set = 0, binding = 18) readonly buffer RtgiNearScaleTable { uvec2 nearScaleTable[]; };
+#define NEAR_SCALE(i) nearScaleTable[i]
 #define RTGI_REGION_OF 1
 layout(std430, set = 0, binding = 17) readonly buffer RtgiNearAdj { uint nearAdj[]; };
 #define NEAR_ADJ(i) nearAdj[i]

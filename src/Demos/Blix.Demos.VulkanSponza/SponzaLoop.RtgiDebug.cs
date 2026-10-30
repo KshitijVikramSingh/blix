@@ -17,6 +17,7 @@ internal sealed partial class SponzaLoop
         "Cooked near: state (red buried, blue ungathered)", "Cooked near: near light", "Cell's probe level / probes reached",
         "Probe harmonic distance (5 cm - 5 m)", "Cell samples held (log)", "Fix-up pixels (magenta)",
         "Temporal history held (blue 0 - red 16)", "Cell region (grey: none cooked)",
+        "Cooked near: far term (escape share x far light per ray)", "Cooked near: the cache's light under it",
     };
 
     // The view (rtgi_readout.frag's uContact.w, rtgi_blur.frag's uHalf.x): 0 the light; 1-7 a cell's state; 8 the light

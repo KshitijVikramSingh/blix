@@ -123,6 +123,9 @@ void sink(bool never) { if (never) atomicAdd(rtgiStats[63], 1u); }
 // The cooked cells' regions by level and their links (rtgi_nearcook_cook.comp; rtgi_cache.glsl's rtgiRegion).
 layout(std430, set = 0, binding = 26) readonly buffer RtgiNearRegions { uint nearRegions[]; };
 #define NEAR_REGIONS(i) nearRegions[i]
+// The cooked cells' cell sizes by 5 cm cube (rtgi_nearcook.glsl's nearScaleAt; rtgi_cache.glsl's rtgiCellSize).
+layout(std430, set = 0, binding = 27) readonly buffer RtgiNearScaleTable { uvec2 nearScaleTable[]; };
+#define NEAR_SCALE(i) nearScaleTable[i]
 #define RTGI_REGION_OF 1
 #include "rtgi_cache.glsl"
 layout(std430, set = 0, binding = 24) readonly buffer RtgiNearTable { uvec2 nearTable[]; };
@@ -589,6 +592,19 @@ void main() {
     // their means no different for fewer samples. Each level was an insert and a dozen atomics a sample: the training
     // ~8 ms a frame through Crytek Sponza's first seconds at 4x the rays (2026-10-26).
     uint thin = rtgiHash(hd ^ 0x9E3779B9u);
+    // And the finer level's cell holding it, where one is held (found, never made): a cell across a step of the cells'
+    // size (rtgi_cache.glsl's rtgiCellSize, by the geometry) holds points of its own level on one part and of the next
+    // level up on the other, and was trained by the first alone -- half the samples of the cells beside it, so leaned on
+    // its parent the more (rtgi_filter.comp), the parent's wider, brighter mean along every step: a bright line on each of
+    // the size's contours, the cells' own light clean (the user, the crevices testbed, 2026-10-30). Trained over all of
+    // itself it holds what its neighbours do. Only cells already held: the finer level is not made where nothing reads it.
+    {
+        uint fs = RTGI_EMPTY;
+        if (live && level > 0u) fs = rtgiFind(cellAt(p.xyz, n, level - 1u), u.uParams);
+        statOffset = 0u;
+        if (table || fs != RTGI_EMPTY) add(fs, e, counted, sky, sunTraced, sunLit, true);
+        clampDone = false;
+    }
     for (uint k = 0u; k < uint(u.uNearField.w); k++) {
         bool thinned = u.uHitSun.y > 0.5 && k >= 3u && ((thin >> (4u * k)) & ((1u << (k - 2u)) - 1u)) != 0u;
         bool here = live && level + k <= top && !thinned;
@@ -632,6 +648,12 @@ void main() {
     }
     if (!table && !landing) return;
     statOffset = 8u;
+    // The origin's finer cell too, where held (as the sample's above).
+    {
+        uint fs = RTGI_EMPTY;
+        if (landing && lo > 0u) fs = rtgiFind(cellAt(oP.xyz, oN.xyz, lo - 1u), u.uParams);
+        if (table || fs != RTGI_EMPTY) add(fs, eo, true, false, false, false, true);
+    }
     for (uint k = 0u; k < uint(u.uNearField.w); k++) {
         bool here = landing && lo + k <= top;
         if (!table && !here) continue;

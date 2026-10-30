@@ -112,6 +112,9 @@ layout(std430, set = 0, binding = 29) readonly buffer RtgiNearPoints { vec4 near
 // The cooked cells' regions by level and their links (rtgi_nearcook_cook.comp; rtgi_cache.glsl's rtgiRegion).
 layout(std430, set = 0, binding = 30) readonly buffer RtgiNearRegions { uint nearRegions[]; };
 #define NEAR_REGIONS(i) nearRegions[i]
+// The cooked cells' cell sizes by 5 cm cube (rtgi_nearcook.glsl's nearScaleAt; rtgi_cache.glsl's rtgiCellSize).
+layout(std430, set = 0, binding = 32) readonly buffer RtgiNearScaleTable { uvec2 nearScaleTable[]; };
+#define NEAR_SCALE(i) nearScaleTable[i]
 #define RTGI_REGION_OF 1
 layout(std430, set = 0, binding = 31) readonly buffer RtgiNearAdj { uint nearAdj[]; };
 #define NEAR_ADJ(i) nearAdj[i]
@@ -644,8 +647,12 @@ void main() {
             // The near light over the cache's far light: per ray, a surface met brings the cooked light, one past the
             // contact radius the cell's far light per such ray (E x farShare / nearCell).
             float esc = nc.w - 1.0;
-            vec3 cooked = esc * e.rgb * farShare / max(nearCell, 0.05) + nc.rgb;
-            e.rgb = mix(e.rgb, cooked, clamp(found, 0.0, 1.0));
+            vec3 farPer = e.rgb * farShare / max(nearCell, 0.05);
+            vec3 cooked = esc * farPer + nc.rgb;
+            // Views 25 and 26 (SponzaLoop.RtgiDebug.cs): its far term alone (esc x far per ray), the cache's light under it.
+            int dv = int(u.uContact.w + 0.5);
+            if (dv == 25) e.rgb = esc * farPer;
+            else if (dv != 26) e.rgb = mix(e.rgb, cooked, clamp(found, 0.0, 1.0));
         }
     }
     if (e.w > 0.0 && u.uContact.x > 0.5) {
@@ -694,8 +701,9 @@ void main() {
             uint hh = rtgiHash(hk.y);
             c = vec3(hh & 255u, (hh >> 8) & 255u, (hh >> 16) & 255u) / 255.0 * 0.8 + 0.2;
         } else if (view == 12) {
-            // Its size, the geometry's (5 cm blue to 1 m red, log); the camera's distance's where no probes are cooked: grey.
-            float g = volCellScale(p);
+            // Its size, the geometry's (5 cm blue to 1 m red, log): the cooked cells' where there are some, the probes'
+            // elsewhere; the camera's distance's where neither is cooked: grey.
+            float g = max(nearScaleAt(p), volCellScale(p));
             float size = rtgiCellSize(p, u.uCamera.xyz, u.uParams);
             c = g > 0.0 ? heat(log2(size / 0.05) / log2(20.0)) : vec3(0.5);
         } else if (view == 13 || view == 14) {

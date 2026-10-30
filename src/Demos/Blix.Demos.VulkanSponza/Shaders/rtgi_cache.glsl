@@ -78,10 +78,18 @@ uint rtgiSide(vec3 n) {
 #ifndef RTGI_FAR_GROW
 #define RTGI_FAR_GROW 0.0
 #endif
+#ifdef NEAR_SCALE
+float nearScaleAt(vec3 p);
+#endif
 float rtgiCellSize(vec3 p, vec3 camera, vec4 params) {
     float dist = length(p - camera);
 #ifdef RTGI_GEOM_SCALE
-    float g = RTGI_GEOM_SCALE(p);
+    // The cooked cells' own (rtgi_nearcook.glsl's nearScaleAt) where there are some, else the probes'.
+    float g = -1.0;
+#ifdef NEAR_SCALE
+    g = nearScaleAt(p);
+#endif
+    if (!(g > 0.0)) g = RTGI_GEOM_SCALE(p);
     if (g > 0.0) return max(g, params.x + RTGI_FAR_GROW * dist);
 #endif
     return params.x + params.y * max(dist - RTGI_NEAR, 0.0);

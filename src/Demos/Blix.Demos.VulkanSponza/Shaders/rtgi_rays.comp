@@ -94,6 +94,9 @@ layout(std430, set = 0, binding = 22) readonly buffer RtgiVolumeProbes { float v
 // The cooked cells' regions by level and their links (rtgi_nearcook_cook.comp; rtgi_cache.glsl's rtgiRegion).
 layout(std430, set = 0, binding = 25) readonly buffer RtgiNearRegions { uint nearRegions[]; };
 #define NEAR_REGIONS(i) nearRegions[i]
+// The cooked cells' cell sizes by 5 cm cube (rtgi_nearcook.glsl's nearScaleAt; rtgi_cache.glsl's rtgiCellSize).
+layout(std430, set = 0, binding = 26) readonly buffer RtgiNearScaleTable { uvec2 nearScaleTable[]; };
+#define NEAR_SCALE(i) nearScaleTable[i]
 #define RTGI_REGION_OF 1
 #include "rtgi_cache.glsl"
 #define GUIDE_KEYS(i) guideKeys[i]
@@ -118,6 +121,11 @@ bool surfacePoint(inout vec3 p, inout vec3 n, uint h) {
     uint side = rtgiSide(n);
     ivec3 cell = ivec3(floor((p - RTGI_ORIGIN) / size));
     uint subs = max(1u, uint(size / NEAR_PARAMS.x + 0.5));
+    // Only cells of the point's own region at its level (rtgi_nearcook_cook.comp's pieces): a cache cell keyed by a piece
+    // is trained over that piece. Drawn from any, a piece split off at a junction was trained only when a draw happened
+    // to land in it -- its cell thin of samples, short dark dashes along the crevices testbed's creases (2026-10-30).
+    uint own = nearRegion(p, side);
+    uint want = own != 0u && lv < NEAR_LEVELS ? nearRegions[(own - 1u) * NEAR_LEVELS + lv] : 0u;
     for (uint k = 0u; k < 6u; k++) {
         uint hk = nearHash(h ^ (k + 1u) * 0x9E3779B9u);
         uvec3 sub = uvec3(hk % subs, (hk >> 10) % subs, (hk >> 20) % subs);
@@ -125,6 +133,7 @@ bool surfacePoint(inout vec3 p, inout vec3 n, uint h) {
         uint j = nearFind(ivec3(floor((at - RTGI_ORIGIN) / NEAR_PARAMS.x)), side);
         if (j == 0xFFFFFFFFu) continue;
         if ((floatBitsToUint(nearPoints[2u * j].w) & NEAR_BURIED) != 0u) continue;
+        if ((lv < NEAR_LEVELS ? nearRegions[j * NEAR_LEVELS + lv] : 0u) != want) continue;
         vec3 q = nearPoints[2u * j].xyz;
         if (ivec3(floor((q - RTGI_ORIGIN) / size)) != cell) continue;
         p = q;

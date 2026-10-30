@@ -14,7 +14,8 @@ layout(set = 0, binding = 0) uniform RtgiNearCookCook {
     vec4 uCook;      // x the chunk's first cell; y its cells; z the contact radius (m); w the kind
     vec4 uVolume;    // rtgi_volume.glsl's VOL_PARAMS (kinds 2 and 3); x the level the regions are probes of
     vec4 uRegion;    // x the volume's level the regions are drawn from; y the links' round; z the rounds
-    vec4 uConn;      // x 1: the labels' first pass (each its own index); y the cube hash's slots - 1
+    vec4 uConn;      // x 1: the labels' first pass (each its own index); y the cube hash's slots - 1; z the scale's pass (its parity)
+    vec4 uGeom;      // rtgi_volume.glsl's VOL_GEOM (kinds 11-13: x the cells' share of the distance, y their most, w the level)
 } u;
 // Per cell, its candidate points (one sample per 4 x 4 sub-square of it across its surface, w 1 where it had one): kinds 4
 // and 5 test each with 8 rays and keep the one meeting no back face, nearest the cell's middle, as its point -- the
@@ -40,6 +41,15 @@ layout(std430, set = 0, binding = 10) buffer RtgiNearLabels { uint nearLabels[];
 layout(std430, set = 0, binding = 11) buffer RtgiNearRegions { uint nearRegions[]; };
 layout(std430, set = 0, binding = 12) buffer RtgiNearCubes { uvec2 nearCubes[]; };
 layout(std430, set = 0, binding = 13) readonly buffer RtgiNearTable { uvec2 nearTable[]; };
+// The cache's cell size the cooked cells ask for (kinds 11-13, after the regions): each live cell's mean inverse distance
+// over its NEAR_RAYS rays -- a ray that met a surface its distance, one that left the probes' harmonic distance there (at
+// least the contact radius) -- two halves for the passes averaging it over its linked neighbours, then 0.1 / it (VOL_GEOM)
+// into a table by 5 cm cube, sides alike (the smallest of a cube's cells): rtgi_nearcook.glsl's nearScaleAt, which
+// rtgi_cache.glsl's rtgiCellSize asks before the probes. Sized from the 2 m probes alone, trilinear over 2 m with cooked
+// probes missing here and there, a crease's cells stepped size at the probes' cubes -- tears in the cell-size view and
+// steps of light along the crevices testbed's floor (the user, 2026-10-30); a cooked cell's own rays are its surface's.
+layout(std430, set = 0, binding = 14) buffer RtgiNearScale { float nearScale[]; };
+layout(std430, set = 0, binding = 15) buffer RtgiNearScaleTable { uvec2 nearScaleTable[]; };
 
 #define NEAR_PARAMS u.uNearCook
 #define NEAR_TABLE(i) nearTable[i]
@@ -60,7 +70,8 @@ uint nearNeighbour(uint i, uint k) {
 ivec3 nearCube(uint i, uint level) { return ivec3(floor((nearPoints[2u * i].xyz - RTGI_ORIGIN) / (NEAR_PARAMS.x * exp2(float(level))))); }
 bool nearLive(uint i) { return (floatBitsToUint(nearPoints[2u * i].w) & NEAR_BURIED) == 0u; }
 #define VOL_PARAMS vec4(u.uVolume.xyz, 1.0)
-#define VOL_GEOM vec4(0.0)
+// The probes' raw harmonic distance (volCellScale with a share of 1, no most).
+#define VOL_GEOM vec4(1.0, 1e6, 0.0, u.uGeom.w)
 #define VOL_TABLE(i) volTable[i]
 #define VOL_PROBES(i) volProbes[i]
 #define VOL_DEPTH(i) 0u
@@ -141,6 +152,44 @@ void main() {
             if (slot == 0xFFFFFFFFu) { if (kind == 10u) nearRegions[i * NEAR_LEVELS + l] = 0u; continue; }
             if (kind == 9u) atomicMin(nearCubes[slot].y, lab);
             else nearRegions[i * NEAR_LEVELS + l] = lab == nearCubes[slot].y ? 0u : lab + 1u;
+        }
+        return;
+    }
+    if (kind == 11u || kind == 12u || kind == 13u) {
+        if (t >= cells) return;
+        uint i = first + t, n = uint(NEAR_PARAMS.z);
+        uint src = u.uConn.z > 0.5 ? n : 0u, dst = n - src;
+        if (kind == 11u) {
+            if (!nearLive(i)) { nearScale[i] = 0.0; return; }
+            float far = volCellScale(nearPoints[2u * i].xyz);
+            float leftInv = far > 0.0 ? 1.0 / max(far, radius) : 0.0, inv = 0.0;
+            for (uint k = 0u; k < NEAR_RAYS; k++) {
+                uint link = nearLinks[i * NEAR_RAYS + k].x;
+                inv += (link & 0x80000000u) != 0u ? 1.0 / max(float((link >> 16) & 0x7FFFu) / 32767.0 * radius, 0.01) : leftInv;
+            }
+            nearScale[i] = inv / float(NEAR_RAYS);
+            return;
+        }
+        if (!nearLive(i)) return;
+        if (kind == 12u) {
+            float s = nearScale[src + i], w = 1.0;
+            for (uint k = 0u; k < 8u; k++) {
+                if ((nearAdj[i] & (1u << k)) == 0u) continue;
+                uint j = nearNeighbour(i, k);
+                if (j == 0xFFFFFFFFu || (nearAdj[j] & (1u << (k ^ 1u))) == 0u) continue;
+                s += nearScale[src + j];
+                w += 1.0;
+            }
+            nearScale[dst + i] = s / w;
+            return;
+        }
+        float inv = nearScale[src + i];
+        float size = inv > 0.0 ? min(u.uGeom.x / inv, u.uGeom.y) : u.uGeom.y;
+        uvec2 h = nearCellHash(ivec3(floor((nearPoints[2u * i].xyz - RTGI_ORIGIN) / NEAR_PARAMS.x)), 7u);
+        for (uint k = 0u; k < NEAR_PROBE_STEPS; k++) {
+            uint s = (h.x + k) & uint(NEAR_PARAMS.y);
+            uint prev = atomicCompSwap(nearScaleTable[s].x, 0u, h.y);
+            if (prev == 0u || prev == h.y) { atomicMin(nearScaleTable[s].y, floatBitsToUint(size)); break; }
         }
         return;
     }

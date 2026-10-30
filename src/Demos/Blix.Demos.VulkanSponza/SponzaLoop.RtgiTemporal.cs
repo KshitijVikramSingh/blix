@@ -157,6 +157,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiVolumeCellVis", RtgiVolCellVisOrDummy),
                 new ShaderBufferBinding("RtgiNearPoints", RtgiNearPointsOrDummy),
                 new ShaderBufferBinding("RtgiNearRegions", RtgiNearRegionsOrDummy),
+                new ShaderBufferBinding("RtgiNearScaleTable", RtgiNearScaleTableOrDummy),
                 new ShaderBufferBinding("RtgiNearAdj", RtgiNearAdjOrDummy),
             }));
         graph.Pass(rtgiHistoryPassHandle, scope => fullscreen.Draw(

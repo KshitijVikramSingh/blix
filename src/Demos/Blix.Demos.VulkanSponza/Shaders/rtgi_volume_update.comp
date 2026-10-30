@@ -51,14 +51,16 @@ layout(std430, set = 0, binding = 11) readonly buffer RtgiNearPoints { vec4 near
 // The cooked cells' regions by level and their links (rtgi_nearcook_cook.comp; rtgi_cache.glsl's rtgiRegion).
 layout(std430, set = 0, binding = 12) readonly buffer RtgiNearRegions { uint nearRegions[]; };
 #define NEAR_REGIONS(i) nearRegions[i]
+// The cooked cells' cell sizes by 5 cm cube (rtgi_nearcook.glsl's nearScaleAt; rtgi_cache.glsl's rtgiCellSize).
+layout(std430, set = 0, binding = 13) readonly buffer RtgiNearScaleTable { uvec2 nearScaleTable[]; };
+#define NEAR_SCALE(i) nearScaleTable[i]
 #define RTGI_REGION_OF 1
 #include "rtgi_cache.glsl"
 #include "rtgi_nearcook.glsl"
 
 // The cache's indirect light at q facing n: its level's cell holding 8 samples or more, else a coarser one (two up at
 // most); w 0 none.
-vec4 cellLight(vec3 q, vec3 n) {
-    rtgiRegion = nearRegion(q, rtgiSide(n));
+vec4 cellLightKeyed(vec3 q, vec3 n) {
     uint level = rtgiLevel(q, u.uCamera.xyz, u.uParams), side = rtgiSide(n);
     uint top = uint(u.uParams.w);
     for (uint l = level; l <= min(level + 2u, top); ++l) {
@@ -70,6 +72,16 @@ vec4 cellLight(vec3 q, vec3 n) {
         return vec4(rg, bs.x, 1.0);
     }
     return vec4(0.0);
+}
+
+// q's cell under its own region, else under the unsplit key (region 0): a hit right at a junction resolves to a region its
+// pieces split there that no training point keys alike -- a cell never trained, and a cooked cell all of whose rays met
+// it never gathered (the blue dashes along the crevices testbed's edges, 2026-10-30).
+vec4 cellLight(vec3 q, vec3 n) {
+    rtgiRegion = nearRegion(q, rtgiSide(n));
+    vec4 c = cellLightKeyed(q, n);
+    if (c.w < 0.5 && rtgiRegion != 0u) { rtgiRegion = 0u; c = cellLightKeyed(q, n); }
+    return c;
 }
 
 void main() {

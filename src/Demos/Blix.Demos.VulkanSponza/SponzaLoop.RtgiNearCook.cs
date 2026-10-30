@@ -85,6 +85,13 @@ internal sealed partial class SponzaLoop
     private GpuBufferHandle rtgiNearAdj, rtgiNearLabels, rtgiNearRegions, rtgiNearCubes;
     private int rtgiNearCubeSlots, rtgiNearConnStage, rtgiNearLabelPass;
     private GpuBufferHandle RtgiNearRegionsOrDummy => rtgiNearCookBuilt ? rtgiNearRegions : rtgiVolDummy;
+    // The cache's cell sizes the cooked cells ask for (rtgi_nearcook_cook.comp kinds 11-13: stages 4-6 after the regions):
+    // each cell's mean inverse distance (two halves), averaged NearScalePasses times over its linked neighbours, then by
+    // 5 cm cube into a table of the near table's slots (rtgi_nearcook.glsl's nearScaleAt).
+    private const int NearScalePasses = 4;
+    private GpuBufferHandle rtgiNearScale, rtgiNearScaleTable;
+    private int rtgiNearScalePass;
+    private GpuBufferHandle RtgiNearScaleTableOrDummy => rtgiNearCookBuilt ? rtgiNearScaleTable : rtgiVolDummy;
     private GpuBufferHandle RtgiNearAdjOrDummy => rtgiNearCookBuilt ? rtgiNearAdj : rtgiVolDummy;
 
     private bool RtgiNearCookOn => rtgiNearCook && rtgiNearCookReady;
@@ -280,6 +287,10 @@ internal sealed partial class SponzaLoop
         var cubes = new uint[rtgiNearCubeSlots * 2];
         for (var k = 1; k < cubes.Length; k += 2) cubes[k] = 0xFFFFFFFFu;
         rtgiNearCubes = Own(device.CreateGpuBuffer(cubes.Length * 4, MemoryMarshal.AsBytes(cubes.AsSpan()).ToArray(), "sponza.rtgi.near-cubes"));
+        rtgiNearScale = Own(device.CreateGpuBuffer(cells * 8, new byte[cells * 8], "sponza.rtgi.near-scale"));
+        var scaleTable = new uint[layout.Slots * 2];
+        for (var k = 1; k < scaleTable.Length; k += 2) scaleTable[k] = 0xFFFFFFFFu;
+        rtgiNearScaleTable = Own(device.CreateGpuBuffer(scaleTable.Length * 4, MemoryMarshal.AsBytes(scaleTable.AsSpan()).ToArray(), "sponza.rtgi.near-scale-table"));
         rtgiNearCandidates = Own(device.CreateGpuBuffer(cells * NearCandidates * 16, rtgiNearCells > 0 ? MemoryMarshal.AsBytes(layout.Candidates.AsSpan()).ToArray() : new byte[NearCandidates * 16], "sponza.rtgi.near-candidates"));
         rtgiNearLinks = Own(device.CreateGpuBuffer(cells * NearRays * 8, new byte[cells * NearRays * 8], "sponza.rtgi.near-links"));
         rtgiNearLightBuf = Own(device.CreateGpuBuffer(cells * 16, new byte[cells * 16], "sponza.rtgi.near-light"));
@@ -300,7 +311,8 @@ internal sealed partial class SponzaLoop
             new("uCook", new Vector4Uniform(new Vector4(rtgiNearCookFirstNow, rtgiNearCookCountNow, rtgiContactRadius, kind))),
             new("uVolume", new Vector4Uniform(RtgiVolumeParams)),
             new("uRegion", new Vector4Uniform(new Vector4(NearRegionLevel, rtgiNearLinkRound, NearLinkRounds, 0f))),
-            new("uConn", new Vector4Uniform(new Vector4(firstLabels ? 1f : 0f, Math.Max(rtgiNearCubeSlots, 1) - 1, 0f, 0f))),
+            new("uConn", new Vector4Uniform(new Vector4(firstLabels ? 1f : 0f, Math.Max(rtgiNearCubeSlots, 1) - 1, rtgiNearScalePass & 1, 0f))),
+            new("uGeom", new Vector4Uniform(RtgiVolumeGeom)),
         },
         Array.Empty<ShaderTextureBinding>(),
         Buffers: new[]
@@ -318,6 +330,8 @@ internal sealed partial class SponzaLoop
             new ShaderBufferBinding("RtgiNearRegions", rtgiNearRegions),
             new ShaderBufferBinding("RtgiNearCubes", rtgiNearCubes),
             new ShaderBufferBinding("RtgiNearTable", rtgiNearTable),
+            new ShaderBufferBinding("RtgiNearScale", rtgiNearScale),
+            new ShaderBufferBinding("RtgiNearScaleTable", rtgiNearScaleTable),
         });
 
     // Placement time: the next chunk's rays (traced in the Metal batch: RtgiNearCookRaysNow); with the training their
@@ -395,7 +409,16 @@ internal sealed partial class SponzaLoop
                 return;
             }
             if (rtgiNearConnStage == 2) { graph.Dispatch(rtgiNearCookPassHandle, NearCookDispatchAll(cur, 9, all, false)); rtgiNearConnStage = 3; return; }
-            graph.Dispatch(rtgiNearCookPassHandle, NearCookDispatchAll(cur, 10, all, false));
+            if (rtgiNearConnStage == 3) { graph.Dispatch(rtgiNearCookPassHandle, NearCookDispatchAll(cur, 10, all, false)); rtgiNearConnStage = 4; return; }
+            // The cell sizes: the raw, the passes (one a frame: each reads the other half), the table.
+            if (rtgiNearConnStage == 4) { rtgiNearScalePass = 0; graph.Dispatch(rtgiNearCookPassHandle, NearCookDispatchAll(cur, 11, all, false)); rtgiNearConnStage = 5; return; }
+            if (rtgiNearConnStage == 5)
+            {
+                graph.Dispatch(rtgiNearCookPassHandle, NearCookDispatchAll(cur, 12, all, false));
+                if (++rtgiNearScalePass >= NearScalePasses) rtgiNearConnStage = 6;
+                return;
+            }
+            graph.Dispatch(rtgiNearCookPassHandle, NearCookDispatchAll(cur, 13, all, false));
             rtgiNearConnecting = false;
             {
                 rtgiNearCookReady = true;
@@ -427,6 +450,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiNearLight", rtgiNearLightBuf),
                 new ShaderBufferBinding("RtgiNearRegions", rtgiNearRegions),
                 new ShaderBufferBinding("RtgiNearAdj", rtgiNearAdj),
+                new ShaderBufferBinding("RtgiNearScaleTable", rtgiNearScaleTable),
                 new ShaderBufferBinding("RtgiKeys", rtgiKeys),
                 new ShaderBufferBinding("RtgiRecord", rtgiRecord),
                 new ShaderBufferBinding("RtgiResolved", rtgiResolved),

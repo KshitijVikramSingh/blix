@@ -833,6 +833,7 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("RtgiNearTable", RtgiNearTableOrDummy),
                     new ShaderBufferBinding("RtgiNearPoints", RtgiNearPointsOrDummy),
                     new ShaderBufferBinding("RtgiNearRegions", RtgiNearRegionsOrDummy),
+                    new ShaderBufferBinding("RtgiNearScaleTable", RtgiNearScaleTableOrDummy),
                 });
             for (var r = 0; r < trainReps; r++) graph.Dispatch(rtgiTrainPassHandle, train);
             // The near rays traced with the hits this training reads (the same parity): lit into the readout's samples.
@@ -868,6 +869,7 @@ internal sealed partial class SponzaLoop
                         new ShaderBufferBinding("RtgiNearTable", RtgiNearTableOrDummy),
                         new ShaderBufferBinding("RtgiNearPoints", RtgiNearPointsOrDummy),
                     new ShaderBufferBinding("RtgiNearRegions", RtgiNearRegionsOrDummy),
+                    new ShaderBufferBinding("RtgiNearScaleTable", RtgiNearScaleTableOrDummy),
                     }));
         }
         // The bench of the training ends the cache's frame here; of placement or the trace, goes on to them.
@@ -1114,6 +1116,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiNearTable", RtgiNearTableOrDummy),
                 new ShaderBufferBinding("RtgiNearPoints", rtgiNearCookBuilt ? rtgiNearPoints : rtgiVolDummy),
                 new ShaderBufferBinding("RtgiNearRegions", RtgiNearRegionsOrDummy),
+                new ShaderBufferBinding("RtgiNearScaleTable", RtgiNearScaleTableOrDummy),
                 new ShaderBufferBinding("RtgiCapturePixels", RtgiCapturePixelBuffer),
                 new ShaderBufferBinding("RtgiPrevHits", rtgiHitsBuf[prev]),
                 new ShaderBufferBinding("RtgiPoints", rtgiPointsBuf[cur]),
@@ -1358,6 +1361,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiNearLight", RtgiNearLightOrDummy),
                 new ShaderBufferBinding("RtgiNearPoints", RtgiNearPointsOrDummy),
                     new ShaderBufferBinding("RtgiNearRegions", RtgiNearRegionsOrDummy),
+                    new ShaderBufferBinding("RtgiNearScaleTable", RtgiNearScaleTableOrDummy),
                     new ShaderBufferBinding("RtgiNearAdj", RtgiNearAdjOrDummy),
             }));
         rtgiUnsureWritten = true;

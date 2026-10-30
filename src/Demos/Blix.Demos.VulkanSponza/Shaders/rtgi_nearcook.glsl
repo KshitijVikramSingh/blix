@@ -98,6 +98,21 @@ uint nearRegion(vec3 p, uint side) {
 #define RTGI_REGION_DECLARED
 uint rtgiRegion = 0u;
 #endif
+#ifdef NEAR_SCALE
+// The cache's cell size the cooked cells ask for at p (m; rtgi_nearcook_cook.comp kinds 11-13), by p's 5 cm cube, any side;
+// -1 where none is cooked (the probes size it then). rtgi_cache.glsl's rtgiCellSize asks it first. The includer declares
+// NEAR_SCALE(i) (uvec2: key, size's bits; the near table's slots).
+float nearScaleAt(vec3 p) {
+    if (NEAR_PARAMS.w < 0.5) return -1.0;
+    uvec2 h = nearCellHash(ivec3(floor((p - RTGI_ORIGIN) / NEAR_PARAMS.x)), 7u);
+    for (uint k = 0u; k < NEAR_PROBE_STEPS; k++) {
+        uvec2 e = NEAR_SCALE((h.x + k) & uint(NEAR_PARAMS.y));
+        if (e.x == h.y) return uintBitsToFloat(e.y);
+        if (e.x == 0u) break;
+    }
+    return -1.0;
+}
+#endif
 #ifdef NEAR_REGIONS
 // rtgi_cache.glsl's hook: the point's cooked cell's region at a level.
 uint nearRegionOfLevel(uint level) {
