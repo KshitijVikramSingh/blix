@@ -163,7 +163,7 @@ void keepAlive(uint s) {
 }
 
 vec4 irradianceAt(vec3 q, vec3 nq, out bool fine, float sunAt) {
-    uint level = rtgiLevel(q, u.uCamera.xyz, u.uParams);
+    uint level = rtgiLevel(q, rtgiSide(nq), u.uCamera.xyz, u.uParams);
     fine = false;
     if (twice(128u)) { fine = true; return vec4(0.1, 0.1, 0.1, 1.0); }
     uint own = rtgiFind(cellAt(q, nq, level), u.uParams);
@@ -456,7 +456,7 @@ bool pointSample(uint i, out vec4 p, out vec3 n, out vec3 e, out bool counted, o
         if (twice(1u)) {
             bool fine2;
             vec3 tq = normalize(abs(nq.y) < 0.99 ? cross(nq, vec3(0.0, 1.0, 0.0)) : cross(nq, vec3(1.0, 0.0, 0.0)));
-            vec4 eq2 = irradianceAt(q + tq * rtgiSize(rtgiLevel(q, u.uCamera.xyz, u.uParams), u.uParams), nq, fine2, -1.0);
+            vec4 eq2 = irradianceAt(q + tq * rtgiSize(rtgiLevel(q, rtgiSide(nq), u.uCamera.xyz, u.uParams), u.uParams), nq, fine2, -1.0);
             sink(eq2.x == -1234.5);
         }
         if (!fine && u.uEpoch.w > 0.0) {
@@ -503,7 +503,7 @@ void main() {
     }
     tally(1u, live);
     if (!table && !live) return;
-    uint level = live ? rtgiLevel(p.xyz, u.uCamera.xyz, u.uParams) : 0u;
+    uint level = live ? rtgiLevel(p.xyz, rtgiSide(n), u.uCamera.xyz, u.uParams) : 0u;
     // Its level and uNearField.w - 1 above (3: the next, which the readout blends in, and two up, the fallback; more feed
     // the blend's cascade further up, rtgi_filter.comp).
     uint top = uint(u.uParams.w);

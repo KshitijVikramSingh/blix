@@ -67,7 +67,7 @@ vec4 cellLightKeyed(vec3 q, vec3 n, uint level) {
 vec4 cellLight(vec3 q, vec3 n, uint hit) {
     rtgiRegion = hit & 0x0FFFFFFFu;
     uint level = hit >> 28;
-    if (level > 10u) level = rtgiLevel(q, u.uCamera.xyz, u.uParams);
+    if (level > 10u) level = rtgiLevel(q, rtgiSide(n), u.uCamera.xyz, u.uParams);
     vec4 c = cellLightKeyed(q, n, level);
     if (c.w < 0.0 && rtgiRegion != 0u) { rtgiRegion = 0u; c = cellLightKeyed(q, n, level); }
     return c;

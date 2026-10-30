@@ -89,6 +89,9 @@ layout(std430, set = 0, binding = 26) readonly buffer RtgiNearLight { vec4 nearL
 #define COOK_POINTS(i) cookPoints[i]
 #define COOK_REGIONS(i) cookRegions[i]
 #define COOK_SCALE(i) cookScale[i]
+// The cooked cells' training points (view 24 marks them).
+layout(std430, set = 0, binding = 27) readonly buffer RtgiCookCellPoints { uvec2 cookCellPoints[]; };
+#define COOK_CELL_POINTS(i) cookCellPoints[i]
 #define RTGI_REGION_OF 1
 #include "rtgi_cook.glsl"
 
@@ -297,7 +300,7 @@ void main() {
     uint side = rtgiSide(n);
     rtgiRegion = nearRegion(p, side);
     // The two levels around the point's, blended by where it sits between them (rtgiLevelF): no jump at a level's edge.
-    float lf = rtgiLevelF(p, u.uCamera.xyz, u.uParams);
+    float lf = rtgiLevelF(p, side, u.uCamera.xyz, u.uParams);
     uint level = uint(lf);
     float blurR = -1.0;
     if (unsureIn) {
@@ -376,7 +379,7 @@ void main() {
         // Its relative error summed (4096ths, at most 1): the screen's mean, the point budget's need (SponzaLoop.RtgiBudget.cs).
         atomicAdd(doneCount[8], uint(clamp(relD, 0.0, 1.0) * 4096.0));
         // Cooked, but its cell sized by the camera's distance: a point the cook's size table does not cover.
-        if (COOK_PARAMS.w > 0.5 && !(cookScaleAt(p) > 0.0)) atomicAdd(doneCount[9], 1u);
+        if (COOK_PARAMS.w > 0.5 && !(cookScaleAt(p, side) > 0.0)) atomicAdd(doneCount[9], 1u);
     }
     // The RTGI panel's views (uView.x, SponzaLoop.RtgiDebug.cs), the pixel's own cell (its level's, nearest) painted
     // in place of its light: 1 done (green) or open (red), by the light; 2 how unsure, the blend's relative error, from
@@ -397,8 +400,8 @@ void main() {
         } else if (view == 11) {
             // Its size, the cook's (5 cm blue to 1 m red, log); grey where the cook's size table does not cover the point
             // (the camera's distance sizes it there).
-            float g = cookScaleAt(p);
-            float size = rtgiCellSize(p, u.uCamera.xyz, u.uParams);
+            float g = cookScaleAt(p, side);
+            float size = rtgiCellSize(p, side, u.uCamera.xyz, u.uParams);
             c = g > 0.0 ? heat(log2(size / 0.05) / log2(20.0)) : vec3(0.5);
         } else if (view == 12 || view == 13) {
             // Its own light, unblended (the resolve's), or blended (the record the readout reads): the cell alone, no neighbours.
@@ -438,14 +441,18 @@ void main() {
             c = rg == 0u ? vec3(0.5) : vec3(hh & 255u, (hh >> 8) & 255u, (hh >> 16) & 255u) / 255.0;
         } else if (view == 24) {
             // The cooked cell at the pixel's level: red buried, yellow a junction (inside-tested at levels 0 and 1), green
-            // its surface's own level, blue an ancestor of finer cells only; brighter at the cell's cooked point (within
-            // 1 cm); magenta none.
+            // its surface's own level, blue an ancestor of finer cells only; white dots its training points (within 6% of
+            // the cell's size, 5 mm at least), a black ring its representative (the neighbour rays' end); magenta none.
             uint ci = cookFind(cookCoords(p, side, level), level, side);
             if (ci != COOK_NONE) {
                 uint bits = cookBits(ci);
                 c = (bits & NEAR_BURIED) != 0u ? vec3(0.9, 0.1, 0.1) : (bits & COOK_JUNCTION) != 0u ? vec3(0.8, 0.7, 0.1)
                   : (bits & COOK_OWN) != 0u ? vec3(0.15, 0.6, 0.2) : vec3(0.15, 0.3, 0.8);
-                if (distance(COOK_POINTS(2u * ci).xyz, p) < 0.01) c = vec3(1.0);
+                float cs = cookSize((bits >> 8) & 15u), dot0 = max(0.06 * cs, 0.005);
+                float dr = distance(COOK_POINTS(2u * ci).xyz, p);
+                if (dr < 1.4 * dot0 && dr > dot0) c = vec3(0.0);
+                uint np = cookPointCount(ci);
+                for (uint k = 0u; k < np; k++) if (distance(cookPointAt(ci, k), p) < dot0) c = vec3(1.0);
             }
         } else {
             // 18: how many samples its cell holds, 1 to 16,384 (log) -- where the light is thin.

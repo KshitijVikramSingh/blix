@@ -122,7 +122,7 @@ vec4 fixUp(vec3 p, vec3 n) {
     vec4 params = u.uCacheParams;
     uint side = rtgiSide(n);
     rtgiRegion = nearRegion(p, side);
-    float lf = rtgiLevelF(p, u.uCamera.xyz, params);
+    float lf = rtgiLevelF(p, side, u.uCamera.xyz, params);
     uint level = uint(lf);
     float t = lf - float(level);
     float s0, s1, n0, n1, f0, f1;

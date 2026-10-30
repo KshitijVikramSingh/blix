@@ -24,18 +24,24 @@ namespace Blix.Demos.VulkanSponza;
 //               distance, back-face share, downward escapes, nearest hit; a side kept where its back share <= 0.3 (an
 //               alpha-tested triangle's back faces as fronts) and its void share <= 0.5 (alpha-tested: both kept); size
 //               clamp(0.1 x harmonic, 5 cm, the top level's 51.2 m) (rtgi_cook.comp kinds 0, 1; the Metal batch)
-//   cells       every triangle, each live side, in pieces, its points a fraction of the local size apart, each point's
-//               size its finest same-side sample's on its plane: first the size table (the smallest size by 5 cm cube
-//               under CookFineBelow, by CookCoarseCube cube everywhere), then each point's cell at the level the table
-//               gives it -- the cache's own lookup (rtgi_cook.glsl's cookScaleAt), so the cooked cells are the cache's --
-//               and every level above; per own-level cell its candidate points (one per 4 x 4 sub-square of the cell
-//               across its surface, levels 0 and 1), the one nearest its middle, its normal, whether it is a junction
-//               (its sample's nearest hit under min(1.5 x the cell size, 0.375 m)) (worker)
+//   cells       the size field smoothed along the surfaces (3 passes of each sample's log size averaged over its pass's
+//               same-side samples on its plane within 1.5 spacings); every triangle, each live side, in pieces, its
+//               points a fraction of the local size apart, each point's size interpolated over its piece's lattice of
+//               smoothed sizes (its own side's samples on its own plane, the census's rule): first the size table (by side:
+//               the mean log size of the side's points per 5 cm cube under CookFineBelow, per CookCoarseCube cube
+//               everywhere), then each point's cell at the level the table gives it -- the cache's own lookup
+//               (rtgi_cook.glsl's cookScaleAt), so the cooked cells are the cache's -- and every level above; per
+//               own-level cell one candidate per occupied 4 x 4 sub-square of the cell across its surface (nearest the
+//               sub-square's middle), the one nearest its middle, its normal, whether it is a junction (its sample's
+//               nearest hit under min(1.5 x the cell size, 0.375 m)) (worker)
 //   inside      the level-0 and level-1 junction cells' candidates, 8 rays each to 64 m: the one meeting the fewest back
-//               faces (alpha-tested ones fronts), nearest the middle; buried where even it met more than 0.3 of them
+//               faces (alpha-tested ones fronts), nearest the middle, the representative; those meeting at most 0.3 of
+//               them kept as training points; buried where none is
 //               (rtgi_cook.comp kinds 2, 3)
-//   finalize    each cell's point (the chosen candidate, or the one nearest its middle; an ancestor's its children's
-//               nearest its middle), the cell table, the size table (worker)
+//   finalize    each cell's representative point (the chosen candidate, or the one nearest its middle; an ancestor's
+//               its children's nearest its middle -- the neighbour rays' and the near field's), its training points
+//               (CookPick: clamp(ceil(occupied sub-squares / 2), 4, 16), at most the occupied, in a Bayer order; an
+//               ancestor's from its children's, one per sub-square of its own grid), the cell table, the size table (worker)
 //   near field  the level-0 junction cells' 32 near links (rtgi_cook.comp kinds 6, 7): their near light, relit each frame
 //               (rtgi_nearcook_update.comp), is the readout's crease detail over the cache's far light
 //   neighbours  each cell's 8 neighbours across its surface at its level, a ray between the points (kinds 4, 5): the
@@ -56,6 +62,9 @@ internal sealed partial class SponzaLoop
     // buried (the census's side rule).
     private const int CookCandidates = 16, CookChooseRays = 8;
     private const float CookBuriedShare = 0.3f;
+    // The size field's smoothing: passes, and their reach in the pass's sample spacing (CookField.Smooth).
+    private const int CookSmoothPasses = 3;
+    private const float CookSmoothReach = 1.5f;
     private const int CookSizeRays = 64, CookNeighbourRays = 8, CookNearRays = 32;
     // The cook's rays a frame at most (its ray and hit buffers: 80 MB a parity, freed when the cook is done).
     private const int CookRayRoom = 1 << 20;
@@ -151,6 +160,8 @@ internal sealed partial class SponzaLoop
     private GpuBufferHandle[] cookRayBufs = Array.Empty<GpuBufferHandle>(), cookHitBufs = Array.Empty<GpuBufferHandle>();
     // The cooked data (rtgi_cook.glsl): the cell table, the cells' points, the size table, the level-0 cells' regions, the
     // near field's links and light, the near-train list; the regions' scratch.
+    private GpuBufferHandle cookCellPoints;
+    private GpuBufferHandle CookCellPointsOrDummy => CookOr(cookCellPoints);
     private GpuBufferHandle cookTable, cookPoints, cookScale, cookRegions, cookLabels, cookCubes, nearLinks, nearHits, nearLightBuf, nearList;
     private int cookCubeSlots;
     private long cookGpuBytes;
@@ -292,6 +303,8 @@ internal sealed partial class SponzaLoop
         public readonly CensusPass[] Passes;
         public readonly int[] Offsets;
         public readonly float[] Size, Nearest;
+        // Each sample's log2 size, smoothed along its surface (Smooth).
+        public float[] LogSize;
         public readonly bool[] Dead;
         public readonly byte[] PassOf;
         public readonly float Finest, Top;
@@ -310,6 +323,45 @@ internal sealed partial class SponzaLoop
                     var g = Offsets[p] + i;
                     Size[g] = passes[p].Size[i]; Dead[g] = passes[p].Dead[i]; Nearest[g] = passes[p].Nearest[i]; PassOf[g] = (byte)p;
                 }
+            LogSize = Size.Select(v => MathF.Log2(v)).ToArray();
+        }
+
+        // The size field smoothed along the surfaces: CookSmoothPasses passes, each sample's log size the weighted mean of
+        // its pass's live samples facing its side on its plane within CookSmoothReach of the pass's spacing (itself
+        // included) -- as the near cook averaged its sizes over its linked neighbours, four passes. Each sample's own 64
+        // rays' size jumped from sample to sample, and the levels stepped along the size table's cubes.
+        public void Smooth()
+        {
+            for (var p = 0; p < Passes.Length; p++)
+            {
+                var pass = Passes[p];
+                var off = Offsets[p];
+                var radius = CookSmoothReach * pass.Effective;
+                for (var k = 0; k < CookSmoothPasses; k++)
+                {
+                    var next = (float[])LogSize.Clone();
+                    var from = LogSize;
+                    Parallel.For(0, pass.Pos.Length, i =>
+                    {
+                        if (Dead[off + i]) return;
+                        var (sum, w) = pass.Grid!.Average(pass.Pos[i], pass.Side[i], pass.Normal[i], radius, from, Dead, off);
+                        if (w > 0) next[off + i] = (float)(sum / w);
+                    });
+                    LogSize = next;
+                }
+            }
+        }
+
+        // The smoothed log size at q on a side (facing normal): the finest pass with live samples near on its plane,
+        // their weighted mean within the pass's spacing; NaN none.
+        public float Kernel(Vector3 q, uint side, Vector3 normal)
+        {
+            for (var p = LastPass; p >= 0; p--)
+            {
+                var (sum, w) = Passes[p].Grid!.Average(q, side, normal, Passes[p].Effective, LogSize, Dead, Offsets[p]);
+                if (w > 0) return (float)(sum / w);
+            }
+            return float.NaN;
         }
 
         // The finest pass's sample near a point: one facing its side within 1.5 of a pass's traced spacing, else the
@@ -335,8 +387,8 @@ internal sealed partial class SponzaLoop
     // The walk's counts: points, those on dropped sides skipped, lattice points filled outward, pieces without a sample.
     private struct CookWalkCounts { public long Points, Buried, Filled, None; }
 
-    // A point of a surface side: where, its side, the side's normal, its finest sample (-1 none).
-    private delegate void CookPointSink(Vector3 p, uint side, Vector3 normal, int sample);
+    // A point of a surface side: where, its side, the side's normal, its finest sample (-1 none), its smoothed size (m).
+    private delegate void CookPointSink(Vector3 p, uint side, Vector3 normal, int sample, float size);
 
     // One run of triangles walked, each side in pieces no edge longer than CensusPieceLattices lattice steps of the pass at
     // hand (whole, one 1 km2 terrain triangle of the jungle's was one worker's for most of an hour; a piece whose lattice
@@ -437,6 +489,24 @@ internal sealed partial class SponzaLoop
                             for (var k = 0; k < row.Length; k++) row[k] = from[(int)MathF.Round(k / (float)Math.Max(1, row.Length - 1) * (from.Length - 1))];
                             counts.Filled += row.Length;
                         }
+                    // The smoothed size field at the lattice points (CookField.Kernel), each point's size interpolated between
+                    // them -- smooth contours, not the samples' cells.
+                    var vals = new float[rows0 + 1][];
+                    var leastSmooth = float.MaxValue;
+                    for (var r = 0; r <= rows0; r++)
+                    {
+                        var f = r / (float)rows0;
+                        var p0 = ea + (apex - ea) * f;
+                        var p1 = eb + (apex - eb) * f;
+                        var m = lattice[r].Length - 1;
+                        var row = vals[r] = new float[m + 1];
+                        for (var k = 0; k <= m; k++)
+                        {
+                            row[k] = field.Kernel(m == 0 ? p0 : p0 + (p1 - p0) * (k / (float)m), side, faceNormal);
+                            if (!float.IsNaN(row[k])) leastSmooth = MathF.Min(leastSmooth, MathF.Pow(2f, row[k]));
+                        }
+                    }
+                    if (leastSmooth < float.MaxValue) least = Math.Clamp(leastSmooth, field.Finest, field.Top);
                     var h = CookSpacing(least);
                     var rows = Math.Max(1, (int)MathF.Ceiling(height / h));
                     for (var r = 0; r <= rows; r++)
@@ -452,12 +522,34 @@ internal sealed partial class SponzaLoop
                             var j = row[(int)MathF.Round(along * (row.Length - 1))];
                             if (j >= 0 && field.Dead[j]) { counts.Buried++; continue; }
                             counts.Points++;
-                            sink(p0 + (p1 - p0) * along, side, faceNormal, j);
+                            var lv = CookInterp(vals, rows0, f, along);
+                            var size = float.IsNaN(lv) ? (j >= 0 ? field.Size[j] : field.Top) : Math.Clamp(MathF.Pow(2f, lv), field.Finest, field.Top);
+                            sink(p0 + (p1 - p0) * along, side, faceNormal, j, size);
                         }
                     }
                 }
             }
         }
+    }
+
+    // The lattice's values at row fraction f, along the row: linear between rows and along each, NaN entries left out.
+    private static float CookInterp(float[][] vals, int rows0, float f, float along)
+    {
+        var fr = f * rows0;
+        var r0 = Math.Min((int)MathF.Floor(fr), rows0);
+        var r1 = Math.Min(r0 + 1, rows0);
+        var a = RowAt(vals[r0], along);
+        var b = RowAt(vals[r1], along);
+        return Mix(a, b, fr - r0);
+
+        static float RowAt(float[] row, float along)
+        {
+            var x = along * (row.Length - 1);
+            var k0 = Math.Min((int)MathF.Floor(x), row.Length - 1);
+            var k1 = Math.Min(k0 + 1, row.Length - 1);
+            return Mix(row[k0], row[k1], x - k0);
+        }
+        static float Mix(float a, float b, float t) => float.IsNaN(a) ? b : float.IsNaN(b) ? a : a + (b - a) * t;
     }
 
     // Points a quarter of the local size apart (a cell's 4 x 4 sub-squares each met), and a third of the size table's
@@ -473,6 +565,7 @@ internal sealed partial class SponzaLoop
         public float BestD = float.MaxValue;
         public bool Junction;
         public Vector3[]? Sub;
+        public float[]? SubD;
         public int SubMask;
         public void Add(CookAcc o)
         {
@@ -481,8 +574,9 @@ internal sealed partial class SponzaLoop
             if (o.BestD < BestD) { BestD = o.BestD; Best = o.Best; }
             if (o.Sub is null) return;
             Sub ??= new Vector3[CookCandidates];
+            SubD ??= new float[CookCandidates];
             for (var k = 0; k < CookCandidates; k++)
-                if ((o.SubMask & (1 << k)) != 0 && (SubMask & (1 << k)) == 0) { Sub[k] = o.Sub[k]; SubMask |= 1 << k; }
+                if ((o.SubMask & (1 << k)) != 0 && ((SubMask & (1 << k)) == 0 || o.SubD![k] < SubD[k])) { Sub[k] = o.Sub[k]; SubD[k] = o.SubD![k]; SubMask |= 1 << k; }
         }
     }
 
@@ -490,23 +584,21 @@ internal sealed partial class SponzaLoop
     // them), every level's cells (the census's sorted keys: own-level flag; own: junction flag), the counts.
     private sealed class CookCells
     {
-        public Dictionary<long, float> Fine = new(), Coarse = new();
+        public Dictionary<(long, byte), float> Fine = new(), Coarse = new();
         public Dictionary<long, CookAcc>[] Acc = Array.Empty<Dictionary<long, CookAcc>>();
         public long[][] All = Array.Empty<long[]>(), Own = Array.Empty<long[]>();
         public CookWalkCounts Counts;
         public double TableMs, EnumerateMs;
         public float Share = 1f, FineCube = 0.05f;
-        // For comparison with the census before the cook: the cells had each point taken its own sample's size (not the
-        // table's smallest in its cube).
-        public long SampleRuleCells;
+        public double SmoothMs;
         public CookField Field = null!;
     }
 
-    // The size table's lookup, as rtgi_cook.glsl's cookScaleAt: the fine cube, else the coarse; -1 none.
-    private static float CookTableSize(CookCells cells, Vector3 p)
+    // The size table's lookup, as rtgi_cook.glsl's cookScaleAt: the side's fine cube, else its coarse; -1 none.
+    private static float CookTableSize(CookCells cells, Vector3 p, uint side)
     {
-        if (cells.Fine.TryGetValue(CubeKey(Floor3((p - CookScaleOrigin) / cells.FineCube)), out var f)) return f;
-        if (cells.Coarse.TryGetValue(CubeKey(Floor3((p - CookScaleOrigin) / CookCoarseCube)), out var c)) return c;
+        if (cells.Fine.TryGetValue((CubeKey(Floor3((p - CookScaleOrigin) / cells.FineCube)), (byte)side), out var f)) return f;
+        if (cells.Coarse.TryGetValue((CubeKey(Floor3((p - CookScaleOrigin) / CookCoarseCube)), (byte)side), out var c)) return c;
         return -1f;
     }
 
@@ -524,21 +616,29 @@ internal sealed partial class SponzaLoop
         }
         var clock = Stopwatch.StartNew();
         var gate = new object();
-        // The table: the smallest size by fine cube (sizes under CookFineBelow), by coarse cube (sizes from CookFineBelow
-        // up where a cube has any, else all) -- an open wall beside a crease keeps its own size past the crease's cubes.
-        var coarseAll = new Dictionary<long, float>();
+        // The size field smoothed along the surfaces first (CookField.Smooth).
+        field.Smooth();
+        cells.SmoothMs = clock.Elapsed.TotalMilliseconds;
+        clock.Restart();
+        // The table, by side: the mean log size of the side's points in each fine cube (points under CookFineBelow) and
+        // each coarse cube (points from CookFineBelow up where the cube has any, else all) -- each point's size its own
+        // side's samples on its own plane, smoothed (the census's rule); the cells are then enumerated from the table, so
+        // the runtime's lookup gives the cells the cook made.
+        var fineAcc = new Dictionary<(long, byte), (double Sum, int N)>();
+        var bigAcc = new Dictionary<(long, byte), (double Sum, int N)>();
+        var allAcc = new Dictionary<(long, byte), (double Sum, int N)>();
         var done = 0;
         DebugProgress.Begin("rtgi cook: cells (table)", work.Length);
-        Parallel.ForEach(work, () => (Fine: new Dictionary<long, float>(), Big: new Dictionary<long, float>(), All: new Dictionary<long, float>()), (item, _, local) =>
+        Parallel.ForEach(work, () => (Fine: new Dictionary<(long, byte), (double Sum, int N)>(), Big: new Dictionary<(long, byte), (double Sum, int N)>(), All: new Dictionary<(long, byte), (double Sum, int N)>()), (item, _, local) =>
         {
             var counts = new CookWalkCounts();
-            CookWalk(field, instances[item.Inst], item.First, item.Count, (p, side, normal, j) =>
+            CookWalk(field, instances[item.Inst], item.First, item.Count, (p, side, normal, j, s) =>
             {
-                var s = j >= 0 ? field.Size[j] : field.Top;
-                if (s < CookFineBelow) Min(local.Fine, CubeKey(Floor3((p - CookScaleOrigin) / finest)), s);
-                var ck = CubeKey(Floor3((p - CookScaleOrigin) / CookCoarseCube));
-                if (s >= CookFineBelow) Min(local.Big, ck, s);
-                Min(local.All, ck, s);
+                var ls = MathF.Log2(s);
+                if (s < CookFineBelow) Add(local.Fine, (CubeKey(Floor3((p - CookScaleOrigin) / finest)), (byte)side), ls);
+                var ck = (CubeKey(Floor3((p - CookScaleOrigin) / CookCoarseCube)), (byte)side);
+                if (s >= CookFineBelow) Add(local.Big, ck, ls);
+                Add(local.All, ck, ls);
             }, ref counts);
             DebugProgress.Set("rtgi cook: cells (table)", Interlocked.Increment(ref done), work.Length);
             return local;
@@ -546,12 +646,13 @@ internal sealed partial class SponzaLoop
         {
             lock (gate)
             {
-                foreach (var (k, v) in local.Fine) Min(cells.Fine, k, v);
-                foreach (var (k, v) in local.Big) Min(cells.Coarse, k, v);
-                foreach (var (k, v) in local.All) Min(coarseAll, k, v);
+                foreach (var (k, v) in local.Fine) Merge(fineAcc, k, v);
+                foreach (var (k, v) in local.Big) Merge(bigAcc, k, v);
+                foreach (var (k, v) in local.All) Merge(allAcc, k, v);
             }
         });
-        foreach (var (k, v) in coarseAll) cells.Coarse.TryAdd(k, v);
+        foreach (var (k, v) in fineAcc) cells.Fine[k] = MathF.Pow(2f, (float)(v.Sum / v.N));
+        foreach (var (k, v) in allAcc) cells.Coarse[k] = MathF.Pow(2f, (float)(bigAcc.TryGetValue(k, out var big) ? big.Sum / big.N : v.Sum / v.N));
         DebugProgress.End("rtgi cook: cells (table)");
         cells.TableMs = clock.Elapsed.TotalMilliseconds;
 
@@ -562,23 +663,15 @@ internal sealed partial class SponzaLoop
         var totals = new CookWalkCounts();
         done = 0;
         DebugProgress.Begin("rtgi cook: cells", work.Length);
-        var sampleRule = Enumerable.Range(0, levels).Select(_ => new HashSet<long>()).ToArray();
-        Parallel.ForEach(work, () => (Acc: Enumerable.Range(0, levels).Select(_ => new Dictionary<long, CookAcc>()).ToArray(), Counts: new CookWalkCounts(),
-            Rule: Enumerable.Range(0, levels).Select(_ => new HashSet<long>()).ToArray()), (item, _, local) =>
+        Parallel.ForEach(work, () => (Acc: Enumerable.Range(0, levels).Select(_ => new Dictionary<long, CookAcc>()).ToArray(), Counts: new CookWalkCounts()), (item, _, local) =>
         {
             var counts = local.Counts;
             var mine = local.Acc;
-            var rule = local.Rule;
-            CookWalk(field, instances[item.Inst], item.First, item.Count, (p, side, normal, j) =>
+            CookWalk(field, instances[item.Inst], item.First, item.Count, (p, side, normal, j, own) =>
             {
-                var s = CookTableSize(cells, p);
-                if (!(s > 0f)) s = field.Top;
+                var s = CookTableSize(cells, p, side);
+                if (!(s > 0f)) s = own;
                 var l = field.LevelOf(s);
-                {
-                    var ls = field.LevelOf(j >= 0 ? field.Size[j] : field.Top);
-                    var gs = Floor3((p - NearGridOrigin(side)) / field.SizeOfLevel(ls));
-                    rule[ls].Add(CensusCellKey((int)gs.X, (int)gs.Y, (int)gs.Z, side));
-                }
                 var cs = field.SizeOfLevel(l);
                 var g = (p - NearGridOrigin(side)) / cs;
                 int cx = (int)MathF.Floor(g.X), cy = (int)MathF.Floor(g.Y), cz = (int)MathF.Floor(g.Z);
@@ -591,20 +684,21 @@ internal sealed partial class SponzaLoop
                 float u0 = f0 - MathF.Floor(f0), u1 = f1 - MathF.Floor(f1);
                 var d = (u0 - 0.5f) * (u0 - 0.5f) + (u1 - 0.5f) * (u1 - 0.5f);
                 if (d < e.BestD) { e.BestD = d; e.Best = p; }
-                if (l <= 1)
-                {
-                    e.Sub ??= new Vector3[CookCandidates];
-                    var q = Math.Min((int)(u0 * 4f), 3) + 4 * Math.Min((int)(u1 * 4f), 3);
-                    if ((e.SubMask & (1 << q)) == 0) { e.Sub[q] = p; e.SubMask |= 1 << q; }
-                }
+                // Its sub-square of the cell's 4 x 4 grid across its surface: the cell's candidates (the inside test's at
+                // junctions) and training points, one each, the point nearest the sub-square's middle.
+                e.Sub ??= new Vector3[CookCandidates];
+                e.SubD ??= new float[CookCandidates];
+                float s0 = u0 * 4f, s1 = u1 * 4f;
+                var q = Math.Min((int)s0, 3) + 4 * Math.Min((int)s1, 3);
+                var dq = (s0 - MathF.Floor(s0) - 0.5f) * (s0 - MathF.Floor(s0) - 0.5f) + (s1 - MathF.Floor(s1) - 0.5f) * (s1 - MathF.Floor(s1) - 0.5f);
+                if ((e.SubMask & (1 << q)) == 0 || dq < e.SubD[q]) { e.Sub[q] = p; e.SubD[q] = dq; e.SubMask |= 1 << q; }
             }, ref counts);
             DebugProgress.Set("rtgi cook: cells", Interlocked.Increment(ref done), work.Length);
-            return (mine, counts, rule);
+            return (mine, counts);
         }, local =>
         {
             lock (gate)
             {
-                for (var l = 0; l < levels; l++) sampleRule[l].UnionWith(local.Rule[l]);
                 totals.Points += local.Counts.Points; totals.Buried += local.Counts.Buried;
                 totals.Filled += local.Counts.Filled; totals.None += local.Counts.None;
                 for (var l = 0; l < levels; l++)
@@ -635,14 +729,18 @@ internal sealed partial class SponzaLoop
             for (var i = 0; i < cells.Own[l].Length; i++) keys[below + i] = (cells.Own[l][i] & ~1L) | 1L;
             cells.All[l] = CensusSortUnique(keys, keys.Length);
         }
-        for (var l = 1; l < levels; l++) sampleRule[l].UnionWith(sampleRule[l - 1].Select(CensusParent));
-        cells.SampleRuleCells = sampleRule.Sum(r => (long)r.Count);
         cells.EnumerateMs = clock.Elapsed.TotalMilliseconds;
         return cells;
 
-        static void Min(Dictionary<long, float> d, long k, float v)
+        static void Add(Dictionary<(long, byte), (double Sum, int N)> d, (long, byte) k, float v)
         {
-            if (!d.TryGetValue(k, out var o) || v < o) d[k] = v;
+            d.TryGetValue(k, out var o);
+            d[k] = (o.Sum + v, o.N + 1);
+        }
+        static void Merge(Dictionary<(long, byte), (double Sum, int N)> d, (long, byte) k, (double Sum, int N) v)
+        {
+            d.TryGetValue(k, out var o);
+            d[k] = (o.Sum + v.Sum, o.N + v.N);
         }
     }
 
@@ -664,7 +762,9 @@ internal sealed partial class SponzaLoop
     {
         public int Cells, Level0, NearCells, TableSlots, ScaleSlots;
         public Vector4[] Points = Array.Empty<Vector4>();
-        public uint[] Table = Array.Empty<uint>(), Scale = Array.Empty<uint>();
+        public uint[] Table = Array.Empty<uint>(), Scale = Array.Empty<uint>(), CellPoints = Array.Empty<uint>();
+        public long[] PointsPerCell = new long[CookCandidates + 1];
+        public int ScaleEntries;
         public long[] ByLevel = new long[RtgiTopLevel + 1], OwnByLevel = new long[RtgiTopLevel + 1], JunctionByLevel = new long[RtgiTopLevel + 1];
         public long Buried, InsideBuried;
         public double Ms;
@@ -678,27 +778,32 @@ internal sealed partial class SponzaLoop
         // The inside test's choices by cell.
         var choice = new Dictionary<(int, long), uint>(inside.Length);
         for (var i = 0; i < inside.Length; i++) choice[inside[i]] = chosen[i];
-        // Per level, every cell's point, normal, bits; ancestors from their children's points nearest their middle.
-        var cellsAt = new Dictionary<long, (Vector3 P, Vector3 N, uint Bits)>[levels];
+        // Per level, every cell's representative point, normal, bits, and its training points; ancestors' from their
+        // children's.
+        var cellsAt = new Dictionary<long, (Vector3 P, Vector3 N, uint Bits, Vector3[] Pts)>[levels];
         for (var l = 0; l < levels; l++)
         {
-            var mine = cellsAt[l] = new Dictionary<long, (Vector3, Vector3, uint)>(cells.All[l].Length);
+            var mine = cellsAt[l] = new Dictionary<long, (Vector3, Vector3, uint, Vector3[])>(cells.All[l].Length);
+            var cs = finest * MathF.Pow(2f, l);
             foreach (var (key, a) in cells.Acc[l])
             {
                 var (_, _, _, side) = CensusCellUnkey(key);
                 var p = a.Best;
                 var bits = side | 64u | ((uint)l << 8) | (a.Junction ? 32u : 0u);
+                var mask = a.SubMask;
                 if (choice.TryGetValue((l, key), out var c))
                 {
                     if (a.Sub is not null && (a.SubMask & (1 << (int)(c & 0xFF))) != 0) p = a.Sub[(int)(c & 0xFF)];
-                    if ((c & 256u) != 0) { bits |= 16u; layout.InsideBuried++; }
+                    mask &= (int)(c >> 16);
+                    if ((c & 256u) != 0) { bits |= 16u; layout.InsideBuried++; mask = 0; }
                 }
                 var n = a.N.LengthSquared() > 1e-12f ? Vector3.Normalize(a.N) : Vector3.UnitY;
-                mine[key] = (p, n, bits);
+                mine[key] = (p, n, bits, CookPick(a.Sub, mask));
             }
             if (l == 0) continue;
-            // The ancestors: from the level below's live cells, each parent's point the child's nearest its middle.
-            var best = new Dictionary<long, (Vector3 P, Vector3 N, float D, bool Live)>();
+            // The ancestors: from the level below's live cells -- the representative the child's nearest the middle, the
+            // training points the children's, one per sub-square of the ancestor's own 4 x 4 grid (nearest its middle).
+            var best = new Dictionary<long, (Vector3 P, Vector3 N, float D, bool Live, Vector3[] Sub, float[] SubD, int Mask)>();
             foreach (var (childKey, child) in cellsAt[l - 1])
             {
                 var parent = CensusParent(childKey);
@@ -706,12 +811,23 @@ internal sealed partial class SponzaLoop
                 var live = (child.Bits & 16u) == 0;
                 var mid = CookCellMiddle(parent, l, finest);
                 var d = Vector3.DistanceSquared(child.P, mid);
-                if (!best.TryGetValue(parent, out var b) || (live && !b.Live) || (live == b.Live && d < b.D)) best[parent] = (child.P, child.N, d, live);
+                if (!best.TryGetValue(parent, out var b)) b = (child.P, child.N, float.MaxValue, false, new Vector3[CookCandidates], new float[CookCandidates], 0);
+                if ((live && !b.Live) || (live == b.Live && d < b.D)) { b.P = child.P; b.N = child.N; b.D = d; b.Live = live; }
+                if (live)
+                {
+                    var (_, _, _, side) = CensusCellUnkey(parent);
+                    foreach (var q in child.Pts.Length > 0 ? child.Pts : new[] { child.P })
+                    {
+                        var (k, dq) = CookSubSquare(q, side, cs);
+                        if ((b.Mask & (1 << k)) == 0 || dq < b.SubD[k]) { b.Sub[k] = q; b.SubD[k] = dq; b.Mask |= 1 << k; }
+                    }
+                }
+                best[parent] = b;
             }
             foreach (var (key, b) in best)
             {
                 var (_, _, _, side) = CensusCellUnkey(key);
-                mine[key] = (b.P, b.N, side | ((uint)l << 8) | (b.Live ? 0u : 16u));
+                mine[key] = (b.P, b.N, side | ((uint)l << 8) | (b.Live ? 0u : 16u), b.Live ? CookPick(b.Sub, b.Mask) : Array.Empty<Vector3>());
             }
         }
         // The order: level 0's live junction cells (the near field's), its others, level 1 up.
@@ -723,12 +839,29 @@ internal sealed partial class SponzaLoop
         for (var l = 1; l < levels; l++) order.AddRange(cellsAt[l].Keys.Select(k => (l, k)));
         layout.Cells = order.Count;
         layout.Points = new Vector4[order.Count * 2];
+        var totalPts = order.Sum(o => (long)cellsAt[o.Level][o.Key].Pts.Length);
+        // The training points after the cells' index words (rtgi_cook.glsl's COOK_CELL_POINTS).
+        layout.CellPoints = new uint[2 * (order.Count + totalPts)];
+        var at = order.Count;
         for (var i = 0; i < order.Count; i++)
         {
             var (l, key) = order[i];
             var c = cellsAt[l][key];
             layout.Points[2 * i] = new Vector4(c.P, BitConverter.UInt32BitsToSingle(c.Bits));
             layout.Points[2 * i + 1] = new Vector4(c.N, 0f);
+            var (x, y, z, side) = CensusCellUnkey(key);
+            var cs = finest * MathF.Pow(2f, l);
+            var corner = new Vector3(x, y, z);
+            layout.CellPoints[2 * i] = (uint)at | ((uint)c.Pts.Length << 27);
+            foreach (var q in c.Pts)
+            {
+                var u = (q - NearGridOrigin(side)) / cs - corner;
+                uint Q(float v) => (uint)Math.Clamp((int)(v * 65536f), 0, 65535);
+                layout.CellPoints[2 * at] = Q(u.X) | (Q(u.Y) << 16);
+                layout.CellPoints[2 * at + 1] = Q(u.Z);
+                at++;
+            }
+            layout.PointsPerCell[c.Pts.Length]++;
             layout.ByLevel[l]++;
             if ((c.Bits & 64u) != 0) layout.OwnByLevel[l]++;
             if ((c.Bits & 32u) != 0) layout.JunctionByLevel[l]++;
@@ -741,12 +874,13 @@ internal sealed partial class SponzaLoop
             var (x, y, z, side) = CensusCellUnkey(key);
             return (x, y, z, (uint)l, side, (uint)i);
         }, out layout.TableSlots);
-        // The size table: the fine cubes (tier 7), the coarse (tier 6), each its size's bits.
-        var scale = cells.Fine.Select(kv => (Key: kv.Key, Tier: 7u, Size: kv.Value)).Concat(cells.Coarse.Select(kv => (Key: kv.Key, Tier: 6u, Size: kv.Value))).ToArray();
+        // The size table: the fine cubes (level 15), the coarse (14), by side, each its size's bits.
+        var scale = cells.Fine.Select(kv => (Key: kv.Key, Tier: 15u, Size: kv.Value)).Concat(cells.Coarse.Select(kv => (Key: kv.Key, Tier: 14u, Size: kv.Value))).ToArray();
+        layout.ScaleEntries = scale.Length;
         layout.Scale = CookHashTable(scale.Length, i =>
         {
-            var (x, y, z) = CubeUnkey(scale[i].Key);
-            return (x, y, z, 15u, scale[i].Tier, BitConverter.SingleToUInt32Bits(scale[i].Size));
+            var (x, y, z) = CubeUnkey(scale[i].Key.Item1);
+            return (x, y, z, scale[i].Tier, scale[i].Key.Item2, BitConverter.SingleToUInt32Bits(scale[i].Size));
         }, out layout.ScaleSlots);
         layout.Ms = clock.Elapsed.TotalMilliseconds;
         return layout;
@@ -759,6 +893,35 @@ internal sealed partial class SponzaLoop
     // Slots per entry at least: at 2 (half full) the near field's relight walked long runs, 9.6 ms a frame at Crytek
     // Sponza; at 4, a quarter full.
     private const int CookTableRoom = 4;
+    // A cell's training points from its candidates (one per occupied sub-square of its 4 x 4 grid, mask): as many as
+    // clamp(ceil(occupied / 2), 4, 16), at most the occupied -- one per (cell size / 2)^2 of its surface, a full cell's 8,
+    // a sliver's all -- taken in a 4 x 4 Bayer order, so any count is spread over the cell.
+    private static readonly int[] CookBayer = { 0, 10, 2, 8, 5, 15, 7, 13, 1, 11, 3, 9, 4, 14, 6, 12 };
+    private static Vector3[] CookPick(Vector3[]? sub, int mask)
+    {
+        if (sub is null || mask == 0) return Array.Empty<Vector3>();
+        var occupied = BitOperations.PopCount((uint)mask);
+        var want = Math.Min(occupied, Math.Clamp((occupied + 1) / 2, 4, 16));
+        var picked = new Vector3[want];
+        var n = 0;
+        foreach (var k in CookBayer)
+            if ((mask & (1 << k)) != 0 && n < want) picked[n++] = sub[k];
+        return picked;
+    }
+
+    // A point's sub-square of a cell's 4 x 4 grid across its surface (side), and its squared distance from the
+    // sub-square's middle (in sub-squares).
+    private static (int K, float D) CookSubSquare(Vector3 p, uint side, float cs)
+    {
+        var g = (p - NearGridOrigin(side)) / cs;
+        int axis = (int)(side >> 1), a0 = (axis + 1) % 3, a1 = (axis + 2) % 3;
+        float f0 = a0 == 0 ? g.X : a0 == 1 ? g.Y : g.Z, f1 = a1 == 0 ? g.X : a1 == 1 ? g.Y : g.Z;
+        float s0 = (f0 - MathF.Floor(f0)) * 4f, s1 = (f1 - MathF.Floor(f1)) * 4f;
+        var k = Math.Min((int)s0, 3) + 4 * Math.Min((int)s1, 3);
+        var d = (s0 - MathF.Floor(s0) - 0.5f) * (s0 - MathF.Floor(s0) - 0.5f) + (s1 - MathF.Floor(s1) - 0.5f) * (s1 - MathF.Floor(s1) - 0.5f);
+        return (k, d);
+    }
+
     private static uint[] CookHashTable(int count, Func<int, (int X, int Y, int Z, uint Level, uint Side, uint Value)> entry, out int slots)
     {
         slots = 1024;
@@ -970,7 +1133,7 @@ internal sealed partial class SponzaLoop
                 var cells = cookCells = build.Result;
                 var own = cells.Own.Sum(o => (long)o.Length);
                 CookEnd("cells", cells.All.Sum(a => (long)a.Length), string.Create(CultureInfo.InvariantCulture,
-                    $"{cells.All.Sum(a => (long)a.Length):N0} cells ({own:N0} own-level, {cells.Own.Sum(o => o.LongCount(k => (k & 1) != 0)):N0} junction) from {cells.Counts.Points:N0} surface points ({cells.Counts.Buried:N0} on dropped sides skipped); size table {cells.Fine.Count:N0} fine cubes and {cells.Coarse.Count:N0} coarse in {cells.TableMs:0} ms, cells in {cells.EnumerateMs:0} ms; each point at its own sample's size, as the census before the cook, {cells.SampleRuleCells:N0} cells"));
+                    $"{cells.All.Sum(a => (long)a.Length):N0} cells ({own:N0} own-level, {cells.Own.Sum(o => o.LongCount(k => (k & 1) != 0)):N0} junction) from {cells.Counts.Points:N0} surface points ({cells.Counts.Buried:N0} on dropped sides skipped); size table {cells.Fine.Count:N0} fine cubes and {cells.Coarse.Count:N0} coarse in {cells.TableMs:0} ms, cells in {cells.EnumerateMs:0} ms (the size field smoothed in {cells.SmoothMs:0} ms)"));
                 if (rtgiCensus)
                 {
                     // --rtgi-census: the report from this cook's cells, and the demo closes.
@@ -1042,7 +1205,7 @@ internal sealed partial class SponzaLoop
                 cookPass = null;
                 if (cookSampleCapacity > 0) { Disown(cookSamples); Disown(cookResults); cookSamples = default; cookResults = default; cookSampleCapacity = 0; }
                 CookEnd("finalize", layout.Cells, string.Create(CultureInfo.InvariantCulture,
-                    $"{layout.Cells:N0} cells by level {string.Join("/", layout.ByLevel)} (own-level {string.Join("/", layout.OwnByLevel)}; junction {string.Join("/", layout.JunctionByLevel)}), {layout.Buried:N0} buried; cell table {layout.TableSlots:N0} slots, size table {layout.ScaleSlots:N0} slots; {cookGpuBytes / 1048576.0:0.0} MB on the GPU"));
+                    $"{layout.Cells:N0} cells by level {string.Join("/", layout.ByLevel)} (own-level {string.Join("/", layout.OwnByLevel)}; junction {string.Join("/", layout.JunctionByLevel)}), {layout.Buried:N0} buried; training points {layout.PointsPerCell.Select((c, k) => (long)c * k).Sum():N0}, cells by points 0-16 {string.Join("/", layout.PointsPerCell)} ({(layout.CellPoints.Length * 4L) / 1048576.0:0.0} MB); cell table {layout.TableSlots:N0} slots ({layout.Table.Length * 4L / 1048576.0:0.0} MB), size table {layout.ScaleEntries:N0} cubes by side in {layout.ScaleSlots:N0} slots ({layout.Scale.Length * 4L / 1048576.0:0.0} MB); {cookGpuBytes / 1048576.0:0.0} MB on the GPU"));
                 cookCursor = 0;
                 CookBegin("near field", layout.NearCells);
                 cookStage = CookStage.NearLinks;
@@ -1140,6 +1303,7 @@ internal sealed partial class SponzaLoop
         var n0 = Math.Max(layout.Level0, 1);
         var nj = Math.Max(layout.NearCells, 1);
         cookTable = Own(device.CreateGpuBuffer(layout.Table.Length * 4, MemoryMarshal.AsBytes(layout.Table.AsSpan()).ToArray(), "sponza.rtgi.cook-table"));
+        cookCellPoints = Own(device.CreateGpuBuffer(Math.Max(layout.CellPoints.Length, 2) * 4, layout.CellPoints.Length > 0 ? MemoryMarshal.AsBytes(layout.CellPoints.AsSpan()).ToArray() : new byte[8], "sponza.rtgi.cook-cell-points"));
         cookPoints = Own(device.CreateGpuBuffer(cells * 32, layout.Cells > 0 ? MemoryMarshal.AsBytes(layout.Points.AsSpan()).ToArray() : new byte[32], "sponza.rtgi.cook-points"));
         cookScale = Own(device.CreateGpuBuffer(layout.Scale.Length * 4, MemoryMarshal.AsBytes(layout.Scale.AsSpan()).ToArray(), "sponza.rtgi.cook-scale"));
         cookRegions = Own(device.CreateGpuBuffer(n0 * CookRegionLevels * 4, new byte[n0 * CookRegionLevels * 4], "sponza.rtgi.cook-regions"));
@@ -1153,7 +1317,7 @@ internal sealed partial class SponzaLoop
         nearHits = Own(device.CreateGpuBuffer(nj * CookNearRays * 4, new byte[nj * CookNearRays * 4], "sponza.rtgi.near-hits"));
         nearLightBuf = Own(device.CreateGpuBuffer(nj * 16, new byte[nj * 16], "sponza.rtgi.near-light"));
         nearList = Own(device.CreateGpuBuffer(16 + cells * 4, new byte[16 + cells * 4], "sponza.rtgi.near-list"));
-        cookGpuBytes = layout.Table.Length * 4L + cells * 32L + layout.Scale.Length * 4L + n0 * CookRegionLevels * 4L + nj * (CookNearRays * 12L + 16L) + 16L + cells * 4L;
+        cookGpuBytes = layout.CellPoints.Length * 4L + layout.Table.Length * 4L + cells * 32L + layout.Scale.Length * 4L + n0 * CookRegionLevels * 4L + nj * (CookNearRays * 12L + 16L) + 16L + cells * 4L;
     }
 
     // The cook done: the cache started over on the cooked cells, the totals logged; its transient buffers freed a few

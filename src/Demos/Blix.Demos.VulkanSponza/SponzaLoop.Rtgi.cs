@@ -741,6 +741,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiCookPoints", CookPointsOrDummy),
                 new ShaderBufferBinding("RtgiCookRegions", CookRegionsOrDummy),
                 new ShaderBufferBinding("RtgiCookScale", CookScaleOrDummy),
+                new ShaderBufferBinding("RtgiCookCellPoints", CookCellPointsOrDummy),
                 new ShaderBufferBinding("RtgiCapturePixels", RtgiCapturePixelBuffer),
                 new ShaderBufferBinding("RtgiCaptureOut", RtgiCaptureOutBuffer),
                 new ShaderBufferBinding("RtgiNearList", NearListOrDummy),
@@ -855,6 +856,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiCookPoints", CookPointsOrDummy),
                 new ShaderBufferBinding("RtgiCookRegions", CookRegionsOrDummy),
                 new ShaderBufferBinding("RtgiCookScale", CookScaleOrDummy),
+                new ShaderBufferBinding("RtgiCookCellPoints", CookCellPointsOrDummy),
                 new ShaderBufferBinding("RtgiNearLight", NearLightOrDummy),
             }));
         rtgiUnsureWritten = true;

@@ -91,23 +91,23 @@ uint rtgiSide(vec3 n) {
 // distance, a surface changed cells as the camera moved -- the light crawled and settled again, and read differently from
 // each place (the user, Crytek Sponza, 2026-10-29).
 #ifdef COOK_SCALE
-float cookScaleAt(vec3 p);
+float cookScaleAt(vec3 p, uint side);
 #endif
-float rtgiCellSize(vec3 p, vec3 camera, vec4 params) {
+float rtgiCellSize(vec3 p, uint side, vec3 camera, vec4 params) {
     float dist = length(p - camera);
 #ifdef COOK_SCALE
-    float g = cookScaleAt(p);
+    float g = cookScaleAt(p, side);
     if (g > 0.0) return max(g, params.x);
 #endif
     return params.x + params.y * max(dist - RTGI_NEAR, 0.0);
 }
 
-float rtgiLevelF(vec3 p, vec3 camera, vec4 params) {
-    return clamp(log2(rtgiCellSize(p, camera, params) / params.x), 0.0, params.w);
+float rtgiLevelF(vec3 p, uint side, vec3 camera, vec4 params) {
+    return clamp(log2(rtgiCellSize(p, side, camera, params) / params.x), 0.0, params.w);
 }
 
-uint rtgiLevel(vec3 p, vec3 camera, vec4 params) {
-    return uint(clamp(floor(log2(rtgiCellSize(p, camera, params) / params.x)), 0.0, params.w));
+uint rtgiLevel(vec3 p, uint side, vec3 camera, vec4 params) {
+    return uint(clamp(floor(log2(rtgiCellSize(p, side, camera, params) / params.x)), 0.0, params.w));
 }
 
 float rtgiSize(uint level, vec4 params) { return params.x * exp2(float(level)); }

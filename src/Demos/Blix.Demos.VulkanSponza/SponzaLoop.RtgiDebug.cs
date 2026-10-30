@@ -18,7 +18,7 @@ internal sealed partial class SponzaLoop
         "Cell samples held (log)", "Fix-up pixels (magenta)",
         "Temporal history held (blue 0 - red 16)", "Cell region (grey: none cooked)",
         "Cooked near: far term (escape share x far light per ray)", "Cooked near: the cache's light under it",
-        "Cooked cell (red buried, yellow junction, green own level, blue ancestor; white its point)",
+        "Cooked cell (red buried, yellow junction, green own level, blue ancestor; white its training points, black ring its representative)",
     };
 
     // The view (rtgi_readout.frag's uView.x, rtgi_blur.frag's uHalf.x, rtgi_temporal.frag's uDebug.x): 0 the light; 1-7 a

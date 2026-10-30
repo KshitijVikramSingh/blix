@@ -312,6 +312,8 @@ internal sealed partial class SponzaLoop
         public Vector4[] Gpu = Array.Empty<Vector4>();
         public Vector3[] Pos = Array.Empty<Vector3>();
         public byte[] Side = Array.Empty<byte>();
+        // Its side's normal (the cook's smoothing keeps to a sample's plane).
+        public Vector3[] Normal = Array.Empty<Vector3>();
         // Whether its triangle is alpha-tested (both sides kept whatever their samples say).
         public bool[] Alpha = Array.Empty<bool>();
         // The area each stands for (its spacing^2 over the share traced).
@@ -405,14 +407,14 @@ internal sealed partial class SponzaLoop
         var pass = new CensusPass
         {
             Index = index, Spacing = spacing, Full = fulls.Sum(), Keep = keep, Area = (float)(spacing * spacing / keep),
-            Gpu = new Vector4[count], Pos = new Vector3[count], Side = new byte[count], Alpha = new bool[count],
+            Gpu = new Vector4[count], Pos = new Vector3[count], Side = new byte[count], Alpha = new bool[count], Normal = new Vector3[count],
         };
         var at = 0;
         foreach (var list in lists)
             foreach (var (p, nrm, side, alpha) in list)
             {
                 pass.Gpu[at] = new Vector4(p, BitConverter.UInt32BitsToSingle(CensusOctPack(nrm)));
-                pass.Pos[at] = p; pass.Side[at] = side; pass.Alpha[at] = alpha;
+                pass.Pos[at] = p; pass.Side[at] = side; pass.Alpha[at] = alpha; pass.Normal[at] = nrm;
                 at++;
             }
         pass.Ms = clock.Elapsed.TotalMilliseconds;
@@ -473,6 +475,35 @@ internal sealed partial class SponzaLoop
                 cells[keys[i]] = (i, j - i);
                 i = j;
             }
+        }
+
+        // The weighted mean of values[offset + i] over the live samples facing wantSide within radius of q on its plane
+        // (as Nearest's), each weighed 1 - its distance over the radius: the cook's smoothing of the size field.
+        public (double Sum, double Weight) Average(Vector3 q, uint wantSide, Vector3 normal, float radius, float[] values, bool[] dead, int offset)
+        {
+            int cx = (int)MathF.Floor(q.X / Size), cy = (int)MathF.Floor(q.Y / Size), cz = (int)MathF.Floor(q.Z / Size);
+            var reach = Math.Max(1, (int)MathF.Ceiling(radius / Size));
+            double sum = 0, weight = 0;
+            var r2 = radius * radius;
+            for (var dz = -reach; dz <= reach; dz++)
+            for (var dy = -reach; dy <= reach; dy++)
+            for (var dx = -reach; dx <= reach; dx++)
+            {
+                if (!cells.TryGetValue(Key(cx + dx, cy + dy, cz + dz), out var run)) continue;
+                for (var k = run.Start; k < run.Start + run.Count; k++)
+                {
+                    var i = order[k];
+                    if (side[i] != wantSide || dead[offset + i]) continue;
+                    var d2 = Vector3.DistanceSquared(pos[i], q);
+                    if (d2 > r2) continue;
+                    var off = MathF.Abs(Vector3.Dot(pos[i] - q, normal));
+                    if (off > CensusPlaneOff + CensusPlaneSlope * MathF.Sqrt(MathF.Max(d2 - off * off, 0f))) continue;
+                    var w = 1.0 - MathF.Sqrt(d2) / radius + 1e-3;
+                    sum += w * values[offset + i];
+                    weight += w;
+                }
+            }
+            return (sum, weight);
         }
 
         private long KeyOf(Vector3 p) => Key((int)MathF.Floor(p.X / Size), (int)MathF.Floor(p.Y / Size), (int)MathF.Floor(p.Z / Size));

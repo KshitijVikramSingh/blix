@@ -155,11 +155,13 @@ uint nearRegionOfLevel(uint level) {
 #endif
 
 #ifdef COOK_SCALE
-// The cache's cell size the cook asks for at p (m): the fine tier's 5 cm cube, else the coarse tier's (COOK_COUNTS.w) --
-// the smallest size the cook's surface points there had, sides alike; -1 where the cook covered nothing (the camera's
-// distance sizes it then). rtgi_cache.glsl's rtgiCellSize asks it first.
-float cookScaleIn(ivec3 cube, uint tier) {
-    uvec2 h = cookCellHash(cube, 15u, tier, uint(COOK_COUNTS.z));
+// The cache's cell size the cook asks for at p on a side (m): the fine tier's 5 cm cube for that side, else the coarse
+// tier's (COOK_COUNTS.w) -- the mean log size of the cook's surface points of that side there, each point's size its own
+// side's samples on its own plane, smoothed along the surface (SponzaLoop.RtgiCook.cs); -1 where the cook covered nothing
+// (the camera's distance sizes it then). rtgi_cache.glsl's rtgiCellSize asks it first. By side: the smallest of every
+// side's in a cube put the floor's cells at the wall's size along every foot of a wall (2026-10-31).
+float cookScaleIn(ivec3 cube, uint tier, uint side) {
+    uvec2 h = cookCellHash(cube, tier, side, uint(COOK_COUNTS.z));
     for (uint k = 0u; k < COOK_PROBE_STEPS; k++) {
         uvec2 e = COOK_SCALE((h.x + k) & uint(COOK_COUNTS.z));
         if (e.x == h.y) return uintBitsToFloat(e.y);
@@ -167,11 +169,34 @@ float cookScaleIn(ivec3 cube, uint tier) {
     }
     return -1.0;
 }
-float cookScaleAt(vec3 p) {
+float cookScaleAt(vec3 p, uint side) {
     if (COOK_PARAMS.w < 0.5) return -1.0;
-    float g = cookScaleIn(ivec3(floor((p - NEAR_SCALE_ORIGIN) / COOK_PARAMS.x)), 7u);
+    float g = cookScaleIn(ivec3(floor((p - NEAR_SCALE_ORIGIN) / COOK_PARAMS.x)), 15u, side);
     if (g > 0.0) return g;
-    return cookScaleIn(ivec3(floor((p - NEAR_SCALE_ORIGIN) / COOK_COUNTS.w)), 6u);
+    ivec3 coarse = ivec3(floor((p - NEAR_SCALE_ORIGIN) / COOK_COUNTS.w));
+    g = cookScaleIn(coarse, 14u, side);
+    // No point of that side here (a shading normal's dominant axis not the triangle's -- a surface near 45 degrees): the
+    // coarse cube's other sides, before the camera's distance (1% of Cornell's pixels).
+    for (uint k = 1u; k < 6u && !(g > 0.0); k++) g = cookScaleIn(coarse, 14u, (side + k) % 6u);
+    return g;
+}
+#endif
+
+#ifdef COOK_CELL_POINTS
+// A cell's training points (SponzaLoop.RtgiCook.cs): several spread over its own surface piece -- one per occupied
+// sub-square of its 4 x 4 grid across the surface, in a Bayer order, inside-tested at junctions -- so a cell's mean is its
+// surface's, not one spot's. One buffer of uvec2s, COOK_CELL_POINTS(k): the first COOK_PARAMS.z its cells' (x: the cell's
+// first point | its count << 27; y: its turn, the next point to train from, rtgi_rays.comp), then the points, each within
+// its cell's cube, 16 bits an axis (x: x | y << 16; y: z).
+#define COOK_POINT_INDEX(i) COOK_CELL_POINTS(i).x
+uint cookPointCount(uint i) { return COOK_POINT_INDEX(i) >> 27; }
+vec3 cookPointAt(uint i, uint k) {
+    uint bits = cookBits(i);
+    uint side = bits & 7u, level = (bits >> 8) & 15u;
+    ivec3 c = cookCoords(COOK_POINTS(2u * i).xyz, side, level);
+    uvec2 q = COOK_CELL_POINTS((COOK_POINT_INDEX(i) & 0x07FFFFFFu) + k);
+    vec3 f = (vec3(q.x & 0xFFFFu, q.x >> 16, q.y & 0xFFFFu) + 0.5) / 65536.0;
+    return rtgiOrigin(side) + (vec3(c) + f) * cookSize(level);
 }
 #endif
 
