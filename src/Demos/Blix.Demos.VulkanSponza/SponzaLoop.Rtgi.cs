@@ -384,6 +384,7 @@ internal sealed partial class SponzaLoop
         if (args.Flag("rtgi-no-cascade")) rtgiCascade = false;
         if (args.Int("rtgi-train-levels") is { } tl) rtgiTrainLevels = Math.Clamp(tl, 1, 8);
         ParseRtgiVolume(args);
+        ParseRtgiCensus(args);
         if (args.String("rtgi-dump") is { } dump) rtgiDumpDir = dump;
         if (args.String("rtgi-dump-frames") is { } frames)
             rtgiDumpFrames = new SortedSet<int>(frames.Split(',').Select(f => int.Parse(f, CultureInfo.InvariantCulture)));
@@ -406,6 +407,7 @@ internal sealed partial class SponzaLoop
         rtgiFilterPassHandle = graph.ComputePass("rtgi-filter").Async(rtgiAsync).Shader(rtgiFilterInterface).Handle;
         rtgiEvictInterface = reflect("rtgi_evict.comp");
         rtgiEvictPassHandle = graph.ComputePass("rtgi-evict").Async(rtgiAsync).Shader(rtgiEvictInterface).Handle;
+        DeclareRtgiCensusReducePass();
     }
 
     // Setup, after the pre-pass: placement (this frame's rays, traced in the shadow trace's group after it).
@@ -415,6 +417,7 @@ internal sealed partial class SponzaLoop
         rtgiRaysPassHandle = graph.ComputePass("rtgi-rays").Shader(rtgiRaysInterface)
             .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
         DeclareRtgiVolumeRaysPass(reflect);
+        DeclareRtgiCensusRaysPass(reflect);
     }
 
     // Setup: the readout into the half-res incident targets.
@@ -474,6 +477,7 @@ internal sealed partial class SponzaLoop
         rtgiEvictPipeline = Compute("rtgi_evict", rtgiEvictInterface);
         rtgiFilterPipeline = Compute("rtgi_filter", rtgiFilterInterface);
         rtgiRaysPipeline = Compute("rtgi_rays", rtgiRaysInterface, full32);
+        CreateRtgiCensusPipeline((name, iface) => Compute(name, iface));
         rtgiReadoutPipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
                 presentVertSpv, File.ReadAllBytes(Path.Combine(shaderDir, "rtgi_readout.frag.spv")), rtgiReadoutInterface, "rtgi_readout")),
             VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
@@ -533,6 +537,8 @@ internal sealed partial class SponzaLoop
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] rtgi: {rtgiTiles:N0} visible points and {rtgiHitPoints:N0} from last frame's hits a frame; cache {RtgiSlots:N0} slots ({RtgiSlots * 80 / 1048576.0:0} MB), cells {rtgiCell:0.###} m + {rtgiCellGrow:0.###} per metre, {rtgiHistory:0} samples held, untrained cells emptied after {rtgiMaxAge:0} frames."));
         }
+        // --rtgi-census: the census's frame in place of the cache's (SponzaLoop.RtgiCensus.cs).
+        if (rtgiCensus) { RecordRtgiCensus(tracer); return; }
         // The panel's freeze: no rays, no training, the cache read as it stands.
         if (rtgiFrozen) return;
         var cur = (int)(rtgiFrameCount & 1u);

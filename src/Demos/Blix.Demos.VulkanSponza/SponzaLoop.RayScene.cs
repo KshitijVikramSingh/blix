@@ -191,6 +191,7 @@ internal sealed partial class SponzaLoop
         // The GPU scene and RTGI's volume are the diffuse GI's, so both are built whenever there is a scene.
         if (data is not null) BuildRayGpu(data);
         if (placements > 0) StartRtgiVolumeBuild(scene);
+        if (placements > 0) StartRtgiCensus(scene);
         if (rayCheck && placements > 0) BuildRayCheck();
     }
 

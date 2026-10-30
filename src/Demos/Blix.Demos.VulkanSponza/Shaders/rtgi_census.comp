@@ -1,0 +1,80 @@
+#version 450
+
+// The census (--rtgi-census, SponzaLoop.RtgiCensus.cs): a measurement of what a cooked, per-chunk cache would hold, not part
+// of the frame's GI. Its coarse pass, a chunk of surface samples a frame. Kind 0: each sample's CENSUS_RAYS cosine rays,
+// from its point lifted off its surface, into the Metal batch (closest hit, as far as uChunk.z). Kind 1 (after the
+// trace): their hits reduced to the sample's sum of inverse distances (escapes add nothing), and its counts of rays that
+// met a surface, met a back face, and met one within uNear.x.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform RtgiCensusParams {
+    vec4 uChunk;  // x the chunk's first sample; y its samples; z the rays' reach (m); w the kind
+    vec4 uNear;   // x the near distance (m); y the lift off the surface (m)
+} u;
+// Per sample: xyz its point, w its normal (octahedral, packSnorm2x16, as bits).
+layout(std430, set = 0, binding = 1) readonly buffer RtgiCensusSamples { vec4 censusSamples[]; };
+// The chunk's rays (two vec4s a ray: origin and t-min, direction and reach) and the Metal batch's hits (three uvec4s a
+// ray: [0].x the distance's bits, [0].w bit 0 met, bit 1 front face; the rest unused here).
+layout(std430, set = 0, binding = 2) buffer RtgiCensusRays { vec4 censusRays[]; };
+layout(std430, set = 0, binding = 3) readonly buffer RtgiCensusHits { uvec4 censusHits[]; };
+// Per sample: x the sum of 1 / distance (float bits); y the met count, the back-face count << 8, the near count << 16.
+layout(std430, set = 0, binding = 4) buffer RtgiCensusResults { uvec2 censusResults[]; };
+
+#define CENSUS_RAYS 64u
+
+uint censusHash(uint x) {
+    x ^= x >> 16; x *= 0x7feb352du;
+    x ^= x >> 15; x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+vec3 censusOctDecode(vec2 e) {
+    vec3 n = vec3(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
+    if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    return normalize(n);
+}
+
+// Ray k of sample i: cosine about n, an 8 x 8 stratified set shifted by the sample's own offset.
+vec3 censusRayDir(uint i, uint k, vec3 n) {
+    uint h = censusHash(i * 0x9E3779B1u + 0x51u);
+    float j1 = float(h & 0xFFFFu) / 65536.0, j2 = float(h >> 16) / 65536.0;
+    float r1 = (float(k & 7u) + j1) / 8.0, r2 = (float(k >> 3) + j2) / 8.0;
+    float phi = 6.28318530718 * r1, r = sqrt(r2);
+    vec3 l = vec3(r * cos(phi), r * sin(phi), sqrt(max(0.0, 1.0 - r2)));
+    // Frisvad's basis about n.
+    float s = n.z >= 0.0 ? 1.0 : -1.0;
+    float a = -1.0 / (s + n.z), b = n.x * n.y * a;
+    vec3 t1 = vec3(1.0 + s * n.x * n.x * a, s * b, -s * n.x);
+    vec3 t2 = vec3(b, s + n.y * n.y * a, -n.y);
+    return normalize(t1 * l.x + t2 * l.y + n * l.z);
+}
+
+void main() {
+    uint t = gl_GlobalInvocationID.x;
+    uint first = uint(u.uChunk.x), count = uint(u.uChunk.y);
+    uint kind = uint(u.uChunk.w + 0.5);
+    if (kind == 0u) {
+        if (t >= count * CENSUS_RAYS) return;
+        uint i = first + t / CENSUS_RAYS, k = t % CENSUS_RAYS;
+        vec4 s = censusSamples[i];
+        vec3 n = censusOctDecode(unpackSnorm2x16(floatBitsToUint(s.w)));
+        censusRays[2u * t] = vec4(s.xyz + n * u.uNear.y, 0.0);
+        censusRays[2u * t + 1u] = vec4(censusRayDir(i, k, n), u.uChunk.z);
+        return;
+    }
+    if (t >= count) return;
+    float inv = 0.0;
+    uint met = 0u, backs = 0u, near = 0u;
+    for (uint k = 0u; k < CENSUS_RAYS; k++) {
+        uvec4 h0 = censusHits[3u * (t * CENSUS_RAYS + k)];
+        if ((h0.w & 1u) == 0u) continue;
+        float d = uintBitsToFloat(h0.x);
+        met++;
+        if ((h0.w & 2u) == 0u) backs++;
+        if (d <= u.uNear.x) near++;
+        inv += 1.0 / max(d, 1e-3);
+    }
+    censusResults[first + t] = uvec2(floatBitsToUint(inv), met | (backs << 8) | (near << 16));
+}
