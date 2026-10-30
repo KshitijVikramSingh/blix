@@ -57,10 +57,7 @@ internal sealed partial class SponzaLoop
         if (args.Float("cloth-transmission") is { } cloth) clothTransmission = Math.Clamp(cloth, 0f, 1f);
         materialOcclusion = !args.Flag("no-material-ao");
         materialAoOnGi = args.Flag("material-ao-on-gi");
-        // --rt-shadow-full: every pixel traced every frame (ShadowsSettings.Interleave off).
-        if (args.Flag("rt-shadow-full")) shadows.Interleave = false;
         if (args.Flag("no-rt-shadow-move-interleave")) rtShadowMoveInterleave = false;
-        if (args.Flag("no-prepass")) noPrepass = true;
         if (args.String("probe") is { } probe) probeName = probe;
         // Zero isolates sky-fed transport from the direct-sun source for probe censuses.
         if (args.Float("sun-strength") is { } ss) sunStrength = MathF.Max(0f, ss);
@@ -82,13 +79,8 @@ internal sealed partial class SponzaLoop
         if (scene.Exposure is { } se) render.Exposure = se;
         // --exposure X: the display exposure from the start (the testbeds' sun and sky read white at Sponza's).
         if (args.Float("exposure") is { } ex) render.Exposure = Math.Clamp(ex, 0.05f, 16f);
-        // The A/B for the single-sample canopy: hashed stochastic cutout against the plain binary
-        // one. Re-cooks nothing and rebuilds nothing — it changes one number in the material.
-        if (args.Flag("msaa1")) MsaaSamples = 1;
+        // One sample by default (MsaaSamples); --msaa2 and --msaa4 for alpha-to-coverage foliage.
         if (args.Flag("msaa2")) MsaaSamples = 2;
-        // Present so the sample count can be swept from the command line in BOTH directions. Without
-        // it only the non-default could be asked for, so a paired run could not be ordered 4-2-2-4 —
-        // and on this machine a single ordering is not a measurement.
         if (args.Flag("msaa4")) MsaaSamples = 4;
         // Align shadows and direct light to a detected environment sun by default. --sun-authored
         // opts out; probes without a detectable sun naturally retain the authored direction.
@@ -104,9 +96,6 @@ internal sealed partial class SponzaLoop
         // --cpu-cull: build the indirect records and visible lists on the CPU, the way 1a did, for an A/B
         // against the GPU cull (scene_cull.comp) that is otherwise the default.
         gpuCull = !args.Flag("cpu-cull");
-        // --lit-flat: the lit pass shades opaque geometry with flat.frag, everything else unchanged (same lit.vert,
-        // culling, pre-pass and LOD). What a cost does under it is the part that is not material shading.
-        litFlat = args.Flag("lit-flat");
         // --no-lit-early-z: opaque groups shade with the cutout build too (late depth test), as before 2026-10-24.
         litEarlyZ = !args.Flag("no-lit-early-z");
         litLean = !args.Flag("no-lit-lean");
@@ -120,24 +109,14 @@ internal sealed partial class SponzaLoop
         rayLeakCensus = args.Flag("ray-leak-census");
         memoryReport = args.Flag("memory-report");
         if (args.Flag("occlusion-audit")) occlusionAuditEvery = Math.Max(1, args.Int("occlusion-audit-every") ?? 30);
-        if (args.Flag("settle-log")) settleLogEvery = Math.Max(1, args.Int("settle-every") ?? 60);
-        if (args.String("settle-dir") is { } settleAt) { settleDir = settleAt; Directory.CreateDirectory(settleAt); }
         // RenderSettings.HalfResShadows from the command line, for scripted runs.
         if (args.Flag("half-res-shadows")) render.HalfResShadows = true;
-        if (args.Flag("full-res-shadows")) render.HalfResShadows = false;
-        metalDeviceQueue = args.Flag("metal-device-queue");
-        tracerBatchesApart = args.Flag("tracer-batches-apart");
         // --no-frame-chain: frames may overlap on the GPU again (the A/B for IGraphicsDevice.ChainFrames).
         if (args.Flag("no-frame-chain")) device.ChainFrames = false;
         if (args.Flag("no-pass-barriers")) device.ExplicitPassBarriers = false;
         // --rt-no-overlap: no join, so the frame waits for the trace right after it (the overlap's control).
         rtNoOverlap = args.Flag("rt-no-overlap");
         rtNoPack = args.Flag("no-rt-pack");
-        // --rt-isolated: nothing but the trace lights the frame, sky included: no incident field (SponzaLoop.RtShadows).
-        rtIsolated = args.Flag("rt-isolated");
-        rtCoverageCoin = args.Flag("rt-coverage-coin");
-        if (args.Float("rt-alpha-mip") is { } alphaMip) rtAlphaMip = Math.Clamp(alphaMip, 0f, 12f);
-        rtAlphaAb = args.Flag("rt-alpha-ab");
         // --no-taa: no TAA and so no sub-pixel jitter: the control for --stability, whose variation otherwise
         // counts every edge the jitter moves.
         if (args.Flag("no-taa")) render.Taa = 0f;
@@ -146,26 +125,11 @@ internal sealed partial class SponzaLoop
         // --taa-show-rejection: the resolve outputs 1 where it clamped history, 0 where it kept it; with --stability
         // the presented image's mean is then the rejection rate.
         if (args.Flag("taa-show-rejection")) render.ShowTaaRejection = true;
-        if (args.String("taa-reproject") is { } reproject) taaMotionReprojection = reproject switch
-        {
-            "motion" => true, "old" => false,
-            _ => throw new AppArgsException($"--taa-reproject takes motion or old, not '{reproject}'."),
-        };
-        if (args.String("taa-clip") is { } clip) taaVarianceClip = clip switch
-        {
-            "variance" => true, "box" => false,
-            _ => throw new AppArgsException($"--taa-clip takes variance or box, not '{clip}'."),
-        };
-        if (args.Float("taa-gamma") is { } gamma) taaGamma = Math.Max(0.1f, gamma);
         taaCountRejection = args.Flag("taa-count-rejection");
         if (args.Float("taa-relax") is { } relax) taaRelax = Math.Max(1f, relax);
         if (args.Float("taa-accumulate") is { } accumulate) taaAccumulate = Math.Max(0f, accumulate);
         // --stability K: per-pixel temporal variation over the K still frames before the shot (SponzaLoop.Stability).
         if (args.Int("stability") is { } stability) stabilityFrames = Math.Max(2, stability);
-        if (args.Float("taa-dynamic-count") is { } tdc) taaDynamicCount = Math.Max(1f, tdc);
-        ParseMoverArgs();
-        // --surface-check: hold the pre-pass's SurfaceKey and velocity against CPU rays at the shot (stage 4e-iv).
-        surfaceCheck = args.Flag("surface-check");
         if (args.Float("incident-normal-bias") is { } nb) incidentNormalBias = Math.Clamp(nb, 0f, 12f);
         if (args.Float("incident-gradient-clamp") is { } gc) incidentGradientClamp = Math.Clamp(gc, 0f, 4f);
         if (args.Int("ray-region-triangles") is { } regionTriangles) rayRegionTriangles = Math.Max(1, regionTriangles);
@@ -325,11 +289,6 @@ internal sealed partial class SponzaLoop
         // The scene cull: every pass's indirect records and visible list, written before the first pass
         // that draws from them (the pre-pass), so it is declared ahead of all of them. Its dispatches
         // are fenced on both sides because they bind GPU buffers; the graph tracks images only.
-        // The mover's rows are written first of all, before anything culls or draws from the transform table.
-        moverInterface = Reflect("mover.comp");
-        moverPassHandle = graph.ComputePass("mover").Shader(moverInterface).Handle;
-        moverRaysInterface = Reflect("mover_rays.comp");
-        moverRaysPassHandle = graph.ComputePass("mover-rays").Shader(moverRaysInterface).Handle;
         cullInterface = Reflect("scene_cull.comp");
         cullPassHandle = graph.ComputePass("scene-cull").Shader(cullInterface).Handle;
         raySurfaceBakeInterface = Reflect("ray_surface_bake.comp");
@@ -372,7 +331,6 @@ internal sealed partial class SponzaLoop
         {
             surfaceKeyHandle = graph.ColorTarget("surface-key", TextureFormat.R32Uint, fullSize);
             velocityHandle = graph.ColorTarget("velocity", TextureFormat.Rg16F, fullSize);
-            if (MotionTarget) motionHandle = graph.ColorTarget("world-motion", TextureFormat.Rgba16F, fullSize);
         }
         var prepassBuilder = graph.GraphicsPass("depth-prepass")
             .Target(prepassNormalHandle, LoadOp.Clear, StoreOp.Store)
@@ -382,7 +340,6 @@ internal sealed partial class SponzaLoop
         {
             prepassBuilder = prepassBuilder.Target(surfaceKeyHandle, LoadOp.Clear, StoreOp.Store)
                 .Target(velocityHandle, LoadOp.Clear, StoreOp.Store);
-            if (MotionTarget) prepassBuilder = prepassBuilder.Target(motionHandle, LoadOp.Clear, StoreOp.Store);
         }
         // Same rule as the depth: at one sample the target IS what a reader wants, and asking for
         // a resolve anyway is invalid.
@@ -418,7 +375,6 @@ internal sealed partial class SponzaLoop
         {
             lateBuilder = lateBuilder.Target(surfaceKeyHandle, LoadOp.Load, StoreOp.Store)
                 .Target(velocityHandle, LoadOp.Load, StoreOp.Store);
-            if (MotionTarget) lateBuilder = lateBuilder.Target(motionHandle, LoadOp.Load, StoreOp.Store);
         }
         if (MsaaSamples > 1) lateBuilder = lateBuilder.ResolveColor(prepassNormalResolveHandle).ResolveDepth(depthResolveHandle);
         latePrepassHandle = lateBuilder.Handle;
@@ -551,19 +507,11 @@ internal sealed partial class SponzaLoop
         opaqueSolidPipeline = Pipeline(litProgram, VertexPosition3NormalTangentTexture.Layout,
             DepthState.LessEqualNoWrite, RasterizerState.BackFaceCulling,
             new[] { BlendState.Disabled }, litPassHandle, "lit.opaque", alphaToCoverage: MsaaSamples > 1);
-        opaqueSolidPipelineWrites = Pipeline(litProgram, VertexPosition3NormalTangentTexture.Layout,
-            DepthState.LessEqualWrite, RasterizerState.BackFaceCulling,
-            new[] { BlendState.Disabled }, litPassHandle, "lit.opaque.writes",
-            alphaToCoverage: MsaaSamples > 1);
-        opaqueDoubleSidedPipelineWrites = Pipeline(litProgram, VertexPosition3NormalTangentTexture.Layout,
-            DepthState.LessEqualWrite, RasterizerState.NoCulling,
-            new[] { BlendState.Disabled }, litPassHandle, "lit.opaque.doubleSided.writes",
-            alphaToCoverage: MsaaSamples > 1);
         opaqueDoubleSidedPipeline = Pipeline(litProgram, VertexPosition3NormalTangentTexture.Layout,
             DepthState.LessEqualNoWrite, RasterizerState.NoCulling,
             new[] { BlendState.Disabled }, litPassHandle, "lit.opaque.doubleSided", alphaToCoverage: MsaaSamples > 1);
         // Opaque (no cutout) groups draw with these: the early depth test against the pre-pass's depth, so a covered
-        // surface is not shaded. The pipelines above stay for cutout groups and the no-pre-pass and flat variants.
+        // surface is not shaded. The pipelines above stay for cutout groups.
         litOpaqueProgram = Own(device.CreateShaderProgramFromSpv(litVertSpv,
             File.ReadAllBytes(Path.Combine(shaderDir, "lit_opaque.frag.spv")), litInterface, "lit.opaque.early"));
         opaqueSolidPipelineEarly = Pipeline(litOpaqueProgram, VertexPosition3NormalTangentTexture.Layout,
@@ -621,7 +569,8 @@ internal sealed partial class SponzaLoop
         flatPipeline = Pipeline(flatProgram, VertexPosition3NormalTangentTexture.Layout,
             DepthState.LessEqualNoWrite, RasterizerState.NoCulling,
             new[] { BlendState.Disabled }, litPassHandle, "flat");
-        // --lit-flat's single-sided twin: the flat fragment over exactly the raster work the lit pipeline does.
+        // BLIX_PROBE=litflat's single-sided twin: the flat fragment over exactly the raster work the lit pipeline does
+        // (what a cost does under it is the part that is not material shading).
         flatSolidPipeline = Pipeline(flatProgram, VertexPosition3NormalTangentTexture.Layout,
             DepthState.LessEqualNoWrite, RasterizerState.BackFaceCulling,
             new[] { BlendState.Disabled }, litPassHandle, "flat.solid");
@@ -693,10 +642,6 @@ internal sealed partial class SponzaLoop
         // from gl_VertexIndex in the vertex shader — the buffer is never sampled).
         fullscreen = new FullscreenPass(device, "present.dummy");
 
-        moverPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
-            File.ReadAllBytes(Path.Combine(shaderDir, "mover.comp.spv")), moverInterface!, "mover")), "mover"));
-        moverRaysPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
-            File.ReadAllBytes(Path.Combine(shaderDir, "mover_rays.comp.spv")), moverRaysInterface!, "mover_rays")), "mover_rays"));
         var cullSpv = File.ReadAllBytes(Path.Combine(shaderDir, "scene_cull.comp.spv"));
         var cullProgram = Own(device.CreateComputeShaderProgramFromSpv(cullSpv, cullInterface, "scene_cull"));
         cullPipeline = Own(device.CreateComputePipeline(cullProgram, "scene_cull"));
@@ -948,9 +893,7 @@ internal sealed partial class SponzaLoop
         }
     }
 
-    // The pre-pass's targets: the normal, and under single sampling the surface key, the velocity and the world motion
-    // (stage 4e).
-    // One per pre-pass colour target: normal; surface key and velocity; world motion (a target the pipelines once did
-    // not count had nothing written to it).
-    private BlendState[] PrepassBlends() => Enumerable.Repeat(BlendState.Disabled, !SurfaceTargets ? 1 : 3 + (MotionTarget ? 1 : 0)).ToArray();
+    // One per pre-pass colour target: the normal, and under single sampling the surface key and the velocity (stage 4e).
+    // A target the pipelines do not count has nothing written to it.
+    private BlendState[] PrepassBlends() => Enumerable.Repeat(BlendState.Disabled, !SurfaceTargets ? 1 : 3).ToArray();
 }

@@ -21,11 +21,10 @@ internal sealed partial class SponzaLoop
     // The 2x2's pixels in an order that alternates diagonals, so two consecutive frames never share a row or column.
     private static readonly (int X, int Y)[] LightingSubpixels = { (0, 0), (1, 1), (1, 0), (0, 1) };
 
-    // --fixed-subpixel: the same pixel of each 2x2 every frame. The rotation is for TAA to gather all four; with TAA off
-    // (since 2026-10-21) its four-frame cycle showed as crawl wherever neighbouring answers differ (the RTGI cache's
-    // cells, 2026-10-26).
-    private bool fixedSubpixel;
-    private (int X, int Y) LightingSubpixel => fixedSubpixel ? (0, 0) : LightingSubpixels[lightingFrame & 3u];
+    // The rotation is for TAA to gather all four; with TAA off the frame counter holds (RenderFrame), the same pixel every
+    // frame -- turning, its four-frame cycle showed as crawl wherever neighbouring answers differ (the RTGI cache's cells,
+    // 2026-10-26).
+    private (int X, int Y) LightingSubpixel => LightingSubpixels[lightingFrame & 3u];
 
     // The half-res grid, as the graph sizes MatchSwapchainGraphSize(0.5f) targets (rounded down, as the AO's).
     private static (int Width, int Height) HalfLightingSize(int width, int height) =>

@@ -313,9 +313,7 @@ internal sealed partial class SponzaLoop
                 var world = s.Worlds[w];
                 placements.Add(new Placement(bucket.Count, sceneTransforms.Count, WorldBounds(bm.Bounds, world)));
                 sceneTransforms.Add(world);
-                sceneTransformMaterials.Add((uint)s.Material.Id);
                 sceneTransformSurfaceKeys.Add(SurfaceKeyOf(s, w, i, surfaceKeys));
-                sceneTransformInstances.Add(s.Instances[w]);
                 rayInstances.Add(new RayQueryScene.Instance(rayMeshes[i], world));
                 rayPlacementMaterials.Add(new RayMaterial(s.Albedo, s.BaseColor, s.AlphaCutoff, s.IsBlend, s.TransmissionTexture, s.TransmissionColorTexture));
                 rayPlacementDoubleSided.Add(s.Pipeline == opaqueDoubleSidedPipeline || s.Pipeline == blendDoubleSidedPipeline);
@@ -333,9 +331,7 @@ internal sealed partial class SponzaLoop
                 s.Pipeline == opaqueDoubleSidedPipeline || s.Pipeline == blendDoubleSidedPipeline));
         }
 
-        SelectMover(rayInstances);
         StartRayScene(rayMeshes, rayInstances);
-        WriteSurfaceKeyCensus(ordered, surfaceKeys.Count);
 
         // lit.vert carries normals by the model's linear part, exact for rotation and uniform scale. Said
         // when it is not, rather than shaded wrong in silence.
@@ -467,8 +463,8 @@ internal sealed partial class SponzaLoop
         };
         sceneSurfaceKeyBuffer = Own(device.CreateGpuBuffer(Math.Max(1, sceneTransformSurfaceKeys.Count) * 4,
             MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(sceneTransformSurfaceKeys)), "sponza.scene.surface-keys"));
-        // Where each row stood last frame. Nothing moves yet, so it starts (and stays) equal to the transforms; a
-        // mover (4e-vi) writes a moved row's old matrix here before its new one goes in.
+        // Where each row stood last frame (instances.glsl, the pre-pass's velocity). Nothing in these scenes moves, so it
+        // equals the transforms: the velocity is the camera's alone, through the same path a moving row would take.
         scenePreviousTransformBuffer = Own(device.CreateGpuBuffer(Math.Max(1, sceneTransforms.Count) * 64,
             MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(sceneTransforms)), "sponza.scene.previous-transforms"));
         litSceneBuffers = null;
@@ -629,9 +625,6 @@ internal sealed partial class SponzaLoop
     // A surface's identity (stage 4e): the instance that draws it and the source primitive it was cooked from.
     // Without provenance (a primitive built in memory) the staged primitive itself stands in for its source.
     private const uint StochasticSurface = 0x80000000u;
-    // The placement may move (declared dynamic, with a reach: the mover's rows): a fact about the surface, set once
-    // the mover is chosen, that TAA reads to know a pixel's shading follows that placement's pose (stage 4f).
-    private const uint DynamicSurface = 0x40000000u;
 
     private readonly record struct SurfaceIdentity(PlacementInstance Instance, int SourceMesh, int SourcePrimitive, int Unsourced);
 
@@ -647,52 +640,5 @@ internal sealed partial class SponzaLoop
             : new SurfaceIdentity(s.Instances[w], -1, -1, stagingIndex);
         if (!keys.TryGetValue(identity, out var key)) keys[identity] = key = (uint)keys.Count + 1;
         return s.AlphaCutoff > 0f ? key | StochasticSurface : key;
-    }
-
-    // What the keys say about the scene: how many surfaces, how many placement rows (cooked chunks x instances)
-    // each spans, and how much the cook's split would have fragmented an identity without provenance.
-    private void WriteSurfaceKeyCensus(IReadOnlyList<DrawableStaging> ordered, int keyCount)
-    {
-        var rows = sceneTransformSurfaceKeys.Count;
-        var rowsPerKey = sceneTransformSurfaceKeys.GroupBy(k => k).Select(g => g.Count()).OrderBy(c => c).ToArray();
-        var instances = ordered.SelectMany(s => s.Instances).Distinct().Count();
-        var unsourced = ordered.Count(s => s.Source is null);
-        var materials = sceneTransformMaterials.Distinct().Count();
-        // Does a key name one place? A key is authoring granularity (source primitive x instance), and one authored
-        // primitive can be several disconnected surfaces. Group each key's rows into regions whose world boxes touch
-        // (a split's chunks are adjacent, so one connected surface is one region); a key over several regions is a
-        // place where only spatial support, not the key, can tell two surfaces apart.
-        var rowBounds = new Bounds3[rows];
-        foreach (var pl in opaquePlacements.Concat(blendPlacements)) rowBounds[pl.Transform] = pl.Bounds;
-        var multiRegion = 0;
-        (uint Key, int Rows, int Regions, float Extent) worst = default;
-        foreach (var group in Enumerable.Range(0, rows).GroupBy(r => sceneTransformSurfaceKeys[r]))
-        {
-            var members = group.ToArray();
-            if (members.Length < 2) continue;
-            var parent = Enumerable.Range(0, members.Length).ToArray();
-            int Find(int a) { while (parent[a] != a) a = parent[a] = parent[parent[a]]; return a; }
-            for (var a = 0; a < members.Length; a++)
-            for (var b = a + 1; b < members.Length; b++)
-            {
-                var ba = rowBounds[members[a]]; var bb = rowBounds[members[b]];
-                const float touch = 0.02f;
-                if (ba.Min.X <= bb.Max.X + touch && bb.Min.X <= ba.Max.X + touch && ba.Min.Y <= bb.Max.Y + touch
-                    && bb.Min.Y <= ba.Max.Y + touch && ba.Min.Z <= bb.Max.Z + touch && bb.Min.Z <= ba.Max.Z + touch)
-                {
-                    parent[Find(a)] = Find(b);
-                }
-            }
-            var regions = Enumerable.Range(0, members.Length).Select(Find).Distinct().Count();
-            if (regions < 2) continue;
-            multiRegion++;
-            var lo = members.Select(r => rowBounds[r].Min).Aggregate(Vector3.Min);
-            var hi = members.Select(r => rowBounds[r].Max).Aggregate(Vector3.Max);
-            if (regions > worst.Regions) worst = (group.Key, members.Length, regions, (hi - lo).Length());
-        }
-        Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] surface keys spanning disconnected regions: {multiRegion:N0} of {keyCount:N0}; the most split: {worst.Rows} rows in {worst.Regions} regions over {worst.Extent:0.0} m."));
-        Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] surface keys: {keyCount:N0} surfaces over {rows:N0} placement rows ({instances:N0} instances; rows per surface median {rowsPerKey[rowsPerKey.Length / 2]}, max {rowsPerKey[^1]}); {materials} materials, {unsourced} staged primitive(s) without provenance."));
     }
 }

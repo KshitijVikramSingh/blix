@@ -137,15 +137,6 @@ internal sealed record SceneProfile(
         StartPitch: 0f,
         MoveSpeed: 3f);
 
-    /// <summary>The Cornell box with a panel hung from the skylight's edge (<c>blix cornell --panel</c>): with
-    /// <c>--mover panel</c>, an occluder swinging across the light over surfaces that do not move.</summary>
-    public static readonly SceneProfile CornellPanel = Cornell with
-    {
-        Name = "cornell-panel",
-        Title = "Vulkan Cornell box, hanging panel",
-        Packs = new ScenePack[] { new("cornell-panel", Required: true) },
-    };
-
     /// <summary>The Cornell room with a veil and a pleated curtain in the sun's shaft (<c>blix drapes</c>): light through cloth.</summary>
     /// <remarks>
     /// Cornell's room and sun, its blocks swapped for two double-sided sheets that scatter light through themselves: the
@@ -348,7 +339,7 @@ internal sealed record SceneProfile(
         StartPitch = -40f,
     };
 
-    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, CornellPanel, Drapes, SheetSlab, SheetShell, SheetShellThin, ThinWall, Crevices, CrevicesDark, KhronosPlant, KhronosTeacup, KhronosTest, CrytekSponza, Jungle, SanMiguel, LadderFloor, LadderCorner, LadderObjects, LadderClutter, LadderGrid };
+    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, Drapes, SheetSlab, SheetShell, SheetShellThin, ThinWall, Crevices, CrevicesDark, KhronosPlant, KhronosTeacup, KhronosTest, CrytekSponza, Jungle, SanMiguel, LadderFloor, LadderCorner, LadderObjects, LadderClutter, LadderGrid };
 
     /// <summary>The profile <c>--scene</c> names, Sponza when it names none.</summary>
     public static SceneProfile Named(string? name)

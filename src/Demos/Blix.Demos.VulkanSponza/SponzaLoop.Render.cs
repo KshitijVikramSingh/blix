@@ -380,7 +380,6 @@ internal sealed partial class SponzaLoop
         if (lastFrameStamp != 0)
         {
             var periodMs = System.Diagnostics.Stopwatch.GetElapsedTime(lastFrameStamp, stamp).TotalMilliseconds;
-            RecordSettlePeriod(periodMs);
             // Smoothed for the overlay only — the A/B buckets below keep the raw period, because a
             // distribution is the whole point of that instrument and a filter would flatten it.
             lastFramePeriodMs = lastFramePeriodMs > 0.0
@@ -449,13 +448,6 @@ internal sealed partial class SponzaLoop
         // The 2x2's sampled pixel turns each frame for TAA to gather; with no TAA it stays (the first), so a still frame is
         // the same frame -- turning, the half-res lighting shimmered on a four-frame cycle with the camera still.
         if (render.Taa > 0f) lightingFrame++;
-        // --ab queue: the Metal tracers on the Vulkan device's queue (ON) or their own (OFF), switched at each phase. Safe
-        // mid-run: the hand-offs still wait on the frame timeline, so work already on the other queue stays ordered.
-        if (abMode == "queue" && frameTracer is { } queueTracer && tracerOnDeviceQueue == AbOffPhase)
-        {
-            tracerOnDeviceQueue = !AbOffPhase;
-            queueTracer.UseDeviceQueue(tracerOnDeviceQueue);
-        }
 
         var perFrameList = new List<ShaderUniform>
         {
@@ -536,9 +528,6 @@ internal sealed partial class SponzaLoop
             return;
         }
 
-        // The mover's pose for this frame, before the camera cull reads the transforms.
-        UpdateMover();
-
         // Fill camera commands once for both depth and lit passes. Frustum culling zeroes
         // instanceCount without compacting groups, saving vertex/binning work while preserving
         // indirect offsets. Recorded off-screen geometry was 55% at the default view and 96% on
@@ -562,14 +551,12 @@ internal sealed partial class SponzaLoop
         RtgiDumpIfDue();
         FlushTracerGroup();
 
-        // Occlusion needs the pre-pass's depth; without one the early list is the whole frustum's.
-        var skipPrepass = noPrepass || (abMode == "prepass" && AbOffPhase);
-        var occlusionNow = occlusionCull && render.OcclusionCull && !skipPrepass;
-        // Nothing moved for two frames (the camera, the mover, the placements): last frame's occlusion test marked every
+        var occlusionNow = occlusionCull && render.OcclusionCull;
+        // Nothing moved for two frames (the camera, the placements): last frame's occlusion test marked every
         // visible placement, so this frame's early list is the whole visible set and the late list would be empty. The
         // occlusion pyramid, its cull and the late pre-pass -- which loads and stores all five pre-pass targets, ~224 MB
         // a frame drawing nothing (2026-10-20) -- are skipped, and the lit pass draws the early list.
-        var occlusionSame = cameraView == occlusionLastView && cameraProjection == occlusionLastProjection && !moverMoved
+        var occlusionSame = cameraView == occlusionLastView && cameraProjection == occlusionLastProjection
             && opaquePlacements.Count == occlusionLastPlacements;
         // Counted in frames the test actually RAN under this camera: frames before the scene (loading, the cook screen)
         // never set the placements' visible flags, and skipping on them drew an empty list -- a black frame until the
@@ -591,11 +578,8 @@ internal sealed partial class SponzaLoop
         // depth the lit pass loads covers exactly what it shades), depth only.
         // Per group: mask binds the material (set 2 albedo) for the alpha
         // discard + the mask pipeline; opaque needs only set 0 + model push.
-        // --ab prepass off-phase: record the pass (it still clears depth) but draw nothing into it,
-        // so the lit pass below establishes depth itself through the writing pipelines.
         graph.Pass(depthPrepassHandle, scope =>
         {
-            if (skipPrepass) return;
             foreach (var g in opaqueGroups)
             {
                 if (g.IsMask && SkipMaskDraws) continue;
@@ -652,18 +636,13 @@ internal sealed partial class SponzaLoop
             {
                 if (g.IsMask && (SkipMaskDraws || litProbe == "nomask")) continue;
                 var pipeline = g.Pipeline;
-                if (skipPrepass)
-                {
-                    if (pipeline == opaqueSolidPipeline) pipeline = opaqueSolidPipelineWrites;
-                    else if (pipeline == opaqueDoubleSidedPipeline) pipeline = opaqueDoubleSidedPipelineWrites;
-                }
-                else if (!g.IsMask && litEarlyZ)
+                if (!g.IsMask && litEarlyZ)
                 {
                     var lean = leanNow && !richMaterials.Contains(g.Material);
                     if (pipeline == opaqueSolidPipeline) pipeline = lean ? opaqueSolidPipelineLean : opaqueSolidPipelineEarly;
                     else if (pipeline == opaqueDoubleSidedPipeline) pipeline = lean ? opaqueDoubleSidedPipelineLean : opaqueDoubleSidedPipelineEarly;
                 }
-                if (litFlat || litProbe == "litflat") pipeline = g.Pipeline == opaqueDoubleSidedPipeline ? flatPipeline : flatSolidPipeline;
+                if (litProbe == "litflat") pipeline = g.Pipeline == opaqueDoubleSidedPipeline ? flatPipeline : flatSolidPipeline;
                 DrawSceneGroup(scope, occlusionNow ? SceneListCameraFinal : SceneListCamera, g, pipeline, perFrame, passBindings, g.Material);
             }
             // Sky after opaque, before blend. Fullscreen triangle; positions are
@@ -696,14 +675,11 @@ internal sealed partial class SponzaLoop
         // The camera this frame's velocity was measured against becomes the next frame's "previous".
         velocityPrevViewProj = viewProj;
         velocityPrevValid = true;
-        RecordSurfaceCheckCamera();
-        RecordMoverPose();
 
         // Capture only a completed lit arm after at least one prior fully loaded frame has populated
         // readback targets. Deadlines use post-load frames and require a useful timing sample set.
         var measuredFrames = postLoadFrames;
         SampleStability();
-        SampleSettle();
         AuditOcclusion();
         WriteWalkDumps();
         WriteRtgiCapture();
@@ -719,8 +695,6 @@ internal sealed partial class SponzaLoop
             }
             WriteSceneShot(path);
             WriteStability(Path.ChangeExtension(path, null));
-            WriteSurfaceCheck();
-            WriteMoverShot(Path.ChangeExtension(path, null));
             WritePassBreakdown();
             WriteLodCensus();
             WriteClusterCensus();
@@ -749,14 +723,12 @@ internal sealed partial class SponzaLoop
         {
             "flat"   => "everything (materials+IBL+shadows+GI)",
             "shadow" => "sun shadows",
-            "prepass"=> "the depth pre-pass",
             "textures"=> "material texture bandwidth",
             "pbr"    => "the GGX specular lobe",
             "ibl"    => "image-based lighting",
             "normal" => "normal mapping",
             "cull"    => "camera frustum culling",
             "occlskip" => "the occlusion test and late pre-pass skipped while nothing moves (OFF: every frame)",
-            "queue"   => "the Metal tracers on the Vulkan device's command queue (OFF: their own)",
             "lod"     => lodArmOff > 0f
                 ? string.Create(Inv, $"mesh LOD at {lodArmOn:0.##} px rather than {lodArmOff:0.##} px")
                 : "mesh level of detail",
@@ -1116,13 +1088,7 @@ internal sealed partial class SponzaLoop
             new("uParams",              new Vector4Uniform(new Vector4(
                 render.Taa, taaHistoryValid ? 1f : 0f, render.ShowTaaRejection ? 1f : 0f, taaCountRejection ? 1f : 0f))),
             new("uViewProj",            new Matrix4x4Uniform(viewProj)),
-            new("uMode",                new Vector4Uniform(new Vector4(
-                taaMotionReprojection ? 1f : 0f, taaVarianceClip ? 1f : 0f, taaGamma, 0f))),
-            new("uAccumulate",          new Vector4Uniform(new Vector4(taaAccumulate, taaRelax, 0.25f, 0f))),
-            // Stage 4f: what moved this frame, for TAA's per-pixel dependency (surface variant only).
-            new("uDynamicMin",          new Vector4Uniform(MoverActive && moverMoved ? new Vector4(moverReach.Min, 1f) : Vector4.Zero)),
-            new("uDynamicMax",          new Vector4Uniform(new Vector4(MoverActive ? moverReach.Max : Vector3.Zero, taaDynamicCount))),
-            new("uSunDirection",        new Vector4Uniform(new Vector4(sunDirection, 0f))),
+            new("uAccumulate",          new Vector3Uniform(new Vector3(taaAccumulate, taaRelax, 0.25f))),
         };
         if (taaStats.Equals(default(GpuBufferHandle))) taaStats = Own(device.CreateGpuBuffer(8, name: "sponza.taa.stats"));
         var bindings = new List<ShaderTextureBinding>

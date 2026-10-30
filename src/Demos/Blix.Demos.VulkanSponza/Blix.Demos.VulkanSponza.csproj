@@ -60,8 +60,6 @@
     <GlslShader Include="Shaders\skybox.vert" />
     <GlslShader Include="Shaders\skybox.frag" />
     <GlslShader Include="Shaders\scene_cull.comp" />
-    <GlslShader Include="Shaders\mover.comp" />
-    <GlslShader Include="Shaders\mover_rays.comp" />
     <GlslShader Include="Shaders\scene_occlusion.comp" />
     <GlslShader Include="Shaders\rt_shadow_rays.comp" />
     <GlslShader Include="Shaders\rtgi_rays.comp" />

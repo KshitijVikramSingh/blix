@@ -159,17 +159,14 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private int taaWriteNext;
     private Matrix4x4 prevTaaViewProj = Matrix4x4.Identity;
     private bool taaHistoryValid;
-    // taa.frag's modes (each a flag, so each change is measured alone): --taa-reproject motion|old, --taa-clip
-    // variance|box, --taa-gamma G; --taa-count-rejection counts clipped history into taaStats (refused, total).
-    // Measured on Sponza, still camera, 32 frames (presented median variation / median error against the jittered
-    // frames' supersample): the old resolve 3.16% / 4.20%, its error barely under one raw jittered frame (4.95%).
-    // Motion reprojection (history stops being resampled at the jitter offset): 1.89% / 2.31%. Heavier history then
-    // got steadier but WRONGER (0.9: 1.12% / 4.68%, 4.51% of it bias): R11G11B10F history rounds to ~1.6% steps, and
-    // once a frame's 10% step is below half of one, history stops converging. Rgba16F: 0.9 gives 0.83% / 0.94%.
-    // Variance clipping measured worse than the min/max box here (5 taps: 0.7 2.25% / 2.53%).
-    private bool taaMotionReprojection = true;
-    private bool taaVarianceClip;
-    private float taaGamma = 1f;
+    // The resolve (taa.glsl) reprojects by the surface's motion applied to the pixel's centre and bounds history by the
+    // 5-tap min/max box, blending in a tonemapped space. Measured on Sponza, still camera, 32 frames (presented median
+    // variation / median error against the jittered frames' supersample): resampling history at the jitter offset
+    // instead read 3.16% / 4.20%, its error barely under one raw jittered frame (4.95%); motion reprojection 1.89% /
+    // 2.31%. Heavier history then got steadier but WRONGER (0.9: 1.12% / 4.68%, 4.51% of it bias): R11G11B10F history
+    // rounds to ~1.6% steps, and once a frame's 10% step is below half of one, history stops converging. Rgba16F: 0.9
+    // gives 0.83% / 0.94%. Variance clipping measured worse than the min/max box here (5 taps: 0.7 2.25% / 2.53%).
+    // --taa-count-rejection counts clipped history into taaStats (refused, total).
     private bool taaCountRejection;
     // --taa-accumulate N: a per-pixel frame count (in the Rgba16F history's alpha), blended at 1/count up to N for a
     // still pixel (10 by a pixel of motion); 0 is the fixed weight. --taa-relax W: the clamp box W times wider where
@@ -232,22 +229,12 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // resolve, so under MSAA there are none and consumers keep their own reprojection.
     private GraphResourceHandle surfaceKeyHandle;
     private GraphResourceHandle velocityHandle;
-    // World motion (Rgba16F, xyz): that surface point's world position now minus last frame's. Velocity says where to
-    // look on screen; this says where the point was in the world, rigid or deforming alike, without the key standing
-    // for a transform.
-    private GraphResourceHandle motionHandle;
-    // Only --surface-check reads world motion; elsewhere the full-resolution Rgba16F target was written by both
-    // pre-passes and loaded again by the late one for nothing. The shaders still write it (location 3): with no
-    // attachment there the writes are dropped, as under MSAA.
-    private bool MotionTarget => SurfaceTargets && surfaceCheck;
     private bool SurfaceTargets => MsaaSamples == 1;
     // The surface-key target as the previous frame left it (copied at the end of each frame), and TAA's per-pixel
     // accumulated count, ping-ponged with its colour (R32Uint: an integer, read at the nearest pixel).
     private GraphResourceHandle surfaceKeyHistoryHandle;
     private PassHandle surfaceKeyHistoryPassHandle;
     private PipelineHandle surfaceKeyHistoryPipeline;
-    // Stage 4f: --taa-dynamic-count N, the count a pixel whose shading depends on the mover accumulates up to.
-    private float taaDynamicCount = 4f;
     // Last frame's un-jittered view-projection, for the velocity (the camera's half of it).
     private Matrix4x4 velocityPrevViewProj;
     private bool velocityPrevValid;
@@ -315,12 +302,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private readonly HashSet<MaterialHandle> richMaterials = new();
     private PipelineHandle opaqueSolidPipeline;
     private PipelineHandle opaqueDoubleSidedPipeline;
-    // Depth-WRITING twins of the opaque lit pipelines, for --ab prepass. The normal pair tests
-    // LessEqual and does not write, because the pre-pass already laid the complete depth down; with
-    // the pre-pass skipped the lit pass has to establish depth itself or it draws in submission
-    // order over a cleared buffer.
-    private PipelineHandle opaqueSolidPipelineWrites;
-    private PipelineHandle opaqueDoubleSidedPipelineWrites;
     private PipelineHandle blendSolidPipeline;
     private PipelineHandle blendDoubleSidedPipeline;
 
@@ -371,8 +352,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // "" = off. "flat" swaps the whole lit path for flat.frag; "shadow" zeroes uShadowStrength, and
     // the shading modes (textures, pbr, ibl, normal) set one of uAbFlags. Those are uniform-driven,
     // so they alternate without touching pipelines — which is what makes a fine interleave possible.
-    // --no-prepass: drop the depth pre-pass for good, not as an A/B phase.
-    private bool noPrepass;
     /// <summary>--probe &lt;name&gt;: a cooked .blixprobe to prefer over the default list.</summary>
     private string? probeName;
     /// <summary>--sun-overhead: straight down, so the courtyard is lit while base lighting is worked on.</summary>
@@ -636,11 +615,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private readonly List<Placement> blendPlacements = new();
     // Every placement's world matrix, both buckets: set 3 binding 0 (instances.glsl), written once.
     private readonly List<Matrix4x4> sceneTransforms = new();
-    // Each placement's material, by the same row: CPU only, for the surface-key census to compare against (it was
-    // screen probes' identity before the SurfaceKey, and two walls of one stone share it).
-    private readonly List<uint> sceneTransformMaterials = new();
-    // Which placement instance each row is (stage 4e): the mover moves one instance's rows together.
-    private readonly List<PlacementInstance> sceneTransformInstances = new();
     // Each placement row's SurfaceKey (stage 4e): one dense id per (instance, source primitive), from 1; every
     // cooked chunk of one source primitive on one instance shares it. 0 is no surface.
     private readonly List<uint> sceneTransformSurfaceKeys = new();
@@ -657,7 +631,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // levels it reads are uploaded once; per-placement LOD state lives in cullState across frames. set 3
     // is then these buffers by name (sceneBuffers) rather than the sceneInstances material.
     private bool gpuCull = true;
-    private bool litFlat;
     private bool litEarlyZ = true;
     private PipelineHandle flatSolidPipeline;
     private PassHandle cullPassHandle;
@@ -742,7 +715,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
 
     // Slack on the camera frustum test, in metres. See the call site in OnRender.
     private const float CameraCullMargin = 0.5f;
-    /// <summary>--no-hashed-alpha: use binary rather than hashed cutouts at one sample.</summary>
+    // The camera's un-jittered view-projection: culling, LOD and everything spatial read this one (UpdateCamera).
     private Matrix4x4 viewProj;
 
     // Sun travel direction, recomputed from overlay yaw/pitch. A cooked probe with a detected sun

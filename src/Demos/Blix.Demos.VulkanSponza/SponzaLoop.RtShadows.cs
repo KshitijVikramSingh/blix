@@ -22,34 +22,21 @@ namespace Blix.Demos.VulkanSponza;
 // Until the trace is ready the lit pass leaves the sun off. A run whose Metal tracer failed to build has no traced
 // shadows at all (and no GI): the lit pass then binds a placeholder mask and the sun is unshadowed.
 //
-// --rt-isolated: no incident field either, so nothing but the trace lights the frame. The ambient is the irradiance
-// cube times the sky visibility the trace finds (one cosine-weighted sky ray per pixel a frame, TAA averaging them);
-// a way to judge the trace alone, which without bounce light leaves an enclosed courtyard mostly dark.
-//
 // Origins and masks are one per frame slot, written in the slot's frame and read in it, so the slot's fence orders reuse.
 internal sealed partial class SponzaLoop
 {
     // Off only when the frame's Metal tracer failed to build (RecordRtShadows): nothing shadows the sun then.
     private bool rtShadows = true;
     private bool rtNoOverlap;
-    // --metal-device-queue: the Metal tracers on the Vulkan device's own command queue rather than one of their own. A
-    // Sponza frame idles 7-19 ms around each hand-off between the two queues (Metal System Trace), and one queue was the
-    // obvious fix -- measured, it is worse: --ab queue (LOD 0, camera still, one process) put one queue at a 96.4 ms
-    // median against 73.6 ms on two (IQRs 88-100 and 69-80). On two queues the tracers' work (the traced shadows' 7.4 ms
-    // among it) runs beside the Vulkan passes; on one it runs between them. Two it is; this keeps the other measurable.
-    private bool metalDeviceQueue;
-    private bool tracerOnDeviceQueue;
-    private bool rtIsolated;
-    // --rt-coverage-coin: leaf cards' shadows by the baked coverage's coin (as the software traversal meets them), not by
-    // their textures' alpha at the point hit.
-    private bool rtCoverageCoin;
-    // --rt-alpha-mip N: the mip the shadows' alpha test reads (0: full resolution).
-    private float rtAlphaMip;
-    // --rt-alpha-ab: the lit pass's trace takes the coin and the alpha test in turn, a frame each, its GPU time kept
-    // apart for each (stats slots 1, 2): one process, one thermal state -- across runs the fanless M4 throttles enough to
-    // drown the difference. Measured so (Sponza, 2880x1620): the alpha test costs what the coin does, within 1%.
-    private bool rtAlphaAb;
-    private static readonly string[] RtShadowKinds = { "batches", "coin", "alpha test" };
+    // The tracers run on a Metal command queue of their own, not the Vulkan device's: a Sponza frame idles 7-19 ms around
+    // each hand-off between the two queues (Metal System Trace), but one queue measured worse -- 96.4 ms median against
+    // 73.6 ms on two (LOD 0, camera still, one process; IQRs 88-100 and 69-80). On two queues the tracers' work (the
+    // traced shadows' 7.4 ms among it) runs beside the Vulkan passes; on one it runs between them.
+    //
+    // Leaf cards' shadows are alpha-tested against their textures at full resolution, not by the baked coverage's coin:
+    // measured, the test costs what the coin does, within 1% (Sponza, 2880x1620, a frame each in one process).
+    // The lit pass's trace counts its GPU time in the tracer's shadow slot 1 (0: the deferred batches, 3: RTGI's).
+    private const int RtShadowStatSlot = 1;
     private ShaderInterface rtShadowRaysInterface = null!;
     private PassHandle rtShadowRaysPassHandle, rtShadowTracePassHandle, rtShadowFilterPassHandle;
     private PipelineHandle rtShadowRaysPipeline, rtShadowFilterPipeline;
@@ -89,14 +76,11 @@ internal sealed partial class SponzaLoop
     private int rtSheetRows;
     // Per ray, its own direction toward the sun's disc (ShadowsSettings.SunDiscDegrees), per frame slot.
     private GpuBufferHandle[] rtShadowDirections = Array.Empty<GpuBufferHandle>();
-    // Isolated only: one sky ray per pixel, per frame slot.
-    private GpuBufferHandle[] rtShadowSky = Array.Empty<GpuBufferHandle>();
-    private bool RtSkyRays => rtShadows && rtIsolated;
     private (int Width, int Height) rtShadowSize;
-    // The traced rays packed (rt_shadow_rays.comp, uCompact): only they go to Metal, each SIMD group full. Off with sky
-    // rays (traced per pixel) or --no-rt-pack (the A/B).
+    // The traced rays packed (rt_shadow_rays.comp, uCompact): only they go to Metal, each SIMD group full. Off under
+    // --no-rt-pack (the A/B).
     private bool rtNoPack;
-    private bool RtPack => !rtNoPack && !RtSkyRays;
+    private bool RtPack => !rtNoPack;
     // The per-pixel origins and directions (285 MB at 2880x1620, two slots): the unpacked trace reads them, and the leak
     // census; a packed frame needs neither.
     private bool RtPerPixel => !RtPack || rayLeakCensus;
@@ -145,8 +129,8 @@ internal sealed partial class SponzaLoop
 
     // A slot's mask kept at rest (--no-shadow-keep: traced every frame). With no TAA there is no jitter, so a still camera's
     // pixels are the same pixels: the mask a slot traced under the same camera, sun and size is this frame's answer, so long
-    // as nothing moved (the camera, the sun, the mover). Packed rays only, and none of
-    // what varies by frame (interleave, the disc's sequence, sky rays, the per-pixel census, the coverage coin). The
+    // as nothing moved (the camera, the sun). Packed rays only, and none of
+    // what varies by frame (interleave, the disc's sequence, the per-pixel census). The
     // rays pass and trace were ~6 ms of a still ~14 ms frame at Crytek Sponza's courtyard (2026-10-24).
     private bool shadowKeep = true;
     private (Matrix4x4 ViewProj, Vector3 Sun, float Reach, int W, int H)?[] rtShadowSlotKey = Array.Empty<(Matrix4x4, Vector3, float, int, int)?>();
@@ -162,8 +146,8 @@ internal sealed partial class SponzaLoop
     private bool RtShadowKeep(int slot, int width, int height)
     {
         if (rtShadowSlotKey.Length != device.MaxFramesInFlightCount) rtShadowSlotKey = new (Matrix4x4, Vector3, float, int, int)?[device.MaxFramesInFlightCount];
-        var keyable = shadowKeep && rtShadowPacked.Length > 0 && (!halfShadowsNow || render.Taa <= 0f) && !RtSkyRays && !RtPerPixel && !shadows.Interleave
-            && SunDiscTangent <= 0f && !rtCoverageCoin && !rtAlphaAb && !MoverActive;
+        var keyable = shadowKeep && rtShadowPacked.Length > 0 && (!halfShadowsNow || render.Taa <= 0f) && !RtPerPixel && !shadows.Interleave
+            && SunDiscTangent <= 0f;
         var key = (viewProjJittered, -Vector3.Normalize(sunDirection), rayReach, width, height);
         var keep = keyable && rtShadowSlotKey[slot] == key;
         rtShadowSlotKey[slot] = keyable ? key : null;
@@ -178,9 +162,9 @@ internal sealed partial class SponzaLoop
             if (frameTracerFailed) rtShadows = false;
             return;
         }
-        // The A/B's OFF phase (the cascades shade), or shadows off (--no-shadow: the lit pass applies none, so the frame
-        // traces none -- the tracer stays for the GI, its batches a group of their own): no external pass splits the frame.
-        if (abMode == "rtshadow" && AbOffPhase || !shadows.Enabled)
+        // Shadows off (--no-shadow: the lit pass applies none, so the frame traces none -- the tracer stays for the GI, its
+        // batches a group of their own): no external pass splits the frame.
+        if (!shadows.Enabled)
         {
             rtShadowPrevSlot = -1;
             if (!rtShadowBound.Equals(default(GpuBufferHandle)))
@@ -202,7 +186,6 @@ internal sealed partial class SponzaLoop
             device.WaitIdle();
             foreach (var b in rtShadowOrigins) device.DestroyGpuBuffer(b);
             foreach (var b in rtShadowMasks) device.DestroyGpuBuffer(b);
-            foreach (var b in rtShadowSky) device.DestroyGpuBuffer(b);
             foreach (var b in rtShadowDirections) device.DestroyGpuBuffer(b);
             foreach (var b in rtShadowPacked) device.DestroyGpuBuffer(b);
             foreach (var b in rtShadowPixelOf) device.DestroyGpuBuffer(b);
@@ -210,15 +193,13 @@ internal sealed partial class SponzaLoop
             foreach (var b in rtShadowDepths) device.DestroyGpuBuffer(b);
             rtShadowPrevSlot = -1;
             var slots = device.MaxFramesInFlightCount;
-            var header = MemoryMarshal.AsBytes(new uint[] { (uint)width, (uint)height, 1u, RtSkyRays ? 1u : 0u }.AsSpan()).ToArray();
+            var header = MemoryMarshal.AsBytes(new uint[] { (uint)width, (uint)height, 1u, 0u }.AsSpan()).ToArray();
             rtShadowOrigins = Enumerable.Range(0, RtPerPixel ? slots : 0)
                 .Select(s => Own(device.CreateGpuBuffer(width * height * 16, name: $"sponza.rt-shadow.origins{s}"))).ToArray();
             rtShadowMasks = Enumerable.Range(0, slots)
                 .Select(s => Own(device.CreateGpuBuffer(16 + width * height * 4 * RtMaskPlanes, header, $"sponza.rt-shadow.mask{s}"))).ToArray();
             rtShadowDirections = Enumerable.Range(0, RtPerPixel ? slots : 0)
                 .Select(s => Own(device.CreateGpuBuffer(width * height * 16, name: $"sponza.rt-shadow.directions{s}"))).ToArray();
-            rtShadowSky = Enumerable.Range(0, RtSkyRays ? slots : 0)
-                .Select(s => Own(device.CreateGpuBuffer(width * height * 32, name: $"sponza.rt-shadow.sky{s}"))).ToArray();
             // The packed rays and their pixels live from this frame's rays pass to its trace (joined inside the frame), and
             // the frames are chained on the GPU (IGraphicsDevice.ChainFrames): one copy, not one a frame in flight --
             // 36 B a pixel twice over, ~340 MB at 2880x1620 (2026-10-24). --no-frame-chain: one a slot again.
@@ -255,19 +236,18 @@ internal sealed partial class SponzaLoop
         // Packed (RtPack): this use of the slot counts into one of its two counters and zeroes the other for its next.
         var pack = rtShadowPacked.Length > 0;
         var counter = pack ? (int)(rtShadowSlotUses[slot]++ & 1u) : 0;
-        GpuBufferHandle? sky = RtSkyRays ? rtShadowSky[slot] : null;
         var towardSun = -Vector3.Normalize(sunDirection);
         // The sun's disc (ShadowsSettings.SunDiscDegrees): filtered in space after the trace (PenumbraFilter, the rays toward
         // its centre), or each ray toward its own point of it (rt_shadow_rays.comp) and TAA averaging them.
         var filterPenumbra = shadows.PenumbraFilter && !halfShadowsNow && SunDiscTangent > 0f;
         var discTangent = filterPenumbra ? 0f : SunDiscTangent;
         var directions = rtShadowDirections.Length > 0 ? rtShadowDirections[slot] : RtShadowPlaceholder;
-        // Interleaved: packed rays only (no sky rays, no census reading every pixel's) -- always with ShadowsSettings.Interleave,
+        // Interleaved: packed rays only (no census reading every pixel's) -- always with ShadowsSettings.Interleave,
         // and otherwise whenever the mask is not kept (a moving camera): a quarter of the pixels' rays a frame, the rest last
         // frame's reprojected (rt_shadow_fill.comp; full or half res). A still view keeps its mask and traces none; a moving
         // one traced every pixel, its rays pass and trace the frame's largest extra while walking Crytek Sponza 1080p
         // (2026-10-28). --no-rt-shadow-move-interleave: every pixel traced while moving.
-        var interleave = (shadows.Interleave || rtShadowMoveInterleave) && pack && sky is null && !RtPerPixel;
+        var interleave = (shadows.Interleave || rtShadowMoveInterleave) && pack && !RtPerPixel;
         var historyGood = interleave && rtShadowPrevSlot >= 0 && rtShadowPrevSlot != slot && rtShadowPrevSun == towardSun;
         var phase = historyGood ? RtShadowPhases[rtShadowPhase++ & 3u] : 0u;
         var reach = rayReach;
@@ -281,7 +261,6 @@ internal sealed partial class SponzaLoop
                 new("uSize", new Vector4Uniform(new Vector4(width, height, 0f, 0f))),
                 new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, 0f))),
                 new("uSun", new Vector4Uniform(new Vector4(towardSun, reach))),
-                new("uSky", new Vector4Uniform(new Vector4(sky is null ? 0f : 1f, rtShadowFrame % (1u << 24), 0f, 0f))),
                 new("uHalf", new Vector4Uniform(new Vector4(halfShadowsNow ? 1f : 0f, sub.X, sub.Y, 0f))),
                 // The frame's number for the disc's sequence, kept small: a float's fraction holds at 2^16.
                 new("uDisc", new Vector4Uniform(new Vector4(discTangent, rtShadowFrame % 65536u, 0f, 0f))),
@@ -293,10 +272,9 @@ internal sealed partial class SponzaLoop
                 new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
                 new ShaderTextureBinding("uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
             },
-            // Without sky rays the shader writes none, and the placeholder only fills the binding.
             Buffers: new[]
             {
-                new ShaderBufferBinding("RtShadowOrigins", origins), new ShaderBufferBinding("RtShadowSky", sky ?? RtShadowPlaceholder),
+                new ShaderBufferBinding("RtShadowOrigins", origins),
                 new ShaderBufferBinding("RtShadowDirections", directions),
                 new ShaderBufferBinding("RtShadowPacked", pack ? rtShadowPacked[slot % rtShadowPacked.Length] : RtShadowPlaceholder),
                 new ShaderBufferBinding("RtShadowPixelOf", pack ? rtShadowPixelOf[slot % rtShadowPixelOf.Length] : RtShadowPlaceholder),
@@ -307,7 +285,6 @@ internal sealed partial class SponzaLoop
         // A new coin per frame for the partly covered (foliage), so TAA averages their shadows instead of freezing one draw.
         var tracer = frameTracer!;
         var count = width * height;
-        var kind = rtCoverageCoin ? 1 : rtAlphaAb ? 1 + (int)(rtShadowFrame % 2) : 2;
         var seed = unchecked(rtShadowFrame++ * 0x9E3779B9u);
         GpuBufferHandle? perRay = discTangent > 0f ? directions : null;
         // Through sheets that transmit (the curtains): their light on the points behind them, past the words (RtMaskPlanes).
@@ -321,14 +298,14 @@ internal sealed partial class SponzaLoop
             {
                 EncodeDeferredBatches(sync, tracer);
                 tracer.EncodeShadow(sync, packed, mask, 16, count, towardSun, seed, null,
-                    alphaTest: kind == 2, statSlot: kind, limit: counters, limitOffset: counter * 4, pixelOf: pixelOf, throughAt: throughAt);
+                    alphaTest: true, statSlot: RtShadowStatSlot, limit: counters, limitOffset: counter * 4, pixelOf: pixelOf, throughAt: throughAt);
             }));
         }
         else graph.External(rtShadowTracePassHandle, sync => tracer.EncodeGroup(sync, () =>
         {
             EncodeDeferredBatches(sync, tracer);
-            tracer.EncodeShadow(sync, origins, mask, 16, count, towardSun, seed, sky,
-                alphaTest: kind == 2, statSlot: kind, directions: perRay, throughAt: throughAt);
+            tracer.EncodeShadow(sync, origins, mask, 16, count, towardSun, seed, null,
+                alphaTest: true, statSlot: RtShadowStatSlot, directions: perRay, throughAt: throughAt);
         }));
         // The frame's deferred batches go in this group (SponzaLoop.TracerGroup.cs).
         tracerGroupRecorded = ReferenceEquals(tracer, frameTracer);
@@ -412,12 +389,8 @@ internal sealed partial class SponzaLoop
         var surfaceWords = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(raySurfaces, 0, rayGpuData!.RowPlacements.Length * 4).AsSpan()).ToArray();
         device.WaitIdle();
         var blocks = RayQueryGpuData.BlockNames.Select(name => rayBlockBuffers.First(b => b.Name == name).Buffer).ToArray();
-        var (alphaMaterials, rowMaterial) = rtCoverageCoin ? (new List<MetalRayTracer.AlphaMaterial>(), Array.Empty<uint>()) : RtAlphaMaterials();
+        var (alphaMaterials, rowMaterial) = RtAlphaMaterials();
         var alphaTested = rowMaterial.Select(m => m != uint.MaxValue).ToArray();
-        // On its own queue unless --metal-device-queue (above); the bake scene's tracer shares this one either way
-        // (SponzaLoop.BakeScene.cs).
-        if (metalDeviceQueue) tracer.UseDeviceQueue();
-        tracerOnDeviceQueue = metalDeviceQueue;
         // Sheets that transmit (KHR_materials_diffuse_transmission, --cloth-transmission: the curtains): the sun's shadow
         // rays go through them (MetalRayTracer.SetTransmit), so they are built non-opaque with the alpha-tested.
         var rowTransmit = RtRowTransmit(surfaceWords, out rtSheetRows);
@@ -427,11 +400,11 @@ internal sealed partial class SponzaLoop
             for (var row = 0; row < rowTransmit.Length; row++) if (rowTransmit[row] != 0u) alphaTested[row] = true;
         }
         rtBuild = tracer.Build(rayGpuData, blocks, surfaceWords, alphaTested);
-        if (!rtCoverageCoin) tracer.SetAlpha(alphaMaterials, rowMaterial, raySurfaceBakeBuffers.First(b => b.Name == "BlixRayUvs").Buffer, rtAlphaMip);
+        tracer.SetAlpha(alphaMaterials, rowMaterial, raySurfaceBakeBuffers.First(b => b.Name == "BlixRayUvs").Buffer, 0f);
         if (rtSheetRows > 0) tracer.SetTransmit(rowTransmit);
         frameTracer = tracer;
         Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] metal tracer: {rtBuild.Value.SolidTriangles + rtBuild.Value.PartialTriangles:N0} triangles ({rtBuild.Value.PartialTriangles:N0} partly covered, {(rtCoverageCoin ? "by the coverage coin" : string.Create(Inv, $"alpha-tested by {alphaMaterials.Count} materials' textures"))}) in {rtBuild.Value.Hierarchies} bottom-level structures, built in {rtBuild.Value.CpuPrepareMs + rtBuild.Value.BlasGpuMs + rtBuild.Value.CompactTlasGpuMs:0} ms; {rtBuild.Value.CompactedBytes / 1048576.0:0} MB."));
+            $"[VulkanSponza] metal tracer: {rtBuild.Value.SolidTriangles + rtBuild.Value.PartialTriangles:N0} triangles ({rtBuild.Value.PartialTriangles:N0} partly covered, alpha-tested by {alphaMaterials.Count} materials' textures) in {rtBuild.Value.Hierarchies} bottom-level structures, built in {rtBuild.Value.CpuPrepareMs + rtBuild.Value.BlasGpuMs + rtBuild.Value.CompactTlasGpuMs:0} ms; {rtBuild.Value.CompactedBytes / 1048576.0:0} MB."));
         return true;
     }
 
@@ -516,8 +489,6 @@ internal sealed partial class SponzaLoop
         var mask = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(rtShadowMasks[device.CurrentFrameSlot], 16, (int)rays * 4).AsSpan());
         long blocked = 0;
         foreach (var word in mask) if ((word & 1u) != 0) blocked++;
-        long skyBlocked = 0;
-        foreach (var word in mask) if ((word & 2u) != 0) skyBlocked++;
         // The mask itself beside the shot (white: the sun reaches; black: blocked), pixel for pixel with the image.
         var rgba = new byte[rays * 4];
         for (var i = 0; i < rays; i++)
@@ -535,13 +506,12 @@ internal sealed partial class SponzaLoop
                 $"[VulkanSponza] rt shadows, last frame: {packed:N0} rays packed ({100.0 * packed / rays:0.0}% of {rays:N0} pixels); of them facing away from the sun (sheets, foliage) {c[3]:N0}."));
         }
         Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] rt shadows, last frame's mask: sun blocked at {100.0 * blocked / rays:0.0}% of pixels, reaching {100.0 * (rays - blocked) / rays:0.0}%{(RtSkyRays ? string.Create(Inv, $"; sky rays blocked at {100.0 * skyBlocked / rays:0.0}%") : "")}."));
-        for (var slot = 1; slot < RtShadowKinds.Length; slot++)
+            $"[VulkanSponza] rt shadows, last frame's mask: sun blocked at {100.0 * blocked / rays:0.0}% of pixels, reaching {100.0 * (rays - blocked) / rays:0.0}%."));
+        var stats = frameTracer.ShadowStatsOf(RtShadowStatSlot);
+        if (stats.Dispatches > 0)
         {
-            var stats = frameTracer.ShadowStatsOf(slot);
-            if (stats.Dispatches == 0) continue;
             Console.WriteLine(string.Create(Inv,
-                $"[VulkanSponza] rt shadows, {RtShadowKinds[slot]}: {stats.Dispatches:N0} frames traced ({rtShadowFrames:N0} recorded), {rtShadowSize.Width}x{rtShadowSize.Height} = {rays:N0} rays a frame; Metal GPU {stats.MeanGpuMs:0.000} ms mean, {stats.LastGpuMs:0.000} ms last, {rays / Math.Max(stats.MeanGpuMs, 1e-6) / 1000.0:0.0} M rays/s; {stats.Failures} failed."));
+                $"[VulkanSponza] rt shadows, the pixels: {stats.Dispatches:N0} frames traced ({rtShadowFrames:N0} recorded), {rtShadowSize.Width}x{rtShadowSize.Height} = {rays:N0} rays a frame; Metal GPU {stats.MeanGpuMs:0.000} ms mean, {stats.LastGpuMs:0.000} ms last, {rays / Math.Max(stats.MeanGpuMs, 1e-6) / 1000.0:0.0} M rays/s; {stats.Failures} failed."));
         }
     }
 }

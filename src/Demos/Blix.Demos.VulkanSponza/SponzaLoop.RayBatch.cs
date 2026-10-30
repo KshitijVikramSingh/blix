@@ -42,7 +42,7 @@ internal sealed partial class SponzaLoop
     }
 
     // At the shot: what the frame tracer's in-frame batches cost on Metal, from their own GPU times (closest-hit batches;
-    // shadow batches, the traced screen shadows' among them).
+    // the deferred shadow batches -- the traced screen shadows count in a slot of their own, RtShadowStatSlot).
     private void WriteFrameTracerStats()
     {
         if (frameTracer is null) return;

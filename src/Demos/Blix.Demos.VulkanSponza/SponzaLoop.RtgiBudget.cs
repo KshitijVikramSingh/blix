@@ -254,7 +254,7 @@ internal sealed partial class SponzaLoop
         restLastSun = sunDirection;
         var settled = rtgiBudget && rtgiNeedVisible < 0.25f && rtgiNeedHits < 0.25f && rtgiNeedSun < 0.01f;
         var eligible = rtgiScreenEvery > 1 && RtgiReadoutReady && !RtgiSettleNow && !RtgiDumpDue && !RtgiTemporalNow
-            && !gpuReference && !MoverActive && rtgiStillFrames >= 2 && settled;
+            && !gpuReference && rtgiStillFrames >= 2 && settled;
         if (Environment.GetEnvironmentVariable("BLIX_PROBE") == "screenrest") eligible &= AbArm == 1;
         rtgiScreenFrame++;
         screenRestNow = eligible && rtgiScreenFrame % rtgiScreenEvery != 0;

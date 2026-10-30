@@ -8,16 +8,14 @@ namespace Blix.Demos.VulkanSponza;
 // idle at every turn (a Metal System Trace: ~29 ms of a 103 ms frame idle, ~24 ms more in waits). Batches whose answers
 // are read on a LATER frame (RTGI's, SponzaLoop.Rtgi.cs) are deferred here and encoded
 // in one group (MetalRayTracer.EncodeGroup) with the traced screen shadows -- or, on a frame without them, in a group
-// pass of their own. The frames' chain (VulkanGraphicsDevice.ChainFrames) puts the next frame's readers after it.
-// --tracer-batches-apart: each batch its own external pass, in its own frame, as before.
+// pass of their own. The frames' chain (IGraphicsDevice.ChainFrames) puts the next frame's readers after it.
 internal sealed partial class SponzaLoop
 {
-    private bool tracerBatchesApart;
     private PassHandle tracerGroupPassHandle;
     private readonly List<Action<ExternalWorkSync, MetalRayTracer>> tracerDeferred = new();
     private bool tracerGroupRecorded;
 
-    private bool TracerGroupsOn => !tracerBatchesApart && FrameRaysOnHardware;
+    private bool TracerGroupsOn => FrameRaysOnHardware;
 
     private void DeferTracerBatch(Action<ExternalWorkSync, MetalRayTracer> batch) => tracerDeferred.Add(batch);
 

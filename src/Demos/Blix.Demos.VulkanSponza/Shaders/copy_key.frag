@@ -1,6 +1,6 @@
 #version 450
 // The surface-key target kept for the next frame (stage 4e): a copy at the end of the frame, after every reader,
-// so the next frame's TAA and screen probes can ask which surface a pixel showed one frame ago.
+// so the next frame's TAA can ask which surface a pixel showed one frame ago.
 #include "fullscreen.glsl"
 
 layout(location = 0) in vec2 vUv;

@@ -29,12 +29,10 @@ layout(location = 0) out vec4 outNormal;
 layout(location = 6) flat in uint vSurfaceKey;
 layout(location = 7) in vec4 vClipNow;
 layout(location = 8) in vec4 vClipPrev;
-layout(location = 9) in vec3 vWorldMotion;
-// Stage 4e: which surface this pixel shows, its motion in uv since last frame and in world space (both now minus
-// then). Single-sample passes only carry these targets; under MSAA the writes have nowhere to go and are dropped.
+// Stage 4e: which surface this pixel shows, and its motion in uv since last frame (now minus then). Single-sample
+// passes only carry these targets; under MSAA the writes have nowhere to go and are dropped.
 layout(location = 1) out uint outSurfaceKey;
 layout(location = 2) out vec2 outVelocity;
-layout(location = 3) out vec4 outMotion;
 
 void main() {
     vec3 n = normalize(vNormalWorld);
@@ -42,7 +40,6 @@ void main() {
     outNormal = vec4(shading, 0.0);
     outSurfaceKey = vSurfaceKey;
     outVelocity = (vClipNow.xy / vClipNow.w - vClipPrev.xy / vClipPrev.w) * 0.5;
-    outMotion = vec4(vWorldMotion, 0.0);
 
     float a = texture(uAlbedo, vUv).a * mat.uBaseColorFactor.w;
     // Derivatives before any discard (blix_layerHash reads the world position's).

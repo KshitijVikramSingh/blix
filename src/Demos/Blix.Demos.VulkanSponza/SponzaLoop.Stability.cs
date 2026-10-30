@@ -6,8 +6,8 @@ namespace Blix.Demos.VulkanSponza;
 // --stability K: does the lighting settle? Over the K frames before the shot, every 4th pixel's luminance in the
 // incident-light field and in the final HDR image is read back each frame, and the shot reports how much each pixel
 // moves: its temporal coefficient of variation (std / mean over the K frames) and its mean frame-to-frame step. A
-// heat map of the incident field's variation is written beside the shot. History counters say whether probes KEEP
-// their past; this says whether what is shaded actually holds still.
+// heat map of the incident field's variation is written beside the shot. History counters say whether a cache KEEPS
+// its past; this says whether what is shaded actually holds still.
 internal sealed partial class SponzaLoop
 {
     private int stabilityFrames;

@@ -350,7 +350,6 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-filter-settled") is { } fs) rtgiFilterSettled = MathF.Max(1f, fs);
         if (args.Float("rtgi-filter-young") is { } fy) rtgiFilterYoung = MathF.Max(1f, MathF.Round(fy));
         if (args.Flag("rtgi-no-requests")) rtgiRequests = false;
-        fixedSubpixel = args.Flag("fixed-subpixel");
         if (args.Float("rtgi-filter-from") is { } ffr) rtgiFilterFrom = MathF.Max(0f, ffr);
         if (args.Float("rtgi-filter-to") is { } fto) rtgiFilterTo = MathF.Max(1f, fto);
         if (args.Float("rtgi-filter-sigma") is { } fsg) rtgiFilterSigma = MathF.Max(0.1f, fsg);
