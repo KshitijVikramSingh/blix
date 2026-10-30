@@ -207,27 +207,47 @@ void main() {
         if (clip.w > 1e-4) {
             vec2 uv = clip.xy / clip.w * 0.5 + 0.5;
             if (all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0)))) {
-                vec4 state = texture(uHistoryState, uv);
                 float expected = length(p - u.uPrevCamera.xyz);
+                // The four history texels around uv, each validated alone and only those kept blended (by their bilinear
+                // weights, renormalised). Filtered as one, a silhouette's four mixed the near surface's history with the
+                // one behind it -- the distance itself blended, passing the test by chance -- and the brighter surface
+                // behind an edge streaked along it while the camera moved (the user, the crevices testbed, 2026-10-31).
                 // Finite only: the history targets are not written before the first frame that keeps one (the boot's
                 // settle draws no lit frame), and their garbage passed the state test now and then -- NaN, mixed in at
                 // 15/16, kept every lit pixel black on a still camera until motion dropped the history (the user,
-                // Crytek Sponza, 2026-10-29).
-                vec4 hist = texture(uHistory, uv), fh = texture(uFastHistory, uv);
-                // The same surface's, by its normal too: by the distance alone, at a junction the other wall's history (at
-                // the same distance) was taken -- its light carried over the edge, a comb along the crevices testbed's
-                // corners, and the opposing faces of a gap trading theirs (2026-10-29).
-                vec2 hn = state.zw * 2.0 - 1.0;
-                vec3 nPrev = vec3(hn, 1.0 - abs(hn.x) - abs(hn.y));
-                float tt = max(-nPrev.z, 0.0);
-                nPrev.x += nPrev.x >= 0.0 ? -tt : tt;
-                nPrev.y += nPrev.y >= 0.0 ? -tt : tt;
-                bool sameFacing = dot(normalize(nPrev), nHere) > 0.9;
-                bool finite = !any(isnan(hist)) && !any(isinf(hist)) && !any(isnan(fh)) && !any(isinf(fh)) && !isnan(state.x);
-                if (finite && sameFacing && state.y > 0.5 && abs(state.x - expected) < 0.02 * expected + 0.02) {
-                    history = hist;
-                    fast = fh;
-                    held = state.y;
+                // Crytek Sponza, 2026-10-29). The same surface's, by its normal too: by the distance alone, at a junction
+                // the other wall's history (at the same distance) was taken -- its light carried over the edge, a comb
+                // along the crevices testbed's corners, and the opposing faces of a gap trading theirs (2026-10-29).
+                ivec2 hs = textureSize(uHistory, 0);
+                vec2 ft = uv * vec2(hs) - 0.5;
+                ivec2 t0 = ivec2(floor(ft));
+                vec2 fr = ft - vec2(t0);
+                vec4 hsum = vec4(0.0), fsum = vec4(0.0);
+                float wsum = 0.0, heldSum = 0.0;
+                for (int k = 0; k < 4; k++) {
+                    ivec2 o = ivec2(k & 1, k >> 1);
+                    ivec2 tc = clamp(t0 + o, ivec2(0), hs - 1);
+                    float wk = (o.x == 1 ? fr.x : 1.0 - fr.x) * (o.y == 1 ? fr.y : 1.0 - fr.y);
+                    if (wk <= 1e-4) continue;
+                    vec4 state = texelFetch(uHistoryState, tc, 0);
+                    vec4 hist = texelFetch(uHistory, tc, 0), fh = texelFetch(uFastHistory, tc, 0);
+                    vec2 hn = state.zw * 2.0 - 1.0;
+                    vec3 nPrev = vec3(hn, 1.0 - abs(hn.x) - abs(hn.y));
+                    float tt = max(-nPrev.z, 0.0);
+                    nPrev.x += nPrev.x >= 0.0 ? -tt : tt;
+                    nPrev.y += nPrev.y >= 0.0 ? -tt : tt;
+                    bool sameFacing = dot(normalize(nPrev), nHere) > 0.9;
+                    bool finite = !any(isnan(hist)) && !any(isinf(hist)) && !any(isnan(fh)) && !any(isinf(fh)) && !isnan(state.x);
+                    if (!(finite && sameFacing && state.y > 0.5 && abs(state.x - expected) < 0.02 * expected + 0.02)) continue;
+                    hsum += hist * wk;
+                    fsum += fh * wk;
+                    heldSum += state.y * wk;
+                    wsum += wk;
+                }
+                if (wsum > 0.05) {
+                    history = hsum / wsum;
+                    fast = fsum / wsum;
+                    held = heldSum / wsum;
                 }
             }
         }
