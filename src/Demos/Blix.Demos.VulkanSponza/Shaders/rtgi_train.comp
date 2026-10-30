@@ -46,6 +46,10 @@ layout(set = 0, binding = 0) uniform RtgiTrain {
                          // slots (frames); 0 x: none
     vec4 uCook;          // the cooked cell set: rtgi_cook.glsl's COOK_PARAMS (w 0: not cooked yet)
     vec4 uCookCounts;    // rtgi_cook.glsl's COOK_COUNTS
+    vec4 uCookTrain;     // a cooked training point's samples (rtgi_rays.comp's cookedSource): x 1 its back-face samples dropped
+                         // and tallied, the point dropped from its cell's turn past z of w (cookTally); y 1 the probe's
+                         // lifetime counts (RtgiCookProbe); z the back-face samples a window of w allows; w the window
+    vec4 uCookTrain2;    // x the placements (RtgiCookSided's)
 } u;
 bool twice(uint b) { return (uint(u.uDouble.x) & b) != 0u; }
 // How a sample's words reach its cell (uFallback.w): 0 each lane's atomics, 1 the subgroup's rounds, 2 the workgroup's table.
@@ -106,6 +110,12 @@ layout(std430, set = 0, binding = 27) readonly buffer RtgiCookScale { uvec2 cook
 #define COOK_POINTS(i) cookPoints[i]
 #define COOK_REGIONS(i) cookRegions[i]
 #define COOK_SCALE(i) cookScale[i]
+// The cooked training points' tallies (rtgi_cook.glsl's COOK_CELL_POINTS), the triangles' alpha-tested bits (rtgi_cook.comp's
+// RtgiCookSided: a leaf's back face is a front), and the probe's lifetime counts per point (BLIX_RTGI_NEAR_PROBE: samples,
+// back-face samples, the samples' luminance in 1024ths).
+layout(std430, set = 0, binding = 28) buffer RtgiCookCellPoints { uvec2 cookCellPoints[]; };
+layout(std430, set = 0, binding = 29) readonly buffer RtgiCookSided { uint cookSided[]; };
+layout(std430, set = 0, binding = 30) buffer RtgiCookProbe { uvec4 cookProbe[]; };
 #define RTGI_REGION_OF 1
 #include "rtgi_cache.glsl"
 #include "rtgi_cook.glsl"
@@ -413,6 +423,31 @@ void add(uint s, vec3 e, bool counted, bool sky, bool sunTraced, bool sunLit, bo
 vec4 captureHit = vec4(0.0), captureHitN = vec4(0.0);
 
 // The point's sample: false where it has none (past the frame's points, a point not live, a degenerate hit).
+// Whether hit i met an alpha-tested triangle (its back face a front: rtgi_cook.comp's cookAlphaTested).
+bool hitAlphaTested(uint i) {
+    uint placements = uint(u.uCookTrain2.x);
+    uvec4 h1 = hits[3u * i + 1u];
+    if (h1.x >= placements) return false;
+    uint first = cookSided[h1.x], count = cookSided[h1.x + 1u] - first;
+    if (h1.y >= count) return false;
+    uint b = first + h1.y;
+    return ((cookSided[placements + 1u + (b >> 5u)] >> (b & 31u)) & 1u) != 0u;
+}
+
+// A cooked training point's sample tallied (uCookTrain.x): its samples and those whose ray met a back face (strict: an
+// alpha-tested triangle's back face a front) over a window of uCookTrain.w; past uCookTrain.z of them, the point is out of
+// its cell's turn for good (COOK_POINT_DEAD) -- a point the inside test passed whose rays still start inside a wall (a
+// floor's point at a wall's foot): its back-face samples trained its cell black, creases darkening (the user, crevices,
+// 2026-10-31).
+void cookTally(uint slot, bool back) {
+    uint old = atomicAdd(cookCellPoints[slot].y, (1u << 16) + (back ? (1u << 22) : 0u));
+    uint n = ((old >> 16) & 63u) + 1u;
+    if (n < uint(u.uCookTrain.w)) return;
+    uint b = ((old >> 22) & 63u) + (back ? 1u : 0u);
+    atomicAnd(cookCellPoints[slot].y, ~(0xFFFu << 16));
+    if (float(b) > u.uCookTrain.z) atomicOr(cookCellPoints[slot].y, 0x80000000u);
+}
+
 bool pointSample(uint i, out vec4 p, out vec3 n, out vec3 e, out bool counted, out bool sky, out bool sunTraced, out bool sunLit,
                  out uint hd) {
     p = vec4(0.0); n = vec3(0.0); e = vec3(0.0);
@@ -426,7 +461,10 @@ bool pointSample(uint i, out vec4 p, out vec3 n, out vec3 e, out bool counted, o
     vec3 d = rays[2u * i + 1u].xyz;
     sampleDir = d;
     // The ray's weight against cosine sampling (rtgi_rays.comp: 1, its rays cosine). Its sample is PI x L_in x it.
-    float weight = points[2u * i + 1u].w;
+    uint wb = floatBitsToUint(points[2u * i + 1u].w);
+    bool cooked = (wb & 0xC0000000u) == 0x80000000u;
+    uint cookedSlot = wb & 0x3FFFFFFFu;
+    float weight = cooked ? 1.0 : uintBitsToFloat(wb);
     captureHit = vec4(rays[2u * i].xyz + d * 1e4, weight);
     captureHitN = vec4(0.0, 0.0, 0.0, 1e30);
     uvec4 h0 = hits[3u * i];
@@ -435,6 +473,16 @@ bool pointSample(uint i, out vec4 p, out vec3 n, out vec3 e, out bool counted, o
     counted = true;
     captureFlags = 0.0;
     if ((h0.w & 1u) != 0u && (h0.w & 2u) == 0u) captureFlags += 8.0;
+    if (cooked) {
+        bool back = (h0.w & 1u) != 0u && (h0.w & 2u) == 0u && !hitAlphaTested(i);
+        if (u.uCookTrain.y > 0.5) { atomicAdd(cookProbe[cookedSlot].x, 1u); if (back) atomicAdd(cookProbe[cookedSlot].y, 1u); }
+        // A cooked point's ray met a back face: it started inside something -- no sample (a screen point's stays black: a
+        // single-sided wall seen from behind is dark).
+        if (u.uCookTrain.x > 0.5) {
+            cookTally(cookedSlot, back);
+            if (back) return false;
+        }
+    }
     if ((h0.w & 1u) == 0u) {
         e = 3.14159265359 * textureLod(uSkyRadiance, d, u.uSun.w).rgb;
         sky = true;
@@ -473,6 +521,7 @@ bool pointSample(uint i, out vec4 p, out vec3 n, out vec3 e, out bool counted, o
     e *= weight;
     // Nothing not finite reaches a cell: one NaN there spreads to every cell whose rays land in it.
     if (any(isnan(e)) || any(isinf(e))) counted = false;
+    if (cooked && u.uCookTrain.y > 0.5 && counted) atomicAdd(cookProbe[cookedSlot].z, uint(min(dot(e, vec3(0.2126, 0.7152, 0.0722)), 4000.0) * 1024.0));
     // A point whose cell's sun is settled traced none (rtgi_rays.comp: w 2).
     sunTraced = dot(n, u.uSun.xyz) > 0.0 && p.w < 1.5;
     sunLit = sunTraced && (occluded[i] & 1u) == 0u;

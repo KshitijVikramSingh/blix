@@ -34,10 +34,9 @@ namespace Blix.Demos.VulkanSponza;
 //               own-level cell one candidate per occupied 4 x 4 sub-square of the cell across its surface (nearest the
 //               sub-square's middle), the one nearest its middle, its normal, whether it is a junction (its sample's
 //               nearest hit under min(1.5 x the cell size, 0.375 m)) (worker)
-//   inside      the level-0 and level-1 junction cells' candidates, 8 rays each to 64 m: the one meeting the fewest back
-//               faces (alpha-tested ones fronts), nearest the middle, the representative; those meeting at most 0.3 of
-//               them kept as training points; buried where none is
-//               (rtgi_cook.comp kinds 2, 3)
+//   inside      every own-level cell's candidates, 16 rays each to 64 m: the one meeting the fewest back faces
+//               (alpha-tested ones fronts), nearest the middle, the representative; only those meeting none kept as
+//               training points (none clean: the best alone); buried where even it met more than 0.3 of them
 //   finalize    each cell's representative point (the chosen candidate, or the one nearest its middle; an ancestor's
 //               its children's nearest its middle -- the neighbour rays' and the near field's), its training points
 //               (CookPick: clamp(ceil(occupied sub-squares / 2), 4, 16), at most the occupied, in a Bayer order; an
@@ -60,7 +59,16 @@ internal sealed partial class SponzaLoop
     private const float CookFineBelow = 0.2f, CookCoarseCube = 0.2f;
     // The inside test: candidates a cell, rays a candidate, the share of a candidate's rays on back faces past which it is
     // buried (the census's side rule).
-    private const int CookCandidates = 16, CookChooseRays = 8;
+    private const int CookCandidates = 16, CookChooseRays = 16;
+    // --rtgi-cook-keep-backs N: a junction cell's candidate kept as a training point only where at most N of its inside
+    // test's rays met a back face (0: clean only; none clean, the cell's best alone). At the buried share (4 of 16) creases
+    // darkened: points at a wall's foot started a fifth of their rays inside the wall (the user, crevices, 2026-10-31).
+    private int rtgiCookKeepBacks;
+    // The training's tally (rtgi_train.comp cookTally): a cooked point out of its cell's turn once more than
+    // CookDropBacks of its last CookDropWindow samples met back faces, and its back-face samples dropped; --rtgi-cook-no-drop
+    // off (they train black, as a screen point's do).
+    private bool rtgiCookDrop = true;
+    private const int CookDropWindow = 32, CookDropBacks = 2;
     private const float CookBuriedShare = 0.3f;
     // The size field's smoothing: passes, and their reach in the pass's sample spacing (CookField.Smooth).
     private const int CookSmoothPasses = 3;
@@ -81,6 +89,7 @@ internal sealed partial class SponzaLoop
     private long rtgiCookMost = 12_000_000;
     // --rtgi-cook-log: each stage's line to the log (on); the cooked cells near a point (BLIX_RTGI_NEAR_PROBE="x,y,z").
     private bool rtgiCookProbePending;
+    private uint cookReadyFrame;
 
     private enum CookStage { Waiting, Geometry, SizePlace, SizeTrace, SizeDrain, Cells, InsideTrace, InsideDrain, Finalize, NearLinks, Neighbours, Regions, Ready }
     private CookStage cookStage = CookStage.Waiting;
@@ -160,7 +169,13 @@ internal sealed partial class SponzaLoop
     private GpuBufferHandle[] cookRayBufs = Array.Empty<GpuBufferHandle>(), cookHitBufs = Array.Empty<GpuBufferHandle>();
     // The cooked data (rtgi_cook.glsl): the cell table, the cells' points, the size table, the level-0 cells' regions, the
     // near field's links and light, the near-train list; the regions' scratch.
-    private GpuBufferHandle cookCellPoints;
+    private GpuBufferHandle cookCellPoints, cookProbe;
+    private GpuBufferHandle CookSidedOrDummy => CookOr(cookSided);
+    private GpuBufferHandle CookProbeOrDummy => CookOr(cookProbe);
+    // rtgi_train.comp's uCookTrain (x the tally and the drop on; y the probe's counts; z the back-face samples a window
+    // allows; w the window) and uCookTrain2 (x the placements).
+    private Vector4 CookTrainUniform => new(rtgiCookReady && rtgiCookDrop ? 1f : 0f, rtgiCookReady && !cookProbe.Equals(default(GpuBufferHandle)) ? 1f : 0f, CookDropBacks, CookDropWindow);
+    private Vector4 CookTrain2Uniform => new(cookPlacements, 0f, 0f, 0f);
     private GpuBufferHandle CookCellPointsOrDummy => CookOr(cookCellPoints);
     private GpuBufferHandle cookTable, cookPoints, cookScale, cookRegions, cookLabels, cookCubes, nearLinks, nearHits, nearLightBuf, nearList;
     private int cookCubeSlots;
@@ -202,6 +217,8 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-cook-ms") is { } ms) rtgiCookMs = MathF.Max(0.1f, ms);
         if (args.Int("rtgi-cook-rays") is { } rays) rtgiCookRays = Math.Clamp(rays, 0, CookRayRoom);
         if (args.Long("rtgi-cook-most") is { } most) rtgiCookMost = Math.Max(65536, most);
+        if (args.Int("rtgi-cook-keep-backs") is { } kb) rtgiCookKeepBacks = Math.Clamp(kb, 0, CookChooseRays);
+        if (args.Flag("rtgi-cook-no-drop")) rtgiCookDrop = false;
         if (args.Flag("rtgi-no-near-cook")) rtgiNearCook = false;
         if (args.Flag("rtgi-no-surface-train")) rtgiSurfaceTrain = false;
         if (args.Float("rtgi-near-blend") is { } nb) rtgiNearBlend = Math.Clamp(nb, 0.01f, 1f);
@@ -744,9 +761,12 @@ internal sealed partial class SponzaLoop
         }
     }
 
-    // The inside test's cells: the level-0 and level-1 own-level junction cells, by level then key.
+    // The inside test's cells: every own-level cell (its candidates are its training points). The junction cells of levels
+    // 0 and 1 alone were tested until 2026-10-31: a floor's cell under a wall standing on it, its sample a quarter metre
+    // off and clear, was no junction, and all its points sat inside the wall -- 91% of their rays on back faces, a black
+    // patch at the dead end's crease (crevices, the probe).
     private static (int Level, long Key)[] CookInsideCells(CookCells cells) =>
-        Enumerable.Range(0, 2).SelectMany(l => cells.Acc[l].Where(kv => kv.Value.Junction && kv.Value.Sub is not null).Select(kv => (l, kv.Key))).ToArray();
+        Enumerable.Range(0, cells.Acc.Length).SelectMany(l => cells.Acc[l].Where(kv => kv.Value.Sub is not null).Select(kv => (l, kv.Key))).ToArray();
 
     private static uint CookOctPack(Vector3 n) => CensusOctPack(n.LengthSquared() > 1e-12f ? Vector3.Normalize(n) : Vector3.UnitY);
 
@@ -765,25 +785,29 @@ internal sealed partial class SponzaLoop
         public uint[] Table = Array.Empty<uint>(), Scale = Array.Empty<uint>(), CellPoints = Array.Empty<uint>();
         public long[] PointsPerCell = new long[CookCandidates + 1];
         public int ScaleEntries;
+        // The inside test's back-face rays of each training point (255: not inside-tested), by its slot past the cells';
+        // the inside-tested cells' points under the rule before and now, and those left their best candidate alone.
+        public byte[] PointBacks = Array.Empty<byte>();
+        public long InsidePointsBefore, InsidePointsNow, BestOnly;
         public long[] ByLevel = new long[RtgiTopLevel + 1], OwnByLevel = new long[RtgiTopLevel + 1], JunctionByLevel = new long[RtgiTopLevel + 1];
         public long Buried, InsideBuried;
         public double Ms;
     }
 
-    private static CookLayout FinalizeCook(CookCells cells, (int Level, long Key)[] inside, uint[] chosen, float finest)
+    private static CookLayout FinalizeCook(CookCells cells, (int Level, long Key)[] inside, uint[] chosen, float finest, int keepBacks)
     {
         var clock = Stopwatch.StartNew();
         var levels = RtgiTopLevel + 1;
         var layout = new CookLayout();
         // The inside test's choices by cell.
-        var choice = new Dictionary<(int, long), uint>(inside.Length);
-        for (var i = 0; i < inside.Length; i++) choice[inside[i]] = chosen[i];
+        var choice = new Dictionary<(int, long), int>(inside.Length);
+        for (var i = 0; i < inside.Length; i++) choice[inside[i]] = i;
         // Per level, every cell's representative point, normal, bits, and its training points; ancestors' from their
         // children's.
-        var cellsAt = new Dictionary<long, (Vector3 P, Vector3 N, uint Bits, Vector3[] Pts)>[levels];
+        var cellsAt = new Dictionary<long, (Vector3 P, Vector3 N, uint Bits, Vector3[] Pts, byte[] Backs)>[levels];
         for (var l = 0; l < levels; l++)
         {
-            var mine = cellsAt[l] = new Dictionary<long, (Vector3, Vector3, uint, Vector3[])>(cells.All[l].Length);
+            var mine = cellsAt[l] = new Dictionary<long, (Vector3, Vector3, uint, Vector3[], byte[])>(cells.All[l].Length);
             var cs = finest * MathF.Pow(2f, l);
             foreach (var (key, a) in cells.Acc[l])
             {
@@ -791,14 +815,32 @@ internal sealed partial class SponzaLoop
                 var p = a.Best;
                 var bits = side | 64u | ((uint)l << 8) | (a.Junction ? 32u : 0u);
                 var mask = a.SubMask;
-                if (choice.TryGetValue((l, key), out var c))
+                var backs = new byte[CookCandidates];
+                Array.Fill(backs, (byte)255);
+                if (choice.TryGetValue((l, key), out var ci))
                 {
-                    if (a.Sub is not null && (a.SubMask & (1 << (int)(c & 0xFF))) != 0) p = a.Sub[(int)(c & 0xFF)];
-                    mask &= (int)(c >> 16);
-                    if ((c & 256u) != 0) { bits |= 16u; layout.InsideBuried++; mask = 0; }
+                    var c = chosen[5 * ci];
+                    var bestK = (int)(c & 0xFF);
+                    if (a.Sub is not null && (a.SubMask & (1 << bestK)) != 0) p = a.Sub[bestK];
+                    var clean = 0;
+                    for (var k = 0; k < CookCandidates; k++)
+                    {
+                        backs[k] = (byte)(chosen[5 * ci + 1 + k / 4] >> (8 * (k % 4)));
+                        if ((a.SubMask & (1 << k)) != 0 && backs[k] <= keepBacks) clean |= 1 << k;
+                    }
+                    // The rule before (bd877111): a level-0/1 junction cell's candidates under the buried share; any other
+                    // cell's every candidate, untested.
+                    var tested = a.Junction && l <= 1;
+                    var before = tested ? a.SubMask & (int)(c >> 16) : a.SubMask;
+                    if ((c & 256u) != 0) { bits |= 16u; layout.InsideBuried++; mask = 0; if (tested) before = 0; }
+                    else if (clean == 0) { mask = 1 << bestK; layout.BestOnly++; }
+                    else mask = clean;
+                    layout.InsidePointsBefore += CookPick(a.Sub, before).Pts.Length;
+                    layout.InsidePointsNow += CookPick(a.Sub, mask).Pts.Length;
                 }
                 var n = a.N.LengthSquared() > 1e-12f ? Vector3.Normalize(a.N) : Vector3.UnitY;
-                mine[key] = (p, n, bits, CookPick(a.Sub, mask));
+                var pick = CookPick(a.Sub, mask);
+                mine[key] = (p, n, bits, pick.Pts, pick.Subs.Select(k => backs[k]).ToArray());
             }
             if (l == 0) continue;
             // The ancestors: from the level below's live cells -- the representative the child's nearest the middle, the
@@ -827,7 +869,8 @@ internal sealed partial class SponzaLoop
             foreach (var (key, b) in best)
             {
                 var (_, _, _, side) = CensusCellUnkey(key);
-                mine[key] = (b.P, b.N, side | ((uint)l << 8) | (b.Live ? 0u : 16u), b.Live ? CookPick(b.Sub, b.Mask) : Array.Empty<Vector3>());
+                var pts = b.Live ? CookPick(b.Sub, b.Mask).Pts : Array.Empty<Vector3>();
+                mine[key] = (b.P, b.N, side | ((uint)l << 8) | (b.Live ? 0u : 16u), pts, pts.Select(_ => (byte)255).ToArray());
             }
         }
         // The order: level 0's live junction cells (the near field's), its others, level 1 up.
@@ -842,6 +885,7 @@ internal sealed partial class SponzaLoop
         var totalPts = order.Sum(o => (long)cellsAt[o.Level][o.Key].Pts.Length);
         // The training points after the cells' index words (rtgi_cook.glsl's COOK_CELL_POINTS).
         layout.CellPoints = new uint[2 * (order.Count + totalPts)];
+        layout.PointBacks = new byte[totalPts];
         var at = order.Count;
         for (var i = 0; i < order.Count; i++)
         {
@@ -853,8 +897,10 @@ internal sealed partial class SponzaLoop
             var cs = finest * MathF.Pow(2f, l);
             var corner = new Vector3(x, y, z);
             layout.CellPoints[2 * i] = (uint)at | ((uint)c.Pts.Length << 27);
-            foreach (var q in c.Pts)
+            for (var pi = 0; pi < c.Pts.Length; pi++)
             {
+                var q = c.Pts[pi];
+                layout.PointBacks[at - order.Count] = c.Backs[pi];
                 var u = (q - NearGridOrigin(side)) / cs - corner;
                 uint Q(float v) => (uint)Math.Clamp((int)(v * 65536f), 0, 65535);
                 layout.CellPoints[2 * at] = Q(u.X) | (Q(u.Y) << 16);
@@ -897,16 +943,17 @@ internal sealed partial class SponzaLoop
     // clamp(ceil(occupied / 2), 4, 16), at most the occupied -- one per (cell size / 2)^2 of its surface, a full cell's 8,
     // a sliver's all -- taken in a 4 x 4 Bayer order, so any count is spread over the cell.
     private static readonly int[] CookBayer = { 0, 10, 2, 8, 5, 15, 7, 13, 1, 11, 3, 9, 4, 14, 6, 12 };
-    private static Vector3[] CookPick(Vector3[]? sub, int mask)
+    private static (Vector3[] Pts, int[] Subs) CookPick(Vector3[]? sub, int mask)
     {
-        if (sub is null || mask == 0) return Array.Empty<Vector3>();
+        if (sub is null || mask == 0) return (Array.Empty<Vector3>(), Array.Empty<int>());
         var occupied = BitOperations.PopCount((uint)mask);
         var want = Math.Min(occupied, Math.Clamp((occupied + 1) / 2, 4, 16));
         var picked = new Vector3[want];
+        var subs = new int[want];
         var n = 0;
         foreach (var k in CookBayer)
-            if ((mask & (1 << k)) != 0 && n < want) picked[n++] = sub[k];
-        return picked;
+            if ((mask & (1 << k)) != 0 && n < want) { subs[n] = k; picked[n++] = sub[k]; }
+        return (picked, subs);
     }
 
     // A point's sub-square of a cell's 4 x 4 grid across its surface (side), and its squared distance from the
@@ -1154,7 +1201,7 @@ internal sealed partial class SponzaLoop
                         items[(CookCandidates + 1) * i + 1 + c] = (a.SubMask & (1 << c)) != 0 ? new Vector4(a.Sub![c], 1f) : Vector4.Zero;
                 }
                 cookCandidates = Own(device.CreateGpuBuffer(items.Length * 16, MemoryMarshal.AsBytes(items.AsSpan()).ToArray(), "sponza.rtgi.cook-candidates"));
-                cookChosen = Own(device.CreateGpuBuffer(Math.Max(1, inside.Length) * 4, new byte[Math.Max(1, inside.Length) * 4], "sponza.rtgi.cook-chosen"));
+                cookChosen = Own(device.CreateGpuBuffer(Math.Max(1, inside.Length) * 20, new byte[Math.Max(1, inside.Length) * 20], "sponza.rtgi.cook-chosen"));
                 cookCursor = 0;
                 cookDrain = 0;
                 CookBegin("inside test", inside.Length);
@@ -1178,17 +1225,18 @@ internal sealed partial class SponzaLoop
             {
                 if (++cookDrain < 3) return;
                 device.WaitIdle();
-                var chosen = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(cookChosen, 0, Math.Max(1, cookInsideItems) * 4).AsSpan()).ToArray();
-                var buried = chosen.Take(cookInsideItems).Count(c => (c & 256u) != 0);
+                var chosen = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(cookChosen, 0, Math.Max(1, cookInsideItems) * 20).AsSpan()).ToArray();
+                var buried = Enumerable.Range(0, cookInsideItems).Count(i => (chosen[5 * i] & 256u) != 0);
                 CookEnd("inside test", cookInsideItems, string.Create(CultureInfo.InvariantCulture,
-                    $"{cookInsideItems:N0} level-0/1 junction cells, {CookCandidates} candidates x {CookChooseRays} rays each; {buried:N0} buried"));
+                    $"{cookInsideItems:N0} own-level cells, up to {CookCandidates} candidates x {CookChooseRays} rays each; {buried:N0} buried"));
                 Disown(cookCandidates); Disown(cookChosen);
                 cookCandidates = default; cookChosen = default;
                 var cells = cookCells!;
                 var inside = cookInsideList;
                 var finest = rtgiCell;
                 CookBegin("finalize", 0);
-                cookFinalizeBuild = Task.Run(() => FinalizeCook(cells, inside, chosen, finest));
+                var keepBacks = rtgiCookKeepBacks;
+                cookFinalizeBuild = Task.Run(() => FinalizeCook(cells, inside, chosen, finest, keepBacks));
                 cookStage = CookStage.Finalize;
                 return;
             }
@@ -1205,7 +1253,7 @@ internal sealed partial class SponzaLoop
                 cookPass = null;
                 if (cookSampleCapacity > 0) { Disown(cookSamples); Disown(cookResults); cookSamples = default; cookResults = default; cookSampleCapacity = 0; }
                 CookEnd("finalize", layout.Cells, string.Create(CultureInfo.InvariantCulture,
-                    $"{layout.Cells:N0} cells by level {string.Join("/", layout.ByLevel)} (own-level {string.Join("/", layout.OwnByLevel)}; junction {string.Join("/", layout.JunctionByLevel)}), {layout.Buried:N0} buried; training points {layout.PointsPerCell.Select((c, k) => (long)c * k).Sum():N0}, cells by points 0-16 {string.Join("/", layout.PointsPerCell)} ({(layout.CellPoints.Length * 4L) / 1048576.0:0.0} MB); cell table {layout.TableSlots:N0} slots ({layout.Table.Length * 4L / 1048576.0:0.0} MB), size table {layout.ScaleEntries:N0} cubes by side in {layout.ScaleSlots:N0} slots ({layout.Scale.Length * 4L / 1048576.0:0.0} MB); {cookGpuBytes / 1048576.0:0.0} MB on the GPU"));
+                    $"{layout.Cells:N0} cells by level {string.Join("/", layout.ByLevel)} (own-level {string.Join("/", layout.OwnByLevel)}; junction {string.Join("/", layout.JunctionByLevel)}), {layout.Buried:N0} buried; the inside-tested cells' training points {layout.InsidePointsNow:N0} (at most {rtgiCookKeepBacks} of {CookChooseRays} rays on back faces; {layout.InsidePointsBefore:N0} under the buried share, the rule before; {layout.BestOnly:N0} cells their best candidate alone); training points {layout.PointsPerCell.Select((c, k) => (long)c * k).Sum():N0}, cells by points 0-16 {string.Join("/", layout.PointsPerCell)} ({(layout.CellPoints.Length * 4L) / 1048576.0:0.0} MB); cell table {layout.TableSlots:N0} slots ({layout.Table.Length * 4L / 1048576.0:0.0} MB), size table {layout.ScaleEntries:N0} cubes by side in {layout.ScaleSlots:N0} slots ({layout.Scale.Length * 4L / 1048576.0:0.0} MB); {cookGpuBytes / 1048576.0:0.0} MB on the GPU"));
                 cookCursor = 0;
                 CookBegin("near field", layout.NearCells);
                 cookStage = CookStage.NearLinks;
@@ -1303,6 +1351,12 @@ internal sealed partial class SponzaLoop
         var n0 = Math.Max(layout.Level0, 1);
         var nj = Math.Max(layout.NearCells, 1);
         cookTable = Own(device.CreateGpuBuffer(layout.Table.Length * 4, MemoryMarshal.AsBytes(layout.Table.AsSpan()).ToArray(), "sponza.rtgi.cook-table"));
+        if (Environment.GetEnvironmentVariable("BLIX_RTGI_NEAR_PROBE") is { Length: > 0 })
+        {
+            // By slot, as the training indexes it (the cells' index words first).
+            var slots = Math.Max(layout.CellPoints.Length / 2, 1);
+            cookProbe = Own(device.CreateGpuBuffer(slots * 16, new byte[slots * 16], "sponza.rtgi.cook-probe"));
+        }
         cookCellPoints = Own(device.CreateGpuBuffer(Math.Max(layout.CellPoints.Length, 2) * 4, layout.CellPoints.Length > 0 ? MemoryMarshal.AsBytes(layout.CellPoints.AsSpan()).ToArray() : new byte[8], "sponza.rtgi.cook-cell-points"));
         cookPoints = Own(device.CreateGpuBuffer(cells * 32, layout.Cells > 0 ? MemoryMarshal.AsBytes(layout.Points.AsSpan()).ToArray() : new byte[32], "sponza.rtgi.cook-points"));
         cookScale = Own(device.CreateGpuBuffer(layout.Scale.Length * 4, MemoryMarshal.AsBytes(layout.Scale.AsSpan()).ToArray(), "sponza.rtgi.cook-scale"));
@@ -1324,17 +1378,19 @@ internal sealed partial class SponzaLoop
     // frames on (this frame's dispatches still bind them).
     private void FinishRtgiCook()
     {
-        cookFreeLater.AddRange(cookRayBufs.Concat(cookHitBufs).Append(cookLabels).Append(cookCubes).Append(cookSided).Where(b => !b.Equals(default(GpuBufferHandle))));
+        cookFreeLater.AddRange(cookRayBufs.Concat(cookHitBufs).Append(cookLabels).Append(cookCubes).Where(b => !b.Equals(default(GpuBufferHandle))));
         cookFreeIn = 4;
         cookRayBufs = Array.Empty<GpuBufferHandle>();
         cookHitBufs = Array.Empty<GpuBufferHandle>();
-        cookLabels = default; cookCubes = default; cookSided = default;
+        // The alpha-tested bits stay: the training's tally reads them (rtgi_train.comp hitAlphaTested).
+        cookLabels = default; cookCubes = default;
         rtgiCookReady = true;
         cookStage = CookStage.Ready;
         cookClock.Stop();
         // The cells the cache held until now were sized by the camera: emptied, its cells the cooked ones from here.
         rtgiResetPending = true;
-        rtgiCookProbePending = Environment.GetEnvironmentVariable("BLIX_RTGI_NEAR_PROBE") is { Length: > 0 };
+        rtgiCookProbePending = true;
+        cookReadyFrame = rtgiFrameCount;
         var l = cookLayout!;
         var stageMs = string.Join(", ", CookStageOrder.Where(cookStages.ContainsKey).Select(s => $"{s} {cookStages[s].Ms:0}"));
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
@@ -1354,7 +1410,9 @@ internal sealed partial class SponzaLoop
             cookFreeLater.Clear();
         }
         if (cookLayout is not { } layout || layout.Cells == 0) return;
-        if (rtgiCookProbePending) { rtgiCookProbePending = false; ProbeRtgiCookCells(); }
+        // The probe (and the tally's count of dropped points), BLIX_RTGI_NEAR_PROBE_FRAMES (900) frames on.
+        var probeAt = int.TryParse(Environment.GetEnvironmentVariable("BLIX_RTGI_NEAR_PROBE_FRAMES"), out var pf) ? pf : 900;
+        if (rtgiCookProbePending && rtgiFrameCount - cookReadyFrame >= probeAt) { rtgiCookProbePending = false; ProbeRtgiCookCells(); }
         if (rtgiNearTrain > 0 && rtgiFrameCount % 30 == 0)
         {
             graph.Dispatch(cookReducePassHandle, CookDispatch(0, 14, 0, 1, 1));
@@ -1408,21 +1466,60 @@ internal sealed partial class SponzaLoop
     // point, level, side and flags, their neighbour mask, the near light of a near-field cell.
     private void ProbeRtgiCookCells()
     {
-        var at = Environment.GetEnvironmentVariable("BLIX_RTGI_NEAR_PROBE")!.Split(',').Select(v => float.Parse(v, CultureInfo.InvariantCulture)).ToArray();
-        var q = new Vector3(at[0], at[1], at[2]);
         var layout = cookLayout!;
         device.WaitIdle();
         var pts = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(cookPoints, 0, layout.Cells * 32)).ToArray();
-        var light = layout.NearCells > 0 ? MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(nearLightBuf, 0, layout.NearCells * 16)).ToArray() : Array.Empty<Vector4>();
+        var cp = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(cookCellPoints, 0, layout.CellPoints.Length * 4)).ToArray();
+        var probe = cookProbe.Equals(default(GpuBufferHandle)) ? Array.Empty<uint>()
+            : MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(cookProbe, 0, Math.Max(layout.CellPoints.Length / 2, 1) * 16)).ToArray();
+        // The scene: training points dropped from their cells' turns (the tally), and the cooked samples' back-face share.
+        long dead = 0, deadTested = 0;
+        for (var k = 0; k < layout.PointBacks.Length; k++)
+            if ((cp[2 * (layout.Cells + k) + 1] & 0x80000000u) != 0) { dead++; if (layout.PointBacks[k] != 255) deadTested++; }
+        long samples = 0, backs = 0;
+        for (var k = 0; k + 3 < probe.Length; k += 4) { samples += probe[k]; backs += probe[k + 1]; }
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[VulkanSponza] rtgi cook probe at {rtgiFrameCount - cookReadyFrame} frames: {dead:N0} of {layout.PointBacks.Length:N0} training points dropped by the tally ({deadTested:N0} of them inside-tested){(probe.Length > 0 ? $"; cooked samples {samples:N0}, {100.0 * backs / Math.Max(1, samples):0.00}% on back faces" : "")}."));
+        if (Environment.GetEnvironmentVariable("BLIX_RTGI_NEAR_PROBE") is not { Length: > 0 } where) return;
+        var at = where.Split(',').Select(v => float.Parse(v, CultureInfo.InvariantCulture)).ToArray();
+        var q = new Vector3(at[0], at[1], at[2]);
+        var radius = float.TryParse(Environment.GetEnvironmentVariable("BLIX_RTGI_NEAR_PROBE_R"), NumberStyles.Float, CultureInfo.InvariantCulture, out var r) ? r : 0.15f;
+        long nearSamples = 0, nearBacks = 0, nearPts = 0, nearDead = 0;
+        double nearLum = 0;
         for (var i = 0; i < layout.Cells; i++)
         {
             var p = new Vector3(pts[2 * i].X, pts[2 * i].Y, pts[2 * i].Z);
-            if (Vector3.Distance(p, q) > 0.06f) continue;
+            if (Vector3.Distance(p, q) > radius) continue;
             var w = BitConverter.SingleToUInt32Bits(pts[2 * i].W);
-            var adj = BitConverter.SingleToUInt32Bits(pts[2 * i + 1].W);
+            var level = (int)((w >> 8) & 15);
+            var side = w & 7;
+            var cs = rtgiCell * MathF.Pow(2f, level);
+            var corner = Floor3((p - NearGridOrigin(side)) / cs);
+            var first = (int)(cp[2 * i] & 0x07FFFFFFu);
+            var count = (int)(cp[2 * i] >> 27);
+            long cs0 = 0, cb0 = 0; double cl0 = 0;
+            var lines = new List<string>();
+            for (var k = 0; k < count; k++)
+            {
+                var slot = first + k;
+                if (slot < layout.Cells || 2 * slot + 1 >= cp.Length) continue;
+                var x = cp[2 * slot]; var y = cp[2 * slot + 1];
+                var f = new Vector3(x & 0xFFFF, x >> 16, y & 0xFFFF) / 65536f;
+                var pp = NearGridOrigin(side) + (corner + f) * cs;
+                var ib = layout.PointBacks[slot - layout.Cells];
+                var life = probe.Length > 0 ? (probe[4 * slot], probe[4 * slot + 1], probe[4 * slot + 2]) : (0u, 0u, 0u);
+                cs0 += life.Item1; cb0 += life.Item2; cl0 += life.Item3 / 1024.0;
+                if ((y & 0x80000000u) != 0) nearDead++;
+                lines.Add(string.Create(CultureInfo.InvariantCulture,
+                    $"    point ({pp.X:0.000},{pp.Y:0.000},{pp.Z:0.000}) inside-test backs {(ib == 255 ? "-" : $"{ib}/{CookChooseRays}")}{((y & 0x80000000u) != 0 ? " DEAD" : "")}; samples {life.Item1}, back {100.0 * life.Item2 / Math.Max(1u, life.Item1):0.0}%, mean luminance {life.Item3 / 1024.0 / Math.Max(1u, life.Item1):0.0000}"));
+            }
+            nearSamples += cs0; nearBacks += cb0; nearLum += cl0; nearPts += count;
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                $"[VulkanSponza] cooked cell {i}: p=({p.X:0.0000},{p.Y:0.0000},{p.Z:0.0000}) level {(w >> 8) & 15} side {w & 7} buried {(w & 16) != 0} junction {(w & 32) != 0} own {(w & 64) != 0} n=({pts[2 * i + 1].X:0.00},{pts[2 * i + 1].Y:0.00},{pts[2 * i + 1].Z:0.00}) neighbours {Convert.ToString(adj & 0x1FF, 2)}{(i < light.Length ? $" near light w {light[i].W:0.00}" : "")}"));
+                $"[VulkanSponza] cooked cell {i}: rep ({p.X:0.000},{p.Y:0.000},{p.Z:0.000}) level {level} side {side} buried {(w & 16) != 0} junction {(w & 32) != 0} own {(w & 64) != 0}; {count} points: samples {cs0}, back {100.0 * cb0 / Math.Max(1, cs0):0.0}%, mean luminance {cl0 / Math.Max(1, cs0):0.0000}"));
+            foreach (var line in lines) Console.WriteLine(line);
         }
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"[VulkanSponza] rtgi cook probe within {radius:0.##} m of ({q.X},{q.Y},{q.Z}): {nearPts} points ({nearDead} dropped), samples {nearSamples:N0}, back {100.0 * nearBacks / Math.Max(1, nearSamples):0.0}%, mean sample luminance {nearLum / Math.Max(1, nearSamples):0.0000}."));
     }
 
     // The cook window's section (DrawRtgiSettle): each stage, its progress, its rays and rate.

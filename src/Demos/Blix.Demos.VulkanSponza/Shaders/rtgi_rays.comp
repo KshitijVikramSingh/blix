@@ -103,18 +103,25 @@ layout(std430, set = 0, binding = 29) buffer RtgiCookCellPoints { uvec2 cookCell
 // cooked point, a big cell held that spot's light (the user, 2026-10-31). Only points of the pixel's region at that level
 // (rtgi_cook.comp's pieces: a cache cell keyed by a piece is trained over that piece) -- the turn goes on past the
 // others. None (not cooked, buried, no point of its piece, --rtgi-no-surface-train): the pixel's own point.
+// The training point's slot in COOK_CELL_POINTS (its tally kept by rtgi_train.comp, which drops its back-face samples),
+// COOK_NONE the pixel's own point or a cell's representative.
+uint cookedSource = COOK_NONE;
 bool cookTrainPoint(uint j, uint lv, uint side, uint want, out vec3 q) {
     uint count = cookPointCount(j);
     q = COOK_POINTS(2u * j).xyz;
     if (count == 0u) return true;
     uint start = atomicAdd(cookCellPoints[j].y, 1u);
     for (uint t = 0u; t < count; t++) {
-        vec3 c = cookPointAt(j, (start + t) % count);
+        uint k = (start + t) % count;
+        // A point whose samples kept meeting back faces (rtgi_train.comp): out of the turn for good.
+        if (cookPointDead(j, k)) continue;
+        vec3 c = cookPointAt(j, k);
         if (lv < NEAR_LEVELS) {
             uint at = nearRegion(c, side);
             if ((at != 0u ? COOK_REGIONS((at - 1u) * NEAR_LEVELS + lv) : 0u) != want) continue;
         }
         q = c;
+        cookedSource = cookPointSlot(j, k);
         return true;
     }
     return false;
@@ -338,7 +345,17 @@ void main() {
             uint e = nearList[(uint(u.uNearField.z) + j - asked) % nearListCount];
             n = cookPoints[2u * e + 1u].xyz;
             uint ce = cookPointCount(e);
-            p = ce > 0u ? cookPointAt(e, atomicAdd(cookCellPoints[e].y, 1u) % ce) : cookPoints[2u * e].xyz;
+            p = cookPoints[2u * e].xyz;
+            if (ce > 0u) {
+                uint start = atomicAdd(cookCellPoints[e].y, 1u);
+                for (uint t = 0u; t < ce; t++) {
+                    uint k = (start + t) % ce;
+                    if (cookPointDead(e, k)) continue;
+                    p = cookPointAt(e, k);
+                    cookedSource = cookPointSlot(e, k);
+                    break;
+                }
+            }
         } else {
             if ((uint(u.uSkip.x) & 8u) != 0u) { none(i); return; }
             // A share of last frame's training rays, spread over all of them and turning each frame.
@@ -422,7 +439,9 @@ void main() {
     vec3 d = normalize(t * (cos(phi) * s) + b * (sin(phi) * s) + n * sqrt(max(0.0, 1.0 - r2)));
     points[2u * i] = vec4(p, skipSun ? 2.0 : 1.0);
     // w: the ray's weight against cosine sampling, 1 (rtgi_train.comp scales its sample by it).
-    points[2u * i + 1u] = vec4(n, 1.0);
+    // w: the ray's weight against cosine sampling, 1 -- or a cooked training point's slot (bits 30-31 10: rtgi_train.comp
+    // tallies its back-face samples and drops them), its weight 1.
+    points[2u * i + 1u] = vec4(n, cookedSource != COOK_NONE ? uintBitsToFloat(0x80000000u | cookedSource) : 1.0);
     rays[2u * i] = vec4(o, 0.0);
     rays[2u * i + 1u] = vec4(d, u.uCounts.w);
     origins[i] = vec4(o, dot(n, u.uSun.xyz) > 0.0 && !skipSun ? u.uCounts.w : 0.0);

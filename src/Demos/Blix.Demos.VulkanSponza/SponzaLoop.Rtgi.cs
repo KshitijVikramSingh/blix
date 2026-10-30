@@ -575,6 +575,8 @@ internal sealed partial class SponzaLoop
                     new("uCapture", new Vector4Uniform(RtgiCaptureUniform)),
                     new("uCook", new Vector4Uniform(CookParams)),
                     new("uCookCounts", new Vector4Uniform(CookCounts)),
+                    new("uCookTrain", new Vector4Uniform(CookTrainUniform)),
+                    new("uCookTrain2", new Vector4Uniform(CookTrain2Uniform)),
                 },
                 new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
                 Buffers: new[]
@@ -598,6 +600,9 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("RtgiCookPoints", CookPointsOrDummy),
                     new ShaderBufferBinding("RtgiCookRegions", CookRegionsOrDummy),
                     new ShaderBufferBinding("RtgiCookScale", CookScaleOrDummy),
+                    new ShaderBufferBinding("RtgiCookCellPoints", CookCellPointsOrDummy),
+                    new ShaderBufferBinding("RtgiCookSided", CookSidedOrDummy),
+                    new ShaderBufferBinding("RtgiCookProbe", CookProbeOrDummy),
                 });
             for (var r = 0; r < trainReps; r++) graph.Dispatch(rtgiTrainPassHandle, train);
         }

@@ -187,9 +187,13 @@ float cookScaleAt(vec3 p, uint side) {
 // sub-square of its 4 x 4 grid across the surface, in a Bayer order, inside-tested at junctions -- so a cell's mean is its
 // surface's, not one spot's. One buffer of uvec2s, COOK_CELL_POINTS(k): the first COOK_PARAMS.z its cells' (x: the cell's
 // first point | its count << 27; y: its turn, the next point to train from, rtgi_rays.comp), then the points, each within
-// its cell's cube, 16 bits an axis (x: x | y << 16; y: z).
+// its cell's cube, 16 bits an axis (x: x | y << 16; y: z), y's upper bits its training tally (rtgi_train.comp: samples
+// 16-21, those whose ray met a back face 22-27, COOK_POINT_DEAD -- dropped from the cell's turn).
+#define COOK_POINT_DEAD 0x80000000u
 #define COOK_POINT_INDEX(i) COOK_CELL_POINTS(i).x
 uint cookPointCount(uint i) { return COOK_POINT_INDEX(i) >> 27; }
+uint cookPointSlot(uint i, uint k) { return (COOK_POINT_INDEX(i) & 0x07FFFFFFu) + k; }
+bool cookPointDead(uint i, uint k) { return (COOK_CELL_POINTS(cookPointSlot(i, k)).y & COOK_POINT_DEAD) != 0u; }
 vec3 cookPointAt(uint i, uint k) {
     uint bits = cookBits(i);
     uint side = bits & 7u, level = (bits >> 8) & 15u;

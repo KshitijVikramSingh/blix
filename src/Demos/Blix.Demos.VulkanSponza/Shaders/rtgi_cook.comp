@@ -47,8 +47,8 @@ layout(std430, set = 0, binding = 3) readonly buffer RtgiCookHits { uvec4 cookHi
 // alpha-tested (SponzaLoop.RtgiCensus.cs BuildCensusGeometry).
 layout(std430, set = 0, binding = 5) readonly buffer RtgiCookSided { uint cookSided[]; };
 // The inside test's cells, COOK_ITEM vec4s each: [0] the cell's middle (xyz) and its normal (w, as the samples'); then its
-// candidates (xyz; w 1 where there is one). Its result a cell: the candidate chosen | 256 buried | the candidates not
-// buried << 16.
+// candidates (xyz; w 1 where there is one). Its result a cell, five words: the candidate chosen | 256 buried | the
+// candidates under the buried share << 16; then each candidate's rays that met a back face, a byte each.
 layout(std430, set = 0, binding = 6) readonly buffer RtgiCookCandidates { vec4 cookCandidates[]; };
 layout(std430, set = 0, binding = 7) buffer RtgiCookChosen { uint cookChosen[]; };
 layout(std430, set = 0, binding = 8) readonly buffer RtgiCookTable { uvec2 cookTable[]; };
@@ -81,7 +81,8 @@ uint cookSideOf(vec3 n) {
 
 #define COOK_SIZE_RAYS 64u
 #define COOK_CANDIDATES 16u
-#define COOK_CHOOSE_RAYS 8u
+// 16: at 8 a candidate a few centimetres inside a wall's foot could pass with no ray on the wall's inside.
+#define COOK_CHOOSE_RAYS 16u
 #define COOK_ITEM (COOK_CANDIDATES + 1u)
 
 vec3 cookOctDecode(vec2 e) {
@@ -192,6 +193,7 @@ void main() {
         uint item = first + t;
         vec3 mid = cookCandidates[COOK_ITEM * item].xyz;
         uint best = 0u, bad = 0u, live = 0u;
+        uint backWords[4] = uint[4](0u, 0u, 0u, 0u);
         float bestBacks = 1e30, bestD = 1e30;
         for (uint c = 0u; c < COOK_CANDIDATES; c++) {
             vec4 cand = cookCandidates[COOK_ITEM * item + 1u + c];
@@ -203,12 +205,15 @@ void main() {
                 if ((h0.w & 1u) != 0u && (h0.w & 2u) == 0u && !cookAlphaTested(ray, bad)) backs += 1.0;
             }
             if (backs <= u.uConn.z * float(COOK_CHOOSE_RAYS)) live |= 1u << c;
+            backWords[c >> 2] |= uint(backs) << (8u * (c & 3u));
             float dm = length(cand.xyz - mid);
             if (backs < bestBacks || (backs == bestBacks && dm < bestD)) { bestBacks = backs; bestD = dm; best = c; }
         }
         bool buried = bestBacks > u.uConn.z * float(COOK_CHOOSE_RAYS) && bestBacks < 1e29;
         // The chosen candidate (the cell's representative point), buried, and every candidate not buried (its training points).
-        cookChosen[item] = best | (buried ? 256u : 0u) | (live << 16);
+        cookChosen[5u * item] = best | (buried ? 256u : 0u) | (live << 16);
+        // Each candidate's back-face rays, a byte each (SponzaLoop.RtgiCook.cs keeps only the clean ones).
+        for (uint w = 0u; w < 4u; w++) cookChosen[5u * item + 1u + w] = backWords[w];
         return;
     }
     if (kind == 4u) {
