@@ -118,8 +118,9 @@ Graph colour targets can serve as compute storage images. Device-created
 storage textures, including three-dimensional textures, and buffers are not
 graph-owned resources. Applications may use them in dispatch bindings, but
 their lifetime and any ordering not represented by graph edges remain the
-caller's responsibility. Sponza's froxel and probe atlases are the important
-current example of that boundary.
+caller's responsibility. Sponza's RTGI cache and its traced-shadow masks, GPU
+buffers ordered by the device's buffer hazards and the frame timeline, are the
+important current example of that boundary.
 
 ### MSAA and resolves
 
@@ -162,10 +163,8 @@ two obligations outside the graph:
 one frame whenever it changes. This includes same-sized swapchain recreation,
 such as a present-mode change; a window-size callback alone is not sufficient.
 
-Sponza follows that generation for GTAO accumulation and its two-target TAA
-ping-pong. Its froxel history is device-owned rather than graph-owned, so the
-application invalidates that separately when it replaces the froxel grid. Use
-an ordinary `Read` whenever the producer is in the current frame.
+Sponza follows that generation for its two-target TAA ping-pong (and MetalFX's
+history). Use an ordinary `Read` whenever the producer is in the current frame.
 
 ## Recording, binding, and dynamic data
 
@@ -231,8 +230,9 @@ A shader can take a texture in two forms, and they sample identically:
 `texture(uMap, uv)` on a combined sampler with that state. The difference is the
 per-stage limits: MoltenVK allows 16 samplers per stage and 256 sampled images, and
 a combined sampler uses one of each. Keep the combined form until a stage nears 16
-textures. Sponza's lit shader reads 25, so its per-pass set is separate images
-through one sampler, and the stage holds 7 samplers.
+textures. Sponza's lit shader read 25 when this was settled (16 since its cascades,
+fog and GTAO went), so its per-pass set is separate images through one sampler,
+and the stage holds 8 samplers.
 
 **A separate sampler's state is declared in the shader,** on the line before it:
 
@@ -286,7 +286,8 @@ Do not update one long-lived dynamic vertex buffer under in-flight GPU reads,
 and do not rebuild descriptor machinery inside the transient vertex arena.
 
 `DrawIndexedIndirect` consumes GPU draw structs; Sponza groups compatible draws
-and maintains per-cascade command buffers. `DrawIndexedInstanced` is the lower
+and maintains indirect records per culled list (the camera's early, late and
+final lists, and the blend list). `DrawIndexedInstanced` is the lower
 level primitive behind `InstanceBuffer` and `InstancedBatch`. Those helpers own
 instance transport and batching, not a shader or lighting policy.
 
@@ -346,7 +347,6 @@ defines after `#version`, and `#line` mappings for useful compiler errors.
 | `tonemap.glsl` | ACES, AgX, Reinhard, and neutral curves |
 | `fullscreen.glsl` | Fullscreen-triangle vertex synthesis |
 | `bloom.glsl` | Bright extraction and separable Gaussian blur |
-| `froxel.glsl` | Shared froxel addressing and integration helpers |
 | `sheen.glsl`, `coverage.glsl`, `noise.glsl` | Material sheen, coverage shaping, and stochastic helpers |
 
 Application shaders stay with the application. A helper should graduate into
@@ -410,40 +410,36 @@ hierarchy.
 
 ## Vulkan Sponza research renderer
 
-Vulkan Sponza is being rebuilt as a heavy-scene rendering instrument. Its live
-graph is approximately:
+Vulkan Sponza is a heavy-scene rendering instrument. Its live graph is
+approximately:
 
 ```text
-three shadow cascades
-    -> froxel fog
-    -> depth + normal pre-pass and MSAA resolves
-    -> Hi-Z pyramid
-    -> GTAO -> temporal/spatial denoise
-    -> traced sun shadows and RTGI's rays (Metal), the cache's update
-    -> half-resolution RTGI readout -> full-resolution upsample
-    -> HDR lit scene
-    -> parity-selected TAA resolve
+scene cull (GPU: frustum, screen-space-error LOD)
+    -> depth + normal pre-pass, its own Hi-Z, the occlusion test, the late pre-pass
+    -> traced sun shadow rays -> the Metal trace (sun shadows, RTGI's rays) beside
+       RTGI's half-resolution readout and the cache's async update
+    -> full-resolution upsample of the incident light (and the half-res shadows)
+    -> HDR lit scene (optional MSAA resolve)
+    -> parity-selected TAA resolve, or MetalFX's temporal scaler (both opt-in)
     -> present and diagnostics
 ```
 
 The exact graph continues to move. The important current research areas are:
 
-- GPU-driven indirect submission, draw grouping, culling, and screen-space
-  error LOD over cooked mesh chains;
-- cascade fitting plus caster/receiver reasoning and survivor counts;
-- a depth/normal pre-pass, six-level Hi-Z pyramid, half-resolution GTAO,
-  temporal history, bilateral reconstruction, and denoising;
-- baked sky visibility and occupancy/albedo volumes;
+- GPU-driven indirect submission, draw grouping, two-phase occlusion culling,
+  and screen-space error LOD over cooked mesh chains;
+- sun shadows traced on Apple's ray tracing hardware (Metal, inside the frame
+  on the device's timeline), alpha-tested foliage and light through thin
+  sheets; without a Metal tracer the sun is unshadowed and there is no GI;
 - RTGI, the only GI: a world radiance cache trained by hardware rays, with a
-  cooked world volume and near field sizing and keying its cells;
-- a half-resolution incident-light field (RTGI's readout) and full-resolution
-  upsample;
-- colour TAA and temporally accumulated volumetric froxel fog;
+  cooked world volume and near field sizing and keying its cells, read at half
+  resolution into an incident-light field and upsampled along depth and normals;
+- TAA (off by default) and MetalFX's temporal scaler (`--metalfx`);
 - extended material work including sheen and diffuse transmission, the latter
-  read per material out of the baked albedo grid's alpha rather than from one
-  scene-wide control; and
-- debug views, command-line A/Bs, pass timings, resource and draw censuses,
-  captures, and CPU/path-traced reference checks.
+  read per material from its factor and textures (and, for the rays, per
+  triangle by the surface bake) rather than from one scene-wide control; and
+- debug views, command-line and in-boot A/Bs, pass timings, resource and draw
+  censuses, captures, and the GPU path-traced reference the GI gate judges by.
 
 Three material responses are deliberately absent, each for a stated reason
 rather than a backlog position. There is **no second, cheaper sheen BRDF**: a
@@ -452,21 +448,12 @@ ships a fast lobe beside the real one has made the fast one the default. There
 is **no `KHR_materials_volume` response** — thickness and attenuation are read
 and stored, but responding to them means refraction against a scene-colour
 copy, which is a transmission pass and its own piece of work. And there is **no
-sheen in the voxel bake**: sheen is a view-dependent rim and a probe has no
-view, so diffuse transmission is the half of cloth that indirect light can
-carry.
+sheen in the GI**: sheen is a view-dependent rim and RTGI's cache holds light
+arriving at a surface, not a view of it, so diffuse transmission is the half of
+cloth that indirect light can carry. RTGI's rays do not carry light through
+thin cloth either; the glow behind a sunlit curtain is the traced shadows' own.
 
-**Ambient banding is probe spacing, and automatic placement has been tried.** The
-cause is measured rather than suspected: across 14,072 adjacent probe pairs at
-1.57 m, the irradiance ratio between neighbours is median 1.41x, p90 5.15x and
-p99 25.7x. It reads worst on curtains because they are large, smooth and have
-nothing to hide it. Eight competing explanations were refuted by measurement and
-four separate attempts at automatic density heuristics failed — so a fifth is not
-the next idea. The live one is **authored** density as nested uniform volumes,
-following the material-rule precedent (a project's cook configuration) of letting a person state what a bake cannot
-infer. Recorded here so the refuted ground is not walked again.
-
-Some storage textures and probe resources are device-owned rather than graph
+RTGI's cache and the traced shadows' masks are GPU buffers rather than graph
 resources, so Sponza also exposes where the graph contract is not yet broad
 enough. Local comments retain present contracts and measurements that still
 govern the implementation; completed experiments and superseded alternatives
@@ -509,9 +496,9 @@ separately, and each cell names the instrument that establishes it.
 | `KHR_materials_specular` | yes | ignores (script) | ignores |
 | `KHR_materials_iridescence` | yes | ignores (script) | ignores |
 | `KHR_materials_anisotropy` | yes | ignores (script) | ignores |
-| `KHR_materials_diffuse_transmission` | yes | ignores (script) | **draws the factor, colour factor and colour texture**; the factor texture is not read |
+| `KHR_materials_diffuse_transmission` | yes | ignores (script) | **draws the factor, factor texture, colour factor and colour texture** (`uDiffuseTransmissionTex`, `uDiffuseTransmissionColorTex`) |
 | `KHR_materials_dispersion` | yes | ignores (script) | ignores |
-| `KHR_materials_unlit` | yes | **ignores: an unlit material is lit** (script) | ignores |
+| `KHR_materials_unlit` | yes | **ignores: an unlit material is lit** (script) | **draws**: the base colour, unshaded (`uSheenColor.w`) |
 | `KHR_texture_transform` | yes | **draws**, every core channel; the normal map in its own frame, Gram-Schmidt of `[T B] F M⁻¹ F` (Test.Recipes `NormalMapFramesFollowTheTextureTransform`, conformal and non-conformal; lab `uvtransform`, `nmxf`, `nmxf2`) | ignores: the pack has none, and the loader does not read them |
 | A second UV set (`texCoord: 1`) | yes | **draws**, static and skinned (lab `uv1`, `skinned-uv1colour`) | ignores: its layout (`ModelNeeds(Tangents: true)`) has no second set |
 | `COLOR_0` | yes | **draws**, static and skinned, as a base-colour multiplier (lab `vertexcolor`, `skinned-uv1colour`) | ignores: its layout has no colour |
@@ -531,7 +518,7 @@ is that the choice is written down and re-measurable, not inferred from a
 | Shared mechanism or vocabulary | Reflected binding, graphics/compute graph passes, history reads, MSAA resolves, transient vertices, instancing, indirect draw, mesh bundling, PBR/IBL/shadow/tonemap helpers, fullscreen work, sprites, particles |
 | Studio-authored reference | Three-cascade inspection lighting, procedural fallback environment, reference exposure/tonemap/MSAA, optional pre-pass, inspection viewport |
 | Application-owned | Point and spot shadows in Vulkan Lit, bloom chains, Pong CRT presentation, game culling and draw grouping |
-| Sponza research | Hi-Z/GTAO/TAA, probe transport and incident field, froxel fog, heavy-scene LOD/culling, material experiments, A/B and reference machinery |
+| Sponza research | RTGI and its incident field, traced sun shadows on Metal, TAA/MetalFX, occlusion culling, heavy-scene LOD/culling, material experiments, A/B and reference machinery |
 
 Screen-space reflections, dual-filter/Kawase bloom, and the MRT material
 G-buffer from the retired OpenGL renderer are not present in the current Vulkan

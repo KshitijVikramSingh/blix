@@ -185,16 +185,18 @@ Source: `src/Demos/Blix.Demos.VulkanSponza/`
 
 Vulkan Sponza is the heavy-scene rendering and measurement application, not the
 getting-started renderer. It combines cooked multi-pack assets, deferred work,
-bundled geometry, indirect submission, SSE LOD, cascade culling, a depth/normal
-pre-pass, Hi-Z, GTAO, ray-traced indirect light (RTGI), an incident-light field, TAA,
-temporal froxel fog, extended material work, and extensive A/B and capture
-instrumentation.
+bundled geometry, GPU-culled indirect submission, SSE LOD, two-phase occlusion
+culling, a depth/normal pre-pass, sun shadows and ray-traced indirect light (RTGI)
+on Apple's ray tracing hardware, an incident-light field, opt-in TAA and MetalFX,
+extended material work, and extensive A/B and capture instrumentation. Without a
+Metal tracer it still draws, its sun unshadowed and with no indirect light.
 
 The graph and research ownership are documented in
 [Renderer](renderer.md#vulkan-sponza-research-renderer). The detailed command
 surface remains application-owned and evolves with the experiments. Common
-families include `--ab`, `--viz`, `--tune`, `--shot`, `--gpu-reference`, LOD
-controls, shadow controls, and feature toggles.
+families include `--ab`, `--viz`, `--tune`, `--shot` (the scene, linear times
+exposure, sRGB encoded, with the run's read-outs beside it), `--gpu-reference`,
+`--walk`, LOD controls, RTGI and traced-shadow controls, and feature toggles.
 
 Sponza assets are not committed. `BLIX_SPONZA_ASSETS` names the cooked pack set
 and is required. `setup-sponza-modern.sh` extracts the Khronos packs into a

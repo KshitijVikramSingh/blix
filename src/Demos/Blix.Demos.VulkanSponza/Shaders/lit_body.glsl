@@ -98,7 +98,7 @@ layout(set = 1, binding = 18) uniform texture2D uPrepassNormalViz;
 
 // <b>Every set-1 texture above is a separate image, read through this one sampler.</b> As combined
 // samplers they were 19 of this stage's 25, against MoltenVK's 16 per stage; as separate images they
-// count against sampled images (256) instead, and the stage holds 7 samplers: this and set 2's six.
+// count against sampled images (256) instead, and the stage holds 8 samplers: this and set 2's seven.
 // One is enough because every one of those textures was created LinearClamp or LinearClampMipmap,
 // which are the same VkSampler: GenerateMipmaps is a texture-creation flag, and every sampler leaves
 // MaxLod unclamped so the texture's own mip count limits it. See docs/renderer.md, "Separate images

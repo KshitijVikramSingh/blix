@@ -112,8 +112,8 @@ tonemap, and MSAA defaults, outside engine core. It is a reasonable thing to
 prototype against, and a project may reuse all, some, or none of it.
 
 **Vulkan Sponza** is a demo. It is where heavy-scene asset flow, GPU-driven
-submission, screen-space-error LOD, cascaded shadows, Hi-Z, GTAO, probe-based
-indirect light, incident fields, TAA, temporal volumetric fog, material
+submission, screen-space-error LOD, occlusion culling, hardware-traced sun
+shadows and indirect light (RTGI), incident fields, TAA, material
 response, and measurement tooling are implemented and stressed — a worked
 reference for how far the machinery goes and how those techniques are built.
 It is not a renderer to adopt and its graph is not an engine promise. A

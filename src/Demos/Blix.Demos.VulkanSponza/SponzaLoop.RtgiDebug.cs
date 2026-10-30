@@ -40,9 +40,9 @@ internal sealed partial class SponzaLoop
             var view = debug.Controls.Enum("View", rtgiView, RtgiViewNames);
             if (view != rtgiView)
             {
-                // A view paints the incident light: shown as the raw bounce radiance (channel 10), the Show channel kept
+                // A view paints the incident light: shown as the raw bounce radiance (channel 8), the Show channel kept
                 // to give back.
-                if (rtgiView == 0 && view != 0) { rtgiShowBefore = (int)MathF.Round(vizChannel); vizChannel = 10; }
+                if (rtgiView == 0 && view != 0) { rtgiShowBefore = (int)MathF.Round(vizChannel); vizChannel = 8; }
                 if (view == 0 && rtgiShowBefore >= 0) { vizChannel = rtgiShowBefore; rtgiShowBefore = -1; }
                 rtgiView = view;
             }
