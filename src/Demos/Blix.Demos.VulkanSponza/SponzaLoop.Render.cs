@@ -844,12 +844,6 @@ internal sealed partial class SponzaLoop
         return result;
     }
 
-    // --- live GPU pass cost ----------------------------------------------
-    // The mean of the last 60 frames per pass, taken from the host's cumulative totals: the same window
-    // the overlay's Perf tab shows. A window rather than a lifetime mean, which includes loading and
-    // responds too slowly for live controls.
-    private GpuPassWindow gpuPasses = new(FrameTimings.None);
-
     /// <summary>What each LOD budget actually submits, counted rather than timed.</summary>
     /// <remarks>
     /// Triangle submission is the exact effect of an LOD budget and complements noisy timing. The

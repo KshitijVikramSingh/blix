@@ -43,7 +43,6 @@ internal sealed partial class SponzaLoop
             host.RequestClose();
             return;
         }
-        gpuPasses = new GpuPassWindow(host.Timing);
         textureLoader = new MaterialTextureLoader(device);
         // --no-textures: every material on the defaults, no texture loaded (what the frame costs without them).
         if (args.Flag("no-textures")) textureLoader.SkipTextures = true;

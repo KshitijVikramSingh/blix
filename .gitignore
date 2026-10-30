@@ -76,3 +76,4 @@ third_party/gltf-corpus/
 # build product here follows.
 dist/
 .gstack/
+__pycache__/

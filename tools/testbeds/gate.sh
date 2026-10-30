@@ -59,8 +59,9 @@ frames=4500
 # And 96 points at the corridor's creases (--gpu-ref-seams): the box joints, where a leak lights first.
 run crevices-corridor --scene=crevices-dark --cam 6,1.5,1.5,90,-5 --gpu-ref-seams 96 "$@"
 # The corridor's second leg from its turn to its dead end, which the first leg's view never sees: lit only by what turns
-# the corner, its light is where a leak through the walls shows -- a texel outside the far wall lit a patch inside, and
-# the leg read 1.4-2.2x its path trace while every point above held (2026-10-23).
+# the corner, its light is where a leak through the walls shows -- under the texel GI a texel outside the far wall lit a
+# patch inside, and the leg read 1.4-2.2x its path trace while every point above held (2026-10-23). The ratchets
+# (gate.py) were set on the texel GI and want recalibrating on RTGI.
 run crevices-deadend --scene=crevices-dark --cam 8.7,1.3,0.9,0,-8 "$@"
 rm -f "$LOGS"/*.png
 python3 "$REPO/tools/testbeds/gate.py" "$LOGS"

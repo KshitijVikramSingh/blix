@@ -22,9 +22,10 @@ internal sealed partial class SponzaLoop
     private float sunMoveMinElevation = 40f;
 
     // The day the sun moves along: Sponza at 35-45 deg N. North is set so the authored sun is a midsummer morning sun at
-    // 37 deg N (the authored 74.5 deg elevation is reachable only south of ~39 deg); BandLatitude and BandMinElevation
-    // bound the day's span (DayHalfSpan).
-    private const float BandLatitude = 40f, AuthoredLatitude = 37f, Obliquity = 23.44f, BandMinElevation = 5f;
+    // 37 deg N (the authored 74.5 deg elevation is reachable only south of ~39 deg); the day's span (DayHalfSpan) is
+    // bounded at that latitude too, down to BandMinElevation. It was taken at 40 deg N while the sun was placed at 37:
+    // the span the move clamped to and the day the sun travelled were two different days.
+    private const float AuthoredLatitude = 37f, Obliquity = 23.44f, BandMinElevation = 5f;
 
     private void ParseSunMove(AppArgs args)
     {
@@ -47,11 +48,12 @@ internal sealed partial class SponzaLoop
         return new Vector3(east, north, up);   // (east, north, up)
     }
 
-    // The hour angle (degrees) at which a sun of this declination sets below the band's least elevation, at its latitude.
+    // The hour angle (degrees) at which a sun of this declination sets below the band's least elevation, at the authored
+    // latitude.
     private static float DayHalfSpan(float decDeg)
     {
         float r(float d) => d * MathF.PI / 180f;
-        var c = (MathF.Sin(r(BandMinElevation)) - MathF.Sin(r(BandLatitude)) * MathF.Sin(r(decDeg))) / (MathF.Cos(r(BandLatitude)) * MathF.Cos(r(decDeg)));
+        var c = (MathF.Sin(r(BandMinElevation)) - MathF.Sin(r(AuthoredLatitude)) * MathF.Sin(r(decDeg))) / (MathF.Cos(r(AuthoredLatitude)) * MathF.Cos(r(decDeg)));
         return MathF.Acos(Math.Clamp(c, -1f, 1f)) * 180f / MathF.PI;
     }
 

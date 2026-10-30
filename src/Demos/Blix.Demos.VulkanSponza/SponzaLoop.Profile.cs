@@ -275,9 +275,12 @@ internal sealed partial class SponzaLoop
                 $"[profile]   moving, sections a frame (ms): {SectionMeans(moving, 8)}"));
     }
 
-    // At exit: the session's frames, moving against still, and its slowest.
+    // At exit: the session's frames, moving against still, and its slowest; and the frame series closed, its last frames
+    // written (it flushed every 120 frames, and a run's tail stayed in the writer's buffer).
     private void ProfileSessionEnd()
     {
+        cpuFrameSeries?.Dispose();
+        cpuFrameSeries = null;
         if (!profileOn || profSession.Count == 0) return;
         var moving = profSession.Where(f => f.Moving).ToList();
         var still = profSession.Where(f => !f.Moving).ToList();

@@ -5,7 +5,7 @@
 """A texel's sky as a light-free list: its visibility in direction bins, lit by a sky it was not cooked under (uv run
 tools/gi-model/sky_bins.py).
 
-The sky is half to three quarters of a texel's light (light_lists.py: Sponza's coarse texels 76%, fine 49%). A list
+The sky is half to three quarters of a texel's light (measured: Sponza's coarse texels 76%, fine 49%). A list
 keeps per texel the cosine-weighted share of its hemisphere that sees the sky, by bin (octahedral, N x N over the
 sphere); a sky lights it as sum_b V_b L_b, L_b the sky's mean radiance over bin b. Exact: the integral of V L cos. The
 error is V and L varying together inside a bin, and it shows when the sky changes (a time of day): cooked for one, lit

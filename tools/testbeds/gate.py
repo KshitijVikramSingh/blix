@@ -9,6 +9,10 @@ Every metric carries two bars:
   ratchet  where the renderer stands today, with a margin. Breaking it FAILS the gate: something got worse.
 When a change moves a metric past its ratchet for the better, tighten the ratchet here in the same commit.
 
+The ratchets, and the dated values beside them, were set on the retired texel GI (to 2026-10-23). They have not been
+recalibrated on RTGI, the GI there is now: before reading a broken ratchet as a regression, run the gate on RTGI and
+set them from what it measures (with the user, where a bar would loosen).
+
 The numbers come from the per-sample lines --gpu-reference prints ("surface at ... total F ref R"): F is the
 incident light the frame shaded with (all indirect diffuse), R the GPU path trace on the triangles at the same point.
 """
@@ -61,6 +65,7 @@ def main():
     open_field = mean(f for f, _ in lit)
 
     # (name, value, target test, target text, ratchet test, ratchet text, what it says)
+    # The ratchets need recalibrating on RTGI (see the top): their numbers are the texel GI's.
     metrics = [
         ('cornell energy', mean(f for f, _ in cornell) / cornell_ref,
          lambda v: abs(v - 1) <= 0.03, '|x - 1| <= 0.03', lambda v: abs(v - 1) <= 0.03, '|x - 1| <= 0.03',
@@ -84,11 +89,11 @@ def main():
          'the dark crevices\' L corridor, lit by bounce through a doorway alone: shade from rare paths (2026-10-13: 0.986)'),
         ('crevices corridor |error|', mean(abs(f - r) for f, r in corridor) / corridor_ref,
          lambda v: v <= 0.015, '<= 0.015', lambda v: v <= 0.035, '<= 0.035',
-         'how far each corridor point is, over its mean light: the gather\'s noise there (2026-10-13: 0.036 against a 16,384-path '
-         'reference, itself 0.026 off; against 262,144 (0.007 off): the gather 0.021, the split cook 0.025)'),
+         'how far each corridor point is, over its mean light: the GI\'s noise there (2026-10-13, the texel GI: 0.036 against '
+         'a 16,384-path reference, itself 0.026 off; against 262,144 (0.007 off): 0.021, its split cook 0.025)'),
         # The seams were judged by their excess alone (Sum max(F - R, 0) over Sum R, ratchet 0.03): built when a leak put
         # 6% of light into the creases (2026-10-16), by 2026-10-22 it read the noise's bright half and any bright bias --
-        # the gather losing a dark bias (seam |error| 0.0735 -> 0.0560, bias -2.2% -> +0.5% over four changes) read worse.
+        # the texel GI's gather losing a dark bias (seam |error| 0.0735 -> 0.0560, bias -2.2% -> +0.5% over four changes) read worse.
         # Now the error both ways, the bias (energy), and a leak as a leak looks: light far above its point.
         ('crevices seam |error|', sum(abs(f - r) for f, r in seams) / sum(r for _, r in seams),
          lambda v: v <= 0.04, '<= 0.04', lambda v: v <= 0.07, '<= 0.07',
@@ -96,13 +101,13 @@ def main():
          'were 0.026 / 0.048 on 2026-10-21)'),
         ('crevices seam leak', sum(f - 1.25 * r for f, r in seams if f > 1.25 * r) / sum(r for _, r in seams),
          lambda v: v <= 0.001, '<= 0.001', lambda v: v <= 0.005, '<= 0.005',
-         'crease light more than 25% above its point\'s path trace, over the creases\' light: a texel centred where a box '
-         'rests on a face gathered half inside the box, its sky-lit outside (2026-10-16: excess 0.063 -> 0.015, records '
-         'moved off contacts; 2026-10-22: 0.0023, one crease bottom at +31-41%)'),
+         'crease light more than 25% above its point\'s path trace, over the creases\' light: light through a joint (the '
+         'texel GI\'s: a texel centred where a box rests on a face gathered half inside the box, its sky-lit outside; '
+         '2026-10-16: excess 0.063 -> 0.015; 2026-10-22: 0.0023, one crease bottom at +31-41%)'),
         ('crevices seam energy', mean(f for f, _ in seams) / mean(r for _, r in seams),
          lambda v: abs(v - 1) <= 0.02, '|x - 1| <= 0.02', lambda v: abs(v - 1) <= 0.05, '|x - 1| <= 0.05',
-         'the creases\' light over the path trace\'s: the texels beside a buried one answer for it (2026-10-16: 0.886; '
-         '2026-10-22: 1.005)'),
+         'the creases\' light over the path trace\'s: is a crease too dark or too bright on the whole (the texel GI, '
+         '2026-10-16: 0.886; 2026-10-22: 1.005)'),
     ]
     if deadend:
         deadend_ref = mean(r for _, r in deadend)
@@ -110,7 +115,7 @@ def main():
             ('crevices dead end energy', mean(f for f, _ in deadend) / deadend_ref,
              lambda v: abs(v - 1) <= 0.03, '|x - 1| <= 0.03', lambda v: abs(v - 1) <= 0.06, '|x - 1| <= 0.06',
              'the corridor\'s second leg to its dead end, lit only round the corner: light through its walls shows here first '
-             '(2026-10-23: 1.023 / 1.022; with patchless texels lighting the nearest patch through the far wall, 1.324)'),
+             '(the texel GI, 2026-10-23: 1.023 / 1.022; with patchless texels lighting the nearest patch through the far wall, 1.324)'),
             ('crevices dead end |error|', mean(abs(f - r) for f, r in deadend) / deadend_ref,
              lambda v: v <= 0.02, '<= 0.02', lambda v: v <= 0.05, '<= 0.05',
              'how far each dead-end point is, over its mean light (2026-10-23: 0.037 / 0.037)'),
