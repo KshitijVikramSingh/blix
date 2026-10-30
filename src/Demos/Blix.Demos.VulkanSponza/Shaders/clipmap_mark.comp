@@ -35,7 +35,8 @@ layout(std430, set = 0, binding = 3) buffer ClipmapSeen { uint seen[]; };
 // Allocating a surface probe writes its slot's state (cell, ALLOCATED) and publishes the slot in the index.
 layout(std430, set = 0, binding = 4) buffer ClipmapState { uvec4 states[]; };
 layout(std430, set = 0, binding = 5) buffer SurfaceIndex { uint surfaceIndex[]; };
-// fresh slots handed out, the free ring's ends (surface_reclaim.comp fills it under pressure), then the ring.
+// fresh slots handed out, the free ring's ends, then the ring. The surface probes are retired: bound empty and off
+// (SponzaLoop.Clipmap.cs), until the clipmap goes too.
 layout(std430, set = 0, binding = 6) buffer SurfaceAlloc { uint fresh; uint freeHead; uint freeTail; uint pressure; uint reclaimed; uint pad0; uint pad1; uint pad2; uint ring[]; };
 
 // Addressing only: the sampling half of probe_clipmap.glsl is left out (no atlas or state is read here).

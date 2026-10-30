@@ -24,10 +24,9 @@ internal sealed partial class SponzaLoop
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {Mb(g.Sum(t => t.ByteSize)),7} MB  textures {g.Key} ({g.Count():N0})"));
         foreach (var t in snap.Textures.OrderByDescending(t => t.ByteSize).Take(6))
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"    {Mb(t.ByteSize),7} MB  texture {t.Name} {t.Width}x{t.Height} {t.Format}"));
-        // The cook's CPU structures, by their counts (a tuple of int and float is 8 bytes; an array's header aside).
-        var couplingPairs = transportSolve?.Couplings.Sum(c => (long)(c?.Length ?? 0)) ?? 0;
+        // The CPU's ray scene, by its counts.
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"    cook on the CPU: couplings {couplingPairs:N0} pairs (~{Mb(couplingPairs * 8 + (transportSolve?.Couplings.Length ?? 0) * 32L)} MB as arrays a patch); ray scene {rayQueries?.MeshNodeCount ?? 0:N0} nodes (~{Mb((rayQueries?.MeshNodeCount ?? 0) * 32L)} MB) and {rayQueries?.StoredTriangleCount ?? 0:N0} triangles."));
+            $"    ray scene on the CPU: {rayQueries?.MeshNodeCount ?? 0:N0} nodes (~{Mb((rayQueries?.MeshNodeCount ?? 0) * 32L)} MB) and {rayQueries?.StoredTriangleCount ?? 0:N0} triangles."));
         LogHeapHolders();
     }
 }

@@ -81,7 +81,8 @@ internal sealed partial class SponzaLoop
     }
 
     // Per triangle row, its sheet for the reference (reference_wave.comp, ReferenceSheets): rgb8 T c, the top byte T; null
-    // with no sheet in the scene (or --ref-opaque-sheets). The spec's terms, not RtRowTransmit's frame-side cap and hue.
+    // with no sheet in the scene. --ref-opaque-sheets binds it and leaves it unread; the lit pass asks whether it exists
+    // (SheetGlowInField). The spec's terms, not RtRowTransmit's frame-side cap and hue.
     private GpuBufferHandle? referenceSheets;
     private bool referenceSheetsMade;
     private GpuBufferHandle? SheetRowsBuffer
@@ -90,7 +91,7 @@ internal sealed partial class SponzaLoop
         {
             if (referenceSheetsMade) return referenceSheets;
             referenceSheetsMade = true;
-            if (!(refSheets || sheetLight) || rayGpuData is not { } data) return null;
+            if (rayGpuData is not { } data) return null;
             var rows = new uint[Math.Max(1, data.RowPlacements.Length)];
             var any = 0;
             double shareSum = 0;
@@ -110,14 +111,15 @@ internal sealed partial class SponzaLoop
                 any++;
             }
             if (any == 0) return null;
-            Console.WriteLine(string.Create(Inv, $"[VulkanSponza] sheets: {any:N0} triangle rows are thin sheets (diffuse transmission), scattered as the spec has them{(refSheets ? " in the reference" : "")}{(sheetLight ? " and the GI" : "")}; their factor textures keep {shareSum / Math.Max(1, any):P0} of the factor on average{(raySurfacesChecked ? "" : " (the surface bake not read yet: whole)")}."));
+            Console.WriteLine(string.Create(Inv, $"[VulkanSponza] sheets: {any:N0} triangle rows are thin sheets (diffuse transmission), scattered as the spec has them{(refSheets ? " in the reference" : "")}; their factor textures keep {shareSum / Math.Max(1, any):P0} of the factor on average{(raySurfacesChecked ? "" : " (the surface bake not read yet: whole)")}."));
             referenceSheets = Own(device.CreateGpuBuffer(rows.Length * 4, MemoryMarshal.AsBytes(rows.AsSpan()), "sponza.reference.sheets"));
             return referenceSheets;
         }
     }
 
     // Per triangle row, one bit: KHR_materials_unlit (reference_wave.comp, ReferenceUnlit) -- a camera path's first hit
-    // there sees the base colour and ends. All zeros with none.
+    // there sees the base colour and ends. All zeros with none. Only camera points read it, and none is made since the
+    // camera-path view (--ref-view) went with the texel GI: the gate's points are surface points.
     private GpuBufferHandle? referenceUnlit;
     private GpuBufferHandle ReferenceUnlitBuffer
     {
@@ -129,7 +131,7 @@ internal sealed partial class SponzaLoop
             var any = 0;
             for (var row = 0; row < rows.Length; row++)
                 if ((int)rows[row] < rayPlacementUnlit.Count && rayPlacementUnlit[(int)rows[row]]) { bits[row >> 5] |= 1u << (row & 31); any++; }
-            if (any > 0) Console.WriteLine(string.Create(Inv, $"[VulkanSponza] view reference: {any:N0} triangle rows unlit (KHR_materials_unlit), their base colour as the camera sees it."));
+            if (any > 0) Console.WriteLine(string.Create(Inv, $"[VulkanSponza] reference: {any:N0} triangle rows unlit (KHR_materials_unlit), their base colour as the camera sees it."));
             referenceUnlit = Own(device.CreateGpuBuffer(bits.Length * 4, MemoryMarshal.AsBytes(bits.AsSpan()), "sponza.reference.unlit"));
             return referenceUnlit.Value;
         }
@@ -156,9 +158,9 @@ internal sealed partial class SponzaLoop
         return w;
     }
 
-    // --shot-when-ready: the shot as soon as what it compares is there -- the texels at rest (settled and filtered; when
-    // they are in use) and the gate's reference with all its paths (when asked for; its wave starts at load instead of
-    // counting back from the shot frame) -- and ShotReadyMargin frames more for the image to catch up; --shot-frames
+    // --shot-when-ready: the shot as soon as what it compares is there -- RTGI's cache settled (when in use), a
+    // --sun-change applied, and the gate's reference with all its paths (when asked for; its wave starts at load instead
+    // of counting back from the shot frame) -- and ShotReadyMargin frames more for the image to catch up; --shot-frames
     // stays the latest it may be. The gate ran each scene a fixed 3,000-4,500 frames, long after both.
     private bool shotWhenReady;
     // --shot-hold N: frames at rest before the shot (default 120) -- a timing run's still/moving windows want seconds of it.
@@ -178,25 +180,18 @@ internal sealed partial class SponzaLoop
         if (!shotWhenReady) return false;
         if (shotReadyFrame < 0)
         {
-            // And no light on its way: a --sun-change still to come or relighting, the split light still cooking (a shot
-            // of a sun change taken before its relight measured the old sun, 2026-10-14).
-            var lightReady = (!transportTexels || texelsRestReported) && relightTask is null && !splitCooking
-                && (sunChange is null || sunChangeApplied && postLoadFrames > sunChangeAppliedAt + 1) && giRelightAt < 0 && !giRelighting && !giConverging && !(giNeedsConverge && (giConverge || GiBehindSliders)) && float.IsNaN(giStopHour);
+            // And no light on its way: a --sun-change still to come (a shot of a sun change taken before it measured the old
+            // sun, 2026-10-14).
+            var lightReady = sunChange is null || sunChangeApplied && postLoadFrames > sunChangeAppliedAt + 1;
             var referenceReady = !gpuReference || referenceMonolithic
                 ? !gpuReference || gpuReferencePaths >= GpuReferenceTarget
                 : cachedReferenceSums is not null || gateWave is { } w && w.Dispatch >= ReferenceWaveFrames(w);
-            // The sun records when asked (--lightlets, --lightlet-sun): a shot of them before they land measured the
-            // traced shadows instead (2026-10-14: a bake closed at 0%).
-            var recordsReady = !lightletsAsked || lightlets is not null;
-            // And --ref-view's camera paths, all of them (a shot before they finished compared a part of them, 2026-10-22).
-            var viewReady = refViewStride <= 0 || viewWave is { } v && v.Dispatch >= ReferenceWaveFrames(v);
             // --rtgi: the cache trained --rtgi-settle-frames scene frames (its training stops behind the cook screen).
             var cacheReady = !rtgi || rtgiTraced >= rtgiSettleFrames;
-            if (!lightReady || !referenceReady || !recordsReady || !viewReady || !cacheReady) return false;
+            if (!lightReady || !referenceReady || !cacheReady) return false;
             shotReadyFrame = postLoadFrames;
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                $"[VulkanSponza] shot: ready at post-load frame {postLoadFrames} (light {(transportTexels ? "at rest" : "not cooked")}, reference {(gpuReference ? "complete" : "none")}{(lightletsAsked ? ", sun records up" : "")}); writing in {ShotReadyMargin} frames."));
-            DumpShotState();
+                $"[VulkanSponza] shot: ready at post-load frame {postLoadFrames} (reference {(gpuReference ? "complete" : "none")}{(rtgi ? ", the cache settled" : "")}); writing in {ShotReadyMargin} frames."));
         }
         // On a frame fixed in advance, not a fixed count after ready: TAA's jitter is a Halton sequence over the post-load
         // frame, and at a crease the shot's value hangs on which jitter it lands on -- the gate's crevices seams read 0.872
@@ -268,7 +263,7 @@ internal sealed partial class SponzaLoop
 
     // One bounce of every lane's path: step (the next rays) -> CLOSEST -> shade (shadow rays, the next start) -> SHADOW ->
     // resolve. The batches are the frame's (SponzaLoop.RayBatch.cs): software, or Metal under --ray-backend hw|both.
-    private void RecordReferenceWave(ReferenceWave w, MetalRayTracer? on = null)
+    private void RecordReferenceWave(ReferenceWave w)
     {
         var count = w.Count;
         if (count == 0) return;
@@ -300,10 +295,10 @@ internal sealed partial class SponzaLoop
                 .Append(new ShaderBufferBinding("ReferenceUnlit", ReferenceUnlitBuffer))
                 .Where(b => declared.Contains(b.Name)).ToArray());
         graph.Dispatch(referenceWaveStepPass, Wave(0));
-        RecordClosestBatch(referenceClosestBatch, w.Rays, w.Hits, count, frameSeed, on);
+        RecordClosestBatch(referenceClosestBatch, w.Rays, w.Hits, count, frameSeed);
         graph.Dispatch(referenceWaveShadePass, Wave(1));
-        if (refSunClosest) RecordClosestBatch(referenceSunBatch, w.SunRays, w.SunHits, count, frameSeed ^ 0x5bd1e995u, on);
-        else RecordShadowBatch(referenceShadowBatch, w.Origins, w.Occluded, count, -Vector3.Normalize(sunDirection), frameSeed ^ 0x5bd1e995u, on,
+        if (refSunClosest) RecordClosestBatch(referenceSunBatch, w.SunRays, w.SunHits, count, frameSeed ^ 0x5bd1e995u);
+        else RecordShadowBatch(referenceShadowBatch, w.Origins, w.Occluded, count, -Vector3.Normalize(sunDirection), frameSeed ^ 0x5bd1e995u,
             directions: refSunDisc ? w.Directions : null);
         graph.Dispatch(referenceWaveResolvePass, Wave(2));
         w.Dispatch++;
@@ -427,13 +422,14 @@ internal sealed partial class SponzaLoop
     private Vector4[]? cachedReferenceSums;
     private string? referenceCacheFile;
 
-    // The geometry by the transport's patches key (the scene's triangles): a variant of a scene under its name, its points
-    // where the last one's were (a thicker roof over the same corridor), read the other's reference (2026-10-23).
+    // "geometry -": the key's geometry field, kept so references cached before the texel GI's removal (which filled it with
+    // the transport's patches key, "-" without its cook) still answer. A variant of a scene under its name, its points
+    // where the last one's were (a thicker roof over the same corridor), reads the other's reference: name it apart.
     private string ReferenceCacheKey(List<Vector4> packed)
     {
         using var sha = System.Security.Cryptography.SHA256.Create();
         var head = string.Create(CultureInfo.InvariantCulture,
-            $"ref v1;{sunDirection.X:G9},{sunDirection.Y:G9},{sunDirection.Z:G9};{EffectiveSunIrradiance.X:G9},{EffectiveSunIrradiance.Y:G9},{EffectiveSunIrradiance.Z:G9};sky {refSky:G9};seed {refSeed};bounces {refBounces};lanes {ReferenceLanesPerPoint};quota {ReferenceLaneQuota};disc {refSunDisc};sheets {refSheets};closest {refSunClosest};lift {refLift:G6};scene {scene.Name};geometry {transportPatchesKey ?? "-"};probe {probeName}");
+            $"ref v1;{sunDirection.X:G9},{sunDirection.Y:G9},{sunDirection.Z:G9};{EffectiveSunIrradiance.X:G9},{EffectiveSunIrradiance.Y:G9},{EffectiveSunIrradiance.Z:G9};sky {refSky:G9};seed {refSeed};bounces {refBounces};lanes {ReferenceLanesPerPoint};quota {ReferenceLaneQuota};disc {refSunDisc};sheets {refSheets};closest {refSunClosest};lift {refLift:G6};scene {scene.Name};geometry -;probe {probeName}");
         var bytes = System.Text.Encoding.UTF8.GetBytes(head).Concat(MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(packed)).ToArray()).ToArray();
         return Convert.ToHexString(sha.ComputeHash(bytes))[..24].ToLowerInvariant();
     }

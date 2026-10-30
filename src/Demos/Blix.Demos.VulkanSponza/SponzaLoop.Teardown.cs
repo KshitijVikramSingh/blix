@@ -54,6 +54,5 @@ internal sealed partial class SponzaLoop
         textureLoader?.Dispose();
         // Waits for its last in-flight Metal pass before letting go of what it reads.
         frameTracer?.Dispose();
-        bakeTracer?.Dispose();
     }
 }

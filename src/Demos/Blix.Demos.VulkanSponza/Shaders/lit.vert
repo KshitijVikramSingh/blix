@@ -23,8 +23,6 @@ layout(location = 3) out vec3 vTangentWorld;
 layout(location = 4) out float vTangentSign;
 // Stage 4e, for the pre-pass: the surface this is, and where this vertex is now and was last frame (un-jittered
 // clip space; the fragment divides, so the velocity is exact per pixel rather than interpolated after division).
-// The LOD level this placement is drawn at (instances.glsl): the fragment applies the atlas's LOD 0 frame only above 0.
-layout(location = 5) flat out uint vLod;
 layout(location = 6) flat out uint vSurfaceKey;
 layout(location = 7) out vec4 vClipNow;
 layout(location = 8) out vec4 vClipPrev;
@@ -32,8 +30,6 @@ layout(location = 8) out vec4 vClipPrev;
 // asking how it moved. Affine in the position, so interpolation is exact for rigid motion; a still row holds the same
 // transform twice and writes exactly zero.
 layout(location = 9) out vec3 vWorldMotion;
-// The vertex's lightmap texel (--lightmap; instances.glsl), for the lightmap debug view and the passes after.
-layout(location = 10) out vec2 vLightmapTexel;
 
 // gl_Position must be bit-identical to the depth pre-pass (which reuses this
 // vertex shader) so the lit pass's LessEqual depth test matches the pre-pass
@@ -53,10 +49,8 @@ void main() {
     vUv = inUv;
     vWorldPos = world.xyz;
     vSurfaceKey = instanceSurfaceKey();
-    vLod = instanceLod();
     vClipNow = frame.uViewProjUnjittered * world;
     vec4 previousWorld = instancePreviousWorld() * vec4(inPosition, 1.0);
     vClipPrev = frame.uPrevViewProjUnjittered * previousWorld;
     vWorldMotion = world.xyz - previousWorld.xyz;
-    vLightmapTexel = vertexLightmapTexel();
 }

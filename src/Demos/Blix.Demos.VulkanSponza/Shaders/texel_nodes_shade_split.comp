@@ -1,7 +1,0 @@
-#version 450
-// The sun nodes' shade for up to 32 suns -- the split light's cook (a sky column and a sun's): texel_nodes_shade.glsl
-// with one sun-bit word a candidate and a workgroup of 32. The 256-sun layout reserved ~11 KB of shared memory a
-// workgroup for bits a split cook never fills, which held the GPU to a few workgroups a core (2026-10-14).
-#define MAX_WORDS 1
-#define SHADE_THREADS 32
-#include "texel_nodes_shade.glsl"

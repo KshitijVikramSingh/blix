@@ -69,17 +69,17 @@ internal sealed partial class SponzaLoop
     // The seed travels as its bits in a float (a vec4 uniform): exact, which a float's value would not be past 2^24.
     private static float SeedBits(uint seed) => BitConverter.UInt32BitsToSingle(seed);
 
-    // With frame rays on Metal, `on` answers (the bake scene's tracer, for the texels' gathers), else the frame's.
+    // With frame rays on Metal, the frame's tracer answers, else the software kernel.
     // limit (Metal only): a uint the frame wrote before the batch, its live count; the software kernel traces all count.
     // deferred: the answers are read on a later frame, so the batch can wait for the frame's tracer group
     // (SponzaLoop.TracerGroup.cs) instead of a trip to Metal of its own.
     private void RecordClosestBatch(RayBatchPasses passes, GpuBufferHandle rays, GpuBufferHandle hits, int count, uint seedBase,
-        MetalRayTracer? on = null, GpuBufferHandle? limit = null, bool deferred = false)
+        GpuBufferHandle? limit = null, bool deferred = false)
     {
         if (count <= 0) return;
-        if (FrameRaysOnHardware && (on ?? (EnsureFrameTracer() ? frameTracer : null)) is { } tracer)
+        if (FrameRaysOnHardware && (EnsureFrameTracer() ? frameTracer : null) is { } tracer)
         {
-            if (deferred && TracerGroupsOn && ReferenceEquals(tracer, frameTracer))
+            if (deferred && TracerGroupsOn)
                 DeferTracerBatch((sync, t) => t.EncodeTrace(sync, rays, 0, hits, 0, count, seedBase, limit));
             else graph.External(passes.Hardware, sync => tracer.EncodeTrace(sync, rays, 0, hits, 0, count, seedBase, limit));
             return;
@@ -93,12 +93,12 @@ internal sealed partial class SponzaLoop
     }
 
     private void RecordShadowBatch(RayBatchPasses passes, GpuBufferHandle origins, GpuBufferHandle occluded, int count, Vector3 towardLight, uint seedBase,
-        MetalRayTracer? on = null, GpuBufferHandle? limit = null, bool deferred = false, GpuBufferHandle? directions = null)
+        GpuBufferHandle? limit = null, bool deferred = false, GpuBufferHandle? directions = null)
     {
         if (count <= 0) return;
-        if (FrameRaysOnHardware && (on ?? (EnsureFrameTracer() ? frameTracer : null)) is { } tracer)
+        if (FrameRaysOnHardware && (EnsureFrameTracer() ? frameTracer : null) is { } tracer)
         {
-            if (deferred && TracerGroupsOn && ReferenceEquals(tracer, frameTracer))
+            if (deferred && TracerGroupsOn)
                 DeferTracerBatch((sync, t) => t.EncodeShadow(sync, origins, occluded, 0, count, towardLight, seedBase, limit: limit, directions: directions));
             else graph.External(passes.Hardware, sync => tracer.EncodeShadow(sync, origins, occluded, 0, count, towardLight, seedBase, limit: limit, directions: directions));
             return;

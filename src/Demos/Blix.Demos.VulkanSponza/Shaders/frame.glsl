@@ -74,16 +74,16 @@ layout(set = 0, binding = 0) uniform Frame {
     // diffuse, sky included). Off -- --no-incident, or before the clipmap's first solve -- the lit
     // pass falls back to the open-sky irradiance cube with sky visibility 1.
     // x = 1 when it takes the field's sky visibility and light at all (--no-sky / --sky-no-sample
-    // zero it: sky visibility 1, no incident light). y = 1 when the field already holds its own occlusion -- the
-    // reference view's path trace, or texels with --texel-gtao 0 -- so GTAO does not darken it again. w = 1 when the lighting
+    // zero it: sky visibility 1, no incident light). y = 1 when the field already holds its own occlusion -- RTGI's
+    // traced readout, or the GI reference's path trace -- so GTAO does not darken it again. w = 1 when the lighting
     // ran at half resolution (RenderSettings.HalfResLighting): the traced sun's visibility is then the incident gradient's
     // w, upsampled (lighting_upsample.frag), not the mask at this pixel.
     vec4  uIncident;
     // How the lit pass carries the incident field's light to its normal-mapped normal (incident_clipmap.frag's
     // gradient): x the mip bias the normal map is read at for it (indirect diffuse answers to folds and relief, not
     // to a weave finer than a pixel, which under TAA's jitter shimmered), y how far the correction may scale the
-    // light either way (factor in [1 - y, 1 + y]); z 1: the sheets' glow is the incident field's (--sheet-light), the
-    // frame's own (rtSheetGlow) off; w 1: a sheet's far side the GI's back records (lit.frag, lightmapBackIrradiance).
+    // light either way (factor in [1 - y, 1 + y]); z 1: the sheets' glow taken as the incident field's, the frame's own
+    // (rtSheetGlow) off (lit_body.glsl). w is unread (written 0), kept so the block's layout holds.
     vec4  uIncidentGradient;
     // Stage 4e's velocity: this frame's UN-jittered view-projection and last frame's. The pre-pass projects a
     // vertex through both (current and previous world) and writes the difference, so motion never carries the
@@ -98,9 +98,8 @@ layout(set = 0, binding = 0) uniform Frame {
     vec4  uClipOrigin1;
     vec4  uClipOrigin2;
     vec4  uClipOrigin3;
-    // x 1 (--texel-h4): a lightmapped pixel carries its indirect light to its normal-mapped normal by the records' own
-    // shapes per channel (lit.frag, lightmapShape), not the incident pass's luminance gradient. y 1: GTAO ran (0: --no-ao,
-    // its passes skipped -- the visibility one). w 1 (--ibl-brdf-lut): the specular IBL's split sum from the LUT, not the
-    // analytic fit (lit_body.glsl). Appended last.
+    // y 1: GTAO ran (0: --no-ao, its passes skipped -- the visibility one). w 1 (--ibl-brdf-lut): the specular IBL's
+    // split sum from the LUT, not the analytic fit (lit_body.glsl). x and z are unread (written 0), kept so the block's
+    // layout holds. Appended last.
     vec4  uTexelShape;
 } frame;

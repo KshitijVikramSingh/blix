@@ -3,12 +3,15 @@ using Blix.Graphics;
 
 namespace Blix.Demos.VulkanSponza;
 
-// The incident pass reuses last frame's answer (incident_clipmap.frag, uReuse). At rest -- the texels resolved, the
-// probes resting, the light still -- a pixel's incident light changes only as the camera moves, and three of each 2x2
-// reproject last frame's where the same surface showed there; the fourth recomputes, a different one each frame. With
-// the camera still four frames, every pixel has been recomputed under it: the pass and its copy are skipped and the lit
-// pass reads the targets as they stand. The texel lookups were the frame's largest pass (~10-20 ms, 2026-10-20).
-// --no-incident-reuse: every pixel every frame; --ab increuse alternates the two.
+// The incident pass reuses last frame's answer (incident_clipmap.frag, uReuse). At rest -- the light the pass reads
+// still -- a pixel's incident light changes only as the camera moves, and three of each 2x2 reproject last frame's where
+// the same surface showed there; the fourth recomputes, a different one each frame. With the camera still four frames,
+// every pixel has been recomputed under it: the pass and its copy are skipped and the lit pass reads the targets as they
+// stand. --no-incident-reuse: every pixel every frame; --ab increuse alternates the two.
+//
+// The rest was the texels' (resolved and still), and nothing reports one now (incidentLightResting): the reuse and the
+// skips do not engage. The incident pass goes with the clipmap; MarkIncidentDirty's events stay the traced shadows' keep
+// rule too (RtShadowKeep).
 internal sealed partial class SponzaLoop
 {
     private GraphResourceHandle incidentPrevHandle, incidentGradientPrevHandle, reuseStandInFloat, reuseStandInUint;
@@ -16,7 +19,7 @@ internal sealed partial class SponzaLoop
     private PipelineHandle incidentHistoryPipeline;
     private bool incidentReuse = true;
     // The frame the incident history last matched the targets (copied, or both left standing); the frame the light the
-    // pass reads last changed (a texel compose, a probe solve).
+    // pass reads last changed (a probe solve, a moved light or object).
     private long incidentHistoryFrame = -10, incidentDirtyFrame = -10;
     private Matrix4x4 incidentLastView, incidentLastProjection;
     private int incidentStillFrames;
@@ -33,14 +36,14 @@ internal sealed partial class SponzaLoop
             : b.Read(reuseStandInFloat).Read(reuseStandInUint);
     }
 
-    private bool IncidentReuseOn => incidentReuse && !(abMode == "increuse" && AbOffPhase) && !TexelToolsOn;
+    private bool IncidentReuseOn => incidentReuse && !(abMode == "increuse" && AbOffPhase);
+    // Whether the light the incident pass reads is at rest (see above): never, since the texels went.
+    private readonly bool incidentLightResting = false;
 
     // Whether this frame's incident pass may reuse last frame's: everything it reads at rest, last frame's answer kept.
-    // A census (IncidentCensusNow) is taken by a frame that runs the pass in full; census: false asks without taking one.
-    private bool IncidentReuseNow(bool half, bool census = true) =>
-        IncidentReuseOn && SurfaceTargets && !half && texelResting && !MoverActive
-        && framesRendered - incidentDirtyFrame > 1 && incidentHistoryFrame == framesRendered - 1 && surfaceKeyHistoryFrame == framesRendered - 1
-        && !(census && IncidentCensusNow(half));
+    private bool IncidentReuseNow(bool half) =>
+        IncidentReuseOn && SurfaceTargets && !half && incidentLightResting && !MoverActive
+        && framesRendered - incidentDirtyFrame > 1 && incidentHistoryFrame == framesRendered - 1 && surfaceKeyHistoryFrame == framesRendered - 1;
 
     // The reuse textures and uniform for RecordIncidentClipmap.
     private IEnumerable<ShaderTextureBinding> IncidentReuseTextures() => new[]
@@ -66,9 +69,7 @@ internal sealed partial class SponzaLoop
         var same = cameraView == incidentLastView && cameraProjection == incidentLastProjection;
         incidentLastView = cameraView;
         incidentLastProjection = cameraProjection;
-        // Skipped at rest before any census is asked for: a census forced the pass in full every 240 frames (with the
-        // camera still, the last census stands).
-        if (same && incidentStillFrames >= 4 && IncidentReuseNow(half: false, census: false))
+        if (same && incidentStillFrames >= 4 && IncidentReuseNow(half: false))
         {
             incidentHistoryFrame = framesRendered;   // the history still matches the targets: neither was written
             incidentSkipped++;
@@ -88,7 +89,7 @@ internal sealed partial class SponzaLoop
         var same = cameraView == incidentLastView && cameraProjection == incidentLastProjection;
         incidentLastView = cameraView;
         incidentLastProjection = cameraProjection;
-        var restable = IncidentReuseOn && render.Taa <= 0f && texelResting && !MoverActive && framesRendered - incidentDirtyFrame > 1;
+        var restable = IncidentReuseOn && render.Taa <= 0f && incidentLightResting && !MoverActive && framesRendered - incidentDirtyFrame > 1;
         if (!same || !restable) { incidentStillFrames = 0; return true; }
         if (incidentStillFrames >= 4) { incidentSkipped++; return false; }
         incidentStillFrames++;

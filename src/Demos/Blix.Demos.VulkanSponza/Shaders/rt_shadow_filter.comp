@@ -52,7 +52,7 @@ vec3 worldAt(ivec2 pixel, float raw) {
     return w.xyz / w.w;
 }
 
-// 1 where the sun reached; the blocker's distance where it did not (0 when unknown: a baked answer, no ray).
+// 1 where the sun reached; the blocker's distance where it did not (0 when unknown).
 // p within MaxRadius of the group's pixels (every tap is).
 vec2 tapAt(ivec2 p) {
     ivec2 t = p - tileOrigin;

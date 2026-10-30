@@ -1,5 +1,0 @@
-#version 450
-// The sun nodes' shade for up to 256 suns (--sun-nodes studies): texel_nodes_shade.glsl.
-#define MAX_WORDS 8
-#define SHADE_THREADS 64
-#include "texel_nodes_shade.glsl"

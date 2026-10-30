@@ -236,8 +236,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // The interpolated world normal, written by the depth pre-pass. What the incident field used
     // to infer from the depth buffer, and could not for foliage, two-sided cloth or silhouettes.
     private GraphResourceHandle prepassNormalHandle;
-    // --lightmap: each pixel's lightmap atlas texel, packed (depth_prepass.frag, texel.glsl texelLightmapUnpack).
-    private GraphResourceHandle lightmapTexelHandle;
     private GraphResourceHandle prepassNormalResolveHandle;
     /// <summary>The normal target a reader should sample: resolved under MSAA, direct at one sample.</summary>
     // Stage 4e: the pre-pass's surface identity and motion. SurfaceKey (R32Uint): the surface each pixel shows (the
@@ -250,13 +248,10 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // look on screen; this says where the point was in the world, rigid or deforming alike, without the key standing
     // for a transform.
     private GraphResourceHandle motionHandle;
-    // Only screen probes (and --surface-check) read world motion; elsewhere the full-resolution Rgba16F target was
-    // written by both pre-passes and loaded again by the late one for nothing. The shaders still write it: with no
+    // Only --surface-check reads world motion; elsewhere the full-resolution Rgba16F target was written by both
+    // pre-passes and loaded again by the late one for nothing. The shaders still write it (location 3): with no
     // attachment there the writes are dropped, as under MSAA.
-    private bool MotionTarget => SurfaceTargets && (screenProbesEnabled || surfaceCheck);
-    // The lightmap texel target (R32Uint) sits at location 3, before the motion target's 4: on with --lightmap, and with
-    // the motion target (which needs a location 3 to sit behind; the shaders write it, nothing reads it there).
-    private bool LightmapTexelTarget => SurfaceTargets && (lightmapEnabled || MotionTarget);
+    private bool MotionTarget => SurfaceTargets && surfaceCheck;
     private bool SurfaceTargets => MsaaSamples == 1;
     // The surface-key target as the previous frame left it (copied at the end of each frame), and TAA's per-pixel
     // accumulated count, ping-ponged with its colour (R32Uint: an integer, read at the nearest pixel).
@@ -286,13 +281,8 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private GraphResourceHandle incidentHalfHandle, incidentGradientHalfHandle;
     private PassHandle incidentHalfPassHandle, lightingUpsamplePassHandle;
     private PipelineHandle incidentHalfPipeline, lightingUpsamplePipeline;
-    // incident_lean.frag's (no debug view, picker, probe, screen probes or reference view): SponzaLoop.Clipmap.cs picks them.
+    // incident_lean.frag's (no reference view): SponzaLoop.Clipmap.cs picks them.
     private PipelineHandle incidentLeanPipeline, incidentHalfLeanPipeline;
-    // The half-res pass split (incident_fast.frag, incident_slow.frag): SponzaLoop.Clipmap.cs records both in its place.
-    private PipelineHandle incidentHalfFastPipeline, incidentHalfSlowPipeline;
-    private PassHandle incidentHalfFastPassHandle, incidentHalfSlowPassHandle;
-    private GraphResourceHandle incidentSlowHalfHandle;
-    private ShaderInterface incidentFastInterface = null!, incidentSlowInterface = null!;
     private ShaderInterface lightingUpsampleInterface = null!;
     // Which of its 2x2 a half-res pixel stands for this frame (LightingSubpixel), all four every four frames.
     private uint lightingFrame;
@@ -468,7 +458,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     /// <summary>--orbit: a closed camera path, one revolution per A/B phase. See ApplyOrbit.</summary>
     private bool orbit;
     private Vector4? orbitAt;
-    // --orbit-frames N: a slower revolution, for what a walking camera sees (screen-probe history); the A/B
+    // --orbit-frames N: a slower revolution, for what a walking camera sees; the A/B
     // alignment above holds only at the default.
     private int OrbitFrames = AbPeriodFrames;
     // --ab lod alternates two error budgets in-process. Defaults compare the configured budget with
@@ -491,7 +481,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     {
         "Lit scene", "Geometric normal", "Shading normal", "Tangent-space normal",
         "Front/back facing", "Tangent", "Bitangent", "Sky visibility",
-        // 8, 9, 16 and 21 read the retired baked volume. Kept as names because the index is the channel id.
+        // 8, 9 and 16 read the retired baked volume and show black. Kept as names because the index is the channel id.
         "unused", "unused",
         "Bounce radiance (raw)", "Bounce contribution", "Direct sun only",
         "GTAO visibility", "Texture AO", "Occlusion product",
@@ -502,8 +492,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
         "Pre-pass normal (what the incident field reads)",
         "Clipmap: solves behind the light (red 1, orange 2-3, yellow 4-7, green 8-31, blue 32+)",
         "Clipmap: answering level (white 0, green 1, blue 2, magenta 3)",
-        "Lightmap texels (--lightmap: a checker of one texel, tinted by atlas block; magenta where none)",
-        "Diffuse response (the --ref-view reference's model: base lobe and transmission, direct and indirect)",
     };
 
     // --ao-fullres: run ambient visibility at framebuffer resolution instead of half. Half res is
@@ -516,6 +504,18 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // Standard path: the probe clipmap's light reaches the lit pass through the full-resolution incident field.
     // --no-incident is a diagnostic: the lit pass then uses the open-sky irradiance cube with sky visibility 1.
     private bool incidentField = true;
+
+    // How the lit pass carries the incident field's light to its normal-mapped normal (frame.uIncidentGradient).
+    // --incident-normal-bias B: mips down the normal map is read for the gradient; --incident-gradient-clamp C: the
+    // correction's factor stays in [1 - C, 1 + C] (it was [0, 3]). Sponza, still camera: pixels the gradient moves
+    // (TAA off) against the presented image's median variation (TAA on): bias 0 (clamp 0-3) 13.0% / 6.69%, 1 5.3% /
+    // 4.78%, 2 1.7% / 3.67%, 3 0.56% / 3.44%, none 0 / 3.40%. The detail IS the shimmer: what a normal map adds below
+    // a few pixels, TAA's jitter samples differently every frame. Under the reworked TAA (motion reprojection,
+    // Rgba16F history, 0.9) the same sweep reads bias 0/1/2 at 1.83/1.24/0.97% (no gradient 0.94%, default look
+    // 0.83%), and at 1 the user saw "tiny spots of light and dark across walls": the presented-variation heat map
+    // shows weave- and grain-scale speckle on every textured surface with it and none without. 2.
+    private float incidentNormalBias = 2f;
+    private float incidentGradientClamp = 0.5f;
 
     // --ao-debug N: make the GTAO pass write an intermediate instead of the bent normal. See gtao.frag.
     private float aoDebug;
@@ -599,19 +599,11 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private float shadowLodTexels = 1.5f;
     /// <summary>The camera frustum for this frame; the cascades cull their casters against it.</summary>
     private Frustum cameraFrustumThisFrame;
-    /// <summary>--offscreen-shadow-rays: a gather ray's hit outside the camera's view takes its sun by a shadow ray, not
-    /// the cascades, which hold only the casters of what the camera sees (Shaders/cascade_receivers.glsl).</summary>
-    private bool offscreenShadowRays;
-    // Where the gather passes may take the sun from the cascades: the view the casters were culled against, or (every
-    // point to (0, 0, 0.5, 1), inside) anywhere when nothing was culled or the check is off.
-    // Nowhere (every point to w 0), by default: every gather hit takes its sun by a ray. The cascades hold only the casters
-    // the camera's view culled them to and filter hard at 2-20 cm a texel: Sponza's authored-sun bake (raw: no filter, no
-    // blend) read 9.6% brighter with them than with a ray at every hit, and the sun nodes' cook matched the rays to
-    // +1.05% (2026-10-12). --texel-sun-cascades: the cascades where they cover, as before.
-    private bool texelSunRays = true;
-    private Matrix4x4 CascadeReceivers => texelSunRays ? default
-        : offscreenShadowRays ? viewProj
-        : new Matrix4x4(0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0.5f, 1f);
+    // Where the probes' hits may take the sun from the cascades (Shaders/cascade_receivers.glsl): nowhere (every point to
+    // w 0), so every hit takes its sun by a ray. The cascades hold only the casters the camera's view culled them to and
+    // filter hard at 2-20 cm a texel: Sponza's authored-sun bake read 9.6% brighter with them than with a ray at every hit
+    // (2026-10-12).
+    private static Matrix4x4 CascadeReceivers => default;
     /// <summary>--probe-reference: path-trace references on the CPU and print them beside the clipmap's answers.</summary>
     private bool probeReference;
     /// <summary>--no-foliage: skip the ivy and tree packs, to price alpha-cutout overdraw.</summary>
@@ -627,8 +619,8 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private bool refFaceNormal;
     private float refSky = 1f;
     // The GPU reference's sun rays (the wavefront's, on Metal) each toward its own point of the sun's disc, as the frame's
-    // direct sun and the gather's hits (--hit-sun) have it: one sun for the picture, the GI and its truth (2026-10-21; the
-    // gate's history before was against a point sun). --ref-sun point: the disc's centre.
+    // direct sun has it: one sun for the picture and its truth (2026-10-21; the gate's history before was against a point
+    // sun). --ref-sun point: the disc's centre.
     private bool refSunDisc = true;
     private Matrix4x4 prevAmbientViewProj = Matrix4x4.Identity;
     private bool ambientHistoryValid;
@@ -797,9 +789,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
         Blix.Assets.PrimitiveSource? Source,
         // The material's base colour factor (linear rgb, alpha): what a ray's surface bake multiplies the texture by.
         Vector4 BaseColor,
-        // With --lightmap: each vertex's texel in the scene's lightmap atlas (the vertices and LODs are then the
-        // lightmap file's split ones). Null: no lightmap for this primitive.
-        Vector2[]? LightmapTexels = null,
         // KHR_materials_diffuse_transmission: its factor times its colour factor (zero: none) -- what a sheet of it lets
         // through to its far side, which the bounce light will read as the sheet's glow (rayPlacementTransmission).
         Vector3 Transmission = default,
@@ -828,7 +817,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private readonly record struct Placement(int Drawable, int Transform, Bounds3 Bounds);
 
     /// <summary>A unique cooked primitive, in mesh space, with every world it is placed at and which instance each is.</summary>
-    private sealed record PlacedPrimitive(ModelData.Primitive Primitive, Matrix4x4[] Worlds, PlacementInstance[] Instances, Vector2[]? LightmapTexels = null);
+    private sealed record PlacedPrimitive(ModelData.Primitive Primitive, Matrix4x4[] Worlds, PlacementInstance[] Instances);
 
     /// <summary>Which instance a world is: the pack, the node that draws it, and which of that node's draws.</summary>
     /// <remarks>
@@ -897,9 +886,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private bool gpuCull = true;
     private bool litFlat;
     private bool litEarlyZ = true;
-    // The lit pass's per-channel shape from the nearest atlas cell alone (lit_body.glsl, lightmapShape): the default since
-    // 2026-10-24 (the user saw no steps; the lit pass 5.5 -> 3.9 ms at Crytek Sponza's courtyard). --texel-shape-bilinear: the four.
-    private bool texelShapeNearest = true;
     private PipelineHandle flatSolidPipeline;
     private PassHandle cullPassHandle;
     private PipelineHandle cullPipeline;
@@ -914,7 +900,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private PipelineHandle occlusionPipeline;
     private PassHandle latePrepassHandle;
     private GpuBufferHandle cullPlacements, cullDrawables, cullLods, cullState, cullCursor, sceneArgs, sceneVisible, sceneTransformBuffer,
-        sceneSurfaceKeyBuffer, scenePreviousTransformBuffer, sceneLightmapTexels;
+        sceneSurfaceKeyBuffer, scenePreviousTransformBuffer;
     private ShaderBufferBinding[] cullBuffers = System.Array.Empty<ShaderBufferBinding>();
     private ShaderBufferBinding[] sceneBuffers = System.Array.Empty<ShaderBufferBinding>();
     // A Selection-panel margin edit not yet sent: (global placement index + 1, value), carried by the
@@ -1125,7 +1111,7 @@ internal sealed class ShadowsSettings
     // the rays aim at another point of the disc and TAA averages them: a penumbra that widens with the distance from
     // the occluder, hard at contact. 0: a point sun, every shadow hard -- the default since 2026-10-21, for a while:
     // with the penumbra filter, shadow interleave and TAA off, a point sun gives a reproducibly correct image, and the
-    // GI's hits and the GPU reference follow it (--hit-sun disc, --ref-sun disc read this). --sun-disc D: the disc.
+    // GPU reference follows it (--ref-sun disc reads this). --sun-disc D: the disc.
     [Tune(0f, 5f)]    public float SunDiscDegrees = 0f;
     // The disc's penumbra filtered in space (rt_shadow_filter.comp): every ray toward the sun's centre (coherent, no
     // direction per pixel), the hard shadow widened by blocker distance x the disc. Stable without TAA. Off: each ray
@@ -1144,8 +1130,8 @@ internal sealed class ShadowsSettings
 // extra strength, power, or bias controls layered over its visibility integral.
 internal sealed class AmbientSettings
 {
-    // Off by default (2026-10-21): the texels hold the occlusion the bounce needs (lit.frag skips GTAO on it once they
-    // are up), and screen-space visibility is the one term of the image that is neither the GI nor its truth. --ao: on.
+    // Off by default (2026-10-21): the traced GI holds the occlusion the bounce needs (lit.frag skips GTAO on it, uIncident.y),
+    // and screen-space visibility is the one term of the image that is neither the GI nor its truth. --ao: on.
     [Tune]            public bool Enabled = false;
     [Tune(0.1f, 4f)]  public float RadiusMetres = 0.8f;
 
@@ -1190,13 +1176,6 @@ internal sealed class RenderSettings
     // Two-phase occlusion culling of the camera's opaque placements (scene_occlusion.comp; --no-occlusion turns it off
     // for the whole run). Off: the frustum alone decides -- the reference, for geometry that breaks up and comes back.
     [Tune]             public bool OcclusionCull = true;
-    // --lightlets: the traced shadows take the baked sun records' answer (SponzaLoop.LightletBake) where a pixel's four
-    // atlas texels all answer and agree, and trace only the rest. Off: every pixel traces (the reference).
-    [Tune]             public bool LightletSun = false;
-    // How far (degrees) from its visibility boundary a record must put the sun to answer (phase 0b: 2 -> 0.001% wrong).
-    [Tune(0.25f, 4f)]  public float LightletTau = 2f;
-    // --split-light: the sky's part of the texels' light times this (SponzaLoop.SplitLight.cs: a compose, no solve).
-    [Tune(0f, 4f)]     public float SkyStrength = 1f;
     // History weight for the full-screen resolve; zero is the current-frame reference. History is
     // rejected off-screen and neighbourhood-clamped so the present frame remains authoritative.
     // 0 by default (2026-10-21): each frame its own, reproducibly; --taa W for the history.

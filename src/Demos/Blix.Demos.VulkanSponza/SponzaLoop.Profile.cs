@@ -114,7 +114,7 @@ internal sealed partial class SponzaLoop
         profLastYaw = camera.Yaw;
         profLastPitch = camera.Pitch;
         var last = host.Timing.LastFrame;
-        var state = $"{(CookScreenNow ? "cook-screen" : "scene")} {sunNodeStage}{(liveRetargeting ? " re-aiming" : "")}{(fineGathering ? " fine" : "")}";
+        var state = CookScreenNow ? "cook-screen" : "scene";
         // The garbage collector's pauses over the frame, and its full collections (a 6-7 GB heap).
         var gcPause = GC.GetTotalPauseDuration();
         var gen2 = GC.CollectionCount(2);

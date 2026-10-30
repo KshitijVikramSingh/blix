@@ -33,8 +33,8 @@ layout(set = 0, binding = 0) uniform ReferenceWave {
 } u;
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
-// Two vec4s a point: its position, then its normal -- or, w 1 on the second (--ref-view, SponzaLoop.ViewReference.cs), a
-// CAMERA point: the camera's position and its pixel's direction, the path's first ray along it (not a cosine ray), so
+// Two vec4s a point: its position, then its normal -- or, w 1 on the second (the retired --ref-view's; no host makes one
+// now), a CAMERA point: the camera's position and its pixel's direction, the path's first ray along it (not a cosine ray), so
 // the path's first hit is the surface the pixel shows and its sum the radiance that pixel sees: the material's response
 // (the base lobe and the sheet's transmission, by the rules below) with every light that reaches it.
 layout(std430, set = 0, binding = 2) readonly buffer ReferencePointList { vec4 points[]; };

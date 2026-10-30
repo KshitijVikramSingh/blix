@@ -13,25 +13,15 @@ namespace Blix.Demos.VulkanSponza;
 internal sealed partial class SponzaLoop
 {
     private bool referenceView;
+    // Each pixel's sum of its paths' luminance squared (reference_trace.comp): the reference's own standard error (RTGI's
+    // dump reads it, SponzaLoop.Rtgi.cs).
     private GpuBufferHandle referenceMoments;
-    // The incident pass's: the moments, or a placeholder (the comparison then greys nothing out).
-    private ShaderBufferBinding ReferenceMomentsBinding()
-    {
-        if (referenceMoments.Equals(default(GpuBufferHandle))) referenceMoments = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.reference.moments.none"));
-        return new ShaderBufferBinding("ReferenceMoments", referenceMoments);
-    }
     private bool referenceAvailable;
-    // --texel-debug: the incident pass writes where texels answer instead of light (incident_clipmap.frag).
-    // --texel-debug-records: which atlas record each of a pixel's four lightmap texels gives it, by bilinear weight --
-    // green a double-sided texel's front, blue its back, white a one-sided texel, red buried (skipped), black none
-    // there (a gutter or off the atlas); magenta where the pixel has no lightmap coordinate.
-    private bool texelDebug, texelDebugRecords;
-    private bool lightmapEnabled;
-    // Whether the incident field already holds its occlusion: the reference view's always; the texels' with GTAO off.
-    // GTAO never darkens the texels' light: texels resolve occlusion to 5 cm themselves, and on top of them GTAO darkened
-    // corners twice -- the Cornell box's presented image against the reference read mean error 1.53%, p99 19.4%, 2.86% of
-    // pixels over 10% with it; 0.64%, 7.4%, 0.57% without.
-    private bool IncidentHoldsOcclusion => (referenceView && referenceSamples > 0) || texelsUploaded || RtgiReadoutReady;
+    // Whether the incident field already holds its occlusion: the reference view's always; RTGI's readout too. GTAO never
+    // darkens a traced field's light: its rays resolve occlusion themselves, and on top of them GTAO darkened corners
+    // twice -- the Cornell box's presented image against the reference read mean error 1.53%, p99 19.4%, 2.86% of pixels
+    // over 10% with it; 0.64%, 7.4%, 0.57% without.
+    private bool IncidentHoldsOcclusion => (referenceView && referenceSamples > 0) || RtgiReadoutReady;
     // --gi-reference-bounces N: path length (6: the 16-bounce CPU reference differs from 6 by well under its noise
     // indoors, where albedos under 0.6 shrink each bounce).
     private int referenceBounces = 6;
@@ -50,21 +40,6 @@ internal sealed partial class SponzaLoop
         referenceView = args.Flag("gi-reference");
         referenceAvailable = true;
         if (args.Int("gi-reference-bounces") is { } b) referenceBounces = Math.Clamp(b, 1, 32);
-        texelDebug = args.Flag("texel-debug");
-        texelDebugRecords = args.Flag("texel-debug-records");
-        // --lightmap: draw with each pack's lightmap unwrap (blix cook lightmap --write): its split vertices and LOD
-        // chains, and every vertex's atlas texel (the lightmap debug view shows the parameterization).
-        lightmapEnabled = args.Flag("lightmap");
-        if (args.Int("lightmap-backface") is { } bf) lightmapBackface = Math.Clamp(bf, 1, 16);
-        lightmapBuriedWhy = args.Flag("lightmap-buried-why");
-        texelCentroidWhy = args.Flag("texel-centroid-why");
-        texelLift = args.Flag("texel-lift");
-        if (args.Float("lightmap-buried-lift") is { } bl) lightmapBuriedLiftAsked = Math.Clamp(bl, 0f, 1f);
-        if (args.Float("lightmap-buried-reach") is { } br) lightmapBuriedReach = Math.Clamp(br, 0.01f, 1000f);
-        if (args.Int("lightmap-enclosed") is { } le) lightmapEnclosedTests = Math.Clamp(le, 0, 64);
-        // --texel-inspect [N | x,y;...]: at the shot, what the darkest-against-their-surroundings pixels (or these, in
-        // frame fractions) read from the atlas (SponzaLoop.TexelInspect.cs).
-        texelInspect = args.String("texel-inspect");
         // --gi-reference-seed N: start the paths' random sequence elsewhere -- two references that differ only in it
         // differ only by their noise (the floor any comparison against one can resolve).
         if (args.Int("gi-reference-seed") is { } seed) referenceFrame = (uint)seed * 1000003u;
@@ -74,13 +49,6 @@ internal sealed partial class SponzaLoop
     {
         if (input[Key.G].Pressed)
         {
-            // The view traces in GLSL: past boot the live cook has released the ray geometry (unless --keep-cpu-scene or
-            // --gi-reference); then G says so and stays off -- it threw, and took the session with it (2026-10-22).
-            if (!referenceView && rayTraversalDropped && rayGpuData is { GeometryReleased: true })
-            {
-                Console.WriteLine("[VulkanSponza] reference view: not available -- the ray geometry was released after boot; boot with --gi-reference (or --keep-cpu-scene) to use G.");
-                return;
-            }
             referenceView = !referenceView;
             if (referenceView) RestoreRayTraversal("the reference view traces in GLSL");
             referenceSamples = 0;
@@ -131,9 +99,8 @@ internal sealed partial class SponzaLoop
     {
         if (referenceAccum.Equals(default(GpuBufferHandle)))
             referenceAccum = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.reference.none"));
-        // Held off while a view dump waits (SponzaLoop.ViewDump.cs): the field it reads is the GI's, not the trace shown in its place.
-        var on = referenceView && referenceSize.X > 0 && referenceSamples > 0 && viewDumpWaiting == 0;
-        return (new Vector4(on ? 1f : 0f, referenceSize.X, referenceSize.Y, TexelViewReferenceW(texelDebugRecords ? 2f : texelDebug ? 1f : 0f)), new ShaderBufferBinding("ReferenceAccum", referenceAccum));
+        var on = referenceView && referenceSize.X > 0 && referenceSamples > 0;
+        return (new Vector4(on ? 1f : 0f, referenceSize.X, referenceSize.Y, 0f), new ShaderBufferBinding("ReferenceAccum", referenceAccum));
     }
 
     private void ReportReference(DebugContext debug)

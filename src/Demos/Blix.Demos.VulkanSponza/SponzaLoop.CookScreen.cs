@@ -5,12 +5,12 @@ using ImGuiNET;
 
 namespace Blix.Demos.VulkanSponza;
 
-// The cook screen: while the transport cook runs in the background the scene is not rendered at all -- the frame
-// does only what the cook waits on (the ray surfaces' bake, the bake scene and the frame's tracer being built, the
-// cook's landing) and clears -- at CookFrameCap frames a second, and a window over it shows the cook's progress (the
-// Logs tab's section: stages, time left, memory). The cook had the GPU and the CPU to share with full frames of
-// traced shadows and GI: each of its Metal round trips waited behind a frame's passes (Sponza's couplings waited
-// 35 s on Metal for 5 s of GPU work, 2026-10-13). --no-cook-screen renders as before.
+// The cook screen: while the frame's tracer is built, or the gate's reference wave traces (ReferenceCookingNow), the scene
+// is not rendered at all -- the frame does only what that work waits on and clears (or keeps the last image) -- at
+// CookFrameCap frames a second, and a window over it shows the progress (the engine's jobs, memory). Work like it had
+// the GPU and the CPU to share with full frames of traced shadows and GI: each of its Metal round trips waited behind a
+// frame's passes. The same window shows RTGI's settle ("Settling the light", DrawRtgiSettle) over the scene.
+// --no-cook-screen renders as before.
 internal sealed partial class SponzaLoop : IUiSource
 {
     private const double CookFrameCap = 10;
@@ -19,98 +19,22 @@ internal sealed partial class SponzaLoop : IUiSource
 
     public string UiName => "vulkan-sponza";
 
-    // A cook on: the transport's (in the background), the split light's (its sweep and refining rounds), or the sun
-    // records' (lightlets). The records' bake beside full frames waited on Metal behind each frame's traced shadows: 43%
-    // of its thread in LightletVisibility / LightletRings, 25 min for 347 s of GPU work (2026-10-14).
-    private bool SplitCookRunning => splitLight && texelsUploaded && sunNodeStage is not (SunNodeStage.Off or SunNodeStage.Done);
-    // The transport cook, the sun records' bake and the split light's cook hold the screen: their Metal round trips waited
-    // behind every full frame (35 s for 5 s of GPU; 25 min for 6). The split cook ran live for a while (the scene up, its
-    // light landing as it went), at 50 ms of each ~150 ms frame: Sponza's sweep went from 6 min to ~23 (2026-10-14). The
-    // user's call: lock the frame and the camera while it cooks. It takes the screen once a scene frame is up and the
-    // visible-first order is read (one scene frame records it), so the texels on screen still go first.
-    // --live-texels too: a live gather takes the screen like any cook, so its interruptions show and are timed (the
-    // user, 2026-10-16: "keep it for actual loading every time so we know when we're getting interrupted and for how
-    // long"). Its view is read first, from a scene frame (SplitVisiblePending); an empty read keeps the last view.
-    // The frame's tracer too, with traced shadows (EnsureFrameTracer, built during the cook screen's frames): before it the
+    // The frame's tracer, with traced shadows (EnsureFrameTracer, built during the cook screen's frames): before it the
     // frame ran on a fallback sun -- shadows from another direction, then a snap -- and the clipmap, the specular, cloth
     // and foliage held that light for hundreds of solves after (the user, Crytek Sponza, 2026-10-26).
     private bool TracerPending => rtShadows && frameTracer is null && !frameTracerFailed;
-    private bool CookScreenNow => !cookScreenOff && (transportCookTask is { IsCompleted: false } || LightletBakePending || ReferenceCookingNow
-        || TracerPending
-        || (SplitCookRunning && sceneFrameDrawn && !SplitVisiblePending && instantShowFrames == 0 && !GatherInBackground && !ChangeBehindFrame));
-    // A light change after the first landing, under --sweep-in-frame: behind the frame from its re-aim on -- its setup's
-    // passes chunked a frame at a time (the guides, the direct, the visible bands, the cells, the instant layer), the
-    // cook screen a few seconds at every step of a moving sun before (2026-10-25). --change-cook-screen: as before.
-    private bool changeCookScreen;
-    private bool ChangeBehindFrame => sweepInFrame && (liveSkyGathered && liveCookWarm || bootInFrame && liveTexels) && !changeCookScreen;
-    // Scene frames let through after the instant layer is written (ApplyPatchTexelsNow): the cook screen keeps the last
-    // image drawn, and before these it was the provisional's -- every texel its patch's light, too bright -- for the whole
-    // gather, the instant layer never shown (2026-10-19).
-    private int instantShowFrames;
+    private bool CookScreenNow => !cookScreenOff && (ReferenceCookingNow || TracerPending);
 
-    // The cook screen's frame (RenderFrame, while CookScreenNow): the cook's needs, a cleared screen, the cap.
-    // The split cook's sweep of Sponza's 14.8M texels is ~3,800 frames: at full frames (3 fps) ~1,600 s. The cap is
-    // for the transport cook alone (its work is off the frame).
-    // Vsync is off while the cook screen is up (each frame carries a split-cook pass: one waiting on the display's
-    // refresh held the cook to it), and back on after (RestoreVsyncAfterCook).
-    private bool cookTurnedVsyncOff;
     // A scene frame has been drawn and presented: the cook screen shows it rather than clearing (RecordCookFrame).
     private bool sceneFrameDrawn;
     // The progress window was up last frame: a cook that starts opens it (DrawUi).
     private bool progressWindowShown;
 
-    // A vsync change recreates the swapchain and drops the frame recorded beside it (VulkanGraphicsDevice), so that frame
-    // is a cleared screen alone: a split-cook pass or the compose in it would be lost (the compose was: every texel's
-    // light left zero, 2026-10-13).
-    private bool RestoreVsyncAfterCook(RenderCommandList commandList)
-    {
-        if (!cookTurnedVsyncOff || CookScreenNow) return false;
-        cookTurnedVsyncOff = false;
-        device.VsyncEnabled = true;
-        RecordClearedFrame(commandList);
-        return true;
-    }
-
-    private void RecordClearedFrame(RenderCommandList commandList)
-    {
-        graph.Pass(litPassHandle, _ => { }, clearColor: new GraphicsColor(0.03f, 0.04f, 0.06f, 1f));
-        graph.Execute(commandList);
-        RecordPresentPass(commandList);
-    }
-
+    // The cook screen's frame (RenderFrame, while CookScreenNow): the cook's needs, the last image or a cleared screen, the cap.
     private void RecordCookFrame(RenderCommandList commandList)
     {
-        // Vsync stays as it is: it went off here so the split cook's in-frame passes were not held to the display, and the
-        // split cook no longer runs behind this screen -- while the toggle's recreate threw away the last image the
-        // screen now keeps showing.
         RecordRaySurfaceBake();
-        UpdateBakeScene();
         EnsureFrameTracer();
-        CookTransportWhenReady();
-        // A sun relight that lands while the screen is up is taken here (its patches' light, the split's new sun part):
-        // the split cook waits for no relight in flight (BeginSunNodes), and only FollowSun clears one. Without it a sun
-        // moved twice left the cook at Waiting for good (2026-10-13).
-        if (texelsUploaded) FollowSun();
-        // The sun records' bake starts on a tracer and lands here as it does in RecordTexels.
-        if (texelsUploaded) LightletBakeWhenReady();
-        // Up to SunNodePassCopies of the split cook's passes a frame, each in its own copy of the passes (a frame-graph
-        // Metal pass takes one piece a frame), stopping at a slice's readback (it needs the frame's GPU work done).
-        var splitCooking = SplitCookRunning && rayBlockBuffers.Length > 0;
-        if (texelsUploaded && rayBlockBuffers.Length > 0) RecordLivePatchLight();
-        if (splitCooking)
-        {
-            for (sunNodeCopy = 0; sunNodeCopy < SunNodePassesNow; sunNodeCopy++)
-            {
-                RecordSunNodes();
-                if (sunNodeStage != SunNodeStage.Tracing || sunNodeReadback) break;
-            }
-            sunNodeCopy = 0;
-            // Composed once the gather is done, not every frame of it: the screen keeps the last image, so nothing shows
-            // the parts, and the compose of every texel (twice, with the filter) was the frame's work each gather pass's
-            // first waited on (~80 ms a frame, ~25 s of Sponza's light change, 2026-10-19). Left dirty, the first frame
-            // after composes.
-            if (sunNodeStage != SunNodeStage.Tracing) RecordSplitCompose();
-        }
         // The last image the scene drew stays up under the cook window (the present pass reads TAA's history, or the HDR
         // target, neither touched here): the user watched streamed geometry and textures vanish for the cook, which needs
         // the GPU, not the screen. Before any scene frame, a cleared screen.
@@ -125,27 +49,20 @@ internal sealed partial class SponzaLoop : IUiSource
         graph.Execute(commandList);
         RecordPresentPass(commandList);
         var budgetMs = 1000.0 / CookFrameCap;
-        if (!splitCooking && !ReferenceCookingNow && cookFrameClock.IsRunning && cookFrameClock.Elapsed.TotalMilliseconds < budgetMs)
+        if (!ReferenceCookingNow && cookFrameClock.IsRunning && cookFrameClock.Elapsed.TotalMilliseconds < budgetMs)
             Thread.Sleep(TimeSpan.FromMilliseconds(budgetMs - cookFrameClock.Elapsed.TotalMilliseconds));
         cookFrameClock.Restart();
     }
 
-    // The progress window: while the scene loads, its textures stream, or a cook runs -- the engine's jobs
-    // (DebugProgress: load, stream, cook) and the machine's memory.
+    // The progress window: while the scene loads, its textures stream, the cook screen is up or RTGI settles -- the
+    // engine's jobs (DebugProgress: load, stream, cook) and the machine's memory.
     public void DrawUi()
     {
-        ReportCookProgress();
-        DrawTexelPicker();
         var loading = !sceneLoaded;
         var streaming = sceneLoaded && !fullyLoaded;
         var settling = RtgiSettleNow;
         var cooking = CookScreenNow || settling;
-        // A live cook (the split light's, at boot or after a sun move): the same window over the scene, collapsible, opened
-        // again each time a cook starts and otherwise left as the user leaves it.
-        // Not a light change behind the frame (ChangeBehindFrame): its progress is the log's alone -- the window over the
-        // scene at every step of a moving sun was in the way (the user, 2026-10-25).
-        var live = !loading && !streaming && !cooking && SplitCookRunning && !ChangeBehindFrame;
-        var shown = loading || streaming || cooking || live;
+        var shown = loading || streaming || cooking;
         var opened = shown && !progressWindowShown;
         progressWindowShown = shown;
         if (!shown) return;
@@ -154,8 +71,7 @@ internal sealed partial class SponzaLoop : IUiSource
         ImGui.SetNextWindowSize(new System.Numerics.Vector2(MathF.Min(760f, io.DisplaySize.X - 32f), 0f), ImGuiCond.Always);
         if (opened) ImGui.SetNextWindowCollapsed(false, ImGuiCond.Always);
         var title = loading ? "Loading" : streaming ? "Streaming textures" : settling ? "Settling the light" : "Cooking";
-        var flags = ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoSavedSettings;
-        if (!live) flags |= ImGuiWindowFlags.NoCollapse;
+        var flags = ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoSavedSettings | ImGuiWindowFlags.NoCollapse;
         if (!ImGui.Begin(title + "##progress-screen", flags))
         {
             ImGui.End();
@@ -163,9 +79,8 @@ internal sealed partial class SponzaLoop : IUiSource
         }
         if (settling) DrawRtgiSettle();
         else ImGui.TextUnformatted(loading ? "Loading the scene." : streaming ? "Streaming the scene's textures; drawn flat until they are in."
-            : live ? "Cooking the scene's light -- the scene stays up, its light landing as it is cooked, what is on screen first."
             : ReferenceCookingNow ? "Tracing the reference -- the scene is not drawn meanwhile (--ref-in-frame draws it)."
-            : "Cooking the scene's light -- the scene is not drawn meanwhile (--no-cook-screen draws it).");
+            : "Building the frame's ray tracer -- the scene is not drawn meanwhile (--no-cook-screen draws it).");
         // The gate's reference wave behind the screen: how far through its frames, and how long it has taken.
         if (ReferenceCookingNow && gateWave is { } rw)
         {

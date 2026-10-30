@@ -91,7 +91,7 @@ internal sealed partial class SponzaLoop
             for (var k = 0; k < d.PlacementCount; k++)
             {
                 if (levelScratch[k] < 0) continue;
-                visibleScratch[fill[levelScratch[k]]++] = (uint)placements[d.PlacementStart + k].Transform | ((uint)Math.Min(levelScratch[k], 255) << 24);   // the level in the top 8 bits (instances.glsl)
+                visibleScratch[fill[levelScratch[k]]++] = (uint)placements[d.PlacementStart + k].Transform | ((uint)Math.Min(levelScratch[k], 255) << 24);   // the level in the top 8 bits, as scene_cull.glsl writes it
             }
 
             // One record a drawable (recordSlots 1: no drawable placed twice): its one placement's level.
@@ -134,6 +134,14 @@ internal sealed partial class SponzaLoop
     private int GroupDrawCount(OpaqueGroup g) => g.Count * recordSlots;
 
     // --ab lod reaches every camera and cascade selection through this. A zero budget is full detail.
+    // The lit pass leaves the frame's own sheet glow out (lit_body.glsl, rtSheetGlow) where the scene has sheets the traced
+    // shadows pass through: the texel GI's rule (--sheet-light, on by default), whose gather counted that glow. It held
+    // under --rtgi too, whose rays do not count it, and is kept as it stood: whether RTGI frames should show the frame's
+    // glow on curtains is the user's call.
+    private bool SheetGlowInField => rtSheetRows > 0 && SheetRowsBuffer is not null;
+
+    // --lod-pixels E (SponzaLoop.Setup.cs): the LOD error budget in place of RenderSettings.LodErrorPixels (-1: none given).
+    private float lodPixelsOverride = -1f;
     private float LodErrorPixelsNow => abMode == "lod" ? LodArmPixels : lodPixelsOverride >= 0f ? lodPixelsOverride : render.LodErrorPixels;
 
     // The lists a frame culls, each its own indirect records and run of the visible list: the camera's
@@ -323,7 +331,7 @@ internal sealed partial class SponzaLoop
         MaterialHandle? material, byte[]? pushConstants = null, bool litLayout = true)
     {
         var ib = g.IsU32 ? sharedIbU32 : sharedIbU16;
-        // Every lit-layout draw reads LOD 0's frames through the atlas's index texture (lightmap_frame.glsl).
+        // Every lit-layout draw binds the lit interface's set-1 buffers (LitSceneBuffers: the clipmap's state, the mask).
         if (gpuCull)
         {
             scope.DrawIndexedIndirect(sharedVb, ib, pipeline, sceneArgs,
@@ -342,11 +350,9 @@ internal sealed partial class SponzaLoop
     private ShaderBufferBinding[]? litSceneBuffers;
     private ShaderBufferBinding[]? litClipmapBuffer;
     // The ray-traced shadow mask rides along (lit.frag declares it); RecordRtShadows drops both lists each frame it
-    // binds a new slot's mask. And the lightmap's index map and LOD 0 frames (lightmap_frame.glsl), placeholders until
-    // the bake lands.
+    // binds a new slot's mask.
     private ShaderBufferBinding[] LitClipmapBuffer =>
-        litClipmapBuffer ??= new[] { new ShaderBufferBinding("ClipmapState", ClipmapStateOrPlaceholder), new ShaderBufferBinding("RtShadowMask", RtShadowMask) }
-            .Concat(LitLightmapBuffers()).ToArray();
+        litClipmapBuffer ??= new[] { new ShaderBufferBinding("ClipmapState", ClipmapStateOrPlaceholder), new ShaderBufferBinding("RtShadowMask", RtShadowMask) };
     private ShaderBufferBinding[] LitSceneBuffers => litSceneBuffers ??= sceneBuffers.Concat(LitClipmapBuffer).ToArray();
 
     public void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)
@@ -501,7 +507,6 @@ internal sealed partial class SponzaLoop
         {
             tracerOnDeviceQueue = !AbOffPhase;
             queueTracer.UseDeviceQueue(tracerOnDeviceQueue);
-            BakeTracer?.UseDeviceQueue(tracerOnDeviceQueue);
         }
 
         // Stress hook: flip fog every 90 frames to exercise the on/off barrier
@@ -538,7 +543,8 @@ internal sealed partial class SponzaLoop
                 IncidentHoldsOcclusion ? (materialAoOnGi ? 2f : 1f) : 0f,
                 IncidentFieldNow ? 1f : 0f,
                 halfShadowsNow ? 1f : 0f))),
-            new("uIncidentGradient", new Vector4Uniform(new Vector4(incidentNormalBias, incidentGradientClamp, SheetsInGi && IncidentFieldNow ? 1f : 0f, GiFarSideNow && IncidentFieldNow ? (sheetGlowSplit ? 2f : NearGlowSplitNow ? 3f : 1f) : 0f))),
+            // z: the sheets' glow left to the field (SheetGlowInField); w unread (frame.glsl), kept so the block's layout holds.
+            new("uIncidentGradient", new Vector4Uniform(new Vector4(incidentNormalBias, incidentGradientClamp, SheetGlowInField && IncidentFieldNow ? 1f : 0f, 0f))),
             new("uViewProjUnjittered", new Matrix4x4Uniform(viewProj)),
             // Last frame's un-jittered camera, or this frame's on the first (zero motion rather than garbage).
             new("uPrevViewProjUnjittered", new Matrix4x4Uniform(velocityPrevValid ? velocityPrevViewProj : viewProj)),
@@ -554,7 +560,8 @@ internal sealed partial class SponzaLoop
                 AbOffPhase && abMode == "pbr"      || ShaderProbe("pbr") ? 1f : 0f,
                 AbOffPhase && abMode == "ibl"      || ShaderProbe("ibl") ? 1f : 0f,
                 AbOffPhase && abMode == "normal"   || ShaderProbe("normal") ? 1f : 0f))),
-            new("uTexelShape",       new Vector4Uniform(new Vector4(litShapesBound && IncidentFieldNow ? 1f : 0f, ambient.Enabled ? 1f : 0f, texelShapeNearest ? 1f : 0f, iblBrdfLut ? 1f : 0f))),
+            // y GTAO ran, w --ibl-brdf-lut; x and z unread (frame.glsl), kept so the block's layout holds.
+            new("uTexelShape",       new Vector4Uniform(new Vector4(0f, ambient.Enabled ? 1f : 0f, 0f, iblBrdfLut ? 1f : 0f))),
         };
         // The remaining //@tune uniforms (shadow slope scale, uVisualizeCascades) are appended by
         // name from the overlay panel — reflection lands each at its offset. The intensity and
@@ -595,8 +602,8 @@ internal sealed partial class SponzaLoop
             return;
         }
 
-        if (RestoreVsyncAfterCook(commandList)) return;
-        // A transport cook in the background: only what it waits on, and the cook screen (SponzaLoop.CookScreen.cs).
+        // The frame's tracer being built or the reference tracing: only what it waits on, and the cook screen
+        // (SponzaLoop.CookScreen.cs).
         if (CookScreenNow)
         {
             using (Prof("cook-frame")) RecordCookFrame(commandList);
@@ -767,18 +774,17 @@ internal sealed partial class SponzaLoop
         // blinking in and out as you turn. Half a metre of slack costs a fraction of a percent of
         // the rejections and removes the whole class.
         RecordRaySurfaceBake();
-        UpdateBakeScene();
         profFrameSize = (frame.Width, frame.Height);
         using (Prof("rt-shadows")) RecordRtShadows(frame.Width, frame.Height);
-        if (rtgi && !texelsUploaded) ApplySunChangeIfDue();
+        // The sun turned by --sun-change or the moving sun (SponzaLoop.Sun.cs, SponzaLoop.SunMove.cs), before RTGI sees it.
+        ApplySunChangeIfDue();
+        StepSunMove();
         using (Prof("rtgi"))
         {
             UpdateRtgiBudget();
             RecordRtgi(frame.Width, frame.Height);
         }
         RtgiDumpIfDue();
-        CookTransportWhenReady();
-        CookGiWhenLanded();
         using (Prof("clipmap")) RecordClipmap();
         FlushTracerGroup();
         PickWatchPoints();
@@ -924,24 +930,13 @@ internal sealed partial class SponzaLoop
             {
                 // The JITTERED projection: what the depth these passes read was rasterized with. Reconstructing with the
                 // unjittered one put each point up to a pixel's footprint off its surface -- far off on a face seen
-                // edge-on -- and the texel mark, visiting a pixel every 16th frame in step with the Halton x jitter
-                // (base 2: frame mod 16 sets it), never queued the texels other jitters land on: on the Cornell boxes'
-                // side faces half the texels pixels read had never been traced (texel debug view).
+                // edge-on.
                 Matrix4x4.Invert(cameraProjection * cameraJitter, out var incidentInvProj);
                 Matrix4x4.Invert(cameraView, out var incidentInvView);
-                ReadIncidentCensus();
-                // --no-probe-updates: after their first solve the probes stand as they are -- no marking, reclaim or screen
-                // probes a frame (what a run that measures the texels' own cost leaves out).
-                if (!probeUpdatesOff)
-                {
-                    RecordSurfaceReclaim();
-                    RecordClipmapMark(incidentInvProj, incidentInvView, frame.Width, frame.Height);
-                    RecordScreenProbes(frame.Width, frame.Height);
-                }
-                using (Prof("texels")) RecordTexels(incidentInvProj, incidentInvView, frame.Width, frame.Height);
+                // --no-probe-updates: after their first solve the probes stand as they are -- no marking a frame.
+                if (!probeUpdatesOff) RecordClipmapMark(incidentInvProj, incidentInvView, frame.Width, frame.Height);
                 RecordReference(incidentInvProj, incidentInvView, frame.Width, frame.Height);
                 RecordGpuReference();
-                RecordViewReference();
                 if (rtgi) UpdateScreenRest();
                 // A settled, still view's screen light every other frame (SponzaLoop.RtgiBudget.cs): the targets hold it.
                 if (screenRestNow) { }
@@ -1012,10 +1007,10 @@ internal sealed partial class SponzaLoop
 
         // Resolve before the graph executes, so the pass is recorded with the rest of the frame.
         if (!settling) using (Prof("taa")) RecordTaaResolve();
-        // Last: this frame's surface keys become the next frame's history (after TAA and screen probes read it). Only for a
-        // reader: the full-res incident pass's reuse, TAA, the screen probes -- under the half-res lighting with neither of
-        // the others on, nothing read it and it was 0.85 ms a frame at 2880 x 1620 (2026-10-24).
-        if (SurfaceTargets && (IncidentReuseOn && !halfLightingNow || render.Taa > 0f || screenProbesEnabled))
+        // Last: this frame's surface keys become the next frame's history (after TAA reads it). Only for a reader: the
+        // full-res incident pass's reuse, TAA -- under the half-res lighting with TAA off, nothing read it and it was
+        // 0.85 ms a frame at 2880 x 1620 (2026-10-24).
+        if (SurfaceTargets && (IncidentReuseOn && !halfLightingNow || render.Taa > 0f))
         {
             graph.Pass(surfaceKeyHistoryPassHandle, scope => fullscreen.Draw(scope, surfaceKeyHistoryPipeline,
                 new[] { new ShaderTextureBinding("uSource", graph.GetColorTexture(surfaceKeyHandle)) }));
@@ -1027,7 +1022,6 @@ internal sealed partial class SponzaLoop
         RecordPresentPass(commandList);
         TickRtgiSettle();
         sceneFrameDrawn = !settling || sceneFrameDrawn;
-        if (instantShowFrames > 0) instantShowFrames--;
         taaWrite = taaWriteNext;
         // The camera this frame's velocity was measured against becomes the next frame's "previous".
         velocityPrevViewProj = viewProj;
@@ -1072,14 +1066,8 @@ internal sealed partial class SponzaLoop
             WriteRayBenchmark();
             WriteRayCheck();
             WriteClipmapCheck();
-            WriteScreenProbeCheck();
-            WriteTexelCensus();
-            WriteCouplingCensus();
-            WriteTexelInspect();
             WriteRayView(Path.ChangeExtension(path, null));
             WriteRtShadows(Path.ChangeExtension(path, null));
-            WriteLightletCensus(Path.ChangeExtension(path, null));
-            WriteLightletRecordStudy();
             WriteLeakCensus(Path.ChangeExtension(path, null));
             WriteMemoryReport();
             WriteFrameTracerStats();
@@ -1310,11 +1298,8 @@ internal sealed partial class SponzaLoop
             "normal" => "normal mapping",
             "cull"    => "camera frustum culling",
             "castercull" => "shadow caster culling against the camera",
-            "atlasgather" => "the incident pass's atlas lookup by gather and meta words (OFF: the index-map buffer walk)",
             "increuse" => "the incident pass reusing last frame's answer at rest (OFF: every pixel every frame)",
             "occlskip" => "the occlusion test and late pre-pass skipped while nothing moves (OFF: every frame)",
-            "leaflookup" => "pixels the atlas leaves out reading one coarser texel level alone (OFF: both levels)",
-            "lightlets" => "the traced shadows answered by the baked sun records where they can (OFF: every pixel traced)",
             "queue"   => "the Metal tracers on the Vulkan device's command queue (OFF: their own)",
             "lod"     => lodArmOff > 0f
                 ? string.Create(Inv, $"mesh LOD at {lodArmOn:0.##} px rather than {lodArmOff:0.##} px")
@@ -1730,14 +1715,6 @@ internal sealed partial class SponzaLoop
             }
         }
 
-        if (IncidentStop > 8.5 && !incidentCensus.Equals(default(GpuBufferHandle)))
-        {
-            device.WaitIdle();
-            var w = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(incidentCensus, 128, 44).AsSpan()).ToArray();
-            double Pct(uint v) => w[0] > 0 ? 100.0 * v / w[0] : 0.0;
-            Console.WriteLine(string.Create(Inv,
-                $"[VulkanSponza] incident lookup branches (BLIX_INCIDENT_STOP=9): {w[0]:N0} pixels computed; the full walk (no gather) {Pct(w[1]):0.00}%, the neighbour search {Pct(w[2]):0.00}%, a seam candidate {Pct(w[3]):0.00}%, the coarser level {Pct(w[4]):0.00}%; the atlas cells answered {Pct(w[5]):0.00}% (not: a cell not whole {Pct(w[6]):0.00}%, a pair {Pct(w[7]):0.00}%, seams {Pct(w[8]):0.00}%, turned over 25 deg {Pct(w[9]):0.00}%, the atlas's edge {Pct(w[10]):0.00}%)."));
-        }
         if (host.Timing.IsolatePasses)
         {
             // Per-run cost describes one execution; per-frame cost includes scheduling frequency.

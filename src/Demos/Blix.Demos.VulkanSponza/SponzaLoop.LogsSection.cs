@@ -7,12 +7,9 @@ using ImGuiNET;
 
 namespace Blix.Demos.VulkanSponza;
 
-// Sponza's section of the overlay's Logs tab (IDebugLogsSection): each cook's progress and time left, and the
-// machine's memory -- what a long Sponza run is watched for (the old gather's light bake drove a 16 GB machine to
-// critical memory pressure, 2026-10-13). The log itself is the engine's (DebugLog).
-//   Progress: the CPU stages that report through Progress* (the transport cook's couplings, the hashed texels, the
-//   exposure diagnostics), and the GPU cooks read from their own counters (the split cook's sweep and refine rounds,
-//   the old gather's light bake).
+// Sponza's section of the overlay's Logs tab (IDebugLogsSection): the machine's memory -- what a long Sponza run is
+// watched for (a GPU cook once drove a 16 GB machine to critical memory pressure, 2026-10-13). The log itself is the
+// engine's (DebugLog).
 //   Memory: this process's resident size, the GPU's allocation (Metal's count, every client's), what is available, and
 //   whether pages are going to swap now; read once a second. The verdict is ours, not the kernel's pressure level: the
 //   kernel sits at "warning" whenever free pages are low and anything is compressed or swapped -- other apps' old pages
@@ -21,58 +18,6 @@ namespace Blix.Demos.VulkanSponza;
 //   stays on the line, dimmed.
 internal sealed partial class SponzaLoop : IDebugLogsSection
 {
-    // The cook's CPU stages report through the engine's registry (DebugProgress), the Logs tab and the cook screen
-    // drawing them; the "cook" group.
-    // BLIX_STAGE_TIMES=1: each stage's wall time logged at its end (the boot's timeline, 2026-10-16).
-    private static readonly bool stageTimes = Environment.GetEnvironmentVariable("BLIX_STAGE_TIMES") == "1";
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> stageStarts = new();
-    private static void ProgressBegin(string name, long total)
-    {
-        if (stageTimes) stageStarts[name] = System.Diagnostics.Stopwatch.GetTimestamp();
-        DebugProgress.Begin(name, total, "cook");
-    }
-    private static void ProgressAdd(string name, long units = 1) => DebugProgress.Add(name, units);
-    private static void ProgressEnd(string name)
-    {
-        if (stageTimes && stageStarts.TryRemove(name, out var t0))
-            Console.WriteLine($"[stage] {name}: {System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalSeconds:0.00} s");
-        DebugProgress.End(name);
-    }
-
-    // Each frame: the GPU cooks' own counters into the registry (the split cook's sweep and rounds, the light bake).
-    private string? splitProgressName;
-    private void ReportCookProgress()
-    {
-        if (sunNodeStage is not (SunNodeStage.Off or SunNodeStage.Done) && sunNodeSuns is not null)
-        {
-            var refining = sunNodeRefineRound > 0;
-            var name = sunNodeStage != SunNodeStage.Tracing ? $"split cook: {sunNodeStage}"
-                : (fineGathering ? "light change, 2 of 2 (fine texels): " : TransferOn ? "light change, 1 of 2 (coarse texels): " : "split cook: ")
-                  + (refining ? $"refining round {sunNodeRefineRound}" : "sweep");
-            if (splitProgressName != name && splitProgressName is not null) DebugProgress.End(splitProgressName);
-            splitProgressName = name;
-            if (sunNodeStage == SunNodeStage.Tracing)
-            {
-                var live = refining ? sunNodeRefineIds.Length : sunNodeTraceIds.Length;
-                var passes = refining ? RefinePasses : sunNodeRays / 32;
-                // The slice as traced: in the frame the budget's (sweepSliceNow), a few thousand texels -- at the cook screen's
-                // 32,768 the count ran ahead within each slice and fell back at the next, as if each texel went two or three
-                // times (2026-10-25).
-                var slice = Math.Min(sweepSliceInFrame ? sweepSliceNow : sunNodeSlice, Math.Max(0, live - sunNodeFirst));
-                DebugProgress.Set(name, sunNodeFirst + (long)((double)sunNodePass / passes * slice), live);
-            }
-            else DebugProgress.Set(name, 0, 0);
-        }
-        else if (splitProgressName is not null)
-        {
-            DebugProgress.End(splitProgressName);
-            splitProgressName = null;
-        }
-        if (lightBakeTotal > 0 && lightBakeIssued > 0 && lightBakeIssued < lightBakeTotal)
-            DebugProgress.Set("light bake (the old gather)", lightBakeIssued, lightBakeTotal);
-        else DebugProgress.End("light bake (the old gather)");
-    }
-
     private readonly Stopwatch memoryClock = new();
     private string memoryLine = "", pressureLine = "", kernelLine = "";
     private int pressureVerdict;   // 0 fine, 1 tight (little available), 2 pressing (swapping out now)

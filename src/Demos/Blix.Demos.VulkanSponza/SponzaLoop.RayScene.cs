@@ -14,24 +14,15 @@ namespace Blix.Demos.VulkanSponza;
 internal sealed partial class SponzaLoop
 {
     private RayQueryScene? rayQueries;
-    // The scene's diagonal: how far a sun ray may go. Kept apart from the CPU scene, which --live-texels drops
-    // (SponzaLoop.LivePatchLight.cs, DropCpuScene) -- the frame's traced passes need only this of it.
+    // The scene's diagonal: how far a sun ray may go -- the frame's traced passes need only this of the CPU scene.
     private float rayReach = 1000f;
     // Per ray-scene placement (the transform table's order): the material a surface bake reads.
     // Clear: authored transmission (the panes): no coverage, rays pass (ray_surface_bake.comp).
     private readonly record struct RayMaterial(TextureHandle Albedo, Vector4 BaseColor, float AlphaCutoff, bool Clear, TextureHandle Transmission = default,
         TextureHandle TransmissionColor = default);
     private readonly List<RayMaterial> rayPlacementMaterials = new();
-    // Per placement (the ray scene's order): whether its surface is in the lightmap atlas (--lightmap). The hashed
-    // texels leave those out when the atlas's texels serve them (SponzaLoop.Lightmap.cs).
-    private readonly List<bool> rayPlacementLightmapped = new();
-    // Per placement: whether it is drawn double-sided -- a sheet with no inside (the lightmap's buried test).
+    // Per placement (the ray scene's order): whether it is drawn double-sided -- a sheet with no inside.
     private readonly List<bool> rayPlacementDoubleSided = new();
-    // Two-sided for the GI: double-sided, or a surface that lets light through (KHR_materials_diffuse_transmission) --
-    // its far side receives light (a closed thin shell's walls: the teacup, single-sided, T 1), so it gets a record pair
-    // (SponzaLoop.Lightmap.cs) and its back faces are no solid's inside in the buried and contact tests. The RT shadows
-    // keep rayPlacementDoubleSided (how a ray counts a sheet's crossings). --no-gi-far-side: double-sided alone.
-    private readonly List<bool> rayPlacementGiTwoSided = new();
     // Per placement: its material's diffuse transmission (factor times colour; zero: none). The sun's shadow rays go
     // through such a sheet (SponzaLoop.RtShadows.cs RtRowTransmit), and what lands behind it is the sunlit sheet's
     // diffuse glow, not a tinted beam (tried as a beam: a sharp coloured copy of the cloth, 2026-10-15).
@@ -41,7 +32,7 @@ internal sealed partial class SponzaLoop
     private readonly List<bool> rayPlacementCloth = new();
     // Per placement: KHR_materials_unlit (DrawableStaging.Unlit).
     private readonly List<bool> rayPlacementUnlit = new();
-    // Per placement: its primitive's name (--texel-inspect).
+    // Per placement: its primitive's name (the leak census names what a leak passed).
     private readonly List<string> rayPlacementNames = new();
     private RayQueryGpuData? rayGpuData;
     private GpuBufferHandle raySurfaces;
@@ -78,16 +69,15 @@ internal sealed partial class SponzaLoop
     private int rayRegionTriangles = RayQueryScene.DefaultRegionTriangles;
     // --ray-lod-error M (a measurement): trace each mesh at its coarsest cooked level whose geometric error, carried into
     // the world by the largest scale any of its placements gives it, stays within M metres. Full detail (0) by default:
-    // every texel, its lift and its visibility rays stand on the surface the rays are traced against. At 2 cm (the old
-    // default, 506 MB on Sponza's GPU rather than 781) Crytek Sponza's vaults sat up to 2 cm behind their coarse
-    // surface: their texels' rays started inside it, 61% of the arcade ceilings' texels found no patch they could see
-    // (271 of 283 of their lines clear on the real triangles), and the vaults went black in the bounce (2026-10-23).
+    // every ray's origin and lift stand on the surface the rays are traced against. At 2 cm (the old default, 506 MB on
+    // Sponza's GPU rather than 781) Crytek Sponza's vaults sat up to 2 cm behind their coarse surface: rays started
+    // inside it, and the vaults went black in the bounce (2026-10-23).
     private float rayLodError = 0f;
 
-    // At each mesh's coarsest level within lodError (null: rayLodError; 0: full detail -- the bake scene's).
-    private RayMesh[] BuildRayMeshes(List<DrawableStaging> ordered, float? lodError = null)
+    // At each mesh's coarsest level within rayLodError (0: full detail).
+    private RayMesh[] BuildRayMeshes(List<DrawableStaging> ordered)
     {
-        var lodLimit = lodError ?? rayLodError;
+        var lodLimit = rayLodError;
         var stride = sharedLayout.Stride;
         var semantics = Blix.Graphics.VertexSemantics.Of(sharedLayout);
         var position = semantics?.Position ?? 0;
@@ -119,6 +109,17 @@ internal sealed partial class SponzaLoop
         return meshes;
     }
 
+    // Where the ray scene's hierarchies are kept (StartRayScene): the scene's "gi" directory beside its packs when it has
+    // one, else the user's cache.
+    private static string rayStoreDir =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".cache", "blix", "transport");
+
+    private static void ChooseRayStore(string assetsRoot)
+    {
+        var bundle = Path.Combine(assetsRoot, "gi");
+        if (Directory.Exists(bundle)) rayStoreDir = bundle;
+    }
+
     // The ray scene's build and its packing for the GPU, in the background (TryFinishLoad waits on the task, the window
     // going on); FinishRayScene, on the frame thread, uploads it and makes the clipmap.
     private Task<(RayQueryScene Scene, RayQueryGpuData? Data, double BuildMs, int Meshes, int Placements)>? rayBuildTask;
@@ -127,11 +128,11 @@ internal sealed partial class SponzaLoop
     {
         DebugProgress.Begin("ray scene: build and pack", 0, "load");
         var regionTriangles = rayRegionTriangles;
-        var storeDir = transportCacheDir;
+        var storeDir = rayStoreDir;
         rayBuildTask = Task.Run(() =>
         {
             var clock = Stopwatch.StartNew();
-            // The hierarchies are the geometry's: kept beside the GI bundle's stages (or in the user's cache), read
+            // The hierarchies are the geometry's: kept in the scene's gi directory (or in the user's cache), read
             // back for the same placements instead of built (29.5 s on Sponza, 2026-10-16).
             var key = RayQueryScene.Key(instances, regionTriangles);
             var keyMs = clock.Elapsed.TotalMilliseconds;
@@ -215,8 +216,8 @@ internal sealed partial class SponzaLoop
     private int RayCheckDispatchCount => RayCheckCount * rayBenchRepeat;
     // --ray-bench <mixed|probe|camera|surface>: closest hit only, on a batch shaped like one use (null: --ray-check's
     // mix with any-hit too). probe: 2,048 points on a grid through the scene, 32 directions each, as GI probes cast;
-    // camera: the start view's primary rays; surface: 2,048 camera-visible surface points, lifted as screen probes
-    // lift them, 32 hemisphere directions each.
+    // camera: the start view's primary rays; surface: 2,048 camera-visible surface points, lifted off their surfaces,
+    // 32 hemisphere directions each.
     private string? rayBench;
     // --ray-probe <ray> <placement> <triangle>: also run that ray against that triangle alone on the GPU.
     private (int Ray, int Instance, int Triangle)? rayCheckProbe;
@@ -234,7 +235,7 @@ internal sealed partial class SponzaLoop
     private bool rayTraversalDropped;
     // --keep-ray-nodes: the nodes uploaded whatever traces (the A/B).
     private bool keepRayNodes;
-    private bool SoftwareTraversalNeeded => keepRayNodes || !FrameRaysOnHardware || clipmapInline || clipmapExactVisibility || incidentExactVisibility || screenProbesEnabled
+    private bool SoftwareTraversalNeeded => keepRayNodes || !FrameRaysOnHardware || clipmapInline || clipmapExactVisibility || incidentExactVisibility
         || rayView || rayCheck || gpuReference || referenceMonolithic || referenceView;
 
     private void BuildRayGpu(RayQueryGpuData data)
@@ -289,7 +290,6 @@ internal sealed partial class SponzaLoop
     private void RestoreRayTraversal(string why)
     {
         if (!rayTraversalDropped || rayGpuData is null) return;
-        if (rayGpuData.GeometryReleased) throw new InvalidOperationException($"the software traversal is wanted ({why}) after the ray geometry was released; boot with --keep-cpu-scene.");
         var blocks = rayGpuData.Blocks();
         foreach (var b in new[] { 0, 2 })
             rayBlockBuffers[b] = new ShaderBufferBinding(RayQueryGpuData.BlockNames[b],
@@ -325,7 +325,7 @@ internal sealed partial class SponzaLoop
             {
                 if (rayBench == "surface")
                 {
-                    // As screen probes cast: 64 x 32 camera-visible points over the view, each lifted off its surface
+                    // 64 x 32 camera-visible points over the view, each lifted off its surface
                     // along the geometric normal (1 cm + 0.1% of the depth) and casting 32 directions uniform over its
                     // hemisphere. The grid-point batch starts in open air; these start inside the geometry's detail.
                     var point = i / 32;
@@ -418,11 +418,11 @@ internal sealed partial class SponzaLoop
     // ahead of every pass that traces.
     // The frame the bake was recorded in, and how many times; a few frames on the surfaces are read back, and a bake that
     // left every word unbaked white is recorded again (the testbeds' surfaces were never baked: albedo 1 everywhere --
-    // the patches, the texels' hits and the GPU reference all read it, the raster drew the real colours).
+    // the GI's hits and the GPU reference all read it, the raster drew the real colours).
     private int raySurfaceBakeFrame = -1, raySurfaceBakeTries;
     private bool raySurfacesChecked;
-    // What everything that reads the surfaces waits for: baked, and read back to have been (the transport cook's key and
-    // its patches' albedo, the frame tracer's coverage, the references and the clipmap).
+    // What everything that reads the surfaces waits for: baked, and read back to have been (the frame tracer's coverage,
+    // the references, RTGI and the clipmap).
     private bool RaySurfacesReady => raySurfacesChecked;
 
     private void RecordRaySurfaceBake()

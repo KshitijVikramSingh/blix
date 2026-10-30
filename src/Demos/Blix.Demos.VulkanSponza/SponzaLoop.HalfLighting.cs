@@ -6,7 +6,7 @@ namespace Blix.Demos.VulkanSponza;
 // RenderSettings.HalfResLighting (the debug overlay's Render group): the frame's lighting at half resolution.
 //
 //   rt-shadow-rays        one sun ray per half-res pixel (SponzaLoop.RtShadows), a quarter of the rays
-//   incident-light-half   the incident field per half-res pixel (incident_clipmap.frag), a quarter of its texel lookups
+//   incident-light-half   the incident field per half-res pixel (incident_clipmap.frag), or RTGI's readout
 //   lighting-upsample     both back to full resolution along the depth and normals (lighting_upsample.frag), into the
 //                         targets the lit pass reads, the sun's visibility in the gradient's w
 //
@@ -15,8 +15,6 @@ namespace Blix.Demos.VulkanSponza;
 // full-res pixel is on it. Which of the four turns each frame (LightingSubpixel), so over four frames every full-res
 // pixel has had its own sample and TAA, accumulating, holds full-resolution lighting where the camera is still; in
 // motion, where history is refused, it is the half-res answer, upsampled.
-//
-// The texel mark follows (SponzaLoop.Texels.cs): it queues the texels of pixels the incident pass reads this frame.
 internal sealed partial class SponzaLoop
 {
     // The 2x2's pixels in an order that alternates diagonals, so two consecutive frames never share a row or column.
@@ -59,7 +57,7 @@ internal sealed partial class SponzaLoop
                 new("uHalf", new Vector4Uniform(new Vector4(halfShadowsNow ? 1f : 0f, sub.X, sub.Y, SunDiscTangent))),
                 new("uPixel", new Vector4Uniform(new Vector4(pixelAngle, raw && rtgi ? 1f : 0f, 0f, 0f))),
             },
-            buffers: new[] { new ShaderBufferBinding("RtShadowMask", mask), new ShaderBufferBinding("RtShadowBaked", RtShadowBakedBound) }));
+            buffers: new[] { new ShaderBufferBinding("RtShadowMask", mask) }));
     }
 
     // ShadowsSettings.SunDiscDegrees: the tangent of the sun's angular radius (0: a point sun). The traced shadows aim each

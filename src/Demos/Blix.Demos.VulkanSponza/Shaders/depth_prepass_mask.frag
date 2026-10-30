@@ -26,10 +26,7 @@ layout(location = 1) in vec2 vUv;
 layout(location = 2) in vec3 vWorldPos;
 
 layout(location = 0) out vec4 outNormal;
-#include "texel_bin.glsl"
-#include "lightmap_frame.glsl"
 layout(location = 6) flat in uint vSurfaceKey;
-layout(location = 5) flat in uint vLod;
 layout(location = 7) in vec4 vClipNow;
 layout(location = 8) in vec4 vClipPrev;
 layout(location = 9) in vec3 vWorldMotion;
@@ -37,37 +34,15 @@ layout(location = 9) in vec3 vWorldMotion;
 // then). Single-sample passes only carry these targets; under MSAA the writes have nowhere to go and are dropped.
 layout(location = 1) out uint outSurfaceKey;
 layout(location = 2) out vec2 outVelocity;
-layout(location = 4) out vec4 outMotion;
-// --lightmap: the atlas texel, packed as texel.glsl's texelLightmapUnpack reads it: u and v in eighths of a texel, 16
-// bits each (an atlas up to 8192 wide); 0 where the primitive has no lightmap (its vertices' texel is 0).
-layout(location = 10) in vec2 vLightmapTexel;
-layout(location = 3) out uint outLightmapTexel;
+layout(location = 3) out vec4 outMotion;
 
 void main() {
     vec3 n = normalize(vNormalWorld);
-    // --lightmap: LOD 0's normal through the atlas (lightmap_frame.glsl), as lit.frag shades with it.
-    vec3 lodZeroN;
-    vec4 lodZeroT;
-    // LOD 0's frame through the atlas only on a coarse level: on LOD 0 the mesh's own normal is exact, and the atlas's
-    // 4 cm frames smeared its fine geometry (a joint's chamfer) over the face (2026-10-14).
-    if (vLod > 0u) {
-        vec3 reference = lodFrameReference(vWorldPos, n);
-        if (lightmapShadingFrame(vLightmapTexel, reference, lodZeroN, lodZeroT)) n = lodZeroN;
-        else if (dot(vLightmapTexel, vLightmapTexel) > 1e-6) n = reference;
-    }
     vec3 shading = gl_FrontFacing ? n : -n;
-    // w: the texel bins (texel_bin.glsl, texelFaceBins) of this pixel's FACE normal -- the plane of the triangle, from the world
-    // position's screen derivatives (one triangle's within a quad), turned to the shading normal's side. The texels
-    // are keyed by face; the interpolated normal's bin differed from it at a third of Sponza's hall.
-    vec3 face = cross(dFdx(vWorldPos), dFdy(vWorldPos));
-    face = dot(face, face) > 1e-20 ? normalize(face) : shading;
-    if (dot(face, shading) < 0.0) face = -face;
-    outNormal = vec4(shading, texelFaceBins(face));
+    outNormal = vec4(shading, 0.0);
     outSurfaceKey = vSurfaceKey;
     outVelocity = (vClipNow.xy / vClipNow.w - vClipPrev.xy / vClipPrev.w) * 0.5;
     outMotion = vec4(vWorldMotion, 0.0);
-    uvec2 eighths = uvec2(clamp(vLightmapTexel * 8.0, vec2(0.0), vec2(65535.0)));
-    outLightmapTexel = dot(vLightmapTexel, vLightmapTexel) > 1e-6 ? (eighths.x | (eighths.y << 16)) : 0u;
 
     float a = texture(uAlbedo, vUv).a * mat.uBaseColorFactor.w;
     // Derivatives before any discard (blix_layerHash reads the world position's).

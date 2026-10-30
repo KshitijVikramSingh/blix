@@ -27,8 +27,6 @@ for scene in cornell cornell-panel thinwall crevices crevices-dark drapes sheets
     "$REPO/blix" run --build "$app" ${extra[@]+"${extra[@]}"} --out "$SRC/$scene/$scene.gltf"
     rm -rf "${COOKED:?}/$scene"
     dotnet "$REPO/src/Blix.Tools.Cook/bin/Debug/net8.0/Blix.Tools.Cook.dll" asset "$SRC/$scene/$scene.gltf" --out "$COOKED/$scene"
-    # The lightmap atlas (--lightmap), 4 cm texels.
-    dotnet "$REPO/src/Blix.Tools.Cook/bin/Debug/net8.0/Blix.Tools.Cook.dll" lightmap "$COOKED/$scene" --write
 done
 # The cost ladder (blix ladder): what the GI cache's per-point work scales with, a step at a time (SponzaLoop.RtgiBench.cs).
 for scene in ladder-floor ladder-corner ladder-objects ladder-clutter ladder-grid; do
@@ -43,12 +41,9 @@ for scene in ladder-floor ladder-corner ladder-objects ladder-clutter ladder-gri
     rm -rf "${COOKED:?}/$scene"
     dotnet "$REPO/src/Blix.Tools.Cook/bin/Debug/net8.0/Blix.Tools.Cook.dll" asset "$SRC/$scene/$scene.gltf" --out "$COOKED/$scene"
 done
-# crevices-hashed: the dark crevices with no lightmap, so every texel is a hashed one (Sponza's trees and ivy are).
-rm -rf "${COOKED:?}/crevices-hashed"
-dotnet "$REPO/src/Blix.Tools.Cook/bin/Debug/net8.0/Blix.Tools.Cook.dll" asset "$SRC/crevices-dark/crevices-dark.gltf" --out "$COOKED/crevices-hashed"
 # BLIX_TESTBED_KHRONOS=1: Khronos' diffuse-transmission samples (glTF-Sample-Assets, each under its own licence: its
 # LICENSE.md beside it), downloaded once into "$SRC/khronos", placed by `blix khronos` and cooked: khronos-plant and
-# khronos-teacup in the Cornell room's sunlit shaft, khronos-test on open ground (tools/testbeds/materials.sh judges them).
+# khronos-teacup in the Cornell room's sunlit shaft, khronos-test on open ground.
 if [[ "${BLIX_TESTBED_KHRONOS:-0}" == 1 ]]; then
     K="$SRC/khronos"
     for m in DiffuseTransmissionPlant DiffuseTransmissionTeacup DiffuseTransmissionTest; do
@@ -64,7 +59,6 @@ if [[ "${BLIX_TESTBED_KHRONOS:-0}" == 1 ]]; then
         "$REPO/blix" run --build khronos "$@" --out "$SRC/$scene/$scene.gltf"
         rm -rf "${COOKED:?}/$scene"
         dotnet "$REPO/src/Blix.Tools.Cook/bin/Debug/net8.0/Blix.Tools.Cook.dll" asset "$SRC/$scene/$scene.gltf" --out "$COOKED/$scene"
-        dotnet "$REPO/src/Blix.Tools.Cook/bin/Debug/net8.0/Blix.Tools.Cook.dll" lightmap "$COOKED/$scene" --write
     }
     khronos khronos-plant --model "$K/DiffuseTransmissionPlant/DiffuseTransmissionPlant.glb" --scale 1.5 --at -0.7,0,-1.68 --room cornell
     khronos khronos-teacup --model "$K/DiffuseTransmissionTeacup/DiffuseTransmissionTeacup.glb" --scale 8 --at -0.7,0,-1.68 --rest --room cornell
@@ -81,5 +75,4 @@ if [[ "${BLIX_TESTBED_KHRONOS:-0}" == 1 ]]; then
     fi
     rm -rf "${COOKED:?}/crytek-sponza"
     dotnet "$REPO/src/Blix.Tools.Cook/bin/Debug/net8.0/Blix.Tools.Cook.dll" asset "$K/Sponza/Sponza.gltf" --out "$COOKED/crytek-sponza"
-    dotnet "$REPO/src/Blix.Tools.Cook/bin/Debug/net8.0/Blix.Tools.Cook.dll" lightmap "$COOKED/crytek-sponza" --write
 fi

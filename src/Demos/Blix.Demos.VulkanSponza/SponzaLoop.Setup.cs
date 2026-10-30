@@ -134,17 +134,11 @@ internal sealed partial class SponzaLoop
         // --sun-overhead maximizes directly lit courtyard area when isolating base lighting. The
         // cascade fit handles the vertical-light up-vector degeneracy.
         if (args.Flag("sun-overhead")) sunOverhead = true;
-        if (args.Values("sun", 2) is [var sy, var sp]) sunOverrideDegrees = new Vector2(float.Parse(sy, System.Globalization.CultureInfo.InvariantCulture), float.Parse(sp, System.Globalization.CultureInfo.InvariantCulture));
-        // The scene's own sun (SceneProfile.DefaultSunDegrees) where --sun, --sun-authored and --sun-overhead say none.
-        else if (scene.DefaultSunDegrees is { } sceneSun && !args.Flag("sun-authored") && !args.Flag("sun-overhead")) sunOverrideDegrees = sceneSun;
-        // --sun-change F yaw pitch: turn the sun at post-load frame F (degrees, as --sun) -- what following the sun is
-        // measured against (SponzaLoop.Texels.cs, FollowSun).
-        if (args.Values("sun-change", 3) is [var cf, var cy, var cp]) sunChange = (int.Parse(cf, System.Globalization.CultureInfo.InvariantCulture), new Vector2(float.Parse(cy, System.Globalization.CultureInfo.InvariantCulture), float.Parse(cp, System.Globalization.CultureInfo.InvariantCulture)));
+        // --sun, --sun-change (SponzaLoop.Sun.cs).
+        ReadSunArgs(args);
         // GPU isolation submits and waits per pass. It attributes real tile execution but removes
         // overlap, so isolated pass times are not additive components of the normal frame.
         if (args.Flag("gpu-isolate")) host.Timing.IsolatePasses = true;
-        offscreenShadowRays = args.Flag("offscreen-shadow-rays");
-        texelSunRays = !args.Flag("texel-sun-cascades");
         if (args.Flag("no-foliage")) noFoliage = true;
         // --cpu-cull: build the indirect records and visible lists on the CPU, the way 1a did, for an A/B
         // against the GPU cull (scene_cull.comp) that is otherwise the default.
@@ -154,11 +148,9 @@ internal sealed partial class SponzaLoop
         litFlat = args.Flag("lit-flat");
         // --no-lit-early-z: opaque groups shade with the cutout build too (late depth test), as before 2026-10-24.
         litEarlyZ = !args.Flag("no-lit-early-z");
-        texelShapeNearest = !args.Flag("texel-shape-bilinear");
         litLean = !args.Flag("no-lit-lean");
         iblBrdfLut = args.Flag("ibl-brdf-lut");
         incidentLean = !args.Flag("no-incident-lean");
-        incidentSplit = args.Flag("incident-split");
         cascadesAlways = args.Flag("cascades-always");
         shadowKeep = !args.Flag("no-shadow-keep");
         // --ray-check: also trace a fixed batch of rays on the GPU every frame and hold them against the CPU at the shot.
@@ -194,25 +186,11 @@ internal sealed partial class SponzaLoop
         ParseRtgiBench(args);
         ParseMetalFx(args);
         ParseRtgiTemporal(args);
-        lightletCensus = args.Flag("lightlet-census");
-        lightletRecord = args.Flag("lightlet-record");
         rayLeakCensus = args.Flag("ray-leak-census");
         memoryReport = args.Flag("memory-report");
         if (args.Flag("occlusion-audit")) occlusionAuditEvery = Math.Max(1, args.Int("occlusion-audit-every") ?? 30);
         if (args.Flag("settle-log")) settleLogEvery = Math.Max(1, args.Int("settle-every") ?? 60);
         if (args.String("settle-dir") is { } settleAt) { settleDir = settleAt; Directory.CreateDirectory(settleAt); }
-        lightletsAsked = args.Flag("lightlets");
-        if (args.Int("coupling-census") is { } cc) couplingCensus = Math.Max(0, cc);
-        // --lightlets-then-exit: close as asked once the sun records are baked and up (a scripted bake).
-        lightletsThenExit = args.Flag("lightlets-then-exit");
-        ReadSunSweepArgs(args);
-        ReadSunNodeArgs(args);
-        ReadPatchSplitArgs(args);
-        ReadSplitLightArgs(args);
-        if (lightletsThenExit) lightletsAsked = true;
-        // --lightlet-sun: RenderSettings.LightletSun on from the start (the overlay's toggle; [Tune] fields are not read
-        // from the command line here).
-        if (args.Flag("lightlet-sun")) { render.LightletSun = true; lightletsAsked = true; }
         // RenderSettings.HalfResLighting / HalfResShadows from the command line, for scripted runs.
         if (args.Flag("half-res-lighting")) render.HalfResLighting = true;
         if (args.Flag("full-res-lighting")) render.HalfResLighting = false;
@@ -239,8 +217,6 @@ internal sealed partial class SponzaLoop
         if (args.Float("clipmap-spacing") is { } clipSpacing) clipmapSpacing = Math.Max(0.05f, clipSpacing);
         if (args.Int("clipmap-budget") is { } clipBudget) clipmapBudget = Math.Clamp(clipBudget, 1, 65535);
         if (args.Float("clipmap-unknown-sky") is { } unknownSky) clipmapUnknownSky = Math.Clamp(unknownSky, 0f, 1f);
-        // --gi-screen-probes: the per-tile gather over the clipmap (SponzaLoop.ScreenProbes).
-        screenProbesEnabled = args.Flag("gi-screen-probes");
         // --no-taa: no TAA and so no sub-pixel jitter: the control for --stability, whose variation otherwise
         // counts every edge the jitter moves.
         if (args.Flag("no-taa")) render.Taa = 0f;
@@ -267,12 +243,6 @@ internal sealed partial class SponzaLoop
         if (args.Int("stability") is { } stability) stabilityFrames = Math.Max(2, stability);
         if (args.Float("taa-dynamic-count") is { } tdc) taaDynamicCount = Math.Max(1f, tdc);
         ParseMoverArgs();
-        if (args.Float("dynamic-history") is { } dh) dynamicHistory = Math.Max(1f, dh);
-        if (args.Int("fresh-passes") is { } fp) freshPasses = Math.Clamp(fp, 1, 16);
-        if (args.Float("fresh-frames") is { } ff) freshFrames = Math.Max(1f, ff);
-        if (args.Float("probe-ray-length") is { } prl) probeRayLength = Math.Max(0f, prl);
-        if (args.Int("probe-layers") is { } pl) probeLayers = Math.Clamp(pl, 1, 2);
-        if (args.Int("dependent-passes") is { } dp) dependentPasses = Math.Clamp(dp, 1, 16);
         if (args.Int("clipmap-dependent-rays") is { } cdr) clipmapDependentRays = Math.Clamp(cdr, 1, 64);
         if (args.Float("clipmap-dependent-share") is { } cds) clipmapDependentShare = Math.Clamp(cds, 0f, 1f);
         clipmapShadowRays = args.Flag("clipmap-shadow-rays");
@@ -284,8 +254,6 @@ internal sealed partial class SponzaLoop
         clipmapWavefront = args.Flag("clipmap-wavefront");
         clipmapInline = args.Flag("clipmap-inline");
         keepRayNodes = args.Flag("keep-ray-nodes");
-        noBakeScene = args.Flag("no-bake-scene");
-        bakeSceneAlbedoCheck = args.Flag("bake-scene-albedo-check");
         if (args.Int("clipmap-young") is { } young) clipmapYoung = Math.Clamp(young, 0, 16);
         // --clipmap-visible-share F: at most this share of the budget a frame goes to the probes the image reads (0: none,
         // the A/B).
@@ -310,15 +278,8 @@ internal sealed partial class SponzaLoop
         surfaceCheck = args.Flag("surface-check");
         if (args.Float("incident-normal-bias") is { } nb) incidentNormalBias = Math.Clamp(nb, 0f, 12f);
         if (args.Float("incident-gradient-clamp") is { } gc) incidentGradientClamp = Math.Clamp(gc, 0f, 4f);
-        if (args.Int("screen-probe-reset-at") is { } resetAt) screenProbeResetAt = resetAt;
-        if (args.Int("screen-probe-seed-offset") is { } seedOffset) screenProbeSeedOffset = seedOffset;
-        if (args.Float("screen-probe-seed") is { } seed) screenProbeSeedFrames = Math.Max(0f, seed);
         if (args.Int("clipmap-freeze") is { } freeze) clipmapFreeze = Math.Max(1, freeze);
-        if (args.Int("screen-probe-filter") is { } spFilter) screenProbeFilterRadius = Math.Clamp(spFilter, 0, 4);
-        if (args.Int("screen-probe-ablate") is { } ablate) screenProbeAblate = ablate;
         if (args.Int("orbit-frames") is { } orbitFrames) OrbitFrames = Math.Max(2, orbitFrames);
-        if (screenProbesEnabled && MsaaSamples > 1) throw new AppArgsException("--gi-screen-probes needs a single-sample pre-pass: probes find their surface by its SurfaceKey and velocity, which MSAA cannot resolve.");
-        if (args.Float("screen-probe-history") is { } spHistory) screenProbeHistory = Math.Max(1f, spHistory);
         if (args.Int("ray-region-triangles") is { } regionTriangles) rayRegionTriangles = Math.Max(1, regionTriangles);
         if (args.Float("ray-lod-error") is { } lodError) rayLodError = Math.Max(0f, lodError);
         if (args.Values("ray-probe", 3) is [var probeRay, var probeInstance, var probeTriangle])
@@ -338,7 +299,6 @@ internal sealed partial class SponzaLoop
         gpuReference = args.Flag("gpu-reference");
         // --ref-in-frame: the gate's reference wave beside the scene's frames, as before; otherwise behind the cook screen.
         refInFrame = args.Flag("ref-in-frame");
-        ReadViewReferenceArgs(args);
         // --reference-monolithic: the GPU reference's first form (whole paths in one kernel), the wavefront's cross-check.
         referenceMonolithic = args.Flag("reference-monolithic");
         if (args.Int("gpu-ref-paths") is { } grp) gpuReferencePathsWanted = Math.Clamp(grp, 256, 1 << 22);
@@ -349,7 +309,7 @@ internal sealed partial class SponzaLoop
         // of one photograph of it. Ignores --cam, which is the still counterpart.
         if (args.Flag("orbit")) orbit = true;
         if (args.Int("shot-hold") is { } hold) ShotReadyMargin = Math.Max(1, hold);
-        // --no-probe-updates: the probe clipmap solved once, then frozen, its marking and screen probes off (SponzaLoop.Render.cs).
+        // --no-probe-updates: the probe clipmap solved once, then frozen, its marking off (SponzaLoop.Render.cs).
         if (args.Flag("no-probe-updates")) { probeUpdatesOff = true; clipmapFreeze = 1; }
         if (args.Values("orbit-at", 4) is [var ox, var oy, var oz, var orad])
         {
@@ -359,8 +319,12 @@ internal sealed partial class SponzaLoop
         }
         ReadWalkArgs(args);
         ReadWatchArgs(args);
-        ReadSurfaceArgs(args);
-        ReadTransportArgs(args);
+        ReadReferenceArgs(args);
+        // --no-cook-screen: the scene drawn while the frame's tracer builds or the reference traces (SponzaLoop.CookScreen.cs).
+        cookScreenOff = args.Flag("no-cook-screen");
+        // --lod-pixels E: the LOD error budget (0: full detail everywhere) -- the [Tune] field is not reachable from the
+        // command line.
+        if (args.Float("lod-pixels") is { } lod) lodPixelsOverride = Math.Max(0f, lod);
         // --cam x,y,z,yaw,pitch — a reproducible viewpoint. Without it every capture and every
         // census speaks only for wherever the camera happens to start, which for a question like
         // "how much of this scene is occluded" is the difference between a measurement and an
@@ -373,7 +337,6 @@ internal sealed partial class SponzaLoop
             abFlat = abMode == "flat";
             // rtshadow: ray-traced sun shadows (ON) against the cascades (OFF), which needs the traced path built.
             if (abMode == "rtshadow") rtShadows = true;
-            if (abMode == "lightlets") lightletsAsked = true;
         }
         // --rt-shadows: whatever asks whether a point sees the sun asks a ray, never the cascades (SponzaLoop.RtShadows).
         // The lit pass asks the Metal trace; the clipmap's injection asks shadow rays at its hits (--clipmap-shadow-rays,
@@ -383,13 +346,9 @@ internal sealed partial class SponzaLoop
         {
             clipmapShadowRays = true;
             if (!fogAsked) fog.Enabled = false;
-            if (rtIsolated)
-            {
-                incidentField = false;
-                screenProbesEnabled = false;
-            }
+            if (rtIsolated) incidentField = false;
             Console.WriteLine(rtIsolated
-                ? "[VulkanSponza] rt shadows: isolated (the trace's sun and sky only: no incident field or screen probes; no fog); the sun is off until the trace is ready."
+                ? "[VulkanSponza] rt shadows: isolated (the trace's sun and sky only: no incident field; no fog); the sun is off until the trace is ready."
                 : "[VulkanSponza] rt shadows: sun visibility from rays everywhere (lit pass: Metal; clipmap injection: shadow rays; fog off unless --fog); the sun is off until the trace is ready.");
         }
         if (args.Float("ao-debug") is { } aoDebugValue) aoDebug = aoDebugValue;
@@ -411,121 +370,12 @@ internal sealed partial class SponzaLoop
         if (args.Int("shot-frames") is { } sf) shotFrame = sf;
         shotWhenReady = args.Flag("shot-when-ready");
         framesAfterLoad = args.Int("frames-after-load");
-        // --cook-gi: cook the scene's GI bundle -- what depends on the geometry alone -- and exit (SponzaLoop.CookGi.cs).
-        cookGi = args.Flag("cook-gi");
-        // --live-patch-light: the patches' light solved at runtime for the lights as they are (SponzaLoop.LivePatchLight.cs).
-        // --live-texels: the texels' gather (the split light's cook) lit by the live patch light, with no light cached on
-        // disk -- stage 3 of the real-time GI (SponzaLoop.LivePatchLight.cs).
-        liveTexels = args.Flag("live-texels");
-        livePatchLight = args.Flag("live-patch-light") || args.Flag("live-patch-always") || liveTexels;
-        if (liveTexels) splitLight = true;
-        liveAlways = args.Flag("live-patch-always");
-        keepCpuScene = args.Flag("keep-cpu-scene");
-        // --live-min-level L (1): the finest hashed level live mode gathers and pixels read; --live-rays N (128): its
-        // rays a texel on the sweep (--sun-nodes-rays, when given, wins).
-        if (args.Int("live-min-level") is { } lml) liveMinLevel = Math.Max(0, lml);
-        if (args.Int("live-rays") is { } lr) liveRays = Math.Max(32, lr / 32 * 32);
-        if (liveTexels && args.Int("sun-nodes-rays") is null) sunNodeRays = liveRays;
-        // --no-hit-cells: the shade searches what a hit lies among, as before (SponzaLoop.HitCells.cs); --hit-cell M its size.
-        hitCellsOn = !args.Flag("no-hit-cells");
-        // --live-transfer: every texel lit from its cooked transport, nothing gathered at runtime (SponzaLoop.Transfer.cs);
-        // --transfer-rays N its cook's rays a texel, --transfer-k K its entries. Every level is lit: pixels read the finest.
-        liveTransfer = args.Flag("live-transfer");
-        livePatchRefine = args.Flag("live-patch-refine");
-        // --cpu-resolve: the traced slices read back and resolved in C# (SponzaLoop.SliceResolve.cs), as before.
-        cpuResolve = args.Flag("cpu-resolve");
-        // --fine-gather N (5 M with the refine; 0 off), --fine-rays R (128): SponzaLoop.Transfer.cs, the fine refine.
-        fineGatherBudget = args.Int("fine-gather") ?? (livePatchRefine ? 5_000_000 : 0);
-        if (args.Int("fine-rays") is { } fr) fineGatherRays = Math.Max(32, fr / 32 * 32);
-        livePatchTexels = args.Flag("live-patch-texels") || livePatchRefine;
-        if (livePatchTexels) { liveTransfer = true; hitCellsOn = livePatchRefine && !args.Flag("no-hit-cells"); transferAoRays = 128; transferAoReach = TexelOpenReach; }
-        if (args.Int("transfer-rays") is { } tr) transferRays = Math.Max(32, tr / 32 * 32);
-        if (args.Int("transfer-k") is { } tk) transferK = Math.Clamp(tk, 1, 32);
-        if (args.Float("transfer-near") is { } tn) transferNear = Math.Max(0f, tn);
-        if (args.Float("transfer-gather-share") is { } tg) transferGatherShare = Math.Clamp(tg, 0f, 1f);
-        if (args.Float("transfer-gather-top") is { } gt) transferGatherTop = Math.Clamp(gt, 0f, 1f);
-        // The transfer's cells at 20 cm: at 10 cm Sponza's 48 M cells and their light were 1.2 GB (the cells serve the
-        // near field, within 25 cm, and the hybrid's gather).
-        if (liveTransfer && args.Float("hit-cell") is null) hitCellSize = 0.2f;
-        // --transfer-level L (1): the finest level the transfer carries; the finer take theirs through their contact
-        // visibility within two of its spacings (SponzaLoop.Transfer.cs, A').
-        if (args.Int("transfer-level") is { } tl2) transferMinLevel = Math.Clamp(tl2, 0, 4);
-        if (!livePatchTexels) transferAoReach = 2f * texelSpacing * (1 << transferMinLevel);
-        // The hybrid's gathered texels are the hard ones, and few: more rays each (--live-rays, --live-max-rays win).
-        // The refine (path B and the fine round): 384 a coarse texel, the least the gate's crevices corridor holds at (256: its
-        // noise 0.039 against the ratchet's 0.035, with refining's cap at 2,048 too), 2026-10-19; else 512.
-        // 512 with the refine (2026-10-21; 384 before): the coarse cells' ray noise is what the fine copies carry as clouds
-        // on every wall (tools/gi-model/cell_noise.py); 512 takes ~15% off them (two seeds: surfaces' noise 1.17-1.19x
-        // less), the light landing a few frames later on the testbeds. --live-rays N.
-        // 128 since 2026-10-25 (the refine takes the noisy up to 4 x): every gate and materials ratchet holds beside 512's
-        // (the dead end's |error| 0.034 -> 0.042, ratchet 0.05), at ~1/3 the rays -- a sun change in the frame at 512 was
-        // ~1 G rays, minutes behind a 120 fps frame.
-        if (liveTransfer && args.Int("live-max-rays") is null && args.Int("texel-max-rays") is null) texelMaxRays = 4 * sunNodeRays;
-        if (liveTransfer && args.Int("live-min-level") is null) liveMinLevel = 0;
-        if (args.Float("hit-cell") is { } hc) hitCellSize = Math.Clamp(hc, 0.01f, 1f);
-        if (args.Float("cell-near") is { } cn) hitCellNear = Math.Max(0f, cn);
-        cellMarks = args.Flag("cell-marks");
         clipmapAlways = args.Flag("clipmap-always");
         freezeCascades = args.Flag("freeze-cascades");
-        unmappedCoarse = args.Flag("unmapped-coarse");
         occlusionAlways = args.Flag("occlusion-always");
         incidentReuse = !args.Flag("no-incident-reuse");
-        atlasGather = !args.Flag("no-atlas-gather");
-        ratioRelight = !args.Flag("no-ratio-relight");
-        if (args.Float("sun-change-select") is { } scs) sunChangeSelect = Math.Max(0f, scs);
-        sunChangeSelectFine = args.Flag("sun-change-select-fine");
-        if (args.Float("sun-change-fine-below") is { } sfb) sunChangeFineBelow = Math.Max(0f, sfb);
-        if (args.Float("old-start-below") is { } osb) oldStartBelow = Math.Max(0f, osb);
-        if (args.Float("keep-old-below") is { } kob) keepOldBelow = Math.Max(0f, kob);
-        visibleChanged = !args.Flag("no-visible-changed");
-        screenFirst = args.Flag("screen-first");
-        hitBlend = !args.Flag("no-hit-blend");
-        fineCloth = !args.Flag("no-fine-cloth");
-        ReadTexelPickArgs(args);
-        if (args.Float("lightmap-edge-inset") is { } edgeInset) LightmapEdgeInset = Math.Clamp(edgeInset, 0f, 0.1f);
-        atlasCoarse = args.Flag("atlas-coarse");
-        if (args.Int("coarse-filter") is { } coarsePasses) coarseFilterPasses = Math.Max(0, coarsePasses);
-        coarseFilterLinear = !args.Flag("coarse-filter-mean");
-        cookedSkyVis = !args.Flag("no-cooked-sky-vis");
-        contactAllRays = !args.Flag("contact-rays-own");
-        if (args.Int("sky-vis-rays") is { } svr) skyVisRays = Math.Max(32, svr / 32 * 32);
-        if (args.Int("sky-vis-filter") is { } svf) skyVisFilterPasses = Math.Max(0, svf);
-        backgroundGather = args.Flag("background-gather");
-        ParseSweepFrame(args);
         ParseSunMove(args);
-        ParseGiLight(args);
-        ParseChangeBoost(args);
-        ParseSunLinear(args);
-        ParseFlipPush(args);
-        if (args.Float("background-gather-ms") is { } bgMs) backgroundGatherMs = Math.Max(0f, bgMs);
-        gatherStepsAFrame = Math.Max(0, args.Int("gather-steps-a-frame") ?? 0);
-        patchPickOld = args.Flag("patch-pick-old");
         if (args.Float("render-scale") is { } renderScaleArg) render.RenderScale = Math.Clamp(renderScaleArg, 0.5f, 1f);
-        fineAll = args.Flag("fine-all");
-        // --fine-contact R (0.999; 0 off): fine texels more closed than their coarse cells (their contact ratio under R)
-        // flagged, first (--no-fine-contact-first: by their score among the rest). Crevices' seams 0.835 -> 0.932 (the
-        // cooked gather's 0.931); Sponza at 5 M: every fine texel's mean error against the cooked gather 0.166 -> 0.155
-        // (2026-10-19). At 0.999 every texel the copy would darken: the ratio treats the face across a crease as black
-        // (tools/gi-model/crease_contact.py: -6% in room light alone at 2 cm, -12% to +16% under light from one side);
-        // Cornell's back corner -4.1% -> -1.0%, the crevices' crease bias -6.1% -> -3.8% (2026-10-21).
-        fineContact = args.Float("fine-contact") ?? (livePatchRefine ? 0.999f : 0f);
-        fineContactFirst = !args.Flag("no-fine-contact-first");
-        if (args.Int("fine-max-rays") is { } fm) fineGatherMaxRays = Math.Max(32, fm / 32 * 32);
-        fineRefineContactOnly = !args.Flag("fine-refine-all");
-        fineRefineCloth = !args.Flag("no-fine-refine-cloth");
-        giFarSide = !args.Flag("no-gi-far-side");
-        regatherSky = args.Flag("regather-sky");
-        if (args.Int("live-bounces") is { } lb) LiveBouncesToRest = Math.Max(1, lb);
-        // --live-max-rays N (4 x --live-rays): the refine's ceiling a texel in live mode -- the budget's other half. At
-        // --texel-max-rays' 2,048 a 128-ray sweep of the coarse levels refined a million texels for 15 rounds (~3 min).
-        if (liveTexels && args.Int("texel-max-rays") is null) texelMaxRays = args.Int("live-max-rays") ?? (!args.Flag("no-refine-need") ? (args.Int("refine-max") ?? 16) : 4) * liveRays;
-        // Live: no light lists, a 3.5% noise share (2026-10-22). The lists' 16 patches could not cover the sun a contact sees
-        // (466 patches, 90% from 158): a quarter of its rays at slivers, under 1% of its light; their rays the cosine's and
-        // the guide's. The 5% share let the smoother passes settle before a rare doorway's light was counted (the corridor
-        // 1% dark); at 3.5% none is, for 4-15% more rays. Two seeds: crevices-dark surfaces |error| 1.87/1.93% ->
-        // 1.61/1.63%, Cornell seed noise 0.72% -> 0.53%. --light-lists, --texel-noise 0.05: as before.
-        if (liveTexels && !args.Flag("light-lists")) sunNodeLights = false;
-        if (liveTexels && args.Float("texel-noise") is null) texelNoise = 0.035f;
 
         // Seed sun yaw/pitch from the default direction so the Sun controls
         // start matching the baked look.
@@ -541,21 +391,18 @@ internal sealed partial class SponzaLoop
             return;
         }
         LoadIbl(assetsRoot);
-        sceneAssetsRoot = assetsRoot;
-        ChooseGiBundle(assetsRoot);
-        // The band's north is set from this sun (BandNorth), whatever --sun or a sweep turns it to.
+        ChooseRayStore(assetsRoot);
+        // The moving sun's north is set from this sun (BandNorth), whatever --sun or a move turns it to.
         authoredSunDirection = sunDirection;
-        // --sun yaw,pitch (degrees; pitch negative, below the horizon of travel): a fixed sun for a measurement -- the
-        // transport spike's sun sweep holds one cook against the path trace at several angles (stage 5a).
+        // --sun yaw,pitch (degrees; pitch negative, below the horizon of travel): a fixed sun for a measurement.
         if (sunOverrideDegrees is { } sunDeg)
         {
             sunYaw = sunDeg.X * MathF.PI / 180f;
             sunPitch = sunDeg.Y * MathF.PI / 180f;
             UpdateSunDirection();
             Console.WriteLine($"[VulkanSponza]   sun set to {sunDeg.X:0.##}, {sunDeg.Y:0.##} (yaw, pitch; {(args.Values("sun", 2) is not null ? "--sun" : "the scene's default")}): {sunDirection}");
-            // The scene's default sun is its authored one: the band (BandNorth) is fitted around it, as it was around the
-            // probe's. --sun is a measurement and leaves the band where it was. (The default (180, -72) lay at
-            // declination 29.2 of a band fitted to the probe's sun, +-28.4: the records answered nothing, 2026-10-14.)
+            // The scene's default sun is its authored one: the moving sun's day (BandNorth) is fitted around it, as it was
+            // around the probe's. --sun is a measurement and leaves the day where it was.
             if (args.Values("sun", 2) is null) authoredSunDirection = sunDirection;
         }
 
@@ -671,7 +518,7 @@ internal sealed partial class SponzaLoop
         }
 
         // The clipmap's solve, after the cascades it takes the sun from where they cover a hit (frame audit F4), and
-        // before the fog, screen probes and incident pass that read it.
+        // before the fog and incident pass that read it.
         // The ray batches' interfaces (SponzaLoop.RayBatch.cs), before the first consumer declares a batch.
         batchClosestInterface = Reflect("ray_batch_closest.comp");
         batchShadowInterface = Reflect("ray_batch_shadow.comp");
@@ -745,8 +592,6 @@ internal sealed partial class SponzaLoop
         }
         incidentHalfHandle = graph.ColorTarget("incident-light-half", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(0.5f));
         incidentGradientHalfHandle = graph.ColorTarget("incident-gradient-half", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(0.5f));
-        // The half-res split's marks (incident_fast.frag): 1 where the slow pass answers.
-        incidentSlowHalfHandle = graph.ColorTarget("incident-slow-half", TextureFormat.R8, new MatchSwapchainGraphSize(0.5f));
 
         // The pre-pass writes geometric normals for incident reconstruction instead of inferring
         // them from depth. That inference measured 5.31 mean sRGB error. Rgba16F avoids directional
@@ -763,7 +608,6 @@ internal sealed partial class SponzaLoop
         {
             surfaceKeyHandle = graph.ColorTarget("surface-key", TextureFormat.R32Uint, fullSize);
             velocityHandle = graph.ColorTarget("velocity", TextureFormat.Rg16F, fullSize);
-            if (LightmapTexelTarget) lightmapTexelHandle = graph.ColorTarget("lightmap-texel", TextureFormat.R32Uint, fullSize);
             if (MotionTarget) motionHandle = graph.ColorTarget("world-motion", TextureFormat.Rgba16F, fullSize);
         }
         var prepassBuilder = graph.GraphicsPass("depth-prepass")
@@ -774,7 +618,6 @@ internal sealed partial class SponzaLoop
         {
             prepassBuilder = prepassBuilder.Target(surfaceKeyHandle, LoadOp.Clear, StoreOp.Store)
                 .Target(velocityHandle, LoadOp.Clear, StoreOp.Store);
-            if (LightmapTexelTarget) prepassBuilder = prepassBuilder.Target(lightmapTexelHandle, LoadOp.Clear, StoreOp.Store);
             if (MotionTarget) prepassBuilder = prepassBuilder.Target(motionHandle, LoadOp.Clear, StoreOp.Store);
         }
         // Same rule as the depth: at one sample the target IS what a reader wants, and asking for
@@ -812,7 +655,6 @@ internal sealed partial class SponzaLoop
         {
             lateBuilder = lateBuilder.Target(surfaceKeyHandle, LoadOp.Load, StoreOp.Store)
                 .Target(velocityHandle, LoadOp.Load, StoreOp.Store);
-            if (LightmapTexelTarget) lateBuilder = lateBuilder.Target(lightmapTexelHandle, LoadOp.Load, StoreOp.Store);
             if (MotionTarget) lateBuilder = lateBuilder.Target(motionHandle, LoadOp.Load, StoreOp.Store);
         }
         if (MsaaSamples > 1) lateBuilder = lateBuilder.ResolveColor(prepassNormalResolveHandle).ResolveDepth(depthResolveHandle);
@@ -822,56 +664,12 @@ internal sealed partial class SponzaLoop
         rayViewInterface = Reflect("ray_view.comp");
         rayViewPassHandle = graph.ComputePass("ray-view").Shader(rayViewInterface).Read(SampleableSceneDepth).Handle;
 
-        // The texels (mark, filter, the light bake's slice, the gather and its Metal batches) BEFORE the traced shadows:
-        // they read only the pre-pass and the cascades, and a Metal batch declared between rt-shadow-trace and its join
-        // waits for the trace first (VulkanGraphicsDevice: a later external pass waits on the pending join) -- the overlap
-        // lost, two bubbles more, every frame the texels gather or bake.
-        texelMarkInterface = Reflect("texel_mark.comp");
-        {
-            var markBuilder = graph.ComputePass("texel-mark").Read(SampleableSceneDepth).Read(SampleablePrepassNormal);
-            for (var c = 0; c < CascadeCount; c++) markBuilder = markBuilder.Read(cascadeHandles[c]);
-            markBuilder = markBuilder.Read(lightmapEnabled ? lightmapTexelHandle : surfaceKeyHandle);
-            texelMarkPassHandle = markBuilder.Shader(texelMarkInterface).Handle;
-        }
-        texelFilterInterface = Reflect("texel_filter.comp");
-        // The filter sweep's list (texel_filter_fill.comp), before the filter that reads it.
-        texelFilterFillInterface = Reflect("texel_filter_fill.comp");
-        texelFilterFillPassHandle = graph.ComputePass("texel-filter-fill").Shader(texelFilterFillInterface).Handle;
-        texelFilterPassHandle = graph.ComputePass("texel-filter").Shader(texelFilterInterface).Handle;
-        // The texels at rest, resolved once (SponzaLoop.TexelRest.cs): after the filter, before the incident pass reads them.
-        texelResolveInterface = Reflect("texel_resolve.comp");
-        texelResolvePassHandle = graph.ComputePass("texel-resolve").Shader(texelResolveInterface).Handle;
-        lightBakeInterface = Reflect("texel_bake.comp");
-        lightBakePassHandle = graph.ComputePass("light-bake").Shader(lightBakeInterface).Handle;
-        texelGatherInterface = Reflect("texel_gather.comp");
-        // The gather as a wavefront (--texel-wavefront, or frame rays on Metal): rays out, hits shaded, the hits' sun out,
-        // the answers gathered in texel-gather; the batches between the phases (SponzaLoop.Texels.cs).
-        texelRaysPassHandle = graph.ComputePass("texel-gather-rays").Shader(texelGatherInterface).Handle;
-        texelClosestBatch = DeclareClosestBatch("texel-closest");
-        {
-            var builder = graph.ComputePass("texel-gather-shade");
-            for (var c = 0; c < CascadeCount; c++) builder = builder.Read(cascadeHandles[c]);
-            texelShadePassHandle = builder.Shader(texelGatherInterface).Handle;
-        }
-        texelShadowBatch = DeclareShadowBatch("texel-shadow");
-        {
-            var builder = graph.ComputePass("texel-gather");
-            for (var c = 0; c < CascadeCount; c++) builder = builder.Read(cascadeHandles[c]);
-            texelGatherPassHandle = builder.Shader(texelGatherInterface).Handle;
-        }
-        // --sun-nodes: the texels' light for many suns from one trace (SponzaLoop.SunNodes.cs), among the texels' passes.
-        DeclareSunNodePasses(stages => Reflect(stages));
-        DeclareSplitLightPass(stages => Reflect(stages));
-        DeclareLightmapCellsPass(stages => Reflect(stages));
-
         // --rt-shadows: the shadow rays as soon as the pre-pass has the depth and normals they start from, and the Metal
         // pass that traces them; the lit pass joins it (rt-shadow-join, below). Everything between (Hi-Z, GTAO, the
         // clipmap's marks, the incident light) reads none of it, so it runs while the rays are traced.
         rtShadowRaysInterface = Reflect("rt_shadow_rays.comp");
         rtShadowRaysPassHandle = graph.ComputePass("rt-shadow-rays").Shader(rtShadowRaysInterface)
-            .Read(SampleableSceneDepth).Read(SampleablePrepassNormal)
-            // The atlas texel a pixel shows, for the lightlets' sun records (rt_shadow_rays.comp).
-            .Read(lightmapEnabled ? lightmapTexelHandle : surfaceKeyHandle).Handle;
+            .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
         // The cache's rays traced in a Metal pass of their own before the sun's, where neither async compute nor the tracer
         // groups take them (SponzaLoop.Rtgi.cs).
         rtgiInlineTracePassHandle = graph.ExternalPass("rtgi-inline-trace");
@@ -921,28 +719,11 @@ internal sealed partial class SponzaLoop
 
         // The incident pass sits between the depth it unprojects and the lit pass that reads it. It also reads the
         // clipmap's atlases, device-owned rather than graph resources, so declaration order carries that dependency.
-        // Screen probes read this frame's depth and normals and write buffers the incident pass reads; declared
-        // between them, and fenced like every pass that binds GPU buffers.
         // The probes this frame's image reads, stamped for the next solve (stage 4g-iii): after the depth and normals
         // it reads, and fenced like every pass that binds GPU buffers.
-        // Surface probes give back slots unseen for long before the mark allocates new ones (stage 4g-ix B).
-        surfaceReclaimInterface = Reflect("surface_reclaim.comp");
-        surfaceReclaimPassHandle = graph.ComputePass("surface-reclaim").Shader(surfaceReclaimInterface).Handle;
         clipmapMarkInterface = Reflect("clipmap_mark.comp");
         clipmapMarkPassHandle = graph.ComputePass("clipmap-mark").Shader(clipmapMarkInterface)
             .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
-        // Three stages (place, trace, integrate: screen_probe_kernel.glsl), each its own pass so each is timed.
-        for (var stage = 0; stage < ScreenProbeStages.Length; stage++)
-        {
-            screenProbeInterfaces[stage] = Reflect($"screen_probe_{ScreenProbeStages[stage]}.comp");
-            var builder = graph.ComputePass($"screen-probe-{ScreenProbeStages[stage]}")
-                .Read(SampleableSceneDepth)
-                .Read(SampleablePrepassNormal);
-            if (SurfaceTargets) builder = builder.Read(surfaceKeyHandle).Read(velocityHandle);
-            if (MotionTarget) builder = builder.Read(motionHandle);
-            for (var c = 0; c < CascadeCount; c++) builder = builder.Read(cascadeHandles[c]);
-            screenProbePassHandles[stage] = builder.Shader(screenProbeInterfaces[stage]).Handle;
-        }
         referenceInterface = Reflect("reference_trace.comp");
         gpuReferenceInterface = Reflect("reference_points.comp");
         gpuReferencePassHandle = graph.ComputePass("reference-points").Shader(gpuReferenceInterface).Handle;
@@ -956,8 +737,6 @@ internal sealed partial class SponzaLoop
         referenceWaveResolvePass = graph.ComputePass("reference-wave-resolve").Shader(referenceWaveInterface).Handle;
         referencePassHandle = graph.ComputePass("reference-trace").Shader(referenceInterface)
             .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
-        screenProbeFilterInterface = Reflect("screen_probe_filter.comp");
-        screenProbeFilterPassHandle = graph.ComputePass("screen-probe-filter").Shader(screenProbeFilterInterface).Handle;
 
         {
             var incidentBuilder = graph.GraphicsPass("incident-light")
@@ -965,9 +744,6 @@ internal sealed partial class SponzaLoop
                 .Target(incidentGradientHandle, LoadOp.Clear, StoreOp.Store)
                 .Read(SampleableSceneDepth)
                 .Read(SampleablePrepassNormal);
-            // The cascades: the texel level rule asks whether a pixel has direct sun (texelSunlit).
-            for (var c = 0; c < CascadeCount; c++) incidentBuilder = incidentBuilder.Read(cascadeHandles[c]);
-            incidentBuilder = incidentBuilder.Read(lightmapEnabled ? lightmapTexelHandle : surfaceKeyHandle);
             incidentBuilder = IncidentReuseReads(incidentBuilder);
             incidentPassHandle = incidentBuilder.Shader(incidentClipmapInterface).Handle;
             // The same pass at half resolution (RenderSettings.HalfResLighting); a frame records one of the two.
@@ -976,36 +752,10 @@ internal sealed partial class SponzaLoop
                 .Target(incidentGradientHalfHandle, LoadOp.Clear, StoreOp.Store)
                 .Read(SampleableSceneDepth)
                 .Read(SampleablePrepassNormal);
-            for (var c = 0; c < CascadeCount; c++) halfBuilder = halfBuilder.Read(cascadeHandles[c]);
-            halfBuilder = halfBuilder.Read(lightmapEnabled ? lightmapTexelHandle : surfaceKeyHandle);
             halfBuilder = IncidentReuseReads(halfBuilder);
             incidentHalfPassHandle = halfBuilder.Shader(incidentClipmapInterface).Handle;
             // --rtgi: the cache read into the same targets in its place (SponzaLoop.Rtgi.cs).
             DeclareRtgiReadoutPass((vert, frag) => Reflect(vert, frag));
-            // The half-res pass split in two (incident_body.glsl, INCIDENT_FAST / INCIDENT_SLOW): the cells' answers and
-            // the marks, then the marked pixels over them. Declared before the shadows' join, as the pass they replace.
-            incidentFastInterface = Reflect("present.vert", "incident_fast.frag");
-            incidentSlowInterface = Reflect("present.vert", "incident_slow.frag");
-            var fastBuilder = graph.GraphicsPass("incident-light-half-fast")
-                .Target(incidentHalfHandle, LoadOp.Clear, StoreOp.Store)
-                .Target(incidentGradientHalfHandle, LoadOp.Clear, StoreOp.Store)
-                .Target(incidentSlowHalfHandle, LoadOp.Clear, StoreOp.Store)
-                .Read(SampleableSceneDepth)
-                .Read(SampleablePrepassNormal);
-            for (var c = 0; c < CascadeCount; c++) fastBuilder = fastBuilder.Read(cascadeHandles[c]);
-            fastBuilder = fastBuilder.Read(lightmapEnabled ? lightmapTexelHandle : surfaceKeyHandle);
-            fastBuilder = IncidentReuseReads(fastBuilder);
-            incidentHalfFastPassHandle = fastBuilder.Shader(incidentFastInterface).Handle;
-            var slowBuilder = graph.GraphicsPass("incident-light-half-slow")
-                .Target(incidentHalfHandle, LoadOp.Load, StoreOp.Store)
-                .Target(incidentGradientHalfHandle, LoadOp.Load, StoreOp.Store)
-                .Read(incidentSlowHalfHandle)
-                .Read(SampleableSceneDepth)
-                .Read(SampleablePrepassNormal);
-            for (var c = 0; c < CascadeCount; c++) slowBuilder = slowBuilder.Read(cascadeHandles[c]);
-            slowBuilder = slowBuilder.Read(lightmapEnabled ? lightmapTexelHandle : surfaceKeyHandle);
-            slowBuilder = IncidentReuseReads(slowBuilder);
-            incidentHalfSlowPassHandle = slowBuilder.Shader(incidentSlowInterface).Handle;
         }
 
 
@@ -1091,7 +841,7 @@ internal sealed partial class SponzaLoop
         }
         if (SurfaceTargets)
         {
-            // After every reader of last frame's keys (screen probes, TAA): this frame's become the history.
+            // After every reader of last frame's keys (TAA): this frame's become the history.
             surfaceKeyHistoryPassHandle = graph.GraphicsPass("surface-key-history")
                 .Target(surfaceKeyHistoryHandle, LoadOp.Clear, StoreOp.Store)
                 .Read(surfaceKeyHandle)
@@ -1305,14 +1055,6 @@ internal sealed partial class SponzaLoop
                 presentVertSpv, incidentLeanSpv, incidentClipmapInterface, "incident_lean_half")),
             VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
             new[] { BlendState.Disabled, BlendState.Disabled }, incidentHalfPassHandle, "incident_lean_half");
-        incidentHalfFastPipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
-                presentVertSpv, File.ReadAllBytes(Path.Combine(shaderDir, "incident_fast.frag.spv")), incidentFastInterface, "incident_fast")),
-            VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
-            new[] { BlendState.Disabled, BlendState.Disabled, BlendState.Disabled }, incidentHalfFastPassHandle, "incident_fast");
-        incidentHalfSlowPipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
-                presentVertSpv, File.ReadAllBytes(Path.Combine(shaderDir, "incident_slow.frag.spv")), incidentSlowInterface, "incident_slow")),
-            VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
-            new[] { BlendState.Disabled, BlendState.Disabled }, incidentHalfSlowPassHandle, "incident_slow");
         CreateRtgiPipelines(shaderDir, presentVertSpv);
         CreateRtgiTemporalPipelines(shaderDir, presentVertSpv);
         lightingUpsamplePipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
@@ -1346,8 +1088,6 @@ internal sealed partial class SponzaLoop
             Own(device.CreateComputeShaderProgramFromSpv(clipmapSpv, clipmapInterface, "clipmap_inject")), "clipmap_inject"));
         clipmapWatchPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "clipmap_watch.comp.spv")), clipmapWatchInterface, "clipmap_watch")), "clipmap_watch"));
-        surfaceReclaimPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
-            File.ReadAllBytes(Path.Combine(shaderDir, "surface_reclaim.comp.spv")), surfaceReclaimInterface, "surface_reclaim")), "surface_reclaim"));
         CreateRayBatchPipelines(shaderDir);
         referenceWavePipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "reference_wave.comp.spv")), referenceWaveInterface, "reference_wave")), "reference_wave"));
@@ -1355,32 +1095,8 @@ internal sealed partial class SponzaLoop
             File.ReadAllBytes(Path.Combine(shaderDir, "reference_points.comp.spv")), gpuReferenceInterface, "reference_points")), "reference_points"));
         referencePipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "reference_trace.comp.spv")), referenceInterface, "reference_trace")), "reference_trace"));
-        texelFilterPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
-            File.ReadAllBytes(Path.Combine(shaderDir, "texel_filter.comp.spv")), texelFilterInterface, "texel_filter")), "texel_filter"));
-        texelResolvePipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
-            File.ReadAllBytes(Path.Combine(shaderDir, "texel_resolve.comp.spv")), texelResolveInterface, "texel_resolve")), "texel_resolve"));
-        texelFilterFillPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
-            File.ReadAllBytes(Path.Combine(shaderDir, "texel_filter_fill.comp.spv")), texelFilterFillInterface, "texel_filter_fill")), "texel_filter_fill"));
-        texelMarkPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
-            File.ReadAllBytes(Path.Combine(shaderDir, "texel_mark.comp.spv")), texelMarkInterface, "texel_mark")), "texel_mark"));
-        lightBakePipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
-            File.ReadAllBytes(Path.Combine(shaderDir, "texel_bake.comp.spv")), lightBakeInterface, "texel_bake")), "texel_bake"));
-        CreateSunNodePipelines(shaderDir);
-        CreateSplitLightPipeline(shaderDir);
-        CreateLightmapCellsPipeline(shaderDir);
-        texelGatherPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
-            File.ReadAllBytes(Path.Combine(shaderDir, "texel_gather.comp.spv")), texelGatherInterface, "texel_gather")), "texel_gather"));
         clipmapMarkPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "clipmap_mark.comp.spv")), clipmapMarkInterface, "clipmap_mark")), "clipmap_mark"));
-        for (var stage = 0; stage < ScreenProbeStages.Length; stage++)
-        {
-            var name = $"screen_probe_{ScreenProbeStages[stage]}";
-            screenProbePipelines[stage] = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
-                File.ReadAllBytes(Path.Combine(shaderDir, name + ".comp.spv")), screenProbeInterfaces[stage], name)), name));
-        }
-        var screenProbeFilterSpv = File.ReadAllBytes(Path.Combine(shaderDir, "screen_probe_filter.comp.spv"));
-        screenProbeFilterPipeline = Own(device.CreateComputePipeline(
-            Own(device.CreateComputeShaderProgramFromSpv(screenProbeFilterSpv, screenProbeFilterInterface, "screen_probe_filter")), "screen_probe_filter"));
         var bakeSpv = File.ReadAllBytes(Path.Combine(shaderDir, "ray_surface_bake.comp.spv"));
         raySurfaceBakePipeline = Own(device.CreateComputePipeline(
             Own(device.CreateComputeShaderProgramFromSpv(bakeSpv, raySurfaceBakeInterface, "ray_surface_bake")), "ray_surface_bake"));
@@ -1468,7 +1184,7 @@ internal sealed partial class SponzaLoop
         meshLoad.Start(() =>
         {
             var prims = new List<PlacedPrimitive>();
-            foreach (var (name, primitives) in ParsePacksParallel(packsToParse, lightmapEnabled))
+            foreach (var (name, primitives) in ParsePacksParallel(packsToParse))
             {
                 prims.AddRange(primitives);
                 Console.WriteLine(
@@ -1567,7 +1283,6 @@ internal sealed partial class SponzaLoop
             brdfLutTexture = baked.BrdfLut;
             iblPrefilterMips = baked.Probe.PrefilteredSpecularMipCount;
             Console.WriteLine($"[VulkanSponza] IBL: cooked probe {Path.GetFileName(probePath)} ({iblPrefilterMips} GGX prefilter mips).");
-            skyIdentity = Path.GetFileName(probePath);
             // Align the directional sun (key light + shadow caster) to the probe's
             // detected sun so cast shadows match the visible sky sun. FROM-sun-
             // into-scene convention, matching sunDirection.
@@ -1671,7 +1386,7 @@ internal sealed partial class SponzaLoop
 
     // The pre-pass's targets: the normal, and under single sampling the surface key, the velocity and the world motion
     // (stage 4e).
-    // One per pre-pass colour target: normal; surface key and velocity; the lightmap texel; world motion (a target the
-    // pipelines once did not count had nothing written to it).
-    private BlendState[] PrepassBlends() => Enumerable.Repeat(BlendState.Disabled, !SurfaceTargets ? 1 : 3 + (LightmapTexelTarget ? 1 : 0) + (MotionTarget ? 1 : 0)).ToArray();
+    // One per pre-pass colour target: normal; surface key and velocity; world motion (a target the pipelines once did
+    // not count had nothing written to it).
+    private BlendState[] PrepassBlends() => Enumerable.Repeat(BlendState.Disabled, !SurfaceTargets ? 1 : 3 + (MotionTarget ? 1 : 0)).ToArray();
 }

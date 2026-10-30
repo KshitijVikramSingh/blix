@@ -75,7 +75,6 @@ internal sealed partial class SponzaLoop
             sunStrength = debug.Controls.Float("Strength (x measured)", sunStrength, 0f, 8f);
             UpdateSunDirection();
         }
-        GiLightControls(debug);
         RtgiControls(debug);
         // ShadowsSettings and RenderSettings are [Tune]-tagged and auto-paneled below.
         // Shader-uniform tunables (//@tune in lit.frag): sun/ambient intensity,
@@ -106,18 +105,6 @@ internal sealed partial class SponzaLoop
             // Toggle the incident field under a still camera: off, the lit pass uses the open-sky cube
             // with no clipmap light, the diagnostic --no-incident is.
             incidentField = debug.Controls.Toggle("Incident field (off: open sky cube)", incidentField);
-            // The cells' detail (SponzaLoop.SplitDetail.cs): off, the probes answer everywhere, as before the detail.
-            texelDetailOn = debug.Controls.Toggle("Cells answer alone (sky visibility, direction)", texelDetailOn);
-            // What the cook made, live (SponzaLoop.TexelPicker.cs): the picker's panel, and each pixel's texel by the stage
-            // that wrote it (shown through Show: Bounce radiance (raw)).
-            texelPicker = debug.Controls.Toggle("Texel picker (hover; P freezes)", texelPicker);
-            var texelViewAsked = debug.Controls.Enum("Texel view", texelView, TexelViewNames);
-            if (texelViewAsked != texelView)
-            {
-                texelView = texelViewAsked;
-                if (texelViewAsked != 0) vizChannel = 10f;
-                MarkIncidentDirty();
-            }
         }
 
         // The clipmap's levels, live (stage 4g-v): answer from one level alone or the blend, and the knobs the level
@@ -161,7 +148,6 @@ internal sealed partial class SponzaLoop
         //
         // Level 0 is deliberately not drawn: at a sane budget most of the scene is at full detail,
         // and outlining all of it would bury the handful of primitives the question is about.
-        DrawGatherRays(debug);
         if (debug.Draw.Layer("lod", visible: false))
         {
             for (var i = 0; i < lodLevels.Length && i < opaquePlacements.Count; i++)

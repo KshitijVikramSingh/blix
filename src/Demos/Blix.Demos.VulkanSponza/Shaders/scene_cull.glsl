@@ -198,7 +198,7 @@ void scatter(uint i) {
     uint record = uint(u.uArgs.x) + recordOf(p.drawable, lod);
     // Every placement at this level writes the same value.
     args[record * 5u + 4u] = start;
-    // The level rides in the top 8 bits (instances.glsl, instanceLod): the atlas's LOD 0 frames apply only to coarse levels.
+    // The level rides in the top 8 bits (instances.glsl's instanceRow masks it off).
     visible[start + atomicAdd(cursor[record], 1u)] = p.transform | (min(lod, 255u) << 24u);
 }
 

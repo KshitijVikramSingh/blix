@@ -109,11 +109,6 @@ internal sealed partial class SponzaLoop
     private int clipmapFreeze = int.MaxValue;
     private ShaderInterface incidentClipmapInterface = null!;
     private bool incidentLean = true;
-    // --incident-split: the half-res pass as two (incident_fast.frag, incident_slow.frag). Off by default: the slow pass's
-    // discarded pixels still launch its shader, 1.25 ms a run for 3% of them, the pair 2.33 against the one pass's 1.98
-    // (Crytek Sponza's courtyard, 2026-10-24). It pays once the slow pass launches on the marked pixels alone -- a stencil
-    // test, or an indirect draw over the marked tiles, neither of which the engine has yet.
-    private bool incidentSplit;
     private PipelineHandle incidentClipmapPipeline;
 
     private Vector4 ClipmapOrigin(int level) => clipmap is { } c
@@ -136,15 +131,9 @@ internal sealed partial class SponzaLoop
     {
         var sub = LightingSubpixel;
         var origins = clipmap!.Origins;
-        var screen = ScreenProbeIncidentInputs(frameWidth, frameHeight);
-        var surface = SurfaceUniforms(ClipmapLevels * clipmap.ProbesPerLevel);
-        var texel = TexelIncidentInputs();
         var reference = ReferenceIncidentInputs();
-        var pick = TexelPickInputs(frameWidth, frameHeight);
-        // The lean build where nothing it compiles out is on (incident_lean.frag); --no-incident-lean: never.
-        var lean = incidentLean && pick.Code == 0f && reference.Params.X <= 0.5f && reference.Params.W <= 0.5f
-            && screen.Screen.X <= 0.5f && IncidentStop == 0f;
-        // Built once: the uniforms count this frame's reuse and census as they are made.
+        // The lean build where the reference view is off (incident_lean.frag); --no-incident-lean: never.
+        var lean = incidentLean && reference.Params.X <= 0.5f;
         var textures = new[]
             {
                 new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
@@ -152,7 +141,8 @@ internal sealed partial class SponzaLoop
                 new ShaderTextureBinding("uClipmapIrradiance", clipmapIrradiance),
                 new ShaderTextureBinding("uClipmapDepth", clipmapDepth),
                 new ShaderTextureBinding("uIrradiance", irradianceCubeTexture),
-            }.Concat(TexelCascadeTextures()).Append(LightmapTexelTexture()).Concat(IncidentReuseTextures()).ToArray();
+            }.Concat(IncidentReuseTextures()).ToArray();
+        // Built once: the uniforms count this frame's reuse as they are made.
         var uniforms = new ShaderUniform[]
             {
                 new("uInvProjection", new Matrix4x4Uniform(invProjection)),
@@ -164,45 +154,18 @@ internal sealed partial class SponzaLoop
                 new("uOrigin1", new Vector4Uniform(new Vector4(origins[1].X, origins[1].Y, origins[1].Z, 0f))),
                 new("uOrigin2", new Vector4Uniform(new Vector4(origins[2].X, origins[2].Y, origins[2].Z, 0f))),
                 new("uOrigin3", new Vector4Uniform(new Vector4(origins[3].X, origins[3].Y, origins[3].Z, 0f))),
-                new("uScreen", new Vector4Uniform(screen.Screen)),
-                new("uFrameSize", new Vector4Uniform(screen.FrameSize)),
-                new("uSurfaceGrid", new Vector4Uniform(surface.Grid)),
-                new("uSurfaceDims", new Vector4Uniform(surface.Dims)),
-                new("uSurfaceAtlas", new Vector4Uniform(surface.Atlas)),
-                new("uTexelGrid", new Vector4Uniform(texel.Grid)),
-                new("uTexelParams", new Vector4Uniform(texel.Params)),
                 new("uReference", new Vector4Uniform(reference.Params)),
-                new("uClipExact", new Vector4Uniform(new Vector4(incidentExactVisibility ? 1f : 0f, IncidentCensusNow(half) ? 1f : 0f, UnmappedCoarse ? 1f : 0f, AtlasGatherNow ? 1f : 0f))),
-                new("uTexelDebug", new Vector4Uniform(new Vector4(texelFrame, texelResting ? 1f : 0f, texelDetailOn && TexelDetailUp ? 1f : 0f, pick.Code))),
-                new("uLightmap", new Vector4Uniform(LightmapUniform)),
-                new("uTexelLevels", new Vector4Uniform(TexelLevelsUniform(frameHeight))),
-                new("uHalf", new Vector4Uniform(new Vector4(half ? 1f : 0f, sub.X, sub.Y, PatchViewColumns))),
+                new("uClipExact", new Vector4Uniform(new Vector4(incidentExactVisibility ? 1f : 0f, 0f, 0f, 0f))),
+                new("uHalf", new Vector4Uniform(new Vector4(half ? 1f : 0f, sub.X, sub.Y, 0f))),
                 new("uReuse", new Vector4Uniform(IncidentReuseUniform(half))),
-                new("uSeam", new Vector4Uniform(new Vector4(SeamBlendNow ? 1f : 0f, TexelShapeOn ? 1f : 0f, LightmapCellsNow ? 1f : 0f, IncidentStop))),
-            }.Concat(TexelSunUniforms()).ToArray();
-        var buffers = new[] { new ShaderBufferBinding("ClipmapState", clipmapState), new ShaderBufferBinding("ScreenProbeTiles", screen.Tiles), new ShaderBufferBinding("ScreenProbes", screen.Probes), new ShaderBufferBinding("SurfaceIndex", surfaceIndex) }.Concat(texel.Buffers).Append(reference.Buffer).Append(new ShaderBufferBinding("IncidentCensus", IncidentCensusBuffer())).Append(AtlasGatherMeta()).Append(AtlasIndexBuffer()).Append(LightmapCellsBinding())
-                .Append(ProvenanceBinding()).Append(new ShaderBufferBinding("TexelShape", ShapeOr(texelShapeBuffer))).Append(TexelRaysBinding()).Append(pick.Buffer).Concat(PatchViewBindings()).Append(ReferenceMomentsBinding())
-                .Concat(SeamBlendBindings())
+            };
+        var buffers = new[] { new ShaderBufferBinding("ClipmapState", clipmapState), reference.Buffer }
                 // The ray scene, for --clipmap-exact-visibility (declared always; read only then).
                 .Concat(rayBlockBuffers).ToArray();
-        // The half-res split (incident_fast.frag, incident_slow.frag) where the lean build runs, with --incident-split.
-        if (half && lean && incidentSplit)
-        {
-            graph.Pass(incidentHalfFastPassHandle, scope => fullscreen.Draw(scope, incidentHalfFastPipeline, textures,
-                pushConstants: null, uniforms: uniforms, buffers: buffers));
-            var slowTextures = textures.Append(new ShaderTextureBinding("uSlowMask", graph.GetColorTexture(incidentSlowHalfHandle))).ToArray();
-            graph.Pass(incidentHalfSlowPassHandle, scope => fullscreen.Draw(scope, incidentHalfSlowPipeline, slowTextures,
-                pushConstants: null, uniforms: uniforms, buffers: buffers));
-            return;
-        }
         graph.Pass(half ? incidentHalfPassHandle : incidentPassHandle, scope => fullscreen.Draw(
             scope, half ? (lean ? incidentHalfLeanPipeline : incidentHalfPipeline) : (lean ? incidentLeanPipeline : incidentClipmapPipeline),
             textures, pushConstants: null, uniforms: uniforms, buffers: buffers));
     }
-
-    // BLIX_INCIDENT_STOP=1 / 2: the incident pass out before / right after its texels are read (incident_clipmap.frag) --
-    // a probe of where its time goes, not a mode to run.
-    private static readonly float IncidentStop = float.TryParse(Environment.GetEnvironmentVariable("BLIX_INCIDENT_STOP"), out var stop) ? stop : 0f;
 
     private const int ClipmapLevels = 4;
     // Probes per level, x y z. --clipmap-height N sets y (16: level 0 reaches +-4 m vertically, 32: +-8 m); stage 4g-viii.
@@ -261,6 +224,14 @@ internal sealed partial class SponzaLoop
     private PassHandle clipmapMarkPassHandle;
     private PipelineHandle clipmapMarkPipeline;
     private const int ClipmapMarkStride = 4;
+    // The clipmap's shaders still declare the retired surface probes' grid (Blix.Shaders/probe_surface.glsl; they go
+    // with the clipmap): bound off -- the grid's w 0, an empty index and allocator.
+    private GpuBufferHandle surfaceIndex, surfaceAlloc;
+    private const int SurfaceAllocHeader = 8;
+    private (Vector4 Grid, Vector4 Dims, Vector4 Atlas) SurfaceUniforms(int clipSlots) => (
+        new Vector4(0f, 0f, 0f, clipmapSpacing),
+        new Vector4(1f, 1f, 1f, clipSlots),
+        new Vector4(clipmap!.AtlasHeight, clipmap.AtlasWidth / 8, 0f, 0f));
 
     private void CreateClipmap()
     {
@@ -268,8 +239,9 @@ internal sealed partial class SponzaLoop
         clipmap = clipmapBlendOverride >= 0f
             ? new ProbeClipmap(ClipmapLevels, ClipmapDims, clipmapSpacing, clipmapBlendOverride)
             : new ProbeClipmap(ClipmapLevels, ClipmapDims, clipmapSpacing);
-        // The surface probes' tiles sit below the clipmap's in the same atlases (stage 4g-ix).
-        var atlasHeight = CreateSurfaceProbes(clipmap.AtlasHeight, clipmap.AtlasWidth);
+        var atlasHeight = clipmap.AtlasHeight;
+        surfaceIndex = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.surface.index.none"));
+        surfaceAlloc = Own(device.CreateGpuBuffer(SurfaceAllocHeader * 4 + 4, new byte[SurfaceAllocHeader * 4 + 4], "sponza.surface.alloc.none"));
         clipmapIrradiance = Own(device.CreateStorageTexture2D(clipmap.AtlasWidth, atlasHeight, TextureFormat.Rgba16F,
             SamplerDescription.LinearClamp, "sponza.clipmap.irradiance"));
         clipmapDepth = Own(device.CreateStorageTexture2D(clipmap.AtlasWidth, atlasHeight, TextureFormat.Rgba16F,
@@ -281,15 +253,15 @@ internal sealed partial class SponzaLoop
         clipmapDynamic = Own(device.CreateStorageTexture2D(clipmap.AtlasWidth, atlasHeight, TextureFormat.Rgba16F,
             SamplerDescription.LinearClamp, "sponza.clipmap.dynamic"));
         var slots = ClipmapLevels * clipmap.ProbesPerLevel;
-        var total = slots + surfaceCapacity;
+        var total = slots;
         // Every clipmap slot starts holding a cell no block contains, unsolved: the first scan re-points and queues all of
-        // them. Surface slots start empty (not ALLOCATED) until clipmap_mark.comp allocates them.
+        // them.
         var initial = new uint[total * 4];
         for (var i = 0; i < slots; i++) { initial[i * 4] = 0x80000000u; initial[i * 4 + 1] = 0x80000000u; initial[i * 4 + 2] = 0x80000000u; }
         clipmapState = Own(device.CreateGpuBuffer(total * 16, MemoryMarshal.AsBytes(initial.AsSpan()), "sponza.clipmap.state"));
         // Each slot's probe offset from its cell's centre (--clipmap-relocate, clipmap_inject.comp), zero to begin.
         // Counters, the per-level unsolved queues, the dependent queue (stage 4f), the cursor, and the buckets' counts and
-        // lists (every slot's worth, surface slots included): visible probes by solves (4g-iii), then young ones off
+        // lists (every slot's worth): visible probes by solves (4g-iii), then young ones off
         // screen (4g-ii).
         clipmapQueue = Own(device.CreateGpuBuffer((8 + 2 * slots + 1 + ClipmapBuckets * (1 + total)) * 4, name: "sponza.clipmap.queue"));
         clipmapSeen = Own(device.CreateGpuBuffer(total * 4, new byte[total * 4], "sponza.clipmap.seen"));
@@ -308,31 +280,16 @@ internal sealed partial class SponzaLoop
             $"[VulkanSponza] probe clipmap: {ClipmapLevels} levels of {ClipmapDims.X}x{ClipmapDims.Y}x{ClipmapDims.Z} probes, spacing {clipmapSpacing:0.##} m doubling (level {ClipmapLevels - 1} spans {clipmap.Spacing(ClipmapLevels - 1) * ClipmapDims.X:0} m), atlases {clipmap.AtlasWidth}x{clipmap.AtlasHeight}, {clipmapBudget} probes a frame."));
     }
 
-    // The pixels the last incident census found reading the probes (-1: no census yet).
-    private long clipmapProbeReaders = -1;
+    // --clipmap-always: the probes solved every frame under --rtgi too (RecordClipmap).
     private bool clipmapAlways;
     // --freeze-cascades (measurement): the sun cascades fitted once, never refit or redrawn.
     private bool freezeCascades;
-    // --unmapped-coarse: pixels the atlas leaves out read one coarser texel level alone (incident_clipmap.frag,
-    // uClipExact.z). Off by default: ~2 ms at the tree, but the user saw pops and tears on the leaves while moving
-    // (2026-10-20). --ab leaflookup alternates the two.
-    private bool unmappedCoarse;
-    private bool UnmappedCoarse => abMode == "leaflookup" ? !AbOffPhase : unmappedCoarse;
     private long clipmapRested;
 
     private void RecordClipmap()
     {
         if (clipmap is null || rayBlockBuffers.Length == 0 || !RaySurfacesReady) return;
         if (clipmapFrame >= clipmapFreeze) return;
-        // --live-texels: the probes solved only while something reads them. With the texels at rest every pixel took the
-        // cells alone (the census: 100%), and the probes' solve -- Metal's closest rays 4-7.5 ms a frame and its shadow
-        // batch -- lit nothing (2026-10-19). Solved again once a census sees a pixel read them, the texels leave rest, or
-        // the mover moves. --clipmap-always: every frame, as before.
-        if (liveTexels && !clipmapAlways && clipmapProbeReaders == 0 && texelResting && !MoverActive)
-        {
-            clipmapRested++;
-            return;
-        }
         // Under --rtgi the cache answers the indirect light, and the probes only glass panes' reflection (the sky they
         // see, lit_body.glsl): solved one frame in --rtgi-clipmap-every (8). Every frame they cost Crytek Sponza ~4 ms
         // (33.3 -> 29.3 frozen, 2026-10-26). 1: every frame.
@@ -341,7 +298,7 @@ internal sealed partial class SponzaLoop
             clipmapRested++;
             return;
         }
-        // The probes solve: what the incident pass reads where texels do not answer changes. Not under --rtgi: the readout
+        // The probes solve: what the incident pass reads changes. Not under --rtgi: the readout
         // stands in for the incident pass, and nothing else marked dirty reads the probes -- the traced sun's kept masks
         // (RtShadowKeep) were thrown away for two frames in every eight, each ~3.5 ms more (the shadow rays and their
         // trace; Crytek Sponza 1080p's per-frame series, 2026-10-28).
@@ -431,7 +388,7 @@ internal sealed partial class SponzaLoop
             var rays = clipmapBudget * 64 * clipmapYoungRays;
             var waveSeed = unchecked((uint)clipmapFrame * 0x9E3779B9u);
             graph.Dispatch(clipmapPassHandle, Phase(0, 1));
-            graph.Dispatch(clipmapPassHandle, Phase(1, (slots + surfaceCapacity + 63) / 64));
+            graph.Dispatch(clipmapPassHandle, Phase(1, (slots + 63) / 64));
             graph.Dispatch(clipmapPassHandle, Phase(3, clipmapBudget));
             RecordClosestBatch(clipmapClosestBatch, clipmapWaveRays, clipmapWaveHits, rays, waveSeed, deferred: true);
             clipmapWave = (origins, clipmapFrame, waveSeed, rays);
@@ -440,7 +397,7 @@ internal sealed partial class SponzaLoop
             return;
         }
         graph.Dispatch(clipmapPassHandle, Phase(0, 1));
-        graph.Dispatch(clipmapPassHandle, Phase(1, (slots + surfaceCapacity + 63) / 64));
+        graph.Dispatch(clipmapPassHandle, Phase(1, (slots + 63) / 64));
         if (wave)
         {
             // The solve as a wavefront: rays out, their hits shaded, the hits' sun out, the answers solved. Each batch
@@ -469,8 +426,7 @@ internal sealed partial class SponzaLoop
     // wave and starts the next (its probes picked, its rays out), frame B shades its hits and sends its sun rays; every
     // batch is read on the frame after, so none needs its own trip to Metal in the frame. In one frame, the chain went
     // to Metal and back three times, the GPU idle between (~19 ms of Sponza's 103 ms frame). A probe update takes two
-    // frames instead of one; the cells answer 99.9% of Sponza's pixels at rest (the incident census), so the probes'
-    // pace shows little. --clipmap-wave-inframe: the whole chain in one frame, as before.
+    // frames instead of one. --clipmap-wave-inframe: the whole chain in one frame, as before.
     private bool clipmapWaveInFrame;
     private bool ClipmapStaged => !clipmapWaveInFrame && TracerGroupsOn && frameTracer is not null;
     private int clipmapWaveStage;
@@ -479,7 +435,7 @@ internal sealed partial class SponzaLoop
     // Stamps the probes this frame's image reads (clipmap_mark.comp), for the next solve's visible queue.
     private void RecordClipmapMark(Matrix4x4 invProjection, Matrix4x4 invView, int width, int height)
     {
-        if (clipmap is null || (clipmapVisibleShare <= 0f && !SurfaceProbesOn)) return;
+        if (clipmap is null || clipmapVisibleShare <= 0f) return;
         var origins = clipmap.Origins;
         var surface = SurfaceUniforms(ClipmapLevels * clipmap.ProbesPerLevel);
         var groups = (((width + ClipmapMarkStride - 1) / ClipmapMarkStride + 7) / 8, ((height + ClipmapMarkStride - 1) / ClipmapMarkStride + 7) / 8);
@@ -497,7 +453,7 @@ internal sealed partial class SponzaLoop
             new("uSurfaceGrid", new Vector4Uniform(surface.Grid)),
             new("uSurfaceDims", new Vector4Uniform(surface.Dims)),
             new("uSurfaceAtlas", new Vector4Uniform(surface.Atlas)),
-            new("uSurfaceCamera", new Vector4Uniform(new Vector4(cameraPosition, surfaceRadius))),
+            new("uSurfaceCamera", new Vector4Uniform(Vector4.Zero)),
         }, new[]
         {
             new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
@@ -517,7 +473,7 @@ internal sealed partial class SponzaLoop
     {
         if (clipmap is null || clipmapFrame == 0) return;
         var slots = ClipmapLevels * clipmap.ProbesPerLevel;
-        var words = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(clipmapState, 0, (slots + surfaceCapacity) * 16).AsSpan()).ToArray();
+        var words = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(clipmapState, 0, slots * 16).AsSpan()).ToArray();
         var mismatched = 0;
         var solved = new int[ClipmapLevels];
         var buried = new int[ClipmapLevels];
@@ -542,8 +498,7 @@ internal sealed partial class SponzaLoop
         }
         var bucketCounts = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(clipmapQueue, (8 + 2 * slots + 1) * 4, ClipmapBuckets * 4).AsSpan()).ToArray();
         // The visible probes' own solves (what the image is made of), from the stamps.
-        var seenStamps = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(clipmapSeen, 0, (slots + surfaceCapacity) * 4).AsSpan()).ToArray();
-        WriteSurfaceCensus(words, seenStamps, slots);
+        var seenStamps = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(clipmapSeen, 0, slots * 4).AsSpan()).ToArray();
         var visibleSolves = new List<uint>();
         for (var g = 0; g < slots; g++)
             if (seenStamps[g] + 2 > clipmapFrame && (words[g * 4 + 3] & 1u) != 0) visibleSolves.Add((words[g * 4 + 3] >> 8) & 0xFFu);

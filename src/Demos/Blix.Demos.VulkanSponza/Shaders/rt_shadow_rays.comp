@@ -22,20 +22,16 @@ layout(set = 0, binding = 0) uniform RtShadowRays {
     vec4 uSize;          // xy: pixels
     vec4 uCamera;        // xyz: position
     vec4 uSun;           // xyz: toward the sun, unit; w: how far a ray goes
-    vec4 uSky;           // x: 1 to write sky rays; y: the frame's number (exact: below 2^24); z: 1 to write baked[] (its
-                         // readers: the half-res upsample, the lightlet census and the shot's audits -- 19 MB a frame else)
+    vec4 uSky;           // x: 1 to write sky rays; y: the frame's number (exact: below 2^24)
     vec4 uHalf;          // x 1: one ray per half-res pixel (uSize the half grid), from the full-res pixel 2p + yz of its
                          // 2x2 (RenderSettings.HalfResLighting: the incident pass's pixel, lighting_upsample.frag)
     vec4 uDisc;          // the sun's disc (ShadowsSettings.SunDiscDegrees): x the tangent of its angular radius (0: a point,
                          // no directions written), y the frame's number
-    vec4 uLightlet;      // the sun records (SponzaLoop.LightletBake, RenderSettings.LightletSun): xy the sun in the band's fine
-                         // node coordinates, z 1 when they answer, w tau (degrees): a record under it is not certain
-    vec4 uLightmap;      // the atlas (texel.glsl): x 1 when on, yz its size
     vec4 uCompact;       // x 1: the traced rays packed (below); y which of the two counters is this frame's; z 1: the
                          // per-pixel origins and directions written too (unpacked, or a census reads them); w > 0:
                          // interleaved (ShadowsSettings.Interleave), only the pixels of each 2x2 at w - 1 (x + 2y)
                          // trace, the rest left to rt_shadow_fill.comp
-    vec4 uClear;         // x 1: the lift half the pixel's record's room along its side's normal at most (TexelClear)
+    vec4 uTerminator;    // x the shadow terminator's skip (metres; 0 off), y the facet's n.l at most (main); z BLIX_RAYS_STOP
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -46,91 +42,14 @@ layout(std430, set = 0, binding = 4) writeonly buffer RtShadowSky { vec4 skyRays
 // pixel and per frame -- the Metal pass traces each its own way (hwx_encode_shadow's directions), so a penumbra is a
 // mix of rays that reached and rays that did not, which lighting_upsample.frag and TAA average.
 layout(std430, set = 0, binding = 5) writeonly buffer RtShadowDirections { vec4 directions[]; };
-// Lightlets: a pixel whose four atlas texels' sun records all answer, and agree, takes the baked answer and traces no
-// ray (0 lit, 1 shadowed); >= 2 where it traces. lighting_upsample.frag reads it beside the traced mask.
-layout(std430, set = 0, binding = 6) writeonly buffer RtShadowBaked { uint baked[]; };
-layout(set = 0, binding = 7) uniform usampler2D uLightmapTexel;
-// The atlas's map from texel to record, as an R32UI texture (SponzaLoop.LightmapGather.cs).
-layout(std430, set = 0, binding = 8) readonly buffer LightmapIndex { uint lightmapIndex[]; };
-#include "lightmap_index.glsl"
-layout(std430, set = 0, binding = 9) readonly buffer Texels { uvec4 texels[]; };
-#include "texel_record.glsl"
-layout(std430, set = 0, binding = 10) readonly buffer LightletIndex { uint lightletIndex[]; };
-layout(std430, set = 0, binding = 11) readonly buffer LightletPool { uint lightletPool[]; };
 // uCompact.x: the rays that trace, packed -- origin, direction, and the pixel each answers -- counted into
 // counters[uCompact.y] (the other zeroed for the slot's next frame). The Metal pass traces only the packed ones, each
 // SIMD group full (one thread a pixel spread the traced over every group: 27.5% traced cost what 100% did), and
-// writes their words; this pass writes every other pixel's word itself (no ray: lit; a record's shadow: 1).
+// writes their words; this pass writes every other pixel's word itself (no ray: lit).
 layout(std430, set = 0, binding = 12) writeonly buffer RtShadowPacked { vec4 packedRays[]; };
 layout(std430, set = 0, binding = 13) writeonly buffer RtShadowPixelOf { uint pixelOf[]; };
 layout(std430, set = 0, binding = 14) buffer RtShadowCounters { uint counters[]; };
 layout(std430, set = 0, binding = 15) writeonly buffer RtShadowMaskWords { uvec4 maskHeader; uint maskWords[]; };
-// Each texel's room along its normal (texel_clear.comp): a record's, the pixel's nearest atlas texel's.
-layout(std430, set = 0, binding = 16) readonly buffer TexelClear { float texelClear[]; };
-#define TEXEL_INDEX_MAP(i) lightmapIndexAt(ivec2(int(i) % int(lightmapIndex[0]), int(i) / int(lightmapIndex[0])))
-#define TEXEL_HASH(i) uvec3(0u)
-#include "texel.glsl"
-#define LIGHTLET_INDEX(i) lightletIndex[i]
-#define LIGHTLET_POOL(i) lightletPool[i]
-#include "lightlet.glsl"
-
-// 0 lit, 1 shadowed by the four texels' records; otherwise a ray, and why: 2 a record under tau or the four disagree,
-// 3 no atlas texel at the pixel (foliage, what the atlas leaves out), 4 a texel missing or buried.
-// Facing the sun the pixel's own side answers. Facing away, a single-sided surface gets no direct sun (1, no ray); a
-// double-sided sheet's ray answers the sun on its FAR side (transmission) -- which is what the far side's own record
-// holds (the pair's other record, its normal turned: facing the sun), so that record answers.
-uint bakedSun(ivec2 q, vec3 n) {
-    if (u.uLightlet.z < 0.5 || u.uLightmap.x < 0.5) return 2u;
-    vec2 atlas;
-    if (!texelLightmapUnpack(texelFetch(uLightmapTexel, q, 0).r, atlas)) return 3u;
-    bool away = dot(n, u.uSun.xyz) <= 0.0;
-    ivec2 size = ivec2(u.uLightmap.yz);
-    ivec2 base = ivec2(floor(atlas - 0.5));
-    int agreed = -1;
-    for (int k = 0; k < 4; ++k) {
-        ivec2 at = base + ivec2(k & 1, k >> 1);
-        if (any(lessThan(at, ivec2(0))) || any(greaterThanEqual(at, size))) return 4u;
-        uint front = TEXEL_INDEX_MAP(at.y * size.x + at.x);
-        if (front == 0xFFFFFFFFu) return 4u;
-        bool pair = TEXEL_POSITION(front).w < 0.0;
-        // The side the pixel shows (texelsAroundLightmap's rule), and the one that answers the sun.
-        uint shown = pair && dot(TEXEL_NORMAL(front).xyz, n) < 0.0 ? front + 1u : front;
-        uint answering = shown;
-        if (away) {
-            if (!pair) return 1u;
-            answering = shown == front ? front + 1u : front;
-        }
-        if (abs(TEXEL_POSITION(answering).w) < 2.0) return 4u;
-        float d = lightletDistance(answering, u.uLightlet.xy);
-        if (abs(d) < u.uLightlet.w) return 2u;
-        int s = d > 0.0 ? 0 : 1;
-        if (agreed >= 0 && s != agreed) return 2u;
-        agreed = s;
-    }
-    return uint(agreed);
-}
-
-// The room along the side the ray leaves by: the pixel's nearest atlas texel's record (the side shown, or facing away
-// the pair's other, its far side), from TexelClear; -1 none (no atlas texel, no pair to leave by).
-float pixelRoom(uint front, vec3 n, bool away) {
-    if (u.uClear.x < 0.5 || front == 0xFFFFFFFFu) return -1.0;
-    bool pair = TEXEL_POSITION(front).w < 0.0;
-    uint shown = pair && dot(TEXEL_NORMAL(front).xyz, n) < 0.0 ? front + 1u : front;
-    if (away) {
-        if (!pair) return -1.0;
-        shown = shown == front ? front + 1u : front;
-    }
-    return texelClear[shown];
-}
-
-// The record a lightmapped pixel shows (its front's for a pair; 0xFFFFFFFF none): whether it lets light through.
-uint pixelRecord(ivec2 q) {
-    if (u.uLightmap.x < 0.5) return 0xFFFFFFFFu;
-    vec2 atlas;
-    if (!texelLightmapUnpack(texelFetch(uLightmapTexel, q, 0).r, atlas)) return 0xFFFFFFFFu;
-    ivec2 at = clamp(ivec2(floor(atlas)), ivec2(0), ivec2(u.uLightmap.yz) - 1);
-    return TEXEL_INDEX_MAP(at.y * int(u.uLightmap.y) + at.x);
-}
 
 uint hash32(uint x) {
     x ^= x >> 16; x *= 0x7feb352du;
@@ -163,18 +82,14 @@ void main() {
     bool sky = u.uSky.x > 0.5;
     if (raw >= 1.0 - 1e-6 || dot(nSample.xyz, nSample.xyz) < 1e-6) {
         if (perPixel) origins[index] = vec4(0.0);
-        if (u.uSky.z > 0.5) baked[index] = 3u;
         if (packing) maskWords[index] = 0u;
         if (sky) skyRays[index * 2u] = vec4(0.0);
         return;
     }
     // Interleaved: not this frame's pixel of its 2x2 -- no ray, no word (the fill writes it). Packed only, never per pixel.
-    if (u.uCompact.w > 0.5 && (p.x & 1u) + 2u * (p.y & 1u) != uint(u.uCompact.w) - 1u) {
-        if (u.uSky.z > 0.5) baked[index] = 2u;
-        return;
-    }
-    // BLIX_RAYS_STOP (uClear.y, a probe of this pass's cost): 1 out after the depth and normal, 2 after the record, 3 after its room.
-    if (u.uClear.y > 0.5 && u.uClear.y < 1.5) { maskWords[index] = floatBitsToUint(raw + nSample.x); return; }
+    if (u.uCompact.w > 0.5 && (p.x & 1u) + 2u * (p.y & 1u) != uint(u.uCompact.w) - 1u) return;
+    // BLIX_RAYS_STOP (uTerminator.z, a probe of this pass's cost): out after the depth and normal.
+    if (u.uTerminator.z > 0.5) { maskWords[index] = floatBitsToUint(raw + nSample.x); return; }
     vec2 ndc = (vec2(q) + 0.5) / vec2(fullSize) * 2.0 - 1.0;
     vec4 world = u.uInvViewProj * vec4(ndc, raw, 1.0);
     vec3 position = world.xyz / world.w;
@@ -182,35 +97,15 @@ void main() {
     vec3 n = normalize(nSample.xyz);
     // The lift grows with distance, as depth precision shrinks: 1 cm plus 0.1% of the distance.
     float lift = 0.01 + 0.001 * length(position - u.uCamera.xyz);
-    // Half the room the ray leaves into at most, the depth's precision (its 0.1%) and a quarter millimetre at least: 1 cm
-    // and more put a pixel's sun ray past walls thinner than that -- the teacup's 4 mm saucer well, the 1.5-2.5 cm walls
-    // of its cup, whose far sides a facing-away pixel's ray answers for (2026-10-24).
     bool away = dot(n, u.uSun.xyz) <= 0.0;
-    // An opaque surface facing away (its record's |w| 4: no light through it): no ray. The sun is nothing on it -- the lit
-    // pass reads no mask where n.l and the light through are both nought -- and its ray, from behind the surface, came
-    // back blocked anyway: 54% of the rays at Crytek Sponza's courtyard (2026-10-24). Sheets that transmit (|w| 5) and
-    // pixels with no record (foliage) keep theirs.
-    uint rec = pixelRecord(q);   // the pixel's atlas record, once (the lift's room and the test below)
-    if (u.uClear.y > 1.5 && u.uClear.y < 2.5) { maskWords[index] = rec == 0xFFFFFFFFu ? 0u : floatBitsToUint(TEXEL_POSITION(rec).w + position.x); return; }
-    if (away && packing) {
-        if (rec != 0xFFFFFFFFu && abs(TEXEL_POSITION(rec).w) < 4.5 && abs(TEXEL_POSITION(rec).w) >= 2.0) {
-            maskWords[index] = 1u;
-            if (u.uSky.z > 0.5) baked[index] = 1u;
-            if (perPixel) origins[index] = vec4(position, -1.0);
-            return;
-        }
-    }
-    float room = pixelRoom(rec, n, away);
-    if (u.uClear.y > 2.5) { maskWords[index] = floatBitsToUint(room + position.x); return; }
-    float sunLift = room > 0.0 ? min(lift, max(0.5 * room, 0.001 * length(position - u.uCamera.xyz) + 2.5e-4)) : lift;
-    vec3 origin = position + n * (away ? -sunLift : sunLift);
-    // The shadow terminator (uClear.z: the skip, 0 off; w: the facet's n.l at most): a coarse mesh shaded by smooth
+    vec3 origin = position + n * (away ? -lift : lift);
+    // The shadow terminator (uTerminator.x: the skip, 0 off; y: the facet's n.l at most): a coarse mesh shaded by smooth
     // normals -- a curtain -- has facets turned from the sun whose smooth normal still faces it. Their ray, however far it
     // is lifted along the normal, heads below the facet's own plane and meets the neighbouring facets: whole triangles
     // dark across sunlit cloth, a staircase along every fold (Crytek Sponza's curtains, 2026-10-27). There the ray starts
-    // uClear.z further toward the sun, past its own facets. The facet's normal is the depth's: this pixel's point against
+    // uTerminator.x further toward the sun, past its own facets. The facet's normal is the depth's: this pixel's point against
     // its nearer neighbour each way.
-    if (u.uClear.z > 0.0 && !away) {
+    if (u.uTerminator.x > 0.0 && !away) {
         vec3 side[2];
         bool okFacet = true;
         for (int axis = 0; axis < 2; axis++) {
@@ -229,15 +124,11 @@ void main() {
             if (dot(ng, ng) > 1e-20) {
                 ng = normalize(ng);
                 if (dot(ng, n) < 0.0) ng = -ng;
-                if (dot(ng, u.uSun.xyz) <= u.uClear.w) origin += u.uSun.xyz * u.uClear.z;
+                if (dot(ng, u.uSun.xyz) <= u.uTerminator.y) origin += u.uSun.xyz * u.uTerminator.x;
             }
         }
     }
-    uint answer = bakedSun(q, n);
-    if (u.uSky.z > 0.5) baked[index] = answer;
-    // Answered: no ray, and the answer rides the reach (blix_shadow: 0 answered lit, < 0 answered shadowed), so the mask
-    // every reader takes -- lit.frag at full res, lighting_upsample at half -- holds it with the traced pixels'.
-    if (perPixel) origins[index] = vec4(origin, answer >= 2u ? u.uSun.w : answer == 1u ? -1.0 : 0.0);
+    if (perPixel) origins[index] = vec4(origin, u.uSun.w);
     vec3 rayDir = u.uSun.xyz;
     if (u.uDisc.x > 0.0) {
         // The frame's point of a low-discrepancy sequence over the disc (R2), shifted per pixel by a hash (Cranley-
@@ -255,14 +146,12 @@ void main() {
         if (perPixel) directions[index] = vec4(rayDir, 0.0);
     }
     if (packing) {
-        if (answer >= 2u) {
-            // The census (SponzaLoop.RtShadows.cs, the shot's stats): word 3 the rays from pixels facing away.
-            if (away) atomicAdd(counters[3], 1u);
-            uint slot = atomicAdd(counters[uint(u.uCompact.y)], 1u);
-            packedRays[slot * 2u] = vec4(origin, u.uSun.w);
-            packedRays[slot * 2u + 1u] = vec4(rayDir, 0.0);
-            pixelOf[slot] = index;
-        } else maskWords[index] = answer == 1u ? 1u : 0u;
+        // The census (SponzaLoop.RtShadows.cs, the shot's stats): word 3 the rays from pixels facing away.
+        if (away) atomicAdd(counters[3], 1u);
+        uint slot = atomicAdd(counters[uint(u.uCompact.y)], 1u);
+        packedRays[slot * 2u] = vec4(origin, u.uSun.w);
+        packedRays[slot * 2u + 1u] = vec4(rayDir, 0.0);
+        pixelOf[slot] = index;
     }
     if (sky) {
         uint h = hash32(index * 0x9E3779B9u ^ hash32(uint(u.uSky.y)));

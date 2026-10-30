@@ -292,18 +292,9 @@ internal sealed record SceneProfile(
         Packs = new ScenePack[] { new("crevices-dark", Required: true) },
     };
 
-    /// <summary>The dark crevices cooked without a lightmap: every texel hashed (the cell grid's), as Sponza's trees,
-    /// ivy and every surface the atlas leaves out are -- what --texel-filter does there.</summary>
-    public static readonly SceneProfile CrevicesHashed = CrevicesDark with
-    {
-        Name = "crevices-hashed",
-        Title = "Vulkan crevices (dark, hashed texels)",
-        Packs = new ScenePack[] { new("crevices-hashed", Required: true) },
-    };
-
     /// <summary>Crytek Sponza (Khronos glTF-Sample-Assets' Sponza: the CRYENGINE Limited License, downloaded, not kept in the
     /// repo; tools/testbeds/setup.sh with BLIX_TESTBED_KHRONOS=1): the atrium at ~262 k triangles, normal-mapped stone
-    /// throughout -- Sponza's layout at a testbed's cost, where a light-change or a texel record's direction is quick to run.</summary>
+    /// throughout -- Sponza's layout at a testbed's cost, where a light change is quick to run.</summary>
     public static readonly SceneProfile CrytekSponza = Sponza with
     {
         Name = "crytek-sponza",
@@ -347,7 +338,7 @@ internal sealed record SceneProfile(
     {
         Name = "san-miguel",
         Title = "Vulkan San Miguel 2 (survey)",
-        SetupHint = "import ~/blix-assets/sanmiguel-src/san-miguel.obj in Blender, export glTF, cook with Blix.Tools.Cook asset + lightmap to $BLIX_TESTBED_ASSETS/san-miguel",
+        SetupHint = "import ~/blix-assets/sanmiguel-src/san-miguel.obj in Blender, export glTF, cook with Blix.Tools.Cook asset to $BLIX_TESTBED_ASSETS/san-miguel",
         Packs = new ScenePack[] { new("san-miguel", Required: true) },
         StartPosition = new Vector3(12f, 1.7f, -7f),
         StartPitch = 0f,
@@ -383,7 +374,7 @@ internal sealed record SceneProfile(
         StartPitch = -40f,
     };
 
-    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, CornellPanel, Drapes, SheetSlab, SheetShell, SheetShellThin, ThinWall, Crevices, CrevicesDark, CrevicesHashed, KhronosPlant, KhronosTeacup, KhronosTest, CrytekSponza, Jungle, SanMiguel, LadderFloor, LadderCorner, LadderObjects, LadderClutter, LadderGrid };
+    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, CornellPanel, Drapes, SheetSlab, SheetShell, SheetShellThin, ThinWall, Crevices, CrevicesDark, KhronosPlant, KhronosTeacup, KhronosTest, CrytekSponza, Jungle, SanMiguel, LadderFloor, LadderCorner, LadderObjects, LadderClutter, LadderGrid };
 
     /// <summary>The profile <c>--scene</c> names, Sponza when it names none.</summary>
     public static SceneProfile Named(string? name)

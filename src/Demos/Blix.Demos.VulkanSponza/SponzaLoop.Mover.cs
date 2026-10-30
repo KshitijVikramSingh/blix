@@ -58,11 +58,6 @@ internal sealed partial class SponzaLoop
         if (args.Float("mover-angle") is { } angle) moverAngleDegrees = Math.Clamp(angle, 0f, 80f);
         if (args.Float("mover-period") is { } period) moverPeriodSeconds = Math.Max(0.1f, period);
         moverHold = args.Int("mover-hold");
-        // The cooked transport treats the scene as static, and the cook (in the background, by default) reads the same
-        // ray scene the mover moves: cooking it mid-swing would be wrong whichever thread did it. What moving geometry
-        // does to cooked transport is stage 5's R4; until then the two are exclusive.
-        if (moverName is not null && (args.Flag("transport-gpu") || args.Flag("transport-texels")))
-            throw new AppArgsException("--mover cannot run with the cooked transport (--transport-gpu, --transport-texels): the cook takes the scene as static, and moving geometry is stage 5's R4.");
     }
 
     // The swing at a frame: about the pivot, row-vector form (world point · rest · motion).

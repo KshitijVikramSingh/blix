@@ -197,7 +197,6 @@ float rtSkyVisibility(vec2 fragCoord) {
 #define BLIX_CLIPMAP_DEPTH_FILTERED(p) textureLod(sampler2D(uClipmapDepth, uLinearClamp), (p) / vec2(textureSize(sampler2D(uClipmapDepth, uLinearClamp), 0)), 0.0)
 #define BLIX_CLIPMAP_STATE(s) clipmapStates[s]
 #include "probe_clipmap.glsl"
-#include "lightmap_frame.glsl"
 
 layout(set = 2, binding = 0) uniform Material {
     vec4 uBaseColorFactor;
@@ -237,113 +236,6 @@ layout(location = 1) in vec2 vUv;
 layout(location = 2) in vec3 vWorldPos;
 layout(location = 3) in vec3 vTangentWorld;   // world-space tangent (forwarded glTF TANGENT.xyz)
 layout(location = 4) in float vTangentSign;   // glTF TANGENT.w handedness
-layout(location = 10) in vec2 vLightmapTexel; // --lightmap: the lightmap atlas texel (lit.vert, instances.glsl)
-
-// A sheet's far side as the GI has it (frame.uIncidentGradient.w): the four atlas texels about the pixel's, of each
-// double-sided pair the record facing away from n (the pair: the front's record, then the back's, SponzaLoop.Lightmap.cs),
-// their resolved irradiance (rgb9e5; word 1 bit 16 once gathered) bilinear. Surfaces that transmit get such pairs
-// whether double-sided or not (SponzaLoop.Scene.cs, GiTwoSided): a closed thin shell -- Khronos' teacup, single-sided,
-// T 1 -- reflects almost nothing and showed black where its far side was the sky cube's guess and the GI kept none
-// (tools/gi-model/thin_shell.py: the gap's light settles in the fine round and two near rounds, within 2-4%).
-layout(std430, set = 1, binding = 22) readonly buffer LitTexels { uvec4 litTexels[]; };          // 2 a record: pos (w < 0 a pair), normal
-#define TEXEL_ARRAY litTexels
-#include "texel_record.glsl"
-layout(std430, set = 1, binding = 23) readonly buffer LitTexelResolved { uvec2 litResolved[]; };
-// --near-glow-split (frame.uIncidentGradient.w 3): each record's glow from the sheets within the frame's pass-by -- its thin
-// wall's other face -- per unit of the sun's irradiance (slice_resolve.comp, GlowPart): left out here, the frame drawing
-// that sun per pixel (sunTransmission), so it is counted once and sharp.
-layout(std430, set = 1, binding = 24) readonly buffer LitGlowPart { uvec2 litGlow[]; };
-bool lightmapBackIrradiance(vec2 texel, vec3 n, out vec3 e) {
-    e = vec3(0.0);
-    uvec2 size = lightmapFrames[0];
-    if (size.x == 0u || dot(texel, texel) < 1e-6) return false;
-    vec2 f = texel - 0.5;
-    ivec2 base = ivec2(floor(f));
-    vec2 t = f - vec2(base);
-    float weight = 0.0;
-    for (int i = 0; i < 4; ++i) {
-        ivec2 o = ivec2(i & 1, i >> 1);
-        ivec2 at = base + o;
-        if (any(lessThan(at, ivec2(0))) || any(greaterThanEqual(at, ivec2(size)))) continue;
-        uint id = LIGHTMAP_CELL_OF(at);
-        if (id == 0xFFFFFFFFu || TEXEL_POSITION(id).w >= 0.0) continue;    // none, or not a pair
-        // The pair's record facing away from n: its back.
-        uint back = dot(TEXEL_NORMAL(id).xyz, n) < 0.0 ? id : id + 1u;
-        if (dot(TEXEL_NORMAL(back).xyz, n) >= 0.0 || abs(TEXEL_POSITION(back).w) < 2.0) continue;
-        uvec2 r = litResolved[back];
-        if ((r.y & 0x10000u) == 0u) continue;
-        uint w9 = r.x;
-        float scale = exp2(float(int(w9 >> 27) - 15 - 9));
-        vec3 l = vec3(float(w9 & 511u), float((w9 >> 9) & 511u), float((w9 >> 18) & 511u)) * scale;
-        if (frame.uIncidentGradient.w > 2.5 && (litGlow[back].y & 0x10000u) != 0u) {
-            uint g9 = litGlow[back].x;
-            float gs = exp2(float(int(g9 >> 27) - 15 - 9));
-            l = max(l - vec3(float(g9 & 511u), float((g9 >> 9) & 511u), float((g9 >> 18) & 511u)) * gs * frame.uSunIrradiance, vec3(0.0));
-        }
-        float wt = (o.x == 1 ? t.x : 1.0 - t.x) * (o.y == 1 ? t.y : 1.0 - t.y);
-        e += wt * l;
-        weight += wt;
-    }
-    if (weight < 1e-4) return false;
-    e /= weight;
-    return true;
-}
-// --texel-h4 (frame.uTexelShape.x): the records' pooled shapes (texel_compose.comp; texel_shape.glsl), one uint a record and
-// channel -- the four atlas texels about the pixel's, of a pair the record facing n, bilinear: per channel c, the light
-// at a normal n' near the record's E_c (1 + s_c . (n' - n)). The incident pass's one gradient is luminance: a bump between
-// the red wall's bounce and the white ceiling's took the mix's tilt in both colours (the model: 31-36% of the direction
-// term's colour, tools/gi-model/directional_bases.py).
-layout(std430, set = 1, binding = 25) readonly buffer LitTexelShape { uint litShape[]; };
-#define TEXEL_SHAPE_NO_STORE
-#include "texel_shape.glsl"
-bool lightmapShape(vec2 texel, vec3 n, out vec3 s0, out vec3 s1, out vec3 s2) {
-    s0 = vec3(0.0); s1 = vec3(0.0); s2 = vec3(0.0);
-    uvec2 size = lightmapFrames[0];
-    if (frame.uTexelShape.x < 0.5 || size.x == 0u || dot(texel, texel) < 1e-6) return false;
-    vec2 f = texel - 0.5;
-    ivec2 base = ivec2(floor(f));
-    vec2 t = f - vec2(base);
-    float weight = 0.0;
-    // uTexelShape.z (the default; --texel-shape-bilinear: 0): the nearest of the four alone -- the shapes pool over 20 cm, a quarter of
-    // the reads; the lookup was 1.8 of the lit pass's 5.0 ms at Crytek Sponza's courtyard (2026-10-24).
-    int first = frame.uTexelShape.z > 0.5 ? (t.x >= 0.5 ? 1 : 0) + (t.y >= 0.5 ? 2 : 0) : 0;
-    int last = frame.uTexelShape.z > 0.5 ? first + 1 : 4;
-    for (int i = first; i < last; ++i) {
-        ivec2 o = ivec2(i & 1, i >> 1);
-        ivec2 at = base + o;
-        if (any(lessThan(at, ivec2(0))) || any(greaterThanEqual(at, ivec2(size)))) continue;
-        uint id = LIGHTMAP_CELL_OF(at);
-        if (id == 0xFFFFFFFFu) continue;
-        // A pair: the record facing n (the front's, then the back's).
-        if (TEXEL_POSITION(id).w < 0.0 && dot(TEXEL_NORMAL(id).xyz, n) < 0.0) id += 1u;
-        if (abs(TEXEL_POSITION(id).w) < 2.0) continue;   // buried
-        vec4 q0 = texelShapeUnpack(litShape[3u * id]);
-        if (q0.w < 0.5) continue;
-        float wt = (o.x == 1 ? t.x : 1.0 - t.x) * (o.y == 1 ? t.y : 1.0 - t.y);
-        s0 += wt * q0.xyz;
-        s1 += wt * texelShapeUnpack(litShape[3u * id + 1u]).xyz;
-        s2 += wt * texelShapeUnpack(litShape[3u * id + 2u]).xyz;
-        weight += wt;
-    }
-    if (weight < 1e-4) return false;
-    s0 /= weight; s1 /= weight; s2 /= weight;
-    return true;
-}
-layout(location = 5) flat in uint vLod;        // the LOD level drawn (instances.glsl): LOD 0 keeps its own frame
-
-// Viz 25, the lightmap's parameterization: a checker one texel wide, tinted per 64-texel block of the atlas -- seams
-// show where the tint or the checker breaks, stretch where the cells are not square, density by their size on
-// screen. Magenta where a primitive has no lightmap (no texel at all).
-vec3 vizLightmap(vec2 t) {
-    if (dot(t, t) < 1e-6) return vec3(1.0, 0.0, 1.0);
-    ivec2 c = ivec2(floor(t));
-    float check = ((c.x + c.y) & 1) == 0 ? 0.55 : 0.9;
-    ivec2 block = c / 64;
-    uint h = uint(block.x) * 73856093u ^ uint(block.y) * 19349663u;
-    h ^= h >> 13;
-    vec3 tint = vec3(float(h & 255u), float((h >> 8) & 255u), float((h >> 16) & 255u)) / 255.0 * 0.6 + 0.4;
-    return tint * check;
-}
 
 layout(location = 0) out vec4 outColor;
 
@@ -470,18 +362,6 @@ void main() {
     vec3 N = normalize(vNormalWorld);
     vec3 tangentWorld = vTangentWorld;
     float tangentSign = vTangentSign;
-    // --lightmap: LOD 0's normal and tangent through the atlas (lightmap_frame.glsl), so a coarse LOD lights and
-    // normal-maps as the full surface does. The pre-pass wrote the same normal, which the incident field read.
-    {
-        vec3 lodZeroN;
-        vec4 lodZeroT;
-        // Judged against the drawn face, and the face where none agrees (lodFrameReference), as the pre-pass does.
-        if (vLod > 0u) {
-            vec3 reference = lodFrameReference(vWorldPos, N);
-            if (lightmapShadingFrame(vLightmapTexel, reference, lodZeroN, lodZeroT)) { N = lodZeroN; tangentWorld = lodZeroT.xyz; tangentSign = lodZeroT.w; }
-            else if (dot(vLightmapTexel, vLightmapTexel) > 1e-6) N = reference;
-        }
-    }
     if (!gl_FrontFacing) N = -N;
     // Before the normal map: the sheets' glow (rtSheetGlow) is light from across a curtain, not along one line, and
     // the weave's normal map under the sun's line printed a cross-hatch into it (2026-10-16).
@@ -601,13 +481,10 @@ void main() {
     if (frame.uShadowStrength > 0.0 && shadowNeed > 0.0 && rtShadowHeader.z != 0u) {
         sunShadow = rtSunVisibility(gl_FragCoord.xy);
         sunShadow = mix(1.0, sunShadow, frame.uShadowStrength);
-        // --sheet-light: the sheets' glow is in the incident field (the gather's hits on a sheet's far side, the patch
-        // solve's twins: tools/gi-model/thin_sheet.py) -- the frame's own here as well counted it twice. Except on a surface
-        // that lets light through, whose records leave it out (texel_nodes_shade.glsl, ownSheet): the sun through the
-        // sheets beyond it is the frame's, per pixel -- a thin shell's far wall's sun sharp, not its texels' blur (the
-        // teacup's smear, 2026-10-22).
-        sheetGlow = frame.uIncidentGradient.z > 0.5 && !(abs(frame.uIncidentGradient.w - 2.0) < 0.5 && mat.uMaterialParams2.z > 0.0)
-            ? vec3(0.0) : rtSheetGlow(gl_FragCoord.xy) * frame.uShadowStrength;
+        // The light sunlit sheets send through to this pixel, the frame's own -- left out where frame.uIncidentGradient.z
+        // says the incident field holds it (a scene with sheets, the field on: SponzaLoop.Render.cs). That rule was the
+        // texel GI's, whose gather counted the sheets' glow; RTGI's rays do not, and it still holds under RTGI.
+        sheetGlow = frame.uIncidentGradient.z > 0.5 ? vec3(0.0) : rtSheetGlow(gl_FragCoord.xy) * frame.uShadowStrength;
     } else if (LIT_RARE(frame.uShadowStrength > 0.0 && shadowNeed > 0.0)) {
         sunShadow = blix_sun_shadow_cascaded(
             uCascadeShadowMaps[0], uCascadeShadowMaps[1], uCascadeShadowMaps[2], uLinearClamp,
@@ -668,12 +545,12 @@ void main() {
     if (LIT_RARE(diffTrans > 0.0)) {
         vec3 dtTex = texture(uDiffuseTransmissionColorTex, uv).rgb;
         // --cloth-transmission: the texture is the cloth's albedo, and the light through is its hue at the factor's
-        // strength (over its brightest channel), as the cooked bounce has it (SponzaLoop.SunNodesSolve.cs). The albedo
+        // strength (over its brightest channel). The albedo
         // as it is passed 2-7% of the sun: the sheet's glow read as opaque cloth (2026-10-16).
         // Capped at what the cloth's lit face reflects ((1 - t) x its brightest channel): through at t in its full hue,
         // dark cloth (0.2-0.3) passed more than it sent back, and every fold's shaded side outshone its lit side -- a
         // bright rim along each edge where a fold turned from the sun (2026-10-16). Heavy cloth passes less than it
-        // reflects. The cook and the shadow rays' sheets cap alike (SunNodesSolve, RtRowTransmit).
+        // reflects. The shadow rays' sheets cap alike (RtRowTransmit).
         if (mat.uDiffuseTransmissionColor.w > 0.5) {
             float m = max(max(dtTex.r, max(dtTex.g, dtTex.b)), 0.05);
             dtTex *= min(1.0, (1.0 - diffTrans) * m / max(diffTrans, 1e-4)) / m;
@@ -832,13 +709,10 @@ void main() {
             vec3 nLow = normalize(mat3(T, B, vizGeometricN) * vec3(nxyLow, sqrt(max(0.0, 1.0 - dot(nxyLow, nxyLow)))));
             float range = frame.uIncidentGradient.y;
             vec3 dn = nLow - vizGeometricN;
-            vec3 s0, s1, s2;
-            if (lightmapShape(vLightmapTexel, vizGeometricN, s0, s1, s2))
-                incident *= clamp(vec3(1.0) + vec3(dot(s0, dn), dot(s1, dn), dot(s2, dn)), vec3(1.0 - range), vec3(1.0 + range));
-            else incident *= clamp(1.0 + dot(gradient, dn) / lum, 1.0 - range, 1.0 + range);
+            incident *= clamp(1.0 + dot(gradient, dn) / lum, 1.0 - range, 1.0 + range);
         }
         vizBounceRaw = incident;
-        // A field that holds occlusion (uIncident.y: the texels' rays found it) takes neither GTAO nor the material's
+        // A field that holds occlusion (uIncident.y: its rays found it) takes neither GTAO nor the material's
         // baked occlusion texture: both are stand-ins for what those rays traced, and on top of them the teacup's
         // occlusion map (0.48 mean) left its wall -16% against the path trace, its shade -59%; without, -1% and -4%
         // (2026-10-22). uIncident.y 2: --material-ao-on-gi, the map as before.
@@ -863,14 +737,7 @@ void main() {
     // the surface is not facing. A curtain with a bright courtyard behind it glows without any
     // direct sun on it at all, and that is most of what makes cloth read as thin.
     vec3 transmittedIBL = vec3(0.0);
-    vec3 backGi;
-    if (LIT_RARE(diffTrans > 0.0) && frame.uIncidentGradient.w > 0.5 && incidentUsed && lightmapBackIrradiance(vLightmapTexel, N, backGi)) {
-        // The GI's far side: the pixel's atlas texels' back records -- their own gathers, the room behind a curtain, the
-        // light inside a closed thin shell's walls -- not the sky cube along -N.
-        // Traced as the front's records are: no occlusion stand-in on it (the bounce's rule above), and never the front's
-        // screen-space visibility, which says nothing of the far side.
-        transmittedIBL = blix_diffuseTransmissionAmbient(backGi, dtColor, diffTrans) / PI * (frame.uIncident.y > 1.5 ? ao * visibility : 1.0);
-    } else if (LIT_RARE(diffTrans > 0.0)) {
+    if (LIT_RARE(diffTrans > 0.0)) {
         // The back side's sky visibility. The incident field answers only at the front's geometric
         // normal, so its visibility stands in for -N's (the clipmap resolves enclosure at room scale,
         // where the two sides of a sheet share it); without the field the sky is open.
@@ -938,17 +805,6 @@ void main() {
             // orange 2-3, yellow 4-7, green 8-31, blue 32+; black where none answers), 24 which level answers
             // (white 0 at 0.5 m, green 1, blue 2, magenta 3; dimmed while the clipmap has not solved).
             frame.uVizChannel > 22.5 && frame.uVizChannel < 24.5 ? vizClipmap(vWorldPos, vizGeometricN, frame.uVizChannel < 23.5) :
-            frame.uVizChannel > 24.5 && frame.uVizChannel < 25.5 ? vizLightmap(vLightmapTexel) :
-            // 26: the diffuse response as the reference's camera paths model it (--ref-view: Lambert's base lobe, 1 - T,
-            // and the sheet's transmission, T c; no specular, no sheen, no Fresnel weight) -- the direct sun on either side
-            // and the indirect light, front and back: what the material and the light make of the pixel, judged against
-            // the path trace pixel for pixel.
-            frame.uVizChannel > 25.5 && frame.uVizChannel < 26.5 && unlit ? albedo :
-            frame.uVizChannel > 25.5 && frame.uVizChannel < 26.5
-                ? albedo / PI * transScale * (NdotL * frame.uSunIrradiance * sunShadow * terminatorFront
-                      + sheetGlow * max(dot(Nsmooth, L), 0.0) * frame.uSunIrradiance)
-                  + sunTransmission + bounce * transScale + diffuseIBL * transScale * visibility * ao + transmittedIBL :
-            // 21 is unused (the retired volume's leak metric); black.
                                        vec3(0.0);
         // Straight out, no exposure and no tonemap — these are directions and flags, and a film
         // curve on a direction is a way to misread it.
