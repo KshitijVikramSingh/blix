@@ -76,6 +76,8 @@ internal sealed partial class SponzaLoop
     private static float CensusBuriedShare = 0.3f;
     // A sample on a point's plane: off it by at most this (m) plus this share of its distance along it (CensusGrid).
     private const float CensusPlaneOff = 0.02f, CensusPlaneSlope = 0.3f;
+    // The size field's edge-stopping width (log2 size, a level is 1): Grid.Average's reference weight.
+    private const float CensusSizeSigma = 0.5f;
     // The slice of a 60 Hz frame the cook and the settling would be given: 2 ms of 16.7.
     private const double CensusSlice = 2.0 / 16.7;
     // The per-item costs priced (bytes, rays), stated in the report.
@@ -483,8 +485,12 @@ internal sealed partial class SponzaLoop
         }
 
         // The weighted mean of values[offset + i] over the live samples facing wantSide within radius of q on its plane
-        // (as Nearest's), each weighed 1 - its distance over the radius: the cook's smoothing of the size field.
-        public (double Sum, double Weight) Average(Vector3 q, uint wantSide, Vector3 normal, float radius, float[] values, bool[] dead, int offset)
+        // (as Nearest's), each weighed 1 - its distance over the radius: the cook's smoothing of the size field. Given a
+        // reference (a log2 size), edge-stopping: a sample further from it than about half a level weighs little -- the
+        // plane is no guard against a wall, the floor outside one an 8 cm gap's own plane, and the gap floor took the open
+        // floor's sizes through the wall (10 cm cells 1.6 cm from it, its pieces left without level-0 cells and so read
+        // through the wall at their region's default; the user, the crevices testbed, 2026-10-31).
+        public (double Sum, double Weight) Average(Vector3 q, uint wantSide, Vector3 normal, float radius, float[] values, bool[] dead, int offset, float reference = float.NaN)
         {
             int cx = (int)MathF.Floor(q.X / Size), cy = (int)MathF.Floor(q.Y / Size), cz = (int)MathF.Floor(q.Z / Size);
             var reach = Math.Max(1, (int)MathF.Ceiling(radius / Size));
@@ -504,11 +510,43 @@ internal sealed partial class SponzaLoop
                     var off = MathF.Abs(Vector3.Dot(pos[i] - q, normal));
                     if (off > CensusPlaneOff + CensusPlaneSlope * MathF.Sqrt(MathF.Max(d2 - off * off, 0f))) continue;
                     var w = 1.0 - MathF.Sqrt(d2) / radius + 1e-3;
+                    if (!float.IsNaN(reference))
+                    {
+                        var dv = values[offset + i] - reference;
+                        w *= Math.Exp(-dv * dv / (2.0 * CensusSizeSigma * CensusSizeSigma));
+                    }
                     sum += w * values[offset + i];
                     weight += w;
                 }
             }
             return (sum, weight);
+        }
+
+        // The least of values[offset + i] over the same samples as Average's (NaN none): the finest size near q on its plane.
+        public float Least(Vector3 q, uint wantSide, Vector3 normal, float radius, float[] values, bool[] dead, int offset)
+        {
+            int cx = (int)MathF.Floor(q.X / Size), cy = (int)MathF.Floor(q.Y / Size), cz = (int)MathF.Floor(q.Z / Size);
+            var reach = Math.Max(1, (int)MathF.Ceiling(radius / Size));
+            var least = float.NaN;
+            var r2 = radius * radius;
+            for (var dz = -reach; dz <= reach; dz++)
+            for (var dy = -reach; dy <= reach; dy++)
+            for (var dx = -reach; dx <= reach; dx++)
+            {
+                if (!cells.TryGetValue(Key(cx + dx, cy + dy, cz + dz), out var run)) continue;
+                for (var k = run.Start; k < run.Start + run.Count; k++)
+                {
+                    var i = order[k];
+                    if (side[i] != wantSide || dead[offset + i]) continue;
+                    var d2 = Vector3.DistanceSquared(pos[i], q);
+                    if (d2 > r2) continue;
+                    var off = MathF.Abs(Vector3.Dot(pos[i] - q, normal));
+                    if (off > CensusPlaneOff + CensusPlaneSlope * MathF.Sqrt(MathF.Max(d2 - off * off, 0f))) continue;
+                    var v = values[offset + i];
+                    if (float.IsNaN(least) || v < least) least = v;
+                }
+            }
+            return least;
         }
 
         private long KeyOf(Vector3 p) => Key((int)MathF.Floor(p.X / Size), (int)MathF.Floor(p.Y / Size), (int)MathF.Floor(p.Z / Size));

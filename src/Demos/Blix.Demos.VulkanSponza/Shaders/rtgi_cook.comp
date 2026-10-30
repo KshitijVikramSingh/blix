@@ -58,7 +58,7 @@ layout(std430, set = 0, binding = 10) buffer RtgiNearLinks { uvec2 nearLinks[]; 
 layout(std430, set = 0, binding = 11) buffer RtgiNearLight { vec4 nearLight[]; };
 layout(std430, set = 0, binding = 12) buffer RtgiCookLabels { uint cookLabels[]; };
 layout(std430, set = 0, binding = 13) buffer RtgiCookRegions { uint cookRegions[]; };
-layout(std430, set = 0, binding = 14) buffer RtgiCookCubes { uvec2 cookCubes[]; };
+layout(std430, set = 0, binding = 14) buffer RtgiCookCubes { uvec4 cookCubes[]; };   // key, lowest label, highest, pad
 layout(std430, set = 0, binding = 15) buffer RtgiNearList { uint nearListCount; uint nearListPad[3]; uint nearList[]; };
 // Per near link, where its hit lies in the cooked set (kind 7): bits 0-27 the hit's level-0 cooked cell + 1 (its region:
 // rtgi_cook.glsl's nearRegion; 0 none), bits 28-31 its cache level (the size table's; 15 not covered) -- each frame's relight
@@ -346,8 +346,12 @@ void main() {
                 else if (cookCubes[s].x == 0u) break;
             }
             if (slot == COOK_NONE) { if (kind == 10u) cookRegions[i * NEAR_LEVELS + l] = 0u; continue; }
-            if (kind == 9u) atomicMin(cookCubes[slot].y, lab);
-            else cookRegions[i * NEAR_LEVELS + l] = lab == cookCubes[slot].y ? 0u : lab + 1u;
+            if (kind == 9u) { atomicMin(cookCubes[slot].y, lab); atomicMax(cookCubes[slot].z, lab); }
+            // A cube of one piece: region 0. Of several: every piece its own, 1 + its label, the lowest's too -- a point
+            // with no level-0 cell takes region 0 (rtgi_cook.glsl's nearRegion), and in a cube of several pieces that was
+            // whichever held the lowest label: an 8 cm gap's floor read the lit floor past its wall, which trained the
+            // cube's region 0 (the crevices testbed's front gap, 2026-10-31). Now region 0 there names no piece's cell.
+            else cookRegions[i * NEAR_LEVELS + l] = cookCubes[slot].y == cookCubes[slot].z ? 0u : lab + 1u;
         }
         return;
     }

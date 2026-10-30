@@ -389,6 +389,21 @@ void main() {
     // The cooked and world-space state, painted (SponzaLoop.RtgiDebug.cs's views 10-18, 21 and 24): everything the light is
     // made of but the screen's stages, each as the pixel reads it. Magenta: none.
     // 26: the point's continuous level (r), the region at its level (g), the cooked size (b), for dumps.
+    // 27, 28: the pixel's own level read alone (rgb; w its weight found) and the next level's, for dumps (a level's bilinear
+    // over its cells, as the blend above takes it).
+    // 29: the pixel's own cell at the next level up, raw (rgb), and the region it is keyed by there (w).
+    if (view == 29) {
+        uint l1 = min(level + 1u, top);
+        uint s1 = rtgiFind(rtgiCellHash(ivec3(floor((p - rtgiOrigin(side)) / rtgiSize(l1, u.uParams))), l1, side, u.uParams), u.uParams);
+        outIncident = vec4(s1 != 0xFFFFFFFFu ? rtgiResolved[2u * s1].rgb : vec3(-0.25), float(rtgiRegionFor(l1)));
+        outIncidentGradient = vec4(0.0);
+        return;
+    }
+    if (view == 27 || view == 28) {
+        outIncident = vec4(view == 27 ? e0.rgb : e1.rgb, view == 27 ? e0.w : e1.w);
+        outIncidentGradient = vec4(0.0);
+        return;
+    }
     if (view == 26) {
         uint ck0 = cookCellAt(p, side, level), ck1 = cookCellAt(p, side, min(level + 1u, uint(u.uParams.w)));
         outIncident = vec4(lf + 1.0, float(rtgiRegionFor(level)) + 1.0, (ck0 != COOK_NONE ? 2.0 : 1.0) + (ck1 != COOK_NONE ? 2.0 : 0.0), 1.0);

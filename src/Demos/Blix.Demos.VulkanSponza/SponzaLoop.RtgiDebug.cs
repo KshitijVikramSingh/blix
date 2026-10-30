@@ -20,6 +20,8 @@ internal sealed partial class SponzaLoop
         "Cooked near: far term (escape share x far light per ray)", "Cooked near: the cache's light under it",
         "Cooked cell (red buried, yellow junction, green own level, blue ancestor; white its training points, black ring its representative)",
         "World position (diagnostic, for dumps)", "Level, region, cooked size (diagnostic, for dumps)",
+        "Own level read alone (diagnostic, for dumps)", "Next level read alone (diagnostic, for dumps)",
+        "Next level own cell raw, w its region (diagnostic, for dumps)",
     };
 
     // The view (rtgi_readout.frag's uView.x, rtgi_blur.frag's uHalf.x, rtgi_temporal.frag's uDebug.x): 0 the light; 1-7 a

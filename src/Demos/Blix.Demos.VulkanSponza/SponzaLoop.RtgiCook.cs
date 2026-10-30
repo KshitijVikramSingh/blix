@@ -381,7 +381,7 @@ internal sealed partial class SponzaLoop
                     Parallel.For(0, pass.Pos.Length, i =>
                     {
                         if (Dead[off + i]) return;
-                        var (sum, w) = pass.Grid!.Average(pass.Pos[i], pass.Side[i], pass.Normal[i], radius, from, Dead, off);
+                        var (sum, w) = pass.Grid!.Average(pass.Pos[i], pass.Side[i], pass.Normal[i], radius, from, Dead, off, from[off + i]);
                         if (w > 0) next[off + i] = (float)(sum / w);
                     });
                     LogSize = next;
@@ -403,7 +403,11 @@ internal sealed partial class SponzaLoop
         {
             for (var p = LastPass; p >= 0; p--)
             {
-                var (sum, w) = Passes[p].Grid!.Average(q, side, normal, Passes[p].Effective, LogSize, Dead, Offsets[p]);
+                // Edge-stopping about the finest size near (Grid.Average): a point by a wall stays as fine as its finest
+                // neighbour on the plane, not the mean of the two sides of the wall.
+                var least = Passes[p].Grid!.Least(q, side, normal, Passes[p].Effective, LogSize, Dead, Offsets[p]);
+                if (float.IsNaN(least)) continue;
+                var (sum, w) = Passes[p].Grid!.Average(q, side, normal, Passes[p].Effective, LogSize, Dead, Offsets[p], least);
                 if (w > 0) return (float)(sum / w);
             }
             return float.NaN;
@@ -1434,8 +1438,9 @@ internal sealed partial class SponzaLoop
         cookLabels = Own(device.CreateGpuBuffer(n0 * CookRegionLevels * 4, new byte[n0 * CookRegionLevels * 4], "sponza.rtgi.cook-labels"));
         cookCubeSlots = 1024;
         while (cookCubeSlots < n0 * CookRegionLevels * 2) cookCubeSlots <<= 1;
-        var cubes = new uint[cookCubeSlots * 2];
-        for (var k = 1; k < cubes.Length; k += 2) cubes[k] = 0xFFFFFFFFu;
+        // Per slot: the cube's key, its lowest label, its highest (rtgi_cook.comp kinds 9, 10), a pad.
+        var cubes = new uint[cookCubeSlots * 4];
+        for (var k = 1; k < cubes.Length; k += 4) cubes[k] = 0xFFFFFFFFu;
         cookCubes = Own(device.CreateGpuBuffer(cubes.Length * 4, MemoryMarshal.AsBytes(cubes.AsSpan()).ToArray(), "sponza.rtgi.cook-cubes"));
         nearLinks = Own(device.CreateGpuBuffer(nj * CookNearRays * 8, new byte[nj * CookNearRays * 8], "sponza.rtgi.near-links"));
         nearHits = Own(device.CreateGpuBuffer(nj * CookNearRays * 4, new byte[nj * CookNearRays * 4], "sponza.rtgi.near-hits"));
@@ -1550,6 +1555,7 @@ internal sealed partial class SponzaLoop
         device.WaitIdle();
         var pts = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(cookPoints, 0, layout.Cells * 32)).ToArray();
         var cp = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(cookCellPoints, 0, layout.CellPoints.Length * 4)).ToArray();
+        var regs = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(cookRegions, 0, Math.Max(layout.Level0, 1) * CookRegionLevels * 4)).ToArray();
         var probe = cookProbe.Equals(default(GpuBufferHandle)) ? Array.Empty<uint>()
             : MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(cookProbe, 0, Math.Max(layout.CellPoints.Length / 2, 1) * 16)).ToArray();
         // The scene: training points dropped from their cells' turns (the tally), and the cooked samples' back-face share.
@@ -1595,7 +1601,7 @@ internal sealed partial class SponzaLoop
             }
             nearSamples += cs0; nearBacks += cb0; nearLum += cl0; nearPts += count;
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                $"[VulkanSponza] cooked cell {i}: rep ({p.X:0.000},{p.Y:0.000},{p.Z:0.000}) level {level} side {side} buried {(w & 16) != 0} junction {(w & 32) != 0} own {(w & 64) != 0}; {count} points: samples {cs0}, back {100.0 * cb0 / Math.Max(1, cs0):0.0}%, mean luminance {cl0 / Math.Max(1, cs0):0.0000}"));
+                $"[VulkanSponza] cooked cell {i}: rep ({p.X:0.000},{p.Y:0.000},{p.Z:0.000}) level {level} side {side} buried {(w & 16) != 0} junction {(w & 32) != 0} own {(w & 64) != 0} adj 0x{BitConverter.SingleToUInt32Bits(pts[2 * i + 1].W):x}{(i < layout.Level0 ? $" regions {string.Join("/", Enumerable.Range(0, 4).Select(l => regs[i * CookRegionLevels + l]))}" : "")}; {count} points: samples {cs0}, back {100.0 * cb0 / Math.Max(1, cs0):0.0}%, mean luminance {cl0 / Math.Max(1, cs0):0.0000}"));
             foreach (var line in lines) Console.WriteLine(line);
         }
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
