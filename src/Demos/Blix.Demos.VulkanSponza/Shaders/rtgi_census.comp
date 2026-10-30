@@ -4,25 +4,29 @@
 // of the frame's GI. Its coarse pass, a chunk of surface samples a frame. Kind 0: each sample's CENSUS_RAYS cosine rays,
 // from its point lifted off its surface, into the Metal batch (closest hit, as far as uChunk.z). Kind 1 (after the
 // trace): their hits reduced to the sample's sum of inverse distances (escapes add nothing), its nearest hit, and its
-// counts of rays that met a surface, met a back face, met one within uNear.x, and met a double-sided placement's back
-// face -- the far side of a sheet with no inside, counted as a front (RtgiCensusSided, the hit's placement's flag).
+// counts of rays that met a surface, met a back face, met one within uNear.x, and met a two-sided triangle's back face --
+// the far side of a sheet with no inside (an open sheet's, or an alpha-tested one's), counted as a front
+// (RtgiCensusSided, the hit's placement's and triangle's bit).
 
 layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) uniform RtgiCensusParams {
     vec4 uChunk;  // x the chunk's first sample; y its samples; z the rays' reach (m); w the kind
-    vec4 uNear;   // x the near distance (m); y the lift off the surface (m); z the placements (RtgiCensusSided's length)
+    vec4 uNear;   // x the near distance (m); y the lift off the surface (m); z the placements
 } u;
 // Per sample: xyz its point, w its normal (octahedral, packSnorm2x16, as bits).
 layout(std430, set = 0, binding = 1) readonly buffer RtgiCensusSamples { vec4 censusSamples[]; };
 // The chunk's rays (two vec4s a ray: origin and t-min, direction and reach) and the Metal batch's hits (three uvec4s a
-// ray: [0].x the distance's bits, [0].w bit 0 met, bit 1 front face; [1].x the placement met; the rest unused here).
+// ray: [0].x the distance's bits, [0].w bit 0 met, bit 1 front face; [1].x the placement met, [1].y its triangle; the
+// rest unused here).
 layout(std430, set = 0, binding = 2) buffer RtgiCensusRays { vec4 censusRays[]; };
 layout(std430, set = 0, binding = 3) readonly buffer RtgiCensusHits { uvec4 censusHits[]; };
 // Per sample: x the sum of 1 / distance (float bits); y the met count, the back-face count << 8, the near count << 16,
-// the double-sided back-face count << 24; z the nearest hit (float bits).
+// the two-sided back-face count << 24; z the nearest hit (float bits); w the hits whose triangle lay past their
+// placement's (a check of the bits' indexing: 0).
 layout(std430, set = 0, binding = 4) buffer RtgiCensusResults { uvec4 censusResults[]; };
-// Per placement: 1 where its material is double-sided (SponzaLoop.RayScene.cs rayPlacementDoubleSided).
+// Per placement p (uNear.z of them): [p] its first bit, [p + 1] one past its last; then the bits, one a triangle, from
+// word uNear.z + 1: 1 where the triangle is two-sided (SponzaLoop.RtgiCensus.cs BuildCensusGeometry).
 layout(std430, set = 0, binding = 5) readonly buffer RtgiCensusSided { uint censusSided[]; };
 
 #define CENSUS_RAYS 64u
@@ -70,21 +74,29 @@ void main() {
     }
     if (t >= count) return;
     float inv = 0.0, nearest = 1e30;
-    uint met = 0u, backs = 0u, near = 0u, sidedBacks = 0u, placements = uint(u.uNear.z);
+    uint met = 0u, backs = 0u, near = 0u, sidedBacks = 0u, bad = 0u, placements = uint(u.uNear.z);
     for (uint k = 0u; k < CENSUS_RAYS; k++) {
         uint r = t * CENSUS_RAYS + k;
         uvec4 h0 = censusHits[3u * r];
         if ((h0.w & 1u) == 0u) continue;
         float d = uintBitsToFloat(h0.x);
         met++;
+        uvec4 h1 = censusHits[3u * r + 1u];
+        bool twoSided = false;
+        if (h1.x < placements) {
+            uint first = censusSided[h1.x], count = censusSided[h1.x + 1u] - first;
+            if (h1.y < count) {
+                uint b = first + h1.y;
+                twoSided = ((censusSided[placements + 1u + (b >> 5u)] >> (b & 31u)) & 1u) != 0u;
+            } else bad++;
+        }
         if ((h0.w & 2u) == 0u) {
-            uint placement = censusHits[3u * r + 1u].x;
-            if (placement < placements && censusSided[placement] != 0u) sidedBacks++;
+            if (twoSided) sidedBacks++;
             else backs++;
         }
         if (d <= u.uNear.x) near++;
         nearest = min(nearest, d);
         inv += 1.0 / max(d, 1e-3);
     }
-    censusResults[first + t] = uvec4(floatBitsToUint(inv), met | (backs << 8) | (near << 16) | (sidedBacks << 24), floatBitsToUint(nearest), 0u);
+    censusResults[first + t] = uvec4(floatBitsToUint(inv), met | (backs << 8) | (near << 16) | (sidedBacks << 24), floatBitsToUint(nearest), bad);
 }

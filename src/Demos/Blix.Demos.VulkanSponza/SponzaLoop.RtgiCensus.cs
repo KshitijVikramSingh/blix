@@ -15,21 +15,27 @@ namespace Blix.Demos.VulkanSponza;
 // layout from the geometry alone, the light real-time -- and what to ship, what to rebuild at load and what to work out
 // at run time, and the chunks' size, are to be chosen from numbers (2026-10-30). Once the ray scene is up the census:
 //
-//   geometry  the static instances' triangles, their world area and bounds (on a worker)
-//   coarse    surface samples by area, one per CensusSpacing^2 (25 x 25 cm) -- a running sum of area along each
-//             run of triangles drops one at a random point of the triangle where it crosses the next 1/16 m2, so tiny
-//             triangles share them; a double-sided triangle's area counts once a side, its samples one a side --
-//             each tracing CensusRays cosine rays through the Metal batch (rtgi_census.comp, a chunk a frame): its
-//             harmonic hit distance (escapes adding nothing to the sum, as the near cook's sizes do), its back-face
-//             share (over half: buried, inside something; a double-sided placement's back face counts as a front, the
-//             far side of a sheet with no inside), its nearest hit, and from them the cache's cell size,
-//             clamp(0.1 x harmonic, 5 cm, the cache's top level) -- open ground gets cells of metres
-//   cells     every triangle (each side of a double-sided one) sampled again at half its local cell size (the smallest
-//             of the nearest same-side coarse samples at a 25 cm lattice over it, by a hash grid, searched outward where
-//             none is near), each point's cell at its own level (its lattice point's sample's size; none where that
-//             sample is buried) and every level above it -- the cells a cooked cache would hold, by level, those that
-//             are some surface's own (finest) level, and the junction cells among them: another surface within 1.5 cell
-//             sizes of the point (its sample's nearest hit), the only ones the cook's inside test is for (on a worker)
+//   geometry  the static instances' triangles, their world area and bounds, and which are two-sided: a triangle of an
+//             open sheet (its connected piece of mesh, vertices welded by position, has an edge only one triangle
+//             uses) or of an alpha-tested material is a sheet with no inside, seen from both sides; a closed one is
+//             one-sided whatever its material's double-sided flag says -- San Miguel's and the jungle's exports mark
+//             every material double-sided, and by the flag their closed walls had no inside (on a worker)
+//   size      the cell-size field, coarse first: surface samples by area at 2 m (CensusPassSpacing), then at 0.5 m and
+//             0.25 m only where the pass above found the geometry tight (a size under CensusRefineFactor of its
+//             spacing, or buried) -- a running sum of area along each run of triangles (or of a triangle's pieces in
+//             the refined regions) drops a sample at a random point where it crosses the next spacing^2, so tiny
+//             triangles share them; a two-sided triangle's area counts once a side. Each sample traces CensusRays
+//             cosine rays through the Metal batch (rtgi_census.comp, a chunk a frame): its harmonic hit distance
+//             (escapes adding nothing to the sum, as the near cook's sizes do), its back-face share (over half:
+//             buried, inside something; a two-sided triangle's back face counts as a front), its nearest hit, and from
+//             them the cache's cell size, clamp(0.1 x harmonic, 5 cm, the cache's top level)
+//   cells     every triangle (each side of a two-sided one) sampled again at half its local cell size: in pieces, each
+//             with a lattice at the finest pass's spacing found near it, each lattice point's nearest sample from the
+//             finest pass that has one near (by hash grids, searched outward where none is); each point's cell at its
+//             own level (its lattice point's sample's size; none where that sample is buried) and every level above
+//             it -- the cells a cooked cache would hold, by level, those that are some surface's own (finest) level,
+//             and the junction cells among them: another surface within min(1.5 cell sizes, 0.375 m) of the point (its
+//             sample's nearest hit), the only ones the cook's inside test is for (on a worker)
 //   pricing   bytes and rays by the per-item costs below, the times at the measured trace rate, whole and per chunk of
 //             16, 32 and 64 m; the runtime bytes at today's slot, at a proposed compact resident record (all cells, and
 //             the chunks within 32 / 64 m of the start camera) plus a transient training pool
@@ -37,31 +43,38 @@ namespace Blix.Demos.VulkanSponza;
 // written to DIR/<scene>.json and .txt, a line to the log, and the demo closes. The cache is left untrained meanwhile
 // (RecordRtgi), the world volume and the near cook off (ParseRtgiCensus): the trace's time is the census's own. Nothing
 // here runs without the flag. Approximations: cells keyed by coordinates and side alone (no regions); the cell grid's
-// origin as rtgi_cache.glsl's; the ray scene's meshes (its LOD) are the geometry; double-sidedness is the placement's
-// material's (rayPlacementDoubleSided, the raster's unculled pipelines); past --rtgi-census-most samples (12 M) the
-// coarse samples are a random share of the full set, each standing for the rest's area.
+// origin as rtgi_cache.glsl's; the ray scene's meshes (its LOD) are the geometry; past --rtgi-census-most samples (12 M)
+// a pass's samples are a random share of its full set, each standing for the rest's area.
 internal sealed partial class SponzaLoop
 {
     private bool rtgiCensus;
     private string rtgiCensusOut = "census";
-    // Coarse samples a frame (64 rays each: 1 M rays at 16,384, the near cook's chunk) and the most traced at all.
+    // Samples a frame (64 rays each: 1 M rays at 16,384, the near cook's chunk) and the most traced in a pass.
     private int rtgiCensusChunk = 16384;
     private long rtgiCensusMost = 12_000_000;
     // --rtgi-census-cell-share F: the cells counted over a random share of the triangle runs and scaled up by 1 / F
     // (1: all). The jungle's count, whole, outgrew a 16 GB machine.
     private float rtgiCensusCellShare = 1f;
-    private const float CensusSpacing = 0.25f, CensusReach = 64f, CensusNear = 0.25f, CensusLift = 0.01f;
+    private const float CensusReach = 64f, CensusNear = 0.25f, CensusLift = 0.01f;
     private const int CensusRays = 64;
+    // The size field's passes (m between samples), coarse first; a pass below refines where the one above found a size
+    // under CensusRefineFactor of its own spacing (or buried): its samples too far apart for the cells there.
+    private static readonly float[] CensusPassSpacing = { 2f, 0.5f, 0.25f };
+    private const float CensusRefineFactor = 2f;
+    // Vertices welded within this (m, world space) for the sheets' boundary edges: exporters split them at UV and normal
+    // seams. --rtgi-census-weld M.
+    private static float CensusWeld = 1e-4f;
     // The slice of a 60 Hz frame the cook and the settling would be given: 2 ms of 16.7.
     private const double CensusSlice = 2.0 / 16.7;
     // The per-item costs priced (bytes, rays), stated in the report.
-    private const int CensusShipSizeField = 1;       // B a coarse sample: its cell size
+    private const int CensusShipSizeField = 1;       // B a size-field sample (every pass's)
     private const int CensusShipCell = 2;            // B a cell: the chosen candidate + buried, its neighbour visibility (8 bits)
     private const int CensusNearCompact = 24;        // B a level-0 cell: the near transfer, compact
     private const int CensusNearToday = 256;         // B a level-0 cell: today's 32 per-ray links (8 B each)
     private const int CensusInsideRays = 16 * 8;     // rays a junction cell: the inside test, 16 candidates x 8 rays
-    // A junction cell: its sample's nearest hit within this many of the cell's size.
-    private const float CensusJunctionReach = 1.5f;
+    // A junction cell: its sample's nearest hit within this many of the cell's size, and never past CensusJunctionMost:
+    // at 1.5 sizes alone every own-level cell from ~3 m up counted (anything met within metres).
+    private const float CensusJunctionReach = 1.5f, CensusJunctionMost = 0.375f;
     // The cell count's pieces: big triangles split until no edge is longer than this many lattice steps.
     private const int CensusPieceLattices = 8;
     private const int CensusNeighbourRays = 8;       // rays a cell: its neighbours' visibility
@@ -99,19 +112,18 @@ internal sealed partial class SponzaLoop
     };
     private const int CensusPoolSlots = 262_144;
 
-    private int rtgiCensusDynamic;
-    private RayQueryScene.Instance[] rtgiCensusInstances = Array.Empty<RayQueryScene.Instance>();
-    // Per census instance, whether its material is double-sided; and per placement (the hit's), for the reduction.
-    private bool[] rtgiCensusSided = Array.Empty<bool>();
-    private GpuBufferHandle rtgiCensusSidedBuf;
-    private int rtgiCensusPlacements;
-    private Task<CensusLayout>? rtgiCensusBuild;
-    private CensusLayout? rtgiCensusLayout;
+    private Task<CensusGeometry>? rtgiCensusGeometryBuild;
+    private CensusGeometry? rtgiCensusGeometry;
+    // The pass being built (on a worker: the previous pass's results taken up, the next's samples placed) and those done.
+    private Task<CensusPass?>? rtgiCensusPassBuild;
+    private CensusPass? rtgiCensusPass;
+    private readonly List<CensusPass> rtgiCensusPasses = new();
     private Task<string>? rtgiCensusReport;
-    // 0 waiting for the samples, 1 tracing, 2 draining, 3 counting the cells, 4 done.
-    private int rtgiCensusStage, rtgiCensusCursor, rtgiCensusDrain, rtgiCensusFrames;
+    // 0 waiting for the geometry, 1 waiting for a pass's samples, 2 tracing, 3 draining, 4 counting the cells, 5 done.
+    private int rtgiCensusStage, rtgiCensusCursor, rtgiCensusDrain, rtgiCensusDynamic;
     private uint rtgiCensusParity;
-    private GpuBufferHandle rtgiCensusSamples, rtgiCensusResults;
+    private int rtgiCensusCapacity, rtgiCensusPlacements;
+    private GpuBufferHandle rtgiCensusSamples, rtgiCensusResults, rtgiCensusSidedBuf;
     private GpuBufferHandle[] rtgiCensusRayBufs = Array.Empty<GpuBufferHandle>(), rtgiCensusHitBufs = Array.Empty<GpuBufferHandle>();
     private ShaderInterface rtgiCensusInterface = null!;
     private PassHandle rtgiCensusRaysPassHandle, rtgiCensusReducePassHandle;
@@ -125,6 +137,7 @@ internal sealed partial class SponzaLoop
         if (args.String("rtgi-census-out") is { Length: > 0 } dir) rtgiCensusOut = dir;
         if (args.Int("rtgi-census-chunk") is { } chunk) rtgiCensusChunk = Math.Clamp(chunk, 1024, 65536);
         if (args.Long("rtgi-census-most") is { } most) rtgiCensusMost = Math.Max(65536, most);
+        if (args.Float("rtgi-census-weld") is { } weld) CensusWeld = Math.Clamp(weld, 1e-6f, 1f);
         if (args.Float("rtgi-census-cell-share") is { } cellShare) rtgiCensusCellShare = Math.Clamp(cellShare, 0.001f, 1f);
         if (!rtgiCensus) return;
         // Alone on the GPU: the volume's and the near cook's rays would share the trace's time.
@@ -152,29 +165,31 @@ internal sealed partial class SponzaLoop
         if (rtgiCensus) rtgiCensusPipeline = compute("rtgi_census", rtgiCensusInterface);
     }
 
-    // FinishRayScene: the static instances, their samples placed on a worker.
+    // FinishRayScene: the static instances and every placement's two-sided triangles, on a worker.
     private void StartRtgiCensus(RayQueryScene scene)
     {
-        if (!rtgiCensus || rtgiCensusBuild is not null) return;
-        // The scene's instances are its placements, in rayPlacementDoubleSided's order (the hits' placement index).
-        var kept = Enumerable.Range(0, scene.Instances.Count).Where(i => !scene.Instances[i].Dynamic).ToArray();
-        var instances = kept.Select(i => scene.Instances[i]).ToArray();
-        var sided = kept.Select(i => i < rayPlacementDoubleSided.Count && rayPlacementDoubleSided[i]).ToArray();
-        rtgiCensusDynamic = scene.Instances.Count - instances.Length;
-        rtgiCensusInstances = instances;
-        rtgiCensusSided = sided;
-        rtgiCensusPlacements = rayPlacementDoubleSided.Count;
-        var flags = rayPlacementDoubleSided.Select(d => d ? 1u : 0u).DefaultIfEmpty(0u).ToArray();
-        rtgiCensusSidedBuf = Own(device.CreateGpuBuffer(flags.Length * 4, MemoryMarshal.AsBytes(flags.AsSpan()).ToArray(), "sponza.rtgi.census-sided"));
-        var most = rtgiCensusMost;
-        DebugProgress.Begin("rtgi census: samples", 0);
-        rtgiCensusBuild = Task.Run(() => BuildCensusLayout(instances, sided, most));
+        if (!rtgiCensus || rtgiCensusGeometryBuild is not null) return;
+        // The scene's instances are its placements, in rayPlacementMaterials' order (the hits' placement index).
+        var placements = scene.Instances.ToArray();
+        var kept = Enumerable.Range(0, placements.Length).Where(i => !placements[i].Dynamic).ToArray();
+        var alpha = Enumerable.Range(0, placements.Length).Select(i => i < rayPlacementMaterials.Count && rayPlacementMaterials[i].AlphaCutoff > 0f).ToArray();
+        var flagged = Enumerable.Range(0, placements.Length).Select(i => i < rayPlacementDoubleSided.Count && rayPlacementDoubleSided[i]).ToArray();
+        rtgiCensusDynamic = placements.Length - kept.Length;
+        rtgiCensusPlacements = placements.Length;
+        DebugProgress.Begin("rtgi census: geometry", 0);
+        rtgiCensusGeometryBuild = Task.Run(() => BuildCensusGeometry(placements, kept, alpha, flagged));
     }
 
-    // The coarse samples: xyz and the packed normal for the GPU, and what the CPU's count of cells reads.
-    private sealed record CensusLayout(
-        Vector4[] Gpu, Vector3[] Pos, byte[] Side, float[] Area, long Triangles, long Degenerate, double SurfaceArea,
-        long SidedTriangles, double SidedArea, Vector3 Min, Vector3 Max, long FullSamples, double Keep, double Ms);
+    // The census's geometry: the static instances, per instance its mesh's open triangles (shared by its placements) and
+    // whether its material is alpha-tested, the totals, and the GPU's per-placement two-sided bits.
+    private sealed record CensusGeometry(
+        RayQueryScene.Instance[] Instances, bool[][] Open, bool[] Alpha, bool[] Flagged,
+        long Triangles, long Degenerate, double Area, Vector3 Min, Vector3 Max,
+        (long Tris, double Area) ByFlag, (long Tris, double Area) ByOpen, (long Tris, double Area) ByAlpha, (long Tris, double Area) ByTwoSided,
+        uint[] SidedBits, double Ms)
+    {
+        public bool TwoSided(int inst, int t) => Alpha[inst] || Open[inst][t];
+    }
 
     // The triangles in runs of at most `run`, the workers' items (one mesh may be most of a scene).
     private static (int Inst, int First, int Count)[] CensusWork(RayQueryScene.Instance[] instances, int run = 65536)
@@ -196,17 +211,169 @@ internal sealed partial class SponzaLoop
             Vector3.Transform(pos[idx[3 * t + 2]], inst.World));
     }
 
-    // The area sampling's walk over a run of triangles: `area` added (a side's), the samples it drops -- each where the
-    // running sum crosses the next CensusSpacing^2, from an offset of the run's own.
+    // Per triangle of the static instances (by instance), whether its sheet is open -- in world space, across every
+    // instance: each corner's position quantized to CensusWeld and hashed (a vertex), each edge keyed by its two vertices
+    // (exporters split vertices at UV and normal seams; the ray scene's meshes are one a material, so a closed box of two
+    // materials is two open pieces until their edges meet across them -- San Miguel's per-mesh test called 82% of its
+    // area open), the keys sorted, the triangles joined across every edge two or more share (union-find), and a piece
+    // open where any of its edges is one triangle's alone.
+    private static bool[][] CensusOpenTriangles(RayQueryScene.Instance[] instances)
+    {
+        var bases = new long[instances.Length + 1];
+        for (var i = 0; i < instances.Length; i++) bases[i + 1] = bases[i] + instances[i].Mesh.TriangleCount;
+        var tris = (int)bases[^1];
+        static ulong Mix(ulong x)
+        {
+            x ^= x >> 33; x *= 0xff51afd7ed558ccdUL;
+            x ^= x >> 33; x *= 0xc4ceb9fe1a85ec53UL;
+            x ^= x >> 33;
+            return x;
+        }
+        static ulong VertexKey(Vector3 p) => Mix((ulong)(long)MathF.Round(p.X / CensusWeld) * 0x9E3779B97F4A7C15UL
+            ^ Mix((ulong)(long)MathF.Round(p.Y / CensusWeld) * 0xC2B2AE3D27D4EB4FUL ^ Mix((ulong)(long)MathF.Round(p.Z / CensusWeld) + 0x165667B19E3779F9UL)));
+        var edges = new ulong[3L * tris];
+        var owner = new int[3L * tris];
+        Parallel.For(0, instances.Length, i =>
+        {
+            var inst = instances[i];
+            for (var t = 0; t < inst.Mesh.TriangleCount; t++)
+            {
+                var (a, b, c) = CensusTriangle(inst, t);
+                ulong ka = VertexKey(a), kb = VertexKey(b), kc = VertexKey(c);
+                var g = bases[i] + t;
+                for (var e = 0; e < 3; e++)
+                {
+                    var (u, v) = e == 0 ? (ka, kb) : e == 1 ? (kb, kc) : (kc, ka);
+                    // A degenerate edge (both ends welded) joins nothing and bounds nothing: the sort's end.
+                    edges[3 * g + e] = u == v ? ulong.MaxValue : Mix(Math.Min(u, v) * 0x9E3779B97F4A7C15UL ^ Math.Max(u, v));
+                    owner[3 * g + e] = (int)g;
+                }
+            }
+        });
+        Array.Sort(edges, owner);
+        var parent = new int[tris];
+        for (var t = 0; t < tris; t++) parent[t] = t;
+        int Find(int x)
+        {
+            while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+            return x;
+        }
+        var boundary = new bool[tris];
+        for (var i = 0; i < edges.Length;)
+        {
+            var j = i;
+            while (j < edges.Length && edges[j] == edges[i]) j++;
+            if (edges[i] != ulong.MaxValue)
+            {
+                if (j - i == 1) boundary[owner[i]] = true;
+                else
+                    for (var k = i + 1; k < j; k++)
+                    {
+                        int ra = Find(owner[i]), rb = Find(owner[k]);
+                        if (ra != rb) parent[ra] = rb;
+                    }
+            }
+            i = j;
+        }
+        var pieceOpen = new bool[tris];
+        for (var t = 0; t < tris; t++) if (boundary[t]) pieceOpen[Find(t)] = true;
+        var open = new bool[instances.Length][];
+        for (var i = 0; i < instances.Length; i++)
+        {
+            open[i] = new bool[instances[i].Mesh.TriangleCount];
+            for (var t = 0; t < open[i].Length; t++) open[i][t] = pieceOpen[Find((int)(bases[i] + t))];
+        }
+        return open;
+    }
+
+    private static CensusGeometry BuildCensusGeometry(RayQueryScene.Instance[] placements, int[] kept, bool[] alpha, bool[] flagged)
+    {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        // The static instances' open triangles (world space, across them all); a dynamic placement's none.
+        var instances = kept.Select(i => placements[i]).ToArray();
+        var instOpen = CensusOpenTriangles(instances);
+        var openOf = new bool[placements.Length][];
+        for (var k = 0; k < kept.Length; k++) openOf[kept[k]] = instOpen[k];
+        // The GPU's bits: per placement its first bit (and one past the last placement's), then a bit a triangle.
+        var bases = new uint[placements.Length + 1];
+        for (var p = 0; p < placements.Length; p++) bases[p + 1] = bases[p] + (uint)placements[p].Mesh.TriangleCount;
+        var words = new uint[(bases[^1] + 31) / 32];
+        Parallel.For(0, placements.Length, p =>
+        {
+            var open = openOf[p];
+            for (var t = 0; t < placements[p].Mesh.TriangleCount; t++)
+            {
+                if (!alpha[p] && (open is null || !open[t])) continue;
+                var b = bases[p] + (uint)t;
+                Interlocked.Or(ref words[b >> 5], 1u << (int)(b & 31));
+            }
+        });
+        var bits = new uint[bases.Length + words.Length];
+        bases.CopyTo(bits, 0);
+        words.CopyTo(bits, bases.Length);
+
+        var instAlpha = kept.Select(i => alpha[i]).ToArray();
+        var instFlag = kept.Select(i => flagged[i]).ToArray();
+        long triangles = 0, degenerate = 0;
+        double area = 0;
+        var tallies = new (long Tris, double Area)[4];
+        var min = new Vector3(float.MaxValue);
+        var max = new Vector3(float.MinValue);
+        var gate = new object();
+        var work = CensusWork(instances);
+        Parallel.For(0, work.Length, w =>
+        {
+            var item = work[w];
+            long tris = 0, degen = 0;
+            double a = 0;
+            var local = new (long Tris, double Area)[4];
+            var lo = new Vector3(float.MaxValue);
+            var hi = new Vector3(float.MinValue);
+            var inst = instances[item.Inst];
+            for (var t = item.First; t < item.First + item.Count; t++)
+            {
+                var (pa, pb, pc) = CensusTriangle(inst, t);
+                tris++;
+                lo = Vector3.Min(lo, Vector3.Min(pa, Vector3.Min(pb, pc)));
+                hi = Vector3.Max(hi, Vector3.Max(pa, Vector3.Max(pb, pc)));
+                var len = Vector3.Cross(pb - pa, pc - pa).Length();
+                if (!(len > 1e-12f)) { degen++; continue; }
+                var ta = 0.5 * len;
+                a += ta;
+                var open = instOpen[item.Inst][t];
+                if (instFlag[item.Inst]) { local[0].Tris++; local[0].Area += ta; }
+                if (open) { local[1].Tris++; local[1].Area += ta; }
+                if (instAlpha[item.Inst]) { local[2].Tris++; local[2].Area += ta; }
+                if (open || instAlpha[item.Inst]) { local[3].Tris++; local[3].Area += ta; }
+            }
+            lock (gate)
+            {
+                triangles += tris; degenerate += degen; area += a;
+                for (var k = 0; k < 4; k++) { tallies[k].Tris += local[k].Tris; tallies[k].Area += local[k].Area; }
+                min = Vector3.Min(min, lo); max = Vector3.Max(max, hi);
+            }
+        });
+        return new CensusGeometry(instances, instOpen, instAlpha, instFlag, triangles, degenerate, area, min, max,
+            tallies[0], tallies[1], tallies[2], tallies[3], bits, clock.Elapsed.TotalMilliseconds);
+    }
+
+    // The area sampling's walk over a run of triangles (or pieces): `area` added (a side's), the samples it drops --
+    // each where the running sum crosses the next spacing^2, from an offset of the run's own.
     private struct CensusAreaWalk
     {
         private double sum, next;
-        public CensusAreaWalk(uint seed) { sum = 0; next = (NearHash(seed) / 4294967296.0) * CensusSpacing * CensusSpacing; }
+        private readonly double step;
+        public CensusAreaWalk(uint seed, float spacing)
+        {
+            step = (double)spacing * spacing;
+            sum = 0;
+            next = NearHash(seed) / 4294967296.0 * step;
+        }
         public int Add(double area)
         {
             sum += area;
             var n = 0;
-            while (sum >= next) { n++; next += CensusSpacing * CensusSpacing; }
+            while (sum >= next) { n++; next += step; }
             return n;
         }
     }
@@ -235,95 +402,158 @@ internal sealed partial class SponzaLoop
         return qx | (qy << 16);
     }
 
-    private static CensusLayout BuildCensusLayout(RayQueryScene.Instance[] instances, bool[] sided, long most)
+    private static float CensusLongest(Vector3 a, Vector3 b, Vector3 c) =>
+        MathF.Sqrt(MathF.Max((b - a).LengthSquared(), MathF.Max((c - b).LengthSquared(), (a - c).LengthSquared())));
+
+    // The triangle halved across its longest edge.
+    private static ((Vector3, Vector3, Vector3), (Vector3, Vector3, Vector3)) CensusBisect(Vector3 a, Vector3 b, Vector3 c)
+    {
+        float ab = (b - a).LengthSquared(), bc = (c - b).LengthSquared(), ca = (a - c).LengthSquared();
+        if (ab >= bc && ab >= ca) { var m = (a + b) * 0.5f; return ((a, m, c), (m, b, c)); }
+        if (bc >= ca) { var m = (b + c) * 0.5f; return ((a, b, m), (a, m, c)); }
+        var k = (c + a) * 0.5f;
+        return ((a, b, k), (k, b, c));
+    }
+
+    // A pass of the size field: its samples (for the GPU, and what the CPU reads), then, traced, each sample's results.
+    private sealed class CensusPass
+    {
+        public int Index;
+        public float Spacing;
+        public long Full;
+        public double Keep, Ms;
+        public Vector4[] Gpu = Array.Empty<Vector4>();
+        public Vector3[] Pos = Array.Empty<Vector3>();
+        public byte[] Side = Array.Empty<byte>();
+        // The area each stands for (its spacing^2 over the share traced).
+        public float Area;
+        public uint[] Results = Array.Empty<uint>();
+        public float[] Size = Array.Empty<float>(), Nearest = Array.Empty<float>();
+        public bool[] Buried = Array.Empty<bool>(), Refine = Array.Empty<bool>();
+        public CensusGrid? Grid;
+        public double GpuMs, WallMs;
+        public int Frames;
+        public long Bad;
+        // The spacing of the samples traced.
+        public float Effective => Spacing / MathF.Sqrt((float)Math.Min(1.0, Keep));
+    }
+
+    // A pass's samples: by area over every triangle (the first), or over the pieces of them the passes above refine.
+    private static CensusPass BuildCensusPass(CensusGeometry geom, int index, IReadOnlyList<CensusPass> above, long most)
     {
         var clock = System.Diagnostics.Stopwatch.StartNew();
+        var spacing = CensusPassSpacing[index];
+        var instances = geom.Instances;
         var work = CensusWork(instances);
-        // First the totals: the triangles, their area and bounds, the samples the area walk drops.
-        long triangles = 0, degenerate = 0, full = 0, sidedTris = 0;
-        double area = 0, sidedArea = 0;
-        var min = new Vector3(float.MaxValue);
-        var max = new Vector3(float.MinValue);
-        var gate = new object();
+        // The share traced from the area it will cover: all (both sides of the two-sided), or the last pass's refined.
+        double expected;
+        if (above.Count == 0) expected = (geom.Area + geom.ByTwoSided.Area) / (spacing * spacing);
+        else
+        {
+            var last = above[^1];
+            expected = last.Refine.Count(r => r) * (double)last.Area / (spacing * spacing);
+        }
+        var keep = expected > most ? most / expected : 1.0;
+        var keepBits = keep >= 1.0 ? uint.MaxValue : (uint)(keep * uint.MaxValue);
+        var lists = new List<(Vector3 P, Vector3 N, byte Side)>[work.Length];
+        var fulls = new long[work.Length];
         Parallel.For(0, work.Length, w =>
         {
             var item = work[w];
-            long tris = 0, degen = 0, samples = 0, sTris = 0;
-            double a = 0, sa = 0;
-            var lo = new Vector3(float.MaxValue);
-            var hi = new Vector3(float.MinValue);
             var inst = instances[item.Inst];
-            var twoSided = sided[item.Inst];
-            var walk = new CensusAreaWalk((uint)w * 0x9E3779B1u + 0x51u);
+            var list = new List<(Vector3, Vector3, byte)>();
+            var walk = new CensusAreaWalk((uint)w * 0x9E3779B1u + 0x51u + (uint)index * 0x2545F491u, spacing);
+            var dropped = 0u;
+            long full = 0;
+            var stack = new Stack<(Vector3 A, Vector3 B, Vector3 C, int Q)>();
             for (var t = item.First; t < item.First + item.Count; t++)
             {
-                var (pa, pb, pc) = CensusTriangle(inst, t);
-                tris++;
-                lo = Vector3.Min(lo, Vector3.Min(pa, Vector3.Min(pb, pc)));
-                hi = Vector3.Max(hi, Vector3.Max(pa, Vector3.Max(pb, pc)));
-                var len = Vector3.Cross(pb - pa, pc - pa).Length();
-                if (!(len > 1e-12f)) { degen++; continue; }
-                a += 0.5 * len;
-                samples += walk.Add(0.5 * len);
-                if (!twoSided) continue;
-                sTris++; sa += 0.5 * len;
-                samples += walk.Add(0.5 * len);
-            }
-            lock (gate)
-            {
-                triangles += tris; degenerate += degen; full += samples; area += a; sidedTris += sTris; sidedArea += sa;
-                min = Vector3.Min(min, lo); max = Vector3.Max(max, hi);
-            }
-        });
-        // Then the samples, all or (past `most`) a random share of them, each standing for its share's area.
-        var keep = full > most ? most / (double)full : 1.0;
-        var keepBits = keep >= 1.0 ? uint.MaxValue : (uint)(keep * uint.MaxValue);
-        var each = (float)(CensusSpacing * CensusSpacing / keep);
-        var lists = new List<(Vector3 P, Vector3 N, byte Side)>[work.Length];
-        Parallel.For(0, work.Length, w =>
-        {
-            var item = work[w];
-            var inst = instances[item.Inst];
-            var twoSided = sided[item.Inst];
-            var list = new List<(Vector3, Vector3, byte)>();
-            var walk = new CensusAreaWalk((uint)w * 0x9E3779B1u + 0x51u);
-            var dropped = 0u;
-            void Drop(int count, Vector3 pa, Vector3 pb, Vector3 pc, Vector3 nrm)
-            {
-                for (var j = 0; j < count; j++, dropped++)
+                var (ta, tb, tc) = CensusTriangle(inst, t);
+                var cross = Vector3.Cross(tb - ta, tc - ta);
+                var len = cross.Length();
+                if (!(len > 1e-12f)) continue;
+                var faces = geom.TwoSided(item.Inst, t) ? 2 : 1;
+                for (var face = 0; face < faces; face++)
                 {
-                    var h = NearHash((uint)w * 0x85EBCA77u ^ NearHash(dropped + 0x7F4A7C15u));
-                    if (keepBits != uint.MaxValue && NearHash(h ^ 0x2545F491u) > keepBits) continue;
-                    list.Add((CensusPointIn(pa, pb, pc, h), nrm, (byte)NearSide(nrm)));
+                    var nrm = face == 0 ? cross / len : -cross / len;
+                    var side = NearSide(nrm);
+                    stack.Push((ta, tb, tc, 0));
+                    while (stack.TryPop(out var piece))
+                    {
+                        var (a, b, c, q) = piece;
+                        if (q < above.Count)
+                        {
+                            // Gated by the pass above: in pieces no longer than twice its spacing, each kept where the
+                            // nearest of its samples (to the piece's middle) asked for more.
+                            var gate = above[q];
+                            if (CensusLongest(a, b, c) > 2f * gate.Spacing)
+                            {
+                                var (h0, h1) = CensusBisect(a, b, c);
+                                stack.Push((h0.Item1, h0.Item2, h0.Item3, q));
+                                stack.Push((h1.Item1, h1.Item2, h1.Item3, q));
+                                continue;
+                            }
+                            var (j, _) = gate.Grid!.Nearest((a + b + c) / 3f, side, 2, sameOnly: true);
+                            if (j < 0 || gate.Refine[j]) stack.Push((a, b, c, q + 1));
+                            continue;
+                        }
+                        var n = walk.Add(0.5 * Vector3.Cross(b - a, c - a).Length());
+                        for (var k = 0; k < n; k++, dropped++)
+                        {
+                            full++;
+                            var h = NearHash((uint)w * 0x85EBCA77u ^ NearHash(dropped + 0x7F4A7C15u + (uint)index * 0x165667B1u));
+                            if (keepBits != uint.MaxValue && NearHash(h ^ 0x2545F491u) > keepBits) continue;
+                            list.Add((CensusPointIn(a, b, c, h), nrm, (byte)side));
+                        }
+                    }
                 }
             }
-            for (var t = item.First; t < item.First + item.Count; t++)
-            {
-                var (pa, pb, pc) = CensusTriangle(inst, t);
-                var nrm = Vector3.Cross(pb - pa, pc - pa);
-                var len = nrm.Length();
-                if (!(len > 1e-12f)) continue;
-                nrm /= len;
-                Drop(walk.Add(0.5 * len), pa, pb, pc, nrm);
-                if (twoSided) Drop(walk.Add(0.5 * len), pa, pb, pc, -nrm);
-            }
             lists[w] = list;
+            fulls[w] = full;
         });
         var count = lists.Sum(l => l.Count);
-        var gpu = new Vector4[count];
-        var positions = new Vector3[count];
-        var sides = new byte[count];
-        var areas = new float[count];
+        var pass = new CensusPass
+        {
+            Index = index, Spacing = spacing, Full = fulls.Sum(), Keep = keep, Area = (float)(spacing * spacing / keep),
+            Gpu = new Vector4[count], Pos = new Vector3[count], Side = new byte[count],
+        };
         var at = 0;
         foreach (var list in lists)
             foreach (var (p, nrm, side) in list)
             {
-                gpu[at] = new Vector4(p, BitConverter.UInt32BitsToSingle(CensusOctPack(nrm)));
-                positions[at] = p; sides[at] = side; areas[at] = each;
+                pass.Gpu[at] = new Vector4(p, BitConverter.UInt32BitsToSingle(CensusOctPack(nrm)));
+                pass.Pos[at] = p; pass.Side[at] = side;
                 at++;
             }
-        return new CensusLayout(gpu, positions, sides, areas, triangles, degenerate, area, sidedTris, sidedArea, min, max, full, keep,
-            clock.Elapsed.TotalMilliseconds);
+        pass.Ms = clock.Elapsed.TotalMilliseconds;
+        return pass;
+    }
+
+    // A pass's results taken up: each sample's size, buried or not, nearest hit; whether it refines (a pass below it);
+    // its grid.
+    private static void TakeCensusResults(CensusPass pass, float finest, float topSize)
+    {
+        var n = pass.Pos.Length;
+        pass.Size = new float[n];
+        pass.Nearest = new float[n];
+        pass.Buried = new bool[n];
+        pass.Refine = new bool[n];
+        var refines = pass.Index < CensusPassSpacing.Length - 1;
+        long bad = 0;
+        for (var i = 0; i < n; i++)
+        {
+            var invSum = BitConverter.UInt32BitsToSingle(pass.Results[4 * i]);
+            var counts = pass.Results[4 * i + 1];
+            int met = (int)(counts & 0xFF), back = (int)((counts >> 8) & 0xFF);
+            pass.Nearest[i] = met > 0 ? BitConverter.UInt32BitsToSingle(pass.Results[4 * i + 2]) : float.PositiveInfinity;
+            var harmonic = invSum > 0f ? CensusRays / invSum : float.PositiveInfinity;
+            pass.Size[i] = Math.Clamp(0.1f * harmonic, finest, topSize);
+            pass.Buried[i] = back * 2 > CensusRays;
+            pass.Refine[i] = refines && (pass.Buried[i] || pass.Size[i] < CensusRefineFactor * pass.Spacing);
+            bad += pass.Results[4 * i + 3];
+        }
+        pass.Bad = bad;
+        pass.Grid = new CensusGrid(pass.Pos, pass.Side, pass.Effective);
     }
 
     private DispatchCommand CensusDispatch(int cur, int kind, int first, int count, int threads) => new(rtgiCensusPipeline, (threads + 63) / 64, 1, 1,
@@ -342,43 +572,87 @@ internal sealed partial class SponzaLoop
             new ShaderBufferBinding("RtgiCensusSided", rtgiCensusSidedBuf),
         });
 
+    // A pass's samples onto the GPU: into the buffers held when they fit, else new ones.
+    private void UploadCensusPass(CensusPass pass)
+    {
+        var n = Math.Max(pass.Pos.Length, 1);
+        var bytes = MemoryMarshal.AsBytes(pass.Gpu.AsSpan());
+        if (n <= rtgiCensusCapacity)
+        {
+            if (bytes.Length > 0) device.WriteGpuBuffer(rtgiCensusSamples, 0, bytes);
+            return;
+        }
+        rtgiCensusCapacity = n;
+        rtgiCensusSamples = Own(device.CreateGpuBuffer(n * 16, bytes.Length > 0 ? bytes.ToArray() : new byte[16], "sponza.rtgi.census-samples"));
+        rtgiCensusResults = Own(device.CreateGpuBuffer(n * 16, new byte[n * 16], "sponza.rtgi.census-results"));
+    }
+
     // RecordRtgi, in place of the cache's frame: the census's stage this frame.
     private void RecordRtgiCensus(MetalRayTracer tracer)
     {
         if (rtgiCensusStage == 0)
         {
-            if (rtgiCensusBuild is not { IsCompleted: true } build) return;
-            DebugProgress.End("rtgi census: samples");
-            var layout = rtgiCensusLayout = build.Result;
-            rtgiCensusBuild = Task.FromResult(layout with { Gpu = Array.Empty<Vector4>() });
-            var samples = Math.Max(layout.Pos.Length, 1);
-            rtgiCensusSamples = Own(device.CreateGpuBuffer(samples * 16,
-                layout.Pos.Length > 0 ? MemoryMarshal.AsBytes(layout.Gpu.AsSpan()).ToArray() : new byte[16], "sponza.rtgi.census-samples"));
-            rtgiCensusResults = Own(device.CreateGpuBuffer(samples * 16, new byte[samples * 16], "sponza.rtgi.census-results"));
+            if (rtgiCensusGeometryBuild is not { IsCompleted: true } build) return;
+            DebugProgress.End("rtgi census: geometry");
+            var geom = rtgiCensusGeometry = build.Result;
+            rtgiCensusSidedBuf = Own(device.CreateGpuBuffer(geom.SidedBits.Length * 4, MemoryMarshal.AsBytes(geom.SidedBits.AsSpan()).ToArray(), "sponza.rtgi.census-sided"));
             var rays = rtgiCensusChunk * CensusRays;
             rtgiCensusRayBufs = Enumerable.Range(0, 2).Select(k => Own(device.CreateGpuBuffer(rays * 32, name: $"sponza.rtgi.census-rays{k}"))).ToArray();
             rtgiCensusHitBufs = Enumerable.Range(0, 2).Select(k => Own(device.CreateGpuBuffer(rays * 48, name: $"sponza.rtgi.census-hits{k}"))).ToArray();
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                $"[VulkanSponza] rtgi census: {layout.Triangles:N0} triangles ({rtgiCensusDynamic} dynamic instances left out, {layout.SidedTriangles:N0} double-sided), {layout.SurfaceArea:N0} m2; {layout.FullSamples:N0} coarse samples, {layout.Pos.Length:N0} traced (share {layout.Keep:0.####}), placed in {layout.Ms:0} ms."));
-            DebugProgress.Begin("rtgi census: coarse rays", layout.Pos.Length);
-            rtgiCensusTraceFrom = tracer.TraceStats;
-            rtgiCensusClock.Restart();
+                $"[VulkanSponza] rtgi census: {geom.Triangles:N0} triangles ({rtgiCensusDynamic} dynamic instances left out), {geom.Area:N0} m2; two-sided {geom.ByTwoSided.Tris:N0} triangles, {geom.ByTwoSided.Area:N0} m2 (open {geom.ByOpen.Area:N0} m2, alpha-tested {geom.ByAlpha.Area:N0} m2; the double-sided flag's {geom.ByFlag.Area:N0} m2), in {geom.Ms:0} ms."));
+            var most = rtgiCensusMost;
+            rtgiCensusPassBuild = Task.Run<CensusPass?>(() => BuildCensusPass(geom, 0, Array.Empty<CensusPass>(), most));
+            DebugProgress.Begin("rtgi census: size field", 0);
             rtgiCensusStage = 1;
             return;
         }
-        var census = rtgiCensusLayout!;
+        var census = rtgiCensusGeometry!;
         if (rtgiCensusStage == 1)
+        {
+            if (rtgiCensusPassBuild is not { IsCompleted: true } build) return;
+            var pass = build.Result;
+            if (pass is null)
+            {
+                // No pass left: the cells.
+                DebugProgress.End("rtgi census: size field");
+                var passes = rtgiCensusPasses.ToArray();
+                var name = scene.Name;
+                var dir = rtgiCensusOut;
+                var dynamic = rtgiCensusDynamic;
+                var cell = rtgiCell;
+                var start = scene.StartPosition;
+                var cellShare = rtgiCensusCellShare;
+                DebugProgress.Begin("rtgi census: cells", 0);
+                rtgiCensusReport = Task.Run(() => WriteCensusReport(name, dir, census, passes, dynamic, cell, start, cellShare));
+                rtgiCensusStage = 4;
+                return;
+            }
+            rtgiCensusPass = pass;
+            UploadCensusPass(pass);
+            pass.Gpu = Array.Empty<Vector4>();
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"[VulkanSponza] rtgi census: size pass {pass.Index} at {pass.Spacing:0.##} m: {pass.Full:N0} samples, {pass.Pos.Length:N0} traced (share {pass.Keep:0.####}), placed in {pass.Ms:0} ms."));
+            rtgiCensusCursor = 0;
+            rtgiCensusDrain = 0;
+            rtgiCensusTraceFrom = tracer.TraceStats;
+            rtgiCensusClock.Restart();
+            rtgiCensusStage = 2;
+            return;
+        }
+        var current = rtgiCensusPass!;
+        if (rtgiCensusStage == 2)
         {
             var cur = (int)(rtgiCensusParity++ & 1u);
             var first = rtgiCensusCursor;
-            var count = Math.Min(rtgiCensusChunk, census.Pos.Length - first);
+            var count = Math.Min(rtgiCensusChunk, current.Pos.Length - first);
             if (count > 0)
             {
                 var rays = count * CensusRays;
                 graph.Dispatch(rtgiCensusRaysPassHandle, CensusDispatch(cur, 0, first, count, rays));
                 var rayBuf = rtgiCensusRayBufs[cur];
                 var hitBuf = rtgiCensusHitBufs[cur];
-                var seed = unchecked((uint)first * 0x9E3779B9u + 0x2545F491u);
+                var seed = unchecked((uint)first * 0x9E3779B9u + 0x2545F491u + (uint)current.Index * 0x85EBCA77u);
                 void EncodeAll(ExternalWorkSync sync, MetalRayTracer t) => t.EncodeTrace(sync, rayBuf, 0, hitBuf, 0, rays, seed);
                 // As the cache's own trace goes (RecordRtgi).
                 if (rtgiAsync && (device.Features & GraphicsFeatures.AsyncCompute) != 0)
@@ -387,20 +661,19 @@ internal sealed partial class SponzaLoop
                 else DeferTracerBatch(EncodeAll);
                 graph.Dispatch(rtgiCensusReducePassHandle, CensusDispatch(cur, 1, first, count, count));
                 rtgiCensusCursor += count;
-                rtgiCensusFrames++;
-                DebugProgress.Set("rtgi census: coarse rays", rtgiCensusCursor, census.Pos.Length);
+                current.Frames++;
             }
-            if (rtgiCensusCursor >= census.Pos.Length) rtgiCensusStage = 2;
+            if (rtgiCensusCursor >= current.Pos.Length) rtgiCensusStage = 3;
             return;
         }
-        if (rtgiCensusStage == 2)
+        if (rtgiCensusStage == 3)
         {
             if (++rtgiCensusDrain < 3) return;
             device.WaitIdle();
-            var wallMs = rtgiCensusClock.Elapsed.TotalMilliseconds;
+            current.WallMs = rtgiCensusClock.Elapsed.TotalMilliseconds;
             var stats = tracer.TraceStats;
-            DebugProgress.End("rtgi census: coarse rays");
-            var n = census.Pos.Length;
+            current.GpuMs = stats.TotalGpuMs - rtgiCensusTraceFrom.TotalGpuMs;
+            var n = current.Pos.Length;
             var results = new uint[4 * n];
             const int piece = 1 << 26;
             for (long off = 0; off < 16L * n; off += piece)
@@ -408,70 +681,34 @@ internal sealed partial class SponzaLoop
                 var len = (int)Math.Min(piece, 16L * n - off);
                 MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(rtgiCensusResults, (int)off, len).AsSpan()).CopyTo(results.AsSpan((int)(off / 4)));
             }
-            var timing = new CensusTiming((long)n * CensusRays, stats.TotalGpuMs - rtgiCensusTraceFrom.TotalGpuMs, wallMs, rtgiCensusFrames,
-                stats.Dispatches - rtgiCensusTraceFrom.Dispatches, stats.Failures - rtgiCensusTraceFrom.Failures);
+            current.Results = results;
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                $"[VulkanSponza] rtgi census: {timing.Rays / 1e6:0.0} M coarse rays in {rtgiCensusFrames} frames, {wallMs / 1000:0.0} s wall, {timing.GpuMs:0} ms the trace's GPU time; counting the cells."));
-            var instances = rtgiCensusInstances;
-            var sided = rtgiCensusSided;
-            rtgiCensusInstances = Array.Empty<RayQueryScene.Instance>();
-            var name = scene.Name;
-            var start = scene.StartPosition;
-            var cellShare = rtgiCensusCellShare;
-            var dir = rtgiCensusOut;
-            var dynamic = rtgiCensusDynamic;
-            var cell = rtgiCell;
-            DebugProgress.Begin("rtgi census: cells", 0);
-            rtgiCensusReport = Task.Run(() => WriteCensusReport(name, dir, census, results, instances, sided, dynamic, timing, cell, start, cellShare));
-            rtgiCensusStage = 3;
+                $"[VulkanSponza] rtgi census: size pass {current.Index}: {(long)n * CensusRays / 1e6:0.0} M rays in {current.Frames} frames, {current.WallMs / 1000:0.0} s wall, {current.GpuMs:0} ms the trace's GPU time."));
+            rtgiCensusPasses.Add(current);
+            // On a worker: this pass's results taken up, the next pass's samples placed from them (or none left).
+            var done = rtgiCensusPasses.ToArray();
+            var most = rtgiCensusMost;
+            var finest = rtgiCell;
+            var topSize = rtgiCell * MathF.Pow(2f, RtgiTopLevel);
+            rtgiCensusPassBuild = Task.Run<CensusPass?>(() =>
+            {
+                TakeCensusResults(current, finest, topSize);
+                return done.Length < CensusPassSpacing.Length ? BuildCensusPass(census, done.Length, done, most) : null;
+            });
+            rtgiCensusStage = 1;
             return;
         }
-        if (rtgiCensusStage == 3 && rtgiCensusReport is { IsCompleted: true } report)
+        if (rtgiCensusStage == 4 && rtgiCensusReport is { IsCompleted: true } report)
         {
             DebugProgress.End("rtgi census: cells");
-            rtgiCensusStage = 4;
+            rtgiCensusStage = 5;
             Console.WriteLine(report.IsFaulted ? $"[VulkanSponza] rtgi census: failed: {report.Exception}" : report.Result);
             host.RequestClose();
         }
     }
 
-    private sealed record CensusTiming(long Rays, double GpuMs, double WallMs, int Frames, long Dispatches, long Failures);
-
-    // The coarse samples' grids for the nearest: a fine one sized to their density (~4 a cell where they are densest --
-    // Intel Sponza's 13 M samples over 12,000 m2 put ~60 in each 25 cm cell, and its count of cells ran for minutes) and
-    // the coarse one where the fine finds none near enough to be sure of.
+    // A pass's samples' grid for the nearest: cells of its traced spacing, the samples sorted by cell.
     private sealed class CensusGrid
-    {
-        private readonly CensusGridLevel fine, coarse;
-        public CensusGrid(Vector3[] pos, byte[] side, float fineSize, float coarseSize)
-        {
-            coarse = new CensusGridLevel(pos, side, coarseSize);
-            fine = fineSize < 0.75f * coarseSize ? new CensusGridLevel(pos, side, fineSize) : coarse;
-        }
-
-        // The nearest sample facing the same side, else the nearest of any (-1: none within eight coarse cells, searched
-        // outward). The fine grid's answer stands when it lies within one fine cell: nothing outside its 27 can be nearer.
-        public int Nearest(Vector3 q, uint wantSide)
-        {
-            if (!ReferenceEquals(fine, coarse))
-            {
-                var (j, d2) = fine.Nearest(q, wantSide, 1, true);
-                if (j >= 0 && d2 <= fine.Size * fine.Size) return j;
-            }
-            foreach (var reach in CensusReaches)
-            {
-                var (same, _) = coarse.Nearest(q, wantSide, reach, true);
-                if (same >= 0) return same;
-                var (any, _) = coarse.Nearest(q, wantSide, reach, false);
-                if (any >= 0) return any;
-            }
-            return -1;
-        }
-    }
-
-    private static readonly int[] CensusReaches = { 1, 2, 4, 8 };
-
-    private sealed class CensusGridLevel
     {
         public readonly float Size;
         private readonly Vector3[] pos;
@@ -479,7 +716,7 @@ internal sealed partial class SponzaLoop
         private readonly int[] order;
         private readonly Dictionary<long, (int Start, int Count)> cells = new();
 
-        public CensusGridLevel(Vector3[] pos, byte[] side, float size)
+        public CensusGrid(Vector3[] pos, byte[] side, float size)
         {
             this.pos = pos; this.side = side; Size = size;
             var keys = new long[pos.Length];
@@ -498,28 +735,37 @@ internal sealed partial class SponzaLoop
         private long KeyOf(Vector3 p) => Key((int)MathF.Floor(p.X / Size), (int)MathF.Floor(p.Y / Size), (int)MathF.Floor(p.Z / Size));
         private static long Key(int x, int y, int z) => ((long)(x + (1 << 20)) << 42) | ((long)(y + (1 << 20)) << 21) | (long)(z + (1 << 20));
 
-        // The nearest within `reach` cells (facing `wantSide` only, or any) and its squared distance.
-        public (int Index, float D2) Nearest(Vector3 q, uint wantSide, int reach, bool sameOnly)
+        // The nearest sample facing the same side, else (unless `sameOnly`) the nearest of any, searched outward to `most`
+        // cells; and its squared distance (-1: none).
+        public (int Index, float D2) Nearest(Vector3 q, uint wantSide, int most, bool sameOnly = false)
         {
             int cx = (int)MathF.Floor(q.X / Size), cy = (int)MathF.Floor(q.Y / Size), cz = (int)MathF.Floor(q.Z / Size);
-            var best = -1;
-            var bestD2 = float.MaxValue;
-            for (var dz = -reach; dz <= reach; dz++)
-            for (var dy = -reach; dy <= reach; dy++)
-            for (var dx = -reach; dx <= reach; dx++)
+            foreach (var reach in CensusReaches)
             {
-                if (!cells.TryGetValue(Key(cx + dx, cy + dy, cz + dz), out var run)) continue;
-                for (var k = run.Start; k < run.Start + run.Count; k++)
+                if (reach > most) break;
+                int same = -1, any = -1;
+                float bestSame = float.MaxValue, bestAny = float.MaxValue;
+                for (var dz = -reach; dz <= reach; dz++)
+                for (var dy = -reach; dy <= reach; dy++)
+                for (var dx = -reach; dx <= reach; dx++)
                 {
-                    var i = order[k];
-                    if (sameOnly && side[i] != wantSide) continue;
-                    var d2 = Vector3.DistanceSquared(pos[i], q);
-                    if (d2 < bestD2) { bestD2 = d2; best = i; }
+                    if (!cells.TryGetValue(Key(cx + dx, cy + dy, cz + dz), out var run)) continue;
+                    for (var k = run.Start; k < run.Start + run.Count; k++)
+                    {
+                        var i = order[k];
+                        var d2 = Vector3.DistanceSquared(pos[i], q);
+                        if (d2 < bestAny) { bestAny = d2; any = i; }
+                        if (side[i] == wantSide && d2 < bestSame) { bestSame = d2; same = i; }
+                    }
                 }
+                if (same >= 0) return (same, bestSame);
+                if (any >= 0 && !sameOnly) return (any, bestAny);
             }
-            return (best, bestD2);
+            return (-1, float.PositiveInfinity);
         }
     }
+
+    private static readonly int[] CensusReaches = { 1, 2, 4, 8 };
 
     // A cell's key: its coordinates at its level (x 19 bits, y and z 20), its side, and bit 0 a flag (a junction in the
     // own-level lists, own-level in the all-levels ones): sorted, a cell's two flag values lie side by side.
@@ -562,57 +808,76 @@ internal sealed partial class SponzaLoop
         public double Cells, Own, Fine, Level0, Junction, Coarse;
     }
 
-    private static string WriteCensusReport(string sceneName, string dir, CensusLayout census, uint[] results,
-        RayQueryScene.Instance[] instances, bool[] sided, int dynamicCount, CensusTiming timing, float finest, Vector3 start, float cellShare)
+    private static string WriteCensusReport(string sceneName, string dir, CensusGeometry census, CensusPass[] passes,
+        int dynamicCount, float finest, Vector3 start, float cellShare)
     {
+        var instances = census.Instances;
         var levels = RtgiTopLevel + 1;
-        var n = census.Pos.Length;
         var topSize = finest * MathF.Pow(2f, RtgiTopLevel);
         int LevelOf(float size) => Math.Clamp((int)MathF.Floor(MathF.Log2(size / finest) + 1e-4f), 0, RtgiTopLevel);
         float SizeOfLevel(int l) => finest * MathF.Pow(2f, l);
+        var lastPass = passes.Length - 1;
 
-        // The size field: each sample's harmonic distance, its size and level (to the cache's top), buried or not, its
-        // nearest hit.
-        var size = new float[n];
-        var buried = new bool[n];
-        var nearest = new float[n];
-        double areaBuried = 0, areaBuriedIgnoringSided = 0, raysMet = 0, raysBack = 0, raysSidedBack = 0, raysNear = 0, sampleWeight = 0;
+        // Every pass's samples as one list (offset by pass), and the size field's area statistics: a sample stands for
+        // its area where nothing below refined it (the last pass's always).
+        var offsets = new int[passes.Length + 1];
+        for (var p = 0; p < passes.Length; p++) offsets[p + 1] = offsets[p] + passes[p].Pos.Length;
+        var total = offsets[^1];
+        var size = new float[total];
+        var buried = new bool[total];
+        var nearest = new float[total];
+        var passOf = new byte[total];
+        double areaBuried = 0, areaBuriedFlag = 0, raysMet = 0, raysBack = 0, raysSidedBack = 0, raysNear = 0, sampleWeight = 0;
         var areaAtLevel = new double[levels];
-        var samplesAtLevel = new long[levels];
         var harmonicBands = new[] { 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, double.MaxValue };
         var areaInBand = new double[harmonicBands.Length];
-        for (var i = 0; i < n; i++)
+        long bad = 0;
+        for (var p = 0; p < passes.Length; p++)
         {
-            var invSum = BitConverter.UInt32BitsToSingle(results[4 * i]);
-            var counts = results[4 * i + 1];
-            int met = (int)(counts & 0xFF), back = (int)((counts >> 8) & 0xFF), near = (int)((counts >> 16) & 0xFF), sidedBack = (int)(counts >> 24);
-            nearest[i] = met > 0 ? BitConverter.UInt32BitsToSingle(results[4 * i + 2]) : float.PositiveInfinity;
-            var harmonic = invSum > 0f ? CensusRays / invSum : float.PositiveInfinity;
-            size[i] = Math.Clamp(0.1f * harmonic, finest, topSize);
-            buried[i] = back * 2 > CensusRays;
-            var a = census.Area[i];
-            // Were double-sidedness ignored (the census before it): a double-sided back face a back face too.
-            if ((back + sidedBack) * 2 > CensusRays) areaBuriedIgnoringSided += a;
-            raysMet += met * (double)a; raysBack += back * (double)a; raysSidedBack += sidedBack * (double)a; raysNear += near * (double)a; sampleWeight += a;
-            if (buried[i]) { areaBuried += a; continue; }
-            var l = LevelOf(size[i]);
-            areaAtLevel[l] += a;
-            samplesAtLevel[l]++;
-            var b = 0;
-            while (b < harmonicBands.Length - 1 && harmonic > harmonicBands[b]) b++;
-            areaInBand[b] += a;
+            var pass = passes[p];
+            bad += pass.Bad;
+            for (var i = 0; i < pass.Pos.Length; i++)
+            {
+                var g = offsets[p] + i;
+                size[g] = pass.Size[i]; buried[g] = pass.Buried[i]; nearest[g] = pass.Nearest[i]; passOf[g] = (byte)p;
+                if (pass.Refine[i]) continue;
+                var invSum = BitConverter.UInt32BitsToSingle(pass.Results[4 * i]);
+                var counts = pass.Results[4 * i + 1];
+                int met = (int)(counts & 0xFF), back = (int)((counts >> 8) & 0xFF), near = (int)((counts >> 16) & 0xFF), sidedBack = (int)(counts >> 24);
+                var a = pass.Area;
+                raysMet += met * (double)a; raysBack += back * (double)a; raysSidedBack += sidedBack * (double)a; raysNear += near * (double)a; sampleWeight += a;
+                // Were two-sidedness ignored: a two-sided back face a back face too.
+                if ((back + sidedBack) * 2 > CensusRays) areaBuriedFlag += a;
+                if (pass.Buried[i]) { areaBuried += a; continue; }
+                areaAtLevel[LevelOf(pass.Size[i])] += a;
+                var harmonic = invSum > 0f ? CensusRays / invSum : float.PositiveInfinity;
+                var b = 0;
+                while (b < harmonicBands.Length - 1 && harmonic > harmonicBands[b]) b++;
+                areaInBand[b] += a;
+            }
+        }
+        // The finest pass's sample near a point: one facing its side within 1.5 of a pass's traced spacing, else the first
+        // pass's nearest (searched outward to 8 cells; facing another side only where none faces its own). A finer pass's
+        // other side first doubled the crevices testbed's cells: the floor's points took the wall's samples.
+        int FinestNear(Vector3 q, uint side)
+        {
+            for (var p = lastPass; p > 0; p--)
+            {
+                var (j, d2) = passes[p].Grid!.Nearest(q, side, 1, sameOnly: true);
+                var reach = 1.5f * passes[p].Effective;
+                if (j >= 0 && d2 <= reach * reach) return offsets[p] + j;
+            }
+            var (j0, _) = passes[0].Grid!.Nearest(q, side, 8);
+            return j0 >= 0 ? j0 : -1;
         }
 
-        // The cells: every triangle (each side of a double-sided one) at half its local size, each point's cell at its
-        // own level (its lattice point's coarse sample's size), a junction cell where that sample's nearest hit is within
-        // CensusJunctionReach of the cell's size; the levels above from those by halving their coordinates.
+        // The cells: every triangle (each side of a two-sided one) in pieces at half its local size, each point's cell at
+        // its own level (its lattice point's sample's size), a junction cell where that sample's nearest hit is within
+        // min(CensusJunctionReach cell sizes, CensusJunctionMost); the levels above from those by halving their
+        // coordinates. The cells as sorted arrays of keys, not sets: the jungle's hundreds of millions in HashSets (24+ B
+        // each, and a merge's copy) took 22 GB of a 16 GB machine. Each run's points de-duplicated in a small set, the
+        // worker's list compacted as it grows, the lists sorted together at the end.
         var clock = System.Diagnostics.Stopwatch.StartNew();
-        var coarseGrid = CensusSpacing / (float)Math.Sqrt(Math.Min(1.0, census.Keep));
-        var density = n / Math.Max(census.SurfaceArea + census.SidedArea, 1e-6);
-        var grid = new CensusGrid(census.Pos, census.Side, Math.Clamp(2f / (float)Math.Sqrt(density), 0.02f, coarseGrid), coarseGrid);
-        // The cells as sorted arrays of keys, not sets: the jungle's hundreds of millions in HashSets (24+ B each, and a
-        // merge's copy) took 22 GB of a 16 GB machine and the count never finished. Each run's points de-duplicated in
-        // a small set, the worker's list compacted as it grows, the lists sorted together at the end.
         var parts = Enumerable.Range(0, levels).Select(_ => new List<List<long>>()).ToArray();
         long points = 0, pointsBuried = 0, latticeFilled = 0, latticeNone = 0;
         var gate = new object();
@@ -625,18 +890,15 @@ internal sealed partial class SponzaLoop
             work = work.Where((_, w) => NearHash((uint)w * 0x27D4EB2Fu + 0x165667B1u) <= shareBits).ToArray();
         }
         var scale = 1.0 / cellShare;
-        // The lattice's step (the traced samples' spacing) and the longest edge of a piece.
-        var lat = coarseGrid;
-        var pieceMost = CensusPieceLattices * lat;
         var done = 0;
         Parallel.ForEach(work, () => (Sets: Enumerable.Range(0, levels).Select(_ => new HashSet<long>()).ToArray(),
-            Lists: Enumerable.Range(0, levels).Select(_ => new List<long>()).ToArray(), Compacted: new int[levels], Points: 0L, Buried: 0L, Filled: 0L, None: 0L), (item, _, local) =>
+            Lists: Enumerable.Range(0, levels).Select(_ => new List<long>()).ToArray(), Compacted: new int[levels],
+            Points: 0L, Buried: 0L, Filled: 0L, None: 0L), (item, _, local) =>
         {
             var inst = instances[item.Inst];
             var sets = local.Sets;
             long pts = 0, bur = 0, filled = 0, none = 0;
-            var faces = sided[item.Inst] ? 2 : 1;
-            var pieces = new Stack<(Vector3, Vector3, Vector3)>();
+            var stack = new Stack<(Vector3 A, Vector3 B, Vector3 C, int Level)>();
             for (var t = item.First; t < item.First + item.Count; t++)
             {
                 var (ta, tb, tc) = CensusTriangle(inst, t);
@@ -644,44 +906,42 @@ internal sealed partial class SponzaLoop
                 var tlen = tcross.Length();
                 if (!(tlen > 1e-12f)) continue;
                 var nrm = tcross / tlen;
-                // Big triangles in pieces no edge longer than CensusPieceLattices lattice steps, each with its own local
-                // size: whole, one 1 km2 terrain triangle of the jungle's was one worker's for most of an hour (its
-                // lattice millions of points, its fine walk at the smallest size anywhere on it).
-                pieces.Clear();
-                pieces.Push((ta, tb, tc));
-                while (pieces.TryPop(out var piece))
+                var faces = census.TwoSided(item.Inst, t) ? 2 : 1;
+                for (var face = 0; face < faces; face++)
                 {
-                    var (pa, pb, pc) = piece;
-                    float ab = (pb - pa).LengthSquared(), bc = (pc - pb).LengthSquared(), ca = (pa - pc).LengthSquared();
-                    if (MathF.Max(ab, MathF.Max(bc, ca)) > pieceMost * pieceMost)
+                    var side = NearSide(face == 0 ? nrm : -nrm);
+                    var origin = NearGridOrigin(side);
+                    // In pieces no edge longer than CensusPieceLattices lattice steps of the pass at hand: whole, one 1 km2
+                    // terrain triangle of the jungle's was one worker's for most of an hour. A piece whose lattice finds a
+                    // finer pass's samples is taken again at that pass's spacing.
+                    stack.Push((ta, tb, tc, 0));
+                    while (stack.TryPop(out var piece))
                     {
-                        if (ab >= bc && ab >= ca) { var m = (pa + pb) * 0.5f; pieces.Push((pa, m, pc)); pieces.Push((m, pb, pc)); }
-                        else if (bc >= ca) { var m = (pb + pc) * 0.5f; pieces.Push((pa, pb, m)); pieces.Push((pa, m, pc)); }
-                        else { var m = (pc + pa) * 0.5f; pieces.Push((pa, pb, m)); pieces.Push((m, pb, pc)); }
-                        continue;
-                    }
-                    var len = Vector3.Cross(pb - pa, pc - pa).Length();
-                    if (!(len > 1e-12f)) continue;
-                    // Rows parallel to the longest edge, `h` apart, points `h` apart along each (the corners included).
-                    Vector3 ea = pa, eb = pb, apex = pc;
-                    if (bc >= ab && bc >= ca) { ea = pb; eb = pc; apex = pa; }
-                    else if (ca >= ab && ca >= bc) { ea = pc; eb = pa; apex = pb; }
-                    var baseLen = (eb - ea).Length();
-                    var height = len / MathF.Max(baseLen, 1e-9f);
-                    for (var face = 0; face < faces; face++)
-                    {
-                        var side = NearSide(face == 0 ? nrm : -nrm);
-                        var origin = NearGridOrigin(side);
-                        // The nearest coarse sample at each point of a lattice over it at the traced samples' spacing (25
-                        // cm, wider where they are a share), and the local size the smallest
-                        // live one's. Each fine point takes its lattice point's sample: a grid search per fine point -- San
-                        // Miguel's 50 M+ of them, big triangles at 2.5 cm -- ran the count past 25 minutes. Area sampling
-                        // leaves tiny triangles without a sample of their own: a lattice point with none near takes its
-                        // row's nearest that has one, or the nearest row's.
+                        var (pa, pb, pc, level) = piece;
+                        var lat = passes[level].Effective;
+                        if (CensusLongest(pa, pb, pc) > CensusPieceLattices * lat)
+                        {
+                            var (h0, h1) = CensusBisect(pa, pb, pc);
+                            stack.Push((h0.Item1, h0.Item2, h0.Item3, level));
+                            stack.Push((h1.Item1, h1.Item2, h1.Item3, level));
+                            continue;
+                        }
+                        var len = Vector3.Cross(pb - pa, pc - pa).Length();
+                        if (!(len > 1e-12f)) continue;
+                        // Rows parallel to the longest edge, points along each (the corners included).
+                        Vector3 ea = pa, eb = pb, apex = pc;
+                        float ab = (pb - pa).LengthSquared(), bc = (pc - pb).LengthSquared(), ca = (pa - pc).LengthSquared();
+                        if (bc >= ab && bc >= ca) { ea = pb; eb = pc; apex = pa; }
+                        else if (ca >= ab && ca >= bc) { ea = pc; eb = pa; apex = pb; }
+                        var baseLen = (eb - ea).Length();
+                        var height = len / MathF.Max(baseLen, 1e-9f);
+                        // The lattice: its points' finest samples, and the local size the smallest live one's. A lattice
+                        // point with none near takes its row's nearest that has one, or the nearest row's.
                         var rows0 = Math.Max(1, (int)MathF.Ceiling(height / lat));
                         var lattice = new int[rows0 + 1][];
                         var least = topSize;
                         var anyRow = -1;
+                        var finer = false;
                         for (var r = 0; r <= rows0; r++)
                         {
                             var f = r / (float)rows0;
@@ -692,36 +952,44 @@ internal sealed partial class SponzaLoop
                             var rowHas = false;
                             for (var k = 0; k <= m; k++)
                             {
-                                var j = row[k] = grid.Nearest(m == 0 ? p0 : p0 + (p1 - p0) * (k / (float)m), side);
+                                var j = row[k] = FinestNear(m == 0 ? p0 : p0 + (p1 - p0) * (k / (float)m), side);
                                 if (j < 0) continue;
                                 rowHas = true;
+                                if (passOf[j] > level) finer = true;
                                 if (!buried[j]) least = MathF.Min(least, size[j]);
                             }
                             if (rowHas) anyRow = r;
-                            else continue;
-                            for (var k = 0; k <= m; k++)
-                            {
-                                if (row[k] >= 0) continue;
-                                for (var d = 1; d <= m; d++)
-                                {
-                                    if (k - d >= 0 && row[k - d] >= 0) { row[k] = row[k - d]; break; }
-                                    if (k + d <= m && row[k + d] >= 0) { row[k] = row[k + d]; break; }
-                                }
-                                filled++;
-                            }
+                        }
+                        if (finer && level < lastPass)
+                        {
+                            stack.Push((pa, pb, pc, level + 1));
+                            continue;
                         }
                         if (anyRow < 0) none++;
                         else
                             for (var r = 0; r <= rows0; r++)
                             {
-                                if (lattice[r].Any(j => j >= 0)) continue;
+                                var row = lattice[r];
+                                if (row.Any(j => j >= 0))
+                                {
+                                    for (var k = 0; k < row.Length; k++)
+                                    {
+                                        if (row[k] >= 0) continue;
+                                        for (var d = 1; d < row.Length; d++)
+                                        {
+                                            if (k - d >= 0 && row[k - d] >= 0) { row[k] = row[k - d]; break; }
+                                            if (k + d < row.Length && row[k + d] >= 0) { row[k] = row[k + d]; break; }
+                                        }
+                                        filled++;
+                                    }
+                                    continue;
+                                }
                                 var from = lattice[anyRow];
                                 for (var d = 1; d <= rows0; d++)
                                 {
                                     if (r - d >= 0 && lattice[r - d].Any(j => j >= 0)) { from = lattice[r - d]; break; }
                                     if (r + d <= rows0 && lattice[r + d].Any(j => j >= 0)) { from = lattice[r + d]; break; }
                                 }
-                                var row = lattice[r];
                                 for (var k = 0; k < row.Length; k++) row[k] = from[(int)MathF.Round(k / (float)Math.Max(1, row.Length - 1) * (from.Length - 1))];
                                 filled += row.Length;
                             }
@@ -744,7 +1012,7 @@ internal sealed partial class SponzaLoop
                                 var l = LevelOf(j >= 0 ? size[j] : topSize);
                                 var cs = SizeOfLevel(l);
                                 var g = (p0 + (p1 - p0) * along - origin) / cs;
-                                var junctionHere = j >= 0 && nearest[j] < CensusJunctionReach * cs;
+                                var junctionHere = j >= 0 && nearest[j] < MathF.Min(CensusJunctionReach * cs, CensusJunctionMost);
                                 sets[l].Add(CensusCellKey((int)MathF.Floor(g.X), (int)MathF.Floor(g.Y), (int)MathF.Floor(g.Z), side) | (junctionHere ? 1L : 0L));
                                 pts++;
                             }
@@ -799,25 +1067,28 @@ internal sealed partial class SponzaLoop
         var ownAt = own.Select(s => (long)(s.Length * scale)).ToArray();
         var junctionAt = own.Select(s => (long)(s.LongCount(k => (k & 1) != 0) * scale)).ToArray();
         long cells = cellsAt.Sum(), ownCells = ownAt.Sum(), level0 = cellsAt[0], fine = cellsAt[0] + cellsAt[1], junctions = junctionAt.Sum();
-        var coarse = census.FullSamples;
+        long sizeSamples = passes.Sum(p => p.Full);
         var slotBytes = CensusSlotBytes.Sum(s => s.Bytes);
         var compactBytes = CensusCompactBytes;
         var poolBytes = CensusPoolBytes.Sum(s => s.Bytes);
         long pool = (long)CensusPoolSlots * poolBytes;
-        var rate = timing.GpuMs > 0 ? timing.Rays / (timing.GpuMs / 1000.0) : timing.Rays / (timing.WallMs / 1000.0);
-        var wallRate = timing.Rays / (timing.WallMs / 1000.0);
+        long traced = passes.Sum(p => (long)p.Pos.Length * CensusRays);
+        var gpuMs = passes.Sum(p => p.GpuMs);
+        var wallMs = passes.Sum(p => p.WallMs);
+        var rate = gpuMs > 0 ? traced / (gpuMs / 1000.0) : traced / (wallMs / 1000.0);
+        var wallRate = traced / (wallMs / 1000.0);
         double Full(double rays) => rays / rate;
         double Sliced(double rays) => rays / (rate * CensusSlice);
         const double Mb = 1048576.0;
-        long shipped = coarse * CensusShipSizeField + cells * CensusShipCell;
+        long shipped = sizeSamples * CensusShipSizeField + cells * CensusShipCell;
         long nearCompact = level0 * CensusNearCompact, nearToday = level0 * CensusNearToday;
         long runtime = cells * slotBytes, runtimeCompact = cells * compactBytes;
-        long cookSize = coarse * CensusRays, cookInside = junctions * CensusInsideRays, cookNeighbours = cells * CensusNeighbourRays;
+        long cookSize = sizeSamples * CensusRays, cookInside = junctions * CensusInsideRays, cookNeighbours = cells * CensusNeighbourRays;
         long cookRays = cookSize + cookInside + cookNeighbours, nearRays = level0 * CensusNearRays;
         long settle8 = ownCells * 8, settle64 = ownCells * 64;
 
-        // The chunks: each cell by its centre, each coarse sample by its point; resident, those whose box lies within
-        // R of the start camera (cells bigger than the chunk always).
+        // The chunks: each cell by its centre, each size sample by its point; resident, those whose box lies within R of
+        // the start camera (cells bigger than the chunk always).
         var chunkSizes = new[] { 16f, 32f, 64f };
         var reaches = new[] { 32f, 64f };
         var chunkStats = new Dictionary<string, object>[chunkSizes.Length];
@@ -853,8 +1124,11 @@ internal sealed partial class SponzaLoop
                     if (isJunction) e.Junction += scale;
                 }
             }
-            var perSample = census.Keep > 0 ? 1.0 / census.Keep : 1.0;
-            foreach (var p in census.Pos) At(p).Coarse += perSample;
+            foreach (var pass in passes)
+            {
+                var perSample = pass.Keep > 0 ? 1.0 / pass.Keep : 1.0;
+                foreach (var p in pass.Pos) At(p).Coarse += perSample;
+            }
             var list = chunks.Values.ToArray();
             double Mean(Func<CensusChunk, double> f) => list.Length > 0 ? list.Average(f) : 0;
             double Max(Func<CensusChunk, double> f) => list.Length > 0 ? list.Max(f) : 0;
@@ -894,37 +1168,42 @@ internal sealed partial class SponzaLoop
 
         var extent = census.Max - census.Min;
         var share = (double v) => v / Math.Max(sampleWeight, 1e-9);
+        object Tally((long Tris, double Area) t) => new Dictionary<string, object> { ["triangles"] = t.Tris, ["area_m2"] = t.Area };
+        var passStats = passes.Select(p => (object)new Dictionary<string, object>
+        {
+            ["spacing_m"] = p.Spacing, ["traced_spacing_m"] = p.Effective, ["samples"] = p.Full, ["samples_traced"] = p.Pos.Length,
+            ["traced_share"] = p.Keep, ["size_field_rays"] = p.Full * CensusRays, ["rays_traced"] = (long)p.Pos.Length * CensusRays,
+            ["refined_share"] = p.Refine.Length > 0 ? p.Refine.Count(r => r) / (double)p.Refine.Length : 0,
+            ["place_ms"] = p.Ms, ["trace_gpu_ms"] = p.GpuMs, ["trace_wall_ms"] = p.WallMs, ["trace_frames"] = p.Frames,
+        }).ToArray();
         var report = new Dictionary<string, object>
         {
             ["scene"] = sceneName,
             ["geometry"] = new Dictionary<string, object>
             {
                 ["instances"] = instances.Length, ["dynamic_instances_left_out"] = dynamicCount,
-                ["double_sided_instances"] = sided.Count(d => d),
-                ["triangles"] = census.Triangles, ["degenerate_triangles"] = census.Degenerate,
-                ["double_sided_triangles"] = census.SidedTriangles,
-                ["area_m2"] = census.SurfaceArea, ["double_sided_area_m2"] = census.SidedArea,
-                ["sampled_area_m2"] = census.SurfaceArea + census.SidedArea,
+                ["triangles"] = census.Triangles, ["degenerate_triangles"] = census.Degenerate, ["area_m2"] = census.Area,
+                ["two_sided_by_double_sided_flag"] = Tally(census.ByFlag), ["two_sided_by_open_sheet"] = Tally(census.ByOpen),
+                ["two_sided_by_alpha_test"] = Tally(census.ByAlpha), ["two_sided"] = Tally(census.ByTwoSided),
+                ["weld_m"] = CensusWeld, ["geometry_ms"] = census.Ms,
                 ["bounds_min"] = new[] { census.Min.X, census.Min.Y, census.Min.Z }, ["bounds_max"] = new[] { census.Max.X, census.Max.Y, census.Max.Z },
                 ["extent_m"] = new[] { extent.X, extent.Y, extent.Z },
                 ["start_camera"] = new[] { start.X, start.Y, start.Z },
             },
             ["coarse"] = new Dictionary<string, object>
             {
-                ["sampling"] = "by area", ["spacing_m"] = CensusSpacing, ["rays_per_sample"] = CensusRays, ["reach_m"] = CensusReach, ["lift_m"] = CensusLift,
-                ["size_cap_m"] = topSize,
-                ["samples"] = coarse, ["samples_traced"] = n, ["traced_share"] = census.Keep, ["place_ms"] = census.Ms,
-                ["size_field_rays"] = cookSize,
-                ["rays_traced"] = timing.Rays, ["trace_gpu_ms"] = timing.GpuMs, ["trace_wall_ms"] = timing.WallMs, ["trace_frames"] = timing.Frames,
-                ["trace_dispatches"] = timing.Dispatches, ["trace_failures"] = timing.Failures,
-                ["rate_rays_per_s_gpu"] = rate, ["rate_rays_per_s_wall"] = wallRate,
+                ["sampling"] = "by area, coarse first", ["passes"] = passStats, ["refine_rule"] = $"buried, or size < {CensusRefineFactor} x the pass's spacing",
+                ["rays_per_sample"] = CensusRays, ["reach_m"] = CensusReach, ["lift_m"] = CensusLift, ["size_cap_m"] = topSize,
+                ["samples"] = sizeSamples, ["samples_traced"] = total, ["size_field_rays"] = cookSize,
+                ["rays_traced"] = traced, ["trace_gpu_ms"] = gpuMs, ["trace_wall_ms"] = wallMs,
+                ["rate_rays_per_s_gpu"] = rate, ["rate_rays_per_s_wall"] = wallRate, ["hits_with_bad_triangle_index"] = bad,
                 ["area_buried_share"] = share(areaBuried),
-                ["area_buried_share_ignoring_double_sided"] = share(areaBuriedIgnoringSided),
+                ["area_buried_share_ignoring_two_sided"] = share(areaBuriedFlag),
                 ["ray_met_share"] = share(raysMet) / CensusRays,
                 ["ray_back_share"] = share(raysBack) / CensusRays,
-                ["ray_double_sided_back_share"] = share(raysSidedBack) / CensusRays,
+                ["ray_two_sided_back_share"] = share(raysSidedBack) / CensusRays,
                 ["ray_within_0_25m_share"] = share(raysNear) / CensusRays,
-                ["area_m2_by_level"] = areaAtLevel, ["traced_samples_by_level"] = samplesAtLevel,
+                ["area_m2_by_level"] = areaAtLevel,
                 ["harmonic_band_upper_m"] = harmonicBands.Select(b => b == double.MaxValue ? -1 : b).ToArray(), ["area_m2_by_harmonic_band"] = areaInBand,
             },
             ["cells"] = new Dictionary<string, object>
@@ -932,20 +1211,20 @@ internal sealed partial class SponzaLoop
                 ["finest_m"] = finest, ["top_level"] = RtgiTopLevel, ["top_m"] = topSize,
                 ["by_level"] = cellsAt, ["own_by_level"] = ownAt, ["junction_by_level"] = junctionAt,
                 ["total"] = cells, ["own_total"] = ownCells, ["junction_total"] = junctions, ["level0_1"] = fine,
-                ["points"] = points, ["points_buried_skipped"] = pointsBuried,
                 ["cell_share"] = cellShare,
+                ["points"] = points, ["points_buried_skipped"] = pointsBuried,
                 ["lattice_points_filled_outward"] = latticeFilled, ["triangle_sides_without_sample"] = latticeNone,
                 ["enumerate_ms"] = enumerateMs,
             },
             ["costs"] = new Dictionary<string, object>
             {
-                ["ship_size_field_b_per_coarse_sample"] = CensusShipSizeField, ["ship_b_per_cell"] = CensusShipCell,
+                ["ship_size_field_b_per_sample"] = CensusShipSizeField, ["ship_b_per_cell"] = CensusShipCell,
                 ["near_compact_b_per_level0_cell"] = CensusNearCompact, ["near_today_b_per_level0_cell"] = CensusNearToday,
                 ["runtime_b_per_slot"] = slotBytes, ["runtime_slot_breakdown"] = CensusSlotBytes.ToDictionary(s => s.Name, s => (object)s.Bytes),
                 ["compact_b_per_cell"] = compactBytes, ["compact_layout_bits"] = CensusCompactBits.ToDictionary(f => f.Name, f => (object)f.Bits),
                 ["pool_slots"] = CensusPoolSlots, ["pool_b_per_slot"] = poolBytes, ["pool_layout"] = CensusPoolBytes.ToDictionary(f => f.Name, f => (object)f.Bytes),
-                ["cook_rays_per_coarse_sample"] = CensusRays, ["inside_rays_per_junction_cell"] = CensusInsideRays,
-                ["junction_rule"] = $"own-level cell whose point's coarse sample met a surface within {CensusJunctionReach} x the cell size",
+                ["rays_per_size_sample"] = CensusRays, ["inside_rays_per_junction_cell"] = CensusInsideRays,
+                ["junction_rule"] = $"own-level cell whose point's sample met a surface within min({CensusJunctionReach} x the cell size, {CensusJunctionMost} m)",
                 ["neighbour_rays_per_cell"] = CensusNeighbourRays, ["near_rays_per_level0_cell"] = CensusNearRays,
                 ["settle_rays_per_sample"] = 1, ["slice_share"] = CensusSlice,
             },
@@ -955,7 +1234,6 @@ internal sealed partial class SponzaLoop
                 ["near_transfer_compact_mb"] = nearCompact / Mb, ["near_transfer_today_mb"] = nearToday / Mb,
                 ["runtime_gpu_mb"] = runtime / Mb, ["runtime_compact_all_mb"] = runtimeCompact / Mb, ["pool_mb"] = pool / Mb,
                 ["cook_rays"] = cookRays, ["cook_rays_size_field"] = cookSize, ["cook_rays_inside"] = cookInside, ["cook_rays_neighbours"] = cookNeighbours,
-                ["cook_rays_inside_if_all_level0_1"] = fine * CensusInsideRays,
                 ["cook_s_full"] = Full(cookRays), ["cook_s_slice"] = Sliced(cookRays),
                 ["near_rays"] = nearRays, ["near_s_full"] = Full(nearRays), ["near_s_slice"] = Sliced(nearRays),
                 ["settle8_rays"] = settle8, ["settle8_s_full"] = Full(settle8), ["settle8_s_slice"] = Sliced(settle8),
@@ -975,12 +1253,15 @@ internal sealed partial class SponzaLoop
         void Line(FormattableString s) => text.AppendLine(s.ToString(inv));
         Line($"RTGI census: {sceneName} ({DateTime.Now:yyyy-MM-dd HH:mm})");
         Line($"");
-        Line($"Geometry: {instances.Length:N0} static instances ({dynamicCount} dynamic left out, {sided.Count(d => d):N0} double-sided), {census.Triangles:N0} triangles ({census.Degenerate:N0} degenerate, {census.SidedTriangles:N0} double-sided), {census.SurfaceArea:N0} m2 (+{census.SidedArea:N0} m2 the double-sided's back sides)");
+        Line($"Geometry: {instances.Length:N0} static instances ({dynamicCount} dynamic left out), {census.Triangles:N0} triangles ({census.Degenerate:N0} degenerate), {census.Area:N0} m2 (in {census.Ms / 1000:0.0} s)");
+        Line($"  two-sided: {census.ByTwoSided.Tris:N0} triangles, {census.ByTwoSided.Area:N0} m2 -- open sheets {census.ByOpen.Tris:N0} / {census.ByOpen.Area:N0} m2, alpha-tested {census.ByAlpha.Tris:N0} / {census.ByAlpha.Area:N0} m2; the double-sided flag's {census.ByFlag.Tris:N0} / {census.ByFlag.Area:N0} m2 (vertices welded within {CensusWeld * 1000:0.#} mm)");
         Line($"  bounds ({census.Min.X:0.0}, {census.Min.Y:0.0}, {census.Min.Z:0.0}) .. ({census.Max.X:0.0}, {census.Max.Y:0.0}, {census.Max.Z:0.0}), extent {extent.X:0.0} x {extent.Y:0.0} x {extent.Z:0.0} m; start camera ({start.X:0.0}, {start.Y:0.0}, {start.Z:0.0})");
         Line($"");
-        Line($"Coarse pass: {coarse:N0} samples by area (one per {CensusSpacing * 100:0} x {CensusSpacing * 100:0} cm), {n:N0} traced (share {census.Keep:0.####}), {CensusRays} cosine rays each to {CensusReach:0} m, lifted {CensusLift * 100:0} cm; size clamp(0.1 x harmonic, {finest * 100:0} cm, {topSize:0.0} m = level {RtgiTopLevel})");
-        Line($"  {timing.Rays / 1e6:0.0} M rays: GPU {timing.GpuMs:0} ms ({rate / 1e6:0} M rays/s), wall {timing.WallMs / 1000:0.0} s over {timing.Frames} frames ({wallRate / 1e6:0} M rays/s); {timing.Failures} failed dispatches");
-        Line($"  by area: buried {100 * share(areaBuried):0.0}% ({100 * share(areaBuriedIgnoringSided):0.0}% were double-sidedness ignored); rays met {100 * share(raysMet) / CensusRays:0.0}%, single-sided back faces {100 * share(raysBack) / CensusRays:0.0}%, double-sided back faces (as fronts) {100 * share(raysSidedBack) / CensusRays:0.0}%, within 25 cm {100 * share(raysNear) / CensusRays:0.0}%");
+        Line($"Size field: by area, coarse first ({string.Join(" -> ", passes.Select(p => p.Spacing.ToString("0.##", inv) + " m"))}; refined where buried or size < {CensusRefineFactor} x the pass's spacing), {CensusRays} cosine rays each to {CensusReach:0} m, lifted {CensusLift * 100:0} cm; size clamp(0.1 x harmonic, {finest * 100:0} cm, {topSize:0.0} m = level {RtgiTopLevel})");
+        foreach (var p in passes)
+            Line($"  pass {p.Index} at {p.Spacing:0.##} m: {p.Full:N0} samples ({p.Full * CensusRays / 1e6:0.0} M rays), {p.Pos.Length:N0} traced (share {p.Keep:0.####}, spacing {p.Effective:0.##} m), {100.0 * p.Refine.Count(r => r) / Math.Max(1, p.Refine.Length):0.0}% refined; GPU {p.GpuMs:0} ms, wall {p.WallMs / 1000:0.0} s over {p.Frames} frames");
+        Line($"  all: {sizeSamples:N0} samples, {cookSize / 1e6:0.0} M size-field rays; traced {traced / 1e6:0.0} M rays, GPU {gpuMs:0} ms ({rate / 1e6:0} M rays/s), wall {wallMs / 1000:0.0} s ({wallRate / 1e6:0} M rays/s); {bad:N0} hits with a triangle index past their placement's");
+        Line($"  by area: buried {100 * share(areaBuried):0.0}% ({100 * share(areaBuriedFlag):0.0}% were two-sidedness ignored); rays met {100 * share(raysMet) / CensusRays:0.0}%, one-sided back faces {100 * share(raysBack) / CensusRays:0.0}%, two-sided back faces (as fronts) {100 * share(raysSidedBack) / CensusRays:0.0}%, within 25 cm {100 * share(raysNear) / CensusRays:0.0}%");
         text.Append("  live area by size level (m2):");
         for (var l = 0; l < levels; l++) text.Append(inv, $" L{l} {areaAtLevel[l]:N0}");
         text.AppendLine();
@@ -989,13 +1270,13 @@ internal sealed partial class SponzaLoop
         text.AppendLine();
         Line($"");
         if (cellShare < 1f) Line($"Cells counted over a random {cellShare:P0} of the triangle runs, scaled up by {scale:0.##} (the points and fills below are unscaled; chunk counts are per counted run, scaled).");
-        Line($"Cells (enumerated in {enumerateMs / 1000:0.0} s, {points:N0} points, {pointsBuried:N0} buried skipped; {latticeFilled:N0} lattice points filled outward, {latticeNone:N0} triangle sides with no sample within 8 coarse cells):");
+        Line($"Cells (enumerated in {enumerateMs / 1000:0.0} s, {points:N0} points, {pointsBuried:N0} buried skipped; {latticeFilled:N0} lattice points filled outward, {latticeNone:N0} triangle pieces with no sample within 8 coarse cells):");
         for (var l = 0; l < levels; l++)
             Line($"  L{l,-2} {SizeOfLevel(l),7:0.00} m  {cellsAt[l],14:N0} cells  {ownAt[l],14:N0} own-level  {junctionAt[l],12:N0} junction");
         Line($"  total {cells:N0}, own-level {ownCells:N0}, junction {junctions:N0} (L0+L1 cells {fine:N0})");
         Line($"");
-        Line($"Costs: ship {CensusShipSizeField} B/coarse sample + {CensusShipCell} B/cell; near transfer {CensusNearCompact} B (compact) / {CensusNearToday} B (today) per L0 cell; runtime {slotBytes} B/slot today, {compactBytes} B compact + a {CensusPoolSlots:N0}-slot pool of {poolBytes} B");
-        Line($"  rays: {CensusRays}/coarse sample, {CensusInsideRays}/junction cell (inside test; junction: nearest hit < {CensusJunctionReach} x cell size), {CensusNeighbourRays}/cell (neighbours), {CensusNearRays}/L0 cell (near, optional); settle 1 ray/sample on own-level cells");
+        Line($"Costs: ship {CensusShipSizeField} B/size sample + {CensusShipCell} B/cell; near transfer {CensusNearCompact} B (compact) / {CensusNearToday} B (today) per L0 cell; runtime {slotBytes} B/slot today, {compactBytes} B compact + a {CensusPoolSlots:N0}-slot pool of {poolBytes} B");
+        Line($"  rays: {CensusRays}/size sample, {CensusInsideRays}/junction cell (inside test; junction: nearest hit < min({CensusJunctionReach} x cell size, {CensusJunctionMost} m)), {CensusNeighbourRays}/cell (neighbours), {CensusNearRays}/L0 cell (near, optional); settle 1 ray/sample on own-level cells");
         Line($"  slot today: {string.Join(", ", CensusSlotBytes.Select(s => $"{s.Name} {s.Bytes}"))}");
         Line($"  compact record ({compactBytes} B): {string.Join("; ", CensusCompactBits.Select(f => $"{f.Name} [{f.Bits}]"))}");
         Line($"  pool slot ({poolBytes} B): {string.Join(", ", CensusPoolBytes.Select(f => $"{f.Name} {f.Bytes}"))}");
@@ -1016,7 +1297,7 @@ internal sealed partial class SponzaLoop
         File.WriteAllText(basePath + ".txt", text.ToString());
 
         return string.Create(inv,
-            $"[VulkanSponza] rtgi census {sceneName}: {census.Triangles:N0} tris, {census.SurfaceArea:N0} m2, {coarse:N0} coarse, buried {100 * share(areaBuried):0.0}%, cells {cells:N0} (L0 {cellsAt[0]:N0}, own {ownCells:N0}, junction {junctions:N0}), shipped {shipped / Mb:0.0} MB, runtime {runtime / Mb:0} MB today / {runtimeCompact / Mb:0} MB compact, cook {Full(cookRays):0.0} s / {Sliced(cookRays):0} s sliced, settle64 {Full(settle64):0.0} s / {Sliced(settle64):0} s sliced, {rate / 1e6:0} M rays/s; written to {basePath}.json/.txt.");
+            $"[VulkanSponza] rtgi census {sceneName}: {census.Triangles:N0} tris, {census.Area:N0} m2 ({census.ByTwoSided.Area:N0} two-sided), {sizeSamples:N0} size samples ({cookSize / 1e6:0.0} M rays), buried {100 * share(areaBuried):0.0}%, cells {cells:N0} (L0 {cellsAt[0]:N0}, own {ownCells:N0}, junction {junctions:N0}), shipped {shipped / Mb:0.0} MB, runtime {runtime / Mb:0} MB today / {runtimeCompact / Mb:0} MB compact, cook {Full(cookRays):0.0} s / {Sliced(cookRays):0} s sliced, settle64 {Full(settle64):0.0} s / {Sliced(settle64):0} s sliced, {rate / 1e6:0} M rays/s; written to {basePath}.json/.txt.");
     }
 
     private static void CensusJson(Utf8JsonWriter w, object? value)
