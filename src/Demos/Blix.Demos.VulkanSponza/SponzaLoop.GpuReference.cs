@@ -19,6 +19,9 @@ internal sealed partial class SponzaLoop
     private int? gpuReferencePathsWanted;
     private int GpuReferenceTarget => gpuReferencePathsWanted ?? refPaths;
     private List<(int K, float Px, float Py)>? gpuReferencePoints;
+    // Per point, the material of the triangle it sits on (its glTF name, "-" for none), printed on its line: tools/testbeds/bsdf_view.py
+    // groups the frame's light against the reference's by it (tools/testbeds/bsdf.sh).
+    private List<string>? gpuReferencePointMaterials;
     private const int GpuReferenceGrid = 24;
     // --gpu-ref-seams N: N more points at concave creases (where two faces meet), printed as "seam" lines. The grid's
     // points almost never land within a few pixels of one, and a leak through a seam lights exactly there: the
@@ -286,6 +289,8 @@ internal sealed partial class SponzaLoop
         }
         var points = new List<(int K, float Px, float Py)>();
         var packed = new List<Vector4>();
+        var materials = new List<string>();
+        var panesSkipped = 0;
         // The shading normal at each point (the pre-pass's: the one RTGI's readout reads the light at and the frame
         // shades with), not its triangle's face: on a faceted fold -- drapes' 2 cm strips with smooth normals -- they part by
         // up to half a facet's turn, and under light from one side the face's irradiance was up to 20% from the smooth one's
@@ -304,6 +309,9 @@ internal sealed partial class SponzaLoop
             foreach (var (dx, dy) in new[] { (2f, 0f), (-2f, 0f), (0f, 2f), (0f, -2f) })
                 if (scene.Closest(CameraRay(px + dx, py + dy)) is not { } other || MathF.Abs(other.T - hit.T) > 0.02f * hit.T) { edge = true; break; }
             if (edge) continue;
+            // Not on a transmitting pane: it is not in the pre-pass, so the frame's light at its pixel is the surface's behind it,
+            // which a reference started on the glass does not measure (the CPU scene meets panes the frame's rays pass).
+            if (hit.Instance < rayPlacementMaterials.Count && rayPlacementMaterials[hit.Instance].Clear) { panesSkipped++; continue; }
             var n = FaceNormal(hit);
             if (Vector3.Dot(n, ray.Direction) > 0f) n = -n;
             var at = n;
@@ -314,6 +322,7 @@ internal sealed partial class SponzaLoop
                 if (s.LengthSquared() > 1e-6f && Vector3.Dot(Vector3.Normalize(s), n) > 0.8f) at = Vector3.Normalize(s);
             }
             points.Add((k, px, py));
+            materials.Add(PointMaterialName(hit.Instance));
             packed.Add(new Vector4(ray.PointAt(hit.T) + n * 0.01f, 0f));
             packed.Add(new Vector4(at, 0f));
         }
@@ -323,7 +332,7 @@ internal sealed partial class SponzaLoop
         if (gpuReferenceSeams > 0)
         {
             const int Fine = 8 * GpuReferenceGrid;
-            var seams = new List<(float Px, float Py, Vector3 P, Vector3 N)>();
+            var seams = new List<(float Px, float Py, Vector3 P, Vector3 N, string Material)>();
             for (var k = 0; k < Fine * Fine; k++)
             {
                 // A pixel's centre, as the grid's: at a crease, a point a fraction of a pixel off its pixel's centre had its
@@ -349,13 +358,14 @@ internal sealed partial class SponzaLoop
                     foreach (var (dx, dy) in new[] { (1f, 0f), (-1f, 0f), (0f, 1f), (0f, -1f) })
                         if (scene.Closest(CameraRay(px + dx, py + dy)) is not { } near || MathF.Abs(near.T - hit.T) > 0.01f * hit.T
                             || Vector3.Dot(FaceNormal(near) * (Vector3.Dot(FaceNormal(near), ray.Direction) > 0f ? -1f : 1f), n) < 0.95f) { edge = true; break; }
-                if (!edge && crease) seams.Add((px, py, ray.PointAt(hit.T) + n * 0.01f, n));
+                if (!edge && crease) seams.Add((px, py, ray.PointAt(hit.T) + n * 0.01f, n, PointMaterialName(hit.Instance)));
             }
             var take = Math.Min(gpuReferenceSeams, seams.Count);
             for (var j = 0; j < take; j++)
             {
                 var s = seams[(int)((long)j * seams.Count / take)];
                 points.Add((SeamKeyBase + j, s.Px, s.Py));
+                materials.Add(s.Material);
                 packed.Add(new Vector4(s.P, 0f));
                 packed.Add(new Vector4(s.N, 0f));
             }
@@ -363,11 +373,17 @@ internal sealed partial class SponzaLoop
                 $"[VulkanSponza] GPU surface reference: {take} seam points of {seams.Count} crease pixels on a {Fine}x{Fine} grid."));
         }
         gpuReferencePoints = points;
+        gpuReferencePointMaterials = materials;
         gpuReferencePackedPoints = packed;
         if (points.Count == 0) return;
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[VulkanSponza] GPU surface reference: {points.Count} of {GpuReferenceGrid * GpuReferenceGrid} pixels off depth edges, {GpuReferenceTarget} paths x {refBounces} bounces, from post-load frame {postLoadFrames}."));
+            $"[VulkanSponza] GPU surface reference: {points.Count} of {GpuReferenceGrid * GpuReferenceGrid} pixels off depth edges{(panesSkipped > 0 ? $" ({panesSkipped} on transmitting panes left out)" : "")}, {GpuReferenceTarget} paths x {refBounces} bounces, from post-load frame {postLoadFrames}."));
     }
+
+    // A placement's material name for a point's line, spaces as underscores so the line stays one token a field ("-": none).
+    private string PointMaterialName(int placement) =>
+        placement >= 0 && placement < rayPlacementPbr.Count && rayPlacementPbr[placement] is { } m && !string.IsNullOrWhiteSpace(m.Name)
+            ? m.Name.Trim().Replace(' ', '_') : "-";
 
     // BLIX_REF_CACHE=dir: the gate's reference kept on disk by what decides it -- its points (the scene and the camera
     // through them), the sun, the sky, the seed and the paths' rules -- and read back instead of traced again: a variant of
@@ -498,7 +514,7 @@ internal sealed partial class SponzaLoop
                 : incidentPointFrames > 0 ? incidentPointSums![i] / incidentPointCounts[i]
                 : Lum(new Vector3((float)BitConverter.ToHalf(incident, o), (float)BitConverter.ToHalf(incident, o + 2), (float)BitConverter.ToHalf(incident, o + 4)));
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                $"    {(k >= SeamKeyBase ? "seam    " : "surface ")} at {px / iw:0.0000},{py / ih:0.0000}  gpu  total {field:0.00000} ref {reference:0.00000}"));
+                $"    {(k >= SeamKeyBase ? "seam    " : "surface ")} at {px / iw:0.0000},{py / ih:0.0000}  gpu  total {field:0.00000} ref {reference:0.00000}  material {(gpuReferencePointMaterials is { } names && i < names.Count ? names[i] : "-")}"));
         }
     }
 }

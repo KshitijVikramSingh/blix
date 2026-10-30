@@ -11,8 +11,8 @@ namespace Blix.Demos.VulkanSponza;
 // albedo of the word), and the rest is absorbed. So the light through the pane is (1 - F) T luminance(base): intensity as the BSDF reference has it, in grey (the tint is not kept; a
 // per-channel pass needs the rays to carry a colour). The reflection is diffuse where the glass's is specular, which the GI can take: it only has to be the right amount.
 //
-// Off by default: it makes pane rows "cutouts" to the consumers that look at coverage (the foliage tests in SponzaLoop.Transport.cs, the sun nodes), and the transport cache key records
-// it. tools/testbeds/materials.sh and the gate hold the GI to the reference, which has the panes (--ref-bsdf); a scene with a window is where it shows.
+// Off by default: it makes pane rows "cutouts" to whatever looks at coverage (the RTGI cook's census sees them as partly covered), and the GPU reference's cache key
+// records it. The gate (and tools/testbeds/bsdf.sh) hold the GI to the reference, which has the panes (--ref-bsdf); a scene with a window is where it shows.
 internal sealed partial class SponzaLoop
 {
     private bool rayPanes;

@@ -7,9 +7,9 @@ page is the map: which extension is read where, which tool judges it, and what e
 
 | | reads | holds it |
 |---|---|---|
-| **the lit pass** (`lit_body.glsl`) | the material's UBO and textures | `tools/testbeds/bsdf.sh` (frame beside reference), `materials.sh` (the diffuse response) |
-| **the rays** (GI, shadows, the cook; `ray_query.glsl`, `blix_hwx.mm`) | one surface word a triangle row (albedo, coverage, diffuse roughness), the alpha atlas | `materials.sh`'s ray view against the raster, the engine suite (Section CA) |
-| **the reference** (`reference_wave.comp`, `--ref-bsdf`) | the material table, per-row baked means, its own tracer with the panes | `lab/bsdf` tests (the BSDF), the GPU twin test (the GLSL) |
+| **the lit pass** (`lit_body.glsl`) | the material's UBO and textures | the engine suite (Section CB: every uniform the scene writes is declared), by eye |
+| **the rays** (GI, shadows, the RTGI cook; `ray_query.glsl`, `blix_hwx.mm`) | one surface word a triangle row (albedo, coverage, diffuse roughness), the alpha atlas | the engine suite (Section CA), `tools/testbeds/bsdf.sh` (RTGI's light at the reference's points) |
+| **the reference** (`reference_wave.comp`, `--gpu-reference --ref-bsdf`) | the material table, per-row baked means, its own tracer with the panes | `lab/bsdf` tests (the BSDF), the GPU twin test (the GLSL) |
 
 ## By extension
 
@@ -36,8 +36,7 @@ roughness glTF has no field for.
 1. **Specular indirect light from the scene.** The lit pass reflects the sky cube, occluded; a smooth metal or a coated floor does not reflect the room. The reference does (it traces its
    specular lobes), so the largest remaining gap in `bsdf.sh` is a smooth surface's reflection of its surroundings. A design, not yet built: trace one reflection ray per pixel whose
    lobe is smooth enough to need it (roughness below ~0.5, a Fresnel weight worth the ray) with the frame's Metal tracer (`EncodeTrace`, the hit's albedo, normal, row), and light the
-   hit from what the GI already has there -- the lightmap record's resolved light where the hit has a texel (`SponzaLoop.HitCells.cs` is that lookup), or the RTGI world radiance cache
-   on the `bistro` branch (a cache query per hit; the natural provider once that branch is the trunk), the sky where the ray escapes. Filter by roughness: a rougher lobe reads a blurred
+   hit from what the GI already has there -- the RTGI world radiance cache (a cache query per hit), the sky where the ray escapes. Filter by roughness: a rougher lobe reads a blurred
    neighbourhood, so its ray count and its hit shading can drop (a mip of the cache, a shorter ray). The reference validates it: `--ref-bsdf` with specular only (the diffuse response and
    the specular response are separate sums in the wave) against the frame's reflection term, per pixel.
 2. **Backdrop panes do not stack.** The backdrop pass draws rough and thick panes over a copy of the scene taken before it: a pane seen through another is not in that copy, and two overlapping
@@ -51,27 +50,28 @@ roughness glTF has no field for.
    reflects or absorbs, by the hemispherical Fresnel and `1 - T luminance(base)` -- through the partly covered rows' coin, so the light through is `(1 - F) T luminance(base)` as the reference has
    it, in grey (the tint is lost: a per-channel pass needs the rays to carry a colour); what stops reflects diffusely what the glass reflects. First run (2026-10-26, TransmissionTest, open ground): frame / reference 0.988 with the flag against 1.007 without, and the partly covered rows' coin, keyed on the triangle, leaves
    dark speckle inside and under the spheres at this ray count -- not an improvement worth the flag there, so it stays off. To judge it properly: a room with a window, the GI against
-   `--ref-bsdf` with and without the flag; the per-triangle coin may want a per-texel one (the hashed texels') to be smooth.
+   `--ref-bsdf` with and without the flag (`tools/testbeds/bsdf.sh room -- --ray-panes`); the per-triangle coin may want a finer one to be smooth.
 6. **Per-texel diffuse transmission** in the GI is a per-triangle share.
 7. **Caustics**: none, in the reference or the frame. The sun reaches what is behind a solid by the sky and the bounces only.
 8. **Dispersion**: not modelled anywhere.
 
-## Under --rtgi (bistro): what the cache does not do yet
+## Under RTGI: what the cache does not do yet
 
-Measured 2026-10-27 against `--ref-bsdf` on a scratch merge of `origin/bistro` and this branch (`tools/testbeds/bsdf.sh`, `BLIX_BSDF_GI="--rtgi"`; the dump under RTGI needs `docs/rtgi-view-dump.patch`).
-Frame / reference, ratio of means -- cooked lightmap, then RTGI: sheen 1.002, 1.002; coat 0.999, 0.999; transmission 1.007, 0.999; plant 1.007, 1.007; teacup 0.975, **0.915**; drapes 1.020, **0.837**.
+Measured 2026-10-27 against `--ref-bsdf` on a scratch merge of `origin/bistro` and the material track, with the old `bsdf.sh` (the camera-path reference, `--ref-view`, since
+removed). Frame / reference over the camera's pixels, ratio of means -- the cooked lightmap, then RTGI: sheen 1.002, 1.002; coat 0.999, 0.999; transmission 1.007, 0.999; plant 1.007, 1.007;
+teacup 0.975, **0.915**; drapes 1.020, **0.837**. `bsdf.sh` now judges at the GPU reference's points instead (below); its first runs replace these numbers.
 What the materials do through the lit pass holds on both; what has to pass through the *cache* does not.
 
 RTGI shades a hit as `albedo x (E_ind + sun)`: an opaque diffuse surface. So, by what the cache is asked to carry:
 
 | gap | state | where it goes |
 |---|---|---|
-| a sheet's far face in the lit pass (cloth, leaves seen from the room) | built, unmeasured (scratch `8aee9013`): the lit pass reads the cache's -N cells (`rtgiBackIrradiance`, `--rtgi-no-back`) | lit_body.glsl; the cells hold nothing until something trains that face |
-| a hit on a transmitting sheet (a bounce off a curtain) | built, unmeasured (scratch S1): the hit gives back `(1 - share) albedo E_front + share tint E_back`, and requests the far face's cells | rtgi_train.comp; `--rtgi-no-hit-materials` |
-| emission at a hit (a lamp lights the walls it faces) | built, unmeasured (scratch S1): the material table's emission (and the row's texture mean) added as `PI L_e` | rtgi_train.comp |
+| a sheet's far face in the lit pass (cloth, leaves seen from the room) | built on a scratch tree only (`8aee9013`), not merged: the lit pass reads the cache's -N cells (`rtgiBackIrradiance`, `--rtgi-no-back`) | lit_body.glsl; the cells hold nothing until something trains that face |
+| a hit on a transmitting sheet (a bounce off a curtain) | built on a scratch tree only (S1), not merged: the hit gives back `(1 - share) albedo E_front + share tint E_back`, and requests the far face's cells | rtgi_train.comp; `--rtgi-no-hit-materials` |
+| emission at a hit (a lamp lights the walls it faces) | built on a scratch tree only (S1), not merged: the material table's emission (and the row's texture mean) added as `PI L_e` | rtgi_train.comp |
 | foliage | the tracer's per-hit alpha test is the ray's (atlas, stochastic BLEND); translucency is the sheet rows, so S1 | -- |
 | glass in the GI | rays pass a pane whole (`--ray-panes` stops a share, in grey); the tint is lost | see below |
-| glass's sun shadow | with `--ray-panes` the shadow ray met a pane by a coin per ray: a speckled, colourless shadow (material-room goblets, 2026-10-28). Built, checked on the bench only (static): the ray multiplies the panes' rgb `(1 - F) T base` as it crosses; the mask word carries the luminance (bits 4-7, read by the filter, fill, upsample and lit pass as a fractional visibility) and the chroma (a lit word's upper half, sqrt rgb565), which `lit_body.glsl` multiplies into the sun's irradiance: a red goblet throws red light. Not yet: motion, San Miguel, textured base colour (the factor only), the half-res upsample path (visibility, no tint), the GI's own sun (grey, uncoloured) | `docs/rtgi-glass-shadow.patch` (against the bistro + this branch merge; the Metal part is `blix_shadow_cover`) |
+| glass's sun shadow | with `--ray-panes` the shadow ray met a pane by a coin per ray: a speckled, colourless shadow (material-room goblets, 2026-10-28). Built, checked on the bench only (static): the ray multiplies the panes' rgb `(1 - F) T base` as it crosses; the mask word carries the luminance (bits 4-7, read by the filter, fill, upsample and lit pass as a fractional visibility) and the chroma (a lit word's upper half, sqrt rgb565), which `lit_body.glsl` multiplies into the sun's irradiance: a red goblet throws red light. Not yet: motion, San Miguel, textured base colour (the factor only), the half-res upsample path (visibility, no tint), the GI's own sun (grey, uncoloured) | `docs/rtgi-glass-shadow.patch` (made against a scratch merge; it no longer applies to the merged tree -- the traced shadows' filter, fill, upsample and lit shader have moved on -- and wants porting by hand; the Metal part is `blix_shadow_cover`) |
 | RT reflections, RT refractions | not built | see below |
 
 **Glass tint in the GI.** The stopped-ray share is right in the mean; the colour is not. A ray that passes a pane should carry its tint (`T x base`, per channel) to whatever it reaches. In Metal's
@@ -91,6 +91,9 @@ the pre-pass has no per-pixel material (its surface key is a surface identity, n
 ## Tools
 
 - `lab/bsdf` -- `uv run python -m pytest tests` (the GPU twin test runs the TonemapLab demo; `--ignore=tests/test_gltf_gpu.py` keeps it off the GPU).
-- `tools/testbeds/materials.sh` -- the ratchets for the diffuse response, the alpha ray view and EON.
-- `tools/testbeds/bsdf.sh [scene...]` -- Khronos' material samples through the frame and the BSDF reference, with how they agree (`bsdf_view.py`).
+- `tools/testbeds/bsdf.sh [scene...]` -- the material samples (Khronos', drapes, teacup, plant, the gallery) under RTGI against the GPU reference with the glTF BSDF
+  (`--gpu-reference --ref-bsdf`), at the reference's points as the gate judges a scene: the frame's incident light against the path trace's irradiance, grouped by the material each
+  point sits on (`bsdf_view.py`; `<scene>-points.png` marks them on the shot). It judges the light the GI carries to a point, not the lit pass's own response at the camera (that was the
+  camera-path reference, `--ref-view`, removed with the texel GI); no points on transmitting panes (their pixels' light is the surface behind). No ratchets yet.
+- `tools/testbeds/gallery.sh` -- cooks `material-gallery`, every sample in the Cornell room.
 - `tools/testbeds/setup.sh` with `BLIX_TESTBED_KHRONOS=1` -- the samples' scenes.

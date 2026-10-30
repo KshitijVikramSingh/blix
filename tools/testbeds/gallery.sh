@@ -7,7 +7,7 @@
 #   BLIX_TESTBED_SRC     the generated glTF, defaulting to "<cooked>-src"
 #   BLIX_TESTBED_KHRONOS=1 setup.sh has downloaded the Khronos samples into "$SRC/khronos" (and the glass vase)
 #
-# Usage: tools/testbeds/gallery.sh        then   blix run Blix.Demos.VulkanSponza --scene=material-gallery --rtgi
+# Usage: tools/testbeds/gallery.sh        then   blix run Blix.Demos.VulkanSponza --scene=material-gallery   (tools/testbeds/bsdf.sh gallery judges it)
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 [[ -n "${BLIX_TESTBED_ASSETS:-}" ]] || { echo "gallery: BLIX_TESTBED_ASSETS is not set; it names the COOKED tree." >&2; exit 1; }
