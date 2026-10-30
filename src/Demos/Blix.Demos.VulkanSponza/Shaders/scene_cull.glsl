@@ -6,15 +6,11 @@
 
 layout(set = 0, binding = 0) uniform Cull {
     mat4 uCull;        // view-projection whose frustum culls (column form: clip = uCull * world)
-    mat4 uReceivers;   // camera view-projection a swept caster must also reach
-    vec4 uSweep;       // xyz unit sun direction, w = 1 to sweep bounds along it
-    vec4 uVolumeMin;   // scene volume a sweep runs to (SceneExitDistance)
-    vec4 uVolumeMax;
     vec4 uCamera;      // xyz camera position, w = pixels-per-world at unit distance
-    vec4 uLod;         // x error pixels, y world error budget (> 0 selects by world error), z hysteresis, w cull margin
+    vec3 uLod;         // x error pixels, y hysteresis, z cull margin
     vec4 uRange;       // x first placement (global), y placement count, z first drawable (global), w visible base
     vec4 uArgs;        // x first record, y record count, z (unused: uSlots), w mode
-    vec4 uFlags;       // x cull by uCull, y cull by uReceivers, z edited placement + 1 (0 = none), w its new margin
+    vec3 uFlags;       // x cull by uCull, y edited placement + 1 (0 = none), z its new margin
     mat4 uView;        // the camera's view (occlusion: a bound's nearest view depth)
     vec4 uOcclusion;   // x 1 = the camera's early list draws only what was visible last frame, 2 = nothing
                        // (--occlusion-cut: every frame a camera cut); y near plane;
@@ -91,22 +87,7 @@ bool intersects(mat4 vp, vec3 bmin, vec3 bmax, float margin) {
         && insidePlane(normalized(r3 - r2), bmin, bmax, margin);
 }
 
-// SceneExitDistance: how far these bounds travel along dir before leaving the scene volume, measured
-// from the trailing face.
-float exitDistance(vec3 bmin, vec3 bmax, vec3 dir) {
-    float t = 3.402823e38;
-    for (int a = 0; a < 3; ++a) {
-        float d = dir[a];
-        if (abs(d) < 1e-5) continue;
-        float start = d > 0.0 ? bmin[a] : bmax[a];
-        float wall = d > 0.0 ? u.uVolumeMax[a] : u.uVolumeMin[a];
-        t = min(t, max((wall - start) / d, 0.0));
-    }
-    return t == 3.402823e38 ? length(u.uVolumeMax.xyz - u.uVolumeMin.xyz) : t;
-}
-
-// PickLod / PickLodWorld: the coarsest level whose error is in budget, coarsening only past the
-// hysteresis band. pixelsPerWorld is 1 for a world budget.
+// PickLod: the coarsest level whose error is in budget, coarsening only past the hysteresis band.
 uint pickLod(uint lodBase, uint lodCount, float budget, float pixelsPerWorld, uint current) {
     if (lodCount <= 1u || budget <= 0.0) return 0u;
     uint wanted = 0u;
@@ -116,7 +97,7 @@ uint pickLod(uint lodBase, uint lodCount, float budget, float pixelsPerWorld, ui
     }
     current = min(current, lodCount - 1u);
     if (wanted <= current) return wanted;
-    float banded = budget / u.uLod.z;
+    float banded = budget / u.uLod.y;
     uint settled = current;
     for (uint l = current + 1u; l <= wanted; ++l) {
         if (lods[lodBase + l].error * pixelsPerWorld <= banded) settled = l;
@@ -145,35 +126,20 @@ void classify(uint i) {
     uint g = uint(u.uRange.x) + i;
     Placement p = placements[g];
     // A margin edit travels with the dispatch and lands here, in the one thread that owns the row.
-    if (uint(u.uFlags.z) == g + 1u) {
-        p.margin = u.uFlags.w;
+    if (uint(u.uFlags.y) == g + 1u) {
+        p.margin = u.uFlags.z;
         placements[g].margin = p.margin;
     }
     vec3 bmin = p.boundsMin.xyz, bmax = p.boundsMax.xyz;
-
-    // Casters are tested by their bounds swept along the sun to where their shadow leaves the scene.
-    vec3 tmin = bmin, tmax = bmax;
-    if (u.uSweep.w > 0.0) {
-        vec3 sweep = u.uSweep.xyz * exitDistance(bmin, bmax, u.uSweep.xyz);
-        tmin = min(bmin, bmin + sweep);
-        tmax = max(bmax, bmax + sweep);
-    }
-    float margin = u.uLod.w;
-    bool vis = u.uFlags.x <= 0.0 || intersects(u.uCull, tmin, tmax, margin);
-    if (vis && u.uFlags.y > 0.0) vis = intersects(u.uReceivers, tmin, tmax, margin);
+    bool vis = u.uFlags.x <= 0.0 || intersects(u.uCull, bmin, bmax, u.uLod.z);
 
     uint d = uint(u.uRange.z) + p.drawable;
     uint lodCount = drawables[d].lodCount;
     uint at = uint(u.uRange.w) + i;
     uint current = state[at] & 0xFFu;
-    uint lod;
-    if (u.uLod.y > 0.0) {
-        lod = pickLod(lodRow(d, 0u), lodCount, u.uLod.y * p.margin, 1.0, current);
-    } else {
-        vec3 nearest = clamp(u.uCamera.xyz, bmin, bmax);
-        float dist = max(length(u.uCamera.xyz - nearest), 0.01);
-        lod = pickLod(lodRow(d, 0u), lodCount, u.uLod.x * p.margin, u.uCamera.w / dist, current);
-    }
+    vec3 nearest = clamp(u.uCamera.xyz, bmin, bmax);
+    float dist = max(length(u.uCamera.xyz - nearest), 0.01);
+    uint lod = pickLod(lodRow(d, 0u), lodCount, u.uLod.x * p.margin, u.uCamera.w / dist, current);
     uint history = state[at] & WasVisible;
     // Two-phase occlusion: the early list draws what the late test found visible last frame, and the late
     // list (scene_occlusion.comp) whatever else this frame's early depth does not hide.

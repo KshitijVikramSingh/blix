@@ -6,16 +6,16 @@ using Blix.Graphics;
 namespace Blix.Demos.VulkanSponza;
 
 // --occlusion-audit [--occlusion-audit-every N]: is two-phase occlusion culling dropping what it should not? Every N
-// frames (30) the last completed frame's verdicts (the final list's Culled bits) are read back with both of its
-// pyramids, and scene_occlusion.comp's hidden() is replayed on the CPU against them, with that frame's matrices.
-// A placement in the frustum that the frame left undrawn was judged hidden behind the EARLY pyramid. Two ways that
-// verdict can be wrong, told apart:
-//   A  the replay against the early pyramid's own contents says visible: the test read something other than what
-//      the pyramid ended up holding (a pyramid not yet written, another frame's, a state word raced);
-//   B  the replay against the FINAL pyramid (the frame's whole depth, a superset of the early one: never farther)
-//      says visible: the early pyramid itself held depth the frame did not draw (stale or foreign depth).
-// Either is a visible placement dropped -- the tear. The replay assumes a camera that held still over the frame read
-// (the matrices are the previous frame's); moves are skipped.
+// frames (30) the last completed frame's verdicts (the final list's Culled bits) are read back with its early pyramid,
+// and scene_occlusion.comp's hidden() is replayed on the CPU against it, with that frame's matrices. A placement in the
+// frustum that the frame left undrawn was judged hidden behind the EARLY pyramid; where the replay against that
+// pyramid's own contents says visible (A), the test read something other than what the pyramid ended up holding (a
+// pyramid not yet written, another frame's, a state word raced) -- a visible placement dropped, the tear. The
+// pyramid's own reduction is checked level by level too (under-reduced texels). The replay assumes a camera that held
+// still over the frame read (the matrices are the previous frame's); moves are skipped.
+//
+// It also held the verdicts against the frame's FINAL depth (B: the early pyramid holding depth the frame did not
+// draw), through the main Hi-Z pyramid; that pyramid went with GTAO, its only other reader.
 internal sealed partial class SponzaLoop
 {
     private int occlusionAuditEvery;
@@ -24,7 +24,7 @@ internal sealed partial class SponzaLoop
     private Matrix4x4 auditPrevViewProj, auditPrevView;
     private bool auditPrevValid;
     private int auditCount;
-    private long auditCulled, auditA, auditB;
+    private long auditCulled, auditA;
 
     private void AuditOcclusion()
     {
@@ -40,14 +40,13 @@ internal sealed partial class SponzaLoop
 
         device.WaitIdle();
         var early = ReadPyramid(occZHandles);
-        var final = ReadPyramid(hiZHandles);
-        if (early is null || final is null) return;
+        if (early is null) return;
         var n = opaquePlacements.Count;
         var finalBase = SceneListVisibleBase(SceneListCameraFinal);
         var state = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(cullState, finalBase * 4, n * 4).AsSpan()).ToArray();
 
         var planes = FrustumPlanes(frameViewProj);
-        int culled = 0, a = 0, b = 0;
+        int culled = 0, a = 0;
         var examples = new List<string>();
         for (var i = 0; i < n; i++)
         {
@@ -56,49 +55,26 @@ internal sealed partial class SponzaLoop
             if (!Intersects(planes, bounds.Min, bounds.Max, CameraCullMargin)) continue;
             culled++;
             var hiddenEarly = Hidden(early, frameViewProj, frameView, bounds.Min, bounds.Max);
-            var hiddenFinal = Hidden(final, frameViewProj, frameView, bounds.Min, bounds.Max);
-            if (!hiddenEarly) a++;
-            if (!hiddenFinal) b++;
-            if ((!hiddenEarly || !hiddenFinal) && examples.Count < 6)
+            if (hiddenEarly) continue;
+            a++;
+            if (examples.Count < 6)
             {
                 var c = (bounds.Min + bounds.Max) * 0.5f;
                 var s = bounds.Max - bounds.Min;
                 examples.Add(string.Create(CultureInfo.InvariantCulture,
-                    $"placement {i} at ({c.X:0.0}, {c.Y:0.0}, {c.Z:0.0}) size ({s.X:0.0}, {s.Y:0.0}, {s.Z:0.0}): {(hiddenEarly ? "" : "A")}{(hiddenFinal ? "" : "B")}"));
-            }
-        }
-        // The pyramids' own claim: the final depth is never farther than the early depth (the late pre-pass only adds).
-        var (fw, fh) = final.Size[0];
-        int farther = 0, minX = int.MaxValue, minY = int.MaxValue, maxX = -1, maxY = -1;
-        float worst = 0f;
-        if (early.Size[0] == final.Size[0])
-        {
-            var e0 = early.Farthest[0];
-            var f0 = final.Farthest[0];
-            for (var y = 0; y < fh; y++)
-            for (var x = 0; x < fw; x++)
-            {
-                var k = y * fw + x;
-                if (f0[k] <= e0[k] * (1f + 1f / 512f)) continue;
-                farther++;
-                worst = MathF.Max(worst, f0[k] - e0[k]);
-                minX = Math.Min(minX, x); minY = Math.Min(minY, y); maxX = Math.Max(maxX, x); maxY = Math.Max(maxY, y);
+                    $"placement {i} at ({c.X:0.0}, {c.Y:0.0}, {c.Z:0.0}) size ({s.X:0.0}, {s.Y:0.0}, {s.Z:0.0})"));
             }
         }
         auditCount++;
         auditCulled += culled;
         auditA += a;
-        auditB += b;
-        if (a + b > 0 || auditCount % 20 == 1)
+        if (a > 0 || auditCount % 20 == 1)
         {
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] occlusion audit #{auditCount} (post-load frame {postLoadFrames}): {culled:N0} in-frustum placements culled; " +
-                $"A (the early pyramid itself says visible) {a}, B (the frame's final depth says visible) {b}; " +
-                $"run so far: {auditCulled:N0} culled, A {auditA}, B {auditB}."));
+                $"A (the early pyramid itself says visible) {a}; run so far: {auditCulled:N0} culled, A {auditA}."));
             foreach (var e in examples) Console.WriteLine($"[VulkanSponza]   {e}");
-            Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                $"[VulkanSponza]   level 0 ({fw}x{fh}): final depth FARTHER than early at {farther:N0} texels{(farther > 0 ? $" (x {minX}..{maxX}, y {minY}..{maxY}; up to {worst:0.00} m)" : "")}"));
-            Console.WriteLine($"[VulkanSponza]   per level, final farther than early: {string.Join(" ", Enumerable.Range(0, HiZLevels).Select(l => FartherCount(early, final, l)))}; under-reduced texels (a level nearer than its parent's max): early {string.Join(" ", Enumerable.Range(1, HiZLevels - 1).Select(l => UnderReduced(early, l)))}, final {string.Join(" ", Enumerable.Range(1, HiZLevels - 1).Select(l => UnderReduced(final, l)))}");
+            Console.WriteLine($"[VulkanSponza]   under-reduced texels per level (a level nearer than its parent's max): {string.Join(" ", Enumerable.Range(1, HiZLevels - 1).Select(l => UnderReduced(early, l)))}");
             for (var l = 1; l < HiZLevels; l++)
             {
                 var (pw, ph) = early.Size[l - 1];
@@ -106,7 +82,7 @@ internal sealed partial class SponzaLoop
                 var step = (int)MathF.Round((float)pw / w);
                 var span = (int)MathF.Ceiling((float)pw / w);
                 var map = auditCount <= 4 ? new byte[w * h * 4] : null;
-                int bad = 0, eqFinal = 0, eqFinalParent = 0, eqPrevEarly = 0, edge = 0;
+                int bad = 0, eqPrevEarly = 0, edge = 0;
                 int bx0 = int.MaxValue, by0 = int.MaxValue, bx1 = -1, by1 = -1;
                 for (var y = 0; y < h; y++)
                 for (var x = 0; x < w; x++)
@@ -131,39 +107,13 @@ internal sealed partial class SponzaLoop
                     bad++;
                     bx0 = Math.Min(bx0, x); by0 = Math.Min(by0, y); bx1 = Math.Max(bx1, x); by1 = Math.Max(by1, y);
                     if (x >= w - 8 || y >= h - 8) edge++;
-                    if (e == final.Farthest[l][k]) eqFinal++;
-                    if (MathF.Abs(e - FromParent(final.Farthest[l - 1])) <= e / 1024f) eqFinalParent++;
                     if (auditPrevEarly is { } pe && e == pe.Farthest[l][k]) eqPrevEarly++;
                 }
                 if (map is not null && bad > 0) Blix.Graphics.Images.PngWriter.WriteRgba8(Path.Combine(Path.GetTempPath(), $"blix-occz-audit{auditCount}-level{l}.png"), map, w, h);
-                if (bad > 0) Console.WriteLine($"[VulkanSponza]   early level {l}: {bad} under-reduced; equal to the final level {eqFinal}, to the final parent's max {eqFinalParent}, to the last audit's early level {eqPrevEarly}; level {w}x{h}, bad within x {bx0}..{bx1} y {by0}..{by1}, {edge} in the last 8 rows/columns");
-            }
-            if (farther > 0 && auditCount <= 3)
-            {
-                var rgba = new byte[fw * fh * 4];
-                var e0 = early.Farthest[0];
-                var f0 = final.Farthest[0];
-                for (var k = 0; k < fw * fh; k++)
-                {
-                    var g = (byte)Math.Clamp(255f / (1f + f0[k] * 0.1f), 0f, 255f);
-                    var bad = f0[k] > e0[k] * (1f + 1f / 512f);
-                    rgba[k * 4] = bad ? (byte)255 : g; rgba[k * 4 + 1] = bad ? (byte)0 : g; rgba[k * 4 + 2] = bad ? (byte)0 : g; rgba[k * 4 + 3] = 255;
-                }
-                var file = Path.Combine(Path.GetTempPath(), $"blix-occlusion-audit-{auditCount}.png");
-                Blix.Graphics.Images.PngWriter.WriteRgba8(file, rgba, fw, fh);
-                Console.WriteLine($"[VulkanSponza]   {file} (red: final farther than early)");
+                if (bad > 0) Console.WriteLine($"[VulkanSponza]   early level {l}: {bad} under-reduced; equal to the last audit's early level {eqPrevEarly}; level {w}x{h}, bad within x {bx0}..{bx1} y {by0}..{by1}, {edge} in the last 8 rows/columns");
             }
         }
         auditPrevEarly = early;
-    }
-
-    private static int FartherCount(AuditPyramid early, AuditPyramid final, int level)
-    {
-        var e = early.Farthest[level];
-        var f = final.Farthest[level];
-        var count = 0;
-        for (var k = 0; k < e.Length; k++) if (f[k] > e[k] * (1f + 1f / 512f)) count++;
-        return count;
     }
 
     // Texels at this level whose farthest depth is nearer than the farthest of the parent texels they cover (as
@@ -204,9 +154,11 @@ internal sealed partial class SponzaLoop
         for (var l = 0; l < HiZLevels; l++)
         {
             var pixels = device.ReadTexture(graph.GetColorTexture(levels[l]), out var w, out var h, out var format);
-            if (format != TextureFormat.Rgba16F) return null;
+            // The levels are Rg16F (min, max); this read refused anything but Rgba16F, so every audit stopped here.
+            if (format != TextureFormat.Rg16F && format != TextureFormat.Rgba16F) return null;
+            var stride = format == TextureFormat.Rg16F ? 4 : 8;
             var f = new float[w * h];
-            for (var i = 0; i < w * h; i++) f[i] = (float)BitConverter.ToHalf(pixels, i * 8 + 2);
+            for (var i = 0; i < w * h; i++) f[i] = (float)BitConverter.ToHalf(pixels, i * stride + 2);
             far[l] = f;
             size[l] = (w, h);
         }

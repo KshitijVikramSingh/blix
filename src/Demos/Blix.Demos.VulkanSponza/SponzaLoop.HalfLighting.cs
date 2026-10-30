@@ -37,7 +37,7 @@ internal sealed partial class SponzaLoop
         var pixelAngle = 2f / (MathF.Max(MathF.Abs(cameraProjection.M22), 1e-6f) * Math.Max(frameHeight, 1));
         var sub = LightingSubpixel;
         // The mask the lit pass would bind: this frame's half-res one, the pending one (the sun off), or the placeholder
-        // (no traced shadows: the lit pass asks the cascades and never reads the w this writes).
+        // (no traced shadows: the sun is unshadowed, and the lit pass never reads the w this writes).
         var mask = RtShadowMask;
         // --rtgi-temporal: into the raw targets the accumulation reads (SponzaLoop.RtgiTemporal.cs).
         var raw = RtgiTemporalNow;

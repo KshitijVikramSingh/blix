@@ -11,9 +11,9 @@
 // identically zero. Depth plus two matrices is the whole motion model, and the day something moves
 // is the day that stops being true — loudly, not subtly.
 //
-// The quantity reprojected is radiance at a WORLD POINT, which is the rule the froxel fog arrived at
-// the hard way: an integral along a ray belongs to the ray, and moving it to another camera is
-// meaningless. Colour at a surface point belongs to the point.
+// The quantity reprojected is radiance at a WORLD POINT: an integral along a ray (a volume's
+// scattering) belongs to the ray, and moving it to another camera is meaningless. Colour at a
+// surface point belongs to the point.
 
 #include "fullscreen.glsl"
 

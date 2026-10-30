@@ -14,15 +14,13 @@ namespace Blix.Demos.VulkanSponza;
 //   rt-shadow-trace (Metal)          any-hit through the ray scene (MetalRayTracer), coverage as the software trace
 //                                    has it, into the mask lit.frag reads; the frame splits around it on the device's
 //                                    frame timeline (RenderGraph.External)
-//   lit-scene                        reads the mask for the direct sun instead of the cascades
+//   lit-scene                        reads the mask for the direct sun
 //
 // The trace runs alongside the passes declared between it and rt-shadow-join (RenderGraph.ExternalJoin). A surface
 // facing away from the sun is traced from its far side (rt_shadow_rays.comp): its answer feeds diffuse transmission.
 //
-// Nothing asks the cascades whether a point sees the sun: the fog is off unless asked for, and until the trace is ready
-// the lit pass leaves the sun off rather than falling back to the cascades. The cascades still render where something
-// reads them (CascadesRead): the fog (--fog), the --ab rtshadow OFF phase, and a run whose Metal tracer failed to build,
-// where they shade the sun in its place.
+// Until the trace is ready the lit pass leaves the sun off. A run whose Metal tracer failed to build has no traced
+// shadows at all (and no GI): the lit pass then binds a placeholder mask and the sun is unshadowed.
 //
 // --rt-isolated: no incident field either, so nothing but the trace lights the frame. The ambient is the irradiance
 // cube times the sky visibility the trace finds (one cosine-weighted sky ray per pixel a frame, TAA averaging them);
@@ -31,7 +29,7 @@ namespace Blix.Demos.VulkanSponza;
 // Origins and masks are one per frame slot, written in the slot's frame and read in it, so the slot's fence orders reuse.
 internal sealed partial class SponzaLoop
 {
-    // Off only when the frame's Metal tracer failed to build (RecordRtShadows): the cascades shade the sun then.
+    // Off only when the frame's Metal tracer failed to build (RecordRtShadows): nothing shadows the sun then.
     private bool rtShadows = true;
     private bool rtNoOverlap;
     // --metal-device-queue: the Metal tracers on the Vulkan device's own command queue rather than one of their own. A
@@ -109,7 +107,7 @@ internal sealed partial class SponzaLoop
     private GpuBufferHandle rtShadowPlaceholder;
     // Until the trace is ready: live with no size, so lit.frag leaves the sun off.
     private GpuBufferHandle rtShadowPending;
-    // The mask the lit pass binds this frame: a slot's, or the placeholder of zeros (the cascades shade).
+    // The mask the lit pass binds this frame: a slot's, or the placeholder of zeros (the sun unshadowed).
     private GpuBufferHandle rtShadowBound;
     // Frames since the surface bake was recorded: the build reads its coverage once it has run. Counted once a frame
     // (rtBakeCountedFrame): every batch asks for the tracer, and counting the asks read the coverage before the bake ran
@@ -144,14 +142,6 @@ internal sealed partial class SponzaLoop
             return rtShadowPlaceholder;
         }
     }
-
-    // Whether anything reads the sun cascades this frame. With the frame's shadow rays traced, the lit pass reads the
-    // traced mask instead (lit_body.glsl: the cascades only where rtShadowHeader.z is 0): fog still reads them, and the
-    // A/B's off phase. Drawn for no reader they were ~0.5 ms a frame at Crytek Sponza's courtyard (2026-10-24).
-    // --cascades-always: drawn whatever reads them, as before.
-    private bool cascadesAlways;
-    private bool CascadesRead => cascadesAlways || !rtShadows || frameTracer is null || rayGpuData is null
-        || abMode == "rtshadow" && AbOffPhase || fog.Enabled;
 
     // A slot's mask kept at rest (--no-shadow-keep: traced every frame). With no TAA there is no jitter, so a still camera's
     // pixels are the same pixels: the mask a slot traced under the same camera, sun and size is this frame's answer, so long

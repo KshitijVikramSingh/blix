@@ -50,17 +50,6 @@ internal sealed partial class SponzaLoop
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
         renderHeightPx = host.LogicalSize.Height;
 
-        // Fog is part of the standard composition; --no-fog retains the unscattered reference path.
-        fog.Enabled = !args.Flag("no-fog");
-        if (args.Flag("fog")) fog.Enabled = true;
-        // --fog-stress flips fog on/off every ~90 frames so a validation run
-        // exercises the compute storage-image layout transitions across the
-        // disabled↔enabled boundary (the highest-risk sync path).
-        if (args.Flag("fog-stress")) { fogStress = true; fog.Enabled = true; }
-        // --no-ao: keep both ambient passes in the graph but give the search a zero radius, so a
-        // paired run attributes the HORIZON SEARCH specifically rather than the whole feature.
-        if (args.Flag("no-ao")) ambient.Enabled = false;
-        if (args.Flag("ao")) ambient.Enabled = true;
         if (args.Float("sun-disc") is { } sunDisc) shadows.SunDiscDegrees = Math.Clamp(sunDisc, 0f, 5f);
         if (args.Flag("penumbra-filter")) shadows.PenumbraFilter = true;
         if (args.Flag("rt-shadow-interleave")) shadows.Interleave = true;
@@ -71,7 +60,6 @@ internal sealed partial class SponzaLoop
         // --rt-shadow-full: every pixel traced every frame (ShadowsSettings.Interleave off).
         if (args.Flag("rt-shadow-full")) shadows.Interleave = false;
         if (args.Flag("no-rt-shadow-move-interleave")) rtShadowMoveInterleave = false;
-        if (args.Flag("ao-fullres")) aoScale = 1f;
         if (args.Flag("no-prepass")) noPrepass = true;
         if (args.String("probe") is { } probe) probeName = probe;
         // Zero isolates sky-fed transport from the direct-sun source for probe censuses.
@@ -90,27 +78,7 @@ internal sealed partial class SponzaLoop
             "point" => false,
             _ => throw new AppArgsException("--ref-sun takes disc or point."),
         };
-        if (args.String("shadow-maps") is { } shadowMaps)
-        {
-            var sm = shadowMaps.Split(',');
-            if (sm.Length != 3 || !sm.All(v => int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out _)))
-            {
-                throw new AppArgsException($"--shadow-maps expects three sizes like 2048,1024,1024, got '{shadowMaps}'.");
-            }
-
-            ShadowMapSizes = sm.Select(v => Math.Clamp(int.Parse(v, CultureInfo.InvariantCulture), 256, 4096)).ToArray();
-        }
         if (args.Float("foliage-lod") is { } fl) FoliageLodMargin = MathF.Max(0.1f, fl);
-        if (args.Float("shadow-lod") is { } sl) shadowLodTexels = MathF.Max(0.1f, sl);
-        // Standard rendering takes RTGI's sky visibility and light through the incident field. --no-sky
-        // turns both off in the lit pass (visibility 1, no incident light).
-        skyVisibilityEnabled = !args.Flag("no-sky");
-        if (skyVisibilityEnabled)
-        {
-            // Exposure accounts for the display level of the physically attenuated composition;
-            // transport strength remains one so material albedo is not silently reinterpreted.
-            render.Exposure = 1.0f;
-        }
         if (scene.Exposure is { } se) render.Exposure = se;
         // --exposure X: the display exposure from the start (the testbeds' sun and sky read white at Sponza's).
         if (args.Float("exposure") is { } ex) render.Exposure = Math.Clamp(ex, 0.05f, 16f);
@@ -125,8 +93,7 @@ internal sealed partial class SponzaLoop
         // Align shadows and direct light to a detected environment sun by default. --sun-authored
         // opts out; probes without a detectable sun naturally retain the authored direction.
         if (!args.Flag("sun-authored")) alignSunToProbe = true;
-        // --sun-overhead maximizes directly lit courtyard area when isolating base lighting. The
-        // cascade fit handles the vertical-light up-vector degeneracy.
+        // --sun-overhead maximizes directly lit courtyard area when isolating base lighting.
         if (args.Flag("sun-overhead")) sunOverhead = true;
         // --sun, --sun-change (SponzaLoop.Sun.cs).
         ReadSunArgs(args);
@@ -144,13 +111,8 @@ internal sealed partial class SponzaLoop
         litEarlyZ = !args.Flag("no-lit-early-z");
         litLean = !args.Flag("no-lit-lean");
         iblBrdfLut = args.Flag("ibl-brdf-lut");
-        cascadesAlways = args.Flag("cascades-always");
         shadowKeep = !args.Flag("no-shadow-keep");
         ParseRtgi(args);
-        // GTAO off unless --ao (AmbientSettings.Enabled): RTGI's light holds its own occlusion (the bounce never took
-        // GTAO), and GTAO occluded the sky's specular reflection a second time over the sky visibility that already held
-        // it -- dark blue seams along Cornell's walls (the user's, 2026-10-27: off looks more correct). Its passes stay in
-        // the graph at a zero radius (--no-ao's way), so this is about the image, not the frame's time.
         ParseGpuCapture(args);
         ParseRtgiBench(args);
         ParseMetalFx(args);
@@ -176,7 +138,6 @@ internal sealed partial class SponzaLoop
         rtCoverageCoin = args.Flag("rt-coverage-coin");
         if (args.Float("rt-alpha-mip") is { } alphaMip) rtAlphaMip = Math.Clamp(alphaMip, 0f, 12f);
         rtAlphaAb = args.Flag("rt-alpha-ab");
-        var fogAsked = args.Flag("fog");
         // --no-taa: no TAA and so no sub-pixel jitter: the control for --stability, whose variation otherwise
         // counts every edge the jitter moves.
         if (args.Flag("no-taa")) render.Taa = 0f;
@@ -207,7 +168,6 @@ internal sealed partial class SponzaLoop
         surfaceCheck = args.Flag("surface-check");
         if (args.Float("incident-normal-bias") is { } nb) incidentNormalBias = Math.Clamp(nb, 0f, 12f);
         if (args.Float("incident-gradient-clamp") is { } gc) incidentGradientClamp = Math.Clamp(gc, 0f, 4f);
-        if (args.Int("orbit-frames") is { } orbitFrames) OrbitFrames = Math.Max(2, orbitFrames);
         if (args.Int("ray-region-triangles") is { } regionTriangles) rayRegionTriangles = Math.Max(1, regionTriangles);
         if (args.Float("ray-lod-error") is { } lodError) rayLodError = Math.Max(0f, lodError);
         // --no-occlusion: the GPU cull without its two-phase occlusion test (scene_occlusion.comp), for the A/B.
@@ -222,17 +182,7 @@ internal sealed partial class SponzaLoop
         if (args.Int("gpu-ref-paths") is { } grp) gpuReferencePathsWanted = Math.Clamp(grp, 256, 1 << 22);
         if (args.Int("gpu-ref-lanes") is { } grl) referenceLanesAsked = Math.Clamp(grl, 64, 8192);
         if (args.Int("gpu-ref-seams") is { } grs) gpuReferenceSeams = Math.Clamp(grs, 0, 1024);
-        if (args.Int("fog-slices") is { } fs) froxelGridZ = Math.Clamp(fs, 8, 128);
-        // --orbit: drive the camera on a fixed path so a measurement is of the renderer rather than
-        // of one photograph of it. Ignores --cam, which is the still counterpart.
-        if (args.Flag("orbit")) orbit = true;
         if (args.Int("shot-hold") is { } hold) ShotReadyMargin = Math.Max(1, hold);
-        if (args.Values("orbit-at", 4) is [var ox, var oy, var oz, var orad])
-        {
-            float F(string v) => float.Parse(v, CultureInfo.InvariantCulture);
-            orbitAt = new Vector4(F(ox), F(oy), F(oz), F(orad));
-            orbit = true;
-        }
         ReadWalkArgs(args);
         // --no-cook-screen: the scene drawn while the frame's tracer builds or the reference traces (SponzaLoop.CookScreen.cs).
         cookScreenOff = args.Flag("no-cook-screen");
@@ -249,18 +199,9 @@ internal sealed partial class SponzaLoop
         {
             abMode = ab;
             abFlat = abMode == "flat";
-            // rtshadow: ray-traced sun shadows (ON) against the cascades (OFF).
         }
-        // Whatever asks whether a point sees the sun asks a ray, never the cascades (SponzaLoop.RtShadows): the lit pass
-        // asks the Metal trace; the fog, which can only ask the cascades, is off unless --fog asks for it. An --ab rtshadow
-        // run sets this up in both phases, so it compares the lit pass's shadows alone.
-        if (!fogAsked) fog.Enabled = false;
-        Console.WriteLine(rtIsolated
-            ? "[VulkanSponza] rt shadows: isolated (the trace's sun and sky only: no incident field; no fog); the sun is off until the trace is ready."
-            : "[VulkanSponza] rt shadows: sun visibility from rays everywhere (lit pass: Metal; fog off unless --fog); the sun is off until the trace is ready.");
-        if (args.Float("ao-debug") is { } aoDebugValue) aoDebug = aoDebugValue;
+        Console.WriteLine("[VulkanSponza] rt shadows: sun visibility from rays (Metal); the sun is off until the trace is ready.");
         if (args.Float("viz") is { } vizValue) vizChannel = vizValue;
-        if (args.Float("ao-radius") is { } aoRadius) ambient.RadiusMetres = aoRadius;
         // --lod-arms <onPx> <offPx>: the two budgets --ab lod alternates between.
         if (args.Values("lod-arms", 2) is [var lodOn, var lodOff])
         {
@@ -270,14 +211,13 @@ internal sealed partial class SponzaLoop
         // Timing runs require --no-vsync; FIFO quantizes frame periods to refresh intervals and can
         // reverse small A/B differences.
         if (args.Flag("no-vsync")) device.VsyncEnabled = false;
-        // --shot <path>: render --shot-frames frames, write the ambient-visibility buffer and the
-        // tonemapped scene beside it, and close. Headless in the sense that matters — nobody has
-        // to be watching.
+        // --shot <path>: render --shot-frames frames, write the scene there (linear x exposure, sRGB
+        // encoded; WriteSceneShot) and the shot's other read-outs beside it, and close. Headless in the
+        // sense that matters — nobody has to be watching.
         if (args.String("shot") is { } shot) shotPath = shot;
         if (args.Int("shot-frames") is { } sf) shotFrame = sf;
         shotWhenReady = args.Flag("shot-when-ready");
         framesAfterLoad = args.Int("frames-after-load");
-        freezeCascades = args.Flag("freeze-cascades");
         occlusionAlways = args.Flag("occlusion-always");
         ParseSunMove(args);
         if (args.Float("render-scale") is { } renderScaleArg) render.RenderScale = Math.Clamp(renderScaleArg, 0.5f, 1f);
@@ -331,17 +271,8 @@ internal sealed partial class SponzaLoop
         if (MsaaSamples > 1) hdrMsaaHandle = graph.ColorTarget("hdr-msaa", TextureFormat.R11G11B10F, fullSize, samples: MsaaSamples);
         depthHandle = graph.DepthTarget("scene-depth", fullSize, samples: MsaaSamples);
 
-        // One depth target per cascade, sized per ShadowMapSizes (no 2D-array
-        // creation API yet; the lit pass binds the three as a Count=3 sampler
-        // array — mixed sizes are fine, each has its own view).
-        for (var c = 0; c < CascadeCount; c++)
-        {
-            cascadeHandles[c] = graph.DepthTarget($"sun-cascade{c}",
-                new FixedGraphSize(ShadowMapSizes[c], ShadowMapSizes[c]));
-        }
-
-        // The per-frame Frame UBO (view-proj, sun, camera, cascades, fog) and
-        // its //@tune-decorated shader tunables are declared in lit.frag; their
+        // The per-frame Frame UBO (view-proj, sun, camera, the incident field's switches) and
+        // its //@tune-decorated shader tunables are declared in frame.glsl; their
         // std140 offsets are reflected from the SPIR-V, not hand-authored here.
         // Shader binding interfaces — descriptor sets, std140 UBO layouts, and
         // push-constant ranges — are reflected from the compiled SPIR-V at
@@ -349,7 +280,7 @@ internal sealed partial class SponzaLoop
         // authored. See docs/architecture.md → the Vulkan binding model. Each program
         // reflects exactly what its stages declare, and a draw binds by name only
         // what its program declares: naming a texture the program lacks throws.
-        // So the skybox has its own list of the six textures it samples rather
+        // So the skybox has its own list of the one texture it samples rather
         // than being handed the lit pass's.
         var shaderDir = AppFiles.Shaders;
         ShaderInterface Reflect(params string[] stages) =>
@@ -359,11 +290,7 @@ internal sealed partial class SponzaLoop
         var skyInterface = Reflect("skybox.vert", "skybox.frag");
         var presentInterface = Reflect("present.vert", "present.frag");
         // Reuses present.vert: both are fullscreen triangles synthesised from gl_VertexIndex.
-        var gtaoInterface = Reflect("present.vert", "gtao.frag");
-        var gtaoDenoiseInterface = Reflect("present.vert", "gtao_denoise.frag");
         var hiZInterface = Reflect("present.vert", "hiz_build.frag");
-        var shadowOpaqueInterface = Reflect("shadow.vert", "shadow.frag");
-        var shadowMaskInterface = Reflect("shadow_mask.vert", "shadow_mask.frag");
 
         // Programs sharing the frame buffer must agree on reflected std140 offsets across program
         // boundaries; stage merging validates only one program at a time.
@@ -371,15 +298,14 @@ internal sealed partial class SponzaLoop
 
         // Scan lit.frag's //@tune decorators (shipped alongside the .spv) and
         // build the overlay's shader-variable panel. The panel owns the live
-        // values + the dials; the per-frame write and the froxel sun term pull
-        // from it by name.
+        // values + the dials; the per-frame write pulls from it by name.
         // Read from the sidecar the shader compiler wrote beside lit.frag.spv, rather than
         // rescanning GLSL here. The build has the expanded source with every include resolved;
         // this process has neither, which is why the decorators in frame.glsl were invisible to
         // a load-time scan and why the application used to ship its shader sources at all.
         tunePanel = new ShaderTunablePanel(
             ShaderTunableSidecar.Load(Path.Combine(shaderDir, "lit.frag.spv")));
-        tuneObjects = new ObjectTunables(fog, shadows, render, ambient, camera);
+        tuneObjects = new ObjectTunables(shadows, render, camera);
 
         // --tune <uName>=<value>, repeatable. A shader dial that can only be reached from the
         // overlay cannot be measured, because an --ab run has no overlay.
@@ -397,7 +323,7 @@ internal sealed partial class SponzaLoop
         }
 
         // The scene cull: every pass's indirect records and visible list, written before the first pass
-        // that draws from them (the cascades), so it is declared ahead of all of them. Its dispatches
+        // that draws from them (the pre-pass), so it is declared ahead of all of them. Its dispatches
         // are fenced on both sides because they bind GPU buffers; the graph tracks images only.
         // The mover's rows are written first of all, before anything culls or draws from the transform table.
         moverInterface = Reflect("mover.comp");
@@ -409,51 +335,20 @@ internal sealed partial class SponzaLoop
         raySurfaceBakeInterface = Reflect("ray_surface_bake.comp");
         raySurfaceBakePassHandle = graph.ComputePass("ray-surface-bake").Shader(raySurfaceBakeInterface).Handle;
 
-        // One graphics pass per cascade, each writing its own depth target.
-        // Both shadow programs are render-pass-compatible with these passes.
-        for (var c = 0; c < CascadeCount; c++)
-        {
-            cascadePassHandles[c] = graph.GraphicsPass($"sun-cascade{c}")
-                .Depth(cascadeHandles[c], LoadOp.Clear, StoreOp.Store)
-                .Shader(shadowOpaqueInterface, shadowMaskInterface)
-                .Handle;
-        }
-
         // The ray batches' interfaces (SponzaLoop.RayBatch.cs), before the first consumer declares a batch.
         batchClosestInterface = Reflect("ray_batch_closest.comp");
         batchShadowInterface = Reflect("ray_batch_shadow.comp");
         // After every deferred batch's producers (SponzaLoop.TracerGroup.cs): a frame without traced screen shadows.
         tracerGroupPassHandle = graph.ExternalPass("tracer-group");
 
-        // Froxel fog compute pass — fills the 3D scattering grid. Declared
-        // between the cascade passes and the lit pass so it runs after the
-        // shadow maps are rendered (it samples them) and before the lit pass
-        // composites its result. Reflected interface: UBO (set 0 binding 0),
-        // the storage grid (binding 1), the cascade shadow maps (binding 2).
-        var froxelInterface = Reflect("froxel.comp");
-        var froxelPass = graph.ComputePass("froxel-fog").Shader(froxelInterface);
-        for (var c = 0; c < CascadeCount; c++)
-        {
-            froxelPass = froxelPass.Read(cascadeHandles[c]);
-        }
-        froxelPassHandle = froxelPass.Handle;
-
         // Depth pre-pass — declared before lit; clears + writes the (4× MSAA)
         // scene depth for all non-blend geometry. Both pre-pass programs reuse
         // litInterface (lit.vert needs set 0 + the model push; the trivial
         // fragments use a subset), so the lit material descriptor set binds to
         // the mask variant unchanged.
-        // 1x depth for GTAO to sample, and the ambient-visibility target it writes.
-        // Rgba16F because .xyz is a bent normal — a direction needs signed components, and an
-        // 8-bit one quantises the IBL lookup into visible facets on a smooth curved surface.
-        // Only under MSAA: at one sample the depth target is already what a reader wants.
+        // The 1x depth the passes after it sample. Only under MSAA: at one sample the depth target is
+        // already what a reader wants.
         if (MsaaSamples > 1) depthResolveHandle = graph.DepthTarget("scene-depth-1x", fullSize);
-        // GTAO defaults to half resolution: the full-resolution horizon search measured about 50 ms
-        // against a 49.8 ms rest-of-frame baseline. Bilateral denoise restores full-size output
-        // without introducing temporal reconstruction.
-        ambientHandle = graph.ColorTarget(
-            "ambient-visibility", TextureFormat.R16F, new MatchSwapchainGraphSize(aoScale));
-        ambientDenoisedHandle = graph.ColorTarget("ambient-visibility-denoised", TextureFormat.R16F, fullSize);
 
         // Incident light, full resolution: rgb RTGI's incoming light, a sky visibility. Rgba16F preserves HDR gradients.
         incidentHandle = graph.ColorTarget("incident-light", TextureFormat.Rgba16F, fullSize);
@@ -499,8 +394,7 @@ internal sealed partial class SponzaLoop
         // Two-phase occlusion culling (scene_occlusion.comp). The pre-pass above is its early half: what was
         // visible last frame. Its depth is reduced into a pyramid of its own, every placement is tested
         // against it, and what is visible but was not drawn is drawn by the late pre-pass into the same
-        // depth and normals, before the main pyramid and everything after read them. A separate pyramid
-        // rather than the main one so that GTAO and the rest see the whole frame's depth.
+        // depth and normals, before everything after reads them.
         occlusionInterface = Reflect("scene_occlusion.comp");
         for (var level = 0; level < HiZLevels; level++)
         {
@@ -530,8 +424,8 @@ internal sealed partial class SponzaLoop
         latePrepassHandle = lateBuilder.Handle;
 
         // The traced shadows: the shadow rays as soon as the pre-pass has the depth and normals they start from, and the Metal
-        // pass that traces them; the lit pass joins it (rt-shadow-join, below). Everything between (Hi-Z, GTAO, the
-        // RTGI's readout) reads none of it, so it runs while the rays are traced.
+        // pass that traces them; the lit pass joins it (rt-shadow-join, below). Everything between (RTGI's readout)
+        // reads none of it, so it runs while the rays are traced.
         rtShadowRaysInterface = Reflect("rt_shadow_rays.comp");
         rtShadowRaysPassHandle = graph.ComputePass("rt-shadow-rays").Shader(rtShadowRaysInterface)
             .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
@@ -543,44 +437,6 @@ internal sealed partial class SponzaLoop
         // The cache's rays (SponzaLoop.Rtgi.cs): traced after the sun's, which the lit pass waits for, and read only by the
         // cache's async update -- an async external pass, nothing in the frame waiting for it.
         rtgiTracePassHandle = graph.ExternalPass("rtgi-trace", async: true);
-
-        // The Hi-Z pyramid, immediately after the pre-pass that resolves the depth it reduces.
-        // Level 0 is half the framebuffer — the same grid GTAO already works on, so its consumers
-        // need no extra rescaling — and each level halves again.
-        for (var level = 0; level < HiZLevels; level++)
-        {
-            hiZHandles[level] = graph.ColorTarget(
-                $"hi-z{level}", TextureFormat.Rg16F, new MatchSwapchainGraphSize(0.5f / (1 << level)));   // min, max (hiz_build.frag)
-        }
-        for (var level = 0; level < HiZLevels; level++)
-        {
-            var builder = graph.GraphicsPass($"hi-z{level}")
-                .Target(hiZHandles[level], LoadOp.Clear, StoreOp.Store);
-            // Level 0 reduces the resolved scene depth; every level after reduces its predecessor.
-            builder = level == 0 ? builder.Read(SampleableSceneDepth) : builder.Read(hiZHandles[level - 1]);
-            hiZPassHandles[level] = builder.Shader(hiZInterface).Handle;
-        }
-
-        // Ambient visibility, between the pre-pass that gives it depth and the lit pass that
-        // consumes it. Declared here because graph order IS declaration order.
-        var gtaoBuilder = graph.GraphicsPass("gtao")
-            .Target(ambientHandle, LoadOp.Clear, StoreOp.Store);
-        // Reads every pyramid level: which one a tap lands on depends on how far it steps, so all
-        // of them are inputs and the graph orders the whole chain ahead of this pass.
-        for (var level = 0; level < HiZLevels; level++) gtaoBuilder = gtaoBuilder.Read(hiZHandles[level]);
-        // ReadHistory samples the prior denoised target before this frame's denoise overwrites it;
-        // the graph owns the required ordering and layout transition.
-        gtaoBuilder = gtaoBuilder.ReadHistory(ambientDenoisedHandle);
-        gtaoPassHandle = gtaoBuilder.Shader(gtaoInterface).Handle;
-
-        // Spatial denoise. A separate pass rather than a wider kernel inside GTAO: the estimate and
-        // its reconstruction are different jobs, and only one of them has to run the horizon search.
-        gtaoDenoisePassHandle = graph.GraphicsPass("gtao-denoise")
-            .Target(ambientDenoisedHandle, LoadOp.Clear, StoreOp.Store)
-            .Read(ambientHandle)
-            .Read(SampleableSceneDepth)
-            .Shader(gtaoDenoiseInterface)
-            .Handle;
 
         // The gate's reference as a wavefront (SponzaLoop.GpuReference.cs), its batches between its steps, in frame order.
         referenceWaveInterface = Reflect("reference_wave.comp");
@@ -643,14 +499,6 @@ internal sealed partial class SponzaLoop
                 .Target(hdrHandle, LoadOp.Clear, StoreOp.Store)
                 .Depth(depthHandle, LoadOp.Load, StoreOp.Store)
                 .Shader(litInterface, skyInterface);
-        // Declare the cascade depth targets as inputs so the graph orders the
-        // shadow passes before the lit pass and transitions them to
-        // shader-read layout.
-        for (var c = 0; c < CascadeCount; c++)
-        {
-            litPass = litPass.Read(cascadeHandles[c]);
-        }
-        litPass = litPass.Read(ambientDenoisedHandle);
         litPass = litPass.Read(incidentHandle);
         litPass = litPass.Read(incidentGradientHandle);
         litPassHandle = litPass.Handle;
@@ -758,25 +606,6 @@ internal sealed partial class SponzaLoop
             DepthState.LessEqualNoWrite, RasterizerState.NoCulling,
             new[] { BlendState.Disabled }, litPassHandle, "skybox");
 
-        // Shadow caster pipelines. NoCulling so Sponza's double-sided foliage
-        // and thin geometry still write depth from both faces; depth-write
-        // LessEqual into the cascade target. Both are render-pass-compatible
-        // with every cascade pass (all depth-only, same format), so we build
-        // them against cascade 0's surface and reuse across cascades.
-        var shadowVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "shadow.vert.spv"));
-        var shadowFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "shadow.frag.spv"));
-        shadowOpaqueProgram = Own(device.CreateShaderProgramFromSpv(shadowVertSpv, shadowFragSpv, shadowOpaqueInterface, "shadow.opaque"));
-        shadowOpaquePipeline = Pipeline(shadowOpaqueProgram, VertexPosition3NormalTangentTexture.Layout,
-            DepthState.LessEqualWrite, RasterizerState.NoCulling,
-            Array.Empty<BlendState>(), cascadePassHandles[0], "shadow.opaque");
-
-        var shadowMaskVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "shadow_mask.vert.spv"));
-        var shadowMaskFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "shadow_mask.frag.spv"));
-        shadowMaskProgram = Own(device.CreateShaderProgramFromSpv(shadowMaskVertSpv, shadowMaskFragSpv, shadowMaskInterface, "shadow.mask"));
-        shadowMaskPipeline = Pipeline(shadowMaskProgram, VertexPosition3NormalTangentTexture.Layout,
-            DepthState.LessEqualWrite, RasterizerState.NoCulling,
-            Array.Empty<BlendState>(), cascadePassHandles[0], "shadow.mask");
-
         // Depth + normal pre-pass pipelines — lit.vert (shared → invariant depth) plus fragments
         // that write the interpolated world normal into the matching colour target. No
         // culling: solid geometry's nearest face still wins the depth test
@@ -820,21 +649,12 @@ internal sealed partial class SponzaLoop
             RasterizerState.NoCulling,
             BlendState.Disabled), "present"));
 
-        var gtaoFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "gtao.frag.spv"));
-        gtaoProgram = Own(device.CreateShaderProgramFromSpv(presentVertSpv, gtaoFragSpv, gtaoInterface, "gtao"));
         // Graph-pass pipelines must be created against the pass surface. Swapchain-present
         // pipelines have no graph render target and are not compatible here.
-        gtaoPipeline = Pipeline(gtaoProgram, VertexPosition3NormalTexture.Layout,
-            DepthState.Disabled, RasterizerState.NoCulling,
-            new[] { BlendState.Disabled }, gtaoPassHandle, "gtao");
-
         var hiZSpv = File.ReadAllBytes(Path.Combine(shaderDir, "hiz_build.frag.spv"));
         hiZProgram = Own(device.CreateShaderProgramFromSpv(presentVertSpv, hiZSpv, hiZInterface, "hiz_build"));
         for (var level = 0; level < HiZLevels; level++)
         {
-            hiZPipelines[level] = Pipeline(hiZProgram, VertexPosition3NormalTexture.Layout,
-                DepthState.Disabled, RasterizerState.NoCulling,
-                new[] { BlendState.Disabled }, hiZPassHandles[level], $"hiz{level}");
             occZPipelines[level] = Pipeline(hiZProgram, VertexPosition3NormalTexture.Layout,
                 DepthState.Disabled, RasterizerState.NoCulling,
                 new[] { BlendState.Disabled }, occZPassHandles[level], $"occz{level}");
@@ -860,13 +680,6 @@ internal sealed partial class SponzaLoop
                 VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
                 new[] { BlendState.Disabled }, surfaceKeyHistoryPassHandle, "copy_key");
         }
-
-        var gtaoDenoiseSpv = File.ReadAllBytes(Path.Combine(shaderDir, "gtao_denoise.frag.spv"));
-        gtaoDenoiseProgram = Own(device.CreateShaderProgramFromSpv(
-            presentVertSpv, gtaoDenoiseSpv, gtaoDenoiseInterface, "gtao_denoise"));
-        gtaoDenoisePipeline = Pipeline(gtaoDenoiseProgram, VertexPosition3NormalTexture.Layout,
-            DepthState.Disabled, RasterizerState.NoCulling,
-            new[] { BlendState.Disabled }, gtaoDenoisePassHandle, "gtao_denoise");
 
         CreateRtgiPipelines(shaderDir, presentVertSpv);
         CreateRtgiTemporalPipelines(shaderDir, presentVertSpv);
@@ -903,34 +716,6 @@ internal sealed partial class SponzaLoop
         var occlusionProgram = Own(device.CreateComputeShaderProgramFromSpv(occlusionSpv, occlusionInterface, "scene_occlusion"));
         occlusionPipeline = Own(device.CreateComputePipeline(occlusionProgram, "scene_occlusion"));
 
-        // --- Froxel fog compute program + grid ---------------------------
-        var froxelSpv = File.ReadAllBytes(Path.Combine(shaderDir, "froxel.comp.spv"));
-        froxelProgram = Own(device.CreateComputeShaderProgramFromSpv(froxelSpv, froxelInterface, "froxel"));
-        froxelPipeline = Own(device.CreateComputePipeline(froxelProgram, "froxel"));
-        // View-aligned 3D scattering grid, sampled trilinearly by the lit pass. Sized from a
-        // swapchain-matched graph target rather than from host.LogicalSize, because that is the
-        // logical size and the framebuffer behind it is 2x on a Retina display — the difference
-        // between eight pixels per froxel and sixteen.
-        if (!device.TryGetTextureSize(graph.GetColorTexture(ambientDenoisedHandle), out var fbW, out var fbH))
-        {
-            throw new InvalidOperationException(
-                "VulkanSponza: the full-size ambient target has no dimensions, so the froxel grid " +
-                "cannot be sized against the framebuffer.");
-        }
-        (froxelGridX, froxelGridY) = FroxelGridSize(fbW, fbH);
-        froxelGridTexture = device.CreateStorageTexture3D(
-            froxelGridX, froxelGridY, froxelGridZ,
-            TextureFormat.Rgba16F, SamplerDescription.LinearClamp, "sponza.froxel_grid");
-        for (var i = 0; i < 2; i++)
-        {
-            fogScatterTextures[i] = device.CreateStorageTexture3D(
-                froxelGridX, froxelGridY, froxelGridZ,
-                TextureFormat.Rgba16F, SamplerDescription.LinearClamp, $"sponza.fog_scatter{i}");
-        }
-        Console.WriteLine(
-            $"[VulkanSponza] froxel grid {froxelGridX}x{froxelGridY}x{froxelGridZ} " +
-            $"({FroxelPixels} px/froxel at {fbW}x{fbH})");
-
         // Build the per-frame-constant buffers after graph compilation and texture creation. Reuse
         // them every frame in OnRender.
         passBindings = new[]
@@ -938,11 +723,6 @@ internal sealed partial class SponzaLoop
             new ShaderTextureBinding("uIrradiance",     irradianceCubeTexture),
             new ShaderTextureBinding("uPrefilteredEnv", envCubeTexture),
             new ShaderTextureBinding("uBrdfLut",        brdfLutTexture),
-            new ShaderTextureBinding("uCascadeShadowMaps[0]", graph.GetDepthTexture(cascadeHandles[0])),
-            new ShaderTextureBinding("uCascadeShadowMaps[1]", graph.GetDepthTexture(cascadeHandles[1])),
-            new ShaderTextureBinding("uCascadeShadowMaps[2]", graph.GetDepthTexture(cascadeHandles[2])),
-            new ShaderTextureBinding("uFroxelGrid",           froxelGridTexture),
-            new ShaderTextureBinding("uAmbientVisibility", graph.GetColorTexture(ambientDenoisedHandle)),
             // Bound to SOMETHING valid always — a descriptor set with a hole is a device loss, not a
             // dark curtain. uSheenMipCount being zero is what tells the shader not to read them.
             new ShaderTextureBinding("uSheenEnv", sheenMipCount > 0 ? sheenEnvTexture : envCubeTexture),
@@ -956,14 +736,8 @@ internal sealed partial class SponzaLoop
                 "uPrepassNormalViz", graph.GetColorTexture(SampleablePrepassNormal)),
         };
 
-        // The one binding that is not constant: the grid is re-created when the framebuffer changes size.
-        froxelGridBinding = Array.FindIndex(passBindings, b => b.Name == "uFroxelGrid");
-
-        // skybox.frag's two, taken from the lit list so the two can never hold different textures.
-        // uFroxelGrid's re-creation reaches it through its own index.
-        string[] skySamples = { "uFroxelGrid", "uEnvCube" };
-        skyBindings = skySamples.Select(n => passBindings.Single(b => b.Name == n)).ToArray();
-        skyFroxelGridBinding = Array.FindIndex(skyBindings, b => b.Name == "uFroxelGrid");
+        // skybox.frag's one, taken from the lit list so the two can never hold different textures.
+        skyBindings = new[] { passBindings.Single(b => b.Name == "uEnvCube") };
 
         // --- Load the scene's geometry ------------------------------------
         // Static meshes (neither scene skins): each cooked primitive
@@ -1009,7 +783,7 @@ internal sealed partial class SponzaLoop
         foreach (var pack in scene.Packs)
         {
             // --no-foliage excludes cutout geometry from every pass. A uniform A/B cannot price discard,
-            // overdraw, pre-pass work, and all shadow cascades together; the pack-level arm can.
+            // overdraw, pre-pass work and the traced shadows' alpha tests together; the pack-level arm can.
             if (pack.Foliage && noFoliage) continue;
             var packDir = Path.Combine(assetsRoot, pack.Directory);
             var found = Directory.Exists(packDir) ? FirstAsset(packDir) : null;

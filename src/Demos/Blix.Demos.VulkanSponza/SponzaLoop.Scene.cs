@@ -91,36 +91,6 @@ internal sealed partial class SponzaLoop
         return new Bounds3(min, max);
     }
 
-    // The scene's extent: everything that can cast or receive is a placement, so their union is the volume caster
-    // culling sweeps to, the fog's ground sits on and the orbit frames. Padded by 2% of the span on each side, as the
-    // retired sky-visibility cook padded the volume this replaces, and widened to the mover's reach so a moving
-    // caster's shadow still reaches the ground it sweeps over. Called after ConsolidateBuffers, which selects the mover.
-    private void FitSceneVolumeToDrawables()
-    {
-        var all = opaquePlacements.Concat(blendPlacements).ToList();
-        if (all.Count == 0) return;
-        var min = all[0].Bounds.Min;
-        var max = all[0].Bounds.Max;
-        foreach (var p in all)
-        {
-            min = Vector3.Min(min, p.Bounds.Min);
-            max = Vector3.Max(max, p.Bounds.Max);
-        }
-
-        var pad = (max - min) * 0.02f;
-        min -= pad;
-        max += pad;
-        if (MoverActive)
-        {
-            min = Vector3.Min(min, moverReach.Min);
-            max = Vector3.Max(max, moverReach.Max);
-        }
-
-        sceneBoundsMin = min;
-        sceneBoundsSpan = max - min;
-        Console.WriteLine($"[VulkanSponza] scene bounds: {min} .. {max}");
-    }
-
     private void TryFinishLoad()
     {
         if (sceneLoaded) return;
@@ -142,9 +112,6 @@ internal sealed partial class SponzaLoop
             // Everything staged → build the shared buffers; the ray scene's build and packing go to the background
             // (StartRayScene), the window going on meanwhile -- it froze ~30 s on Sponza for them.
             ConsolidateBuffers();
-            // After ConsolidateBuffers: it selects the mover, whose reach the bounds include. Without the bounds caster
-            // culling and the orbit read a zero box, and offscreen casters lost their shadows.
-            FitSceneVolumeToDrawables();
             RegisterSelectables();
             BuildCullBuffers();
             Console.WriteLine(
@@ -189,15 +156,14 @@ internal sealed partial class SponzaLoop
         opaqueLodMargins = new float[opaquePlacements.Count];
         blendLodMargins = new float[blendPlacements.Count];
         opaqueLodState = new int[opaquePlacements.Count];
-        cascadeLodState = new int[CascadeCount][];
-        for (var c = 0; c < CascadeCount; c++) cascadeLodState[c] = new int[opaquePlacements.Count];
         blendLodState = new int[blendPlacements.Count];
         System.Array.Fill(opaqueLodMargins, 1f);
         System.Array.Fill(blendLodMargins, 1f);
 
-        // Give cutout foliage four times the global LOD error budget. Its texture-defined silhouette
-        // tolerates coarser geometry, and the ivy/tree packs account for a measured 9.85 ms. Select
-        // by alpha-cutoff semantics rather than asset naming.
+        // Cutout foliage starts at FoliageLodMargin times the global LOD error budget (1 by default:
+        // the global budget; --foliage-lod sweeps it). Its texture-defined silhouette tolerates
+        // coarser geometry, and the ivy/tree packs accounted for a measured 9.85 ms. Select by
+        // alpha-cutoff semantics rather than asset naming.
         var foliage = 0;
         for (var i = 0; i < opaquePlacements.Count; i++)
         {
@@ -210,21 +176,7 @@ internal sealed partial class SponzaLoop
             if (blendDrawables[blendPlacements[i].Drawable].AlphaCutoff <= 0f) continue;
             blendLodMargins[i] = FoliageLodMargin;
         }
-        // Derive the measurement orbit from cutout geometry so foliage-focused runs keep their
-        // intended subject in view as scene bounds or authored placement change.
-        var sum = Vector3.Zero;
-        var n = 0;
-        foreach (var p in opaquePlacements)
-        {
-            if (opaqueDrawables[p.Drawable].AlphaCutoff <= 0f) continue;
-            sum += (p.Bounds.Min + p.Bounds.Max) * 0.5f;
-            n++;
-        }
-        foliageCentre = n > 0 ? sum / n : Vector3.Zero;
-        foliageValid = n > 0;
-        Console.WriteLine(
-            $"[VulkanSponza]   {foliage:N0} cutout placements start at {FoliageLodMargin:0.#}x the LOD budget"
-            + (foliageValid ? $", centred at {foliageCentre}." : "."));
+        Console.WriteLine($"[VulkanSponza]   {foliage:N0} cutout placements start at {FoliageLodMargin:0.#}x the LOD budget.");
     }
 
     // Per-primitive LOD0 triangle-size distribution across all opaque drawables.
@@ -283,7 +235,7 @@ internal sealed partial class SponzaLoop
             // overdraw that makes the hero tree fragment-bound at Retina res.
             // Its alphaCutoff (set in BuildMaterial) drives the shader discard.
             var isBlend = (pm?.TransmissionFactor ?? 0f) > 0f;
-            var material = GetMaterial(pm, out var albedo, out var alphaCutoff, out var baseColorAlpha);
+            var material = GetMaterial(pm, out var albedo, out var alphaCutoff);
             var alphaMode = isBlend ? AlphaMode.Blend
                 : alphaCutoff > 0f ? AlphaMode.Mask
                 : (pm?.AlphaMode ?? AlphaMode.Opaque);
@@ -299,8 +251,7 @@ internal sealed partial class SponzaLoop
             // every pack into the shared VB/IB once loading is done.
             staging.Add(new DrawableStaging(
                 mesh.VertexBytes, mesh.VertexCount, lods, material, pipeline, mesh.Bounds,
-                albedo, alphaCutoff, baseColorAlpha,
-                new[] { new ShaderTextureBinding("uAlbedo", albedo) }, isBlend,
+                albedo, alphaCutoff, isBlend,
                 string.IsNullOrEmpty(mesh.Name) ? "primitive" : mesh.Name, placed.Worlds, placed.Instances, prim.Source,
                 pm?.BaseColorFactor ?? Vector4.One,
                 ClothTransmission(pm) is { } cloth ? cloth.Factor * cloth.Colour
@@ -377,8 +328,7 @@ internal sealed partial class SponzaLoop
 
             bucket.Add(new Drawable(
                 bm.IndicesAreU32, bm.BaseVertex, bm.LodFirstIndex, bm.LodIndexCounts, bm.LodErrors,
-                s.Material, s.Pipeline, bm.Bounds, s.Albedo, s.AlphaCutoff, s.BaseColorAlpha,
-                s.ShadowAlbedoBinding, s.Name, start, s.Worlds.Length,
+                s.Material, s.Pipeline, bm.Bounds, s.AlphaCutoff, s.Name, start, s.Worlds.Length,
                 s.Lods.Select(l => l.Clusters ?? (IReadOnlyList<MeshCluster>)Array.Empty<MeshCluster>()).ToArray(),
                 s.Pipeline == opaqueDoubleSidedPipeline || s.Pipeline == blendDoubleSidedPipeline));
         }
@@ -416,8 +366,8 @@ internal sealed partial class SponzaLoop
         BuildGroups(blendDrawables, blendGroups);
 
         // lodSlots indirect commands per drawable per pass, one per LOD level (see FillIndirect), refilled
-        // each frame (camera opaque + one per shadow cascade + blend). indirectScratch is sized for the
-        // largest list (opaque) and reused for the smaller fills.
+        // each frame (camera opaque + blend). indirectScratch is sized for the largest list (opaque) and
+        // reused for the smaller fills.
         lodSlots = Math.Max(1, opaqueDrawables.Concat(blendDrawables).Select(d => d.LodIndexCounts.Length).DefaultIfEmpty(1).Max());
         // One record a drawable when none is placed twice: its one placement's level is the record's (the cull writes
         // the range). MoltenVK encodes every record of a multi-draw on the CPU, culled or not -- four a drawable was
@@ -432,14 +382,12 @@ internal sealed partial class SponzaLoop
         if (gpuCull) return;
 
         opaqueIndirect = Own(device.CreateIndirectBuffer(opaqueDrawables.Count * recordSlots, "sponza.opaque.indirect"));
-        for (var c = 0; c < CascadeCount; c++)
-            cascadeIndirect[c] = Own(device.CreateIndirectBuffer(opaqueDrawables.Count * recordSlots, $"sponza.cascade{c}.indirect"));
         if (blendDrawables.Count > 0)
             blendIndirect = Own(device.CreateIndirectBuffer(blendDrawables.Count * recordSlots, "sponza.blend.indirect"));
         indirectScratch = new byte[Math.Max(opaqueDrawables.Count, blendDrawables.Count) * recordSlots * IndirectDraw.RecordStride];
 
         // Set 3, sized to this scene: the transform table, and room for every pass to see every placement
-        // (camera and each cascade over the opaque placements, the camera again over the blend ones).
+        // (the camera's lists over the opaque placements, the camera again over the blend ones).
         var visibleCapacity = SceneListVisibleBase(SceneListBlend) + blendPlacements.Count;
         visibleScratch = new uint[Math.Max(1, visibleCapacity)];
         var instances = device.CreateMaterial(
@@ -559,22 +507,22 @@ internal sealed partial class SponzaLoop
         return lo > 0f && hi / lo < 1.001f;
     }
 
-    private MaterialHandle GetMaterial(PbrMaterial? gm, out TextureHandle albedo, out float alphaCutoff, out float baseColorAlpha)
+    private MaterialHandle GetMaterial(PbrMaterial? gm, out TextureHandle albedo, out float alphaCutoff)
     {
         // An unidentifiable material is never cached — an identity nobody can reproduce is not one,
         // and a shared empty key would merge two unrelated materials into whichever built first.
         if (gm is not null && gm.ResourceId.Length > 0 && materialCache.TryGetValue(gm.ResourceId, out var c))
         {
-            (albedo, alphaCutoff, baseColorAlpha) = (c.Albedo, c.Cutoff, c.Alpha);
+            (albedo, alphaCutoff) = (c.Albedo, c.Cutoff);
             return c.Mat;
         }
         if (gm is null && noMaterialCache is { } nc)
         {
-            (albedo, alphaCutoff, baseColorAlpha) = (nc.Albedo, nc.Cutoff, nc.Alpha);
+            (albedo, alphaCutoff) = (nc.Albedo, nc.Cutoff);
             return nc.Mat;
         }
-        var mat = BuildMaterial(gm, out albedo, out alphaCutoff, out baseColorAlpha);
-        var entry = (mat, albedo, alphaCutoff, baseColorAlpha);
+        var mat = BuildMaterial(gm, out albedo, out alphaCutoff);
+        var entry = (mat, albedo, alphaCutoff);
         if (gm is not null && gm.ResourceId.Length > 0) materialCache[gm.ResourceId] = entry;
         else if (gm is null) noMaterialCache = entry;
         return mat;
@@ -588,7 +536,7 @@ internal sealed partial class SponzaLoop
     // MaterialParams (alphaCutoff, normalScale, roughness, metallic) UBO + the
     // five channel textures (defaults when a channel is absent).
     private MaterialHandle BuildMaterial(
-        PbrMaterial? gm, out TextureHandle albedo, out float alphaCutoff, out float baseColorAlpha)
+        PbrMaterial? gm, out TextureHandle albedo, out float alphaCutoff)
     {
         // Engine resolves the five channel textures (read/decode/upload/dedup/
         // stream + glTF-default fallbacks + per-slot sRGB policy); the game keeps
@@ -606,7 +554,6 @@ internal sealed partial class SponzaLoop
             : gm?.AlphaMode == AlphaMode.Mask ? (gm?.AlphaCutoff ?? 0.5f)
             : gm?.AlphaMode == AlphaMode.Blend ? 0.5f
             : 0.0f;
-        baseColorAlpha = baseColorFactor.W;
         var normalScale = gm?.NormalScale ?? 1.0f;
         var roughness = gm?.RoughnessFactor ?? 0.8f;
         var metallic = gm?.MetallicFactor ?? 0.0f;

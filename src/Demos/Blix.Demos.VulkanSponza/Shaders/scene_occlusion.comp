@@ -103,7 +103,7 @@ void occlude(uint i) {
     uint lod = s & 0xFFu;
     bool drawnEarly = (s & Culled) == 0u;
 
-    bool vis = u.uFlags.x <= 0.0 || intersects(u.uCull, p.boundsMin.xyz, p.boundsMax.xyz, u.uLod.w);
+    bool vis = u.uFlags.x <= 0.0 || intersects(u.uCull, p.boundsMin.xyz, p.boundsMax.xyz, u.uLod.z);
     if (vis) vis = !hidden(p.boundsMin.xyz, p.boundsMax.xyz);
     state[early] = (s & ~WasVisible) | (vis ? WasVisible : 0u);
 

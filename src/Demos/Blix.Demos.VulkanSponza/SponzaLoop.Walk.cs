@@ -6,8 +6,8 @@ using Blix.Graphics;
 
 namespace Blix.Demos.VulkanSponza;
 
-// --walk x,y,z,yaw,pitch: walk, then stop -- what a person does, and what neither the orbit (a slow circle) nor a still
-// camera exercises. The camera holds its start pose (--cam, or the profile's) until
+// --walk x,y,z,yaw,pitch: walk, then stop -- what a person does, and what a still camera does not exercise. The camera
+// holds its start pose (--cam, or the profile's) until
 // post-load frame --walk-at (1500), walks at constant speed to the --walk pose over --walk-frames (120), and stays
 // there. --dump-at f1,f2,...: at those post-load frames, the incident light and the presented image are written as
 // RGB floats beside the shot (<shot>.f<frame>.incident.rgb / .resolved.rgb), so the seconds after stopping can be held

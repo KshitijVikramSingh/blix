@@ -54,10 +54,6 @@
     <GlslShader Include="Shaders\lit.frag" />
     <GlslShader Include="Shaders\lit_opaque.frag" />
     <GlslShader Include="Shaders\lit_lean.frag" />
-    <GlslShader Include="Shaders\shadow.vert" />
-    <GlslShader Include="Shaders\shadow.frag" />
-    <GlslShader Include="Shaders\shadow_mask.vert" />
-    <GlslShader Include="Shaders\shadow_mask.frag" />
     <GlslShader Include="Shaders\depth_prepass.frag" />
     <GlslShader Include="Shaders\flat.frag" />
     <GlslShader Include="Shaders\depth_prepass_mask.frag" />
@@ -94,10 +90,7 @@
     <GlslShader Include="Shaders\present.vert" />
     <GlslShader Include="Shaders\present.frag" />
     <GlslShader Include="Shaders\hiz_build.frag" />
-    <GlslShader Include="Shaders\gtao.frag" />
-    <GlslShader Include="Shaders\gtao_denoise.frag" />
     <GlslShader Include="Shaders\lighting_upsample.frag" />
-    <GlslShader Include="Shaders\froxel.comp" />
   </ItemGroup>
 
   <ItemGroup>
@@ -105,7 +98,7 @@
          build target. Listed so edits retrigger compilation. -->
     <!-- Every .glsl these shaders can reach, globbed rather than listed.
          A missing entry here is a shader that does not rebuild. Only fullscreen.glsl was listed,
-         while lit.frag alone includes shadow, sheen, coverage and froxel, so editing
+         while lit.frag alone includes sheen, coverage and noise, so editing
          any of those left the .spv and its //@tune sidecar stale, with a clean build and no
          warning. Found the hard way: changing a tunable's default in frame.glsl and watching the
          overlay come up with the old value.

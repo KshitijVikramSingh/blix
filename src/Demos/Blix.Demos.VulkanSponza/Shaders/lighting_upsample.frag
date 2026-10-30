@@ -44,7 +44,7 @@ layout(set = 0, binding = 2) uniform sampler2D uIncidentGradientHalf;
 layout(set = 0, binding = 3) uniform sampler2D uSceneDepth;
 layout(set = 0, binding = 4) uniform sampler2D uPrepassNormal;
 // The half-res traced mask (SponzaLoop.RtShadows): width, height, 1 while live (0 for the placeholder: no traced
-// shadows, the lit pass asks the cascades and reads no w), 1 with sky rays; then a word per half-res pixel.
+// shadows, the lit pass reads no w), 0; then a word per half-res pixel.
 layout(std430, set = 0, binding = 5) readonly buffer RtShadowMask { uvec4 rtShadowHeader; uint rtShadowWords[]; };
 
 vec3 worldAt(ivec2 pixel, float raw, vec2 fullSize) {

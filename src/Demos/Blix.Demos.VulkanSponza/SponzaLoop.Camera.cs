@@ -37,7 +37,6 @@ internal sealed partial class SponzaLoop
                 gpuTotalsAtLoad = new Dictionary<string, GpuPassTotal>(host.Timing.GpuPassTotals);
                 triangleFrames = 0;
                 cameraTriangleSum = 0;
-                System.Array.Clear(cascadeTriangleSum);
             }
         }
 
@@ -48,7 +47,7 @@ internal sealed partial class SponzaLoop
         // <b>A shot is a measurement, so nothing at the keyboard moves it.</b> The shot window takes focus
         // when it opens; a key or a drag meant for another window then flew the camera, and two "identical"
         // runs captured two places (Bistro's noise floor read 91% of pixels changed). The pose is the
-        // profile's start or --cam, and --orbit still drives its own path.
+        // profile's start or --cam, and --walk still drives its own path.
         if (shotPath is not null)
         {
             UpdateCamera();
@@ -75,56 +74,17 @@ internal sealed partial class SponzaLoop
         UpdateCamera();
     }
 
-    /// <summary>Places the camera on a closed, frame-indexed path for measurement runs.</summary>
-    /// <remarks>
-    /// The orbit exercises cascade refits, LOD transitions, and changing Hi-Z input that a still
-    /// camera would leave cached or static.
-    ///
-    /// The path period matches <c>AbPeriodFrames</c>, so successive A/B phases traverse identical
-    /// viewpoints in identical order and camera motion cancels from their comparison.
-    ///
-    /// A post-load frame clock, rather than elapsed time, makes the path independent of streaming
-    /// duration and of the performance difference being measured.
-    /// </remarks>
-    private void ApplyOrbit()
-    {
-        // Use the post-load measurement clock so --shot-frames identifies the same viewpoint even
-        // when texture streaming takes a different number of frames.
-        var t = (postLoadFrames % OrbitFrames) / (float)OrbitFrames;
-        var angle = t * MathF.Tau;
-        // Orbit the foliage when there is any, because that is the content a measurement most often
-        // wants in frame and the one a bounds-derived path missed entirely.
-        var centre = foliageValid ? foliageCentre : sceneBoundsMin + sceneBoundsSpan * 0.5f;
-        // Inside the building rather than around it: the arcade is where the overdraw, the cutout
-        // foliage and the cascade transitions all are, and an exterior orbit sees none of them.
-        var radius = MathF.Min(sceneBoundsSpan.X, sceneBoundsSpan.Z) * 0.20f;
-        var eyeY = centre.Y * 0.55f + sceneBoundsMin.Y * 0.45f;
-        // --orbit-at x,y,z,r: round a chosen point at its height, looking at it level (the bounds' path circles mid-air
-        // in a scene taller than its floor plan: Crytek Sponza's, 2026-10-24).
-        if (orbitAt is { } at) { centre = new Vector3(at.X, at.Y, at.Z); radius = at.W; eyeY = at.Y; }
-        var eye = new Vector3(
-            centre.X + MathF.Cos(angle) * radius,
-            eyeY,
-            centre.Z + MathF.Sin(angle) * radius);
-
-        // Face inward to keep the measured subject in view. The moving camera position still sweeps
-        // each fitted light frustum through the scene and exercises cascade updates.
-        camera.LookAt(eye, centre);
-        UpdateCamera();
-    }
-
     private void UpdateCamera()
     {
         // The controller's camera, whose view equals CreateLookAt(position, position + forward) (Test.Graphics BO.6).
         // Sponza atrium spans tens of metres; the far plane is generous (SponzaCamera).
         var view = camera.Camera.GetView();
         var proj = camera.Camera.GetProjection(aspect);
-        // Kept apart as well as combined: GTAO reconstructs VIEW space from depth, which needs the
-        // projection alone, and returns a bent normal in world space, which needs the view alone.
+        // Kept apart as well as combined: the occlusion pyramid linearises depth with the projection
+        // alone, and its test measures a bound's view depth with the view alone.
         cameraView = view;
         cameraProjection = proj;
         viewProj = view * proj;
-        UpdateCascades();
     }
 
     // Recompute the sun travel direction from the overlay-driven yaw/pitch.

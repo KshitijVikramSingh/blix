@@ -1,28 +1,23 @@
 // The lit pass's fragment shader, built by lit.frag (cutout materials) and lit_opaque.frag (LIT_OPAQUE).
 
-// The engine's shared cascade implementation owns PCF shape, normal offset, and cascade selection.
-// Sponza overrides only the tap count. Four taps measured about 18% cheaper than sixteen for the
-// current high sun with no material image difference; remeasure if the default sky or sun angle
-// changes enough to put broad penumbrae across the view.
-#define BLIX_SHADOW_PCF_TAPS 4
 // ── What this pass costs, measured ───────────────────────────────────────────
-// Each term ablated in-process on the measurement orbit (--ab <term>), ratios first because the
-// three runs sat at 28.8, 32.6 and 49.7 ms medians and the ratio is the part that reproduces:
+// Each term ablated in-process on a moving camera through the foliage (--ab <term>), ratios first
+// because the three runs sat at 28.8, 32.6 and 49.7 ms medians and the ratio is the part that
+// reproduces. Measured before the traced sun shadows and RTGI's incident field replaced the
+// cascades, the baked volumes and screen-space ambient occlusion, so the terms they replaced are
+// not listed; remeasure (--ab, BLIX_PROBE) before leaning on the numbers:
 //
-//     probe-volume terms          1.312x   8.69 ms   (the baked volumes, since retired)
 //     material texture bandwidth  1.150x   5.42 ms
 //     normal mapping              1.108x   3.97 ms
 //     image-based lighting        1.084x   3.77 ms
-//     ambient visibility (GTAO)   1.076x   2.30 ms
-//     sun shadows (sample + PCF)  1.052x   2.46 ms
 //     the GGX specular lobe       1.002x   0.04 ms
 //
 // They do not sum to the pass: each is what removing that term saves with everything else present,
 // so the table ranks levers rather than partitioning a budget.
 //
 // The attribution shows a memory-bound pass: material/normal-map traffic is much more expensive
-// than the GGX arithmetic. Measurements must use the foliage-inclusive orbit; a wall-only path
-// changes the ranking rather than merely scaling it.
+// than the GGX arithmetic. Measurements must include the foliage; a wall-only view changes the
+// ranking rather than merely scaling it.
 //
 // Do not enable early_fragment_tests while cutout coverage depends on fwidth(alpha). The depth and
 // lit passes can evaluate derivatives over different live quads, producing mismatched leaf edges
@@ -35,35 +30,33 @@
 #ifdef LIT_OPAQUE
 layout(early_fragment_tests) in;
 #endif
-// LIT_RARE(c): a branch most pixels never take -- sheen, diffuse transmission, the cascades' fallback, the debug views,
-// fog. The lean build (lit_lean.frag) compiles them out: a pixel pays for the registers of code it does not run, and
-// the opaque pass went 3.6 -> 3.1 ms at 2880 x 1620 without them (2026-10-24). SponzaLoop.Render.cs picks it only
-// where none can be taken: a material with neither sheen nor diffuse transmission, a frame with none of the rest.
+// LIT_RARE(c): a branch most pixels never take -- sheen, diffuse transmission, the debug views. The lean build
+// (lit_lean.frag) compiles them out: a pixel pays for the registers of code it does not run, and the opaque pass went
+// 3.6 -> 3.1 ms at 2880 x 1620 without them (2026-10-24, with the branches since removed among them).
+// SponzaLoop.Render.cs picks it only where none can be taken: a material with neither sheen nor diffuse transmission,
+// a frame with no debug view.
 #ifdef LIT_LEAN
 #define LIT_RARE(c) false
 #else
 #define LIT_RARE(c) (c)
 #endif
 
-#include "shadow.glsl"
 #include "sheen.glsl"
 #include "noise.glsl"
 #include "coverage.glsl"
-#include "froxel.glsl"
 
 // Lit fragment shader — Cook-Torrance split-sum IBL on top of a Lambert N·L
-// sun term, with cascaded shadows, a Fresnel-glass branch, and froxel-fog
-// composite.
+// sun term, with the traced sun shadows (SponzaLoop.RtShadows), RTGI's incident
+// light for everything indirect, and a Fresnel-glass branch.
 //
-//   set 0 binding 0 : per-frame UBO (viewProj, sun, IBL strength, camera, fog)
+//   set 0 binding 0 : per-frame UBO (viewProj, sun, camera, the incident field's switches: frame.glsl)
 //   set 1           : per-pass textures, all SEPARATE images read through one sampler
 //                     (uLinearClamp, binding 19) -- see the note above that binding. Among them:
-//   set 1 binding 0 : textureCube uIrradiance      (diffuse IBL)
+//   set 1 binding 0 : textureCube uIrradiance      (the sky behind a thin sheet)
 //   set 1 binding 1 : textureCube uPrefilteredEnv  (specular IBL; mip = roughness LOD)
-//   set 1 binding 2 : texture2D   uBrdfLut         (split-sum BRDF integration)
-//   set 1 binding 3 : texture2D   uCascadeShadowMaps[3]
-//   set 1 binding 4 : texture3D   uFroxelGrid      (volumetric fog)
-//   set 1 binding 5 : texture2D   uAmbientVisibility (GTAO: visibility in .r)
+//   set 1 binding 2 : texture2D   uBrdfLut         (split-sum BRDF integration, --ibl-brdf-lut)
+//   set 1 binding 17: texture2D   uIncidentField   (RTGI's light and sky visibility)
+//   set 1 binding 21: buffer      RtShadowMask     (the traced sun's visibility)
 //   set 2 binding 0 : per-material UBO (BaseColorFactor, EmissiveFactor,
 //                                       MaterialParams = alphaCutoff/normalScale/
 //                                       roughness/metallic, MaterialParams2 = the two
@@ -82,17 +75,6 @@ layout(early_fragment_tests) in;
 layout(set = 1, binding = 0) uniform textureCube uIrradiance;
 layout(set = 1, binding = 1) uniform textureCube uPrefilteredEnv;
 layout(set = 1, binding = 2) uniform texture2D   uBrdfLut;
-// Cascaded sun shadow maps (one depth target per cascade, near→far). Sampled
-// with manual depth comparison + 3×3 PCF; cascade chosen by the fragment's
-// view-space depth. GLSL forbids non-uniform dynamic indexing of a sampler
-// array, so the picker dispatches with constant indices (MoltenVK-safe).
-layout(set = 1, binding = 3) uniform texture2D   uCascadeShadowMaps[3];
-#define CASCADE_COUNT 3
-// Froxel volumetric fog grid: (xy) = screen UV, z = world distance / fogFar.
-// .rgb = integrated in-scattering to that distance, .a = transmittance.
-layout(set = 1, binding = 4) uniform texture3D   uFroxelGrid;
-// Ambient visibility from the GTAO pass: .xyz = bent normal (WORLD space), .a = visibility.
-layout(set = 1, binding = 5) uniform texture2D   uAmbientVisibility;
 // The environment convolved with CHARLIE rather than GGX, and the Charlie lobe's directional
 // albedo. Separate from uPrefilteredEnv on purpose: a GGX cube in sheen's place renders something
 // dimmer and rimless and entirely plausible, which is the failure this whole arc keeps closing.
@@ -105,12 +87,12 @@ layout(set = 1, binding = 9) uniform texture2D   uSheenLut;
 layout(set = 1, binding = 10) uniform textureCube uEnvCube;
 
 // The incident-light field, RTGI's readout brought to full resolution (lighting_upsample.frag): rgb = all the indirect
-// diffuse light arriving (sky included), a = sky visibility. Read when uIncident.z says the field is on.
+// diffuse light arriving (sky included), a = sky visibility. Zero until RTGI's readout is ready.
 layout(set = 1, binding = 17) uniform texture2D uIncidentField;
 // How the incident light's luminance changes with the normal, at the geometric normal (rtgi_readout.frag): what lets
 // light the readout evaluated at the geometric normal reach the normal-mapped one.
 layout(set = 1, binding = 20) uniform texture2D uIncidentGradient;
-// The pre-pass normal, bound here ONLY so viz channel 22 can show what the incident field reads.
+// The pre-pass normal, bound here ONLY so viz channel 16 can show what the incident field reads.
 // Nothing in the lit path samples it: lit.frag has its own, better normal.
 layout(set = 1, binding = 18) uniform texture2D uPrepassNormalViz;
 
@@ -125,15 +107,15 @@ layout(set = 1, binding = 18) uniform texture2D uPrepassNormalViz;
 layout(set = 1, binding = 19) uniform sampler uLinearClamp;
 
 // The sun's visibility traced on Apple's ray tracing hardware (SponzaLoop.RtShadows): a header (width,
-// height, 1 while live, 1 with sky rays), then one word per pixel: 1 where the sun is blocked, plus 2, with sky rays,
-// where this frame's sky ray met something. Live with no size: the trace is not ready, and the sun is off
-// (the cascades are not asked). A placeholder of zeros otherwise, and the cascades answer as before.
+// height, 1 while live -- 2 once rt_shadow_filter.comp has filtered it --, 0), then one word per pixel: 1 where the sun
+// is blocked. Live with no size: the trace is not ready, and the sun is off. A placeholder of zeros where there is no
+// Metal tracer: nothing shadows the sun then.
 layout(std430, set = 1, binding = 21) readonly buffer RtShadowMask { uvec4 rtShadowHeader; uint rtShadowWords[]; };
 
 float rtSunVisibility(vec2 fragCoord) {
     // RenderSettings.HalfResShadows: the mask is half-res, and lighting_upsample.frag has brought it back to this
     // pixel along the depth and normals, fractional at a shadow's edge, into the gradient's w.
-    if (frame.uIncident.w > 0.5) return texelFetch(sampler2D(uIncidentGradient, uLinearClamp), ivec2(fragCoord), 0).w;
+    if (frame.uIncident.y > 0.5) return texelFetch(sampler2D(uIncidentGradient, uLinearClamp), ivec2(fragCoord), 0).w;
     uvec2 px = uvec2(fragCoord);
     if (px.x >= rtShadowHeader.x || px.y >= rtShadowHeader.y) return 0.0;
     uint word = rtShadowWords[px.y * rtShadowHeader.x + px.x];
@@ -148,7 +130,7 @@ float rtSunVisibility(vec2 fragCoord) {
 // under this one: the glow is spread over a curtain's width, so its nearest half-res answer is as good as an upsample.
 // Diffuse light from the cloth, not the sun's beam: it lights the diffuse lobe alone.
 vec3 rtSheetGlow(vec2 fragCoord) {
-    uvec2 px = frame.uIncident.w > 0.5 ? uvec2(fragCoord) / 2u : uvec2(fragCoord);
+    uvec2 px = frame.uIncident.y > 0.5 ? uvec2(fragCoord) / 2u : uvec2(fragCoord);
     if (px.x >= rtShadowHeader.x || px.y >= rtShadowHeader.y) return vec3(0.0);
     uint index = px.y * rtShadowHeader.x + px.x;
     uint plane = rtShadowHeader.x * rtShadowHeader.y;
@@ -178,13 +160,6 @@ float blix_terminator(vec3 Ns, vec3 Ng, vec3 L) {
     return g * (1.0 + g - g * g);
 }
 
-// This frame's traced sky ray at the pixel: 1 where it reached the sky. One cosine-weighted ray a frame, so TAA's
-// history is what makes it the sky visibility.
-float rtSkyVisibility(vec2 fragCoord) {
-    uvec2 px = uvec2(fragCoord);
-    if (px.x >= rtShadowHeader.x || px.y >= rtShadowHeader.y) return 1.0;
-    return (rtShadowWords[px.y * rtShadowHeader.x + px.x] & 2u) != 0u ? 0.0 : 1.0;
-}
 layout(set = 2, binding = 0) uniform Material {
     vec4 uBaseColorFactor;
     vec4 uEmissiveFactor;
@@ -264,10 +239,6 @@ float geometrySmith(float NdotV, float NdotL, float roughness) {
 vec3 fresnelSchlick(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
-
-// Cascaded sun shadows are provided by shadow.glsl. Its containment-based selection avoids the
-// view-depth boundary arcs that can occur across a wide frustum, and it owns PCF, normal offset,
-// bias, and diagnostic tint consistently with other renderers.
 
 void main() {
     // A shader that statically writes gl_SampleMask must assign it on every invocation; opaque
@@ -394,7 +365,7 @@ void main() {
             float vis = glassSky;
             vec3 c = frame.uVizChannel < 1.5 ? vizGeometricN * 0.5 + 0.5 :
                      frame.uVizChannel < 2.5 ? N * 0.5 + 0.5 :
-                     frame.uVizChannel < 7.5 ? vec3(vis) : vec3(vis);
+                     vec3(vis);
             outColor = vec4(c, 1.0);
             return;
         }
@@ -420,31 +391,18 @@ void main() {
     float terminatorBack = blix_terminator(-N, -Nsmooth, L);
     float NdotH = max(dot(N, H), 0.0);
     float VdotH = max(dot(V, H), 0.0);
-    // The shared shadow path chooses the cascade before applying its world-space normal offset and
-    // texel-space filter radius, keeping the two units and cascade footprints distinct.
-    int shadowCascade = -1;
     float sunShadow = 1.0;
     vec3 sheetGlow = vec3(0.0);   // through sunlit curtains (rtSheetGlow), on the diffuse lobe beside sunShadow
-    // Pay for shadow filtering only when front-side reflection or back-side diffuse transmission
-    // can consume it. Fragments needing neither leave cascade index -1, which diagnostics render as
-    // outside the cascades because no lookup was requested.
+    // Read the traced mask only where front-side reflection or back-side diffuse transmission can consume it. With no
+    // trace at all (no Metal tracer: the placeholder, header z 0) nothing shadows the sun.
     float backNdotL = max(dot(-N, L), 0.0);
     float shadowNeed = max(NdotL, mat.uMaterialParams2.z > 0.0 ? backNdotL : 0.0);
     if (frame.uShadowStrength > 0.0 && shadowNeed > 0.0 && rtShadowHeader.z != 0u) {
         sunShadow = rtSunVisibility(gl_FragCoord.xy);
         sunShadow = mix(1.0, sunShadow, frame.uShadowStrength);
-        // The light sunlit sheets send through to this pixel, the frame's own -- left out where frame.uIncidentGradient.z
-        // says the incident field holds it (a scene with sheets, the field on: SponzaLoop.Render.cs). That rule was the
-        // texel GI's, whose gather counted the sheets' glow; RTGI's rays do not, and it still holds under RTGI.
-        sheetGlow = frame.uIncidentGradient.z > 0.5 ? vec3(0.0) : rtSheetGlow(gl_FragCoord.xy) * frame.uShadowStrength;
-    } else if (LIT_RARE(frame.uShadowStrength > 0.0 && shadowNeed > 0.0)) {
-        sunShadow = blix_sun_shadow_cascaded(
-            uCascadeShadowMaps[0], uCascadeShadowMaps[1], uCascadeShadowMaps[2], uLinearClamp,
-            frame.uCascadeViewProj[0], frame.uCascadeViewProj[1], frame.uCascadeViewProj[2],
-            frame.uCascadeTexels.xyz,
-            vWorldPos, N, shadowNeed, 2.0, gl_FragCoord.xy,
-            shadowCascade);
-        sunShadow = mix(1.0, sunShadow, frame.uShadowStrength);
+        // The light sunlit sheets send through to this pixel. RTGI's rays do not carry light through thin cloth, so
+        // this, the frame's own, is the only glow behind a curtain there is.
+        sheetGlow = rtSheetGlow(gl_FragCoord.xy) * frame.uShadowStrength;
     }
 
     // GGX microfacet highlight from the sun. Without this the sun produces
@@ -563,52 +521,16 @@ void main() {
     vec3 kS = F;
     vec3 kD = (vec3(1.0) - kS) * (1.0 - metallic);
 
-    // --- Ambient visibility ---------------------------------------------
-    // GTAO provides screen-space visibility and a bent normal for opaque surfaces. Transmissive
-    // materials are absent from the depth pre-pass, so sampling here would describe geometry behind
-    // the pane. The predicate matches the scene's blend classification.
-    vec4 ambientVis = texture(sampler2D(uAmbientVisibility, uLinearClamp), gl_FragCoord.xy / frame.uFog.xy);
-    // <b>Named for what it actually tests.</b> This is "did this surface write depth in the
-    // pre-pass", which is what makes a screen-space visibility lookup meaningful here -- and the
-    // only thing excluded from that pre-pass is a KHR_materials_transmission pane. It was called
-    // `opaqueSurface`, which is false of a curtain that scatters light through itself: a
-    // diffuse-transmission surface IS in the pre-pass and DOES read GTAO, correctly. The behaviour
-    // never changed; the name asserted the same near-miss between KHR_materials_transmission and
-    // KHR_materials_diffuse_transmission that once put a flat translucency on every cell of the
-    // light-transport bake.
-    bool inDepthPrepass = mat.uMaterialParams2.x <= 0.0;
-    float visibility = inDepthPrepass && frame.uTexelShape.y > 0.5 ? ambientVis.r : 1.0;
-
-    // IBL uses the shading normal. (GTAO no longer writes a bent normal: nothing shaded with it.)
+    // IBL uses the shading normal.
     vec3 cubeN   = N;
 
     // --- The incident field (RTGI's readout) -----------------------------------------------------
-    // .a is the sky visibility RTGI's rays found, supplying building-scale enclosure beyond GTAO's
-    // screen-space radius; .rgb is all the indirect diffuse light arriving, sky included. The field is
-    // on whenever RTGI is; before its readout is ready the targets hold zero, so the frame has no
-    // indirect light rather than a guess. Without the field (--rt-isolated) the sky is open:
-    // visibility 1 and the irradiance cube's light.
-    bool incidentOn = frame.uIncident.z > 0.5;
-    bool incidentUsed = incidentOn && frame.uIncident.x > 0.5;
-    vec4 incidentField = incidentOn
-        ? texture(sampler2D(uIncidentField, uLinearClamp), gl_FragCoord.xy / frame.uFog.xy)
-        : vec4(0.0);
-    float skyVisibility = incidentUsed ? incidentField.a : 1.0;
-    // The isolated traced path's own answer: the sky ray traced at this pixel (SponzaLoop.RtShadows).
-    if (!incidentUsed && rtShadowHeader.z != 0u && rtShadowHeader.w != 0u) skyVisibility = rtSkyVisibility(gl_FragCoord.xy);
-
-    // With the field the sky's diffuse light arrives through it, as the sky the surface actually sees;
-    // adding the cube's irradiance times visibility here would count it twice.
-    // Lambert: radiance out is albedo/PI times the irradiance in, as the direct sun has it. Every cache and the
-    // irradiance cube hold irradiance E (PbrIblBaker integrates cos-weighted to E), so the /PI belongs here; shading
-    // them as albedo * E made all indirect light PI times too bright against the sun (fixed 2026-10-21).
-    // The irradiance cube read only where it is used: with the field on (every frame but --rt-isolated) its light is the field's, the
-    // read taken anyway ~0.09 ms of the IBL's 0.46 (Crytek Sponza 1080p, the in-boot A/B, 2026-10-28).
-    vec3 diffuseIBL = vec3(0.0);
-    if (!incidentOn) {
-        vec3 irradiance = frame.uAbFlags.z > 0.5 ? vec3(0.2) : texture(samplerCube(uIrradiance, uLinearClamp), cubeN).rgb;
-        diffuseIBL = irradiance * albedo / PI * skyVisibility;
-    }
+    // .a is the sky visibility RTGI's rays found; .rgb is all the indirect diffuse light arriving, sky
+    // included -- the sky's diffuse light arrives through it, as the sky the surface actually sees, so
+    // the irradiance cube is not read for it. Before RTGI's readout is ready the targets hold zero, so
+    // the frame has no indirect light rather than a guess.
+    vec4 incidentField = texture(sampler2D(uIncidentField, uLinearClamp), gl_FragCoord.xy / frame.uScreenSize);
+    float skyVisibility = incidentField.a;
 
     // Specular: prefiltered env at LOD = roughness × (mipCount - 1), times
     // the BRDF LUT integration (split-sum approximation of the specular term).
@@ -620,9 +542,9 @@ void main() {
         float lod = roughness * (frame.uEnvMipCount - 1.0);
         vec3 prefiltered = textureLod(samplerCube(uPrefilteredEnv, uLinearClamp), R, lod).rgb;
         // The split sum's scale and bias by Karis' analytic fit (Unreal's mobile EnvBRDFApprox), not the LUT's read: the read
-        // ~0.26 ms a frame (Crytek Sponza 1080p, the in-boot A/B, 2026-10-28). frame.uTexelShape.w 1 (--ibl-brdf-lut): the LUT.
+        // ~0.26 ms a frame (Crytek Sponza 1080p, the in-boot A/B, 2026-10-28). frame.uIblBrdfLut 1 (--ibl-brdf-lut): the LUT.
         vec2 envBrdf;
-        if (frame.uTexelShape.w > 0.5) envBrdf = texture(sampler2D(uBrdfLut, uLinearClamp), vec2(NdotV, roughness)).rg;
+        if (frame.uIblBrdfLut > 0.5) envBrdf = texture(sampler2D(uBrdfLut, uLinearClamp), vec2(NdotV, roughness)).rg;
         else {
             vec4 envR = roughness * vec4(-1.0, -0.0275, -0.572, 0.022) + vec4(1.0, 0.0425, 1.04, -0.04);
             float envA = min(envR.x * envR.x, exp2(-9.28 * NdotV)) * envR.x + envR.y;
@@ -633,25 +555,17 @@ void main() {
         specularIBL = prefiltered * (F * envBrdf.x + envBrdf.y) * skyVisibility;
     }
 
-    // AO attenuates indirect light only. Sun visibility is not an ambient-occlusion signal.
-    // Specular gets its own occlusion, derived rather than dialled: a rough surface gathers over a
-    // wide cone and is occluded nearly as much as the diffuse lobe, while a mirror gathers along
-    // one ray that the visibility average says little about. Lagarde's approximation is that
-    // relationship written down, and it takes roughness and visibility as its only inputs.
-    float specularVisibility = clamp(
-        pow(max(NdotV + visibility, 0.0), exp2(-16.0 * roughness - 1.0)) - 1.0 + visibility,
-        0.0, 1.0);
     // The field's light is added to the sum, reflected with the same albedo response as diffuse IBL.
     // It is incident light arriving from elsewhere, not another visibility factor.
     vec3 bounce = vec3(0.0);
     vec3 vizBounceRaw = vec3(0.0);
-    if (incidentUsed && frame.uNoBounceTerm < 0.5) {
+    if (frame.uNoBounceTerm < 0.5) {
         vec3 incident = incidentField.rgb;
         // The field was evaluated at the geometric normal (the pre-pass carries no normal map). Carry it to
         // the normal-mapped normal to first order: all indirect light arrives here, and without this a normal
         // map's folds and relief go flat in it (15% of Sponza's pixels moved when the inline path was
         // evaluated at the geometric normal instead).
-        vec3 gradient = texture(sampler2D(uIncidentGradient, uLinearClamp), gl_FragCoord.xy / frame.uFog.xy).xyz;
+        vec3 gradient = texture(sampler2D(uIncidentGradient, uLinearClamp), gl_FragCoord.xy / frame.uScreenSize).xyz;
         float lum = dot(incident, vec3(0.2126, 0.7152, 0.0722));
         if (lum > 1e-6) {
             // The normal map read blurred (uIncidentGradient.x mips down), through the same frame: indirect
@@ -665,16 +579,16 @@ void main() {
             incident *= clamp(1.0 + dot(gradient, dn) / lum, 1.0 - range, 1.0 + range);
         }
         vizBounceRaw = incident;
-        // A field that holds occlusion (uIncident.y: its rays found it) takes neither GTAO nor the material's
-        // baked occlusion texture: both are stand-ins for what those rays traced, and on top of them the teacup's
-        // occlusion map (0.48 mean) left its wall -16% against the path trace, its shade -59%; without, -1% and -4%
-        // (2026-10-22). uIncident.y 2: --material-ao-on-gi, the map as before.
-        bool fieldOccludes = frame.uIncident.y > 0.5;
-        float giAo = fieldOccludes && frame.uIncident.y < 1.5 ? 1.0 : ao;
+        // A field that holds occlusion (uIncident.x: its rays found it) takes no material's baked occlusion
+        // texture: that is a stand-in for what those rays traced, and on top of them the teacup's occlusion map
+        // (0.48 mean) left its wall -16% against the path trace, its shade -59%; without, -1% and -4%
+        // (2026-10-22). uIncident.x 2: --material-ao-on-gi, the map as before.
+        bool fieldOccludes = frame.uIncident.x > 0.5;
+        float giAo = fieldOccludes && frame.uIncident.x < 1.5 ? 1.0 : ao;
         // The diffuse share of it as the cube's diffuse has it (kD: (1 - F)(1 - metallic)): the specular sky below takes the
         // reflected share F of the same light, and with (1 - metallic) alone here that share was counted twice -- a sky
         // term on top of the sky, ~5-10% on rough stone where the sky is all the light (the shade), 2026-10-28.
-        bounce = incident * albedo / PI * kD * giAo * (fieldOccludes ? 1.0 : visibility);
+        bounce = incident * albedo / PI * kD * giAo;
     }
 
     // Sheen's own prefiltered environment, at the sheen roughness rather than the base one, times
@@ -683,7 +597,7 @@ void main() {
     if (hasSheen && frame.uAbFlags.z < 0.5) {
         float sheenLod = sheenRoughness * max(frame.uSheenMipCount - 1.0, 0.0);
         vec3 sheenEnv = textureLod(samplerCube(uSheenEnv, uLinearClamp), R, sheenLod).rgb;
-        sheenIBL = sheenEnv * sheenColor * sheenAlbedo * skyVisibility * visibility * ao;
+        sheenIBL = sheenEnv * sheenColor * sheenAlbedo * skyVisibility * ao;
     }
 
     // The ambient half of transmission: irradiance gathered along -N, which is the sky on the side
@@ -693,16 +607,16 @@ void main() {
     if (LIT_RARE(diffTrans > 0.0)) {
         // The back side's sky visibility. The incident field answers only at the front's geometric
         // normal, so its visibility stands in for -N's (enclosure at room scale, where the two sides
-        // of a sheet share it); without the field the sky is open.
-        float backVis = incidentUsed ? incidentField.a : 1.0;
+        // of a sheet share it).
+        float backVis = incidentField.a;
         vec3 backIrradiance = texture(samplerCube(uIrradiance, uLinearClamp), -cubeN).rgb * backVis;
         // The helper returns irradiance times the transmitted fraction; Lambert about -N divides by PI.
         transmittedIBL = blix_diffuseTransmissionAmbient(
-            backIrradiance, dtColor, diffTrans) / PI * ao * visibility;
+            backIrradiance, dtColor, diffTrans) / PI * ao;
     }
 
     // Same shape as `direct` above, deliberately: (base + transmitted) * sheenScale + sheen.
-    vec3 ambient = ((kD * diffuseIBL * transScale * visibility + specularIBL * specularVisibility) * ao
+    vec3 ambient = (specularIBL * ao
                     + bounce * transScale
                     + transmittedIBL) * sheenScale
                  + sheenIBL;
@@ -716,8 +630,8 @@ void main() {
     bool unlit = mat.uSheenColor.w > 0.5;
     if (unlit) color = albedo;
 
-    // Debug: tint by which cascade shadowed this fragment (red/green/blue,
-    // near→far). Helps confirm split placement + texel-snap stability.
+    // Debug views (--viz N, the overlay's Show): one shading input instead of the lit colour. The ids are
+    // SponzaLoop's VizChannelNames, in this order.
     if (LIT_RARE(frame.uVizChannel > 0.5)) {
         vec3 c =
             frame.uVizChannel < 1.5 ? vizGeometricN * 0.5 + 0.5 :
@@ -727,63 +641,30 @@ void main() {
             frame.uVizChannel < 5.5 ? T * 0.5 + 0.5 :
             frame.uVizChannel < 6.5 ? B * 0.5 + 0.5 :
             frame.uVizChannel < 7.5 ? vec3(skyVisibility) :
-            // 8 and 9 are unused (they read the retired baked volume); black.
-            frame.uVizChannel < 9.5 ? vec3(0.0) :
-            // 10 is raw incident bounce; 11 includes surface response and occlusion; 12 is direct
+            // 8 is raw incident bounce; 9 includes surface response and occlusion; 10 is direct
             // sun for scale. Keeping these stages separate distinguishes weak transport from later
             // attenuation.
-            frame.uVizChannel < 10.5 ? vizBounceRaw :
-            frame.uVizChannel < 11.5 ? bounce :
-            frame.uVizChannel < 12.5 ? direct :
-            // 13-15 expose GTAO, material AO, and the complete ambient-occlusion product.
-            frame.uVizChannel < 13.5 ? vec3(visibility) :
-            frame.uVizChannel < 14.5 ? vec3(ao) :
-            frame.uVizChannel < 15.5 ? vec3(skyVisibility * visibility * ao) :
-            // 16 is unused (the retired volume's probe-blend confidence); black.
-            frame.uVizChannel < 16.5 ? vec3(0.0) :
-            // 17-20 expose the ambient sum before addition: diffuse sky, specular sky, thin-sheet
-            // transmission, and bounce.
-            frame.uVizChannel < 17.5 ? kD * diffuseIBL * transScale * visibility * ao :
-            frame.uVizChannel < 18.5 ? specularIBL * specularVisibility * ao :
-            frame.uVizChannel < 19.5 ? transmittedIBL :
-            frame.uVizChannel < 20.5 ? bounce * transScale :
-            // 21: the material's albedo as shaded (texture, factor and vertex colour), which multiplies every light above --
+            frame.uVizChannel < 8.5 ? vizBounceRaw :
+            frame.uVizChannel < 9.5 ? bounce :
+            frame.uVizChannel < 10.5 ? direct :
+            // 11: the material's occlusion texture.
+            frame.uVizChannel < 11.5 ? vec3(ao) :
+            // 12-14 expose the ambient sum before addition: specular sky, thin-sheet transmission, and bounce.
+            frame.uVizChannel < 12.5 ? specularIBL * ao :
+            frame.uVizChannel < 13.5 ? transmittedIBL :
+            frame.uVizChannel < 14.5 ? bounce * transScale :
+            // 15: the material's albedo as shaded (texture, factor and vertex colour), which multiplies every light above --
             // a fault in it (a chart's UVs, a broken mip) shows in the image and in no lighting channel.
-            frame.uVizChannel > 20.5 && frame.uVizChannel < 21.5 ? albedo :
-            // 22 shows the pre-pass normal used by the half-resolution incident field. Compare it
+            frame.uVizChannel < 15.5 ? albedo :
+            // 16 shows the pre-pass normal used by the half-resolution incident field. Compare it
             // with geometric channel 1 and shading channel 2 to localize reconstruction faults.
-            frame.uVizChannel < 22.5 && frame.uVizChannel > 21.5
-                ? texture(sampler2D(uPrepassNormalViz, uLinearClamp), gl_FragCoord.xy / frame.uFog.xy).xyz * 0.5 + 0.5 :
-            // 23 and 24 showed the retired probe clipmap and are black, kept so the channels' numbers hold.
-                                       vec3(0.0);
+            texture(sampler2D(uPrepassNormalViz, uLinearClamp), gl_FragCoord.xy / frame.uScreenSize).xyz * 0.5 + 0.5;
         // Straight out, no exposure and no tonemap — these are directions and flags, and a film
         // curve on a direction is a way to misread it.
         // Diagnostics force full coverage so dropped foliage samples cannot reveal the skybox and
         // contaminate the quantity being inspected.
         outColor = vec4(c, 1.0);
         return;
-    }
-
-    if (LIT_RARE(frame.uVisualizeAmbient > 0.5)) {
-        color = vec3(visibility);
-    }
-
-    if (LIT_RARE(frame.uVisualizeCascades > 0.5)) {
-        color = mix(color, blix_cascade_tint(shadowCascade) * (0.5 + 0.5 * NdotL * sunShadow), 0.4);
-    }
-
-    // --- Froxel fog composite -------------------------------------------
-    // Sample the pre-integrated scattering grid at this fragment's screen UV
-    // and radial distance, then apply: lit*transmittance + in-scatter. The
-    // grid is filled by the froxel compute pass earlier this frame.
-    if (LIT_RARE(frame.uFog.w > 0.5)) {
-        vec2 fuv = gl_FragCoord.xy / frame.uFog.xy;
-        float dist = length(vWorldPos - frame.uCameraPos);
-        // The grid's slices are not uniform in distance, so neither is this lookup — the curve is
-        // shared with the compute pass rather than restated (see froxel.glsl).
-        float w = blix_froxelSliceCoord(dist, frame.uFog.z);
-        vec4 fog = texture(sampler3D(uFroxelGrid, uLinearClamp), vec3(fuv, w));
-        color = color * fog.a + fog.rgb;
     }
 
     // Output coverage (not raw alpha) so alpha-to-coverage gets the sharpened

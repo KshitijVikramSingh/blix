@@ -18,9 +18,9 @@ namespace Blix.Demos.VulkanSponza;
 // (.blixtex BC textures, .blixprobe IBL, .blixmesh geometry with LOD chains +
 // spatial split) across the main + curtains + ivy + trees packs.
 //
-// Render graph, abbreviated: three shadow cascades → probe/froxel compute →
-// depth + normal pre-pass → Hi-Z → GTAO + denoise → RTGI's incident light →
-// lit scene (R11G11B10F, optional MSAA resolve) → parity TAA → present.
+// Render graph, abbreviated: scene cull → depth + normal pre-pass (two-phase
+// occlusion) → the traced sun shadows (Metal) and RTGI's incident light → lit
+// scene (R11G11B10F, optional MSAA resolve) → parity TAA or MetalFX → present.
 //
 // Performance shape: screen-space-error LOD over meshopt chains, cook-time spatial split of
 // oversized primitives, all geometry consolidated into one shared VB/IB (draws
@@ -35,11 +35,11 @@ namespace Blix.Demos.VulkanSponza;
 //   • Cooked-asset pipeline: .blixmesh/.blixtex/.blixprobe via MaterialTextureLoader
 //     + AsyncLoadQueue + MeshBundler (one shared VB/IB, draws are sub-ranges)
 //   • GPU-driven indirect draw, screen-space-error LOD over meshopt chains
-//   • RenderGraph at scale: graphics + compute, history reads, cascaded shadows,
-//     depth/normal pre-pass, Hi-Z, GTAO, incident light, TAA, and MSAA resolves
+//   • RenderGraph at scale: graphics + compute + external Metal passes, history reads,
+//     depth/normal pre-pass, an occlusion Hi-Z, incident light, TAA, and MSAA resolves
 // ── Intentionally owns (stays local; don't extract until a 2nd consumer needs it) ──
 //   • Sponza-specific draw groups, LOD/cull policy, cutout-foliage routing
-//   • probe transport, the exact pass wiring, measurement modes, and per-scene tuning
+//   • RTGI, the traced shadows, the exact pass wiring, measurement modes, and per-scene tuning
 //     (this is a research renderer, not a reusable scene renderer)
 public static class Program
 {
@@ -114,10 +114,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
         this.args = args;
         this.scene = scene;
         camera = SceneCamera(scene);
-        cascadeSplits = (float[])scene.CascadeSplits.Clone();
-        // Before ObjectTunables reads the flags, so --tune and the overlay start from the scene's values.
-        shadows.SunDistance = scene.SunDistance;
-        fog.Far = scene.FogFar;
     }
 
     /// <summary>Which scene this run draws (<c>--scene</c>), and the constants sized to it.</summary>
@@ -201,13 +197,12 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // so expensive lit fragments run only on visible pixels and later screen-space
     // work reads an authored world normal rather than reconstructing one from depth.
     // Reuses lit.vert so the lit pass's LessEqual test matches the depth exactly.
+    // It rasterises into sample-count-matched depth; under MSAA it also resolves depth to a
+    // sampleable 1x target for the passes that read it, riding the pass store rather than
+    // requiring another geometry pass. At 1x the original target is used.
     private PassHandle depthPrepassHandle;
 
-    // --- Ambient visibility (GTAO) ----------------------------------------
-    // The pre-pass rasterises every non-blend drawable into sample-count-matched depth. Under MSAA
-    // it also resolves depth to a sampleable 1x target for GTAO; at 1x the original target is used.
-    // The resolve rides the pass store rather than requiring another geometry pass.
-    // Shared by projection, Hi-Z linearisation, and GTAO's background test.
+    // Shared by the projection and the occlusion pyramid's linearisation.
     private float CameraNearPlane => scene.NearPlane;
     // The scene's (SceneProfile.FarPlane): a 30 m atrium and a 180 m street want different reaches.
     private float CameraFarPlane => scene.FarPlane;
@@ -220,19 +215,12 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     /// already sampleable.</remarks>
     private GraphResourceHandle SampleableSceneDepth =>
         MsaaSamples > 1 ? depthResolveHandle : depthHandle;
-    private GraphResourceHandle ambientHandle;        // R16F visibility
-    // --- Hi-Z depth pyramid -----------------------------------------------
+    // --- The occlusion cull's Hi-Z pyramid ------------------------------------
     // Six levels from half the framebuffer down, each the min/max linear view depth of its parent's
     // footprint. Separate targets rather than mips of one image — see hiz_build.frag for why.
     private const int HiZLevels = 6;
-    private readonly GraphResourceHandle[] hiZHandles = new GraphResourceHandle[HiZLevels];
-    private readonly PassHandle[] hiZPassHandles = new PassHandle[HiZLevels];
     private ShaderProgramHandle hiZProgram;
-    private readonly PipelineHandle[] hiZPipelines = new PipelineHandle[HiZLevels];
 
-    private GraphResourceHandle ambientDenoisedHandle; // what the lit pass actually samples
-    private PassHandle gtaoPassHandle;
-    private PassHandle gtaoDenoisePassHandle;
     // The interpolated world normal, written by the depth pre-pass. What the incident field used
     // to infer from the depth buffer, and could not for foliage, two-sided cloth or silhouettes.
     private GraphResourceHandle prepassNormalHandle;
@@ -285,19 +273,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private bool halfLightingNow;
     // RenderSettings.HalfResShadows, this frame: the sun rays on the half-res grid and the upsample carrying the mask.
     private bool halfShadowsNow;
-    private ShaderProgramHandle gtaoProgram;
-    private PipelineHandle gtaoPipeline;
-    private ShaderProgramHandle gtaoDenoiseProgram;
-    private PipelineHandle gtaoDenoisePipeline;
-    private readonly AmbientSettings ambient = new();
-
-    // The scene's extent (placements, padded, and the mover's reach): what caster culling sweeps to, the fog's
-    // ground and the orbit's frame. See FitSceneVolumeToDrawables.
-    private Vector3 sceneBoundsMin;
-    private Vector3 sceneBoundsSpan;
-
-    // The standard path takes RTGI's sky visibility and light in the lit pass. --no-sky disables both.
-    private bool skyVisibilityEnabled;
 
     // The sheen half of the probe. Zero mips means the probe predates .blixprobe v4 and the shader
     // is told so rather than handed the specular cube, which would render a plausible non-answer.
@@ -317,8 +292,8 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
 
     // Streamed-load preview: textures upload over frames via the loader's queue;
     // until they finish, the geometry renders flat (lit.vert + flat.frag, no
-    // material textures sampled) and shadows/IBL/fog are skipped. The full
-    // lit+shadow loop starts once textureLoader.PendingCount hits 0.
+    // material textures sampled) and shadows, GI and IBL are skipped. The full
+    // lit loop starts once textureLoader.PendingCount hits 0.
     private MaterialTextureLoader textureLoader = null!;
     private ShaderProgramHandle flatProgram;
     private PipelineHandle flatPipeline;
@@ -359,45 +334,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private PipelineHandle presentPipeline;
     private FullscreenPass fullscreen = null!;
 
-    // --- Froxel volumetric fog --------------------------------------------
-    // A compute pass fills a view-aligned 3D grid with sun in-scattering and
-    // transmittance (shadow-aware, sampling the cascade maps), ordered after
-    // the shadow passes and before the lit pass, which composites it per
-    // fragment. The first real consumer of the compute layer + 3D textures.
-    // Each XY froxel spans eight framebuffer pixels; Z subdivides the fog range independently.
-    // Compute cost scales with X*Y*Z, so resizing changes screen-space density while the slice
-    // control changes depth integration quality.
-    private const int FroxelPixels = 8;
-    /// <summary>--fog-slices N: depth slices in the froxel grid. See the note on the default.</summary>
-    /// <remarks>
-    /// Twenty-four slices pair with jittered temporal accumulation. Use 48 slices and zero temporal
-    /// weight to compare depth resolution without history.
-    /// </remarks>
-    private int froxelGridZ = 24;
-    private int froxelGridX, froxelGridY;
-    private int froxelGridBinding = -1;
-    private int skyFroxelGridBinding = -1;
-
-    // The grid dimensions a framebuffer of this size asks for. Floored well above zero so a
-    // minimised or absurdly small window still has a grid to dispatch over.
-    private static (int X, int Y) FroxelGridSize(int width, int height) =>
-        (Math.Max(8, (width  + FroxelPixels - 1) / FroxelPixels),
-         Math.Max(8, (height + FroxelPixels - 1) / FroxelPixels));
-    private ShaderProgramHandle froxelProgram;
-    private PipelineHandle froxelPipeline;
-    private TextureHandle froxelGridTexture;
-    // Ping-ponged pre-integration medium history: rgb is scattered radiance and a is extinction per
-    // froxel. Reprojection may read a different texel from the one being written, so aliasing one
-    // texture would be a real read/write hazard.
-    private readonly TextureHandle[] fogScatterTextures = new TextureHandle[2];
-    private int fogScatterWrite;
-    private Matrix4x4 prevFogViewProj = Matrix4x4.Identity;
-    private Vector3 prevFogCamPos;
-    private bool fogHistoryValid;
-    private PassHandle froxelPassHandle;
-    // Volumetric-fog tunables — [Tune]-tagged, auto-bound to the overlay "Fog"
-    // group via ObjectTunables (see FogSettings).
-    private readonly FogSettings fog = new();
+    // [Tune]-tagged settings, auto-bound to the overlay's groups via ObjectTunables.
     private readonly ShadowsSettings shadows = new();
     private readonly RenderSettings render = new();
     // --- Headless capture -------------------------------------------------
@@ -422,27 +359,19 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private readonly double[] flatPeriodsMs = new double[600];
     private int flatPeriodCount;
 
-    // Frames rendered since the scene finished loading. The reproducible clock: the orbit's angle
-    // and the --shot deadline both read it, so a capture is a function of the flag alone.
+    // Frames rendered since the scene finished loading. The reproducible clock: the walk, TAA's
+    // jitter and the --shot deadline all read it, so a capture is a function of the flags alone.
     private int postLoadFrames;
     private bool shotWritten;
 
-    // --no-mask: force every cutout material's alphaCutoff to zero. Nothing then routes to a MASK
-    // pipeline, so no pass samples albedo just to discover a fragment is air — not the camera pass,
-    // not the depth pre-pass, not any shadow cascade. The picture is wrong on purpose (leaves become
-    // solid cards); the point is the frame time beside it.
-
-    // --ab-flat: after loading, alternate between the FLAT path and the full lit path every
-    // AbPeriodFrames frames, bucketing frame times separately.
+    // --ab MODE (--ab-flat: --ab flat): after loading, alternate between two arms every AbPeriodFrames
+    // frames, bucketing frame times separately.
     //
     // Alternate A/B arms inside one process so thermal drift affects both samples on the same run.
-    // "" = off. "flat" swaps the whole lit path for flat.frag; "shadow" zeroes uShadowStrength;
-    // "gtao" zeroes the search radius. The last two are uniform-driven, so they alternate without
-    // touching pipelines — which is what makes a fine interleave possible at all.
+    // "" = off. "flat" swaps the whole lit path for flat.frag; "shadow" zeroes uShadowStrength, and
+    // the shading modes (textures, pbr, ibl, normal) set one of uAbFlags. Those are uniform-driven,
+    // so they alternate without touching pipelines — which is what makes a fine interleave possible.
     // --no-prepass: drop the depth pre-pass for good, not as an A/B phase.
-    //
-    // --no-prepass also removes its Hi-Z and GTAO dependants. It measures that whole dependency
-    // chain, not a depth-only optimization; the recorded comparison was 0.802x frame time.
     private bool noPrepass;
     /// <summary>--probe &lt;name&gt;: a cooked .blixprobe to prefer over the default list.</summary>
     private string? probeName;
@@ -451,12 +380,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private string abMode = "";
     private bool abFlat;
     private const int AbPeriodFrames = 120;
-    /// <summary>--orbit: a closed camera path, one revolution per A/B phase. See ApplyOrbit.</summary>
-    private bool orbit;
-    private Vector4? orbitAt;
-    // --orbit-frames N: a slower revolution, for what a walking camera sees; the A/B
-    // alignment above holds only at the default.
-    private int OrbitFrames = AbPeriodFrames;
     // --ab lod alternates two error budgets in-process. Defaults compare the configured budget with
     // full detail; explicit arms compare two non-zero quality points without cross-run drift.
     private float lodArmOn = -1f;
@@ -474,25 +397,12 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     {
         "Lit scene", "Geometric normal", "Shading normal", "Tangent-space normal",
         "Front/back facing", "Tangent", "Bitangent", "Sky visibility",
-        // 8, 9 and 16 read the retired baked volume, 23 and 24 the retired probe clipmap, and show black. Kept as names
-        // because the index is the channel id.
-        "unused", "unused",
         "Bounce radiance (raw)", "Bounce contribution", "Direct sun only",
-        "GTAO visibility", "Texture AO", "Occlusion product",
-        "unused",
-        "Ambient: sky diffuse", "Ambient: sky specular",
-        "Ambient: transmitted", "Ambient: bounce",
+        "Texture AO",
+        "Ambient: sky specular", "Ambient: transmitted", "Ambient: bounce",
         "Albedo (as shaded: texture, factor, vertex colour)",
         "Pre-pass normal (what the incident field reads)",
-        "unused", "unused",
     };
-
-    // --ao-fullres: run ambient visibility at framebuffer resolution instead of half. Half res is
-    // the right default for a low-frequency term, but a crease a few centimetres wide is not low
-    // frequency, and at half res plus a 3x3 bilateral it spans about one texel before being blurred
-    // with its neighbours. This exists to find out whether fold detail is lost to RESOLUTION rather
-    // than to the search radius.
-    private float aoScale = 0.5f;
 
     // How the lit pass carries the incident field's light to its normal-mapped normal (frame.uIncidentGradient).
     // --incident-normal-bias B: mips down the normal map is read for the gradient; --incident-gradient-clamp C: the
@@ -506,88 +416,17 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private float incidentNormalBias = 2f;
     private float incidentGradientClamp = 0.5f;
 
-    // --ao-debug N: make the GTAO pass write an intermediate instead of the bent normal. See gtao.frag.
-    private float aoDebug;
-
-    private bool fogStress;             // --fog-stress: auto-toggle fog to exercise the on/off barrier transitions under validation
-    private int fogStressFrame;
-
-    // --- Cascaded sun shadow maps -----------------------------------------
-    // Three depth-only cascades fitted to camera-frustum slices, snapped to
-    // the texel grid for swim-free motion. One depth target + one graphics
-    // pass per cascade; a single shadow pipeline serves all three (the
-    // per-cascade light view-proj rides the shadow.vert push constant). The
-    // lit pass samples all three via a Count=3 sampler array at set 1
-    // binding 3 and selects the first cascade whose fitted volume contains the fragment.
-    private const int CascadeCount = 3;
-    // Per-cascade shadow-map resolution. The near two cascades carry the
-    // detail the eye lands on, so they stay at 2048²; the far cascade covers a
-    // huge world area where per-texel detail matters least, so it's 1024². The
-    // lit/froxel PCF reads textureSize() so it adapts to each map automatically;
-    // only texel-snapping + bias need the per-cascade size (see UpdateCascades).
-    /// <summary>--shadow-maps A,B,C: the three cascade resolutions. See the note on the default.</summary>
-    /// <remarks>
-    /// Resolution affects both fill and caster LOD because world texel size supplies the caster
-    /// error budget. At the current fit, cascade 0 measured about 2.5x cascade 2. Its 2048 map
-    /// resolves more finely than the two-texel surface filter, leaving room for future retuning.
-    /// </remarks>
-    private static int[] ShadowMapSizes = { 2048, 2048, 1024 };
-    // Camera-depth slices fit each cascade; shader selection is by fitted-volume containment. The
-    // scene's own (SceneProfile.CascadeSplits), copied because the overlay edits them live.
-    private readonly float[] cascadeSplits;
-    // Per-cascade frustum culling of shadow casters (overlay toggle + margin).
+    // Camera frustum culling (the overlay's Render > Frustum cull): off, every placement is drawn.
     private bool cullEnabled = true;
-    private float cullMargin = 0.5f;
-    private readonly GraphResourceHandle[] cascadeHandles = new GraphResourceHandle[CascadeCount];
-    private readonly PassHandle[] cascadePassHandles = new PassHandle[CascadeCount];
-    private readonly Matrix4x4[] cascadeViewProj = new Matrix4x4[CascadeCount];
-    // Shadow-map caching: the last VP a cascade's depth map was rendered with.
-    // A cascade's texel-snapped VP is bit-identical frame-to-frame while the
-    // camera + sun + splits hold (and for sub-texel camera moves, thanks to the
-    // snap), so we skip re-rendering an unchanged cascade and let the lit pass
-    // sample the persisted depth target. Drops the full ~11.5M-tri redraw per
-    // static cascade — the dominant GPU cost when the view is still.
-    private readonly Matrix4x4[] cachedCascadeViewProj = new Matrix4x4[CascadeCount];
-    // Whether each cascade re-rendered this frame (vs. served from cache) —
-    // surfaced in the overlay so the caching is visible.
-    private readonly bool[] cascadeRendered = new bool[CascadeCount];
-    /// <summary>One shadow texel in WORLD units, per cascade — derived from the cascade fit.</summary>
-    /// <remarks>The shared shadow path derives normal offset and filter scale from this length.</remarks>
-    private readonly float[] cascadeTexelWorld = new float[CascadeCount];
-    // Per-cascade shadow-caster survivor counts after frustum culling,
-    // surfaced live in the diagnostics overlay (see Debug()).
-    private readonly int[] cascadeDrawCounts = new int[CascadeCount];
-    /// <summary>Caster count each cascade was last rendered with — see the cache in OnRender.</summary>
-    private readonly int[] cachedCascadeCasters = new int[CascadeCount];
-    // The LOD budget each cached cascade was built at; see the cache test in UpdateCascades.
-    private readonly float[] cachedCascadeLod = new float[CascadeCount];
-    private readonly Matrix4x4[] cachedCascadeCamera = new Matrix4x4[CascadeCount];
-    // --- cascade scheduling ---------------------------------------------------
-    // How much larger than its slice each cascade is fitted, and how many frames it may be reused.
-    // Cascade 0 is never reused: it carries contact shadows, it is the cheapest of the three to
-    // re-render, and padding it would cost exactly the sharpness it exists for.
-    private static readonly float[] CascadePad = { 0f, 0.20f, 0.45f };
-    private static readonly int[] CascadeInterval = { 1, 2, 4 };
-    private readonly Matrix4x4[] cascadeRenderViewProj = new Matrix4x4[CascadeCount];
-    private readonly Vector3[] cascadeFitCentre = new Vector3[CascadeCount];
-    private readonly int[] cascadeFittedFrame = new int[CascadeCount];
-    private readonly float[] cascadeTexelRendered = new float[CascadeCount];
-    private readonly bool[] cascadeDue = new bool[CascadeCount];
     // Triangles each fill submitted, so a pass's cost can be split between geometry and fill.
     private long fillIndirectTriangles;
     // FillIndirect's per-drawable level choices (-1 = culled), and how far into visibleScratch this
     // frame's fills reached (what UploadVisible sends).
     private int[] levelScratch = System.Array.Empty<int>();
     private int visibleWritten;
-    private readonly long[] cascadeTriangles = new long[CascadeCount];
     private long cameraTriangles;
-    private readonly long[] cascadeTriangleSum = new long[CascadeCount];
     private long cameraTriangleSum;
     private long triangleFrames;
-    /// <summary>--shadow-lod N: caster geometric error allowed, in shadow-map texels.</summary>
-    private float shadowLodTexels = 1.5f;
-    /// <summary>The camera frustum for this frame; the cascades cull their casters against it.</summary>
-    private Frustum cameraFrustumThisFrame;
     /// <summary>--no-foliage: skip the ivy and tree packs, to price alpha-cutout overdraw.</summary>
     private bool noFoliage;
     private int refBounces = 3;
@@ -601,16 +440,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // direct sun has it: one sun for the picture and its truth (2026-10-21; the gate's history before was against a point
     // sun). --ref-sun point: the disc's centre.
     private bool refSunDisc = true;
-    private Matrix4x4 prevAmbientViewProj = Matrix4x4.Identity;
-    private bool ambientHistoryValid;
-    // Two shadow caster pipelines: opaque casters use a push-only program (no
-    // descriptor sets → zero per-draw transient allocations), mask foliage uses
-    // the alpha-cutout program (binds albedo). Routed per drawable by cutoff.
-    private ShaderProgramHandle shadowOpaqueProgram;
-    private PipelineHandle shadowOpaquePipeline;
-    private ShaderProgramHandle shadowMaskProgram;
-    private PipelineHandle shadowMaskPipeline;
-
 
     // IBL textures: a cooked .blixprobe (real GGX prefilter) when present, else
     // the procedural sky bake (see OnLoad). Generated/uploaded once at load.
@@ -654,15 +483,8 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
         // The primitive's own bounds, in mesh space. Where it stands is its placements' (each a
         // world matrix and the world AABB culling and LOD read); see Placement.
         Bounds3 MeshBounds,
-        // Shadow-caster cutout inputs: the albedo handle the shadow.frag
-        // samples for MASK foliage, the alpha cutoff (0 for OPAQUE), and
-        // baseColorFactor.a (glTF effective-alpha multiplier).
-        TextureHandle Albedo,
+        // The alpha cutoff (0 for OPAQUE): a cutout's group draws with the mask pipelines.
         float AlphaCutoff,
-        float BaseColorAlpha,
-        // Pre-built once at load so the per-frame mask shadow draws don't
-        // allocate a binding array each (×3 cascades × every frame).
-        ShaderTextureBinding[] ShadowAlbedoBinding,
         // Source primitive name — selection/inspection identity (debug only).
         string Name,
         // This primitive's placements: a contiguous run of its bucket's placement list.
@@ -682,7 +504,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
         // errorPixels ≤ 0 forces full detail. Distance is to the NEAREST point
         // on the AABB (not the centre) so a big primitive you stand inside stays
         // detailed where it matters instead of coarsening on a far centre.
-        // Identical across lit, depth-pre-pass, and shadow passes so depth stays
+        // Identical across the lit and depth-pre-pass passes so depth stays
         // invariant. 1-LOD drawables (uncooked) always pick 0.
         public int PickLod(in Bounds3 bounds, Vector3 cameraPos, float errorScale, float errorPixels, int currentLevel)
         {
@@ -722,27 +544,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
             }
             return settled;
         }
-
-        /// <summary>The coarsest level whose deviation stays under a WORLD-space bound.</summary>
-        /// <remarks>
-        /// Orthographic cascade texels have a constant world size, so caster error is bounded in
-        /// metres rather than camera pixels. Sub-texel deviations cannot move the sampled shadow.
-        /// </remarks>
-        public int PickLodWorld(float worldError, int currentLevel)
-        {
-            if (LodIndexCounts.Length <= 1 || worldError <= 0f) return 0;
-            var wanted = 0;
-            for (var l = 1; l < LodIndexCounts.Length; l++)
-            {
-                if (LodErrors[l] <= worldError) wanted = l;
-                else break;
-            }
-            // Same asymmetry as above, for the same reason: a cascade refits as the camera moves,
-            // so its texel size changes and its thresholds move with it.
-            currentLevel = Math.Clamp(currentLevel, 0, LodIndexCounts.Length - 1);
-            if (wanted <= currentLevel) return wanted;
-            return SettleCoarser(currentLevel, wanted, worldError / LodHysteresis, pixelsPerWorld: 1f);
-        }
     }
 
     // Staging captured per primitive during load; consolidated into the shared
@@ -754,10 +555,9 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
         MaterialHandle Material,
         PipelineHandle Pipeline,
         Bounds3 Bounds,
+        // The base colour texture, which the rays' surface bake reads.
         TextureHandle Albedo,
         float AlphaCutoff,
-        float BaseColorAlpha,
-        ShaderTextureBinding[] ShadowAlbedoBinding,
         bool IsBlend,
         string Name,
         // Where the primitive stands: one world matrix per placement.
@@ -824,9 +624,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private readonly List<OpaqueGroup> blendGroups = new();
     private IndirectBufferHandle blendIndirect;
     private IndirectBufferHandle opaqueIndirect;
-    // One indirect buffer per shadow cascade — each culls against its own frustum
-    // (culled objects get instanceCount 0), so the per-cascade visible sets differ.
-    private readonly IndirectBufferHandle[] cascadeIndirect = new IndirectBufferHandle[CascadeCount];
     private byte[] indirectScratch = System.Array.Empty<byte>();
     // Two-bucket draw order: opaque/mask first, blend last. Within each
     // bucket draws stay in glTF primitive order; back-to-front sort for
@@ -889,19 +686,12 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private readonly Blix.Render.AsyncLoadQueue<PlacedPrimitive> meshLoad = new();
 
     // Per-frame-reused, content-constant buffers built once at load (avoids
-    // re-allocating them every frame). passBindings: the lit pass's set-1 IBL +
-    // shadow-cascade textures (all stable handles).
+    // re-allocating them every frame). passBindings: the lit pass's set-1 IBL and
+    // incident-light textures (all stable handles).
     private ShaderTextureBinding[] passBindings = null!;
-    // The skybox's own list: it samples six of the lit pass's textures, and a name a program does
+    // The skybox's own list: it samples one of the lit pass's textures, and a name a program does
     // not declare is an error, not a skip.
     private ShaderTextureBinding[] skyBindings = null!;
-    // Mask shadow pushes differ per draw (alpha params), so they can't share one
-    // buffer like opaque casters. Pool + reuse the byte[]s across frames instead
-    // of allocating per draw: CmdPushConstants copies the bytes at record time,
-    // so a buffer is free for reuse once the frame's commands are recorded. The
-    // cursor resets each frame and the pool grows to the per-frame high-water mark.
-    private readonly List<byte[]> maskPushPool = new();
-    private int maskPushCursor;
 
     // The engine's camera controller: look, orbit, fly, zoom, and --cam, starting where the scene's profile
     // says. The three names below are what the renderer reads; they are the controller's now.
@@ -937,8 +727,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     /// of submitted triangles while risking silhouette quality. --foliage-lod retains the sweep.
     /// </remarks>
     private static float FoliageLodMargin = 1f;
-    private Vector3 foliageCentre;
-    private bool foliageValid;
     // What a pick can land on, rebuilt after consolidation. The loop answers the engine's selection
     // and inspection hooks by handing them to it (below); the engine does the picking.
     private readonly SceneSelection sceneSelection = new();
@@ -951,12 +739,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // passes on the same level decision within a frame.
     private int[] opaqueLodState = System.Array.Empty<int>();
     private int[] blendLodState = System.Array.Empty<int>();
-    // Cascades select against their own world-space texel budgets (see PickLodWorld), so each keeps
-    // state independent from the camera and from the other cascades.
-    private int[][] cascadeLodState = System.Array.Empty<int[]>();
-    // How many shadow texels of geometric deviation a caster may have. Below one texel the error
-    // cannot move the shadow at all; a little over one is where it starts to be theoretically
-    // visible and still is not, because the PCF kernel is wider than that.
 
     // Slack on the camera frustum test, in metres. See the call site in OnRender.
     private const float CameraCullMargin = 0.5f;
@@ -993,14 +775,12 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     /// <summary>The sun as everything downstream should see it.</summary>
     private Vector3 EffectiveSunIrradiance => sunIrradiance * sunStrength;
 
-    // Shader-uniform tunables (sun/ambient intensity, metallic/normal/shadow
-    // thresholds, cascade-viz) are declared with //@tune in lit.frag and
-    // auto-bound to the overlay by this panel — no per-variable field + dial +
-    // UBO pack here. The panel owns the live values (seeded from the shader's
-    // tag defaults) and feeds them into the per-frame write by name; CPU-side
-    // readers (e.g. the froxel sun term) pull via tunePanel.Value(...).
+    // Shader-uniform tunables (the cutout and bounce-term diagnostics) are declared with //@tune in
+    // frame.glsl and auto-bound to the overlay by this panel — no per-variable field + dial + UBO
+    // pack here. The panel owns the live values (seeded from the shader's tag defaults) and feeds
+    // them into the per-frame write by name.
     private ShaderTunablePanel tunePanel = null!;
-    // [Tune]-tagged CPU settings objects (Fog, …) auto-paneled in the overlay.
+    // [Tune]-tagged CPU settings objects (Shadows, Render, the camera) auto-paneled in the overlay.
     private ObjectTunables tuneObjects = null!;
 
     // Main thread (from OnUpdate): drain the background-parsed primitives into
@@ -1016,8 +796,8 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
 
     // Cache demo-specific GPU material bindings by canonical material identity. Texture identity is
     // shared through TextureRegistry; binding layout and packed values remain owned by Sponza.
-    private readonly Dictionary<string, (MaterialHandle Mat, TextureHandle Albedo, float Cutoff, float Alpha)> materialCache = new(StringComparer.Ordinal);
-    private (MaterialHandle Mat, TextureHandle Albedo, float Cutoff, float Alpha)? noMaterialCache;
+    private readonly Dictionary<string, (MaterialHandle Mat, TextureHandle Albedo, float Cutoff)> materialCache = new(StringComparer.Ordinal);
+    private (MaterialHandle Mat, TextureHandle Albedo, float Cutoff)? noMaterialCache;
     // The graph owns its passes' render passes and framebuffers and its targets' memory, and only its
     // Dispose frees them: the device destroys what is in its own tables and nothing else. Sponza
     // disposed only the fullscreen pass, and validation counted 70 objects alive at vkDestroyDevice
@@ -1038,49 +818,17 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
 // false positives in the warning channel is how the two fields that WERE dead -- a never-read
 // vsync flag and a never-used triangle-window bool -- sat there being reported and ignored. The
 // initialiser costs nothing and keeps that channel worth reading.
-// Volumetric-fog tunables, auto-exposed via [Tune] (overlay "Fog" group —
-// FogSettings → "Fog"). The fields are the source of truth; the render loop
-// reads fog.Density etc. directly, the overlay reflects + edits them.
-internal sealed class FogSettings
-{
-    [Tune] public bool Enabled;                       // OnLoad enables it unless --no-fog is present
-    [Tune(0f, 0.5f)]    public float Density = 0.018f; // extinction coefficient, per metre
-    [Tune(0f, 1f)]      public float Scatter = 0.6f;   // scattering albedo: the share of extinction that scatters
-    [Tune(-0.9f, 0.9f)] public float PhaseG = 0.6f;    // Henyey-Greenstein anisotropy
-    [Tune(10f, 150f)]   public float Far = 60f;        // grid far distance (metres)
-    // Height in metres over which density falls by e, measured from the volume floor.
-    [Tune(2f, 100f)]    public float HeightFalloff = 14f;
-    // How much density comes from the drifting noise field rather than the smooth falloff. Zero is
-    // uniform haze. Feature size and drift speed derive from range so the look scales with it.
-    [Tune(0f, 1f)]      public float Noise = 0.55f;
-    // History weight trades stability for latency; zero is the current-frame-only reference path.
-    // 0.9 is about a ten-frame time constant — long enough to integrate the jittered slice samples
-    // into a soft shaft, short enough that dragging the sun does not leave a trail behind it.
-    [Tune(0f, 0.98f)]   public float Temporal = 0.9f;
-    // Visualize fog-history rejection: bright at disocclusions and newly exposed screen edges,
-    // black where history was accepted. A still camera should therefore be nearly black.
-    [Tune]              public bool ShowRejection = false;
-}
 
 // Tonemap operators (overlay Render → Tonemap). The value indexes present.frag's branch, so the
 // build checks these names against the //@tune enum{} above uTonemap there.
 [ShaderEnum("present.frag", "uTonemap")]
 internal enum TonemapMode { Reinhard, ACES, AgX, Hejl }
 
-// Sun-shadow tunables (overlay "Shadows" group). Read live by UpdateCascades
-// (the ortho-fit distance) and the per-frame uShadowStrength write.
-//
-// <b>BiasTexels was here and was connected to nothing.</b> It sat in this group as a
-// [Tune(0f, 6f)] slider, and the only other mention of it in the tree was a comment describing a
-// per-cascade NDC bias array that had already been deleted. Depth bias now lives in the shared
-// blix_sun_shadow_cascaded path as a slope-scaled constant, and the receiver offset and filter
-// width are derived from cascadeTexelWorld by the cascade fit -- so there was no longer a quantity
-// for this dial to move. It is deleted rather than re-wired: a control that silently does nothing
-// is worse than no control, because dragging it is evidence the bias is not the problem.
+// Sun-shadow tunables (overlay "Shadows" group): the traced shadows (SponzaLoop.RtShadows) and the
+// per-frame uShadowStrength write read them live.
 internal sealed class ShadowsSettings
 {
     [Tune]            public bool Enabled = true;
-    [Tune(10f, 120f)] public float SunDistance = 40f;
     // The sun's angular diameter the traced shadows see, in degrees (the real sun's is 0.53). Each frame
     // the rays aim at another point of the disc and TAA averages them: a penumbra that widens with the distance from
     // the occluder, hard at contact. 0: a point sun, every shadow hard -- the default since 2026-10-21, for a while:
@@ -1098,33 +846,15 @@ internal sealed class ShadowsSettings
     [Tune]            public bool Interleave = false;
 }
 
-// Ambient-visibility tunables (overlay "Ambient" group).
-//
-// Radius is a scene-space length over which one surface shades another. GTAO intentionally has no
-// extra strength, power, or bias controls layered over its visibility integral.
-internal sealed class AmbientSettings
-{
-    // Off by default (2026-10-21): the traced GI holds the occlusion the bounce needs (lit.frag skips GTAO on it, uIncident.y),
-    // and screen-space visibility is the one term of the image that is neither the GI nor its truth. --ao: on.
-    [Tune]            public bool Enabled = false;
-    [Tune(0.1f, 4f)]  public float RadiusMetres = 0.8f;
-
-    // How much visibility comes from previous frames. The shipping shader uses two slices with four
-    // radial steps; spatial denoise and temporal accumulation supply convergence. Zero disables
-    // history and remains the baseline.
-    [Tune(0f, 0.97f)] public float Temporal = 0.9f;
-    // Visualize ambient-history rejection or clamping: bright at disocclusions and screen edges,
-    // black where history was accepted.
-    [Tune]            public bool ShowRejection = false;
-}
-
 // Misc render tunables (overlay "Render" group). Vsync stays a manual toggle —
 // it's a device property, not a field.
 internal sealed class RenderSettings
 {
-    // Display exposure, independent from measured sun/sky energy. Two is the current authored
-    // presentation default; lighting-strength overrides remain separately visible scene choices.
-    [Tune(0.05f, 16f)] public float Exposure = 2.0f;
+    // Display exposure, independent from measured sun/sky energy: it accounts for the display level of
+    // the physically attenuated composition, while transport strength remains one so material albedo is
+    // not silently reinterpreted. One is the presentation default (a scene's profile or --exposure may
+    // set another); lighting-strength overrides remain separately visible scene choices.
+    [Tune(0.05f, 16f)] public float Exposure = 1.0f;
     [Tune]             public TonemapMode Tonemap = TonemapMode.AgX;
     // Two pixels is the current cost/quality knee: 1 -> 2 px removed 22% of submitted geometry for
     // 1.5 ms, while 2 -> 4 px saved another 17% for only 0.56 ms. Use the exact LOD census when

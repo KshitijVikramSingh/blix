@@ -16,18 +16,15 @@ internal sealed partial class SponzaLoop
     // Index buffer a drawable's LOD indices live in (chosen at consolidation).
     private IndexBufferHandle SharedIb(Drawable d) => d.IndicesAreU32 ? sharedIbU32 : sharedIbU16;
 
-    // Fill an indirect buffer for one pass: per drawable, lodSlots VkDrawIndexedIndirectCommands, one per
-    // LOD level, each instanced over the placements of it this pass sees at that level. The culling and
-    // the level choice are exactly the old per-drawable ones, now per placement: each placement is tested
-    // with its own world bounds and keeps its own LOD state. Its transform row goes into visibleScratch
+    // Fill an indirect buffer for one pass (the CPU cull, --cpu-cull): per drawable, lodSlots
+    // VkDrawIndexedIndirectCommands, one per LOD level, each instanced over the placements of it this pass
+    // sees at that level. Each placement is tested with its own world bounds and keeps its own LOD state. Its transform row goes into visibleScratch
     // from visibleBase on, grouped by drawable and level; a command's firstInstance is where its run
     // starts, which is what gl_InstanceIndex (instances.glsl) indexes. Levels nothing uses get
     // instanceCount 0 (a GPU no-op, so group offsets stay fixed). Returns the visible placement count.
     private int FillIndirect(
         List<Drawable> drawables, List<Placement> placements, float[] lodMargins, int[] lodState,
-        IndirectBufferHandle buffer, int visibleBase,
-        Frustum? cull, float margin, float worldErrorBudget = 0f,
-        Frustum? receivers = null, Vector3 shadowSweepDir = default)
+        IndirectBufferHandle buffer, int visibleBase, Frustum? cull, float margin)
     {
         // Failed or empty pack loads create no indirect buffer; preserve their useful diagnostics
         // instead of following them with an unrelated invalid-handle failure.
@@ -35,11 +32,11 @@ internal sealed partial class SponzaLoop
 
         var cmds = MemoryMarshal.Cast<byte, uint>(indirectScratch.AsSpan());
         var visible = 0;
-        // Count submitted triangles separately from pass time so fill resolution and caster LOD can
-        // be attributed independently.
+        // Count submitted triangles separately from pass time so fill resolution and LOD can be
+        // attributed independently.
         fillIndirectTriangles = 0;
-        // --ab lod reaches every camera and cascade fill through this shared selector. A zero budget
-        // is PickLod's normal full-detail path.
+        // --ab lod reaches every fill through this shared selector. A zero budget is PickLod's normal
+        // full-detail path.
         var errorPixels = LodErrorPixelsNow;
         Span<int> counts = stackalloc int[lodSlots];
         Span<int> fill = stackalloc int[lodSlots];
@@ -53,30 +50,10 @@ internal sealed partial class SponzaLoop
             {
                 var i = d.PlacementStart + k;
                 var bounds = placements[i].Bounds;
-                // Cull shadow casters by their conservative sun-swept bounds, not their unswept object
-                // bounds. An off-volume caster remains relevant when its shadow can reach the cascade or
-                // a visible receiver.
-                var testBounds = bounds;
-                if (shadowSweepDir != Vector3.Zero)
-                {
-                    // Sweep until the caster's shadow exits scene bounds. Cascade depth is a camera
-                    // quantity and can be shorter than the light path to a receiver inside that cascade.
-                    var sweep = shadowSweepDir * SceneExitDistance(bounds, shadowSweepDir);
-                    testBounds = new Bounds3(
-                        Vector3.Min(bounds.Min, bounds.Min + sweep),
-                        Vector3.Max(bounds.Max, bounds.Max + sweep));
-                }
-                var vis = cull is not { } f || f.Intersects(testBounds, margin);
-                // A caster also needs a swept intersection with visible receivers; otherwise its shadow
-                // cannot contribute to the frame even if the light volume contains it.
-                if (vis && receivers is { } rf) vis = rf.Intersects(testBounds, margin);
+                var vis = cull is not { } f || f.Intersects(bounds, margin);
 
                 // Per-placement LOD margin (live-tunable) scales the global px budget.
-                // A world budget means this list is being drawn into something orthographic, where
-                // camera pixels are not the unit of error. Nothing else about the fill changes.
-                var lod = worldErrorBudget > 0f
-                    ? d.PickLodWorld(worldErrorBudget * lodMargins[i], lodState[i])
-                    : d.PickLod(bounds, cameraPosition, LodErrorScale, errorPixels * lodMargins[i], lodState[i]);
+                var lod = d.PickLod(bounds, cameraPosition, LodErrorScale, errorPixels * lodMargins[i], lodState[i]);
                 lodState[i] = lod;
                 levelScratch[k] = vis ? lod : -1;
                 if (!vis) continue;
@@ -133,52 +110,40 @@ internal sealed partial class SponzaLoop
     private int GroupByteOffset(OpaqueGroup g) => g.Start * recordSlots * IndirectDraw.RecordStride;
     private int GroupDrawCount(OpaqueGroup g) => g.Count * recordSlots;
 
-    // --ab lod reaches every camera and cascade selection through this. A zero budget is full detail.
-    // The lit pass leaves the frame's own sheet glow out (lit_body.glsl, rtSheetGlow) where the scene has sheets the traced
-    // shadows pass through and the incident field is read: the texel GI's rule, whose gather counted that glow. RTGI's
-    // rays do not count it, and the rule is kept as it stood: whether the frame should show its glow on curtains is the
-    // user's call.
-    private bool SheetGlowInField => rtSheetRows > 0 && SheetRowsBuffer is not null;
-
     // --lod-pixels E (SponzaLoop.Setup.cs): the LOD error budget in place of RenderSettings.LodErrorPixels (-1: none given).
     private float lodPixelsOverride = -1f;
+    // --ab lod reaches every selection through this. A zero budget is full detail.
     private float LodErrorPixelsNow => abMode == "lod" ? LodArmPixels : lodPixelsOverride >= 0f ? lodPixelsOverride : render.LodErrorPixels;
 
     // The lists a frame culls, each its own indirect records and run of the visible list: the camera's
-    // over the opaque placements (shared by the depth pre-pass and the lit pass), one per cascade over
-    // the same placements, the camera's late list (what occlusion finds the early one missed) and its final one
-    // (early and late together, which the lit pass draws; both GPU only),
-    // and the camera's over the blend ones. Every list before the blend one spans the opaque bucket.
+    // over the opaque placements (shared by the depth pre-pass and the lit pass), the camera's late list
+    // (what occlusion finds the early one missed) and its final one (early and late together, which the lit
+    // pass draws; both GPU only), and the camera's over the blend ones. Every list before the blend one spans
+    // the opaque bucket.
     private const int SceneListCamera = 0;
-    private static int SceneListCascade(int cascade) => 1 + cascade;
-    private const int SceneListCameraLate = 1 + CascadeCount;
+    private const int SceneListCameraLate = 1;
     // Early and late together: what the lit pass draws when occlusion is on.
-    private const int SceneListCameraFinal = 2 + CascadeCount;
-    private const int SceneListBlend = 3 + CascadeCount;
+    private const int SceneListCameraFinal = 2;
+    private const int SceneListBlend = 3;
     private int SceneListRecordBase(int list) => opaqueDrawables.Count * recordSlots * list;
     private int SceneListVisibleBase(int list) => opaquePlacements.Count * list;
 
     // The CPU path's buffers and state per list; it has no late list.
     private IndirectBufferHandle SceneListIndirect(int list) =>
         list == SceneListCamera ? opaqueIndirect : list == SceneListBlend ? blendIndirect
-        : list < SceneListCameraLate ? cascadeIndirect[list - 1]
         : throw new InvalidOperationException("the CPU cull has no late list");
 
     private int[] SceneListLodState(int list) =>
         list == SceneListCamera ? opaqueLodState : list == SceneListBlend ? blendLodState
-        : list < SceneListCameraLate ? cascadeLodState[list - 1]
         : throw new InvalidOperationException("the CPU cull has no late list");
 
     // Cull one list and choose its levels: on the CPU into its indirect buffer (FillIndirect, returning the
     // visible count), or on the GPU as scene_cull.comp's three dispatches into the scene-cull pass
     // (returning -1: the count stays on the GPU). Either way the draws then read it via DrawSceneGroup.
-    // cullViewProj and receiversViewProj are row-vector view-projections (clip = world · M), as the
-    // camera and cascade matrices are kept.
+    // cullViewProj is a row-vector view-projection (clip = world · M), as the camera's matrices are kept.
     // occlusionEarly: this is the camera's early list, so it draws only what the occlusion test found
     // visible last frame (the late list, RecordOcclusion, catches the rest).
-    private int CullList(
-        int list, Matrix4x4? cullViewProj, float margin, float worldErrorBudget = 0f,
-        Matrix4x4? receiversViewProj = null, Vector3 shadowSweepDir = default, bool occlusionEarly = false)
+    private int CullList(int list, Matrix4x4? cullViewProj, float margin, bool occlusionEarly = false)
     {
         var blend = list == SceneListBlend;
         var drawables = blend ? blendDrawables : opaqueDrawables;
@@ -188,8 +153,7 @@ internal sealed partial class SponzaLoop
         {
             return FillIndirect(drawables, placements, blend ? blendLodMargins : opaqueLodMargins,
                 SceneListLodState(list), SceneListIndirect(list), SceneListVisibleBase(list),
-                cullViewProj is { } c ? Frustum.FromViewProjection(Matrix4x4.Transpose(c)) : null, margin, worldErrorBudget,
-                receiversViewProj is { } r ? Frustum.FromViewProjection(Matrix4x4.Transpose(r)) : null, shadowSweepDir);
+                cullViewProj is { } c ? Frustum.FromViewProjection(Matrix4x4.Transpose(c)) : null, margin);
         }
 
         var firstPlacement = blend ? opaquePlacements.Count : 0;
@@ -199,7 +163,7 @@ internal sealed partial class SponzaLoop
         var editsHere = edit >= firstPlacement && edit < firstPlacement + placements.Count;
         if (editsHere) marginEditSent = true;
         DispatchCommand Phase(int mode, int items) => CullPhase(cullPipeline, mode, items,
-            cullViewProj, margin, worldErrorBudget, receiversViewProj, shadowSweepDir,
+            cullViewProj, margin,
             firstPlacement, placements.Count, blend ? opaqueDrawables.Count : 0, SceneListVisibleBase(list),
             SceneListRecordBase(list), records,
             editsHere ? pendingMarginEdit : default,
@@ -214,7 +178,7 @@ internal sealed partial class SponzaLoop
     // One dispatch of either cull shader; every uniform the shared Cull block (scene_cull.glsl) declares.
     private DispatchCommand CullPhase(
         PipelineHandle pipeline, int mode, int items,
-        Matrix4x4? cullViewProj, float margin, float worldErrorBudget, Matrix4x4? receiversViewProj, Vector3 shadowSweepDir,
+        Matrix4x4? cullViewProj, float margin,
         int firstPlacement, int placementCount, int firstDrawable, int visibleBase, int recordBase, int records,
         (int Placement, float Margin) edit, Vector4 occlusion, IReadOnlyList<ShaderTextureBinding>? textures)
     {
@@ -227,17 +191,12 @@ internal sealed partial class SponzaLoop
             var uniforms = new ShaderUniform[]
             {
                 new("uCull", new Matrix4x4Uniform(cullViewProj ?? viewProj)),
-                new("uReceivers", new Matrix4x4Uniform(receiversViewProj ?? Matrix4x4.Identity)),
-                new("uSweep", new Vector4Uniform(new Vector4(shadowSweepDir, shadowSweepDir == Vector3.Zero ? 0f : 1f))),
-                new("uVolumeMin", new Vector4Uniform(new Vector4(sceneBoundsMin, 0f))),
-                new("uVolumeMax", new Vector4Uniform(new Vector4(sceneBoundsMin + sceneBoundsSpan, 0f))),
                 new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, LodErrorScale))),
-                new("uLod", new Vector4Uniform(new Vector4(LodErrorPixelsNow, worldErrorBudget, LodHysteresis, margin))),
+                new("uLod", new Vector3Uniform(new Vector3(LodErrorPixelsNow, LodHysteresis, margin))),
                 new("uRange", new Vector4Uniform(new Vector4(firstPlacement, placementCount, firstDrawable, visibleBase))),
                 new("uArgs", new Vector4Uniform(new Vector4(recordBase, records, lodSlots, mode))),
                 new("uSlots", new Vector4Uniform(new Vector4(lodSlots, recordSlots, 0f, 0f))),
-                new("uFlags", new Vector4Uniform(new Vector4(
-                    cullViewProj is null ? 0f : 1f, receiversViewProj is null ? 0f : 1f, edit.Placement, edit.Margin))),
+                new("uFlags", new Vector3Uniform(new Vector3(cullViewProj is null ? 0f : 1f, edit.Placement, edit.Margin))),
                 new("uView", new Matrix4x4Uniform(cameraView)),
                 new("uOcclusion", new Vector4Uniform(occlusion)),
             };
@@ -264,7 +223,7 @@ internal sealed partial class SponzaLoop
             pyramid[level] = new ShaderTextureBinding($"uOccZ{level}", graph.GetColorTexture(occZHandles[level]));
         }
         DispatchCommand Phase(int mode, int items, int list, int visibleList) => CullPhase(occlusionPipeline, mode, items,
-            cameraCull, CameraCullMargin, 0f, null, Vector3.Zero,
+            cameraCull, CameraCullMargin,
             0, opaquePlacements.Count, 0, SceneListVisibleBase(visibleList), SceneListRecordBase(list), records,
             default, new Vector4(0f, CameraNearPlane,
                 SceneListVisibleBase(SceneListCameraLate), SceneListVisibleBase(SceneListCameraFinal)), pyramid);
@@ -384,23 +343,22 @@ internal sealed partial class SponzaLoop
         // read as pixels until 2026-10-27, so the mesh LODs were picked twice as coarse as asked there.
         renderHeightPx = renderHeight;
         // Match-swapchain graph targets are reallocated rather than resized in place. Their public
-        // handles stay stable, but their contents do not. GTAO reads ambientDenoisedHandle as the
-        // preceding frame and TAA reads the other parity target, so both must refuse history once
-        // after ANY recreation — not only a logical-window resize. Vsync changes and framebuffer-
-        // only resizes recreate the same targets without calling this application's OnResize.
+        // handles stay stable, but their contents do not. TAA reads the other parity target as the
+        // preceding frame, so it must refuse history once after ANY recreation — not only a
+        // logical-window resize. Vsync changes and framebuffer-only resizes recreate the same targets
+        // without calling this application's OnResize.
         if (graphResourceGeneration != graph.MatchSwapchainResourceGeneration)
         {
             graphResourceGeneration = graph.MatchSwapchainResourceGeneration;
-            ambientHistoryValid = false;
             taaHistoryValid = false;
             metalFxHistoryValid = false;
-            Console.WriteLine("[VulkanSponza] graph resources recreated; GTAO/TAA history reset");
+            Console.WriteLine("[VulkanSponza] graph resources recreated; TAA history reset");
         }
 
         // Advance the global frame before every early return so loading measurements and A/B phase
         // transitions cannot stall on the branch they activate.
         framesRendered++;
-        // Post-load frames are the reproducible clock for orbit, capture, and temporal sequences;
+        // Post-load frames are the reproducible clock for the walk, capture, and temporal sequences;
         // global frames still account for loading and A/B scheduling.
         if (fullyLoaded) postLoadFrames++;
         GpuCaptureTick();
@@ -417,8 +375,7 @@ internal sealed partial class SponzaLoop
             Console.WriteLine($"[VulkanSponza] Exiting {afterLoad} frame(s) after load, {framesRendered} in all, as asked.");
             host.RequestClose();
         }
-        if (orbit) ApplyOrbit();
-        else ApplyWalk();
+        ApplyWalk();
         var stamp = System.Diagnostics.Stopwatch.GetTimestamp();
         if (lastFrameStamp != 0)
         {
@@ -465,11 +422,6 @@ internal sealed partial class SponzaLoop
             return;
         }
 
-        gpuPasses.Sample();
-
-        // Built once, before the cascades, because they need it too: a caster is culled against
-        // where its shadow could FALL, and that is the camera's frustum rather than the light's.
-        cameraFrustumThisFrame = Frustum.FromViewProjection(Matrix4x4.Transpose(viewProj));
 
         // Apply Halton (2,3) jitter as a clip-space translation: post-multiplication adds offset*w
         // to clip.xy without changing the unjittered projection used by spatial decisions.
@@ -490,10 +442,9 @@ internal sealed partial class SponzaLoop
         }
 
         // The half-res lighting, decided once for the frame: the traced shadows, RTGI's readout and the lit pass's
-        // uIncident.w must agree on it. Only once the readout can run (the upsample rides on it): before, the incident
-        // targets are cleared and the shadows traced at full resolution. Not under --rt-isolated, whose sky rays are read
-        // per full-res pixel and which reads no incident field.
-        halfLightingNow = IncidentFieldNow && RtgiReadoutReady;
+        // uIncident.y must agree on it. Only once the readout can run (the upsample rides on it): before, the incident
+        // targets are cleared and the shadows traced at full resolution.
+        halfLightingNow = RtgiReadoutReady;
         halfShadowsNow = halfLightingNow && render.HalfResShadows;
         // The 2x2's sampled pixel turns each frame for TAA to gather; with no TAA it stays (the first), so a still frame is
         // the same frame -- turning, the half-res lighting shimmered on a four-frame cycle with the camera still.
@@ -506,14 +457,10 @@ internal sealed partial class SponzaLoop
             queueTracer.UseDeviceQueue(tracerOnDeviceQueue);
         }
 
-        // Stress hook: flip fog every 90 frames to exercise the on/off barrier
-        // transitions under validation (no effect without --fog-stress).
-        if (fogStress && (++fogStressFrame % 90 == 0)) fog.Enabled = !fog.Enabled;
-
         var perFrameList = new List<ShaderUniform>
         {
-            // Only raster shading receives jitter. Cascades, culling, and LOD use the stable matrix
-            // so a sub-pixel sample shift cannot perturb spatial policy or caches.
+            // Only raster shading receives jitter. Culling and LOD use the stable matrix so a
+            // sub-pixel sample shift cannot perturb spatial policy or caches.
             new("uViewProjection",   new Matrix4x4Uniform(viewProjJittered)),
             new("uSunDirection",     new Vector3Uniform(sunDirection)),
             new("uSunIrradiance",    new Vector3Uniform(EffectiveSunIrradiance)),
@@ -523,24 +470,14 @@ internal sealed partial class SponzaLoop
             new("uMsaaSamples",      new FloatUniform(MsaaSamples)),
             new("uShadowStrength",   new FloatUniform(
                 shadows.Enabled && !(abMode == "shadow" && AbOffPhase) ? 1f : 0f)),
-            new("uCascadeViewProj",  new Matrix4x4ArrayUniform(cascadeViewProj)),
-            // uCameraForward and uCascadeSplits are gone from the lit pass with the view-depth
-            // cascade pick they existed for. The froxel dispatch below still takes the splits — it
-            // marches the grid in view depth and genuinely needs them.
-            new("uCascadeTexels",    new Vector4Uniform(
-                new Vector4(cascadeTexelWorld[0], cascadeTexelWorld[1], cascadeTexelWorld[2], 0f))),
-            new("uFog",              new Vector4Uniform(
-                new Vector4(frame.Width, frame.Height, fog.Far, fog.Enabled ? 1f : 0f))),
+            new("uScreenSize",       new Vector2Uniform(new Vector2(frame.Width, frame.Height))),
             new("uVizChannel",       new FloatUniform(vizChannel)),
-            // z gates the read: the incident field, RTGI's light (zero until its readout is ready). x: whether the lit
-            // pass takes the field's sky visibility and light (--no-sky turns both off).
-            new("uIncident",         new Vector4Uniform(new Vector4(
-                skyVisibilityEnabled ? 1f : 0f,
+            // The incident field (RTGI's light, zero until its readout is ready): x whether it holds its own occlusion
+            // (2: --material-ao-on-gi), y whether the traced shadows ran at half resolution (frame.glsl).
+            new("uIncident",         new Vector2Uniform(new Vector2(
                 IncidentHoldsOcclusion ? (materialAoOnGi ? 2f : 1f) : 0f,
-                IncidentFieldNow ? 1f : 0f,
                 halfShadowsNow ? 1f : 0f))),
-            // z: the sheets' glow left to the field (SheetGlowInField); w unread (frame.glsl), kept so the block's layout holds.
-            new("uIncidentGradient", new Vector4Uniform(new Vector4(incidentNormalBias, incidentGradientClamp, SheetGlowInField && IncidentFieldNow ? 1f : 0f, 0f))),
+            new("uIncidentGradient", new Vector2Uniform(new Vector2(incidentNormalBias, incidentGradientClamp))),
             new("uViewProjUnjittered", new Matrix4x4Uniform(viewProj)),
             // Last frame's un-jittered camera, or this frame's on the first (zero motion rather than garbage).
             new("uPrevViewProjUnjittered", new Matrix4x4Uniform(velocityPrevValid ? velocityPrevViewProj : viewProj)),
@@ -550,13 +487,12 @@ internal sealed partial class SponzaLoop
                 AbOffPhase && abMode == "pbr"      || ShaderProbe("pbr") ? 1f : 0f,
                 AbOffPhase && abMode == "ibl"      || ShaderProbe("ibl") ? 1f : 0f,
                 AbOffPhase && abMode == "normal"   || ShaderProbe("normal") ? 1f : 0f))),
-            // y GTAO ran, w --ibl-brdf-lut; x and z unread (frame.glsl), kept so the block's layout holds.
-            new("uTexelShape",       new Vector4Uniform(new Vector4(0f, ambient.Enabled ? 1f : 0f, 0f, iblBrdfLut ? 1f : 0f))),
+            new("uIblBrdfLut",       new FloatUniform(iblBrdfLut ? 1f : 0f)),
         };
-        // The remaining //@tune uniforms (shadow slope scale, uVisualizeCascades) are appended by
-        // name from the overlay panel — reflection lands each at its offset. The intensity and
-        // material knobs are gone: sun and sky are measured from one capture and exposure is the
-        // artistic control, so there is nothing left to balance by eye.
+        // The remaining //@tune uniforms (uForceOpaqueCutout, uNoBounceTerm) are appended by name
+        // from the overlay panel — reflection lands each at its offset. The intensity and material
+        // knobs are gone: sun and sky are measured from one capture and exposure is the artistic
+        // control, so there is nothing left to balance by eye.
         tunePanel.AppendUniforms(perFrameList);
         var perFrame = perFrameList.ToArray();
 
@@ -568,7 +504,7 @@ internal sealed partial class SponzaLoop
         // Geometry is built but its textures are still streaming into their
         // (allocated, undefined) handles, so we render the opaque set flat
         // (lit.vert + flat.frag, no material/IBL/shadow sampling) over the
-        // pre-pass depth. No shadow cascades or fog yet — those start once
+        // pre-pass depth. No traced shadows or GI yet — those start once
         // fullyLoaded. The pre-pass treats everything as solid opaque (no mask
         // discard against the not-yet-uploaded albedo).
         if (!fullyLoaded || AbFlatPhase)
@@ -600,154 +536,14 @@ internal sealed partial class SponzaLoop
             return;
         }
 
-        // The mover's pose for this frame, before the cascades and the camera cull read the transforms.
+        // The mover's pose for this frame, before the camera cull reads the transforms.
         UpdateMover();
-
-        // --- Shadow passes: opaque/mask occluders into each cascade ---------
-        // Each cascade frustum-culls the opaque set against its ortho box, so
-        // the near cascade only redraws nearby geometry instead of the whole
-        // scene ×3. Blend drawables (windows) are skipped — translucent
-        // surfaces shouldn't cast solid shadows. Casters route by alpha mode:
-        // OPAQUE → push-only pipeline (no descriptor set); MASK → alpha-cutout
-        // pipeline binding the albedo, so foliage casts leaf-shaped shadows.
-        var cull = cullEnabled;
-        var margin = cullMargin;
-        // Reset the mask-push pool cursor; the cascade scopes rent monotonically
-        // during graph.Execute, so each draw this frame gets a distinct buffer.
-        maskPushCursor = 0;
-        for (var c = 0; c < CascadeCount; c++)
-        {
-            var ci = c;
-            // Shadows off: skip the pass (the lit shader early-outs without
-            // sampling) and invalidate the cache so re-enabling forces a redraw.
-            // So too with nothing to read them (CascadesRead): the traced sun answers the lit pass.
-            if (!shadows.Enabled || !CascadesRead)
-            {
-                cachedCascadeViewProj[ci] = default;
-                cascadeRendered[ci] = false;
-                continue;
-            }
-            var vp = cascadeViewProj[ci];
-            // Cache validity includes the rendered light matrix, caster population, cascade LOD
-            // budget, and—when receiver culling is active—the camera matrix. These are all inputs to
-            // the stored depth image, including during asynchronous scene loading.
-            var lodKey = abMode == "lod" && LodArmPixels <= 0f ? 0f : cascadeTexelWorld[ci] * shadowLodTexels;
-            // Not due this frame: the map from an earlier frame still covers, and the lit pass is
-            // already being handed the matrix it was rendered with.
-            if (!cascadeDue[ci])
-            {
-                cascadeRendered[ci] = false;
-                continue;
-            }
-            if (vp == cachedCascadeViewProj[ci]
-                && !moverMoved
-                && opaquePlacements.Count == cachedCascadeCasters[ci]
-                && lodKey == cachedCascadeLod[ci]
-                && (viewProj == cachedCascadeCamera[ci]))
-            {
-                cascadeRendered[ci] = false;
-                continue;
-            }
-            cachedCascadeViewProj[ci] = vp;
-            cachedCascadeCasters[ci] = opaquePlacements.Count;
-            cachedCascadeLod[ci] = lodKey;
-            cachedCascadeCamera[ci] = viewProj;
-            cascadeRendered[ci] = true;
-            // Frustum.FromViewProjection expects a column-vector clip matrix
-            // (clip = M·world); our cascade VP is the System.Numerics
-            // row-vector form (clip = Vector4.Transform(world, M)), so transpose
-            // to hand it the clip-coordinate generators as rows.
-            // Cull this cascade's list (per-cascade frustum cull → 0 instanceCount; same SSE LOD
-            // as the lit/pre-pass so shadow depth matches the shaded silhouette). Then one
-            // indirect draw per group.
-            cascadeTriangles[ci] = 0;
-            cascadeDrawCounts[ci] = CullList(
-                SceneListCascade(ci), cull ? vp : null, margin,
-                // Shadow LOD is bounded by this cascade's world texel, not camera pixels. The full-
-                // detail A/B arm explicitly overrides it so “no LOD” means every pass.
-                abMode == "lod" && LodArmPixels <= 0f ? 0f : cascadeTexelWorld[ci] * shadowLodTexels,
-                // Receiver culling tests the scene-bounded sun sweep against the camera frustum.
-                !(abMode == "castercull" && AbOffPhase) ? viewProj : null,
-                Vector3.Normalize(sunDirection));
-            cascadeTriangles[ci] = gpuCull ? -1 : fillIndirectTriangles;
-            // Opaque casters all push the same bytes (this cascade's VP); mask casters push
-            // per-material alpha params, so one mask push per group (constant within a material).
-            // Where each placement stands is set 3's.
-            var cascadeOpaquePush = ShadowOpaquePushBytes(vp);
-            var cascadeList = SceneListCascade(ci);
-            graph.Pass(cascadePassHandles[ci], scope =>
-            {
-                foreach (var g in opaqueGroups)
-                {
-                    if (g.IsMask)
-                    {
-                        var rep = opaqueDrawables[g.Start];
-                        DrawSceneGroup(scope, cascadeList, g, shadowMaskPipeline,
-                            Array.Empty<ShaderUniform>(), rep.ShadowAlbedoBinding, material: null,
-                            pushConstants: RentMaskPush(vp, rep.AlphaCutoff, rep.BaseColorAlpha), litLayout: false);
-                    }
-                    else
-                    {
-                        DrawSceneGroup(scope, cascadeList, g, shadowOpaquePipeline,
-                            Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>(), material: null,
-                            pushConstants: cascadeOpaquePush, litLayout: false);
-                    }
-                }
-            });
-        }
-
-        // Froxel fog: fill the 3D scattering grid. Recorded here — after the
-        // shadow scopes, before the lit scope — so this code reads in frame
-        // order. (Execution is by graph declaration order regardless: the
-        // froxel ComputePass is declared between the cascades and the lit pass,
-        // so it dispatches after the shadow maps render and before the lit pass
-        // samples the grid.) Skipped when fog is off — and the lit shader gates
-        // on uFog.w, so when disabled the grid is never sampled (its contents
-        // are undefined/stale; "disabled" must mean "never sample").
-        if (fog.Enabled)
-        {
-            EnsureFroxelGrid(frame.Width, frame.Height);
-            Matrix4x4.Invert(viewProj, out var invViewProj);
-            var froxelUniforms = new ShaderUniform[]
-            {
-                new("uInvViewProj",   new Matrix4x4Uniform(invViewProj)),
-                new("uCamPos",        new Vector4Uniform(new Vector4(cameraPosition, fog.Far))),
-                new("uCamForward",    new Vector4Uniform(new Vector4(cameraForward, fog.Density))),
-                // The froxel pass scatters the same measured RGB irradiance as the surface pass so
-                // warm direct light remains warm in the medium.
-                new("uSunDir",        new Vector4Uniform(new Vector4(sunDirection, 1f))),
-                new("uSunColor",      new Vector4Uniform(new Vector4(EffectiveSunIrradiance, fog.Scatter))),
-                new("uFogParams",     new Vector4Uniform(new Vector4(fog.PhaseG, 0f, 0f, (float)time.Total))),
-                new("uMedium",        new Vector4Uniform(new Vector4(
-                    fog.HeightFalloff, fog.Noise, 0f, 0f))),
-                // Refuse history until both targets have valid contents, and again after a resize
-                // recreates the grid.
-                new("uTemporal",      new Vector4Uniform(new Vector4(
-                    fogHistoryValid ? fog.Temporal : 0f, FogJitter(), fog.ShowRejection ? 1f : 0f, 0f))),
-                new("uPrevViewProj",  new Matrix4x4Uniform(fogHistoryValid ? prevFogViewProj : viewProj)),
-                new("uPrevCamPos",    new Vector4Uniform(new Vector4(
-                    fogHistoryValid ? prevFogCamPos : cameraPosition, 0f))),
-                new("uBoundsMin",     new Vector4Uniform(new Vector4(sceneBoundsMin, 0f))),
-                // No split depths: fog and surfaces share fitted-volume containment so they select
-                // the same cascade at the same world position.
-                new("uCascadeVP",     new Matrix4x4ArrayUniform(cascadeViewProj)),
-            };
-            graph.Dispatch(froxelPassHandle, new DispatchCommand(
-                froxelPipeline,
-                (froxelGridX + 7) / 8, (froxelGridY + 7) / 8, 1,
-                froxelUniforms, FroxelBindings()));
-            prevFogViewProj = viewProj;
-            prevFogCamPos = cameraPosition;
-            fogScatterWrite ^= 1;
-            fogHistoryValid = true;
-        }
 
         // Fill camera commands once for both depth and lit passes. Frustum culling zeroes
         // instanceCount without compacting groups, saving vertex/binning work while preserving
         // indirect offsets. Recorded off-screen geometry was 55% at the default view and 96% on
-        // the orbit after cook-time spatial splitting made bounds selective.
+        // a measurement orbit after cook-time spatial splitting made bounds selective.
         Matrix4x4? cameraCull = cullEnabled && !(abMode == "cull" && AbOffPhase) ? viewProj : null;
-        //
         // The margin is insurance, not tuning. A chunk whose bounds sit exactly on a frustum plane
         // can fall either way on floating-point noise, and at the screen edge that reads as geometry
         // blinking in and out as you turn. Half a metre of slack costs a fraction of a percent of
@@ -784,14 +580,8 @@ internal sealed partial class SponzaLoop
         occlusionNow &= !occlusionSkipped;
         using (Prof("cull")) CullList(SceneListCamera, cameraCull, margin: CameraCullMargin, occlusionEarly: occlusionNow || occlusionSkipped);
         cameraTriangles = gpuCull ? -1 : fillIndirectTriangles;
-        // Accumulate exactly one contiguous orbit so triangle means cover the full closed path and
-        // do not depend on streaming duration or which arc happened to be sampled.
-        if (!orbit || triangleFrames < OrbitFrames)
-        {
-            for (var c = 0; c < CascadeCount; c++) cascadeTriangleSum[c] += cascadeTriangles[c];
-            cameraTriangleSum += cameraTriangles;
-            triangleFrames++;
-        }
+        cameraTriangleSum += cameraTriangles;
+        triangleFrames++;
         if (blendDrawables.Count > 0)
         {
             CullList(SceneListBlend, cameraCull, margin: CameraCullMargin);
@@ -819,86 +609,9 @@ internal sealed partial class SponzaLoop
             occlusionStillFrames++;
         }
 
-        // Hi-Z pyramid: level 0 reduces the resolved depth, each level after reduces its parent.
-        RecordPyramid(hiZPassHandles, hiZPipelines, hiZHandles, frame.Width, frame.Height, skip: abMode == "hiz" && AbOffPhase || !ambient.Enabled);
-
-        // Ambient visibility. Reads the 1x depth the pre-pass just resolved, writes bent normal +
-        // visibility for the lit pass. Disabled, neither it nor the pyramid runs, and the lit pass takes the term as one
-        // (frame.uTexelShape.y) -- it ran at radius 0 before, 1.7 ms of nothing at 2880 x 1620 (2026-10-24).
-        if (ambient.Enabled)   // off (--no-ao): GTAO and its pyramid not run at all; the lit pass reads no AO (frame.uTexelShape.y)
-        {
-            Matrix4x4.Invert(cameraProjection, out var invProjection);
-            Matrix4x4.Invert(cameraView, out var invView);
-            // The AO buffer is half the framebuffer, so every pixel quantity the search uses — the
-            // texel size it steps by and the scale that turns metres into pixels — is in ITS pixels,
-            // not the screen's. Getting this wrong does not fail loudly; it silently halves or
-            // doubles the radius, which reads as "the AO looks a bit off" and nothing more.
-            var aoWidth = Math.Max(1, (int)(frame.Width * aoScale));
-            var aoHeight = Math.Max(1, (int)(frame.Height * aoScale));
-            var projectionScale = aoHeight * 0.5f / MathF.Tan(fovYRadians * 0.5f);
-            var gtaoUniforms = new ShaderUniform[]
-            {
-                new("uInvProjection", new Matrix4x4Uniform(invProjection)),
-                new("uInvView",       new Matrix4x4Uniform(invView)),
-                new("uTarget",        new Vector4Uniform(new Vector4(
-                    aoWidth, aoHeight, 1f / aoWidth, 1f / aoHeight))),
-                new("uParams",        new Vector4Uniform(new Vector4(
-                    ambient.Enabled && !(abMode == "gtao" && AbOffPhase) ? ambient.RadiusMetres : 0f,
-                    projectionScale, aoDebug, 0f))),
-                // The view ray, in NDC units. The negated Y is Vulkan's flip, taken from the
-                // projection rather than rediscovered in the shader — the same flip whose omission
-                // in the slice basis made the whole floor read as fully occluded.
-                new("uRay",           new Vector4Uniform(new Vector4(
-                    MathF.Tan(fovYRadians * 0.5f) * aspect, -MathF.Tan(fovYRadians * 0.5f),
-                    CameraFarPlane * 0.98f, 0f))),
-                // History is refused on the first frame and whenever the target has just been
-                // re-created, for the same reason the fog's is: blending into an uninitialised
-                // buffer is blending into whatever the allocator left.
-                new("uTemporal",      new Vector4Uniform(new Vector4(
-                    ambientHistoryValid ? ambient.Temporal : 0f,
-                    // A golden-ratio walk over the slice span, so consecutive frames measure
-                    // azimuths that are as far apart as a low-discrepancy sequence can put them.
-                    (float)((postLoadFrames * 0.6180339887) % 1.0) * MathF.PI,
-                    ambient.ShowRejection ? 1f : 0f, 0f))),
-                new("uPrevViewProj",  new Matrix4x4Uniform(ambientHistoryValid ? prevAmbientViewProj : viewProj)),
-            };
-            var hiZBindings = new ShaderTextureBinding[HiZLevels + 1];
-            for (var level = 0; level < HiZLevels; level++)
-            {
-                hiZBindings[level] = new ShaderTextureBinding(
-                    $"uHiZ[{level}]", graph.GetColorTexture(hiZHandles[level]));
-            }
-            hiZBindings[HiZLevels] = new ShaderTextureBinding(
-                "uHistory", graph.GetColorTexture(ambientDenoisedHandle));
-            graph.Pass(gtaoPassHandle, scope => fullscreen.Draw(
-                scope, gtaoPipeline, hiZBindings, pushConstants: null, uniforms: gtaoUniforms));
-            prevAmbientViewProj = viewProj;
-            ambientHistoryValid = true;
-
-            var denoiseUniforms = new ShaderUniform[]
-            {
-                new("uInvProjection", new Matrix4x4Uniform(invProjection)),
-                // Half-res texel size: the taps must step across the AO buffer's grid, not the
-                // screen's, or a 3x3 gathers four copies of the same texel.
-                new("uTarget",        new Vector4Uniform(new Vector4(
-                    aoWidth, aoHeight, 1f / aoWidth, 1f / aoHeight))),
-            };
-            graph.Pass(gtaoDenoisePassHandle, scope => fullscreen.Draw(
-                scope, gtaoDenoisePipeline,
-                new[]
-                {
-                    new ShaderTextureBinding("uAmbientRaw", graph.GetColorTexture(ambientHandle)),
-                    new ShaderTextureBinding(
-                        "uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
-                },
-                pushConstants: null,
-                uniforms: denoiseUniforms));
-        }
-
         // The incident-light field: RTGI's readout at half resolution, brought up to the full-size targets the lit pass
         // reads. Before the readout is ready (the scene loading, the Metal tracer pending) the targets are cleared and
         // nothing drawn: the lit pass reads no indirect light rather than a guess.
-        if (IncidentFieldNow)
         {
             // The JITTERED projection: what the depth these passes read was rasterized with. Reconstructing with the
             // unjittered one put each point up to a pixel's footprint off its surface -- far off on a face seen
@@ -1004,13 +717,7 @@ internal sealed partial class SponzaLoop
                 host.RequestClose();
                 return;
             }
-            VerifyHiZ();
-            OcclusionCensus();
-            WriteAmbientShot(path);
-            // Preserve the raw GTAO result beside the denoised lighting input so horizon-search
-            // output can be inspected without the 3x3 bilateral neighbourhood.
-            WriteAmbientRaw(Path.ChangeExtension(path, null) + ".raw.png");
-            WriteSceneShot(Path.ChangeExtension(path, null) + ".scene.png");
+            WriteSceneShot(path);
             WriteStability(Path.ChangeExtension(path, null));
             WriteSurfaceCheck();
             WriteMoverShot(Path.ChangeExtension(path, null));
@@ -1027,196 +734,6 @@ internal sealed partial class SponzaLoop
         }
     }
 
-    /// <summary>The ambient buffer before the denoise: rgb as written, alpha as visibility.</summary>
-    private void WriteAmbientRaw(string path)
-    {
-        var pixels = device.ReadTexture(
-            graph.GetColorTexture(ambientHandle), out var width, out var height, out var format);
-        if (format != TextureFormat.R16F) return;
-
-        var vis = new byte[width * height * 4];
-        for (var i = 0; i < width * height; i++)
-        {
-            var a = (float)BitConverter.ToHalf(pixels, i * 2);
-            var dst = i * 4;
-            vis[dst] = vis[dst + 1] = vis[dst + 2] = (byte)Math.Clamp((int)MathF.Round(a * 255f), 0, 255);
-            vis[dst + 3] = 255;
-        }
-        var visPath = Path.ChangeExtension(path, null) + ".vis.png";
-        PngWriter.WriteRgba8(visPath, vis, width, height);
-        Console.WriteLine($"[VulkanSponza]   {Path.GetFileName(visPath)}  ({width}x{height}, pre-denoise)");
-    }
-
-    /// <summary>Measures how much on-screen submitted geometry is hidden behind other geometry.</summary>
-    /// <remarks>
-    /// This capture-time CPU query projects each drawable AABB, samples a suitable Hi-Z level, and
-    /// compares nearest object depth with the farthest depth over its screen rectangle. It reports
-    /// both drawable and triangle shares to estimate the value of future GPU-driven culling without
-    /// first requiring storage-capable indirect buffers and graph buffer barriers.
-    /// </remarks>
-    private void OcclusionCensus()
-    {
-        if (ReadHiZ() is not { } hiZ) return;
-        var occluded = 0;
-        long occludedTris = 0, totalTris = 0;
-        var offscreen = 0;
-
-        foreach (var p in opaquePlacements)
-        {
-            var tris = opaqueDrawables[p.Drawable].LodIndexCounts[0] / 3;
-            totalTris += tris;
-            switch (hiZ.Test(p.Bounds))
-            {
-                case HiZVerdict.OffScreen: offscreen++; break;
-                case HiZVerdict.Hidden: occluded++; occludedTris += tris; break;
-            }
-        }
-
-        var shown = opaquePlacements.Count - offscreen;
-        Console.WriteLine(
-            $"[VulkanSponza] occlusion census (Hi-Z level {HiZCensusLevel}, {hiZ.Width}x{hiZ.Height}): " +
-            $"{occluded}/{shown} on-screen placements fully hidden, " +
-            $"{occludedTris / 1000.0:0.0}k of {totalTris / 1000.0:0.0}k triangles " +
-            $"({(totalTris > 0 ? 100.0 * occludedTris / totalTris : 0):0.0}%), {offscreen} off-screen");
-    }
-
-    // A level whose texels are coarse enough that a handful covers a typical object.
-    private const int HiZCensusLevel = 3;
-
-    private enum HiZVerdict { OffScreen, Hidden, Visible }
-
-    // This frame's Hi-Z level, read back: the farthest depth in each texel, and the camera it was drawn with.
-    private sealed record HiZSnapshot(float[] Farthest, int Width, int Height, Matrix4x4 View, Matrix4x4 ViewProj, float Near)
-    {
-        /// <summary>Whether everything these bounds could draw is behind the depth already recorded where they land.</summary>
-        /// <remarks>
-        /// Project the eight corners; take the screen rectangle and the NEAREST view depth. If the farthest
-        /// depth recorded anywhere in that rectangle is still nearer than the bounds' closest point, nothing
-        /// inside them would survive the depth test. Bounds reaching the near plane are never hidden.
-        /// </remarks>
-        public HiZVerdict Test(in Bounds3 b)
-        {
-            float minX = float.MaxValue, minY = float.MaxValue, maxX = float.MinValue, maxY = float.MinValue;
-            var nearest = float.MaxValue;
-            var anyInFront = false;
-            for (var c = 0; c < 8; c++)
-            {
-                var corner = new Vector3(
-                    (c & 1) == 0 ? b.Min.X : b.Max.X,
-                    (c & 2) == 0 ? b.Min.Y : b.Max.Y,
-                    (c & 4) == 0 ? b.Min.Z : b.Max.Z);
-                var depth = -Vector3.Transform(corner, View).Z;
-                if (depth <= Near) { anyInFront = true; continue; }
-                nearest = MathF.Min(nearest, depth);
-                anyInFront = true;
-
-                var clip = Vector4.Transform(new Vector4(corner, 1f), ViewProj);
-                var ndcX = clip.X / clip.W;
-                var ndcY = clip.Y / clip.W;
-                minX = MathF.Min(minX, ndcX); maxX = MathF.Max(maxX, ndcX);
-                minY = MathF.Min(minY, ndcY); maxY = MathF.Max(maxY, ndcY);
-            }
-
-            if (!anyInFront || nearest == float.MaxValue) return HiZVerdict.OffScreen;
-            // Entirely outside the frustum sideways: the frustum cull's job, not this test's.
-            if (maxX < -1f || minX > 1f || maxY < -1f || minY > 1f) return HiZVerdict.OffScreen;
-
-            var x0 = Math.Clamp((int)MathF.Floor((minX * 0.5f + 0.5f) * Width), 0, Width - 1);
-            var x1 = Math.Clamp((int)MathF.Ceiling((maxX * 0.5f + 0.5f) * Width), 0, Width - 1);
-            var y0 = Math.Clamp((int)MathF.Floor((minY * 0.5f + 0.5f) * Height), 0, Height - 1);
-            var y1 = Math.Clamp((int)MathF.Ceiling((maxY * 0.5f + 0.5f) * Height), 0, Height - 1);
-
-            var deepest = 0f;
-            for (var y = y0; y <= y1; y++)
-            for (var x = x0; x <= x1; x++)
-                deepest = MathF.Max(deepest, Farthest[y * Width + x]);
-            return nearest > deepest ? HiZVerdict.Hidden : HiZVerdict.Visible;
-        }
-    }
-
-    private HiZSnapshot? ReadHiZ()
-    {
-        var pixels = device.ReadTexture(
-            graph.GetColorTexture(hiZHandles[HiZCensusLevel]), out var w, out var h, out var format);
-        if (format != TextureFormat.Rg16F && format != TextureFormat.Rgba16F) return null;
-        var stride = format == TextureFormat.Rg16F ? 4 : 8;
-        var farthest = new float[w * h];
-        for (var i = 0; i < w * h; i++) farthest[i] = (float)BitConverter.ToHalf(pixels, i * stride + 2);
-        return new HiZSnapshot(farthest, w, h, cameraView, viewProj, CameraNearPlane);
-    }
-
-    /// <summary>Checks each pyramid level really is the min/max of the one above it.</summary>
-    /// <remarks>
-    /// Recomputes conservative parent bounds from the real GPU buffers. Occlusion safety requires
-    /// minimums never to increase and maximums never to decrease; tolerance covers fp16 reduction.
-    /// </remarks>
-    private void VerifyHiZ()
-    {
-        Console.WriteLine("[VulkanSponza] Hi-Z pyramid:");
-        float[]? parent = null;
-        int parentW = 0, parentH = 0;
-        for (var level = 0; level < HiZLevels; level++)
-        {
-            var pixels = device.ReadTexture(
-                graph.GetColorTexture(hiZHandles[level]), out var w, out var h, out var format);
-            if (format != TextureFormat.Rg16F && format != TextureFormat.Rgba16F) { Console.WriteLine("  unexpected format"); return; }
-            var stride = format == TextureFormat.Rg16F ? 4 : 8;
-
-            var lo = new float[w * h];
-            var hi = new float[w * h];
-            for (var i = 0; i < w * h; i++)
-            {
-                lo[i] = (float)BitConverter.ToHalf(pixels, i * stride);
-                hi[i] = (float)BitConverter.ToHalf(pixels, i * stride + 2);
-            }
-
-            var finite = lo.Where(v => v > 0 && !float.IsInfinity(v)).ToArray();
-            var nearest = finite.Length > 0 ? finite.Min() : 0f;
-            var farthest = hi.Where(v => !float.IsInfinity(v)).DefaultIfEmpty(0f).Max();
-
-            var verdict = "";
-            if (parent is not null)
-            {
-                // Odd dimensions may require overlapping source footprints. Test conservative
-                // containment rather than exact 2x2 equality, which can skip the final row/column.
-                var spanX = Math.Max(1, parentW / w);
-                var spanY = Math.Max(1, parentH / h);
-                double worstLo = 0, worstHi = 0;
-                var tight = true;
-                for (var y = 0; y < h; y++)
-                for (var x = 0; x < w; x++)
-                {
-                    float expectLo = float.MaxValue, expectHi = float.MinValue;
-                    for (var sy = 0; sy < spanY; sy++)
-                    for (var sx = 0; sx < spanX; sx++)
-                    {
-                        var px = Math.Min(parentW - 1, x * spanX + sx);
-                        var py = Math.Min(parentH - 1, y * spanY + sy);
-                        expectLo = MathF.Min(expectLo, parent[(py * parentW + px) * 2]);
-                        expectHi = MathF.Max(expectHi, parent[(py * parentW + px) * 2 + 1]);
-                    }
-                    var scale = MathF.Max(1f, MathF.Abs(expectHi));
-                    // Violation only when the level is LESS conservative than its parent's window.
-                    worstLo = Math.Max(worstLo, (lo[y * w + x] - expectLo) / scale);
-                    worstHi = Math.Max(worstHi, (expectHi - hi[y * w + x]) / scale);
-                    if (lo[y * w + x] < expectLo - 1e-3f || hi[y * w + x] > expectHi + 1e-3f) tight = false;
-                }
-                var ok = worstLo < 0.01 && worstHi < 0.01;
-                var fit = tight ? "tight" : "overlapping";
-                verdict = ok
-                    ? $"  conservative OK, {fit}"
-                    : $"  NOT CONSERVATIVE (min over by {worstLo:0.000}, max under by {worstHi:0.000})";
-            }
-
-            Console.WriteLine(
-                $"  level {level}: {w,5}x{h,-4} nearest {nearest,7:0.00} m  farthest {farthest,8:0.00} m{verdict}");
-
-            parent = new float[w * h * 2];
-            for (var i = 0; i < w * h; i++) { parent[i * 2] = lo[i]; parent[i * 2 + 1] = hi[i]; }
-            parentW = w; parentH = h;
-        }
-    }
-
     /// <summary>Frame-period statistics over the captured window, as a distribution rather than a number.</summary>
     /// <remarks>
     /// Median and quartiles, not a mean: this laptop throws occasional frames two and three times
@@ -1230,18 +747,14 @@ internal sealed partial class SponzaLoop
         // all A/B modes.
         var term = abMode switch
         {
-            "flat"   => "everything (materials+IBL+shadows+AO)",
+            "flat"   => "everything (materials+IBL+shadows+GI)",
             "shadow" => "sun shadows",
-            "rtshadow" => "ray-traced sun shadows (Metal) in place of the cascades in the lit pass",
-            "gtao"   => "ambient visibility (GTAO)",
             "prepass"=> "the depth pre-pass",
-            "hiz"    => "the Hi-Z pyramid",
             "textures"=> "material texture bandwidth",
             "pbr"    => "the GGX specular lobe",
             "ibl"    => "image-based lighting",
             "normal" => "normal mapping",
             "cull"    => "camera frustum culling",
-            "castercull" => "shadow caster culling against the camera",
             "occlskip" => "the occlusion test and late pre-pass skipped while nothing moves (OFF: every frame)",
             "queue"   => "the Metal tracers on the Vulkan device's command queue (OFF: their own)",
             "lod"     => lodArmOff > 0f
@@ -1263,9 +776,9 @@ internal sealed partial class SponzaLoop
                 $"[VulkanSponza] {term}: {lit / flat:0.000}x of frame " +
                 $"({lit - flat:0.00} ms at this run's {lit:0.0} ms median), " +
                 "same geometry, same process, same thermal state, " +
-                // State camera motion explicitly because cascade scheduling and LOD behavior differ
-                // materially between a still view and the measurement orbit.
-                (orbit ? "camera on the measurement orbit" : "CAMERA STILL (cascades cached)"));
+                // State camera motion explicitly because LOD behaviour and the GI's caches differ
+                // materially between a still view and a moving one.
+                (walkTo is not null ? "camera on the walk" : "CAMERA STILL"));
         }
 
         static double Median(double[] buf, int count)
@@ -1344,75 +857,6 @@ internal sealed partial class SponzaLoop
         return (byte)Math.Clamp((int)MathF.Round(encoded * 255f), 0, 255);
     }
 
-    // The grid follows the framebuffer, so a resize re-creates it. It is a descriptor in two live
-    // sets and cannot be swapped under work in flight — but a resize already stalls the pipeline,
-    // which makes this the cheapest correct place to pay for the idle. Texture ids are never
-    // reused, so the destroyed handle cannot come back and match something cached.
-    private void EnsureFroxelGrid(int width, int height)
-    {
-        var (x, y) = FroxelGridSize(width, height);
-        if (x == froxelGridX && y == froxelGridY) return;
-        device.WaitIdle();
-        var previous = froxelGridTexture;
-        froxelGridX = x;
-        froxelGridY = y;
-        froxelGridTexture = device.CreateStorageTexture3D(
-            x, y, froxelGridZ, TextureFormat.Rgba16F, SamplerDescription.LinearClamp,
-            "sponza.froxel_grid");
-        device.DestroyTexture(previous);
-        for (var i = 0; i < 2; i++)
-        {
-            var staleScatter = fogScatterTextures[i];
-            fogScatterTextures[i] = device.CreateStorageTexture3D(
-                x, y, froxelGridZ, TextureFormat.Rgba16F, SamplerDescription.LinearClamp,
-                $"sponza.fog_scatter{i}");
-            device.DestroyTexture(staleScatter);
-        }
-        fogHistoryValid = false;
-        if (froxelGridBinding >= 0)
-        {
-            passBindings[froxelGridBinding] =
-                new ShaderTextureBinding("uFroxelGrid", froxelGridTexture);
-        }
-        if (skyFroxelGridBinding >= 0)
-        {
-            skyBindings[skyFroxelGridBinding] =
-                new ShaderTextureBinding("uFroxelGrid", froxelGridTexture);
-        }
-        Console.WriteLine(
-            $"[VulkanSponza] froxel grid {x}x{y}x{froxelGridZ} ({FroxelPixels} px/froxel at {width}x{height})");
-    }
-
-    // A low-discrepancy offset in [0,1) for this frame's slice sample, so successive frames land at
-    // different depths inside the same segment. R2 rather than Halton: one multiply, no bit
-    // reversal, and a better-spread sequence than either for one dimension.
-    private float FogJitter() => (float)((postLoadFrames * 0.7548776662) % 1.0);
-
-    // How far a point in these bounds can travel along `dir` before it leaves the scene volume.
-    // A slab test against the scene bounds, the extent of everything that can cast or receive --
-    // past it there is nothing left to darken.
-    private float SceneExitDistance(Bounds3 bounds, Vector3 dir)
-    {
-        var min = sceneBoundsMin;
-        var max = sceneBoundsMin + sceneBoundsSpan;
-        var t = float.MaxValue;
-        for (var a = 0; a < 3; a++)
-        {
-            var d = a == 0 ? dir.X : a == 1 ? dir.Y : dir.Z;
-            if (MathF.Abs(d) < 1e-5f) continue;
-            // Measure from the trailing face so a caster overlapping a scene boundary retains a
-            // non-zero conservative sweep until its entire box exits the receiver volume.
-            var start = d > 0
-                ? (a == 0 ? bounds.Min.X : a == 1 ? bounds.Min.Y : bounds.Min.Z)
-                : (a == 0 ? bounds.Max.X : a == 1 ? bounds.Max.Y : bounds.Max.Z);
-            var wall = d > 0
-                ? (a == 0 ? max.X : a == 1 ? max.Y : max.Z)
-                : (a == 0 ? min.X : a == 1 ? min.Y : min.Z);
-            t = MathF.Min(t, MathF.Max((wall - start) / d, 0f));
-        }
-        return t == float.MaxValue ? sceneBoundsSpan.Length() : t;
-    }
-
     /// <summary>Halton low-discrepancy sequence, one dimension.</summary>
     private static float Halton(int index, int radix)
     {
@@ -1427,21 +871,6 @@ internal sealed partial class SponzaLoop
         }
         return result;
     }
-
-    // Whether the lit pass reads the incident field this frame: always but under --rt-isolated, whose sky is the trace's.
-    // RTGI's readout fills it, or the frame's clear leaves it black (RenderFrame).
-    private bool IncidentFieldNow => !rtIsolated;
-
-    private ShaderTextureBinding[] FroxelBindings() => new[]
-    {
-        new ShaderTextureBinding("uGrid", froxelGridTexture),
-        new ShaderTextureBinding("uCascadeShadowMaps[0]", graph.GetDepthTexture(cascadeHandles[0])),
-        new ShaderTextureBinding("uCascadeShadowMaps[1]", graph.GetDepthTexture(cascadeHandles[1])),
-        new ShaderTextureBinding("uCascadeShadowMaps[2]", graph.GetDepthTexture(cascadeHandles[2])),
-        new ShaderTextureBinding("uIrradiance", irradianceCubeTexture),
-        new ShaderTextureBinding("uScatterPrev", fogScatterTextures[fogScatterWrite ^ 1]),
-        new ShaderTextureBinding("uScatter", fogScatterTextures[fogScatterWrite]),
-    };
 
     // --- live GPU pass cost ----------------------------------------------
     // The mean of the last 60 frames per pass, taken from the host's cumulative totals: the same window
@@ -1511,28 +940,22 @@ internal sealed partial class SponzaLoop
     {
         if (opaquePlacements.Count == 0) return;
         var frustum = Frustum.FromViewProjection(Matrix4x4.Transpose(viewProj));
-        var hiZ = ReadHiZ();
+        var budget = LodErrorPixelsNow;
         long placementTris = 0, clusterFrustumTris = 0, coneTris = 0, ineligibleTris = 0;
         long clustersInFrustum = 0, clustersAfterCone = 0, unclustered = 0;
-        // Occlusion against this frame's Hi-Z, on top of the frustum: whole placements, then each
-        // remaining cluster (after the cone).
-        long placementHiddenTris = 0, clusterHiddenTris = 0, clustersVisible = 0;
         for (var i = 0; i < opaquePlacements.Count; i++)
         {
             var p = opaquePlacements[i];
             if (!frustum.Intersects(p.Bounds, CameraCullMargin)) continue;
             var d = opaqueDrawables[p.Drawable];
-            var level = d.PickLod(p.Bounds, cameraPosition, LodErrorScale, render.LodErrorPixels * opaqueLodMargins[i], 0);
+            var level = d.PickLod(p.Bounds, cameraPosition, LodErrorScale, budget * opaqueLodMargins[i], 0);
             placementTris += d.LodIndexCounts[level] / 3;
-            var placementHidden = hiZ?.Test(p.Bounds) == HiZVerdict.Hidden;
-            if (placementHidden) placementHiddenTris += d.LodIndexCounts[level] / 3;
             var clusters = d.LodClusters is { } lc && level < lc.Length ? lc[level] : Array.Empty<MeshCluster>();
             if (clusters.Count == 0)
             {
                 unclustered += d.LodIndexCounts[level] / 3;
                 clusterFrustumTris += d.LodIndexCounts[level] / 3;
                 coneTris += d.LodIndexCounts[level] / 3;
-                if (placementHidden) clusterHiddenTris += d.LodIndexCounts[level] / 3;
                 continue;
             }
 
@@ -1554,24 +977,16 @@ internal sealed partial class SponzaLoop
                 }
                 clustersAfterCone++;
                 coneTris += tris;
-                if (placementHidden || hiZ?.Test(clusterBounds) == HiZVerdict.Hidden) clusterHiddenTris += tris;
-                else clustersVisible++;
             }
         }
 
         double Share(long n) => placementTris > 0 ? n * 100.0 / placementTris : 0;
         Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] cluster census at this camera (opaque, {render.LodErrorPixels:0.##} px): "
+            $"[VulkanSponza] cluster census at this camera (opaque, {budget:0.##} px): "
             + $"placement culling submits {placementTris:N0} triangles; "
             + $"cluster frustum keeps {clusterFrustumTris:N0} ({Share(clusterFrustumTris):0.0}%, {clustersInFrustum:N0} clusters); "
             + $"+ normal cone keeps {coneTris:N0} ({Share(coneTris):0.0}%, {clustersAfterCone:N0} clusters). "
             + $"Cone-ineligible (double-sided or non-uniform): {Share(ineligibleTris):0.0}%; unclustered: {Share(unclustered):0.0}%."));
-        if (hiZ is null) return;
-        Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] occlusion on top (this frame's Hi-Z level {HiZCensusLevel}, {hiZ.Width}x{hiZ.Height}, conservative): "
-            + $"placement occlusion keeps {placementTris - placementHiddenTris:N0} ({Share(placementTris - placementHiddenTris):0.0}%); "
-            + $"frustum + cone + cluster occlusion keeps {coneTris - clusterHiddenTris:N0} "
-            + $"({Share(coneTris - clusterHiddenTris):0.0}%, {clustersVisible:N0} clusters)."));
     }
 
     // The device's cumulative GPU pass totals when the scene finished loading: the breakdown is the window since.
@@ -1581,7 +996,7 @@ internal sealed partial class SponzaLoop
     /// <summary>Prints resolved GPU milliseconds per pass since load, heaviest per frame first.</summary>
     /// <remarks>
     /// Per run is one execution's mean; per frame divides by every frame since load, so a pass that runs every
-    /// other frame or only when due (cascades) counts what it costs a frame. On tile GPUs these timings attribute
+    /// other frame or only when due counts what it costs a frame. On tile GPUs these timings attribute
     /// encoders but do not partition total frame time.
     /// </remarks>
     private void WritePassBreakdown()
@@ -1618,7 +1033,7 @@ internal sealed partial class SponzaLoop
         Console.WriteLine(
             "  NOTE: on a tile-based GPU (Apple/MoltenVK) these bracket ENCODER submission, not the "
             + "deferred tiled execution, so they do not sum to the frame. Compare them to each other, "
-            + "and use paired A/B runs (--no-ao and friends) for absolute cost.");
+            + "and use paired A/B runs (--ab) for absolute cost.");
         // Report triangle means over the measurement window rather than the camera's final pose.
         var tf = Math.Max(1, triangleFrames);
         if (gpuCull)
@@ -1626,11 +1041,7 @@ internal sealed partial class SponzaLoop
             Console.WriteLine("[VulkanSponza] triangles submitted: counted on the GPU, not read back (--cpu-cull counts them).");
         }
         else Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] triangles submitted (mean of {tf} frames): cascades "
-            + $"{cascadeTriangleSum[0] / tf:N0}/{cascadeTriangleSum[1] / tf:N0}/{cascadeTriangleSum[2] / tf:N0}, "
-            + $"camera {cameraTriangleSum / tf:N0}"));
-        Console.WriteLine(string.Create(Inv,
-            $"  shadow maps {ShadowMapSizes[0]}/{ShadowMapSizes[1]}/{ShadowMapSizes[2]}, texel {cascadeTexelWorld[0]:0.000}/{cascadeTexelWorld[1]:0.000}/{cascadeTexelWorld[2]:0.000} m, budget {shadowLodTexels:0.0} texels"));
+            $"[VulkanSponza] triangles submitted (mean of {tf} frames): camera {cameraTriangleSum / tf:N0}"));
 
         // What the backend says the last frame submitted, pass by pass, beside what Sponza thinks it
         // drew. Sponza's figures above are its own culling and LOD choices; these are what reached
@@ -1678,58 +1089,20 @@ internal sealed partial class SponzaLoop
             $"  submit+fence floor: {floor:0.000} ms — the smallest pass a per-pass command buffer could resolve; anything under this is below that instrument's noise."));
     }
 
-    /// <summary>Writes the ambient-visibility buffer as two PNGs: visibility, and bent normal.</summary>
-    /// <remarks>
-    /// Encodes raw linear visibility and signed bent-normal direction without exposure or tonemap;
-    /// mid-grey visibility therefore means 0.5.
-    /// </remarks>
-    private void WriteAmbientShot(string path)
-    {
-        var pixels = device.ReadTexture(
-            graph.GetColorTexture(ambientDenoisedHandle), out var width, out var height, out var format);
-        if (format != TextureFormat.R16F)
-        {
-            Console.Error.WriteLine($"[VulkanSponza] ambient target is {format}, expected R16F.");
-            return;
-        }
-
-        var visibility = new byte[width * height * 4];
-        double sum = 0;
-        var min = float.MaxValue;
-        var max = float.MinValue;
-        for (var i = 0; i < width * height; i++)
-        {
-            var v = (float)BitConverter.ToHalf(pixels, i * 2);
-            sum += v; min = MathF.Min(min, v); max = MathF.Max(max, v);
-            var dst = i * 4;
-            var g = (byte)Math.Clamp((int)MathF.Round(v * 255f), 0, 255);
-            visibility[dst] = visibility[dst + 1] = visibility[dst + 2] = g;
-            visibility[dst + 3] = 255;
-        }
-
-        PngWriter.WriteRgba8(path, visibility, width, height);
-        Console.WriteLine(
-            $"[VulkanSponza] ambient visibility {width}x{height}: " +
-            $"min {min:0.000} max {max:0.000} mean {sum / (width * height):0.000}");
-        Console.WriteLine($"[VulkanSponza]   {path}");
-    }
-
-    // Record one parity pass. The unrecorded target keeps the previous frame and becomes history.
-    // The lean build this frame (lit_lean.frag): none of its compiled-out branches can be taken -- no debug view, no fog,
-    // and the sun's shadow from the traced mask (or no shadow), not the cascades' fallback. --no-lit-lean: never.
+    // The lean build this frame (lit_lean.frag): none of its compiled-out branches can be taken -- no debug view.
+    // --no-lit-lean: never.
     private bool litLean = true;
     // --ibl-brdf-lut: the specular IBL's split sum read from the LUT (lit_body.glsl), not Karis' analytic fit.
     private bool iblBrdfLut;
     // The in-boot A/B's arm for a lit-shader term (BLIX_PROBE=textures|pbr|ibl|normal, uAbFlags).
     private bool ShaderProbe(string term) => AbArm == 1 && Environment.GetEnvironmentVariable("BLIX_PROBE") == term;
-    private bool LitLeanNow => litLean && vizChannel <= 0f && !fog.Enabled
-        && tunePanel.Value("uVisualizeAmbient") <= 0.5f && tunePanel.Value("uVisualizeCascades") <= 0.5f
-        && (!rtShadowBound.Equals(default(GpuBufferHandle)) || !shadows.Enabled || abMode == "shadow" && AbOffPhase);
+    private bool LitLeanNow => litLean && vizChannel <= 0f;
 
     // BLIX_SKIP_MASK=1: the alpha-masked groups (foliage) left out of the pre-passes and the lit pass -- a cost probe, the
     // GI untouched (its scene is cooked); the picture is missing them.
     private static readonly bool SkipMaskDraws = Environment.GetEnvironmentVariable("BLIX_SKIP_MASK") == "1";
 
+    // Record one parity pass. The unrecorded target keeps the previous frame and becomes history.
     private void RecordTaaResolve()
     {
         // --metalfx: the temporal scaler in its place (SponzaLoop.MetalFx.cs); the TAA history then goes stale.
@@ -1798,29 +1171,6 @@ internal sealed partial class SponzaLoop
                 pass, presentPipeline,
                 new[] { new ShaderTextureBinding("uHdr", hdrTex) },
                 push));
-    }
-
-    // Opaque shadow caster push: [cascadeViewProj] = 64 bytes, matching shadow.vert's
-    // PushConstants block. Where each placement stands is set 3's.
-    private static byte[] ShadowOpaquePushBytes(Matrix4x4 cascadeViewProj)
-    {
-        var bytes = new byte[64];
-        MemoryMarshal.Write(bytes.AsSpan(0, 64), in cascadeViewProj);
-        return bytes;
-    }
-
-    // Mask shadow caster push: [cascadeViewProj | alphaParams] = 80 bytes, matching
-    // shadow_mask's PushConstants block. alphaParams.xy = (alphaCutoff, baseColorAlpha).
-    // Rents a pooled buffer (reset per frame via maskPushCursor) rather than allocating,
-    // since these differ per draw.
-    private byte[] RentMaskPush(Matrix4x4 cascadeViewProj, float alphaCutoff, float baseColorAlpha)
-    {
-        if (maskPushCursor >= maskPushPool.Count) maskPushPool.Add(new byte[80]);
-        var bytes = maskPushPool[maskPushCursor++];
-        MemoryMarshal.Write(bytes.AsSpan(0, 64), in cascadeViewProj);
-        var alphaParams = new Vector4(alphaCutoff, baseColorAlpha, 0f, 0f);
-        MemoryMarshal.Write(bytes.AsSpan(64, 16), in alphaParams);
-        return bytes;
     }
 
     // --- input -------------------------------------------------------------

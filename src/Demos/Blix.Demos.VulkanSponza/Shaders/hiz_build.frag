@@ -1,39 +1,31 @@
 #version 450
 
-// One level of the Hi-Z pyramid: the min and max LINEAR view depth of a 2x2 region.
+// One level of the occlusion cull's Hi-Z pyramid (scene_occlusion.comp): the min and max LINEAR view
+// depth of a 2x2 region.
 //
-// ── Why a pyramid, and why this shape ────────────────────────────────────────
-// Three things in this renderer want to ask "what is the depth over THERE", where "there" is an
-// area rather than a point, and all three currently either cannot or pay full price:
-//   * GTAO's horizon search reads individual texels out to a radius, so a wide search costs
-//     proportionally more cache misses. It is capped at 48 texels for exactly that reason, which
-//     costs near-field occlusion on close geometry.
-//   * Occlusion culling does not exist, and the measured prize is large: the depth pre-pass already
-//     saves 29 ms/frame by suppressing overdraw, which says the scene is heavily occluded and
-//     nothing is exploiting that before submission.
-//   * Later: contact shadows, screen-space reflection, light culling.
+// ── Why a pyramid ────────────────────────────────────────────────────────────
+// The occlusion test asks "what is the depth over THERE", where "there" is a bounding box's screen
+// rectangle rather than a point. The measured prize was large: the depth pre-pass alone saved 29
+// ms/frame by suppressing overdraw, which said the scene is heavily occluded and nothing exploited
+// that before submission.
 //
-// ── Min AND max, because the two consumers want opposite answers ─────────────
+// ── Min AND max ──────────────────────────────────────────────────────────────
 // Occlusion culling wants the FARTHEST depth in a region: "my bounding box's nearest point is
 // behind everything there" is then a conservative reject, and being wrong the other way drops
-// visible geometry, which is a correctness bug rather than a quality one. GTAO wants the NEAREST:
-// the closest surface in a region is the strongest occluder. Storing only one would silently make
-// the other consumer wrong, so the pyramid carries both and each reader takes its own channel.
+// visible geometry, which is a correctness bug rather than a quality one. The nearest is kept
+// beside it for a reader that wants the strongest occluder in a region instead.
 //
 // ── LINEAR metres, not raw depth ────────────────────────────────────────────
 // Half-float has about ten bits of mantissa, and a Vulkan [0,1] depth buffer crowds nearly all of
 // its resolution near the near plane — so min/max of raw depth in a half would be nearly useless
-// far away, which is precisely where a pyramid is consulted. Linear view depth spreads evenly, and
-// it is also what a horizon search actually wants: a position is then ray * depth rather than a
-// matrix multiply per tap.
+// far away, which is precisely where a pyramid is consulted. Linear view depth spreads evenly.
 //
 // ── Separate targets per level, rather than mips of one image ───────────────
 // Reading level i-1 while writing level i of the SAME image is the classic mip-generation hazard —
 // one image cannot be colour-attachment and shader-read at once without General layout and per-mip
 // barriers, none of which this graph has. Distinct images have no hazard at all, and the graph's
 // existing barrier inference already orders exactly this shape. A consumer needing a RUNTIME-chosen
-// level is what would justify building mipped storage images; a consumer whose level is fixed per
-// unrolled step (GTAO) needs no such thing.
+// level is what would justify building mipped storage images.
 
 #include "fullscreen.glsl"
 

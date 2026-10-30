@@ -3,8 +3,7 @@ using Blix.Graphics;
 namespace Blix.Demos.VulkanSponza;
 
 // Teardown. Everything Sponza makes on the device is either registered here as it is made (Own) or held
-// in a field this frees directly: the froxel and fog volumes (re-created on resize, so their current
-// handles are the live ones), the IBL textures (the cooked probe's or the procedural sky's), the shared
+// in a field this frees directly: the IBL textures (the cooked probe's or the procedural sky's), the shared
 // mesh bundle, and the texture loader with its defaults. BLIX_TEARDOWN_TRACE=1 lists whatever is still
 // live after Dispose.
 internal sealed partial class SponzaLoop
@@ -42,8 +41,7 @@ internal sealed partial class SponzaLoop
 
         var textures = new HashSet<int>();
         foreach (var t in ownedTextures
-            .Concat(new[] { froxelGridTexture, envCubeTexture, skyCubeTexture, irradianceCubeTexture, brdfLutTexture, sheenEnvTexture, sheenLutTexture })
-            .Concat(fogScatterTextures))
+            .Concat(new[] { envCubeTexture, skyCubeTexture, irradianceCubeTexture, brdfLutTexture, sheenEnvTexture, sheenLutTexture }))
         {
             if (t.Id != 0 && textures.Add(t.Id)) device.DestroyTexture(t);
         }

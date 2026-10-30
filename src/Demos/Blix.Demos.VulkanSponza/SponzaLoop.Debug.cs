@@ -76,58 +76,39 @@ internal sealed partial class SponzaLoop
         }
         RtgiControls(debug);
         // ShadowsSettings and RenderSettings are [Tune]-tagged and auto-paneled below.
-        // Shader-uniform tunables (//@tune in lit.frag): sun/ambient intensity,
-        // metallic/normal/slope/glass thresholds, indirect-shadow base/range,
-        // cascade-viz. Auto-built + read back here — grouped by their UBO block.
+        // Shader-uniform tunables (//@tune in frame.glsl: the cutout and bounce-term diagnostics)
+        // are auto-built + read back here — grouped by their UBO block.
         tunePanel.BuildControls(debug);
-        tuneObjects.BuildControls(debug);   // [Tune]-tagged CPU settings (Fog, …)
+        tuneObjects.BuildControls(debug);   // [Tune]-tagged CPU settings (Shadows, Render, the camera)
 
-        using (debug.Scope("Cascades"))
-        {
-            cullEnabled   = debug.Controls.Toggle("Frustum cull", cullEnabled);
-            cullMargin    = debug.Controls.Float("Cull margin", cullMargin, 0f, 5f);
-            // Far distance of each cascade; clamped into ascending-ish bands so
-            // the splits stay ordered as you drag.
-            cascadeSplits[1] = debug.Controls.Float("Far: cascade 0", cascadeSplits[1], 1f, 20f);
-            cascadeSplits[2] = debug.Controls.Float("Far: cascade 1", cascadeSplits[2], cascadeSplits[1], 50f);
-            cascadeSplits[3] = debug.Controls.Float("Far: cascade 2", cascadeSplits[3], cascadeSplits[2], 150f);
-        }
-        // Exposure / tonemap / fly-speed / LOD-error budget are [Tune] on
-        // RenderSettings (auto-paneled above). Vsync stays manual — it's a
+        // Exposure / tonemap / LOD-error budget / render scale are [Tune] on RenderSettings, the fly
+        // speed on the camera (both auto-paneled above). Vsync stays manual — it's a
         // device property, not a field: FIFO (capped, no tearing) vs Mailbox
         // (uncapped; tears on MoltenVK). Toggling recreates the swapchain.
         using (debug.Scope("Render"))
         {
             device.VsyncEnabled = debug.Controls.Toggle("Vsync", device.VsyncEnabled);
+            // The camera's frustum culling: off, every placement is drawn (the --ab cull arm, held).
+            cullEnabled = debug.Controls.Toggle("Frustum cull", cullEnabled);
             // Visualization channels are named here and share the shader's stable integer IDs.
             vizChannel = debug.Controls.Enum("Show", (int)MathF.Round(vizChannel), VizChannelNames);
         }
 
-        // Spatial gizmos: sun direction + the three cascade ortho boxes.
+        // Spatial gizmos: the sun's direction, an arrow into the origin.
         // Every primitive below belongs to the main view; the scope supplies its matrix.
-        // A layer that starts hidden (the Layers tab): drawn always, they crossed every view as long diagonal lines (the
-        // cascades' frusta) and an arrow at the origin, the tree's foot in Sponza.
+        // A layer that starts hidden (the Layers tab): drawn always, the arrow sat at the origin, the tree's foot in
+        // Sponza.
         using var view = debug.Draw.In("main", viewProj);
         if (debug.Draw.Layer("gizmos", visible: false))
         {
             debug.Draw.Arrow("sun/dir", -sunDirection * 6f, Vector3.Zero,
                 new GraphicsColor(1f, 0.92f, 0.3f, 1f));
-            var cascadeTints = new[]
-            {
-                new GraphicsColor(1f, 0.35f, 0.35f, 0.8f),
-                new GraphicsColor(0.35f, 1f, 0.35f, 0.8f),
-                new GraphicsColor(0.4f, 0.5f, 1f, 0.8f),
-            };
-            for (var c = 0; c < CascadeCount; c++)
-            {
-                debug.Draw.Frustum($"cascade/{c}", cascadeViewProj[c], cascadeTints[c]);
-            }
         }
 
         // Outlines every opaque primitive NOT at full detail, tinted by how coarse it is, and flashes
         // white the moment one switches level. The question this answers is not "how much does LOD
         // save" — the A/B answers that — but "which piece of wall was it". A layer that starts
-        // hidden, switched in the Layers tab.
+        // hidden, switched in the Layers tab. CPU cull only (--cpu-cull), as the values in ReportValues.
         //
         // Level 0 is deliberately not drawn: at a sane budget most of the scene is at full detail,
         // and outlining all of it would bury the handful of primitives the question is about.
@@ -159,24 +140,11 @@ internal sealed partial class SponzaLoop
         // Per-pass GPU time, the CPU split and what was submitted are on the Perf tab, from the host's
         // timing record; the values here are Sponza's own.
 
-        debug.Values.Value("shadow-map", $"{ShadowMapSizes[0]}/{ShadowMapSizes[1]}/{ShadowMapSizes[2]}");
-        debug.Values.Value("splits-m", $"{cascadeSplits[1]:0}/{cascadeSplits[2]:0}/{cascadeSplits[3]:0}");
-        // One shadow texel in world units per cascade. Map size and fitted extent jointly determine
-        // this value, which drives both receiver bias and filter width.
-        debug.Values.Value("cascade-texel-m",
-            $"{cascadeTexelWorld[0]:0.000}/{cascadeTexelWorld[1]:0.000}/{cascadeTexelWorld[2]:0.000}");
-        // Per-cascade caster counts after frustum cull (one frame stale — set
-        // during the previous OnRender's graph.Execute).
-        // Under GPU culling both counts stay on the GPU: --cpu-cull reports them.
-        debug.Values.Value("cascade-casters", gpuCull
+        // The camera's triangles after its cull (one frame stale — set during the previous OnRender's
+        // graph.Execute). Under GPU culling the count stays on the GPU: --cpu-cull reports it.
+        debug.Values.Value("camera-tris", gpuCull
             ? "on the GPU (--cpu-cull counts)"
-            : $"{cascadeDrawCounts[0]}/{cascadeDrawCounts[1]}/{cascadeDrawCounts[2]} of {opaquePlacements.Count}");
-        // Shadow-map cache hits: R = re-rendered this frame, · = served cached.
-        debug.Values.Value("cascade-tris", gpuCull
-            ? "on the GPU (--cpu-cull counts)"
-            : string.Create(Inv,
-                $"{cascadeTriangles[0]:N0}/{cascadeTriangles[1]:N0}/{cascadeTriangles[2]:N0} vs camera {cameraTriangles:N0}"));
-        debug.Values.Value("cascade-cache", $"{(cascadeRendered[0] ? 'R' : '·')}{(cascadeRendered[1] ? 'R' : '·')}{(cascadeRendered[2] ? 'R' : '·')}");
+            : string.Create(Inv, $"{cameraTriangles:N0}"));
         debug.Values.Value("blend-draws", blendDrawables.Count);
         debug.Values.Value("cam-pos", cameraPosition);
         // LOD diagnostic: max levels available + histogram of selected levels
@@ -184,6 +152,18 @@ internal sealed partial class SponzaLoop
         //
         // Retain each drawable's rendered level and transition age as well as the aggregate
         // histogram so the gizmo pass can identify where and when a visible switch occurred.
+        //
+        // CPU cull only (--cpu-cull): the levels are opaqueLodState, which only the CPU fill writes. The GPU
+        // cull keeps its levels in cullState on the GPU, and reading them back every frame for an overlay is a
+        // stall; under it the instrument says so instead of reporting every placement at level 0.
+        if (gpuCull)
+        {
+            const string onGpu = "on the GPU (--cpu-cull counts)";
+            debug.Values.Value("lod-tris", onGpu);
+            debug.Values.Value("lod-popped", onGpu);
+            debug.Values.Value("lod-hist", string.Create(Inv, $"{onGpu} (err={LodErrorPixelsNow:0.0}px)"));
+            return;
+        }
         if (lodLevels.Length != opaquePlacements.Count)
         {
             lodLevels = new int[opaquePlacements.Count];
@@ -220,6 +200,6 @@ internal sealed partial class SponzaLoop
         for (var i = 0; i < lodPopAge.Length; i++) if (lodPopAge[i] < PopHoldSeconds) holding++;
         debug.Values.Value("lod-popped", $"{popped} this frame, {holding} within {PopHoldSeconds:0.0}s");
         debug.Values.Value("lod-maxlevels", maxLevels);
-        debug.Values.Value("lod-hist", $"{hist[0]}/{hist[1]}/{hist[2]}/{hist[3]} (err={render.LodErrorPixels:0.0}px)");
+        debug.Values.Value("lod-hist", string.Create(Inv, $"{hist[0]}/{hist[1]}/{hist[2]}/{hist[3]} (err={LodErrorPixelsNow:0.0}px)"));
     }
 }

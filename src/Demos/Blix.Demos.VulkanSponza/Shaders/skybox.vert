@@ -21,11 +21,6 @@ layout(location = 1) in vec3 inNormal;
 layout(location = 2) in vec2 inUv;
 
 layout(location = 0) out vec3 vWorldDir;
-// Screen UV for the fog lookup. In Vulkan both NDC y and gl_FragCoord y run downward, so this is
-// the same coordinate the lit pass forms as gl_FragCoord.xy / screenSize — and the sky can have it
-// without needing the framebuffer size at all.
-layout(location = 1) out vec2 vScreenUv;
-layout(location = 2) out vec4 vFog;
 
 void main() {
     vec2 ndc = blix_fullscreenTriangleNdc(gl_VertexIndex);
@@ -38,7 +33,5 @@ void main() {
     // z = w forces post-divide depth = 1.0 (max). LessEqualNoWrite depth
     // state lets the sky pass at depth == clear value but lose to any
     // opaque geometry that wrote a closer depth.
-    vScreenUv = ndc * 0.5 + 0.5;
-    vFog = frame.uFog;
     gl_Position = vec4(ndc, 1.0, 1.0);
 }

@@ -13,8 +13,7 @@ internal sealed record ScenePack(string Directory, bool Required = false, bool F
 /// <para>
 /// The renderer is generic over whatever meshes load — LOD, culling, the indirect groups and the pre-pass
 /// never asked which scene they were drawing. What was Sponza's was the layout of its cooked tree and a set
-/// of constants sized to a 30 m building: the far plane, the cascade splits, the sun's distance, the fog's
-/// reach and where the camera starts. Those are this record, one per scene, chosen with <c>--scene</c>.
+/// of constants sized to a 30 m building: the far plane and where the camera starts. Those are this record, one per scene, chosen with <c>--scene</c>.
 /// </para>
 /// <para>
 /// They are the demo's decisions, so they live here and not in the engine or the cook. The probe's sun still
@@ -30,9 +29,6 @@ internal sealed record SceneProfile(
     string ProbeDirectory,
     string[] ProbeCandidates,
     float FarPlane,
-    float[] CascadeSplits,
-    float SunDistance,
-    float FogFar,
     Vector3 StartPosition,
     float StartYaw,
     float StartPitch,
@@ -67,10 +63,6 @@ internal sealed record SceneProfile(
             "rogland_overcast_4k.blixprobe", "sky_hdr.blixprobe",
         },
         FarPlane: 200f,
-        // The 14 m near split keeps its resolution transition out of common mid-range subjects.
-        CascadeSplits: new[] { 0.1f, 14f, 30f, 60f },
-        SunDistance: 40f,
-        FogFar: 60f,
         // Aimed at the +X end-wall lavabo (wall fountain), so the sculpture is in the first frame: useful
         // for normal-map debugging.
         StartPosition: new Vector3(-9f, 3f, 0f),
@@ -85,8 +77,8 @@ internal sealed record SceneProfile(
     /// <summary>Amazon Lumberyard Bistro, exterior (ORCA, CC-BY 4.0): a street ~170 m by 180 m, 2.8M triangles.</summary>
     /// <remarks>
     /// The start pose is the file's own camera at the first key of its path (composed through its parent),
-    /// so the first frame is the view Bistro was authored to be seen from. The far plane and cascades are
-    /// sized to the street: the old 60 m shadow reach stopped mid-block.
+    /// so the first frame is the view Bistro was authored to be seen from. The far plane is sized to the
+    /// street.
     /// </remarks>
     public static readonly SceneProfile Bistro = new(
         Name: "bistro",
@@ -98,9 +90,6 @@ internal sealed record SceneProfile(
         // The sky its .pyscene names, shipped in the pack (Poly Haven's San Giuseppe bridge).
         ProbeCandidates: new[] { "san_giuseppe_bridge_4k.blixprobe" },
         FarPlane: 500f,
-        CascadeSplits: new[] { 0.1f, 20f, 60f, 150f },
-        SunDistance: 120f,
-        FogFar: 150f,
         StartPosition: new Vector3(24.82f, 3.16f, -61.65f),
         StartYaw: -161.4f,
         StartPitch: -3.3f,
@@ -122,9 +111,6 @@ internal sealed record SceneProfile(
         ProbeDirectory: "textures",
         ProbeCandidates: Array.Empty<string>(),
         FarPlane: 2000f,
-        CascadeSplits: new[] { 0.1f, 30f, 120f, 400f },
-        SunDistance: 120f,
-        FogFar: 150f,
         StartPosition: new Vector3(-7f, 1.8f, 30f),
         StartYaw: 0f,
         StartPitch: 0f,
@@ -146,9 +132,6 @@ internal sealed record SceneProfile(
         ProbeDirectory: "textures",
         ProbeCandidates: Array.Empty<string>(),
         FarPlane: 100f,
-        CascadeSplits: new[] { 0.1f, 8f, 20f, 50f },
-        SunDistance: 20f,
-        FogFar: 30f,
         StartPosition: new Vector3(0f, 3f, 10f),
         StartYaw: 0f,
         StartPitch: 0f,
@@ -254,9 +237,6 @@ internal sealed record SceneProfile(
         ProbeDirectory: "textures",
         ProbeCandidates: Array.Empty<string>(),
         FarPlane: 100f,
-        CascadeSplits: new[] { 0.1f, 8f, 20f, 50f },
-        SunDistance: 20f,
-        FogFar: 30f,
         StartPosition: new Vector3(3.05f, 3f, 0f),
         StartYaw: -90f,
         StartPitch: 0f,
@@ -276,9 +256,6 @@ internal sealed record SceneProfile(
         ProbeDirectory: "textures",
         ProbeCandidates: Array.Empty<string>(),
         FarPlane: 100f,
-        CascadeSplits: new[] { 0.1f, 8f, 20f, 50f },
-        SunDistance: 20f,
-        FogFar: 30f,
         StartPosition: new Vector3(0f, 1.6f, 3.5f),
         StartYaw: -20f,
         StartPitch: -8f,
@@ -356,9 +333,6 @@ internal sealed record SceneProfile(
         ProbeDirectory: "textures",
         ProbeCandidates: Array.Empty<string>(),
         FarPlane: 400f,
-        CascadeSplits: new[] { 0.1f, 10f, 40f, 150f },
-        SunDistance: 60f,
-        FogFar: 100f,
         StartPosition: new Vector3(6f, 3f, 10f),
         StartYaw: 0f,
         StartPitch: -10f,
