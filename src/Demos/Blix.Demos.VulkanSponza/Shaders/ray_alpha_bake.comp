@@ -1,0 +1,32 @@
+#version 450
+
+// A cut-out material's alpha, copied into its place in the alpha atlas (Blix.Geometry's RayAlphaAtlas): one thread a word, four texels of
+// the material's alpha channel times its base colour's alpha, read at the mip whose texels are the atlas's, as bytes. The atlas lives in
+// the trailer of BlixRaySurfaces, so the per-hit alpha test (ray_query.glsl) needs no binding of its own.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform AlphaBake {
+    vec4 uSize;    // x width, y height (the atlas entry's), z the atlas word to write from (a uint's bits: floats stop being exact at 16 M), w the base colour's alpha
+} u;
+
+layout(set = 0, binding = 1) uniform sampler2D uAlbedo;
+layout(std430, set = 0, binding = 5) buffer BlixRaySurfaces { uint surfaces[]; };
+
+void main() {
+    uint word = gl_GlobalInvocationID.x;
+    uint w = uint(u.uSize.x), h = uint(u.uSize.y);
+    uint texels = w * h;
+    if (word * 4u >= texels) return;
+    vec2 source = vec2(textureSize(uAlbedo, 0));
+    float lod = max(log2(max(source.x / float(w), source.y / float(h))), 0.0);
+    uint packed = 0u;
+    for (uint k = 0u; k < 4u; ++k) {
+        uint index = word * 4u + k;
+        if (index >= texels) break;
+        vec2 uv = (vec2(float(index % w), float(index / w)) + 0.5) / vec2(float(w), float(h));
+        float a = clamp(textureLod(uAlbedo, uv, lod).a * u.uSize.w, 0.0, 1.0);
+        packed |= uint(a * 255.0 + 0.5) << (k * 8u);
+    }
+    surfaces[floatBitsToUint(u.uSize.z) + word] = packed;
+}

@@ -330,6 +330,12 @@ public interface IGraphicsDevice : IDisposable
 
     int CurrentFrameSlot { get; }
 
+    // The presentation surface is HDR: RGBA16F in an extended-linear sRGB colour space, where 1.0 is the display's SDR
+    // white and values above it use the panel's headroom. A present shader then writes LINEAR light and nothing
+    // encodes it (an sRGB surface encodes in hardware, an HDR one does not). Off unless the host asked (BLIX_HDR=1)
+    // and the surface offers it; a device with no HDR path says false.
+    bool HdrOutput => false;
+
     // Whether presentation waits for the display. Off for timing runs, where a refresh-locked
     // frame period hides the difference being measured.
     bool VsyncEnabled { get; set; }

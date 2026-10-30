@@ -170,6 +170,22 @@ procedural IBL, directional, spot, and point shadows, skinned meshes, HDR bloom,
 and tonemapped presentation. It is a useful complete pipeline example, but its
 scene and pass choices are not a global Blix default.
 
+### Tonemap Lab
+
+Source: `src/Demos/Blix.Demos.TonemapLab/`
+
+The interactive end of `lab/tonemap`: a procedural panoramic world (a sun at 1e6
+nits, a noon sky, a tunnel mouth 8 EV darker than its surroundings, street lamps,
+flashing retroreflective signs) through auto-exposure (the lab's two-stage
+adaptation model, every constant a slider, with a time scale so a 30-minute dusk
+runs in half a minute), white balance and a choice of tone mappers (Blix's four, and GT7 with the lab's tuned parameters), to an SDR or
+an HDR window. `BLIX_HDR=1` asks for an HDR swapchain (RGBA16F, extended-linear
+sRGB: 1.0 is the UI's white, headroom above it); start with the "EDR patches"
+pattern, whose brighter patches should look brighter than the dimmer ones if the
+panel is using its headroom. The GT7 shader is held to `gt7.py` by `--selftest`
+and `lab/tonemap/tests/test_glsl_parity.py`; `--capture` writes what the window
+would show. Left drag looks around, the wheel zooms, and the overlay has the rest.
+
 ### Vulkan Particles
 
 Source: `src/Demos/Blix.Demos.VulkanParticles/`

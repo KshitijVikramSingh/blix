@@ -344,7 +344,8 @@ defines after `#version`, and `#line` mappings for useful compiler errors.
 | `pbr.glsl` | Cook-Torrance metallic/roughness BRDF |
 | `ibl.glsl` | Diffuse irradiance and split-sum specular ambient |
 | `shadow.glsl` | Shared soft sun-shadow sampling and cascade selection |
-| `tonemap.glsl` | ACES, AgX, Reinhard, and neutral curves |
+| `tonemap.glsl`, `gt7.glsl` | ACES, AgX, Reinhard, neutral and GT7 (published and lab-tuned) curves; GT7's parameters are generated from `lab/tonemap` (`gt7_params.glsl`) |
+| `diffuse_eon.glsl` | EON, the energy-preserving Oren-Nayar diffuse lobe that replaced the fixed Lambert one in the RTGI lit shader (reference and tests: `lab/bsdf`) |
 | `fullscreen.glsl` | Fullscreen-triangle vertex synthesis |
 | `bloom.glsl` | Bright extraction and separable Gaussian blur |
 | `sheen.glsl`, `coverage.glsl`, `noise.glsl` | Material sheen, coverage shaping, and stochastic helpers |

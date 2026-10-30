@@ -596,7 +596,7 @@ internal sealed class ViewerPanels
             if (ImGui.SliderFloat("exposure", ref exposure, 0.1f, 4f)) app.Renderer.Look.Exposure = exposure;
 
             var mode = (int)app.Renderer.Look.TonemapMode;
-            if (ImGui.Combo("tonemap", ref mode, "ACES\0AgX\0Reinhard\0Neutral\0"))
+            if (ImGui.Combo("tonemap", ref mode, "ACES\0AgX\0Reinhard\0Neutral\0GT7\0GT7 tuned\0"))
             {
                 app.Renderer.Look.TonemapMode = (Blix.Graphics.Images.TonemapCurve)mode;
             }

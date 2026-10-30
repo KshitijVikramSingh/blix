@@ -302,8 +302,12 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private readonly HashSet<MaterialHandle> richMaterials = new();
     private PipelineHandle opaqueSolidPipeline;
     private PipelineHandle opaqueDoubleSidedPipeline;
+    // A transmissive pane is two draws (SponzaLoop.Render.cs): the scene behind it filtered (these: blended Multiply), then what it adds -- its reflection -- on top
+    // (the Reflect pair: Additive). A group's own Pipeline is the first.
     private PipelineHandle blendSolidPipeline;
     private PipelineHandle blendDoubleSidedPipeline;
+    private PipelineHandle glassReflectSolidPipeline;
+    private PipelineHandle glassReflectDoubleSidedPipeline;
 
     // Skybox program + pipeline. Drawn between opaque/mask and blend so
     // translucent windows composite over the sky correctly.
@@ -561,7 +565,24 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
         TextureHandle TransmissionColorTexture = default,
         // --cloth-transmission's curtains (ClothTransmission): their light through is the albedo's hue, capped at what
         // the lit face reflects (lit.frag, RtRowTransmit); an authored material's is its own colour, uncapped.
-        bool Cloth = false);
+        bool Cloth = false,
+        // The material's metallic-roughness texture and roughness factor: the diffuse roughness a ray's surface bake stores EON's albedo at
+        // (ray_surface_bake.comp). Default: no texture, the factor alone.
+        TextureHandle MetallicRoughness = default,
+        float RoughnessFactor = 0.8f,
+        // Authored BLEND without transmission: drawn cut out at 0.5 (BuildMaterial), but a ray is stopped by it with the probability of its alpha
+        // (RayAlphaAtlas.FlagStochastic), so a translucent leaf or decal casts the shadow and bounces the light it should, on average.
+        bool AlphaBlended = false,
+        // The material as the loop sees it (--material's overrides applied): what the reference's material table is built from. Null: none (the default diffuse).
+        PbrMaterial? Pbr = null,
+        // --material's diffuse-roughness override (EON), or -1: the material's roughness times --diffuse-roughness-scale.
+        float DiffuseRoughness = -1f,
+        // The material's emissive texture (default: none): its mean over each triangle, baked beside the row's roughness and metallic, is what the reference multiplies
+        // the emissive factor by.
+        TextureHandle EmissiveTexture = default,
+        // --ray-panes: the share of rays a transmitting pane stops (what it reflects or absorbs) and the albedo of what stops (SponzaLoop.RayPanes.cs); 0, 0: the rays pass it whole.
+        float PaneStops = 0f,
+        float PaneAlbedo = 0f);
 
     /// <summary>One placement of a unique primitive: which drawable, its row in the transform table, and its world AABB.</summary>
     /// <remarks>

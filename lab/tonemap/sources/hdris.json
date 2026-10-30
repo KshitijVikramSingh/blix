@@ -1,0 +1,230 @@
+{
+ "source": "Poly Haven (https://polyhaven.com), catalogue and file API read 2026-10-25",
+ "license": "CC0 (public domain dedication); stated at https://polyhaven.com/license: any purpose, no attribution required, redistribution allowed. Credit is appreciated.",
+ "note_on_whitebalance_k": "The catalogue's `whitebalance` is the white balance the photographer PROCESSED the image with, not a measured scene illuminant: it is 5300-5600 K for almost every natural-light scene, sunrises and sunsets included, because it is a daylight setting that leaves a sunset warm. Treat it as how much cast the photographer chose to keep, not as the light's colour temperature.",
+ "note_on_evs_cap": "`evs_cap` is the exposure range the capture covers, in EV, as stated by the catalogue.",
+ "bytes_not_in_repo": "The files are a fetch (tools/fetch_hdris.py), not committed; data/ is gitignored.",
+ "hdris": [
+  {
+   "id": "wide_street_01",
+   "name": "Wide Street 01",
+   "why": "bright high-contrast daylight, the widest range here (27 EV)",
+   "url": "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/wide_street_01_2k.hdr",
+   "md5": "f4896567af57de97394257ef47e4ed07",
+   "bytes": 5834052,
+   "resolution": "2k",
+   "format": "hdr (Radiance RGBE)",
+   "time_of_day": "midday",
+   "weather": "clear",
+   "light_type": "natural",
+   "environment": "outdoor",
+   "sky_view": "open",
+   "contrast": "high",
+   "evs_cap": 27,
+   "whitebalance_k": 5500,
+   "authors": [
+    "Sergej Majboroda"
+   ],
+   "page": "https://polyhaven.com/a/wide_street_01"
+  },
+  {
+   "id": "golden_gate_hills",
+   "name": "Golden Gate Hills",
+   "why": "bright daylight, partly cloudy",
+   "url": "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/golden_gate_hills_2k.hdr",
+   "md5": "a4625a381e8351903f2f05316ae9d6db",
+   "bytes": 6500010,
+   "resolution": "2k",
+   "format": "hdr (Radiance RGBE)",
+   "time_of_day": "midday",
+   "weather": "partly_cloudy",
+   "light_type": "natural",
+   "environment": "outdoor",
+   "sky_view": "open",
+   "contrast": "high",
+   "evs_cap": 22,
+   "whitebalance_k": 5539,
+   "authors": [
+    "Dimitrios Savva",
+    "Jarod Guest"
+   ],
+   "page": "https://polyhaven.com/a/golden_gate_hills"
+  },
+  {
+   "id": "cannon",
+   "name": "Cannon",
+   "why": "outdoor overcast: low contrast, the neutral case",
+   "url": "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/cannon_2k.hdr",
+   "md5": "dede8625d6ca239bf802cfa07d33cbce",
+   "bytes": 5682084,
+   "resolution": "2k",
+   "format": "hdr (Radiance RGBE)",
+   "time_of_day": "midday",
+   "weather": "overcast",
+   "light_type": "natural",
+   "environment": "outdoor",
+   "sky_view": "open",
+   "contrast": "low",
+   "evs_cap": 12,
+   "whitebalance_k": 5319,
+   "authors": [
+    "Greg Zaal"
+   ],
+   "page": "https://polyhaven.com/a/cannon"
+  },
+  {
+   "id": "venice_sunset",
+   "name": "Venice Sunset",
+   "why": "a clear sunset: warm light, a sun low in frame",
+   "url": "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/venice_sunset_2k.hdr",
+   "md5": "0108ed73b9b1096ff64b47d257c1849c",
+   "bytes": 5723224,
+   "resolution": "2k",
+   "format": "hdr (Radiance RGBE)",
+   "time_of_day": "sunset",
+   "weather": "clear",
+   "light_type": "natural",
+   "environment": "outdoor",
+   "sky_view": "open",
+   "contrast": "medium",
+   "evs_cap": 19,
+   "whitebalance_k": 5400,
+   "authors": [
+    "Greg Zaal"
+   ],
+   "page": "https://polyhaven.com/a/venice_sunset"
+  },
+  {
+   "id": "rooitou_park",
+   "name": "Rooitou Park",
+   "why": "a clear sunset, high contrast, 23 EV",
+   "url": "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/rooitou_park_2k.hdr",
+   "md5": "56cbcf65f66a7168bb643fb1ca807a83",
+   "bytes": 6555692,
+   "resolution": "2k",
+   "format": "hdr (Radiance RGBE)",
+   "time_of_day": "sunset",
+   "weather": "clear",
+   "light_type": "natural",
+   "environment": "outdoor",
+   "sky_view": "open",
+   "contrast": "high",
+   "evs_cap": 23,
+   "whitebalance_k": 5400,
+   "authors": [
+    "Greg Zaal"
+   ],
+   "page": "https://polyhaven.com/a/rooitou_park"
+  },
+  {
+   "id": "spruit_sunrise",
+   "name": "Spruit Sunrise",
+   "why": "a clear sunrise, high contrast",
+   "url": "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/spruit_sunrise_2k.hdr",
+   "md5": "9d78ba2e8fd230951e7e7dbb50a6b4db",
+   "bytes": 5934209,
+   "resolution": "2k",
+   "format": "hdr (Radiance RGBE)",
+   "time_of_day": "sunrise",
+   "weather": "clear",
+   "light_type": "natural",
+   "environment": "outdoor",
+   "sky_view": "open",
+   "contrast": "high",
+   "evs_cap": 21,
+   "whitebalance_k": 5400,
+   "authors": [
+    "Greg Zaal"
+   ],
+   "page": "https://polyhaven.com/a/spruit_sunrise"
+  },
+  {
+   "id": "moonless_golf",
+   "name": "Moonless Golf",
+   "why": "night, a dark scene with a few lights, the dark end of the range",
+   "url": "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/moonless_golf_2k.hdr",
+   "md5": "804fae62fb961da3faad6c13a1a72147",
+   "bytes": 6688317,
+   "resolution": "2k",
+   "format": "hdr (Radiance RGBE)",
+   "time_of_day": "night",
+   "weather": "clear",
+   "light_type": "mixed",
+   "environment": "outdoor",
+   "sky_view": "open",
+   "contrast": "medium",
+   "evs_cap": 23,
+   "whitebalance_k": 3942,
+   "authors": [
+    "Greg Zaal"
+   ],
+   "page": "https://polyhaven.com/a/moonless_golf"
+  },
+  {
+   "id": "shanghai_bund",
+   "name": "Shanghai Bund",
+   "why": "night with artificial lights (3300 K label): the warm, low-light case",
+   "url": "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/shanghai_bund_2k.hdr",
+   "md5": "7514519fbe8a917aa2e4829f3b52cdde",
+   "bytes": 6467753,
+   "resolution": "2k",
+   "format": "hdr (Radiance RGBE)",
+   "time_of_day": "night",
+   "weather": "partly_cloudy",
+   "light_type": "artificial",
+   "environment": "outdoor",
+   "sky_view": "open",
+   "contrast": "high",
+   "evs_cap": 17,
+   "whitebalance_k": 3300,
+   "authors": [
+    "Greg Zaal"
+   ],
+   "page": "https://polyhaven.com/a/shanghai_bund"
+  },
+  {
+   "id": "studio_small_09",
+   "name": "Studio Small 09",
+   "why": "an indoor studio under warm artificial light (2750 K label)",
+   "url": "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/studio_small_09_2k.hdr",
+   "md5": "b056fea247bc84b81d2e0987d44c87d8",
+   "bytes": 6312947,
+   "resolution": "2k",
+   "format": "hdr (Radiance RGBE)",
+   "time_of_day": null,
+   "weather": null,
+   "light_type": "artificial",
+   "environment": "indoor",
+   "sky_view": null,
+   "contrast": "medium",
+   "evs_cap": 18,
+   "whitebalance_k": 2750,
+   "authors": [
+    "Sergej Majboroda"
+   ],
+   "page": "https://polyhaven.com/a/studio_small_09"
+  },
+  {
+   "id": "meadow_2",
+   "name": "Meadow 2",
+   "why": "an obstructed outdoor scene, 27 EV: sky and foliage together",
+   "url": "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/meadow_2_2k.hdr",
+   "md5": "5df4449d333ec6b6b729f7c9eeb85c32",
+   "bytes": 6280107,
+   "resolution": "2k",
+   "format": "hdr (Radiance RGBE)",
+   "time_of_day": "morning",
+   "weather": "partly_cloudy",
+   "light_type": "natural",
+   "environment": "outdoor",
+   "sky_view": "obstructed",
+   "contrast": "high",
+   "evs_cap": 27,
+   "whitebalance_k": 5300,
+   "authors": [
+    "Sergej Majboroda"
+   ],
+   "page": "https://polyhaven.com/a/meadow_2"
+  }
+ ]
+}

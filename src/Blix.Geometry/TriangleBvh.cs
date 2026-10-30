@@ -46,7 +46,13 @@ public readonly struct ShearedRay
 /// triangle, not on where a hierarchy happens to list it, so a triangle referenced twice (split across cells or
 /// nodes) flips one coin, not two.
 /// </summary>
-public readonly record struct RayCoverageKey(uint Seed, uint Placement, int[]? OwnerPlacement = null, int[]? OwnerTriangle = null);
+/// <remarks>
+/// <paramref name="AlphaTrailer"/> and <paramref name="Uvs"/> (the entry's vertex coordinates, as the hierarchy's indices name them) turn the coin
+/// into the per-hit alpha test (<see cref="RayAlphaAtlas"/>) for the materials the trailer lists: a partly covered triangle is met where its
+/// material's alpha passes at the point hit.
+/// </remarks>
+public readonly record struct RayCoverageKey(uint Seed, uint Placement, int[]? OwnerPlacement = null, int[]? OwnerTriangle = null,
+    uint[]? AlphaTrailer = null, Vector2[]? Uvs = null);
 
 /// <summary>The ray tests a traversal is built from, written once for the CPU and mirrored by the GPU's.</summary>
 public static class RayTests
@@ -464,7 +470,7 @@ public sealed class TriangleBvh
                 for (var k = 0; k < node.Count; k++)
                 {
                     var tri = Order[node.Index + k];
-                    if (Hit(ray, tri, tMin, t, out var th, out var bc, out var front) && Covered(key, node.Index + (uint)k))
+                    if (Hit(ray, tri, tMin, t, out var th, out var bc, out var front) && Covered(key, node.Index + (uint)k, bc))
                     {
                         t = th;
                         triangle = tri;
@@ -511,19 +517,33 @@ public sealed class TriangleBvh
             }
             for (var k = 0; k < node.Count; k++)
             {
-                if (Hit(ray, Order[node.Index + k], tMin, tMax, out _, out _, out _) && Covered(key, node.Index + (uint)k)) return true;
+                if (Hit(ray, Order[node.Index + k], tMin, tMax, out _, out var bc, out _) && Covered(key, node.Index + (uint)k, bc)) return true;
             }
         }
         return false;
     }
 
-    private bool Covered(RayCoverageKey key, uint leafPosition)
+    private bool Covered(RayCoverageKey key, uint leafPosition, Vector2 barycentrics)
     {
         if (Coverage is not { } coverage) return true;
         var triangle = Order[leafPosition];
-        return key.OwnerPlacement is { } owners
-            ? RayTests.Covered(coverage[leafPosition], key.Seed, (uint)owners[triangle], (uint)(key.OwnerTriangle![triangle] & 0x7FFFFFFF))
-            : RayTests.Covered(coverage[leafPosition], key.Seed, key.Placement, (uint)triangle);
+        var byteCoverage = coverage[leafPosition];
+        if (byteCoverage == 255) return true;
+        if (byteCoverage == 0) return false;
+        var placement = key.OwnerPlacement is { } owners ? (uint)owners[triangle] : key.Placement;
+        var identity = key.OwnerPlacement is not null ? (uint)(key.OwnerTriangle![triangle] & 0x7FFFFFFF) : (uint)triangle;
+        // The per-hit alpha test (ray_query.glsl's blix_covered): a material the trailer lists is met where its alpha passes at the hit.
+        if (key.AlphaTrailer is { } trailer && key.Uvs is { } uvs && RayAlphaAtlas.IsTrailer(trailer) && placement < trailer[1])
+        {
+            var material = trailer[trailer[4] + placement];
+            if (material != RayAlphaAtlas.None)
+            {
+                var uv = uvs[Indices[triangle * 3]] * (1f - barycentrics.X - barycentrics.Y)
+                    + uvs[Indices[triangle * 3 + 1]] * barycentrics.X + uvs[Indices[triangle * 3 + 2]] * barycentrics.Y;
+                return RayAlphaAtlas.Passes(trailer, material, uv, RayAlphaAtlas.Random(key.Seed, placement, identity));
+            }
+        }
+        return RayTests.Covered(byteCoverage, key.Seed, placement, identity);
     }
 
     /// <summary>One triangle by index, through the same test the traversal uses.</summary>

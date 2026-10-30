@@ -77,6 +77,12 @@ public interface IRenderHost
     // the machine was busy. The display knows; ask the display.
     int? DisplayRefreshHz { get; }
 
+    // How far above SDR white the display is currently willing to go: 1.0 means it is not (no HDR surface, or nothing
+    // on screen has been granted headroom yet), 4.0 means four times the UI's white. Read from the display, not assumed,
+    // because it moves with the brightness setting and only rises once something on screen is using extended range.
+    // A host with no way to ask says 1.0. See IGraphicsDevice.HdrOutput.
+    float DisplayHeadroom => 1f;
+
     // What the host measured and submitted: the last frame's CPU phases and submitted work, and
     // cumulative GPU time per pass. Facts, always kept and never drained by reading, so a program
     // measuring itself reads them here instead of from a backend's device. A host that submits

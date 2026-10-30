@@ -65,6 +65,18 @@ public sealed partial class VulkanGraphicsDevice
         }
     }
 
+    // BLIX_HDR=1 asks for an HDR swapchain (RGBA16F, extended-linear sRGB) and logs every format the surface offers.
+    // Opt-in: an HDR surface takes LINEAR light with no hardware encode, so every present shader written for the sRGB
+    // surface would come out wrong on it.
+    internal static readonly bool HdrRequested = Environment.GetEnvironmentVariable("BLIX_HDR") == "1";
+
+    /// <summary>
+    /// The swapchain is HDR: RGBA16F in an extended-linear sRGB colour space, where 1.0 is the display's SDR white and
+    /// values above it use the panel's headroom. A present shader then writes linear light and nothing encodes it.
+    /// </summary>
+    public bool HdrOutput { get; private set; }
+
+    internal ColorSpaceKHR SwapchainColorSpace { get; private set; }
     internal KhrSwapchain KhrSwapchain { get; private set; } = null!;
     internal SwapchainKHR Swapchain { get; private set; }
     internal Format SwapchainFormat { get; private set; }
@@ -298,6 +310,10 @@ public sealed partial class VulkanGraphicsDevice
         {
             KhrSurface.GetPhysicalDeviceSurfaceFormats(PhysicalDevice, Surface, &fmtCount, p);
         }
+        if (HdrRequested)
+        {
+            foreach (var f in formats) Console.WriteLine($"[blix] surface format: {f.Format} / {f.ColorSpace}");
+        }
         var chosenFormat = formats[0];
         foreach (var f in formats)
         {
@@ -307,7 +323,24 @@ public sealed partial class VulkanGraphicsDevice
                 break;
             }
         }
+        HdrOutput = false;
+        if (HdrRequested)
+        {
+            var hdr = formats.Where(f => f.Format == Format.R16G16B16A16Sfloat
+                                         && f.ColorSpace == ColorSpaceKHR.SpaceExtendedSrgbLinearExt).ToArray();
+            if (hdr.Length > 0)
+            {
+                chosenFormat = hdr[0];
+                HdrOutput = true;
+            }
+            else
+            {
+                Console.WriteLine("[blix] BLIX_HDR=1 but the surface offers no RGBA16F / extended-linear sRGB; staying SDR.");
+            }
+            Console.WriteLine($"[blix] swapchain: {chosenFormat.Format} / {chosenFormat.ColorSpace} (HDR output: {HdrOutput})");
+        }
         SwapchainFormat = chosenFormat.Format;
+        SwapchainColorSpace = chosenFormat.ColorSpace;
 
         // FIFO (vsync) by default — no tearing, always supported. When vsync is
         // off, prefer Mailbox (uncapped, true frame cost on the HUD) if the

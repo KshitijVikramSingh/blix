@@ -35,5 +35,5 @@ void main() {
     batchHits[3u * i] = uvec4(floatBitsToUint(hit.t), floatBitsToUint(hit.barycentrics.x), floatBitsToUint(hit.barycentrics.y), flags);
     batchHits[3u * i + 1u] = uvec4(hit.instance, hit.triangle, 0u, 0u);
     batchHits[3u * i + 2u] = uvec4(floatBitsToUint(hit.normal.x), floatBitsToUint(hit.normal.y), floatBitsToUint(hit.normal.z),
-                                   packUnorm4x8(vec4(hit.albedo, 0.0)));
+                                   packUnorm4x8(vec4(hit.albedo, hit.roughness)));   // alpha: the diffuse roughness the albedo was baked at
 }

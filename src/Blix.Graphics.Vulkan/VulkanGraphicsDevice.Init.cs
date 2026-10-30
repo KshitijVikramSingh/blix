@@ -183,6 +183,12 @@ public sealed partial class VulkanGraphicsDevice
         {
             extensions.Add("VK_EXT_debug_utils");
         }
+        // BLIX_HDR=1: the extended colour spaces (extended-linear sRGB, HDR10) are only reported by a surface when the
+        // instance enabled this extension; without it every format comes back as sRGB-nonlinear.
+        if (HdrRequested && InstanceExtensionAvailable("VK_EXT_swapchain_colorspace"))
+        {
+            extensions.Add("VK_EXT_swapchain_colorspace");
+        }
 
         using var extNames = new Utf8ArrayPin(extensions);
         using var layerNames = new Utf8ArrayPin(validationEnabled ? ValidationLayers : Array.Empty<string>());

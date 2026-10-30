@@ -170,6 +170,50 @@ public static class Program
         return 0;
     }
 
+    /// <summary>Many glTF models in one Cornell room: a gallery to see the GI and the materials working together, not each alone on open ground.</summary>
+    /// <remarks>
+    /// <c>--put "PATH,scale,x,y,z[,rest][,yaw=DEG]"</c> repeated: the model scaled, turned about Y, and placed with its origin at x,y,z (<c>rest</c>: lifted so its lowest point stands at y).
+    /// The room is Cornell's (6 m, a 1.5 m skylight, red and green walls), as <c>blix khronos --room cornell</c>. Each model's bounds are printed, to lay the next one out.
+    /// </remarks>
+    [BlixApp("gallery", Summary = "place several glTF models in the Cornell room, as glTF: a scene to see the GI and the materials together")]
+    public static int Gallery(AppArgs args)
+    {
+        var output = args.String("out") ?? "gallery.gltf";
+        var scene = new SceneBuilder();
+        foreach (var spec in args.All("put"))
+        {
+            var parts = spec.Split(',');
+            if (parts.Length < 5) throw new AppArgsException($"--put '{spec}': PATH,scale,x,y,z[,rest][,yaw=DEG].");
+            var scale = float.Parse(parts[1], System.Globalization.CultureInfo.InvariantCulture);
+            var at = ParseVector(string.Join(',', parts[2..5]));
+            var rest = parts.Skip(5).Contains("rest");
+            var yaw = parts.Skip(5).Where(x => x.StartsWith("yaw=")).Select(x => float.Parse(x[4..], System.Globalization.CultureInfo.InvariantCulture)).FirstOrDefault();
+            var source = SharpGLTF.Schema2.ModelRoot.Load(parts[0]);
+            var lo = new Vector3(float.PositiveInfinity);
+            var hi = new Vector3(float.NegativeInfinity);
+            foreach (var (a0, b0, c0, _) in SharpGLTF.Schema2.Toolkit.EvaluateTriangles(source.DefaultScene))
+                foreach (var v in new[] { a0, b0, c0 })
+                {
+                    var q = v.GetGeometry().GetPosition();
+                    lo = Vector3.Min(lo, q);
+                    hi = Vector3.Max(hi, q);
+                }
+            if (rest && float.IsFinite(lo.Y)) at.Y -= lo.Y * scale;
+            scene.AddScene(SceneBuilder.CreateFrom(source.DefaultScene),
+                Matrix4x4.CreateScale(scale) * Matrix4x4.CreateRotationY(yaw * MathF.PI / 180f) * Matrix4x4.CreateTranslation(at));
+            Console.WriteLine(string.Create(System.Globalization.CultureInfo.InvariantCulture,
+                $"gallery: {Path.GetFileName(parts[0])} x{scale:0.###} yaw {yaw:0} at ({at.X:0.##}, {at.Y:0.##}, {at.Z:0.##}); its own size {(hi - lo).X:0.##} x {(hi - lo).Y:0.##} x {(hi - lo).Z:0.##} m (x scale: {(hi - lo).X * scale:0.##} x {(hi - lo).Y * scale:0.##} x {(hi - lo).Z * scale:0.##})"));
+        }
+        var white = Matte("white", new Vector3(0.73f, 0.73f, 0.73f));
+        var shell = new Mesh("khronos_room");
+        CornellShell(shell, white, Matte("red", new Vector3(0.63f, 0.065f, 0.05f)), Matte("green", new Vector3(0.14f, 0.45f, 0.091f)), 6f, 1.5f);
+        scene.AddRigidMesh(shell, Matrix4x4.Identity);
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!);
+        scene.ToGltf2().SaveGLTF(output);
+        Console.WriteLine($"gallery: {args.All("put").Count} models in the Cornell room -> {output}");
+        return 0;
+    }
+
     private static Vector3 ParseVector(string text)
     {
         var p = text.Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray();

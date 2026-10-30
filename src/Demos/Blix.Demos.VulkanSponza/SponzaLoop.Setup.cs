@@ -116,6 +116,7 @@ internal sealed partial class SponzaLoop
         // --rt-no-overlap: no join, so the frame waits for the trace right after it (the overlap's control).
         rtNoOverlap = args.Flag("rt-no-overlap");
         rtNoPack = args.Flag("no-rt-pack");
+        rtShadowAlphaTexture = args.Flag("rt-alpha-texture");
         // --no-taa: no TAA and so no sub-pixel jitter: the control for --stability, whose variation otherwise
         // counts every edge the jitter moves.
         if (args.Flag("no-taa")) render.Taa = 0f;
@@ -152,6 +153,11 @@ internal sealed partial class SponzaLoop
         // --lod-pixels E: the LOD error budget (0: full detail everywhere) -- the [Tune] field is not reachable from the
         // command line.
         if (args.Float("lod-pixels") is { } lod) lodPixelsOverride = Math.Max(0f, lod);
+        ReadDiffuseArgs(args);
+        ReadMaterialOverrideArgs(args);
+        ReadRefBsdfArgs(args);
+        ReadRayPaneArgs(args);
+        ReadRayAlphaArgs(args);
         // --cam x,y,z,yaw,pitch — a reproducible viewpoint. Without it every capture and every
         // census speaks only for wherever the camera happens to start, which for a question like
         // "how much of this scene is occluded" is the difference between a measurement and an
@@ -292,6 +298,8 @@ internal sealed partial class SponzaLoop
         cullPassHandle = graph.ComputePass("scene-cull").Shader(cullInterface).Handle;
         raySurfaceBakeInterface = Reflect("ray_surface_bake.comp");
         raySurfaceBakePassHandle = graph.ComputePass("ray-surface-bake").Shader(raySurfaceBakeInterface).Handle;
+        rayAlphaBakeInterface = Reflect("ray_alpha_bake.comp");
+        rayAlphaBakePassHandle = graph.ComputePass("ray-alpha-bake").Shader(rayAlphaBakeInterface).Handle;
 
         // The ray batches' interfaces (SponzaLoop.RayBatch.cs), before the first consumer declares a batch.
         batchClosestInterface = Reflect("ray_batch_closest.comp");
@@ -400,6 +408,11 @@ internal sealed partial class SponzaLoop
         referenceWaveShadePass = graph.ComputePass("reference-wave-shade").Shader(referenceWaveInterface).Handle;
         referenceSunBatch = DeclareClosestBatch("reference-sun");
         referenceWaveResolvePass = graph.ComputePass("reference-wave-resolve").Shader(referenceWaveInterface).Handle;
+        // The BSDF reference's sun goes on through thin panes in two more rounds (a pass takes one piece of work a frame, so each has its own).
+        referenceSunBatch2 = DeclareClosestBatch("reference-sun-2");
+        referenceWaveResolve2Pass = graph.ComputePass("reference-wave-resolve-2").Shader(referenceWaveInterface).Handle;
+        referenceSunBatch3 = DeclareClosestBatch("reference-sun-3");
+        referenceWaveResolve3Pass = graph.ComputePass("reference-wave-resolve-3").Shader(referenceWaveInterface).Handle;
 
         // The incident targets cleared and nothing drawn, for a frame with no readout yet (the cache not built, the
         // Metal tracer pending): the lit pass then reads no indirect light. Its interface is the upsample's, which
@@ -457,6 +470,8 @@ internal sealed partial class SponzaLoop
         litPass = litPass.Read(incidentHandle);
         litPass = litPass.Read(incidentGradientHandle);
         litPassHandle = litPass.Handle;
+        noGlassBackdrop = args.Flag("no-glass-backdrop");
+        DeclareGlassBackdrop((a, b) => Reflect(a, b), litInterface, skyInterface);
 
         // One pass per parity. Only one is recorded each frame; the other's target is that frame's
         // history, and ReadHistory is what lets a pass declare a read of it before it is rewritten.
@@ -532,12 +547,24 @@ internal sealed partial class SponzaLoop
         // depth-write (so successive translucent fragments don't z-fight),
         // src-alpha blend. Back-to-front sort within the blend bucket is a
         // deferred polish.
-        blendSolidPipeline = Pipeline(litProgram, VertexPosition3NormalTangentTexture.Layout,
+        // Glass is two draws, the scene behind it filtered by what the pane lets through (Multiply) and its reflection added on top (Additive): a tinted pane, and a
+        // volume's attenuation, need a per-channel filter that one alpha blend cannot say.
+        var litGlassFilterProgram = Own(device.CreateShaderProgramFromSpv(litVertSpv,
+            File.ReadAllBytes(Path.Combine(shaderDir, "lit_glass_filter.frag.spv")), litInterface, "lit.glass.filter"));
+        var litGlassReflectProgram = Own(device.CreateShaderProgramFromSpv(litVertSpv,
+            File.ReadAllBytes(Path.Combine(shaderDir, "lit_glass_reflect.frag.spv")), litInterface, "lit.glass.reflect"));
+        blendSolidPipeline = Pipeline(litGlassFilterProgram, VertexPosition3NormalTangentTexture.Layout,
             DepthState.LessEqualNoWrite, RasterizerState.BackFaceCulling,
-            new[] { BlendState.AlphaBlend }, litPassHandle, "lit.blend");
-        blendDoubleSidedPipeline = Pipeline(litProgram, VertexPosition3NormalTangentTexture.Layout,
+            new[] { BlendState.Multiply }, litPassHandle, "lit.glass.filter");
+        blendDoubleSidedPipeline = Pipeline(litGlassFilterProgram, VertexPosition3NormalTangentTexture.Layout,
             DepthState.LessEqualNoWrite, RasterizerState.NoCulling,
-            new[] { BlendState.AlphaBlend }, litPassHandle, "lit.blend.doubleSided");
+            new[] { BlendState.Multiply }, litPassHandle, "lit.glass.filter.doubleSided");
+        glassReflectSolidPipeline = Pipeline(litGlassReflectProgram, VertexPosition3NormalTangentTexture.Layout,
+            DepthState.LessEqualNoWrite, RasterizerState.BackFaceCulling,
+            new[] { BlendState.Additive }, litPassHandle, "lit.glass.reflect");
+        glassReflectDoubleSidedPipeline = Pipeline(litGlassReflectProgram, VertexPosition3NormalTangentTexture.Layout,
+            DepthState.LessEqualNoWrite, RasterizerState.NoCulling,
+            new[] { BlendState.Additive }, litPassHandle, "lit.glass.reflect.doubleSided");
 
         // Sky pipeline. Depth-test LessEqual with NO write, so the sky only
         // draws where the depth buffer still holds the clear value (1.0)
@@ -620,6 +647,7 @@ internal sealed partial class SponzaLoop
                 new[] { BlendState.Disabled },   // one target: the count rides in its alpha
                 taaPassHandles[i], $"taa{i}");
         }
+        CreateGlassBackdropPipelines((a, b) => Reflect(a, b), litInterface, litVertSpv, presentVertSpv, shaderDir);
         if (SurfaceTargets)
         {
             var copyKeyInterface = Reflect("present.vert", "copy_key.frag");
@@ -656,6 +684,9 @@ internal sealed partial class SponzaLoop
         var bakeSpv = File.ReadAllBytes(Path.Combine(shaderDir, "ray_surface_bake.comp.spv"));
         raySurfaceBakePipeline = Own(device.CreateComputePipeline(
             Own(device.CreateComputeShaderProgramFromSpv(bakeSpv, raySurfaceBakeInterface, "ray_surface_bake")), "ray_surface_bake"));
+        var alphaBakeSpv = File.ReadAllBytes(Path.Combine(shaderDir, "ray_alpha_bake.comp.spv"));
+        rayAlphaBakePipeline = Own(device.CreateComputePipeline(
+            Own(device.CreateComputeShaderProgramFromSpv(alphaBakeSpv, rayAlphaBakeInterface, "ray_alpha_bake")), "ray_alpha_bake"));
         var occlusionSpv = File.ReadAllBytes(Path.Combine(shaderDir, "scene_occlusion.comp.spv"));
         var occlusionProgram = Own(device.CreateComputeShaderProgramFromSpv(occlusionSpv, occlusionInterface, "scene_occlusion"));
         occlusionPipeline = Own(device.CreateComputePipeline(occlusionProgram, "scene_occlusion"));
@@ -678,6 +709,12 @@ internal sealed partial class SponzaLoop
                 "uIncidentGradient", graph.GetColorTexture(incidentGradientHandle)),
             new ShaderTextureBinding(
                 "uPrepassNormalViz", graph.GetColorTexture(SampleablePrepassNormal)),
+            // The scene-behind chain's placeholders (SponzaLoop.GlassBackdrop.cs): only the glass pass binds the real ones.
+            new ShaderTextureBinding("uBehind0", brdfLutTexture),
+            new ShaderTextureBinding("uBehind1", brdfLutTexture),
+            new ShaderTextureBinding("uBehind2", brdfLutTexture),
+            new ShaderTextureBinding("uBehind3", brdfLutTexture),
+            new ShaderTextureBinding("uBehind4", brdfLutTexture),
         };
 
         // skybox.frag's one, taken from the lit list so the two can never hold different textures.

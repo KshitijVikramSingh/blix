@@ -1,0 +1,23 @@
+[project]
+name = "tmlab"
+version = "0.0.1"
+description = "Blix tonemapping lab: GT7 baseline, SDR/HDR fitting, perceptual metrics. Offline; nothing here ships in the engine."
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "numpy>=2.0",
+    "opencolorio>=2.6.0",
+    "scipy>=1.17.1",
+]
+
+[dependency-groups]
+dev = [
+    "matplotlib>=3.11.2",
+    "pytest>=8",
+]
+
+[tool.uv]
+package = false  # a lab, not a distribution: run from this directory
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

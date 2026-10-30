@@ -91,7 +91,7 @@ static bool blix_cover(uint row, uint instance, float2 bary, uint seed,
                        device const BlixAlphaParams& alpha, device const uint* rowMaterial,
                        device const BlixAlphaMaterial* materials, device const float2* uvs)
 {
-    if (alpha.enabled != 0u) {
+    if (alpha.enabled == 1u) {
         uint m = rowMaterial[row];
         if (m != 0xFFFFFFFFu) {
             uint4 tri = triangles[row];
@@ -101,15 +101,51 @@ static bool blix_cover(uint row, uint instance, float2 bary, uint seed,
             return a >= materials[m].cutoff;
         }
     }
-    uint coverage = surfaces[row] >> 24u;
-    if (coverage == 255u) return true;
-    if (coverage == 0u) return false;
+    // The coverage in sixteenths (the top byte's low five bits; bits 7..5 are the diffuse roughness level): ray_query.glsl's blix_covered.
+    uint sixteenths = (surfaces[row] >> 24u) & 31u;
+    if (sixteenths >= 16u) return true;
+    if (sixteenths == 0u) return false;
+    uint coverage = sixteenths * 16u;
     uint placement = instances[instance].info.y;
     uint triangle = triangles[row].w;
     if (placement == 0xFFFFFFFFu) {
         uint2 owner = owners[triangle];
         placement = owner.x;
         triangle = owner.y & 0x7FFFFFFFu;
+    }
+    // The per-hit alpha test (hwx_set_alpha_atlas: enabled 2, pad1 the trailer's first word = the triangle count): ray_query.glsl's
+    // blix_covered, read from the trailer on the surface words -- the material's alpha bytes bilinear at the point hit against its cutoff.
+    if (alpha.enabled == 2u) {
+        uint trailer = alpha.pad1;
+        if (surfaces[trailer] == 0xA17A0001u && placement < surfaces[trailer + 1u]) {
+            uint material = surfaces[trailer + surfaces[trailer + 4u] + placement];
+            if (material != 0xFFFFFFFFu) {
+                uint4 tri = triangles[row];
+                uint uvTable = trailer + surfaces[trailer + 6u];
+                float2 uv0 = float2(as_type<float>(surfaces[uvTable + tri.x * 2u]), as_type<float>(surfaces[uvTable + tri.x * 2u + 1u]));
+                float2 uv1 = float2(as_type<float>(surfaces[uvTable + tri.y * 2u]), as_type<float>(surfaces[uvTable + tri.y * 2u + 1u]));
+                float2 uv2 = float2(as_type<float>(surfaces[uvTable + tri.z * 2u]), as_type<float>(surfaces[uvTable + tri.z * 2u + 1u]));
+                float2 uv = uv0 * (1.0f - bary.x - bary.y) + uv1 * bary.x + uv2 * bary.y;
+                uint at = trailer + surfaces[trailer + 5u] + material * 4u;
+                uint offset = trailer + surfaces[at];
+                uint size = surfaces[at + 1u];
+                int w = int(size & 0xFFFFu), h = int(size >> 16u);
+                float2 p = (uv - floor(uv)) * float2(float(w), float(h)) - 0.5f;
+                int2 i0 = int2(floor(p));
+                float2 t = p - float2(i0);
+                float texel[4];
+                for (int k = 0; k < 4; ++k) {
+                    int x = ((i0.x + (k & 1)) % w + w) % w;
+                    int y = ((i0.y + (k >> 1)) % h + h) % h;
+                    uint index = uint(y * w + x);
+                    texel[k] = float((surfaces[offset + (index >> 2u)] >> ((index & 3u) * 8u)) & 255u) * (1.0f / 255.0f);
+                }
+                float a = mix(mix(texel[0], texel[1], t.x), mix(texel[2], texel[3], t.x), t.y);
+                if ((surfaces[at + 3u] & 1u) != 0u)   // authored BLEND: the alpha is the odds the ray is stopped, against its number for the triangle
+                    return a > float(blix_pcg(seed + blix_pcg(placement * 0x9E3779B9u + triangle)) >> 8u) * (1.0f / 16777216.0f);
+                return a >= as_type<float>(surfaces[at + 2u]);
+            }
+        }
     }
     return (blix_pcg(seed + blix_pcg(placement * 0x9E3779B9u + triangle)) >> 24u) < coverage;
 }
@@ -333,7 +369,9 @@ kernel void blix_trace(device const float4* rays [[buffer(0)]],
         n = normalize(transpose(float3x3(m[0].xyz, m[1].xyz, m[2].xyz)) * nn);
         float3 srgb = unpack_unorm4x8_to_float(surfaces[row]).rgb;
         float3 lin = select(pow((srgb + 0.055f) / 1.055f, float3(2.4f)), srgb / 12.92f, srgb < float3(0.04045f));
-        albedo = pack_float_to_unorm4x8(float4(lin, 0.0f));
+        // The hit record's alpha byte is the diffuse roughness the word was baked at (ray_query.glsl's BLIX_SURFACE_ROUGHNESS), as the software path writes it.
+        const float kRoughness[8] = {0.0f, 0.2f, 0.4f, 0.55f, 0.7f, 0.8f, 0.9f, 1.0f};
+        albedo = pack_float_to_unorm4x8(float4(lin, kRoughness[surfaces[row] >> 29u]));
         placement = instances[res.instance_id].info.y;
         triangle = tri.w;
         if (placement == 0xFFFFFFFFu) {
@@ -390,6 +428,8 @@ kernel void blix_trace(device const float4* rays [[buffer(0)]],
     }
 
     uint flags = (found ? 1u : 0u) | (front ? 2u : 0u) | (any ? 4u : 0u) | (sunlit ? 8u : 0u);
+    // p.flags 16: the entry (instance) the hit is on, in the flags' upper bits -- what a consumer that needs the placement's transform (a tangent into world space) asks for.
+    if (found && (p.flags & 16u) != 0u) flags |= res.instance_id << 4u;
     hits[i * 3u] = uint4(as_type<uint>(t), as_type<uint>(bary.x), as_type<uint>(bary.y), flags);
     // z: the packed triangle row (RayQueryGpuData's), top bit an instance's (its row serves every placement of the
     // mesh, so a per-row answer does not hold); w: the row's own barycentrics -- a table keyed by them answers what
@@ -1410,7 +1450,7 @@ HWX_EXPORT int hwx_encode_shadow(HwxContext* ctx, void* sharedEvent, uint64_t wa
 HWX_EXPORT int hwx_encode_trace(HwxContext* ctx, void* sharedEvent, uint64_t waitValue, uint64_t signalValue,
                                 void* rays, uint64_t raysOffset, void* hits, uint64_t hitsOffset,
                                 uint32_t count, uint32_t seedBase, void* limit, uint64_t limitOffset,
-                                const float* sun, float reach, float discTan) {
+                                const float* sun, float reach, float discTan, int instances) {
     @autoreleasepool {
         id<MTLSharedEvent> event = (__bridge id<MTLSharedEvent>)sharedEvent;
         id<MTLBuffer> rayBuffer = (__bridge id<MTLBuffer>)rays;
@@ -1438,7 +1478,7 @@ HWX_EXPORT int hwx_encode_trace(HwxContext* ctx, void* sharedEvent, uint64_t wai
             [enc setIntersectionFunctionTable:ctx->table atBufferIndex:3];
             // Params, as hwx_trace's: flags 1 the live count, 2 each hit's sun, 4 through sheets that transmit.
             struct { uint32_t count, seedBase, closestOnly, flags; float sun[4]; float reach; float discTan; uint32_t pad[2]; } params = {
-                count, seedBase, 1u, (limitBuffer ? 1u : 0u) | (sun ? 2u : 0u) | (sun && ctx->rowTransmit ? 4u : 0u),
+                count, seedBase, 1u, (limitBuffer ? 1u : 0u) | (sun ? 2u : 0u) | (sun && ctx->rowTransmit ? 4u : 0u) | (instances ? 16u : 0u),
                 {sun ? sun[0] : 0.0f, sun ? sun[1] : 0.0f, sun ? sun[2] : 0.0f, sun ? sun[3] : 0.0f}, reach, discTan, {0, 0}};
             [enc setBytes:&params length:sizeof(params) atIndex:4];
             [enc setBuffer:limitBuffer ? limitBuffer : rayBuffer offset:limitBuffer ? limitOffset : raysOffset atIndex:12];
@@ -1651,6 +1691,20 @@ HWX_EXPORT int hwx_set_alpha(HwxContext* ctx, void* const* textures, const float
             [table setBuffer:ctx->materials offset:0 atIndex:8];
             [table setBuffer:ctx->uvs offset:0 atIndex:9];
         }
+        return 0;
+    }
+}
+
+// The per-hit alpha test from the trailer of RayAlphaAtlas on the surface words, from word `rows`. Written into the shared alphaOff buffer the
+// tables already name, so nothing is re-bound. With `shadows`, the tables that took hwx_set_alpha's textures (the sun's shadows and the lightlet
+// bake's) read the atlas too, so authored BLEND stops a shadow ray with the probability of its alpha and every trace meets a cut-out alike;
+// it does nothing for them where hwx_set_alpha was not called (their coin stays).
+HWX_EXPORT int hwx_set_alpha_atlas(HwxContext* ctx, uint32_t rows, int shadows) {
+    @autoreleasepool {
+        if (!ctx->alphaOff) return Fail(ctx, "the alpha atlas before build");
+        uint32_t on[4] = {2, 0, rows, 0};
+        memcpy([ctx->alphaOff contents], on, sizeof(on));
+        if (shadows && ctx->alphaOn) memcpy([ctx->alphaOn contents], on, sizeof(on));
         return 0;
     }
 }

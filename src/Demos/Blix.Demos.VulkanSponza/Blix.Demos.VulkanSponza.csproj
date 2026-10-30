@@ -54,6 +54,11 @@
     <GlslShader Include="Shaders\lit.frag" />
     <GlslShader Include="Shaders\lit_opaque.frag" />
     <GlslShader Include="Shaders\lit_lean.frag" />
+    <GlslShader Include="Shaders\lit_glass_filter.frag" />
+    <GlslShader Include="Shaders\lit_glass_reflect.frag" />
+    <GlslShader Include="Shaders\lit_glass_backdrop.frag" />
+    <GlslShader Include="Shaders\scene_behind_copy.frag" />
+    <GlslShader Include="Shaders\scene_behind_down.frag" />
     <GlslShader Include="Shaders\depth_prepass.frag" />
     <GlslShader Include="Shaders\flat.frag" />
     <GlslShader Include="Shaders\depth_prepass_mask.frag" />
@@ -76,6 +81,7 @@
     <GlslShader Include="Shaders\rt_shadow_filter.comp" />
     <GlslShader Include="Shaders\rt_shadow_fill.comp" />
     <GlslShader Include="Shaders\ray_surface_bake.comp" />
+    <GlslShader Include="Shaders\ray_alpha_bake.comp" />
     <GlslShader Include="Shaders\reference_wave.comp" />
     <GlslShader Include="Shaders\ray_batch_closest.comp" />
     <GlslShader Include="Shaders\ray_batch_shadow.comp" />
