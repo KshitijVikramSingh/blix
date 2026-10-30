@@ -35,6 +35,8 @@ internal sealed partial class SponzaLoop
     private sealed record MaterialOverride(string Pattern, Dictionary<string, string> Keys);
 
     private readonly List<MaterialOverride> materialOverrides = new();
+    // The specs as given, for the GPU reference's cache key (SponzaLoop.GpuReference.cs).
+    private readonly List<string> materialOverrideSpecs = new();
 
     private void ReadMaterialOverrideArgs(AppArgs args)
     {
@@ -55,6 +57,7 @@ internal sealed partial class SponzaLoop
                 keys[key] = pair[(eq + 1)..].Trim();
             }
             materialOverrides.Add(new MaterialOverride(spec[..colon].Trim(), keys));
+            materialOverrideSpecs.Add(spec.Trim());
         }
     }
 

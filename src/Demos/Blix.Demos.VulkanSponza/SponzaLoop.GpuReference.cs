@@ -384,10 +384,20 @@ internal sealed partial class SponzaLoop
     {
         using var sha = System.Security.Cryptography.SHA256.Create();
         var head = string.Create(CultureInfo.InvariantCulture,
-            $"ref v1;{sunDirection.X:G9},{sunDirection.Y:G9},{sunDirection.Z:G9};{EffectiveSunIrradiance.X:G9},{EffectiveSunIrradiance.Y:G9},{EffectiveSunIrradiance.Z:G9};sky {refSky:G9};seed {refSeed};bounces {refBounces};lanes {ReferenceLanesPerPoint};quota {ReferenceLaneQuota};disc {refSunDisc};sheets True;closest True;lift {refLift:G6};scene {scene.Name};geometry -;probe {probeName}");
+            $"ref v1;{sunDirection.X:G9},{sunDirection.Y:G9},{sunDirection.Z:G9};{EffectiveSunIrradiance.X:G9},{EffectiveSunIrradiance.Y:G9},{EffectiveSunIrradiance.Z:G9};sky {refSky:G9};seed {refSeed};bounces {refBounces};lanes {ReferenceLanesPerPoint};quota {ReferenceLaneQuota};disc {refSunDisc};sheets True;closest True;lift {refLift:G6};scene {scene.Name};geometry -;probe {probeName}{ReferenceMaterialKey}");
         var bytes = System.Text.Encoding.UTF8.GetBytes(head).Concat(MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(packed)).ToArray()).ToArray();
         return Convert.ToHexString(sha.ComputeHash(bytes))[..24].ToLowerInvariant();
     }
+
+    // What the material track changed about the paths, appended only where it differs from what the key's older references were
+    // traced with (Lambert, the coverage coin, the diffuse lobe alone): EON's lobe and baked albedo, the alpha atlas's per-hit test
+    // (stochastic BLEND), --ray-panes, --ref-bsdf, and --material's overrides.
+    private string ReferenceMaterialKey =>
+        (diffuseEon ? string.Create(CultureInfo.InvariantCulture, $";diffuse eon x{diffuseRoughnessScale:G6}") : "")
+        + (rayAlphaPlan is not null ? $";alpha-atlas{(rayBlendCutoff ? " blend-cutoff" : "")}" : "")
+        + (rayPanes ? ";ray-panes" : "")
+        + (refBsdf ? ";bsdf" : "")
+        + (materialOverrideSpecs.Count > 0 ? ";material " + string.Join("|", materialOverrideSpecs) : "");
 
     private bool LoadCachedReference(List<Vector4> packed)
     {
