@@ -15,24 +15,28 @@ namespace Blix.Demos.VulkanSponza;
 // layout from the geometry alone, the light real-time -- and what to ship, what to rebuild at load and what to work out
 // at run time, and the chunks' size, are to be chosen from numbers (2026-10-30). Once the ray scene is up the census:
 //
-//   geometry  the static instances' triangles, their world area and bounds, and which are two-sided: a triangle of an
-//             open sheet (its connected piece of mesh, vertices welded by position, has an edge only one triangle
-//             uses) or of an alpha-tested material is a sheet with no inside, seen from both sides; a closed one is
-//             one-sided whatever its material's double-sided flag says -- San Miguel's and the jungle's exports mark
-//             every material double-sided, and by the flag their closed walls had no inside (on a worker)
+//   geometry  the static instances' triangles, their world area and bounds, and which are alpha-tested (on a worker).
+//             Every surface is taken on both sides, and each side kept or dropped by its own samples: buried (most of
+//             its rays met back faces -- one-sided, but an alpha-tested triangle's back face a front) or over the void
+//             (most of its rays left downward, CensusVoidDown: the underside of terrain). An alpha-tested surface keeps
+//             both. Sides chosen by the material's double-sided flag (San Miguel's and the jungle's exports mark every
+//             material so) or by open sheets (most of San Miguel's and Bistro's area: walls of one plane, parts that
+//             touch without sharing edges) made nearly everything two-sided and turned the buried test off
 //   size      the cell-size field, coarse first: surface samples by area at 2 m (CensusPassSpacing), then at 0.5 m and
 //             0.25 m only where the pass above found the geometry tight (a size under CensusRefineFactor of its
 //             spacing, or buried) -- a running sum of area along each run of triangles (or of a triangle's pieces in
 //             the refined regions) drops a sample at a random point where it crosses the next spacing^2, so tiny
-//             triangles share them; a two-sided triangle's area counts once a side. Each sample traces CensusRays
+//             triangles share them; every triangle's area counts once a side. Each sample traces CensusRays
 //             cosine rays through the Metal batch (rtgi_census.comp, a chunk a frame): its harmonic hit distance
 //             (escapes adding nothing to the sum, as the near cook's sizes do), its back-face share (over half:
-//             buried, inside something; a two-sided triangle's back face counts as a front), its nearest hit, and from
-//             them the cache's cell size, clamp(0.1 x harmonic, 5 cm, the cache's top level)
-//   cells     every triangle (each side of a two-sided one) sampled again at half its local cell size: in pieces, each
+//             buried, inside something; an alpha-tested triangle's back face counts as a front), its rays escaping
+//             downward, its nearest hit, and from them the cache's cell size, clamp(0.1 x harmonic, 5 cm, the cache's
+//             top level)
+//   cells     every triangle, each side, sampled again at half its local cell size: in pieces, each
 //             with a lattice at the finest pass's spacing found near it, each lattice point's nearest sample from the
-//             finest pass that has one near (by hash grids, searched outward where none is); each point's cell at its
-//             own level (its lattice point's sample's size; none where that sample is buried) and every level above
+//             finest pass that has one near on the same side (by hash grids, searched outward where none is); each
+//             point's cell at its own level (its lattice point's sample's size; none where that side is dropped) and
+//             every level above
 //             it -- the cells a cooked cache would hold, by level, those that are some surface's own (finest) level,
 //             and the junction cells among them: another surface within min(1.5 cell sizes, 0.375 m) of the point (its
 //             sample's nearest hit), the only ones the cook's inside test is for (on a worker)
@@ -61,9 +65,14 @@ internal sealed partial class SponzaLoop
     // under CensusRefineFactor of its own spacing (or buried): its samples too far apart for the cells there.
     private static readonly float[] CensusPassSpacing = { 2f, 0.5f, 0.25f };
     private const float CensusRefineFactor = 2f;
-    // Vertices welded within this (m, world space) for the sheets' boundary edges: exporters split them at UV and normal
-    // seams. --rtgi-census-weld M.
-    private static float CensusWeld = 1e-4f;
+    // A side over the void: more than CensusVoidShare of its rays escaped with a direction below -CensusVoidDown in y.
+    private const float CensusVoidDown = 0.1f, CensusVoidShare = 0.5f;
+    // A side buried: more than this share of its rays met back faces (--rtgi-census-buried-share F; 0.3). At 0.5 the
+    // inner back sides of crevices' wall shells, seeing the floor running under them for half their rays, stayed live (cells
+    // inside the walls: 73.5k -> 84.0k); at 0.3 crevices matches the one-sided count (2026-10-30).
+    private static float CensusBuriedShare = 0.3f;
+    // A sample on a point's plane: off it by at most this (m) plus this share of its distance along it (CensusGrid).
+    private const float CensusPlaneOff = 0.02f, CensusPlaneSlope = 0.3f;
     // The slice of a 60 Hz frame the cook and the settling would be given: 2 ms of 16.7.
     private const double CensusSlice = 2.0 / 16.7;
     // The per-item costs priced (bytes, rays), stated in the report.
@@ -137,7 +146,7 @@ internal sealed partial class SponzaLoop
         if (args.String("rtgi-census-out") is { Length: > 0 } dir) rtgiCensusOut = dir;
         if (args.Int("rtgi-census-chunk") is { } chunk) rtgiCensusChunk = Math.Clamp(chunk, 1024, 65536);
         if (args.Long("rtgi-census-most") is { } most) rtgiCensusMost = Math.Max(65536, most);
-        if (args.Float("rtgi-census-weld") is { } weld) CensusWeld = Math.Clamp(weld, 1e-6f, 1f);
+        if (args.Float("rtgi-census-buried-share") is { } buriedShare) CensusBuriedShare = Math.Clamp(buriedShare, 0.05f, 1f);
         if (args.Float("rtgi-census-cell-share") is { } cellShare) rtgiCensusCellShare = Math.Clamp(cellShare, 0.001f, 1f);
         if (!rtgiCensus) return;
         // Alone on the GPU: the volume's and the near cook's rays would share the trace's time.
@@ -180,16 +189,12 @@ internal sealed partial class SponzaLoop
         rtgiCensusGeometryBuild = Task.Run(() => BuildCensusGeometry(placements, kept, alpha, flagged));
     }
 
-    // The census's geometry: the static instances, per instance its mesh's open triangles (shared by its placements) and
-    // whether its material is alpha-tested, the totals, and the GPU's per-placement two-sided bits.
+    // The census's geometry: the static instances, per instance whether its material is alpha-tested (and, for the
+    // report, double-sided), the totals, and the GPU's per-placement alpha-tested bits.
     private sealed record CensusGeometry(
-        RayQueryScene.Instance[] Instances, bool[][] Open, bool[] Alpha, bool[] Flagged,
+        RayQueryScene.Instance[] Instances, bool[] Alpha, bool[] Flagged,
         long Triangles, long Degenerate, double Area, Vector3 Min, Vector3 Max,
-        (long Tris, double Area) ByFlag, (long Tris, double Area) ByOpen, (long Tris, double Area) ByAlpha, (long Tris, double Area) ByTwoSided,
-        uint[] SidedBits, double Ms)
-    {
-        public bool TwoSided(int inst, int t) => Alpha[inst] || Open[inst][t];
-    }
+        (long Tris, double Area) ByFlag, (long Tris, double Area) ByAlpha, uint[] SidedBits, double Ms);
 
     // The triangles in runs of at most `run`, the workers' items (one mesh may be most of a scene).
     private static (int Inst, int First, int Count)[] CensusWork(RayQueryScene.Instance[] instances, int run = 65536)
@@ -211,99 +216,19 @@ internal sealed partial class SponzaLoop
             Vector3.Transform(pos[idx[3 * t + 2]], inst.World));
     }
 
-    // Per triangle of the static instances (by instance), whether its sheet is open -- in world space, across every
-    // instance: each corner's position quantized to CensusWeld and hashed (a vertex), each edge keyed by its two vertices
-    // (exporters split vertices at UV and normal seams; the ray scene's meshes are one a material, so a closed box of two
-    // materials is two open pieces until their edges meet across them -- San Miguel's per-mesh test called 82% of its
-    // area open), the keys sorted, the triangles joined across every edge two or more share (union-find), and a piece
-    // open where any of its edges is one triangle's alone.
-    private static bool[][] CensusOpenTriangles(RayQueryScene.Instance[] instances)
-    {
-        var bases = new long[instances.Length + 1];
-        for (var i = 0; i < instances.Length; i++) bases[i + 1] = bases[i] + instances[i].Mesh.TriangleCount;
-        var tris = (int)bases[^1];
-        static ulong Mix(ulong x)
-        {
-            x ^= x >> 33; x *= 0xff51afd7ed558ccdUL;
-            x ^= x >> 33; x *= 0xc4ceb9fe1a85ec53UL;
-            x ^= x >> 33;
-            return x;
-        }
-        static ulong VertexKey(Vector3 p) => Mix((ulong)(long)MathF.Round(p.X / CensusWeld) * 0x9E3779B97F4A7C15UL
-            ^ Mix((ulong)(long)MathF.Round(p.Y / CensusWeld) * 0xC2B2AE3D27D4EB4FUL ^ Mix((ulong)(long)MathF.Round(p.Z / CensusWeld) + 0x165667B19E3779F9UL)));
-        var edges = new ulong[3L * tris];
-        var owner = new int[3L * tris];
-        Parallel.For(0, instances.Length, i =>
-        {
-            var inst = instances[i];
-            for (var t = 0; t < inst.Mesh.TriangleCount; t++)
-            {
-                var (a, b, c) = CensusTriangle(inst, t);
-                ulong ka = VertexKey(a), kb = VertexKey(b), kc = VertexKey(c);
-                var g = bases[i] + t;
-                for (var e = 0; e < 3; e++)
-                {
-                    var (u, v) = e == 0 ? (ka, kb) : e == 1 ? (kb, kc) : (kc, ka);
-                    // A degenerate edge (both ends welded) joins nothing and bounds nothing: the sort's end.
-                    edges[3 * g + e] = u == v ? ulong.MaxValue : Mix(Math.Min(u, v) * 0x9E3779B97F4A7C15UL ^ Math.Max(u, v));
-                    owner[3 * g + e] = (int)g;
-                }
-            }
-        });
-        Array.Sort(edges, owner);
-        var parent = new int[tris];
-        for (var t = 0; t < tris; t++) parent[t] = t;
-        int Find(int x)
-        {
-            while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
-            return x;
-        }
-        var boundary = new bool[tris];
-        for (var i = 0; i < edges.Length;)
-        {
-            var j = i;
-            while (j < edges.Length && edges[j] == edges[i]) j++;
-            if (edges[i] != ulong.MaxValue)
-            {
-                if (j - i == 1) boundary[owner[i]] = true;
-                else
-                    for (var k = i + 1; k < j; k++)
-                    {
-                        int ra = Find(owner[i]), rb = Find(owner[k]);
-                        if (ra != rb) parent[ra] = rb;
-                    }
-            }
-            i = j;
-        }
-        var pieceOpen = new bool[tris];
-        for (var t = 0; t < tris; t++) if (boundary[t]) pieceOpen[Find(t)] = true;
-        var open = new bool[instances.Length][];
-        for (var i = 0; i < instances.Length; i++)
-        {
-            open[i] = new bool[instances[i].Mesh.TriangleCount];
-            for (var t = 0; t < open[i].Length; t++) open[i][t] = pieceOpen[Find((int)(bases[i] + t))];
-        }
-        return open;
-    }
-
     private static CensusGeometry BuildCensusGeometry(RayQueryScene.Instance[] placements, int[] kept, bool[] alpha, bool[] flagged)
     {
         var clock = System.Diagnostics.Stopwatch.StartNew();
-        // The static instances' open triangles (world space, across them all); a dynamic placement's none.
         var instances = kept.Select(i => placements[i]).ToArray();
-        var instOpen = CensusOpenTriangles(instances);
-        var openOf = new bool[placements.Length][];
-        for (var k = 0; k < kept.Length; k++) openOf[kept[k]] = instOpen[k];
         // The GPU's bits: per placement its first bit (and one past the last placement's), then a bit a triangle.
         var bases = new uint[placements.Length + 1];
         for (var p = 0; p < placements.Length; p++) bases[p + 1] = bases[p] + (uint)placements[p].Mesh.TriangleCount;
         var words = new uint[(bases[^1] + 31) / 32];
         Parallel.For(0, placements.Length, p =>
         {
-            var open = openOf[p];
+            if (!alpha[p]) return;
             for (var t = 0; t < placements[p].Mesh.TriangleCount; t++)
             {
-                if (!alpha[p] && (open is null || !open[t])) continue;
                 var b = bases[p] + (uint)t;
                 Interlocked.Or(ref words[b >> 5], 1u << (int)(b & 31));
             }
@@ -316,7 +241,7 @@ internal sealed partial class SponzaLoop
         var instFlag = kept.Select(i => flagged[i]).ToArray();
         long triangles = 0, degenerate = 0;
         double area = 0;
-        var tallies = new (long Tris, double Area)[4];
+        var tallies = new (long Tris, double Area)[2];
         var min = new Vector3(float.MaxValue);
         var max = new Vector3(float.MinValue);
         var gate = new object();
@@ -326,7 +251,7 @@ internal sealed partial class SponzaLoop
             var item = work[w];
             long tris = 0, degen = 0;
             double a = 0;
-            var local = new (long Tris, double Area)[4];
+            var local = new (long Tris, double Area)[2];
             var lo = new Vector3(float.MaxValue);
             var hi = new Vector3(float.MinValue);
             var inst = instances[item.Inst];
@@ -340,21 +265,18 @@ internal sealed partial class SponzaLoop
                 if (!(len > 1e-12f)) { degen++; continue; }
                 var ta = 0.5 * len;
                 a += ta;
-                var open = instOpen[item.Inst][t];
                 if (instFlag[item.Inst]) { local[0].Tris++; local[0].Area += ta; }
-                if (open) { local[1].Tris++; local[1].Area += ta; }
-                if (instAlpha[item.Inst]) { local[2].Tris++; local[2].Area += ta; }
-                if (open || instAlpha[item.Inst]) { local[3].Tris++; local[3].Area += ta; }
+                if (instAlpha[item.Inst]) { local[1].Tris++; local[1].Area += ta; }
             }
             lock (gate)
             {
                 triangles += tris; degenerate += degen; area += a;
-                for (var k = 0; k < 4; k++) { tallies[k].Tris += local[k].Tris; tallies[k].Area += local[k].Area; }
+                for (var k = 0; k < 2; k++) { tallies[k].Tris += local[k].Tris; tallies[k].Area += local[k].Area; }
                 min = Vector3.Min(min, lo); max = Vector3.Max(max, hi);
             }
         });
-        return new CensusGeometry(instances, instOpen, instAlpha, instFlag, triangles, degenerate, area, min, max,
-            tallies[0], tallies[1], tallies[2], tallies[3], bits, clock.Elapsed.TotalMilliseconds);
+        return new CensusGeometry(instances, instAlpha, instFlag, triangles, degenerate, area, min, max,
+            tallies[0], tallies[1], bits, clock.Elapsed.TotalMilliseconds);
     }
 
     // The area sampling's walk over a run of triangles (or pieces): `area` added (a side's), the samples it drops --
@@ -425,11 +347,14 @@ internal sealed partial class SponzaLoop
         public Vector4[] Gpu = Array.Empty<Vector4>();
         public Vector3[] Pos = Array.Empty<Vector3>();
         public byte[] Side = Array.Empty<byte>();
+        // Whether its triangle is alpha-tested (both sides kept whatever their samples say).
+        public bool[] Alpha = Array.Empty<bool>();
         // The area each stands for (its spacing^2 over the share traced).
         public float Area;
         public uint[] Results = Array.Empty<uint>();
         public float[] Size = Array.Empty<float>(), Nearest = Array.Empty<float>();
-        public bool[] Buried = Array.Empty<bool>(), Refine = Array.Empty<bool>();
+        // Buried, over the void, and dropped (either, but not alpha-tested).
+        public bool[] Buried = Array.Empty<bool>(), Void = Array.Empty<bool>(), Dead = Array.Empty<bool>(), Refine = Array.Empty<bool>();
         public CensusGrid? Grid;
         public double GpuMs, WallMs;
         public int Frames;
@@ -447,7 +372,7 @@ internal sealed partial class SponzaLoop
         var work = CensusWork(instances);
         // The share traced from the area it will cover: all (both sides of the two-sided), or the last pass's refined.
         double expected;
-        if (above.Count == 0) expected = (geom.Area + geom.ByTwoSided.Area) / (spacing * spacing);
+        if (above.Count == 0) expected = 2 * geom.Area / (spacing * spacing);
         else
         {
             var last = above[^1];
@@ -455,14 +380,15 @@ internal sealed partial class SponzaLoop
         }
         var keep = expected > most ? most / expected : 1.0;
         var keepBits = keep >= 1.0 ? uint.MaxValue : (uint)(keep * uint.MaxValue);
-        var lists = new List<(Vector3 P, Vector3 N, byte Side)>[work.Length];
+        var lists = new List<(Vector3 P, Vector3 N, byte Side, bool Alpha)>[work.Length];
         var fulls = new long[work.Length];
         Parallel.For(0, work.Length, w =>
         {
             var item = work[w];
             var inst = instances[item.Inst];
-            var list = new List<(Vector3, Vector3, byte)>();
+            var list = new List<(Vector3, Vector3, byte, bool)>();
             var walk = new CensusAreaWalk((uint)w * 0x9E3779B1u + 0x51u + (uint)index * 0x2545F491u, spacing);
+            var alpha = geom.Alpha[item.Inst];
             var dropped = 0u;
             long full = 0;
             var stack = new Stack<(Vector3 A, Vector3 B, Vector3 C, int Q)>();
@@ -472,8 +398,7 @@ internal sealed partial class SponzaLoop
                 var cross = Vector3.Cross(tb - ta, tc - ta);
                 var len = cross.Length();
                 if (!(len > 1e-12f)) continue;
-                var faces = geom.TwoSided(item.Inst, t) ? 2 : 1;
-                for (var face = 0; face < faces; face++)
+                for (var face = 0; face < 2; face++)
                 {
                     var nrm = face == 0 ? cross / len : -cross / len;
                     var side = NearSide(nrm);
@@ -493,7 +418,7 @@ internal sealed partial class SponzaLoop
                                 stack.Push((h1.Item1, h1.Item2, h1.Item3, q));
                                 continue;
                             }
-                            var (j, _) = gate.Grid!.Nearest((a + b + c) / 3f, side, 2, sameOnly: true);
+                            var (j, _) = gate.Grid!.Nearest((a + b + c) / 3f, side, 2, sameOnly: true, normal: nrm);
                             if (j < 0 || gate.Refine[j]) stack.Push((a, b, c, q + 1));
                             continue;
                         }
@@ -503,7 +428,7 @@ internal sealed partial class SponzaLoop
                             full++;
                             var h = NearHash((uint)w * 0x85EBCA77u ^ NearHash(dropped + 0x7F4A7C15u + (uint)index * 0x165667B1u));
                             if (keepBits != uint.MaxValue && NearHash(h ^ 0x2545F491u) > keepBits) continue;
-                            list.Add((CensusPointIn(a, b, c, h), nrm, (byte)side));
+                            list.Add((CensusPointIn(a, b, c, h), nrm, (byte)side, alpha));
                         }
                     }
                 }
@@ -515,28 +440,30 @@ internal sealed partial class SponzaLoop
         var pass = new CensusPass
         {
             Index = index, Spacing = spacing, Full = fulls.Sum(), Keep = keep, Area = (float)(spacing * spacing / keep),
-            Gpu = new Vector4[count], Pos = new Vector3[count], Side = new byte[count],
+            Gpu = new Vector4[count], Pos = new Vector3[count], Side = new byte[count], Alpha = new bool[count],
         };
         var at = 0;
         foreach (var list in lists)
-            foreach (var (p, nrm, side) in list)
+            foreach (var (p, nrm, side, alpha) in list)
             {
                 pass.Gpu[at] = new Vector4(p, BitConverter.UInt32BitsToSingle(CensusOctPack(nrm)));
-                pass.Pos[at] = p; pass.Side[at] = side;
+                pass.Pos[at] = p; pass.Side[at] = side; pass.Alpha[at] = alpha;
                 at++;
             }
         pass.Ms = clock.Elapsed.TotalMilliseconds;
         return pass;
     }
 
-    // A pass's results taken up: each sample's size, buried or not, nearest hit; whether it refines (a pass below it);
-    // its grid.
+    // A pass's results taken up: each sample's size, buried or over the void (its side dropped, unless alpha-tested),
+    // nearest hit; whether it refines (a pass below it); its grid.
     private static void TakeCensusResults(CensusPass pass, float finest, float topSize)
     {
         var n = pass.Pos.Length;
         pass.Size = new float[n];
         pass.Nearest = new float[n];
         pass.Buried = new bool[n];
+        pass.Void = new bool[n];
+        pass.Dead = new bool[n];
         pass.Refine = new bool[n];
         var refines = pass.Index < CensusPassSpacing.Length - 1;
         long bad = 0;
@@ -548,9 +475,11 @@ internal sealed partial class SponzaLoop
             pass.Nearest[i] = met > 0 ? BitConverter.UInt32BitsToSingle(pass.Results[4 * i + 2]) : float.PositiveInfinity;
             var harmonic = invSum > 0f ? CensusRays / invSum : float.PositiveInfinity;
             pass.Size[i] = Math.Clamp(0.1f * harmonic, finest, topSize);
-            pass.Buried[i] = back * 2 > CensusRays;
+            pass.Buried[i] = back > CensusBuriedShare * CensusRays;
+            pass.Void[i] = (pass.Results[4 * i + 3] >> 16) > CensusVoidShare * CensusRays;
+            pass.Dead[i] = !pass.Alpha[i] && (pass.Buried[i] || pass.Void[i]);
             pass.Refine[i] = refines && (pass.Buried[i] || pass.Size[i] < CensusRefineFactor * pass.Spacing);
-            bad += pass.Results[4 * i + 3];
+            bad += pass.Results[4 * i + 3] & 0xFFFFu;
         }
         pass.Bad = bad;
         pass.Grid = new CensusGrid(pass.Pos, pass.Side, pass.Effective);
@@ -560,7 +489,7 @@ internal sealed partial class SponzaLoop
         new ShaderUniform[]
         {
             new("uChunk", new Vector4Uniform(new Vector4(first, count, CensusReach, kind))),
-            new("uNear", new Vector4Uniform(new Vector4(CensusNear, CensusLift, rtgiCensusPlacements, 0f))),
+            new("uNear", new Vector4Uniform(new Vector4(CensusNear, CensusLift, rtgiCensusPlacements, CensusVoidDown))),
         },
         Array.Empty<ShaderTextureBinding>(),
         Buffers: new[]
@@ -600,7 +529,7 @@ internal sealed partial class SponzaLoop
             rtgiCensusRayBufs = Enumerable.Range(0, 2).Select(k => Own(device.CreateGpuBuffer(rays * 32, name: $"sponza.rtgi.census-rays{k}"))).ToArray();
             rtgiCensusHitBufs = Enumerable.Range(0, 2).Select(k => Own(device.CreateGpuBuffer(rays * 48, name: $"sponza.rtgi.census-hits{k}"))).ToArray();
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                $"[VulkanSponza] rtgi census: {geom.Triangles:N0} triangles ({rtgiCensusDynamic} dynamic instances left out), {geom.Area:N0} m2; two-sided {geom.ByTwoSided.Tris:N0} triangles, {geom.ByTwoSided.Area:N0} m2 (open {geom.ByOpen.Area:N0} m2, alpha-tested {geom.ByAlpha.Area:N0} m2; the double-sided flag's {geom.ByFlag.Area:N0} m2), in {geom.Ms:0} ms."));
+                $"[VulkanSponza] rtgi census: {geom.Triangles:N0} triangles ({rtgiCensusDynamic} dynamic instances left out), {geom.Area:N0} m2 a side; alpha-tested {geom.ByAlpha.Tris:N0} triangles, {geom.ByAlpha.Area:N0} m2 (the double-sided flag's {geom.ByFlag.Area:N0} m2), in {geom.Ms:0} ms."));
             var most = rtgiCensusMost;
             rtgiCensusPassBuild = Task.Run<CensusPass?>(() => BuildCensusPass(geom, 0, Array.Empty<CensusPass>(), most));
             DebugProgress.Begin("rtgi census: size field", 0);
@@ -736,8 +665,11 @@ internal sealed partial class SponzaLoop
         private static long Key(int x, int y, int z) => ((long)(x + (1 << 20)) << 42) | ((long)(y + (1 << 20)) << 21) | (long)(z + (1 << 20));
 
         // The nearest sample facing the same side, else (unless `sameOnly`) the nearest of any, searched outward to `most`
-        // cells; and its squared distance (-1: none).
-        public (int Index, float D2) Nearest(Vector3 q, uint wantSide, int most, bool sameOnly = false)
+        // cells; and its squared distance (-1: none). Given the point's normal, only samples on its plane: off it by at
+        // most CensusPlaneOff + CensusPlaneSlope of their distance along it. A side is its normal's dominant axis, so a
+        // thin wall's back side and its other face are one side a few centimetres apart: the dead back side took the live
+        // face's samples, and the crevices testbed's walls grew cells inside them.
+        public (int Index, float D2) Nearest(Vector3 q, uint wantSide, int most, bool sameOnly = false, Vector3 normal = default)
         {
             int cx = (int)MathF.Floor(q.X / Size), cy = (int)MathF.Floor(q.Y / Size), cz = (int)MathF.Floor(q.Z / Size);
             foreach (var reach in CensusReaches)
@@ -754,6 +686,11 @@ internal sealed partial class SponzaLoop
                     {
                         var i = order[k];
                         var d2 = Vector3.DistanceSquared(pos[i], q);
+                        if (normal != default)
+                        {
+                            var off = MathF.Abs(Vector3.Dot(pos[i] - q, normal));
+                            if (off > CensusPlaneOff + CensusPlaneSlope * MathF.Sqrt(MathF.Max(d2 - off * off, 0f))) continue;
+                        }
                         if (d2 < bestAny) { bestAny = d2; any = i; }
                         if (side[i] == wantSide && d2 < bestSame) { bestSame = d2; same = i; }
                     }
@@ -824,10 +761,10 @@ internal sealed partial class SponzaLoop
         for (var p = 0; p < passes.Length; p++) offsets[p + 1] = offsets[p] + passes[p].Pos.Length;
         var total = offsets[^1];
         var size = new float[total];
-        var buried = new bool[total];
+        var dead = new bool[total];
         var nearest = new float[total];
         var passOf = new byte[total];
-        double areaBuried = 0, areaBuriedFlag = 0, raysMet = 0, raysBack = 0, raysSidedBack = 0, raysNear = 0, sampleWeight = 0;
+        double areaBuried = 0, areaVoid = 0, areaAlphaKept = 0, raysVoid = 0, raysMet = 0, raysBack = 0, raysSidedBack = 0, raysNear = 0, sampleWeight = 0;
         var areaAtLevel = new double[levels];
         var harmonicBands = new[] { 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, double.MaxValue };
         var areaInBand = new double[harmonicBands.Length];
@@ -839,16 +776,16 @@ internal sealed partial class SponzaLoop
             for (var i = 0; i < pass.Pos.Length; i++)
             {
                 var g = offsets[p] + i;
-                size[g] = pass.Size[i]; buried[g] = pass.Buried[i]; nearest[g] = pass.Nearest[i]; passOf[g] = (byte)p;
+                size[g] = pass.Size[i]; dead[g] = pass.Dead[i]; nearest[g] = pass.Nearest[i]; passOf[g] = (byte)p;
                 if (pass.Refine[i]) continue;
                 var invSum = BitConverter.UInt32BitsToSingle(pass.Results[4 * i]);
                 var counts = pass.Results[4 * i + 1];
                 int met = (int)(counts & 0xFF), back = (int)((counts >> 8) & 0xFF), near = (int)((counts >> 16) & 0xFF), sidedBack = (int)(counts >> 24);
                 var a = pass.Area;
                 raysMet += met * (double)a; raysBack += back * (double)a; raysSidedBack += sidedBack * (double)a; raysNear += near * (double)a; sampleWeight += a;
-                // Were two-sidedness ignored: a two-sided back face a back face too.
-                if ((back + sidedBack) * 2 > CensusRays) areaBuriedFlag += a;
-                if (pass.Buried[i]) { areaBuried += a; continue; }
+                raysVoid += (pass.Results[4 * i + 3] >> 16) * (double)a;
+                if (pass.Alpha[i] && (pass.Buried[i] || pass.Void[i])) areaAlphaKept += a;
+                if (pass.Dead[i]) { if (pass.Buried[i]) areaBuried += a; else areaVoid += a; continue; }
                 areaAtLevel[LevelOf(pass.Size[i])] += a;
                 var harmonic = invSum > 0f ? CensusRays / invSum : float.PositiveInfinity;
                 var b = 0;
@@ -857,17 +794,17 @@ internal sealed partial class SponzaLoop
             }
         }
         // The finest pass's sample near a point: one facing its side within 1.5 of a pass's traced spacing, else the first
-        // pass's nearest (searched outward to 8 cells; facing another side only where none faces its own). A finer pass's
-        // other side first doubled the crevices testbed's cells: the floor's points took the wall's samples.
-        int FinestNear(Vector3 q, uint side)
+        // pass's nearest facing it (searched outward to 8 cells). A side takes its size, and whether it is kept, from its
+        // own samples: another side's first doubled the crevices testbed's cells (the floor's points took the wall's).
+        int FinestNear(Vector3 q, uint side, Vector3 normal)
         {
             for (var p = lastPass; p > 0; p--)
             {
-                var (j, d2) = passes[p].Grid!.Nearest(q, side, 1, sameOnly: true);
+                var (j, d2) = passes[p].Grid!.Nearest(q, side, 1, sameOnly: true, normal: normal);
                 var reach = 1.5f * passes[p].Effective;
                 if (j >= 0 && d2 <= reach * reach) return offsets[p] + j;
             }
-            var (j0, _) = passes[0].Grid!.Nearest(q, side, 8);
+            var (j0, _) = passes[0].Grid!.Nearest(q, side, 8, sameOnly: true, normal: normal);
             return j0 >= 0 ? j0 : -1;
         }
 
@@ -906,10 +843,10 @@ internal sealed partial class SponzaLoop
                 var tlen = tcross.Length();
                 if (!(tlen > 1e-12f)) continue;
                 var nrm = tcross / tlen;
-                var faces = census.TwoSided(item.Inst, t) ? 2 : 1;
-                for (var face = 0; face < faces; face++)
+                for (var face = 0; face < 2; face++)
                 {
-                    var side = NearSide(face == 0 ? nrm : -nrm);
+                    var faceNormal = face == 0 ? nrm : -nrm;
+                    var side = NearSide(faceNormal);
                     var origin = NearGridOrigin(side);
                     // In pieces no edge longer than CensusPieceLattices lattice steps of the pass at hand: whole, one 1 km2
                     // terrain triangle of the jungle's was one worker's for most of an hour. A piece whose lattice finds a
@@ -952,11 +889,11 @@ internal sealed partial class SponzaLoop
                             var rowHas = false;
                             for (var k = 0; k <= m; k++)
                             {
-                                var j = row[k] = FinestNear(m == 0 ? p0 : p0 + (p1 - p0) * (k / (float)m), side);
+                                var j = row[k] = FinestNear(m == 0 ? p0 : p0 + (p1 - p0) * (k / (float)m), side, faceNormal);
                                 if (j < 0) continue;
                                 rowHas = true;
                                 if (passOf[j] > level) finer = true;
-                                if (!buried[j]) least = MathF.Min(least, size[j]);
+                                if (!dead[j]) least = MathF.Min(least, size[j]);
                             }
                             if (rowHas) anyRow = r;
                         }
@@ -1007,7 +944,7 @@ internal sealed partial class SponzaLoop
                             {
                                 var along = m == 0 ? 0f : k / (float)m;
                                 var j = row[(int)MathF.Round(along * (row.Length - 1))];
-                                if (j >= 0 && buried[j]) { bur++; continue; }
+                                if (j >= 0 && dead[j]) { bur++; continue; }
                                 // No sample anywhere near (none within 8 coarse cells): open, the top.
                                 var l = LevelOf(j >= 0 ? size[j] : topSize);
                                 var cs = SizeOfLevel(l);
@@ -1183,9 +1120,9 @@ internal sealed partial class SponzaLoop
             {
                 ["instances"] = instances.Length, ["dynamic_instances_left_out"] = dynamicCount,
                 ["triangles"] = census.Triangles, ["degenerate_triangles"] = census.Degenerate, ["area_m2"] = census.Area,
-                ["two_sided_by_double_sided_flag"] = Tally(census.ByFlag), ["two_sided_by_open_sheet"] = Tally(census.ByOpen),
-                ["two_sided_by_alpha_test"] = Tally(census.ByAlpha), ["two_sided"] = Tally(census.ByTwoSided),
-                ["weld_m"] = CensusWeld, ["geometry_ms"] = census.Ms,
+                ["sides"] = "both, each kept by its own samples (alpha-tested: both kept)",
+                ["alpha_tested"] = Tally(census.ByAlpha), ["double_sided_flag_for_reference"] = Tally(census.ByFlag),
+                ["geometry_ms"] = census.Ms,
                 ["bounds_min"] = new[] { census.Min.X, census.Min.Y, census.Min.Z }, ["bounds_max"] = new[] { census.Max.X, census.Max.Y, census.Max.Z },
                 ["extent_m"] = new[] { extent.X, extent.Y, extent.Z },
                 ["start_camera"] = new[] { start.X, start.Y, start.Z },
@@ -1198,10 +1135,14 @@ internal sealed partial class SponzaLoop
                 ["rays_traced"] = traced, ["trace_gpu_ms"] = gpuMs, ["trace_wall_ms"] = wallMs,
                 ["rate_rays_per_s_gpu"] = rate, ["rate_rays_per_s_wall"] = wallRate, ["hits_with_bad_triangle_index"] = bad,
                 ["area_buried_share"] = share(areaBuried),
-                ["area_buried_share_ignoring_two_sided"] = share(areaBuriedFlag),
+                ["area_void_share"] = share(areaVoid),
+                ["area_alpha_kept_share"] = share(areaAlphaKept),
+                ["buried_rule"] = $"more than {CensusBuriedShare} of a side's rays met back faces (alpha-tested back faces as fronts)",
+                ["void_rule"] = $"more than {CensusVoidShare} of a side's rays escaped with direction y < -{CensusVoidDown}",
+                ["ray_void_share"] = share(raysVoid) / CensusRays,
                 ["ray_met_share"] = share(raysMet) / CensusRays,
                 ["ray_back_share"] = share(raysBack) / CensusRays,
-                ["ray_two_sided_back_share"] = share(raysSidedBack) / CensusRays,
+                ["ray_alpha_back_share"] = share(raysSidedBack) / CensusRays,
                 ["ray_within_0_25m_share"] = share(raysNear) / CensusRays,
                 ["area_m2_by_level"] = areaAtLevel,
                 ["harmonic_band_upper_m"] = harmonicBands.Select(b => b == double.MaxValue ? -1 : b).ToArray(), ["area_m2_by_harmonic_band"] = areaInBand,
@@ -1254,14 +1195,14 @@ internal sealed partial class SponzaLoop
         Line($"RTGI census: {sceneName} ({DateTime.Now:yyyy-MM-dd HH:mm})");
         Line($"");
         Line($"Geometry: {instances.Length:N0} static instances ({dynamicCount} dynamic left out), {census.Triangles:N0} triangles ({census.Degenerate:N0} degenerate), {census.Area:N0} m2 (in {census.Ms / 1000:0.0} s)");
-        Line($"  two-sided: {census.ByTwoSided.Tris:N0} triangles, {census.ByTwoSided.Area:N0} m2 -- open sheets {census.ByOpen.Tris:N0} / {census.ByOpen.Area:N0} m2, alpha-tested {census.ByAlpha.Tris:N0} / {census.ByAlpha.Area:N0} m2; the double-sided flag's {census.ByFlag.Tris:N0} / {census.ByFlag.Area:N0} m2 (vertices welded within {CensusWeld * 1000:0.#} mm)");
+        Line($"  sides: both, each kept by its own samples; alpha-tested (both kept) {census.ByAlpha.Tris:N0} triangles / {census.ByAlpha.Area:N0} m2 (the double-sided flag's {census.ByFlag.Tris:N0} / {census.ByFlag.Area:N0} m2, not used)");
         Line($"  bounds ({census.Min.X:0.0}, {census.Min.Y:0.0}, {census.Min.Z:0.0}) .. ({census.Max.X:0.0}, {census.Max.Y:0.0}, {census.Max.Z:0.0}), extent {extent.X:0.0} x {extent.Y:0.0} x {extent.Z:0.0} m; start camera ({start.X:0.0}, {start.Y:0.0}, {start.Z:0.0})");
         Line($"");
         Line($"Size field: by area, coarse first ({string.Join(" -> ", passes.Select(p => p.Spacing.ToString("0.##", inv) + " m"))}; refined where buried or size < {CensusRefineFactor} x the pass's spacing), {CensusRays} cosine rays each to {CensusReach:0} m, lifted {CensusLift * 100:0} cm; size clamp(0.1 x harmonic, {finest * 100:0} cm, {topSize:0.0} m = level {RtgiTopLevel})");
         foreach (var p in passes)
             Line($"  pass {p.Index} at {p.Spacing:0.##} m: {p.Full:N0} samples ({p.Full * CensusRays / 1e6:0.0} M rays), {p.Pos.Length:N0} traced (share {p.Keep:0.####}, spacing {p.Effective:0.##} m), {100.0 * p.Refine.Count(r => r) / Math.Max(1, p.Refine.Length):0.0}% refined; GPU {p.GpuMs:0} ms, wall {p.WallMs / 1000:0.0} s over {p.Frames} frames");
         Line($"  all: {sizeSamples:N0} samples, {cookSize / 1e6:0.0} M size-field rays; traced {traced / 1e6:0.0} M rays, GPU {gpuMs:0} ms ({rate / 1e6:0} M rays/s), wall {wallMs / 1000:0.0} s ({wallRate / 1e6:0} M rays/s); {bad:N0} hits with a triangle index past their placement's");
-        Line($"  by area: buried {100 * share(areaBuried):0.0}% ({100 * share(areaBuriedFlag):0.0}% were two-sidedness ignored); rays met {100 * share(raysMet) / CensusRays:0.0}%, one-sided back faces {100 * share(raysBack) / CensusRays:0.0}%, two-sided back faces (as fronts) {100 * share(raysSidedBack) / CensusRays:0.0}%, within 25 cm {100 * share(raysNear) / CensusRays:0.0}%");
+        Line($"  by area, both sides: dropped buried {100 * share(areaBuried):0.0}% (> {CensusBuriedShare:P0} of rays on back faces), dropped over the void {100 * share(areaVoid):0.0}% (> {CensusVoidShare:P0} of rays escaping below y = -{CensusVoidDown}), alpha-tested kept despite either {100 * share(areaAlphaKept):0.0}%; rays met {100 * share(raysMet) / CensusRays:0.0}%, back faces {100 * share(raysBack) / CensusRays:0.0}%, alpha-tested back faces (as fronts) {100 * share(raysSidedBack) / CensusRays:0.0}%, into the void {100 * share(raysVoid) / CensusRays:0.0}%, within 25 cm {100 * share(raysNear) / CensusRays:0.0}%");
         text.Append("  live area by size level (m2):");
         for (var l = 0; l < levels; l++) text.Append(inv, $" L{l} {areaAtLevel[l]:N0}");
         text.AppendLine();
@@ -1270,7 +1211,7 @@ internal sealed partial class SponzaLoop
         text.AppendLine();
         Line($"");
         if (cellShare < 1f) Line($"Cells counted over a random {cellShare:P0} of the triangle runs, scaled up by {scale:0.##} (the points and fills below are unscaled; chunk counts are per counted run, scaled).");
-        Line($"Cells (enumerated in {enumerateMs / 1000:0.0} s, {points:N0} points, {pointsBuried:N0} buried skipped; {latticeFilled:N0} lattice points filled outward, {latticeNone:N0} triangle pieces with no sample within 8 coarse cells):");
+        Line($"Cells (enumerated in {enumerateMs / 1000:0.0} s, {points:N0} points, {pointsBuried:N0} on dropped sides skipped; {latticeFilled:N0} lattice points filled outward, {latticeNone:N0} triangle pieces with no sample within 8 coarse cells):");
         for (var l = 0; l < levels; l++)
             Line($"  L{l,-2} {SizeOfLevel(l),7:0.00} m  {cellsAt[l],14:N0} cells  {ownAt[l],14:N0} own-level  {junctionAt[l],12:N0} junction");
         Line($"  total {cells:N0}, own-level {ownCells:N0}, junction {junctions:N0} (L0+L1 cells {fine:N0})");
@@ -1297,7 +1238,7 @@ internal sealed partial class SponzaLoop
         File.WriteAllText(basePath + ".txt", text.ToString());
 
         return string.Create(inv,
-            $"[VulkanSponza] rtgi census {sceneName}: {census.Triangles:N0} tris, {census.Area:N0} m2 ({census.ByTwoSided.Area:N0} two-sided), {sizeSamples:N0} size samples ({cookSize / 1e6:0.0} M rays), buried {100 * share(areaBuried):0.0}%, cells {cells:N0} (L0 {cellsAt[0]:N0}, own {ownCells:N0}, junction {junctions:N0}), shipped {shipped / Mb:0.0} MB, runtime {runtime / Mb:0} MB today / {runtimeCompact / Mb:0} MB compact, cook {Full(cookRays):0.0} s / {Sliced(cookRays):0} s sliced, settle64 {Full(settle64):0.0} s / {Sliced(settle64):0} s sliced, {rate / 1e6:0} M rays/s; written to {basePath}.json/.txt.");
+            $"[VulkanSponza] rtgi census {sceneName}: {census.Triangles:N0} tris, {census.Area:N0} m2 a side, {sizeSamples:N0} size samples ({cookSize / 1e6:0.0} M rays), dropped buried {100 * share(areaBuried):0.0}% / void {100 * share(areaVoid):0.0}%, cells {cells:N0} (L0 {cellsAt[0]:N0}, own {ownCells:N0}, junction {junctions:N0}), shipped {shipped / Mb:0.0} MB, runtime {runtime / Mb:0} MB today / {runtimeCompact / Mb:0} MB compact, cook {Full(cookRays):0.0} s / {Sliced(cookRays):0} s sliced, settle64 {Full(settle64):0.0} s / {Sliced(settle64):0} s sliced, {rate / 1e6:0} M rays/s; written to {basePath}.json/.txt.");
     }
 
     private static void CensusJson(Utf8JsonWriter w, object? value)
