@@ -1,6 +1,6 @@
 #version 450
 
-// --rtgi-volume (SponzaLoop.RtgiVolume.cs): which probes a cache cell's point sees, traced. The readout asks for a cell the
+// RTGI's world volume (SponzaLoop.RtgiVolume.cs): which probes a cache cell's point sees, traced. The readout asks for a cell the
 // first time it reads one (rtgi_readout.frag: a point of it, its normal, the level to trace to); here, a frame on, a ray
 // from that point to each of the 8 probes around it at that level (the Metal batch traces them), then the mask of those
 // it reached, kept with the cell (tagged with its key: a slot emptied and taken by another cell asks again). The readout

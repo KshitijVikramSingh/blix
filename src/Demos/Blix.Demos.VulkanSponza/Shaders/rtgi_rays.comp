@@ -2,7 +2,7 @@
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_shuffle : require
 
-// --rtgi (S1, SponzaLoop.Rtgi.cs): this frame's training points and their rays. The first uCounts.x are visible: one per
+// RTGI (S1, SponzaLoop.Rtgi.cs): this frame's training points and their rays. The first uCounts.x are visible: one per
 // tile of a grid over the screen, at a pixel of its tile (a new one each frame), from the pre-pass's depth and normal.
 // The rest are where last frame's training rays landed (a different share each frame), so the cells one bounce from
 // the screen -- and, through those, the next -- are trained too: a path grows a vertex a frame through the cache.
@@ -18,9 +18,9 @@ layout(set = 0, binding = 0) uniform RtgiRays {
     vec4 uCounts;        // x visible points, y points from last frame's hits, z the frame's number, w how far a ray goes
     vec4 uSun;           // xyz toward the sun; w 1 when last frame's rays and hits are there to read
     vec4 uParams;        // rtgiParams (rtgi_cache.glsl)
-    vec4 uVolume;        // --rtgi-volume: rtgi_volume.glsl's VOL_PARAMS (w 0: off), what sizes the cells
+    vec4 uVolume;        // the world volume: rtgi_volume.glsl's VOL_PARAMS (w 0: off), what sizes the cells
     vec4 uVolumeGeom;    // rtgi_volume.glsl's VOL_GEOM
-    vec4 uNearCook;      // --rtgi-near-cook: rtgi_nearcook.glsl's NEAR_PARAMS -- its cells the surface a visible point's
+    vec4 uNearCook;      // the cooked near field: rtgi_nearcook.glsl's NEAR_PARAMS -- its cells the surface a visible point's
                          // cell is trained over (surfacePoint)
     vec4 uNearField;     // x the near field's radius (RTGI_NEAR); y of the hit points, how many are cooked cells' points near
                          // the camera instead (--rtgi-near-train, the list RtgiNearList); z the list's turning offset
@@ -73,7 +73,7 @@ layout(std430, set = 0, binding = 12) readonly buffer RtgiDirection { vec4 rtgiD
 layout(std430, set = 0, binding = 13) readonly buffer RtgiMoments { vec4 rtgiMoments[]; };
 layout(std430, set = 0, binding = 14) readonly buffer RtgiConfidence { vec4 rtgiConfidence[]; };
 
-// --rtgi-volume (rtgi_volume.glsl): the probes whose cooked distances size the cache's cells.
+// RTGI's world volume (rtgi_volume.glsl): the probes whose cooked distances size the cache's cells.
 layout(std430, set = 0, binding = 21) readonly buffer RtgiVolumeTable { uvec2 volTable[]; };
 layout(std430, set = 0, binding = 22) readonly buffer RtgiVolumeProbes { float volProbes[]; };
 #define VOL_PARAMS u.uVolume

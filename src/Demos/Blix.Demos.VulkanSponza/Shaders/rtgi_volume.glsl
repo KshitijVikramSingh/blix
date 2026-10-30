@@ -1,4 +1,4 @@
-// --rtgi-volume (SponzaLoop.RtgiVolume.cs): a sparse volume of probes whose cooked geometry sizes the cache's cells
+// RTGI's world volume (SponzaLoop.RtgiVolume.cs): a sparse volume of probes whose cooked geometry sizes the cache's cells
 // (volCellScale) and whose places the cells' traced visibility reaches for (rtgi_volume_vis.comp). The probes once learnt
 // light as well, for young cells to lean on; the readout leaked and blotched with it, and nothing learns or reads it now
 // (the layout keeps its words).

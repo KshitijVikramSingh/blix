@@ -13,6 +13,9 @@ namespace Blix.Demos.VulkanSponza;
 
 internal sealed partial class SponzaLoop
 {
+    // --freeze-cascades (measurement): the sun cascades fitted once, never refit or redrawn.
+    private bool freezeCascades;
+
     // Refit the cascade light view-projections to the current camera. Each
     // cascade bounds a slice [Splits[c], Splits[c+1]] of the camera frustum:
     // we take the slice's 8 corners, wrap them in a bounding sphere (so the

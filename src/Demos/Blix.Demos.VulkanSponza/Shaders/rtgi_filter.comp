@@ -1,7 +1,7 @@
 #version 450
 #extension GL_KHR_shader_subgroup_ballot : require
 
-// --rtgi (SponzaLoop.Rtgi.cs): each cell trained this frame (the dirty list) blended with its neighbours in its plane --
+// RTGI (SponzaLoop.Rtgi.cs): each cell trained this frame (the dirty list) blended with its neighbours in its plane --
 // the same level and side, offset along the surface only (never along its normal: a parallel surface a cell away is
 // another surface) -- into what the readout and the lookups read. A cell's light is a mean of few samples where little
 // training reaches (the shadowed, the bounce-lit): neighbours that hold more lend it theirs, mud that settled nowhere
@@ -43,7 +43,7 @@ layout(set = 0, binding = 0) uniform RtgiFilter {
                     // its slot), 1: every frame; z a young cell's (1: every frame)
     vec4 uDone;     // x the frame's number; y frames between drift checks; z the relative error under which a cell is
                     // done; w the dark floor (absolute luminance the error is measured against at least)
-    vec4 uReach;    // --rtgi-volume's traced reach (cellReach): x 1 on; y the samples under which the blend widens to 5 x 5;
+    vec4 uReach;    // the world volume's traced reach (cellReach): x 1 on; y the samples under which the blend widens to 5 x 5;
                     // z the outer ring's weight
 } u;
 

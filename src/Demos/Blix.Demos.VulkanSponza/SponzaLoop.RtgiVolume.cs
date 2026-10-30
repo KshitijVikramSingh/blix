@@ -7,7 +7,7 @@ using Blix.Graphics;
 
 namespace Blix.Demos.VulkanSponza;
 
-// --rtgi-volume: a sparse volume of probes (rtgi_volume.glsl) whose cooked geometry -- not light -- sizes the cache's cells
+// RTGI's world volume (on by default; --rtgi-no-volume and the RTGI panel's switch off): a sparse volume of probes (rtgi_volume.glsl) whose cooked geometry -- not light -- sizes the cache's cells
 // and gives the cells' traced visibility (rtgi_volume_vis.comp) its probes to reach. The probes once learnt light too, for
 // young cells to lean on; the readout leaked and blotched with it, and nothing reads it now.
 //
@@ -33,7 +33,7 @@ internal sealed partial class SponzaLoop
 {
     // Levels: level l's probes VolFinest x 2^l apart; the 2 m and 8 m placed from the triangles, the finer two refined.
     private const int VolLevels = 5, VolPlacedFine = 2, VolPlacedCoarse = 4;
-    private bool rtgiVolume, rtgiVolumeBuilt;
+    private bool rtgiVolume = true, rtgiVolumeBuilt;
     private float rtgiVolumeSpacing = 2f;
     private int rtgiVolumeMost = 4_000_000;
     // A probe whose rays meet back faces past this share is inside something (left out of every lookup).
@@ -113,7 +113,8 @@ internal sealed partial class SponzaLoop
 
     private void ParseRtgiVolume(Blix.Core.AppArgs args)
     {
-        rtgiVolume = args.Flag("rtgi-volume");
+        // --rtgi-no-volume: RTGI as it ran before the volume, its cells sized by the camera's distance (the A/B).
+        if (args.Flag("rtgi-no-volume")) rtgiVolume = false;
         if (args.Float("rtgi-volume-spacing") is { } sp) rtgiVolumeSpacing = MathF.Max(0.25f, sp);
         if (args.Int("rtgi-volume-most") is { } most) rtgiVolumeMost = Math.Max(1024, most);
         if (args.Float("rtgi-volume-back") is { } bk) rtgiVolumeBackShare = Math.Clamp(bk, 0.01f, 1f);

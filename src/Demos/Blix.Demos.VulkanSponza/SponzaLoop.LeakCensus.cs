@@ -6,7 +6,7 @@ using Blix.Graphics.Images;
 
 namespace Blix.Demos.VulkanSponza;
 
-// --ray-leak-census (at the shot, with --rt-shadows): do the traced shadows' rays leak through the scene -- pass where
+// --ray-leak-census (at the shot): do the traced shadows' rays leak through the scene -- pass where
 // the geometry is closed? The judge is the CPU ray scene (RayQueryScene): watertight by construction, bit-exact with the
 // GPU's software traversal, and the same geometry the frame's Metal tracer holds (the same LOD error). A ray Metal let
 // through that the CPU finds blocked by a SOLID surface (no alpha cutoff: every triangle covers, no coin) is a LEAK.
@@ -25,7 +25,7 @@ internal sealed partial class SponzaLoop
         if (!rayLeakCensus) return;
         if (frameTracer is null || rayQueries is null || rtShadowOrigins.Length == 0)
         {
-            Console.WriteLine("[VulkanSponza] leak census: needs --rt-shadows, the frame tracer and the ray scene; skipped.");
+            Console.WriteLine("[VulkanSponza] leak census: needs the frame tracer and the ray scene; skipped.");
             return;
         }
         device.WaitIdle();

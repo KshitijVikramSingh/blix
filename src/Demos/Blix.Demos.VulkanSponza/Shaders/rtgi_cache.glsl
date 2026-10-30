@@ -1,4 +1,4 @@
-// --rtgi (S1 of the GI redesign, SponzaLoop.Rtgi.cs): the world radiance cache's cells. A cell is a cube of world space
+// RTGI (S1 of the GI redesign, SponzaLoop.Rtgi.cs): the world radiance cache's cells. A cell is a cube of world space
 // at a level -- base size times 2^level, the level chosen by the distance from the camera -- and the side a surface in it
 // faces (the normal's dominant axis and sign, six). Two hashes of (cell, level, side): the first picks the slot, linear
 // probing over RTGI_PROBES slots; the second is the key held in it (never 0, which marks an empty slot).

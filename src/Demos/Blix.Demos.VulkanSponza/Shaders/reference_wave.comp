@@ -33,10 +33,7 @@ layout(set = 0, binding = 0) uniform ReferenceWave {
 } u;
 
 layout(set = 0, binding = 1) uniform samplerCube uSkyRadiance;
-// Two vec4s a point: its position, then its normal -- or, w 1 on the second (the retired --ref-view's; no host makes one
-// now), a CAMERA point: the camera's position and its pixel's direction, the path's first ray along it (not a cosine ray), so
-// the path's first hit is the surface the pixel shows and its sum the radiance that pixel sees: the material's response
-// (the base lobe and the sheet's transmission, by the rules below) with every light that reaches it.
+// Two vec4s a point: its position, then its normal.
 layout(std430, set = 0, binding = 2) readonly buffer ReferencePointList { vec4 points[]; };
 // Per lane, its path (the layout beside main); the host starts every lane with no path (hits -1).
 layout(std430, set = 0, binding = 3) buffer ReferenceLanes { vec4 lanes[]; };
@@ -56,9 +53,6 @@ layout(std430, set = 0, binding = 10) readonly buffer ReferenceSheets { uint she
 // that transmit (its glow mode lets rays through them).
 layout(std430, set = 0, binding = 11) writeonly buffer BatchSunRays { vec4 batchSunRays[]; };
 layout(std430, set = 0, binding = 12) readonly buffer BatchSunHits { uvec4 batchSunHits[]; };
-// Per triangle row, a bit: KHR_materials_unlit. A camera path's first hit on one sees its base colour (the row's albedo)
-// and ends, as lit.frag shows it; any later hit reflects as any surface does (the GI's rule).
-layout(std430, set = 0, binding = 20) readonly buffer ReferenceUnlit { uint unlitRows[]; };
 
 // Nothing here traces (the batches do); ray_query.glsl comes in for blix_pcg and reference_path.glsl's sampling, which
 // the paths must share with the monolithic reference to be the same paths.
@@ -82,7 +76,6 @@ void main() {
 
     if (mode == 0) {
         uint seed = floatBitsToUint(c.w);
-        bool camera = points[2u * (l / uint(u.uParams.w)) + 1u].w > 0.5;
         if (a.w < 0.0) {
             if (b.w >= u.uParams.z) {   // the lane's quota is met: no ray
                 batchRays[2u * l] = vec4(0.0);
@@ -97,7 +90,7 @@ void main() {
             r = vec4(0.0);
             if (seed == 0u) seed = blix_pcg(l * 9781u + uint(u.uCount.y) * 2654435761u + 1u);
         }
-        vec3 dir = camera && a.w < 0.5 ? b.xyz : referenceCosineAround(b.xyz, referenceRand(seed), referenceRand(seed));
+        vec3 dir = referenceCosineAround(b.xyz, referenceRand(seed), referenceRand(seed));
         batchRays[2u * l] = vec4(a.xyz, 0.0);
         batchRays[2u * l + 1u] = vec4(dir, uintBitsToFloat(0x7F800000u));
         lanes[4u * l] = a;
@@ -121,11 +114,6 @@ void main() {
             ended = true;
         } else if (int(a.w + 0.5) == bounces + 1) {
             ended = true;   // a hit past the last one lit: only its escape would have counted
-        } else if (a.w < 0.5 && points[2u * (l / uint(u.uParams.w)) + 1u].w > 0.5
-                   && batchHits[3u * l + 1u].z != 0xFFFFFFFFu
-                   && (unlitRows[(batchHits[3u * l + 1u].z & 0x7FFFFFFFu) >> 5u] & (1u << (batchHits[3u * l + 1u].z & 31u))) != 0u) {
-            r.rgb += c.rgb * unpackUnorm4x8(h2.w).rgb;   // unlit: the base colour, as radiance
-            ended = true;
         } else {
             vec3 normal = vec3(uintBitsToFloat(h2.x), uintBitsToFloat(h2.y), uintBitsToFloat(h2.z));
             vec3 albedo = unpackUnorm4x8(h2.w).rgb;

@@ -1,6 +1,6 @@
 #version 450
 
-// RenderSettings.HalfResLighting: the incident light (incident_clipmap.frag) and the traced sun shadows
+// The incident light (RTGI's readout, rtgi_readout.frag) and, with RenderSettings.HalfResShadows, the traced sun shadows
 // (rt_shadow_rays.comp) ran at half resolution, each half-res pixel h standing for ONE full-res pixel of its 2x2,
 // 2h + uHalf.yz, a different one each frame (all four every four frames, TAA gathering them). This brings both back
 // to full resolution for the lit pass, into the targets it reads either way.
@@ -81,7 +81,7 @@ void main() {
     ivec2 q = clamp(ivec2(gl_FragCoord.xy), ivec2(0), fullSize - 1);
     float rawQ = texelFetch(uSceneDepth, q, 0).r;
     if (rawQ >= 1.0 - 1e-6) {
-        // Sky: as the incident pass leaves it.
+        // Sky: as the readout leaves it.
         outIncident = vec4(0.0, 0.0, 0.0, 1.0);
         outIncidentGradient = vec4(0.0, 0.0, 0.0, 1.0);
         return;

@@ -11,11 +11,9 @@ namespace Blix.Demos.VulkanSponza;
 // one bounce a frame, every ray through the frame's batches -- SponzaLoop.RayBatch.cs: the software traversal, or Metal's
 // hardware under --ray-backend hw|both). --reference-monolithic keeps the first form (reference_points.comp: whole paths
 // in one kernel over ray_query.glsl), the wavefront's cross-check. Both take reference_path.glsl's sampling and bounce
-// count, as the reference view does. The points are the CPU reference's (WriteSurfaceReference): a grid of camera pixels off
-// depth edges, at the surface lifted 1 cm along its face normal. Paths accumulate over the frames before the shot,
-// --ref-paths in all, --ref-bounces deep; at the shot the lines are the CPU reference's format (tools/testbeds/gate.py
-// reads them), the CPU reference's own -- if --probe-reference also ran -- relabelled, and the two held against each
-// other at the same points.
+// count, as the reference view does. The points are a grid of camera pixels off depth edges, at the surface lifted 1 cm
+// along its face normal. Paths accumulate over the frames before the shot, --ref-paths in all, --ref-bounces deep; at the
+// shot each point's line holds the frame's light against the reference's (tools/testbeds/gate.py reads them).
 internal sealed partial class SponzaLoop
 {
     private bool gpuReference;
@@ -29,8 +27,6 @@ internal sealed partial class SponzaLoop
     private GpuBufferHandle gpuReferencePointBuffer, gpuReferenceAccum;
     private int gpuReferencePaths;
     private uint gpuReferenceDispatch;
-    // The CPU reference's totals by point (WriteSurfaceReference), when it ran too: the cross-check.
-    private readonly Dictionary<int, double> cpuSurfaceReference = new();
     private const int GpuReferenceGrid = 24;
     // --gpu-ref-seams N: N more points at concave creases (where two faces meet), printed as "seam" lines. The grid's
     // points almost never land within a few pixels of one, and a leak through a seam lights exactly there: the
@@ -117,26 +113,6 @@ internal sealed partial class SponzaLoop
         }
     }
 
-    // Per triangle row, one bit: KHR_materials_unlit (reference_wave.comp, ReferenceUnlit) -- a camera path's first hit
-    // there sees the base colour and ends. All zeros with none. Only camera points read it, and none is made since the
-    // camera-path view (--ref-view) went with the texel GI: the gate's points are surface points.
-    private GpuBufferHandle? referenceUnlit;
-    private GpuBufferHandle ReferenceUnlitBuffer
-    {
-        get
-        {
-            if (referenceUnlit is { } made) return made;
-            var rows = rayGpuData?.RowPlacements ?? Array.Empty<uint>();
-            var bits = new uint[rows.Length / 32 + 1];
-            var any = 0;
-            for (var row = 0; row < rows.Length; row++)
-                if ((int)rows[row] < rayPlacementUnlit.Count && rayPlacementUnlit[(int)rows[row]]) { bits[row >> 5] |= 1u << (row & 31); any++; }
-            if (any > 0) Console.WriteLine(string.Create(Inv, $"[VulkanSponza] reference: {any:N0} triangle rows unlit (KHR_materials_unlit), their base colour as the camera sees it."));
-            referenceUnlit = Own(device.CreateGpuBuffer(bits.Length * 4, MemoryMarshal.AsBytes(bits.AsSpan()), "sponza.reference.unlit"));
-            return referenceUnlit.Value;
-        }
-    }
-
     private ReferenceWave CreateReferenceWave(List<Vector4> packed, int lanesPerPoint, int quota, string name)
     {
         var w = new ReferenceWave { PointCount = packed.Count / 2, LanesPerPoint = lanesPerPoint, Quota = quota };
@@ -186,12 +162,13 @@ internal sealed partial class SponzaLoop
             var referenceReady = !gpuReference || referenceMonolithic
                 ? !gpuReference || gpuReferencePaths >= GpuReferenceTarget
                 : cachedReferenceSums is not null || gateWave is { } w && w.Dispatch >= ReferenceWaveFrames(w);
-            // --rtgi: the cache trained --rtgi-settle-frames scene frames (its training stops behind the cook screen).
-            var cacheReady = !rtgi || rtgiTraced >= rtgiSettleFrames;
+            // RTGI's cache trained --rtgi-settle-frames scene frames (its training stops behind the cook screen); none to wait
+            // for where the Metal tracer failed to build.
+            var cacheReady = frameTracerFailed || rtgiTraced >= rtgiSettleFrames;
             if (!lightReady || !referenceReady || !cacheReady) return false;
             shotReadyFrame = postLoadFrames;
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                $"[VulkanSponza] shot: ready at post-load frame {postLoadFrames} (reference {(gpuReference ? "complete" : "none")}{(rtgi ? ", the cache settled" : "")}); writing in {ShotReadyMargin} frames."));
+                $"[VulkanSponza] shot: ready at post-load frame {postLoadFrames} (reference {(gpuReference ? "complete" : "none")}{(frameTracerFailed ? "" : ", the cache settled")}); writing in {ShotReadyMargin} frames."));
         }
         // On a frame fixed in advance, not a fixed count after ready: TAA's jitter is a Halton sequence over the post-load
         // frame, and at a crease the shot's value hangs on which jitter it lands on -- the gate's crevices seams read 0.872
@@ -292,7 +269,6 @@ internal sealed partial class SponzaLoop
                 .Append(new ShaderBufferBinding("ReferenceSheets", SheetRowsBuffer ?? w.Occluded))
                 .Append(new ShaderBufferBinding("BatchSunRays", w.SunRays))
                 .Append(new ShaderBufferBinding("BatchSunHits", w.SunHits))
-                .Append(new ShaderBufferBinding("ReferenceUnlit", ReferenceUnlitBuffer))
                 .Where(b => declared.Contains(b.Name)).ToArray());
         graph.Dispatch(referenceWaveStepPass, Wave(0));
         RecordClosestBatch(referenceClosestBatch, w.Rays, w.Hits, count, frameSeed);
@@ -304,7 +280,7 @@ internal sealed partial class SponzaLoop
         w.Dispatch++;
     }
 
-    // WriteSurfaceReference's points: the grid's camera pixels whose four neighbours, 2 px away, meet the same depth
+    // The reference's points: the grid's camera pixels whose four neighbours, 2 px away, meet the same depth
     // (within 2%), at the hit lifted 1 cm along the face normal turned toward the camera.
     private void PickGpuReferencePoints(RayQueryScene scene)
     {
@@ -328,7 +304,7 @@ internal sealed partial class SponzaLoop
         }
         var points = new List<(int K, float Px, float Py)>();
         var packed = new List<Vector4>();
-        // The shading normal at each point (the pre-pass's: the one the incident pass reads the light at and the frame
+        // The shading normal at each point (the pre-pass's: the one RTGI's readout reads the light at and the frame
         // shades with), not its triangle's face: on a faceted fold -- drapes' 2 cm strips with smooth normals -- they part by
         // up to half a facet's turn, and under light from one side the face's irradiance was up to 20% from the smooth one's
         // (tools/gi-model/facet_normal.py; the curtain's +7-10% against the path trace, 2026-10-21). --ref-face-normal: the
@@ -501,7 +477,7 @@ internal sealed partial class SponzaLoop
         incidentPointFrames++;
     }
 
-    // At the shot: the gate's lines from the GPU reference, and the CPU's held against it where both ran.
+    // At the shot: the gate's lines from the GPU reference.
     private void WriteGpuSurfaceReference()
     {
         if (!gpuReference || gpuReferencePoints is not { Count: > 0 } points) return;
@@ -523,7 +499,6 @@ internal sealed partial class SponzaLoop
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[VulkanSponza] reference wavefront on Metal: closest {trace.Dispatches:N0} batches, {trace.MeanGpuMs:0.000} ms mean, {trace.Failures} failed; shadow {shadow.Dispatches:N0} batches, {shadow.MeanGpuMs:0.000} ms mean, {shadow.Failures} failed ({gateWave?.Count ?? 0:N0} rays a batch)."));
         }
-        var pairs = new List<(double Cpu, double Gpu)>();
         for (var i = 0; i < points.Count; i++)
         {
             var (k, px, py) = points[i];
@@ -537,13 +512,6 @@ internal sealed partial class SponzaLoop
                 : Lum(new Vector3((float)BitConverter.ToHalf(incident, o), (float)BitConverter.ToHalf(incident, o + 2), (float)BitConverter.ToHalf(incident, o + 4)));
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"    {(k >= SeamKeyBase ? "seam    " : "surface ")} at {px / iw:0.0000},{py / ih:0.0000}  gpu  total {field:0.00000} ref {reference:0.00000}"));
-            if (cpuSurfaceReference.TryGetValue(k, out var cpu)) pairs.Add((cpu, reference));
         }
-        if (pairs.Count == 0) return;
-        var mean = pairs.Average(p => p.Cpu);
-        var diffs = pairs.Select(p => Math.Abs(p.Gpu - p.Cpu) / Math.Max(mean, 1e-9)).OrderBy(v => v).ToArray();
-        var ratios = pairs.Where(p => p.Cpu > 0.02 * mean).Select(p => p.Gpu / p.Cpu).OrderBy(v => v).ToArray();
-        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[VulkanSponza] GPU reference against the CPU's at {pairs.Count} points: energy {pairs.Sum(p => p.Gpu) / pairs.Sum(p => p.Cpu):0.000}, median ratio {(ratios.Length > 0 ? ratios[ratios.Length / 2] : double.NaN):0.000}, |diff|/mean median {diffs[diffs.Length / 2]:0.000} p90 {diffs[(int)(diffs.Length * 0.9)]:0.000}."));
     }
 }

@@ -226,7 +226,7 @@ internal sealed partial class SponzaLoop
 // --rtgi-screen-every N (4; 1 off): on a settled, still view the screen's light -- the readout, its blur and the upsample,
 // ~1.2 ms a frame (Crytek Sponza 1080p: every 2nd frame -0.62 ms, every 4th -1.25, 7.43 -> 6.18 ms, the in-boot A/B,
 // 2026-10-28) -- every Nth frame; between, the lit pass reads
-// the incident targets as they were (as the incident pass's reuse did). Still: the camera and the sun as they were for two
+// the incident targets as they were. Still: the camera and the sun as they were for two
 // frames; settled: the budget's needs under a quarter, none from the sun (the cache's new cells keep the visible's ~0.1).
 // Anything that moves, a sun change, the cache's error jumping, a truth dump or the first settle: every frame again.
 internal sealed partial class SponzaLoop

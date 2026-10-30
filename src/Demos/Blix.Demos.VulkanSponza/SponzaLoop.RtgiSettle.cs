@@ -4,7 +4,7 @@ using ImGuiNET;
 
 namespace Blix.Demos.VulkanSponza;
 
-// --rtgi: the cache's first settle behind the cook screen. At boot the cache holds nothing and every pixel's light is
+// RTGI: the cache's first settle behind the cook screen. At boot the cache holds nothing and every pixel's light is
 // young: the frames until its error comes down are spent on the cache alone -- the pre-pass, placement, the trace, the
 // training, resolve, filter and eviction, and the readout (its uncertainty map placement reads, its error the progress)
 // -- with the point budget at its most, and no upsample, lit pass or TAA; the screen is the cook screen's, the camera
@@ -32,8 +32,8 @@ internal sealed partial class SponzaLoop
     // trained cells the regions then left behind -- the scene came up unsettled (the crevices testbed, 2026-10-30).
     private bool RtgiVolumeSettling => rtgiVolume && (!rtgiVolumeBuilt || !rtgiVolReady || (rtgiNearCook && !rtgiNearCookReady));
 
-    // Settling now: --rtgi, its first settle not done, the scene and its tracer up, no cook holding the screen.
-    private bool RtgiSettleNow => rtgi && rtgiSettleWanted && !rtgiSettleDone && fullyLoaded && frameTracer is not null
+    // Settling now: its first settle not done, the scene and its tracer up, no cook holding the screen.
+    private bool RtgiSettleNow => rtgiSettleWanted && !rtgiSettleDone && fullyLoaded && frameTracer is not null
         && !CookScreenNow && halfLightingNow;
 
     // After the frame's readout is recorded: one settle frame counted, the error read, the end judged.
@@ -41,7 +41,7 @@ internal sealed partial class SponzaLoop
     {
         if (!RtgiSettleNow || rtgiDoneCount.Equals(default(Blix.Graphics.GpuBufferHandle))) return;
         if (!rtgiSettleClock.IsRunning) rtgiSettleClock.Start();
-        // --rtgi-volume: the cache's light is judged only once the volume is cooked and refined, and the near field cooked
+        // The world volume: the cache's light is judged only once the volume is cooked and refined, and the near field cooked
         // -- the cells are sized and keyed by them then (a cache settled before was sized by the camera, and started over).
         // At most RtgiSettleMaxFrames of waiting.
         if (RtgiVolumeSettling && ++rtgiSettleVolumeFrames < RtgiSettleMaxFrames)

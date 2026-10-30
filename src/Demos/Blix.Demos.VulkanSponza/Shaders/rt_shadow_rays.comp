@@ -1,6 +1,6 @@
 #version 450
 
-// --rt-shadows: one sun shadow ray per pixel, from the pre-pass's depth and normal, for the Metal shadow pass that
+// The traced sun shadows: one sun shadow ray per pixel, from the pre-pass's depth and normal, for the Metal shadow pass that
 // follows (SponzaLoop.RtShadows). Each origin is a vec4: the surface point at the pixel's centre, lifted off the
 // surface, and how far its ray goes toward the sun; 0 where the pixel has no surface (lit).
 //
@@ -24,7 +24,7 @@ layout(set = 0, binding = 0) uniform RtShadowRays {
     vec4 uSun;           // xyz: toward the sun, unit; w: how far a ray goes
     vec4 uSky;           // x: 1 to write sky rays; y: the frame's number (exact: below 2^24)
     vec4 uHalf;          // x 1: one ray per half-res pixel (uSize the half grid), from the full-res pixel 2p + yz of its
-                         // 2x2 (RenderSettings.HalfResLighting: the incident pass's pixel, lighting_upsample.frag)
+                         // 2x2 (RenderSettings.HalfResShadows: the readout's pixel, lighting_upsample.frag)
     vec4 uDisc;          // the sun's disc (ShadowsSettings.SunDiscDegrees): x the tangent of its angular radius (0: a point,
                          // no directions written), y the frame's number
     vec4 uCompact;       // x 1: the traced rays packed (below); y which of the two counters is this frame's; z 1: the

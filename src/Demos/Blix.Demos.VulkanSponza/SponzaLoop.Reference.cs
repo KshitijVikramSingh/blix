@@ -6,22 +6,21 @@ using Blix.Graphics;
 
 namespace Blix.Demos.VulkanSponza;
 
-// --gi-reference (G toggles it at runtime): the reference view -- every pixel's indirect light path-traced on the GPU
-// (Shaders/reference_trace.comp) and shown by the incident pass in place of the GI's answer, accumulating while the
-// camera and the sun hold still. What the GI should look like, in the renderer itself; the probe reference's 24 x 24
-// CPU points measure the same thing at points.
+// --gi-reference (G toggles it at runtime): every pixel's indirect light path-traced on the GPU
+// (Shaders/reference_trace.comp), accumulating while the camera and the sun hold still: what RTGI's light should be.
+// Nothing shows it: RTGI's dump (--rtgi-dump, SponzaLoop.Rtgi.cs) writes the accumulation beside its own light for
+// tools/gi-model/rtgi_timeline.py.
 internal sealed partial class SponzaLoop
 {
     private bool referenceView;
     // Each pixel's sum of its paths' luminance squared (reference_trace.comp): the reference's own standard error (RTGI's
     // dump reads it, SponzaLoop.Rtgi.cs).
     private GpuBufferHandle referenceMoments;
-    private bool referenceAvailable;
-    // Whether the incident field already holds its occlusion: the reference view's always; RTGI's readout too. GTAO never
-    // darkens a traced field's light: its rays resolve occlusion themselves, and on top of them GTAO darkened corners
-    // twice -- the Cornell box's presented image against the reference read mean error 1.53%, p99 19.4%, 2.86% of pixels
-    // over 10% with it; 0.64%, 7.4%, 0.57% without.
-    private bool IncidentHoldsOcclusion => (referenceView && referenceSamples > 0) || RtgiReadoutReady;
+    // Whether the incident field already holds its occlusion: RTGI's readout does. GTAO never darkens a traced field's
+    // light: its rays resolve occlusion themselves, and on top of them GTAO darkened corners twice -- the Cornell box's
+    // presented image against the reference read mean error 1.53%, p99 19.4%, 2.86% of pixels over 10% with it; 0.64%,
+    // 7.4%, 0.57% without.
+    private bool IncidentHoldsOcclusion => RtgiReadoutReady;
     // --gi-reference-bounces N: path length (6: the 16-bounce CPU reference differs from 6 by well under its noise
     // indoors, where albedos under 0.6 shrink each bounce).
     private int referenceBounces = 6;
@@ -38,7 +37,6 @@ internal sealed partial class SponzaLoop
     private void ReadReferenceArgs(AppArgs args)
     {
         referenceView = args.Flag("gi-reference");
-        referenceAvailable = true;
         if (args.Int("gi-reference-bounces") is { } b) referenceBounces = Math.Clamp(b, 1, 32);
         // --gi-reference-seed N: start the paths' random sequence elsewhere -- two references that differ only in it
         // differ only by their noise (the floor any comparison against one can resolve).
@@ -92,15 +90,6 @@ internal sealed partial class SponzaLoop
                 .Where(b => declared.Contains(b.Name)).ToArray()));
         referenceFrame++;
         referenceSamples++;
-    }
-
-    // What the incident pass binds: the accumulation, or a placeholder.
-    private (Vector4 Params, ShaderBufferBinding Buffer) ReferenceIncidentInputs()
-    {
-        if (referenceAccum.Equals(default(GpuBufferHandle)))
-            referenceAccum = Own(device.CreateGpuBuffer(16, new byte[16], "sponza.reference.none"));
-        var on = referenceView && referenceSize.X > 0 && referenceSamples > 0;
-        return (new Vector4(on ? 1f : 0f, referenceSize.X, referenceSize.Y, 0f), new ShaderBufferBinding("ReferenceAccum", referenceAccum));
     }
 
     private void ReportReference(DebugContext debug)

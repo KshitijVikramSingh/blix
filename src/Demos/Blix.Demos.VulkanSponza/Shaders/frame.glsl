@@ -70,16 +70,16 @@ layout(set = 0, binding = 0) uniform Frame {
     //   3 tangent-space normal-map value                    4 front/back facing
     //   5 world tangent                                     6 world bitangent
     float uVizChannel;
-    // z = 1 when the lit pass reads the incident field (the probe clipmap's light: all of its indirect
-    // diffuse, sky included). Off -- --no-incident, or before the clipmap's first solve -- the lit
-    // pass falls back to the open-sky irradiance cube with sky visibility 1.
+    // z = 1 when the lit pass reads the incident field (RTGI's light: all of its indirect diffuse, sky
+    // included; zero until its readout is ready). Off -- --rt-isolated -- the lit pass falls back to the
+    // open-sky irradiance cube with sky visibility 1.
     // x = 1 when it takes the field's sky visibility and light at all (--no-sky / --sky-no-sample
     // zero it: sky visibility 1, no incident light). y = 1 when the field already holds its own occlusion -- RTGI's
-    // traced readout, or the GI reference's path trace -- so GTAO does not darken it again. w = 1 when the lighting
-    // ran at half resolution (RenderSettings.HalfResLighting): the traced sun's visibility is then the incident gradient's
-    // w, upsampled (lighting_upsample.frag), not the mask at this pixel.
+    // traced readout -- so GTAO does not darken it again. w = 1 when the traced sun shadows ran at half resolution
+    // (RenderSettings.HalfResShadows): the traced sun's visibility is then the incident gradient's w, upsampled
+    // (lighting_upsample.frag), not the mask at this pixel.
     vec4  uIncident;
-    // How the lit pass carries the incident field's light to its normal-mapped normal (incident_clipmap.frag's
+    // How the lit pass carries the incident field's light to its normal-mapped normal (the readout's
     // gradient): x the mip bias the normal map is read at for it (indirect diffuse answers to folds and relief, not
     // to a weave finer than a pixel, which under TAA's jitter shimmered), y how far the correction may scale the
     // light either way (factor in [1 - y, 1 + y]); z 1: the sheets' glow taken as the incident field's, the frame's own
@@ -90,14 +90,8 @@ layout(set = 0, binding = 0) uniform Frame {
     // jitter.
     mat4  uViewProjUnjittered;
     mat4  uPrevViewProjUnjittered;
-    // The probe clipmap, for the glass reflection's sky visibility (lit.frag): xyz probes per level, w base spacing;
-    // each level's lowest cell (xyz), and in uClipOrigin0.w the blend band (probes). Appended last: skybox.vert reads
-    // fields above by byte offset.
-    vec4  uClipDims;
-    vec4  uClipOrigin0;
-    vec4  uClipOrigin1;
-    vec4  uClipOrigin2;
-    vec4  uClipOrigin3;
+    // Unread (written 0): the retired probe clipmap's five members, kept so the block's layout holds.
+    vec4  _unusedPad[5];
     // y 1: GTAO ran (0: --no-ao, its passes skipped -- the visibility one). w 1 (--ibl-brdf-lut): the specular IBL's
     // split sum from the LUT, not the analytic fit (lit_body.glsl). x and z are unread (written 0), kept so the block's
     // layout holds. Appended last.

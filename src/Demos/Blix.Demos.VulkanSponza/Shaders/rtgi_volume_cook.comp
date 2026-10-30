@@ -2,7 +2,7 @@
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
 
-// --rtgi-volume (SponzaLoop.RtgiVolume.cs): what each probe sees, cooked once at load from the geometry (rtgi_volume.glsl).
+// RTGI's world volume (SponzaLoop.RtgiVolume.cs): what each probe sees, cooked once at load from the geometry (rtgi_volume.glsl).
 // A workgroup a probe, a subgroup of 32 lanes over its rays (rtgi_volume_rays.comp's kinds 1 and 2):
 //   1 moved: where its rays mostly meet back faces it sits inside something -- moved out through the nearest back face, a
 //     tenth of a spacing past it; where a front face is nearer than 0.15 spacings, moved away from it. Kept within 0.45

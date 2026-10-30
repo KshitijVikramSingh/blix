@@ -209,7 +209,7 @@ internal sealed partial class SponzaLoop
             $"[profile] {seconds:0.0} s: {FrameStats(frames, "all")}; {FrameStats(moving, "moving")}; {FrameStats(still, "still")}; states {string.Join(", ", states)}"));
         if (frames.Count == 0) return;
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[profile]   host a frame: wait {frames.Average(f => f.Wait):0.0}, encode {frames.Average(f => f.Encode):0.0}, submit/present {frames.Average(f => f.Present):0.0} ms; gc pause {frames.Sum(f => f.GcPause):0} ms in all ({frames.Sum(f => f.Gen2)} full); clipmap rested {clipmapRested} frames so far; sections a frame (ms): {SectionMeans(frames, 10)}"));
+            $"[profile]   host a frame: wait {frames.Average(f => f.Wait):0.0}, encode {frames.Average(f => f.Encode):0.0}, submit/present {frames.Average(f => f.Present):0.0} ms; gc pause {frames.Sum(f => f.GcPause):0} ms in all ({frames.Sum(f => f.Gen2)} full); sections a frame (ms): {SectionMeans(frames, 10)}"));
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[profile]   gpu a frame (ms, {gpu.Sum(g => g.Ms):0.0} in all): {string.Join(", ", gpu.OrderByDescending(g => g.Ms).Take(12).Select(g => string.Create(CultureInfo.InvariantCulture, $"{g.Pass} {g.Ms:0.00}")))}"));
         var allBytes = GC.GetTotalAllocatedBytes(false);
@@ -237,7 +237,7 @@ internal sealed partial class SponzaLoop
             var shadow = tracer.ShadowStatsOf(-1);
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"[profile]   metal a frame: closest traces {(trace.TotalGpuMs - profMetalTraceMs) / frames.Count:0.00} ms ({(trace.Dispatches - profMetalTraces) / (double)frames.Count:0.0} batches), shadow traces {(shadow.TotalGpuMs - profMetalShadowMs) / frames.Count:0.00} ms ({(shadow.Dispatches - profMetalShadows) / (double)frames.Count:0.0} batches); allocated {tracer.Memory.AllocatedMb:N0} of {tracer.Memory.RecommendedMb:N0} MB recommended"));
-            // The shadow traces by slot: 0-2 the pixels' kinds (with the clipmap's and other batches in 0), 3 the RTGI's.
+            // The shadow traces by slot: 0-2 the pixels' kinds (with the other batches in 0), 3 the RTGI's.
             var slotMs = new double[4];
             for (var k = 0; k < 4; k++) { var st = tracer.ShadowStatsOf(k); slotMs[k] = (st.TotalGpuMs - profMetalSlotMs[k]) / frames.Count; profMetalSlotMs[k] = st.TotalGpuMs; }
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
@@ -247,7 +247,7 @@ internal sealed partial class SponzaLoop
             profMetalTraceMs = trace.TotalGpuMs; profMetalTraces = trace.Dispatches;
             profMetalShadowMs = shadow.TotalGpuMs; profMetalShadows = shadow.Dispatches;
         }
-        Console.WriteLine($"[profile]   {IncidentReuseCounts()}");
+        Console.WriteLine($"[profile]   {ShadowKeepCounts()}");
         if (RtgiCounts() is { Length: > 0 } rtgiCache)
         {
             Console.WriteLine($"[profile]   {rtgiCache}");

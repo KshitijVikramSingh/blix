@@ -1,6 +1,6 @@
 #version 450
 
-// --rtgi-volume (SponzaLoop.RtgiVolume.cs): the cook's listed probes' rays, into the Metal batch beside the cache's. Two
+// RTGI's world volume (SponzaLoop.RtgiVolume.cs): the cook's listed probes' rays, into the Metal batch beside the cache's. Two
 // kinds (uVol2.x):
 //   1 the cook's first pass: uVol.y rays over the sphere a probe, a spherical Fibonacci set, from where the grid puts the
 //     probe; rtgi_volume_cook.comp moves it out of what it sits inside.

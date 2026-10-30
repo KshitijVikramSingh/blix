@@ -6,7 +6,7 @@ namespace Blix.Demos.VulkanSponza;
 // A frame's Metal work as one trip (2026-10-15). Each in-frame batch was its own external pass: the frame submitted,
 // Metal waited for it, traced, signalled, and the frame went on -- three or four times a frame on Sponza, with the GPU
 // idle at every turn (a Metal System Trace: ~29 ms of a 103 ms frame idle, ~24 ms more in waits). Batches whose answers
-// are read on a LATER frame (the probe clipmap's staged wavefront, SponzaLoop.Clipmap.cs) are deferred here and encoded
+// are read on a LATER frame (RTGI's, SponzaLoop.Rtgi.cs) are deferred here and encoded
 // in one group (MetalRayTracer.EncodeGroup) with the traced screen shadows -- or, on a frame without them, in a group
 // pass of their own. The frames' chain (VulkanGraphicsDevice.ChainFrames) puts the next frame's readers after it.
 // --tracer-batches-apart: each batch its own external pass, in its own frame, as before.

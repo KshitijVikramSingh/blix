@@ -86,9 +86,6 @@
     <GlslShader Include="Shaders\rt_shadow_fill.comp" />
     <GlslShader Include="Shaders\ray_view.comp" />
     <GlslShader Include="Shaders\ray_surface_bake.comp" />
-    <GlslShader Include="Shaders\clipmap_inject.comp" />
-    <GlslShader Include="Shaders\clipmap_mark.comp" />
-    <GlslShader Include="Shaders\clipmap_watch.comp" />
     <GlslShader Include="Shaders\reference_trace.comp" />
     <GlslShader Include="Shaders\reference_points.comp" />
     <GlslShader Include="Shaders\reference_wave.comp" />
@@ -96,9 +93,6 @@
     <GlslShader Include="Shaders\ray_batch_shadow.comp" />
     <GlslShader Include="Shaders\taa_surface.frag" />
     <GlslShader Include="Shaders\copy_key.frag" />
-    <GlslShader Include="Shaders\copy_incident.frag" />
-    <GlslShader Include="Shaders\incident_clipmap.frag" />
-    <GlslShader Include="Shaders\incident_lean.frag" />
     <GlslShader Include="Shaders\present.vert" />
     <GlslShader Include="Shaders\present.frag" />
     <GlslShader Include="Shaders\hiz_build.frag" />

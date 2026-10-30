@@ -18,10 +18,10 @@ fi
 OUT="$(mktemp -d "${TMPDIR:-/tmp}/blix-determinism.XXXXXX")"
 export BLIX_CONFIG=Release BLIX_DIAG=off
 build=(--build)
-gi=(--rtgi --rtgi-volume --rt-shadows --lod-pixels 0)
+fixed=(--lod-pixels 0)
 run() {
     local name=$1; shift
-    "$REPO/blix" run ${build[@]+"${build[@]}"} Blix.Demos.VulkanSponza "${gi[@]}" "$@" --no-fog --render-scale 1 \
+    "$REPO/blix" run ${build[@]+"${build[@]}"} Blix.Demos.VulkanSponza "${fixed[@]}" "$@" --no-fog --render-scale 1 \
         --win=960 540 --shot-when-ready --shot-frames=3000 --shot="$OUT/$name.png" > "$OUT/$name.log" 2>&1 || {
         echo "determinism: the $name run failed; its log is $OUT/$name.log" >&2
         tail -5 "$OUT/$name.log" >&2

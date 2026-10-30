@@ -108,7 +108,7 @@ internal sealed record SceneProfile(
 
     /// <summary>The generated city (<c>blix city</c>, tools/city/setup.sh): the scale scene, any size from a seed.</summary>
     /// <remarks>
-    /// No probe ships with it, so it lights with the procedural sky (the clipmap still traces it):
+    /// No probe ships with it, so it lights with the procedural sky (RTGI still traces it):
     /// it is for measuring how the frame grows with the world, not for how it looks. The start pose stands
     /// in the street at x = -7 (the street east of the fourth block column at the default sizes), looking
     /// down it.

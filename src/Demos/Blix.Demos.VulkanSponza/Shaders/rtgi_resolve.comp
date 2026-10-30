@@ -2,7 +2,7 @@
 #extension GL_KHR_shader_subgroup_ballot : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
 
-// --rtgi (SponzaLoop.Rtgi.cs): each slot's frame of samples into what it holds -- a running mean whose history follows
+// RTGI (SponzaLoop.Rtgi.cs): each slot's frame of samples into what it holds -- a running mean whose history follows
 // the light (S2). Two means per cell: the slow one shown, up to uResolve.x samples, so a still light settles (a fixed 64
 // left it shimmering, 2026-10-26); and a fast one over uChange.y. When the fast mean strays from the slow by more than
 // uResolve.w of the fast's standard errors (the variance from the cell's luminance moments) plus uChange.z of the light, the slow takes the

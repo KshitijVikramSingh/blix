@@ -106,7 +106,7 @@ public sealed partial class VulkanGraphicsDevice
     // MaxPendingPerSlot and flush stale entries instead of waiting forever.
     // Native Vulkan drivers on Linux/Windows resolve correctly. On macOS the
     // CPU timers (frame/build-commands/execute/swap) carry the perf story.
-    // Two per timed pass. 64 held 32 passes, and a frame with the probe clipmap, screen probes and every cascade
+    // Two per timed pass. 64 held 32 passes, and a frame with the (since retired) GI probes and every cascade
     // re-rendering records 33: the tail went untimed in silence. 256 holds 128, and running out is now said once.
     private const uint QueriesPerFrameSlot = 256;
     private bool reportedQueryCap;

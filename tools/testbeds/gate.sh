@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# The GI correctness gate: the correctness scenes rendered and held against the CPU path trace on their triangles.
+# The GI correctness gate: the correctness scenes rendered with the default GI (RTGI) and held against a path trace on
+# their triangles.
 #
 #   BLIX_TESTBED_ASSETS  the cooked scenes (tools/testbeds/setup.sh makes them; this runs it when they are missing).
 #
@@ -7,11 +8,9 @@
 # then the thin-wall scene from inside its sealed room and from the open one. Each converges 1500 frames; the judge is
 # the GPU path-traced reference at 16,384 paths a point (--gpu-reference, reference_points.comp; the CPU's 1,024 a point
 # were a suspect for the run-to-run noise); tools/testbeds/gate.py turns the logs into the verdict (targets and ratchets: see
-# there). BLIX_GATE_CPU_REFERENCE=1 also runs the CPU reference (--probe-reference) as a cross-check: its lines are
-# relabelled, so the verdict stays the GPU's, and each log ends with the two held against each other.
-# Exit 0 when every ratchet holds. Logs stay in the directory printed at the end.
+# there). Exit 0 when every ratchet holds. Logs stay in the directory printed at the end.
 #
-# Usage: tools/testbeds/gate.sh [extra demo flags...]   e.g. --clipmap-guide 0 to price a change against the bars
+# Usage: tools/testbeds/gate.sh [extra demo flags...]   e.g. --rtgi-no-volume to price a change against the bars
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 if [[ -z "${BLIX_TESTBED_ASSETS:-}" ]]; then
@@ -37,7 +36,6 @@ build=(--build)
 # Each run shoots as soon as its light is at rest and its reference has all its paths (--shot-when-ready), plus a
 # margin; the frame counts below are only the latest it may be.
 reference=(--gpu-reference --ref-bounces 32)
-if [[ "${BLIX_GATE_CPU_REFERENCE:-0}" == 1 ]]; then reference+=(--probe-reference); fi
 paths=(--gpu-ref-paths 16384)
 runFlags="${*:-defaults}"   # this gate's extra flags, for the windows' titles
 frames=3000

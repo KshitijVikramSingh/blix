@@ -7,7 +7,8 @@ using Blix.Graphics.MetalHWX;
 
 namespace Blix.Demos.VulkanSponza;
 
-// --rt-shadows: the lit pass's sun shadows traced on Apple's ray tracing hardware, inside the frame.
+// The lit pass's sun shadows traced on Apple's ray tracing hardware, inside the frame: always on, as RTGI is, whose rays
+// the same tracer answers.
 //
 //   rt-shadow-rays (Vulkan compute)  one ray per pixel from the pre-pass's depth and normal, toward the sun
 //   rt-shadow-trace (Metal)          any-hit through the ray scene (MetalRayTracer), coverage as the software trace
@@ -18,20 +19,20 @@ namespace Blix.Demos.VulkanSponza;
 // The trace runs alongside the passes declared between it and rt-shadow-join (RenderGraph.ExternalJoin). A surface
 // facing away from the sun is traced from its far side (rt_shadow_rays.comp): its answer feeds diffuse transmission.
 //
-// Nothing asks the cascades whether a point sees the sun: the clipmap's injection traces shadow rays at its hits
-// (Setup: --clipmap-shadow-rays), the fog is off unless asked for, and until the trace is ready the lit pass leaves the
-// sun off rather than falling back to the cascades. The cascades still render where something reads them (CascadesRead).
+// Nothing asks the cascades whether a point sees the sun: the fog is off unless asked for, and until the trace is ready
+// the lit pass leaves the sun off rather than falling back to the cascades. The cascades still render where something
+// reads them (CascadesRead): the fog (--fog), the --ab rtshadow OFF phase, and a run whose Metal tracer failed to build,
+// where they shade the sun in its place.
 //
 // --rt-isolated: no incident field either, so nothing but the trace lights the frame. The ambient is the irradiance
 // cube times the sky visibility the trace finds (one cosine-weighted sky ray per pixel a frame, TAA averaging them);
 // a way to judge the trace alone, which without bounce light leaves an enclosed courtyard mostly dark.
 //
-// The cascades still render: fog and the clipmap's injection read them. Until the
-// acceleration structures exist (built once, after the surface bake has given coverage) the cascades shade as before.
 // Origins and masks are one per frame slot, written in the slot's frame and read in it, so the slot's fence orders reuse.
 internal sealed partial class SponzaLoop
 {
-    private bool rtShadows;
+    // Off only when the frame's Metal tracer failed to build (RecordRtShadows): the cascades shade the sun then.
+    private bool rtShadows = true;
     private bool rtNoOverlap;
     // --metal-device-queue: the Metal tracers on the Vulkan device's own command queue rather than one of their own. A
     // Sponza frame idles 7-19 ms around each hand-off between the two queues (Metal System Trace), and one queue was the
@@ -145,8 +146,8 @@ internal sealed partial class SponzaLoop
     }
 
     // Whether anything reads the sun cascades this frame. With the frame's shadow rays traced, the lit pass reads the
-    // traced mask instead (lit_body.glsl: the cascades only where rtShadowHeader.z is 0), and the probes' hits ask them
-    // nothing (CascadeReceivers empty): fog still reads them, and the A/B's off phase. Drawn for no reader they were ~0.5 ms a frame at Crytek Sponza's courtyard (2026-10-24).
+    // traced mask instead (lit_body.glsl: the cascades only where rtShadowHeader.z is 0): fog still reads them, and the
+    // A/B's off phase. Drawn for no reader they were ~0.5 ms a frame at Crytek Sponza's courtyard (2026-10-24).
     // --cascades-always: drawn whatever reads them, as before.
     private bool cascadesAlways;
     private bool CascadesRead => cascadesAlways || !rtShadows || frameTracer is null || rayGpuData is null
@@ -154,18 +155,25 @@ internal sealed partial class SponzaLoop
 
     // A slot's mask kept at rest (--no-shadow-keep: traced every frame). With no TAA there is no jitter, so a still camera's
     // pixels are the same pixels: the mask a slot traced under the same camera, sun and size is this frame's answer, so long
-    // as nothing moved and nothing the rays pass reads changed (MarkIncidentDirty's events). Packed rays only, and none of
+    // as nothing moved (the camera, the sun, the mover). Packed rays only, and none of
     // what varies by frame (interleave, the disc's sequence, sky rays, the per-pixel census, the coverage coin). The
     // rays pass and trace were ~6 ms of a still ~14 ms frame at Crytek Sponza's courtyard (2026-10-24).
     private bool shadowKeep = true;
     private (Matrix4x4 ViewProj, Vector3 Sun, float Reach, int W, int H)?[] rtShadowSlotKey = Array.Empty<(Matrix4x4, Vector3, float, int, int)?>();
     private long rtShadowKept;
+    // The traced shadows' rest and interleave counts since the last profile line (SponzaLoop.Profile.cs), and zeroed.
+    private string ShadowKeepCounts()
+    {
+        var t = $"shadow masks kept {rtShadowKept}, interleaved {rtShadowInterleaved} (history {rtShadowInterleavedHistory})";
+        rtShadowKept = rtShadowInterleaved = rtShadowInterleavedHistory = 0;
+        return t;
+    }
 
     private bool RtShadowKeep(int slot, int width, int height)
     {
         if (rtShadowSlotKey.Length != device.MaxFramesInFlightCount) rtShadowSlotKey = new (Matrix4x4, Vector3, float, int, int)?[device.MaxFramesInFlightCount];
         var keyable = shadowKeep && rtShadowPacked.Length > 0 && (!halfShadowsNow || render.Taa <= 0f) && !RtSkyRays && !RtPerPixel && !shadows.Interleave
-            && SunDiscTangent <= 0f && !rtCoverageCoin && !rtAlphaAb && !MoverActive && framesRendered - incidentDirtyFrame > 1;
+            && SunDiscTangent <= 0f && !rtCoverageCoin && !rtAlphaAb && !MoverActive;
         var key = (viewProjJittered, -Vector3.Normalize(sunDirection), rayReach, width, height);
         var keep = keyable && rtShadowSlotKey[slot] == key;
         rtShadowSlotKey[slot] = keyable ? key : null;
@@ -188,7 +196,7 @@ internal sealed partial class SponzaLoop
             if (!rtShadowBound.Equals(default(GpuBufferHandle)))
             {
                 rtShadowBound = default;
-                litClipmapBuffer = null;
+                litMaskBuffer = null;
                 litSceneBuffers = null;
             }
             return;
@@ -247,7 +255,7 @@ internal sealed partial class SponzaLoop
             tracerGroupRecorded = ReferenceEquals(keepTracer, frameTracer);
             rtShadowKept++;
             rtShadowBound = rtShadowMasks[slot];
-            litClipmapBuffer = null;
+            litMaskBuffer = null;
             litSceneBuffers = null;
             return;
         }
@@ -387,7 +395,7 @@ internal sealed partial class SponzaLoop
         }
 
         rtShadowBound = mask;
-        litClipmapBuffer = null;
+        litMaskBuffer = null;
         litSceneBuffers = null;
     }
 

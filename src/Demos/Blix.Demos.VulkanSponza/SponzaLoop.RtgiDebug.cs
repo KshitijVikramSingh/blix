@@ -35,7 +35,6 @@ internal sealed partial class SponzaLoop
 
     private void RtgiControls(DebugContext debug)
     {
-        if (!rtgi) return;
         using (debug.Scope("RTGI"))
         {
             var view = debug.Controls.Enum("View", rtgiView, RtgiViewNames);
@@ -51,8 +50,8 @@ internal sealed partial class SponzaLoop
             rtgiFrozen = debug.Controls.Toggle("Freeze (no rays, no training)", rtgiFrozen);
             if (rtgiVolumeBuilt)
             {
-                rtgiVolume = debug.Controls.Toggle("World volume (--rtgi-volume)", rtgiVolume);
-                if (rtgiNearCookBuilt) rtgiNearCook = debug.Controls.Toggle("Cooked near field (--rtgi-near-cook)", rtgiNearCook);
+                rtgiVolume = debug.Controls.Toggle("World volume (--rtgi-no-volume off)", rtgiVolume);
+                if (rtgiNearCookBuilt) rtgiNearCook = debug.Controls.Toggle("Cooked near field (--rtgi-no-near-cook off)", rtgiNearCook);
                 if (rtgiNearCookBuilt) rtgiSurfaceTrain = debug.Controls.Toggle("Cells trained over their own surface", rtgiSurfaceTrain);
                 rtgiFilterReach = debug.Controls.Toggle("Blend: traced reach", rtgiFilterReach);
                 rtgiFilterWide = MathF.Round(debug.Controls.Float("Blend: 5x5 under samples (0 off)", rtgiFilterWide, 0f, 4096f));

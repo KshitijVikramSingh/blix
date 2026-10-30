@@ -104,11 +104,11 @@ layout(set = 1, binding = 9) uniform texture2D   uSheenLut;
 // skybox, which per-draw descriptor sets made moot.)
 layout(set = 1, binding = 10) uniform textureCube uEnvCube;
 
-// The incident-light field from the probe clipmap: rgb = all the indirect diffuse light arriving (sky included),
-// a = sky visibility. Read when uIncident.z says the pass ran. See incident_clipmap.frag.
+// The incident-light field, RTGI's readout brought to full resolution (lighting_upsample.frag): rgb = all the indirect
+// diffuse light arriving (sky included), a = sky visibility. Read when uIncident.z says the field is on.
 layout(set = 1, binding = 17) uniform texture2D uIncidentField;
-// How the incident light's luminance changes with the normal, at the geometric normal (incident_clipmap.frag):
-// what lets light the incident pass evaluated at the geometric normal reach the normal-mapped one.
+// How the incident light's luminance changes with the normal, at the geometric normal (rtgi_readout.frag): what lets
+// light the readout evaluated at the geometric normal reach the normal-mapped one.
 layout(set = 1, binding = 20) uniform texture2D uIncidentGradient;
 // The pre-pass normal, bound here ONLY so viz channel 22 can show what the incident field reads.
 // Nothing in the lit path samples it: lit.frag has its own, better normal.
@@ -124,13 +124,7 @@ layout(set = 1, binding = 18) uniform texture2D uPrepassNormalViz;
 //@sampler LinearClamp
 layout(set = 1, binding = 19) uniform sampler uLinearClamp;
 
-// The probe clipmap itself, for the one surface the incident field cannot answer: a glass pane, absent from the
-// pre-pass, so the field at its pixel is the surface behind it. Its reflection asks the clipmap how much sky R sees
-// from the pane (frame.uClip*). Bound to a placeholder until the clipmap exists; uIncident.z gates the read.
-layout(set = 1, binding = 11) uniform texture2D uClipmapIrradiance;
-layout(set = 1, binding = 12) uniform texture2D uClipmapDepth;
-layout(std430, set = 1, binding = 13) readonly buffer ClipmapState { uvec4 clipmapStates[]; };
-// --rt-shadows: the sun's visibility traced on Apple's ray tracing hardware (SponzaLoop.RtShadows): a header (width,
+// The sun's visibility traced on Apple's ray tracing hardware (SponzaLoop.RtShadows): a header (width,
 // height, 1 while live, 1 with sky rays), then one word per pixel: 1 where the sun is blocked, plus 2, with sky rays,
 // where this frame's sky ray met something. Live with no size: the trace is not ready, and the sun is off
 // (the cascades are not asked). A placeholder of zeros otherwise, and the cascades answer as before.
@@ -191,13 +185,6 @@ float rtSkyVisibility(vec2 fragCoord) {
     if (px.x >= rtShadowHeader.x || px.y >= rtShadowHeader.y) return 1.0;
     return (rtShadowWords[px.y * rtShadowHeader.x + px.x] & 2u) != 0u ? 0.0 : 1.0;
 }
-#define BLIX_CLIPMAP_IRRADIANCE(t) texelFetch(sampler2D(uClipmapIrradiance, uLinearClamp), t, 0)
-#define BLIX_CLIPMAP_DEPTH(t) texelFetch(sampler2D(uClipmapDepth, uLinearClamp), t, 0)
-#define BLIX_CLIPMAP_IRRADIANCE_FILTERED(p) textureLod(sampler2D(uClipmapIrradiance, uLinearClamp), (p) / vec2(textureSize(sampler2D(uClipmapIrradiance, uLinearClamp), 0)), 0.0)
-#define BLIX_CLIPMAP_DEPTH_FILTERED(p) textureLod(sampler2D(uClipmapDepth, uLinearClamp), (p) / vec2(textureSize(sampler2D(uClipmapDepth, uLinearClamp), 0)), 0.0)
-#define BLIX_CLIPMAP_STATE(s) clipmapStates[s]
-#include "probe_clipmap.glsl"
-
 layout(set = 2, binding = 0) uniform Material {
     vec4 uBaseColorFactor;
     vec4 uEmissiveFactor;
@@ -281,26 +268,6 @@ vec3 fresnelSchlick(float cosTheta, vec3 F0) {
 // Cascaded sun shadows are provided by shadow.glsl. Its containment-based selection avoids the
 // view-depth boundary arcs that can occur across a wide frustum, and it owns PCF, normal offset,
 // bias, and diagnostic tint consistently with other renderers.
-
-vec3 vizClipmap(vec3 worldPos, vec3 n, bool solves) {
-    if (frame.uIncident.z < 0.5) return vec3(0.0);
-    BlixClipmap c;
-    c.dims = ivec3(frame.uClipDims.xyz);
-    c.baseSpacing = frame.uClipDims.w;
-    c.blendProbes = frame.uClipOrigin0.w;
-    c.origin[0] = ivec3(frame.uClipOrigin0.xyz);
-    c.origin[1] = ivec3(frame.uClipOrigin1.xyz);
-    c.origin[2] = ivec3(frame.uClipOrigin2.xyz);
-    c.origin[3] = ivec3(frame.uClipOrigin3.xyz);
-    int level;
-    float n8 = blix_clipmapSolvesAt(c, worldPos, n, level);
-    if (level < 0) return vec3(0.0);
-    if (!solves) {
-        return level == 0 ? vec3(1.0) : level == 1 ? vec3(0.1, 0.9, 0.2) : level == 2 ? vec3(0.2, 0.4, 1.0) : vec3(1.0, 0.2, 1.0);
-    }
-    return n8 < 1.5 ? vec3(1.0, 0.1, 0.1) : n8 < 3.5 ? vec3(1.0, 0.5, 0.1) : n8 < 7.5 ? vec3(1.0, 0.9, 0.1)
-         : n8 < 31.5 ? vec3(0.2, 0.9, 0.3) : vec3(0.2, 0.4, 1.0);
-}
 
 void main() {
     // A shader that statically writes gl_SampleMask must assign it on every invocation; opaque
@@ -409,29 +376,14 @@ void main() {
     // the head-on view to the scene behind instead of reading near-black.
     // (No refraction/absorption tint yet — that's the KHR transmission pass.)
     // Not in the opaque build (LIT_OPAQUE): a transmissive material is a blend one (PickPipeline), drawn by lit.frag's.
-    // Its clipmap lookup was registers every opaque pixel paid for (2026-10-24).
 #ifndef LIT_OPAQUE
     float transmission = mat.uMaterialParams2.x;
     if (transmission > 0.0) {
         float lod = roughness * (frame.uEnvMipCount - 1.0);
-        // Occluded like every other indirect term, along R rather than N: a reflection gathers from where it
-        // points, and a pane deep inside a room points at a wall. Panes are absent from the pre-pass, so the
-        // incident field (the surface behind) cannot say; the clipmap's sky visibility at the pane, facing R, can.
-        // Unoccluded only before the clipmap's first solve, or past its coarsest level.
+        // The reflection sees the open sky. Panes are absent from the pre-pass, so the incident field at their pixel is
+        // the surface behind them, whose sky visibility says nothing of what R sees from the pane, and RTGI's cache is
+        // not read here: a pane deep inside a room reflects the sky it cannot see (its occlusion along R is to come).
         float glassSky = 1.0;
-        if (frame.uIncident.z > 0.5 && frame.uIncident.x > 0.5) {
-            BlixClipmap c;
-            c.dims = ivec3(frame.uClipDims.xyz);
-            c.baseSpacing = frame.uClipDims.w;
-            c.blendProbes = frame.uClipOrigin0.w;
-            c.origin[0] = ivec3(frame.uClipOrigin0.xyz);
-            c.origin[1] = ivec3(frame.uClipOrigin1.xyz);
-            c.origin[2] = ivec3(frame.uClipOrigin2.xyz);
-            c.origin[3] = ivec3(frame.uClipOrigin3.xyz);
-            bool found;
-            vec4 field = blix_clipmapSample(c, vWorldPos, R, found);
-            if (found) glassSky = field.a;
-        }
         vec3 envRefl = textureLod(samplerCube(uPrefilteredEnv, uLinearClamp), R, lod).rgb * glassSky;
         float fresnel = 0.04 + 0.96 * pow(clamp(1.0 - NdotV, 0.0, 1.0), 5.0);
         // No opacity floor: this branch models Fresnel reflection over the background, without
@@ -630,10 +582,11 @@ void main() {
     // IBL uses the shading normal. (GTAO no longer writes a bent normal: nothing shaded with it.)
     vec3 cubeN   = N;
 
-    // --- The incident field (the probe clipmap) ------------------------------------------------
-    // .a is the sky visibility the clipmap's probes see, supplying building-scale enclosure beyond
-    // GTAO's screen-space radius; .rgb is all the indirect diffuse light arriving, sky included.
-    // Without the field (--no-incident, or before the clipmap's first solve) the sky is open:
+    // --- The incident field (RTGI's readout) -----------------------------------------------------
+    // .a is the sky visibility RTGI's rays found, supplying building-scale enclosure beyond GTAO's
+    // screen-space radius; .rgb is all the indirect diffuse light arriving, sky included. The field is
+    // on whenever RTGI is; before its readout is ready the targets hold zero, so the frame has no
+    // indirect light rather than a guess. Without the field (--rt-isolated) the sky is open:
     // visibility 1 and the irradiance cube's light.
     bool incidentOn = frame.uIncident.z > 0.5;
     bool incidentUsed = incidentOn && frame.uIncident.x > 0.5;
@@ -649,7 +602,7 @@ void main() {
     // Lambert: radiance out is albedo/PI times the irradiance in, as the direct sun has it. Every cache and the
     // irradiance cube hold irradiance E (PbrIblBaker integrates cos-weighted to E), so the /PI belongs here; shading
     // them as albedo * E made all indirect light PI times too bright against the sun (fixed 2026-10-21).
-    // The irradiance cube read only where it is used: with the field on (every --rtgi frame) its light is the field's, the
+    // The irradiance cube read only where it is used: with the field on (every frame but --rt-isolated) its light is the field's, the
     // read taken anyway ~0.09 ms of the IBL's 0.46 (Crytek Sponza 1080p, the in-boot A/B, 2026-10-28).
     vec3 diffuseIBL = vec3(0.0);
     if (!incidentOn) {
@@ -739,8 +692,8 @@ void main() {
     vec3 transmittedIBL = vec3(0.0);
     if (LIT_RARE(diffTrans > 0.0)) {
         // The back side's sky visibility. The incident field answers only at the front's geometric
-        // normal, so its visibility stands in for -N's (the clipmap resolves enclosure at room scale,
-        // where the two sides of a sheet share it); without the field the sky is open.
+        // normal, so its visibility stands in for -N's (enclosure at room scale, where the two sides
+        // of a sheet share it); without the field the sky is open.
         float backVis = incidentUsed ? incidentField.a : 1.0;
         vec3 backIrradiance = texture(samplerCube(uIrradiance, uLinearClamp), -cubeN).rgb * backVis;
         // The helper returns irradiance times the transmitted fraction; Lambert about -N divides by PI.
@@ -801,10 +754,7 @@ void main() {
             // with geometric channel 1 and shading channel 2 to localize reconstruction faults.
             frame.uVizChannel < 22.5 && frame.uVizChannel > 21.5
                 ? texture(sampler2D(uPrepassNormalViz, uLinearClamp), gl_FragCoord.xy / frame.uFog.xy).xyz * 0.5 + 0.5 :
-            // 23-24 inspect the clipmap behind the incident light: 23 how many solves its probes have had (red 1,
-            // orange 2-3, yellow 4-7, green 8-31, blue 32+; black where none answers), 24 which level answers
-            // (white 0 at 0.5 m, green 1, blue 2, magenta 3; dimmed while the clipmap has not solved).
-            frame.uVizChannel > 22.5 && frame.uVizChannel < 24.5 ? vizClipmap(vWorldPos, vizGeometricN, frame.uVizChannel < 23.5) :
+            // 23 and 24 showed the retired probe clipmap and are black, kept so the channels' numbers hold.
                                        vec3(0.0);
         // Straight out, no exposure and no tonemap — these are directions and flags, and a film
         // curve on a direction is a way to misread it.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The GI correctness gate's verdict, from --probe-reference logs of the correctness scenes.
+"""The GI correctness gate's verdict, from --gpu-reference logs of the correctness scenes.
 
 usage: gate.py LOG_DIR      (reads cornell.log, thinwall-sealed.log, thinwall-open.log, crevices-corridor.log, the last
                              with --gpu-ref-seams; and crevices-deadend.log where it is there)
@@ -9,8 +9,8 @@ Every metric carries two bars:
   ratchet  where the renderer stands today, with a margin. Breaking it FAILS the gate: something got worse.
 When a change moves a metric past its ratchet for the better, tighten the ratchet here in the same commit.
 
-The numbers come from the per-sample lines --probe-reference prints ("surface at ... total F ref R"): F is the
-incident light the GPU shaded with (all indirect diffuse), R the CPU path trace on the triangles at the same point.
+The numbers come from the per-sample lines --gpu-reference prints ("surface at ... total F ref R"): F is the
+incident light the frame shaded with (all indirect diffuse), R the GPU path trace on the triangles at the same point.
 """
 import os
 import re

@@ -1,6 +1,6 @@
 #version 450
 
-// --rtgi (SponzaLoop.Rtgi.cs): a slice of the slots a frame (uEvict.z onward, uEvict.w of them), each emptied when no
+// RTGI (SponzaLoop.Rtgi.cs): a slice of the slots a frame (uEvict.z onward, uEvict.w of them), each emptied when no
 // training reached it for uEvict.y frames (its stamp, rtgi_train.comp) -- the resolve visits only the cells trained.
 // Only under pressure: while the last sweep of all the slices found more than uPressure.y slots held. Emptied with room to
 // spare, cells the screen still read went untrained-and-old together and came back unsure -- placed on, retrained from

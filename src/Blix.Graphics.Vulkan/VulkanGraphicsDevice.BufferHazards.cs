@@ -13,7 +13,7 @@ namespace Blix.Graphics.Vulkan;
 // pass's flush. The first dispatch of a run keeps the full barrier before it, as before: it may follow a draw that read
 // or wrote what it touches.
 //
-// Crytek Sponza under --rtgi (2026-10-27, two runs an arm, a quiet GPU): 9.6 barriers a frame before every dispatch and
+// Crytek Sponza under RTGI (2026-10-27, two runs an arm, a quiet GPU): 9.6 barriers a frame before every dispatch and
 // 9.6 after became 9.2 before (0.4 skipped) and none after; the training's GPU time 3.85 / 4.07 ms -> 2.51 / 2.79, the
 // frame's GPU time unchanged (22.8-23.2 ms: the RTGI chain's dispatches depend on each other, and the frame waits on the
 // Metal tracer and the screen passes beside it).

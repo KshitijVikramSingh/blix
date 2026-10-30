@@ -1,7 +1,7 @@
 #version 450
 
-// --rtgi (S1, SponzaLoop.Rtgi.cs): the cache read at each half-res pixel, into the incident targets the upsample and the
-// lit pass read (in place of incident-light-half): rgb the indirect irradiance (sky and bounce, no direct sun), a the
+// RTGI (S1, SponzaLoop.Rtgi.cs): the cache read at each half-res pixel, into the half-res incident targets the upsample
+// brings to the lit pass: rgb the indirect irradiance (sky and bounce, no direct sun), a the
 // sky visibility. Half-res pixel h stands for full-res pixel 2h + uHalf.yz (SponzaLoop.HalfLighting.cs). The four cells
 // of the point's tangent plane at its level (the same side), bilinear, those holding nothing left out; where none do, the
 // level two coarser; where neither, nothing (black, the sky seen).
@@ -31,9 +31,9 @@ layout(set = 0, binding = 0) uniform RtgiReadout {
     vec4 uReuse;         // x 1: history to reuse; y this frame's fresh blocks (0-3); z how far a history pixel may sit from
                          // the point, per metre of distance; w the history's full-res pixel of its 2x2 (x + 2 y)
     vec4 uPrevCamera;    // xyz last frame's camera (the history guide's positions are relative to it)
-    vec4 uVolume;        // --rtgi-volume: rtgi_volume.glsl's VOL_PARAMS (w 0: off)
+    vec4 uVolume;        // the world volume: rtgi_volume.glsl's VOL_PARAMS (w 0: off)
     vec4 uVolumeGeom;    // rtgi_volume.glsl's VOL_GEOM (the cells sized by the geometry)
-    vec4 uNearCook;      // --rtgi-near-cook: rtgi_nearcook.glsl's NEAR_PARAMS (w 0: off)
+    vec4 uNearCook;      // the cooked near field: rtgi_nearcook.glsl's NEAR_PARAMS (w 0: off)
     vec4 uVolume2;       // y the visibility requests' room; z 1: neighbours left out where their traced ray was blocked
 } u;
 
@@ -77,7 +77,7 @@ layout(set = 0, binding = 15) uniform sampler2D uHistRaw;
 layout(set = 0, binding = 16) uniform sampler2D uHistGradient;
 layout(set = 0, binding = 17) uniform sampler2D uHistBlurred;
 layout(set = 0, binding = 18) uniform usampler2D uHistGuide;
-// --rtgi-volume (rtgi_volume.glsl): the world's probes, whose cooked geometry sizes the cells and whose visibility the
+// RTGI's world volume (rtgi_volume.glsl): the world's probes, whose cooked geometry sizes the cells and whose visibility the
 // cells' traced reach is tested against.
 layout(std430, set = 0, binding = 22) readonly buffer RtgiVolumeTable { uvec2 volTable[]; };
 layout(std430, set = 0, binding = 23) readonly buffer RtgiVolumeProbes { float volProbes[]; };
@@ -89,7 +89,7 @@ layout(std430, set = 0, binding = 24) readonly buffer RtgiVolumeDepth { uint vol
 // and the requests for cells not traced yet.
 layout(std430, set = 0, binding = 25) buffer RtgiVolumeCellVis { uvec2 cellVis[]; };
 layout(std430, set = 0, binding = 26) buffer RtgiVolumeVisRequests { uint visCount; uint visPad[3]; vec4 visRequests[]; };
-// --rtgi-near-cook (rtgi_nearcook.glsl): the cooked near cells, their table and light.
+// The cooked near field (rtgi_nearcook.glsl): the cooked near cells, their table and light.
 layout(std430, set = 0, binding = 27) readonly buffer RtgiNearTable { uvec2 nearTable[]; };
 layout(std430, set = 0, binding = 28) readonly buffer RtgiNearLight { vec4 nearLight[]; };
 layout(std430, set = 0, binding = 29) readonly buffer RtgiNearPoints { vec4 nearPoints[]; };
@@ -235,7 +235,7 @@ vec4 readLevel(vec3 p, uint side, uint level, out float sky, out vec3 bvec, out 
     return vec4(e, w);
 }
 
-// --rtgi-near-cook: the cooked near cells around p on its surface (the tangent plane's four, bilinear, those gathered and in
+// The cooked near field: the cooked near cells around p on its surface (the tangent plane's four, bilinear, those gathered and in
 // p's region; rtgi_nearcook.glsl): rgb their whole indirect irradiance (rtgi_nearcook_update.comp); found the weight found.
 vec4 readNearCooked(vec3 p, uint side, out float found) {
     found = 0.0;
@@ -381,7 +381,7 @@ void main() {
     else if (e0.w >= 0.05) { e = e0; sky = sky0; bv = b0; nearCell = near0; farShare = far0; }
     else if (e1.w >= 0.05) { e = e1; sky = sky1; bv = b1; nearCell = near1; farShare = far1; }
     else e = readLevel(p, side, min(level + 2u, top), sky, bv, nearCell, farShare);
-    // --rtgi-near-cook: where a cooked cell lies, its near light over the cache's far light (faded in by how much of the
+    // The cooked near field: where a cooked cell lies, its near light over the cache's far light (faded in by how much of the
     // point the cooked cells cover).
     if (NEAR_PARAMS.w > 0.5) {
         float found;

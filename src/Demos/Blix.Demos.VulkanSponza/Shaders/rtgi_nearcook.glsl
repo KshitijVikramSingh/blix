@@ -1,4 +1,4 @@
-// --rtgi-near-cook (SponzaLoop.RtgiNearCook.cs): the near field cooked from the geometry. Surface cells of NEAR_PARAMS.x
+// The cooked near field (SponzaLoop.RtgiNearCook.cs): the near field cooked from the geometry. Surface cells of NEAR_PARAMS.x
 // metres (by side, as the cache's), placed at load from the triangles where the volume found the geometry tight (its
 // refined probes); each traces NEAR_RAYS fixed cosine rays once, to the contact radius (rtgi_nearcook_rays.comp,
 // rtgi_nearcook_cook.comp): how many left (its escape share) and, for each that met a surface, how far, that surface's

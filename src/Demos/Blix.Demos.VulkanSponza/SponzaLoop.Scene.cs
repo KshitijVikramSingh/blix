@@ -309,8 +309,7 @@ internal sealed partial class SponzaLoop
                 // The factor texture (its alpha scales the factor), for the rays' surface bake's per-row share.
                 pm?.Ext.DiffuseTransmissionTexture is not null ? textureLoader.Load(pm).DiffuseTransmission : default,
                 ClothTransmission(pm) is null && pm?.Ext.DiffuseTransmissionColorTexture is not null ? textureLoader.Load(pm).DiffuseTransmissionColor : default,
-                ClothTransmission(pm) is not null,
-                pm?.Ext.Unlit ?? false));
+                ClothTransmission(pm) is not null));
         }
     }
 
@@ -346,7 +345,7 @@ internal sealed partial class SponzaLoop
         // blend buckets (bundle order == ordered order). Each drawable's placements follow as one
         // contiguous run of its bucket's placement list, and every placement takes a row of the
         // transform table.
-        // The clipmap traces the ray scene, so it is always built.
+        // RTGI traces the ray scene, so it is always built.
         var rayMeshes = BuildRayMeshes(ordered);
         var rayInstances = new List<RayQueryScene.Instance>();
         var nonUniform = 0;
@@ -372,7 +371,6 @@ internal sealed partial class SponzaLoop
                 rayPlacementTransmission.Add(s.Transmission);
                 rayPlacementTransmissionFactor.Add(s.TransmissionFactor);
                 rayPlacementCloth.Add(s.Cloth);
-                rayPlacementUnlit.Add(s.Unlit);
                 rayPlacementNames.Add(s.Name);
                 if (!UniformScale(world)) nonUniform++;
             }

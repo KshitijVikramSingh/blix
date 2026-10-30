@@ -47,10 +47,10 @@ internal sealed partial class SponzaLoop
 
     private void ParseRtgiTemporal(Blix.Core.AppArgs args)
     {
-        // Off by default: Cornell's two-seed noise and error no better with it (screen-space smoothing alone, 2026-10-26).
-        rtgiTemporal = false;
+        // On by default: it holds the full-res fix-up (pixels the half-res readout had no sample of their surface for --
+        // slivers and small triangles reading a neighbouring surface's light until the camera moved, the user, 2026-10-30).
+        // Off was Cornell's two-seed noise and error no better with it (screen-space smoothing alone, 2026-10-26).
         if (args.Flag("rtgi-no-temporal")) rtgiTemporal = false;
-        if (args.Flag("rtgi-temporal")) rtgiTemporal = true;
         if (args.Float("rtgi-temporal-frames") is { } f) rtgiTemporalFrames = MathF.Max(1f, f);
         if (args.Float("rtgi-temporal-fast") is { } ff) rtgiTemporalFast = MathF.Max(1f, ff);
         if (args.Float("rtgi-temporal-clamp") is { } tc) rtgiTemporalClamp = MathF.Max(0f, tc);

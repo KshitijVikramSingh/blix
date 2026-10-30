@@ -1,6 +1,6 @@
 #version 450
 
-// --rtgi-near-cook (rtgi_nearcook.glsl): the cook, a chunk of cells a frame. Kinds 4 and 5: each cell's point chosen among
+// The cooked near field (rtgi_nearcook.glsl): the cook, a chunk of cells a frame. Kinds 4 and 5: each cell's point chosen among
 // its candidates. Kind 0 (placement time): each cell's NEAR_RAYS rays, from its point lifted off its surface, into the
 // Metal batch (closest hit). Kind 1 (with the training): their hits into the cell's links (within the contact radius), its
 // escape share, and whether it is buried. Kinds 6-10: the regions by connectivity. Kinds 11-13: the cells' sizes. Kinds 14,

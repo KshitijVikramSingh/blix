@@ -7,7 +7,7 @@ using Blix.Graphics;
 
 namespace Blix.Demos.VulkanSponza;
 
-// --rtgi-near-cook (on with --rtgi-volume; --rtgi-no-near-cook off): the near field cooked from the geometry
+// The cooked near field (on with RTGI's world volume; --rtgi-no-near-cook off): the near field cooked from the geometry
 // (rtgi_nearcook.glsl). Where the volume found the geometry tight (its refined 1 m and 0.5 m probes: creases, gaps,
 // contacts -- elsewhere the near field is the far light), the triangles are sampled into --rtgi-near-cell (5 cm) surface
 // cells by side; each traces 16 fixed cosine rays to the contact radius once, in chunks through the RTGI Metal batch, and

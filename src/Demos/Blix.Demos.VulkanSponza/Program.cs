@@ -19,7 +19,7 @@ namespace Blix.Demos.VulkanSponza;
 // spatial split) across the main + curtains + ivy + trees packs.
 //
 // Render graph, abbreviated: three shadow cascades → probe/froxel compute →
-// depth + normal pre-pass → Hi-Z → GTAO + denoise → incident-light field →
+// depth + normal pre-pass → Hi-Z → GTAO + denoise → RTGI's incident light →
 // lit scene (R11G11B10F, optional MSAA resolve) → parity TAA → present.
 //
 // Performance shape: screen-space-error LOD over meshopt chains, cook-time spatial split of
@@ -268,21 +268,17 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
         MsaaSamples > 1 ? prepassNormalResolveHandle : prepassNormalHandle;
 
     // rgb = incident bounced radiance, a = sky visibility, at full resolution: the lit pass samples it as it is.
-    // (A fractional scale and a bilateral resolve back to full size were removed: full was already the default, the
-    // resolve cost 1.4-1.6 ms isolated, and at full scale its rounding mixed neighbours across edges.)
     private GraphResourceHandle incidentHandle;
+    // Clears the full-size targets to zero while RTGI's readout is not ready: the lit pass reads no indirect light then.
     private PassHandle incidentPassHandle;
     // The incident light's luminance gradient with the normal: how the lit pass carries light evaluated at the
-    // geometric normal to its normal-mapped one (incident_clipmap.frag).
+    // geometric normal to its normal-mapped one (rtgi_readout.frag).
     private GraphResourceHandle incidentGradientHandle;
-    // RenderSettings.HalfResLighting: the same pass into half-size targets, and lighting-upsample bringing them (and the
-    // half-res traced shadow mask) back to incidentHandle / incidentGradientHandle, the sun's visibility in the
-    // gradient's w. A frame records one path or the other; the lit pass reads the full-size targets either way.
+    // RTGI's readout into half-size targets, and lighting-upsample bringing them (and the half-res traced shadow mask)
+    // back to incidentHandle / incidentGradientHandle, the sun's visibility in the gradient's w.
     private GraphResourceHandle incidentHalfHandle, incidentGradientHalfHandle;
-    private PassHandle incidentHalfPassHandle, lightingUpsamplePassHandle;
-    private PipelineHandle incidentHalfPipeline, lightingUpsamplePipeline;
-    // incident_lean.frag's (no reference view): SponzaLoop.Clipmap.cs picks them.
-    private PipelineHandle incidentLeanPipeline, incidentHalfLeanPipeline;
+    private PassHandle lightingUpsamplePassHandle;
+    private PipelineHandle lightingUpsamplePipeline;
     private ShaderInterface lightingUpsampleInterface = null!;
     // Which of its 2x2 a half-res pixel stands for this frame (LightingSubpixel), all four every four frames.
     private uint lightingFrame;
@@ -300,7 +296,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private Vector3 sceneBoundsMin;
     private Vector3 sceneBoundsSpan;
 
-    // The standard path takes the clipmap's sky visibility and light in the lit pass. --no-sky disables both.
+    // The standard path takes RTGI's sky visibility and light in the lit pass. --no-sky disables both.
     private bool skyVisibilityEnabled;
 
     // The sheen half of the probe. Zero mips means the probe predates .blixprobe v4 and the shader
@@ -474,14 +470,12 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private float vizChannel;
 
     /// <summary>What each viz channel shows, in the order lit.frag tests them.</summary>
-    private static readonly string[] ClipmapAnswerNames =
-        { "Blended (normal)", "Level 0 alone (0.5 m)", "Level 1 alone (1 m)", "Level 2 alone (2 m)", "Level 3 alone (4 m)" };
-
     private static readonly string[] VizChannelNames =
     {
         "Lit scene", "Geometric normal", "Shading normal", "Tangent-space normal",
         "Front/back facing", "Tangent", "Bitangent", "Sky visibility",
-        // 8, 9 and 16 read the retired baked volume and show black. Kept as names because the index is the channel id.
+        // 8, 9 and 16 read the retired baked volume, 23 and 24 the retired probe clipmap, and show black. Kept as names
+        // because the index is the channel id.
         "unused", "unused",
         "Bounce radiance (raw)", "Bounce contribution", "Direct sun only",
         "GTAO visibility", "Texture AO", "Occlusion product",
@@ -490,8 +484,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
         "Ambient: transmitted", "Ambient: bounce",
         "Albedo (as shaded: texture, factor, vertex colour)",
         "Pre-pass normal (what the incident field reads)",
-        "Clipmap: solves behind the light (red 1, orange 2-3, yellow 4-7, green 8-31, blue 32+)",
-        "Clipmap: answering level (white 0, green 1, blue 2, magenta 3)",
+        "unused", "unused",
     };
 
     // --ao-fullres: run ambient visibility at framebuffer resolution instead of half. Half res is
@@ -500,10 +493,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // with its neighbours. This exists to find out whether fold detail is lost to RESOLUTION rather
     // than to the search radius.
     private float aoScale = 0.5f;
-
-    // Standard path: the probe clipmap's light reaches the lit pass through the full-resolution incident field.
-    // --no-incident is a diagnostic: the lit pass then uses the open-sky irradiance cube with sky visibility 1.
-    private bool incidentField = true;
 
     // How the lit pass carries the incident field's light to its normal-mapped normal (frame.uIncidentGradient).
     // --incident-normal-bias B: mips down the normal map is read for the gradient; --incident-gradient-clamp C: the
@@ -599,13 +588,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private float shadowLodTexels = 1.5f;
     /// <summary>The camera frustum for this frame; the cascades cull their casters against it.</summary>
     private Frustum cameraFrustumThisFrame;
-    // Where the probes' hits may take the sun from the cascades (Shaders/cascade_receivers.glsl): nowhere (every point to
-    // w 0), so every hit takes its sun by a ray. The cascades hold only the casters the camera's view culled them to and
-    // filter hard at 2-20 cm a texel: Sponza's authored-sun bake read 9.6% brighter with them than with a ray at every hit
-    // (2026-10-12).
-    private static Matrix4x4 CascadeReceivers => default;
-    /// <summary>--probe-reference: path-trace references on the CPU and print them beside the clipmap's answers.</summary>
-    private bool probeReference;
     /// <summary>--no-foliage: skip the ivy and tree packs, to price alpha-cutout overdraw.</summary>
     private bool noFoliage;
     private int refBounces = 3;
@@ -803,10 +785,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
         TextureHandle TransmissionColorTexture = default,
         // --cloth-transmission's curtains (ClothTransmission): their light through is the albedo's hue, capped at what
         // the lit face reflects (lit.frag, RtRowTransmit); an authored material's is its own colour, uncapped.
-        bool Cloth = false,
-        // KHR_materials_unlit: the camera sees its base colour, unshaded (lit.frag; the reference's camera paths alike,
-        // ReferenceUnlit). Light reaching it still reflects off it as off any surface in the GI and the reference.
-        bool Unlit = false);
+        bool Cloth = false);
 
     /// <summary>One placement of a unique primitive: which drawable, its row in the transform table, and its world AABB.</summary>
     /// <remarks>
@@ -1071,8 +1050,6 @@ internal sealed class FogSettings
     [Tune(0f, 0.5f)]    public float Density = 0.018f; // extinction coefficient, per metre
     [Tune(0f, 1f)]      public float Scatter = 0.6f;   // scattering albedo: the share of extinction that scatters
     [Tune(-0.9f, 0.9f)] public float PhaseG = 0.6f;    // Henyey-Greenstein anisotropy
-    // Fallback ambient in-scatter when neither sky visibility nor incident-light data is available.
-    [Tune(0f, 0.2f)]    public float Ambient = 0.005f;
     [Tune(10f, 150f)]   public float Far = 60f;        // grid far distance (metres)
     // Height in metres over which density falls by e, measured from the volume floor.
     [Tune(2f, 100f)]    public float HeightFalloff = 14f;
@@ -1107,7 +1084,7 @@ internal sealed class ShadowsSettings
 {
     [Tune]            public bool Enabled = true;
     [Tune(10f, 120f)] public float SunDistance = 40f;
-    // --rt-shadows: the sun's angular diameter the traced shadows see, in degrees (the real sun's is 0.53). Each frame
+    // The sun's angular diameter the traced shadows see, in degrees (the real sun's is 0.53). Each frame
     // the rays aim at another point of the disc and TAA averages them: a penumbra that widens with the distance from
     // the occluder, hard at contact. 0: a point sun, every shadow hard -- the default since 2026-10-21, for a while:
     // with the penumbra filter, shadow interleave and TAA off, a point sun gives a reproducibly correct image, and the
@@ -1118,7 +1095,7 @@ internal sealed class ShadowsSettings
     // toward its own point of the disc, a different one each frame, and TAA averages them (noisy, incoherent rays).
     // Off by default (2026-10-21; a point sun needs none). --penumbra-filter: on.
     [Tune]            public bool PenumbraFilter = false;
-    // --rt-shadows: a quarter of the pixels traced a frame, one of each 2x2 in turn (rt_shadow_fill.comp fills the
+    // The traced shadows: a quarter of the pixels traced a frame, one of each 2x2 in turn (rt_shadow_fill.comp fills the
     // rest from last frame's mask, reprojected, or this frame's neighbours). Off: every pixel every frame -- the default
     // (2026-10-21: no frame's shadow from another's). --rt-shadow-interleave: on.
     [Tune]            public bool Interleave = false;
@@ -1156,18 +1133,14 @@ internal sealed class RenderSettings
     // 1.5 ms, while 2 -> 4 px saved another 17% for only 0.56 ms. Use the exact LOD census when
     // retuning rather than relying on noisy frame time alone.
     [Tune(0f, 8f)]     public float LodErrorPixels = 2.0f;
-    // The incident light and the traced sun shadows at half resolution, each half-res pixel standing for one of its
-    // 2x2 (a different one each frame with TAA, gathering all four; without, the same one), brought back to full
-    // resolution along the depth and normals (lighting_upsample.frag). On by default since 2026-10-24 (the user's, with
-    // HalfResShadows): moving through Crytek Sponza 60 -> ~78 fps and steady, its 40-50 ms frames gone. --full-res-lighting:
-    // the incident light at full resolution, 4x its cost, no upsample guessing across edges.
-    [Tune]             public bool HalfResLighting = true;
     // The scene's resolution as a fraction of the window's, per axis (RenderGraph.RenderScale): every scene pass renders
     // at it, TAA resolves at it, and the present pass scales the result up to the window. --render-scale S. 1 by default
     // (the user's, 2026-10-22: the image judged at full resolution, as the gate runs; 0.75 was the 2026-10-20 baseline,
     // the tree view 21.5 -> 28.5 fps).
     [Tune(0.5f, 1f)]   public float RenderScale = 1f;
-    // The traced sun shadows at half resolution too (only with HalfResLighting: the upsample brings the mask back). Off by
+    // The traced sun shadows at half resolution, as RTGI's readout always is, each half-res pixel standing for one of its
+    // 2x2 (a different one each frame with TAA, gathering all four; without, the same one), brought back to full
+    // resolution along the depth and normals with the incident light (lighting_upsample.frag). Off by
     // default again since 2026-10-27 (the user's: full-resolution shadows); on 2026-10-24-27, for the trace growing with
     // the sunlit pixels, 7.5-18 ms a frame close to a sunlit wall at full resolution, 0.6-1.8 at half -- at the cost of
     // blocky patches the upsample could not hide, worst on cloth. Cloth's shadows stair-step at either (to come).

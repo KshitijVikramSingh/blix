@@ -6,7 +6,7 @@ using Blix.Graphics.MetalHWX;
 
 namespace Blix.Demos.VulkanSponza;
 
-// --rtgi (S1 of the GI redesign, 2026-10-25): indirect light from a world radiance cache, no cook. A spatial hash of world
+// RTGI (S1 of the GI redesign, 2026-10-25), the scene's only GI: indirect light from a world radiance cache, no cook. A spatial hash of world
 // cells (rtgi_cache.glsl: a cube at a level the distance from the camera picks, and the side the surface faces) holds
 // each cell's indirect irradiance, sky visibility and sun visibility. Each frame:
 //
@@ -18,12 +18,13 @@ namespace Blix.Demos.VulkanSponza;
 //                 --rtgi-hits where last frame's rays landed, so the cells a bounce away train too -- a path grows a
 //                 vertex a frame through the cache; a cosine ray and a sun ray each, to Metal in the traced shadows' group
 //   rtgi-readout  the cache at each half-res pixel (rtgi_readout.frag, bilinear over its level's cells) into the incident
-//                 targets, in place of incident-light-half: the upsample and the lit pass read it unchanged
+//                 targets: the upsample brings it to the full-size ones the lit pass reads
 //
-// The answers arrive a frame later (the group runs beside the frame); the readout reads what the cache holds now.
+// The answers arrive a frame later (the group runs beside the frame); the readout reads what the cache holds now. The
+// rays are the Metal tracer's (the traced shadows', SponzaLoop.RtShadows.cs): without it -- before it is built, or a
+// run where it failed -- there is no cache, and the frame has no indirect light.
 internal sealed partial class SponzaLoop
 {
-    private bool rtgi;
     // 4 M slots (272 MB): San Miguel held 1.8-3.6 M cells (87% of 4 M at the old 1 cm per metre growth, its landings then
     // failing to find a slot).
     // --rtgi-tiles / --rtgi-hits: 292,000 visible points and 128,000 from last frame's hits a frame (4x the 73,000 / 32,000
@@ -126,8 +127,6 @@ internal sealed partial class SponzaLoop
     // A point's cosine direction from its cell's own low-discrepancy sequence (rtgi_rays.comp): Cornell's noise left at 60
     // frames 1.45% against 1.66%, error 0.022 against 0.024; Crytek Sponza alike (2026-10-26). --rtgi-no-blue: hashed.
     private bool rtgiBlue = true;
-    // --rtgi-clipmap-every N: the probe clipmap solved one frame in N under RTGI (SponzaLoop.Clipmap.cs).
-    private int rtgiClipmapEvery = 8;
     // A point whose cell's sun visibility is settled traces its sun 1 in 8 (rtgi_rays.comp). --rtgi-every-sun: always.
     private bool rtgiSettledSun = true;
     private GpuBufferHandle rtgiSeq;
@@ -301,7 +300,6 @@ internal sealed partial class SponzaLoop
 
     private void ParseRtgi(Blix.Core.AppArgs args)
     {
-        rtgi = args.Flag("rtgi");
         ParseRtgiBudget(args);
         ParseRtgiCapture(args);
         ParseScreenRest(args);
@@ -344,7 +342,6 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-block-global") is { } bg) rtgiBlockGlobal = Math.Clamp(bg, 0f, 1f);
         if (args.Float("rtgi-block-window") is { } bw) rtgiBlockWindow = MathF.Max(1f, MathF.Round(bw));
         if (args.Flag("rtgi-no-blue")) rtgiBlue = false;
-        if (args.Int("rtgi-clipmap-every") is { } cme) rtgiClipmapEvery = Math.Max(1, cme);
         if (args.Float("rtgi-blur") is { } bl) rtgiBlur = MathF.Max(0f, bl);
         if (args.Float("rtgi-blur-hit") is { } bh) rtgiBlurHit = MathF.Max(0f, bh);
         if (args.Flag("rtgi-every-sun")) rtgiSettledSun = false;
@@ -390,8 +387,6 @@ internal sealed partial class SponzaLoop
         if (args.String("rtgi-dump") is { } dump) rtgiDumpDir = dump;
         if (args.String("rtgi-dump-frames") is { } frames)
             rtgiDumpFrames = new SortedSet<int>(frames.Split(',').Select(f => int.Parse(f, CultureInfo.InvariantCulture)));
-        // The cache traces its own occlusion, and the Metal tracer answers its rays: the traced shadows build it.
-        if (rtgi) rtShadows = true;
     }
 
     // Setup: the compute passes before the traced shadows' group that takes their batches.
@@ -422,7 +417,7 @@ internal sealed partial class SponzaLoop
         DeclareRtgiVolumeRaysPass(reflect);
     }
 
-    // Setup: the readout into the half-res incident targets, beside incident-light-half (a frame records one of them).
+    // Setup: the readout into the half-res incident targets.
     private void DeclareRtgiReadoutPass(Func<string, string, ShaderInterface> reflect)
     {
         rtgiReadoutInterface = reflect("present.vert", "rtgi_readout.frag");
@@ -495,7 +490,7 @@ internal sealed partial class SponzaLoop
     private void RecordRtgi(int width, int height)
     {
         rtgiHalfRow = HalfLightingSize(width, height).Width;
-        if (!rtgi || frameTracer is not { } tracer) return;
+        if (frameTracer is not { } tracer) return;
         // This frame's spend (SponzaLoop.RtgiBudget.cs; the most without --rtgi-budget); the buffers are sized for the most.
         var lastTotal = rtgiLastPointTotal;
         var n = rtgiTilesNow + rtgiHitsNow;
@@ -555,7 +550,7 @@ internal sealed partial class SponzaLoop
         var frameNumber = rtgiFrameCount + 1u;
         // On the bench (SponzaLoop.RtgiBench.cs) the training dispatched N times, the rest of the cache's frame skipped.
         var trainReps = RtgiTrainReps();
-        // --rtgi-volume: its cook's rays (placement time) and their fold into the probes (with the training), this frame's
+        // The world volume: its cook's rays (placement time) and their fold into the probes (with the training), this frame's
         // both; the cells' visibility and the near field's cook.
         if (!rtgiBenching)
         {
@@ -947,7 +942,7 @@ internal sealed partial class SponzaLoop
         Console.WriteLine($"[VulkanSponza] rtgi dump at frame {postLoadFrames}: {dir}");
     }
 
-    private bool RtgiReadoutReady => rtgi && !rtgiKeys.Equals(default(GpuBufferHandle));
+    private bool RtgiReadoutReady => !rtgiKeys.Equals(default(GpuBufferHandle));
 
     // A full-res pixel's footprint per metre of distance, as the readout sizes the blur's radius and the blur its plane
     // tolerance (uUnsure.w, uBlur.w): doubled. Both were tuned by eye at render scale 1 on a Retina display when this came

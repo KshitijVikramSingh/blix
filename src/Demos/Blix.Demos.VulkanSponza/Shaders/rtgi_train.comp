@@ -4,7 +4,7 @@
 #extension GL_KHR_shader_subgroup_ballot : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
 
-// --rtgi (S1, SponzaLoop.Rtgi.cs): last frame's training points, their rays answered, into the cache. Per point p (normal n):
+// RTGI (S1, SponzaLoop.Rtgi.cs): last frame's training points, their rays answered, into the cache. Per point p (normal n):
 //   indirect  E = PI * L_in along its cosine ray: the sky's radiance where it missed; where it met a surface's front at q,
 //             albedo_q * (E_ind(q) + E_sun * max(0, n_q.s) * sunVis(q)) -- q's outgoing radiance times PI, from q's cell
 //             (a coarser level where q's own has nothing yet; no sample at all where neither has, rather than a dark
@@ -44,7 +44,7 @@ layout(set = 0, binding = 0) uniform RtgiTrain {
                          // subgroup's rounds, 16384 each lane's own atomics
     vec4 uCapture;       // --rtgi-capture (SponzaLoop.RtgiCapture.cs): x the pinned points (the first x); y this frame's slot; z the
                          // slots (frames); 0 x: none
-    vec4 uVolume;        // --rtgi-volume: rtgi_volume.glsl's VOL_PARAMS (w 0: off)
+    vec4 uVolume;        // the world volume: rtgi_volume.glsl's VOL_PARAMS (w 0: off)
     vec4 uVolumeGeom;    // rtgi_volume.glsl's VOL_GEOM (the cells sized by the geometry)
     vec4 uNearCook;      // rtgi_nearcook.glsl's NEAR_PARAMS (the cells' regions)
 } u;
@@ -84,7 +84,7 @@ layout(std430, set = 0, binding = 18) buffer RtgiStats { uint rtgiStats[64]; };
 // The readout's record (rtgi_cache.glsl; the blend's light, the resolve's samples held and sun epoch): a hit's cell read
 // in one 32-byte line (irradianceAt).
 layout(std430, set = 0, binding = 19) readonly buffer RtgiRecord { uvec4 rtgiRecord[]; };
-// --rtgi-volume (rtgi_volume.glsl): the probes whose cooked distances size the cells (volCellScale).
+// RTGI's world volume (rtgi_volume.glsl): the probes whose cooked distances size the cells (volCellScale).
 layout(std430, set = 0, binding = 21) readonly buffer RtgiVolumeTable { uvec2 volTable[]; };
 layout(std430, set = 0, binding = 22) readonly buffer RtgiVolumeProbes { float volProbes[]; };
 #define VOL_PARAMS u.uVolume

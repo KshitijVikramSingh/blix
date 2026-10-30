@@ -1,6 +1,6 @@
 #version 450
-// The gate's points path-traced on the GPU (--gpu-reference, SponzaLoop.GpuReference.cs): the surface points the CPU
-// reference picks (SponzaLoop.ProbeReference, WriteSurfaceReference: a grid of camera pixels off depth edges), each
+// The gate's points path-traced on the GPU (--gpu-reference, SponzaLoop.GpuReference.cs): the surface points
+// PickGpuReferencePoints picks (a grid of camera pixels off depth edges), each
 // accumulating paths over the frames before the shot. One workgroup a point, 64 threads, uParams.z paths a thread a
 // dispatch; the path is reference_path.glsl's, the reference view's own. Each point's sum of pi x radiance and its count
 // add up in ReferencePointAccum.

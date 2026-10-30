@@ -102,22 +102,6 @@ internal sealed partial class SponzaLoop
             device.VsyncEnabled = debug.Controls.Toggle("Vsync", device.VsyncEnabled);
             // Visualization channels are named here and share the shader's stable integer IDs.
             vizChannel = debug.Controls.Enum("Show", (int)MathF.Round(vizChannel), VizChannelNames);
-            // Toggle the incident field under a still camera: off, the lit pass uses the open-sky cube
-            // with no clipmap light, the diagnostic --no-incident is.
-            incidentField = debug.Controls.Toggle("Incident field (off: open sky cube)", incidentField);
-        }
-
-        // The clipmap's levels, live (stage 4g-v): answer from one level alone or the blend, and the knobs the level
-        // probe measured. Each level alone shows what a surface's light does when it crosses into that level.
-        if (clipmap is not null)
-        {
-            using (debug.Scope("GI levels"))
-            {
-                forceLevel = debug.Controls.Enum("Answer from", forceLevel + 1, ClipmapAnswerNames) - 1;
-                clipmapBlendOverride = debug.Controls.Float("Blend band (probes)", ClipmapBlend, 0f, 7f);
-                clipmapLift = debug.Controls.Float("Lookup lift (m, 0: quarter spacing)", clipmapLift, 0f, 2f);
-                clipmapVisibilityPower = debug.Controls.Float("Visibility power (0: 3)", clipmapVisibilityPower, 0f, 16f);
-            }
         }
 
         // Spatial gizmos: sun direction + the three cascade ortho boxes.

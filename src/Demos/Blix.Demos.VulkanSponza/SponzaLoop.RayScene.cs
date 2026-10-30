@@ -10,7 +10,7 @@ namespace Blix.Demos.VulkanSponza;
 
 // The scene under CPU ray-query hierarchies (Blix.Geometry), built at load over every primitive's full-detail
 // triangles: regions over the placements of meshes used once, an instance per placement of a mesh used more. Always
-// built: the clipmap traces it. Stage 3's measure of whether a load-time build fits these scenes, and what a CPU ray costs in them.
+// built: RTGI's volume and the frame's traced passes are built from it. Stage 3's measure of whether a load-time build fits these scenes, and what a CPU ray costs in them.
 internal sealed partial class SponzaLoop
 {
     private RayQueryScene? rayQueries;
@@ -30,8 +30,6 @@ internal sealed partial class SponzaLoop
     private readonly List<float> rayPlacementTransmissionFactor = new();
     // Per placement: --cloth-transmission's curtains (DrawableStaging.Cloth).
     private readonly List<bool> rayPlacementCloth = new();
-    // Per placement: KHR_materials_unlit (DrawableStaging.Unlit).
-    private readonly List<bool> rayPlacementUnlit = new();
     // Per placement: its primitive's name (the leak census names what a leak passed).
     private readonly List<string> rayPlacementNames = new();
     private RayQueryGpuData? rayGpuData;
@@ -121,7 +119,7 @@ internal sealed partial class SponzaLoop
     }
 
     // The ray scene's build and its packing for the GPU, in the background (TryFinishLoad waits on the task, the window
-    // going on); FinishRayScene, on the frame thread, uploads it and makes the clipmap.
+    // going on); FinishRayScene, on the frame thread, uploads it and starts RTGI's volume.
     private Task<(RayQueryScene Scene, RayQueryGpuData? Data, double BuildMs, int Meshes, int Placements)>? rayBuildTask;
 
     private void StartRayScene(RayMesh[] meshes, List<RayQueryScene.Instance> instances)
@@ -190,9 +188,8 @@ internal sealed partial class SponzaLoop
         var nodes = rayQueries.MeshNodeCount;
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] ray scene: {placements:N0} placements of {meshCount:N0} meshes as {rayQueries.RegionCount:N0} regions (at most {rayRegionTriangles:N0} triangles) and {rayQueries.InstanceEntryCount:N0} instances, {rayQueries.StoredTriangleCount:N0} triangles stored, built in {buildMs:0} ms on {Environment.ProcessorCount} threads in the background; {nodes:N0} nodes ({nodes * BvhNode.SizeInBytes / 1048576.0:0.0} MB), top level {rayQueries.Nodes.Length:N0}."));
-        // The GPU scene and the clipmap are the diffuse GI, so both are built whenever there is a scene.
+        // The GPU scene and RTGI's volume are the diffuse GI's, so both are built whenever there is a scene.
         if (data is not null) BuildRayGpu(data);
-        if (placements > 0) CreateClipmap();
         if (placements > 0) StartRtgiVolumeBuild(scene);
         if (rayCheck && placements > 0) BuildRayCheck();
     }
@@ -224,7 +221,7 @@ internal sealed partial class SponzaLoop
     // The top-level entry the probe's placement is: it must be an instance, since a region's triangles are renumbered.
     private int rayProbeEntry = -1;
 
-    // The ray scene on the GPU, for whatever traces it (the check, the view, the traced injection): the packed
+    // The ray scene on the GPU, for whatever traces it (the check, the view, the references): the packed
     // blocks, and the surface bake's inputs.
     private ShaderBufferBinding[] rayBlockBuffers = Array.Empty<ShaderBufferBinding>();
 
@@ -235,7 +232,7 @@ internal sealed partial class SponzaLoop
     private bool rayTraversalDropped;
     // --keep-ray-nodes: the nodes uploaded whatever traces (the A/B).
     private bool keepRayNodes;
-    private bool SoftwareTraversalNeeded => keepRayNodes || !FrameRaysOnHardware || clipmapInline || clipmapExactVisibility || incidentExactVisibility
+    private bool SoftwareTraversalNeeded => keepRayNodes || !FrameRaysOnHardware
         || rayView || rayCheck || gpuReference || referenceMonolithic || referenceView;
 
     private void BuildRayGpu(RayQueryGpuData data)
@@ -422,7 +419,7 @@ internal sealed partial class SponzaLoop
     private int raySurfaceBakeFrame = -1, raySurfaceBakeTries;
     private bool raySurfacesChecked;
     // What everything that reads the surfaces waits for: baked, and read back to have been (the frame tracer's coverage,
-    // the references, RTGI and the clipmap).
+    // the references and RTGI).
     private bool RaySurfacesReady => raySurfacesChecked;
 
     private void RecordRaySurfaceBake()

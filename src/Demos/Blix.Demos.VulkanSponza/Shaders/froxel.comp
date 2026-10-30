@@ -5,7 +5,7 @@
 // The grid is a view-aligned 3D texture: (x,y) = screen tiles, z = distance
 // slices from the camera out to uCamPos.w (fog far). One thread owns a screen
 // column (x,y) and marches z front-to-back, accumulating in-scattering
-// (shadow-aware sun, plus the scene's own indirect light) and Beer-Lambert
+// (shadow-aware sun, plus the sky) and Beer-Lambert
 // transmittance. Each slice stores the *integrated* result up to that distance,
 // so the lit pass samples one trilinear texel per fragment:
 //     litColor = litColor * fog.a + fog.rgb
@@ -14,10 +14,9 @@
 // scene renders with), so the Vulkan clip-space Y flip is handled for free and
 // the grid aligns with gl_FragCoord in the lit shader.
 //
-// Ambient in-scatter comes from the same field as surfaces: the probe clipmap, which carries all the
-// indirect light arriving at a point, sky included. The fallback constant applies only when the
-// clipmap is unavailable. Medium density falls from the volume floor and varies over a slowly
-// drifting noise field so both extinction and scattering have spatial structure.
+// Ambient in-scatter is the open sky's mean radiance, unoccluded: the medium does not read RTGI's light,
+// which lives on surfaces. Medium density falls from the volume floor and varies over a slowly drifting
+// noise field so both extinction and scattering have spatial structure.
 //
 // Deliberate simplification: shadow lookup is one cascade texel per froxel rather than filtered
 // PCF. Cascade selection still uses the shared fitted-volume lookup.
@@ -35,15 +34,8 @@ layout(set = 0, binding = 0) uniform Froxel {
     vec4 uCamForward;    // xyz camera forward, w = extinction coefficient (density)
     vec4 uSunDir;        // xyz direction into scene, w = sun intensity
     vec4 uSunColor;      // rgb sun colour, w = scattering albedo
-    vec4 uFogParams;     // x = phase g, y = ambient fallback, z = indirect available (0/1), w = time
+    vec4 uFogParams;     // x = phase g, w = time (y, z unread)
     vec4 uBoundsMin;     // y the ground the height falloff starts from
-    // The probe clipmap the medium is lit by (as incident_clipmap.frag reads it).
-    vec4 uClipDims;      // xyz probes per level, w base spacing
-    vec4 uClipParams;    // x blend band (probes)
-    vec4 uOrigin0;
-    vec4 uOrigin1;
-    vec4 uOrigin2;
-    vec4 uOrigin3;
     vec4 uMedium;        // x = height scale (m), y = noise amount 0..1
     vec4 uTemporal;      // x = history weight, y = slice jitter, z = visualize rejection
     mat4 uPrevViewProj;  // last frame's camera, for reprojecting the medium
@@ -53,21 +45,11 @@ layout(set = 0, binding = 0) uniform Froxel {
 layout(set = 0, binding = 1, rgba16f) uniform writeonly image3D uGrid;
 layout(set = 0, binding = 2) uniform sampler2D uCascadeShadowMaps[3];
 layout(set = 0, binding = 4) uniform samplerCube uIrradiance;
-// The clipmap: all the indirect light arriving at a point, sky included (what the surfaces are lit by too).
-layout(set = 0, binding = 5) uniform sampler2D  uClipmapIrradiance;
-layout(set = 0, binding = 6) uniform sampler2D  uClipmapDepth;
-layout(std430, set = 0, binding = 3) readonly buffer ClipmapState { uvec4 states[]; };
 // Reproject local medium state, not the camera-relative integral. RGB stores in-scattered radiance
 // and alpha stores extinction before front-to-back integration; after blending, uGrid receives the
 // newly integrated result for the current camera.
 layout(set = 0, binding = 7) uniform sampler3D uScatterPrev;
 layout(set = 0, binding = 8, rgba16f) uniform writeonly image3D uScatter;
-#define BLIX_CLIPMAP_IRRADIANCE(t) texelFetch(uClipmapIrradiance, t, 0)
-#define BLIX_CLIPMAP_DEPTH(t) texelFetch(uClipmapDepth, t, 0)
-#define BLIX_CLIPMAP_IRRADIANCE_FILTERED(p) textureLod(uClipmapIrradiance, (p) / vec2(textureSize(uClipmapIrradiance, 0)), 0.0)
-#define BLIX_CLIPMAP_DEPTH_FILTERED(p) textureLod(uClipmapDepth, (p) / vec2(textureSize(uClipmapDepth, 0)), 0.0)
-#define BLIX_CLIPMAP_STATE(s) states[s]
-#include "probe_clipmap.glsl"
 
 const float PI = 3.14159265359;
 
@@ -76,12 +58,6 @@ const float PI = 3.14159265359;
 // the range does, and the drift is slow enough to read as air rather than as an animation.
 const float NOISE_FEATURES = 8.0;      // features across the fog's range
 const vec3  NOISE_DRIFT = vec3(0.4, 0.05, 0.25);   // metres/second
-
-// How many slices share one probe-volume lookup. The probe field is low-frequency by
-// construction — that premise is what a probe volume IS — so resampling it every slice pays for
-// resolution the data does not have. Eight probes and their visibility test per froxel is the
-// single most expensive thing in this loop.
-const int PROBE_STRIDE = 4;
 
 // Henyey-Greenstein phase function (g>0 forward-scatters toward the sun).
 float phaseHG(float cosT, float g)
@@ -114,7 +90,6 @@ void main()
     float fogFar    = f.uCamPos.w;
     vec3  camPos    = f.uCamPos.xyz;
     float g         = f.uFogParams.x;
-    bool  giOn      = f.uFogParams.z > 0.5;
     vec3  sunInto   = normalize(f.uSunDir.xyz);
 
     // Extinction controls energy removed from the ray; scattering albedo selects the share returned
@@ -138,27 +113,15 @@ void main()
     // environment does not vary along a ray — only the fraction of it a point can SEE does. The
     // irradiance cube is a cosine convolution of the sky, so E(n)/pi is the mean radiance over the
     // hemisphere about n, and the six axes average to the sphere.
-    vec3 skyRadiance = vec3(0.0);
-    BlixClipmap c;
-    c.dims = ivec3(f.uClipDims.xyz);
-    c.baseSpacing = f.uClipDims.w;
-    c.blendProbes = f.uClipParams.x;
-    c.origin[0] = ivec3(f.uOrigin0.xyz);
-    c.origin[1] = ivec3(f.uOrigin1.xyz);
-    c.origin[2] = ivec3(f.uOrigin2.xyz);
-    c.origin[3] = ivec3(f.uOrigin3.xyz);
-    if (giOn) {
-        skyRadiance = (texture(uIrradiance, vec3( 1.0, 0.0, 0.0)).rgb
-                     + texture(uIrradiance, vec3(-1.0, 0.0, 0.0)).rgb
-                     + texture(uIrradiance, vec3( 0.0, 1.0, 0.0)).rgb
-                     + texture(uIrradiance, vec3( 0.0,-1.0, 0.0)).rgb
-                     + texture(uIrradiance, vec3( 0.0, 0.0, 1.0)).rgb
-                     + texture(uIrradiance, vec3( 0.0, 0.0,-1.0)).rgb) / (6.0 * PI);
-    }
+    vec3 skyRadiance = (texture(uIrradiance, vec3( 1.0, 0.0, 0.0)).rgb
+                      + texture(uIrradiance, vec3(-1.0, 0.0, 0.0)).rgb
+                      + texture(uIrradiance, vec3( 0.0, 1.0, 0.0)).rgb
+                      + texture(uIrradiance, vec3( 0.0,-1.0, 0.0)).rgb
+                      + texture(uIrradiance, vec3( 0.0, 0.0, 1.0)).rgb
+                      + texture(uIrradiance, vec3( 0.0, 0.0,-1.0)).rgb) / (6.0 * PI);
 
     vec3  accum = vec3(0.0);
     float transmittance = 1.0;
-    vec3  bounce = vec3(0.0);       // held between PROBE_STRIDE slices
     float noiseScale = fogFar / NOISE_FEATURES;
     float groundY = f.uBoundsMin.y;
 
@@ -186,21 +149,10 @@ void main()
             f.uCascadeVP[0], f.uCascadeVP[1], f.uCascadeVP[2],
             worldPos, 1.0, fogCascade);
 
-        // In-scattered radiance: the phase function against the sun, plus an isotropic ambient
-        // term. Both are radiances, so both are simply multiplied by sigmaS — for an isotropic
+        // In-scattered radiance: the phase function against the sun, plus the sky as an isotropic
+        // ambient term. Both are radiances, so both are simply multiplied by sigmaS — for an isotropic
         // source the phase integrates to one over the sphere and drops out.
-        vec3 ambientRadiance = vec3(f.uFogParams.y);
-        if (giOn) {
-            if ((z % PROBE_STRIDE) == 0) {
-                // The clipmap's irradiance arriving along the view ray (the direction in-scatter toward the eye
-                // travels), as radiance: everything indirect, the sky that reaches here included. Past its coarsest
-                // level, the open sky.
-                bool found;
-                vec4 field = blix_clipmapSample(c, worldPos, -rayDir, found);
-                bounce = found ? field.rgb / PI : skyRadiance;
-            }
-            ambientRadiance = bounce;
-        }
+        vec3 ambientRadiance = skyRadiance;
 
         vec3 sunLit = f.uSunColor.rgb * f.uSunDir.w * phase * vis;
 

@@ -22,7 +22,7 @@ internal sealed partial class SponzaLoop
 {
     private ShaderInterface batchClosestInterface = null!, batchShadowInterface = null!;
     private PipelineHandle batchClosestPipeline, batchShadowPipeline;
-    // --rt-shadows puts frame rays on Metal too: the traced shadows' premise is that rays answer, and Metal answers fastest.
+    // The traced shadows put frame rays on Metal too: the traced shadows' premise is that rays answer, and Metal answers fastest.
     private bool FrameRaysOnHardware => rayBackend is "hw" or "both" || rtShadows;
 
     /// <summary>One consumer's batch: a compute pass for the software traversal and an external pass for Metal, declared
@@ -52,18 +52,6 @@ internal sealed partial class SponzaLoop
         var shadow = frameTracer.ShadowStatsOf(0);
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] metal tracer, in-frame batches: closest {trace.Dispatches:N0} ({trace.MeanGpuMs:0.000} ms mean, {trace.Failures} failed), shadow batches {shadow.Dispatches:N0} ({shadow.MeanGpuMs:0.000} ms mean, {shadow.Failures} failed)."));
-        if (ClipmapOnWavefront && clipmapWaveRayCount > 1)
-        {
-            // The probes' last shadow batch: how many of its rays went out, and how many met something.
-            device.WaitIdle();
-            var origins = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(clipmapWaveOrigins, 0, clipmapWaveRayCount * 16).AsSpan());
-            var occluded = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(clipmapWaveOccluded, 0, clipmapWaveRayCount * 4).AsSpan());
-            int sent = 0, met = 0;
-            for (var i = 0; i < origins.Length; i++)
-                if (origins[i].W > 0f) { sent++; if ((occluded[i] & 1u) != 0u) met++; }
-            Console.WriteLine(string.Create(Inv,
-                $"[VulkanSponza] clipmap wavefront, last shadow batch: {sent:N0} of {origins.Length:N0} slots sent a sun ray, {(sent > 0 ? 100.0 * met / sent : 0):0.0}% occluded."));
-        }
     }
 
     // The seed travels as its bits in a float (a vec4 uniform): exact, which a float's value would not be past 2^24.

@@ -3,10 +3,11 @@ using Blix.Graphics;
 
 namespace Blix.Demos.VulkanSponza;
 
-// RenderSettings.HalfResLighting (the debug overlay's Render group): the frame's lighting at half resolution.
+// The frame's lighting at half resolution:
 //
-//   rt-shadow-rays        one sun ray per half-res pixel (SponzaLoop.RtShadows), a quarter of the rays
-//   incident-light-half   the incident field per half-res pixel (incident_clipmap.frag), or RTGI's readout
+//   rtgi-readout          RTGI's light per half-res pixel (SponzaLoop.Rtgi.cs), always
+//   rt-shadow-rays        one sun ray per half-res pixel (SponzaLoop.RtShadows), a quarter of the rays, with
+//                         RenderSettings.HalfResShadows (the debug overlay's Render group)
 //   lighting-upsample     both back to full resolution along the depth and normals (lighting_upsample.frag), into the
 //                         targets the lit pass reads, the sun's visibility in the gradient's w
 //
@@ -55,7 +56,7 @@ internal sealed partial class SponzaLoop
                 new("uInvProjection", new Matrix4x4Uniform(invProjection)),
                 new("uInvView", new Matrix4x4Uniform(invView)),
                 new("uHalf", new Vector4Uniform(new Vector4(halfShadowsNow ? 1f : 0f, sub.X, sub.Y, SunDiscTangent))),
-                new("uPixel", new Vector4Uniform(new Vector4(pixelAngle, raw && rtgi ? 1f : 0f, 0f, 0f))),
+                new("uPixel", new Vector4Uniform(new Vector4(pixelAngle, raw ? 1f : 0f, 0f, 0f))),
             },
             buffers: new[] { new ShaderBufferBinding("RtShadowMask", mask) }));
     }

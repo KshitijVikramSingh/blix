@@ -17,9 +17,9 @@ namespace Blix.Demos.VulkanSponza;
 // (GPU buffers take no host writes after creation, and a dispatch is ordered after every earlier read of what it
 // binds), on the CPU path into this frame slot's set 3. Bounds cover the whole swing, so culling needs no update.
 // The ray scene moves with it: its rows are dynamic placements whose reach is the swing (RayQueryScene.Instance.Reach),
-// moved in the CPU scene and rewritten in the GPU's instance rows by mover_rays.comp, so probes and the clipmap trace
-// the curtain where it is drawn. (Left at rest, a probe on the swung curtain traced into its own resting copy: the
-// moving curtain's probes read 0.0042 mean radiance against 0.0109 held still, 0.0007 swung toward the wall.)
+// moved in the CPU scene and rewritten in the GPU's instance rows by mover_rays.comp, so the GI's rays trace the curtain
+// where it is drawn. (Left at rest, a probe on the swung curtain traced into its own resting copy: the moving curtain's
+// probes read 0.0042 mean radiance against 0.0109 held still, 0.0007 swung toward the wall.)
 internal sealed partial class SponzaLoop
 {
     // Rows per mover.comp dispatch (its uniform arrays); an instance with more takes several.

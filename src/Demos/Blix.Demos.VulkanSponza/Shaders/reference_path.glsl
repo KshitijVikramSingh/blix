@@ -3,7 +3,7 @@
 // so a hardware backend beneath it speeds both alike.
 //
 // A path from a surface point: cosine-sampled bounces, each hit lit by the sun through a shadow ray and re-radiated in
-// its albedo; an escape brings the sky. `bounces` counts as the CPU reference (WriteSurfaceReference) has always counted
+// its albedo; an escape brings the sky. `bounces` counts as the retired CPU reference always counted
 // it, which the GI gate's history was measured with: the sun at hits 1 to bounces + 1, the sky escaping after up to
 // bounces + 1 hits (an earlier copy here stopped one short of both, and read ~4% low on the Cornell box). The sky is
 // the includer's uSkyRadiance (the sun-free environment blurred a mip, as the texels' rays take it). Returns the radiance arriving along the first direction: irradiance is

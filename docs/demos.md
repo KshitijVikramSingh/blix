@@ -186,14 +186,14 @@ Source: `src/Demos/Blix.Demos.VulkanSponza/`
 Vulkan Sponza is the heavy-scene rendering and measurement application, not the
 getting-started renderer. It combines cooked multi-pack assets, deferred work,
 bundled geometry, indirect submission, SSE LOD, cascade culling, a depth/normal
-pre-pass, Hi-Z, GTAO, probe-based indirect light, an incident-light field, TAA,
+pre-pass, Hi-Z, GTAO, ray-traced indirect light (RTGI), an incident-light field, TAA,
 temporal froxel fog, extended material work, and extensive A/B and capture
 instrumentation.
 
 The graph and research ownership are documented in
 [Renderer](renderer.md#vulkan-sponza-research-renderer). The detailed command
 surface remains application-owned and evolves with the experiments. Common
-families include `--ab`, `--viz`, `--tune`, `--shot`, `--probe-reference`, LOD
+families include `--ab`, `--viz`, `--tune`, `--shot`, `--gpu-reference`, LOD
 controls, shadow controls, and feature toggles.
 
 Sponza assets are not committed. `BLIX_SPONZA_ASSETS` names the cooked pack set

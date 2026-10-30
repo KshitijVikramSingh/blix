@@ -347,7 +347,6 @@ defines after `#version`, and `#line` mappings for useful compiler errors.
 | `fullscreen.glsl` | Fullscreen-triangle vertex synthesis |
 | `bloom.glsl` | Bright extraction and separable Gaussian blur |
 | `froxel.glsl` | Shared froxel addressing and integration helpers |
-| `probe_clipmap.glsl`, `octahedral.glsl` | Probe-clipmap and directional-field sampling |
 | `sheen.glsl`, `coverage.glsl`, `noise.glsl` | Material sheen, coverage shaping, and stochastic helpers |
 
 Application shaders stay with the application. A helper should graduate into
@@ -416,11 +415,12 @@ graph is approximately:
 
 ```text
 three shadow cascades
-    -> sky/probe compute work and froxel fog
+    -> froxel fog
     -> depth + normal pre-pass and MSAA resolves
     -> Hi-Z pyramid
     -> GTAO -> temporal/spatial denoise
-    -> half-resolution incident light -> full-resolution resolve
+    -> traced sun shadows and RTGI's rays (Metal), the cache's update
+    -> half-resolution RTGI readout -> full-resolution upsample
     -> HDR lit scene
     -> parity-selected TAA resolve
     -> present and diagnostics
@@ -434,9 +434,10 @@ The exact graph continues to move. The important current research areas are:
 - a depth/normal pre-pass, six-level Hi-Z pyramid, half-resolution GTAO,
   temporal history, bilateral reconstruction, and denoising;
 - baked sky visibility and occupancy/albedo volumes;
-- runtime probe injection, usage marking, sleeping, carry/ping-pong policy,
-  transport, and indirect-light sampling;
-- a half-resolution incident-light field and full-resolution resolve;
+- RTGI, the only GI: a world radiance cache trained by hardware rays, with a
+  cooked world volume and near field sizing and keying its cells;
+- a half-resolution incident-light field (RTGI's readout) and full-resolution
+  upsample;
 - colour TAA and temporally accumulated volumetric froxel fog;
 - extended material work including sheen and diffuse transmission, the latter
   read per material out of the baked albedo grid's alpha rather than from one

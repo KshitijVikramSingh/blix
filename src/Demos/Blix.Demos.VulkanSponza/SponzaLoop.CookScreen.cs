@@ -20,8 +20,8 @@ internal sealed partial class SponzaLoop : IUiSource
     public string UiName => "vulkan-sponza";
 
     // The frame's tracer, with traced shadows (EnsureFrameTracer, built during the cook screen's frames): before it the
-    // frame ran on a fallback sun -- shadows from another direction, then a snap -- and the clipmap, the specular, cloth
-    // and foliage held that light for hundreds of solves after (the user, Crytek Sponza, 2026-10-26).
+    // frame ran on a fallback sun -- shadows from another direction, then a snap -- and the GI of the time, the specular,
+    // cloth and foliage held that light for hundreds of solves after (the user, Crytek Sponza, 2026-10-26).
     private bool TracerPending => rtShadows && frameTracer is null && !frameTracerFailed;
     private bool CookScreenNow => !cookScreenOff && (ReferenceCookingNow || TracerPending);
 

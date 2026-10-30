@@ -135,9 +135,9 @@ internal sealed partial class SponzaLoop
 
     // --ab lod reaches every camera and cascade selection through this. A zero budget is full detail.
     // The lit pass leaves the frame's own sheet glow out (lit_body.glsl, rtSheetGlow) where the scene has sheets the traced
-    // shadows pass through: the texel GI's rule (--sheet-light, on by default), whose gather counted that glow. It held
-    // under --rtgi too, whose rays do not count it, and is kept as it stood: whether RTGI frames should show the frame's
-    // glow on curtains is the user's call.
+    // shadows pass through and the incident field is read: the texel GI's rule, whose gather counted that glow. RTGI's
+    // rays do not count it, and the rule is kept as it stood: whether the frame should show its glow on curtains is the
+    // user's call.
     private bool SheetGlowInField => rtSheetRows > 0 && SheetRowsBuffer is not null;
 
     // --lod-pixels E (SponzaLoop.Setup.cs): the LOD error budget in place of RenderSettings.LodErrorPixels (-1: none given).
@@ -331,7 +331,7 @@ internal sealed partial class SponzaLoop
         MaterialHandle? material, byte[]? pushConstants = null, bool litLayout = true)
     {
         var ib = g.IsU32 ? sharedIbU32 : sharedIbU16;
-        // Every lit-layout draw binds the lit interface's set-1 buffers (LitSceneBuffers: the clipmap's state, the mask).
+        // Every lit-layout draw binds the lit interface's set-1 buffers (LitSceneBuffers: the traced shadow mask).
         if (gpuCull)
         {
             scope.DrawIndexedIndirect(sharedVb, ib, pipeline, sceneArgs,
@@ -341,19 +341,17 @@ internal sealed partial class SponzaLoop
         }
         scope.DrawIndexedIndirect(sharedVb, ib, pipeline, SceneListIndirect(list), GroupByteOffset(g), GroupDrawCount(g),
             uniforms, textures, material, pushConstants, perDrawMaterial: sceneInstances!.Handle,
-            buffers: litLayout ? LitClipmapBuffer : null);
+            buffers: litLayout ? LitMaskBuffer : null);
     }
 
-    // lit.frag declares the clipmap's state (glass reflections read it), and every program built on its interface
-    // (the pre-pass, flat) shares that layout, so all of them bind it; the shadow programs have their own and must
-    // not (a buffer bound by a name the program lacks is an error). Rebuilt when the clipmap is created.
+    // lit.frag declares the ray-traced shadow mask, and every program built on its interface (the pre-pass, flat) shares
+    // that layout, so all of them bind it; the shadow programs have their own and must not (a buffer bound by a name the
+    // program lacks is an error). RecordRtShadows drops both lists each frame it binds a new slot's mask.
     private ShaderBufferBinding[]? litSceneBuffers;
-    private ShaderBufferBinding[]? litClipmapBuffer;
-    // The ray-traced shadow mask rides along (lit.frag declares it); RecordRtShadows drops both lists each frame it
-    // binds a new slot's mask.
-    private ShaderBufferBinding[] LitClipmapBuffer =>
-        litClipmapBuffer ??= new[] { new ShaderBufferBinding("ClipmapState", ClipmapStateOrPlaceholder), new ShaderBufferBinding("RtShadowMask", RtShadowMask) };
-    private ShaderBufferBinding[] LitSceneBuffers => litSceneBuffers ??= sceneBuffers.Concat(LitClipmapBuffer).ToArray();
+    private ShaderBufferBinding[]? litMaskBuffer;
+    private ShaderBufferBinding[] LitMaskBuffer =>
+        litMaskBuffer ??= new[] { new ShaderBufferBinding("RtShadowMask", RtShadowMask) };
+    private ShaderBufferBinding[] LitSceneBuffers => litSceneBuffers ??= sceneBuffers.Concat(LitMaskBuffer).ToArray();
 
     public void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)
     {
@@ -396,7 +394,6 @@ internal sealed partial class SponzaLoop
             ambientHistoryValid = false;
             taaHistoryValid = false;
             metalFxHistoryValid = false;
-            incidentHistoryFrame = -10;
             Console.WriteLine("[VulkanSponza] graph resources recreated; GTAO/TAA history reset");
         }
 
@@ -422,7 +419,6 @@ internal sealed partial class SponzaLoop
         }
         if (orbit) ApplyOrbit();
         else ApplyWalk();
-        UpdateLevelProbe();
         var stamp = System.Diagnostics.Stopwatch.GetTimestamp();
         if (lastFrameStamp != 0)
         {
@@ -493,10 +489,11 @@ internal sealed partial class SponzaLoop
             viewProjJittered = viewProj;
         }
 
-        // RenderSettings.HalfResLighting, decided once for the frame: the traced shadows, the incident pass, the texel
-        // mark and the lit pass's uIncident.w must agree on it. Only where the incident pass runs (the upsample rides
-        // on it); not under --rt-isolated, whose sky rays are read per full-res pixel.
-        halfLightingNow = render.HalfResLighting && incidentField && !(abMode == "incident" && AbOffPhase) && ClipmapActive && !rtIsolated;
+        // The half-res lighting, decided once for the frame: the traced shadows, RTGI's readout and the lit pass's
+        // uIncident.w must agree on it. Only once the readout can run (the upsample rides on it): before, the incident
+        // targets are cleared and the shadows traced at full resolution. Not under --rt-isolated, whose sky rays are read
+        // per full-res pixel and which reads no incident field.
+        halfLightingNow = IncidentFieldNow && RtgiReadoutReady;
         halfShadowsNow = halfLightingNow && render.HalfResShadows;
         // The 2x2's sampled pixel turns each frame for TAA to gather; with no TAA it stays (the first), so a still frame is
         // the same frame -- turning, the half-res lighting shimmered on a four-frame cycle with the camera still.
@@ -535,9 +532,8 @@ internal sealed partial class SponzaLoop
             new("uFog",              new Vector4Uniform(
                 new Vector4(frame.Width, frame.Height, fog.Far, fog.Enabled ? 1f : 0f))),
             new("uVizChannel",       new FloatUniform(vizChannel)),
-            // z gates the read: the incident field is there once the clipmap has solved. Off in the --ab incident
-            // off phase alongside the pass that fills it, so the arm prices the whole substitution rather than
-            // half of it. x: whether the lit pass takes the field's sky visibility and light (--no-sky turns both off).
+            // z gates the read: the incident field, RTGI's light (zero until its readout is ready). x: whether the lit
+            // pass takes the field's sky visibility and light (--no-sky turns both off).
             new("uIncident",         new Vector4Uniform(new Vector4(
                 skyVisibilityEnabled ? 1f : 0f,
                 IncidentHoldsOcclusion ? (materialAoOnGi ? 2f : 1f) : 0f,
@@ -548,12 +544,6 @@ internal sealed partial class SponzaLoop
             new("uViewProjUnjittered", new Matrix4x4Uniform(viewProj)),
             // Last frame's un-jittered camera, or this frame's on the first (zero motion rather than garbage).
             new("uPrevViewProjUnjittered", new Matrix4x4Uniform(velocityPrevValid ? velocityPrevViewProj : viewProj)),
-            // The clipmap, for glass reflections' sky visibility (read only when uIncident.z says it has solved).
-            new("uClipDims",         new Vector4Uniform(new Vector4(ClipmapDims.X, ClipmapDims.Y, ClipmapDims.Z, clipmapSpacing))),
-            new("uClipOrigin0",      new Vector4Uniform(ClipmapOrigin(0) with { W = ClipmapBlend })),
-            new("uClipOrigin1",      new Vector4Uniform(ClipmapOrigin(1))),
-            new("uClipOrigin2",      new Vector4Uniform(ClipmapOrigin(2))),
-            new("uClipOrigin3",      new Vector4Uniform(ClipmapOrigin(3))),
             // One component per --ab shading mode, live only during that mode's off-phase.
             new("uAbFlags",          new Vector4Uniform(new Vector4(
                 AbOffPhase && abMode == "textures" || ShaderProbe("textures") ? 1f : 0f,
@@ -727,10 +717,7 @@ internal sealed partial class SponzaLoop
                 // warm direct light remains warm in the medium.
                 new("uSunDir",        new Vector4Uniform(new Vector4(sunDirection, 1f))),
                 new("uSunColor",      new Vector4Uniform(new Vector4(EffectiveSunIrradiance, fog.Scatter))),
-                // z: whether the indirect fields are there to be scattered. Without them the
-                // medium falls back to the flat ambient floor, which is all it ever had.
-                new("uFogParams",     new Vector4Uniform(new Vector4(
-                    fog.PhaseG, fog.Ambient, fogIndirect ? 1f : 0f, (float)time.Total))),
+                new("uFogParams",     new Vector4Uniform(new Vector4(fog.PhaseG, 0f, 0f, (float)time.Total))),
                 new("uMedium",        new Vector4Uniform(new Vector4(
                     fog.HeightFalloff, fog.Noise, 0f, 0f))),
                 // Refuse history until both targets have valid contents, and again after a resize
@@ -741,13 +728,6 @@ internal sealed partial class SponzaLoop
                 new("uPrevCamPos",    new Vector4Uniform(new Vector4(
                     fogHistoryValid ? prevFogCamPos : cameraPosition, 0f))),
                 new("uBoundsMin",     new Vector4Uniform(new Vector4(sceneBoundsMin, 0f))),
-                // The clipmap the medium is lit by, as the surfaces are.
-                new("uClipDims",      new Vector4Uniform(new Vector4(ClipmapDims.X, ClipmapDims.Y, ClipmapDims.Z, clipmapSpacing))),
-                new("uClipParams",    new Vector4Uniform(new Vector4(ClipmapBlend, 0f, 0f, 0f))),
-                new("uOrigin0",       new Vector4Uniform(ClipmapOrigin(0))),
-                new("uOrigin1",       new Vector4Uniform(ClipmapOrigin(1))),
-                new("uOrigin2",       new Vector4Uniform(ClipmapOrigin(2))),
-                new("uOrigin3",       new Vector4Uniform(ClipmapOrigin(3))),
                 // No split depths: fog and surfaces share fitted-volume containment so they select
                 // the same cascade at the same world position.
                 new("uCascadeVP",     new Matrix4x4ArrayUniform(cascadeViewProj)),
@@ -755,8 +735,7 @@ internal sealed partial class SponzaLoop
             graph.Dispatch(froxelPassHandle, new DispatchCommand(
                 froxelPipeline,
                 (froxelGridX + 7) / 8, (froxelGridY + 7) / 8, 1,
-                froxelUniforms, FroxelBindings(),
-                Buffers: new[] { new ShaderBufferBinding("ClipmapState", ClipmapStateOrPlaceholder) }));
+                froxelUniforms, FroxelBindings()));
             prevFogViewProj = viewProj;
             prevFogCamPos = cameraPosition;
             fogScatterWrite ^= 1;
@@ -785,10 +764,7 @@ internal sealed partial class SponzaLoop
             RecordRtgi(frame.Width, frame.Height);
         }
         RtgiDumpIfDue();
-        using (Prof("clipmap")) RecordClipmap();
         FlushTracerGroup();
-        PickWatchPoints();
-        RecordClipmapWatch();
         RecordRayCheck();
 
         // Occlusion needs the pre-pass's depth; without one the early list is the whole frustum's.
@@ -921,44 +897,31 @@ internal sealed partial class SponzaLoop
                 uniforms: denoiseUniforms));
         }
 
-        // The incident-light field, from the probe clipmap. Skipped in the --ab off phase so the arm prices the PASS
-        // as well as the lit pass's saving -- leaving it running in both arms would count the saving and not what
-        // pays for it.
-        if (incidentField && !(abMode == "incident" && AbOffPhase))
+        // The incident-light field: RTGI's readout at half resolution, brought up to the full-size targets the lit pass
+        // reads. Before the readout is ready (the scene loading, the Metal tracer pending) the targets are cleared and
+        // nothing drawn: the lit pass reads no indirect light rather than a guess.
+        if (IncidentFieldNow)
         {
-            if (ClipmapActive)
+            // The JITTERED projection: what the depth these passes read was rasterized with. Reconstructing with the
+            // unjittered one put each point up to a pixel's footprint off its surface -- far off on a face seen
+            // edge-on.
+            Matrix4x4.Invert(cameraProjection * cameraJitter, out var incidentInvProj);
+            Matrix4x4.Invert(cameraView, out var incidentInvView);
+            // The reference view accumulates (--gi-reference, G) for RTGI's dump (SponzaLoop.Rtgi.cs); nothing shows it.
+            RecordReference(incidentInvProj, incidentInvView, frame.Width, frame.Height);
+            RecordGpuReference();
+            UpdateScreenRest();
+            // A settled, still view's screen light every other frame (SponzaLoop.RtgiBudget.cs): the targets hold it.
+            if (screenRestNow) { }
+            else if (halfLightingNow)
             {
-                // The JITTERED projection: what the depth these passes read was rasterized with. Reconstructing with the
-                // unjittered one put each point up to a pixel's footprint off its surface -- far off on a face seen
-                // edge-on.
-                Matrix4x4.Invert(cameraProjection * cameraJitter, out var incidentInvProj);
-                Matrix4x4.Invert(cameraView, out var incidentInvView);
-                // --no-probe-updates: after their first solve the probes stand as they are -- no marking a frame.
-                if (!probeUpdatesOff) RecordClipmapMark(incidentInvProj, incidentInvView, frame.Width, frame.Height);
-                RecordReference(incidentInvProj, incidentInvView, frame.Width, frame.Height);
-                RecordGpuReference();
-                if (rtgi) UpdateScreenRest();
-                // A settled, still view's screen light every other frame (SponzaLoop.RtgiBudget.cs): the targets hold it.
-                if (screenRestNow) { }
-                else if (halfLightingNow && (RtgiReadoutReady || IncidentHalfPassNeeded()))
-                {
-                    var (halfWidth, halfHeight) = HalfLightingSize(frame.Width, frame.Height);
-                    // --rtgi: the cache, read every frame (it is still learning), in place of the incident pass.
-                    if (RtgiReadoutReady) RecordRtgiReadout();
-                    else RecordIncidentClipmap(incidentInvProj, incidentInvView, halfWidth, halfHeight, frame.Width, frame.Height, half: true);
-                    // The first settle draws no light (SponzaLoop.RtgiSettle.cs): the readout for its map and error alone.
-                    if (!RtgiSettleNow) RecordLightingUpsample(incidentInvProj, incidentInvView, frame.Height);
-                    if (RtgiTemporalNow) RecordRtgiTemporal();
-                }
-                else if (!halfLightingNow && IncidentPassNeeded())
-                {
-                    RecordIncidentClipmap(incidentInvProj, incidentInvView, frame.Width, frame.Height, frame.Width, frame.Height);
-                    RecordIncidentHistory();
-                }
+                RecordRtgiReadout();
+                // The first settle draws no light (SponzaLoop.RtgiSettle.cs): the readout for its map and error alone.
+                if (!RtgiSettleNow) RecordLightingUpsample(incidentInvProj, incidentInvView, frame.Height);
+                if (RtgiTemporalNow) RecordRtgiTemporal();
             }
-            // Before the clipmap's first solve there is nothing to read, and the lit pass does not (uIncident.z is 0
-            // until then). Recorded empty anyway: the graph runs a pass with nothing drawn, so its Clear load op
-            // leaves the targets black rather than undefined.
+            // Recorded empty: the graph runs a pass with nothing drawn, so its Clear load op leaves the targets black
+            // rather than undefined.
             else graph.Pass(incidentPassHandle, _ => { });
         }
 
@@ -1007,14 +970,12 @@ internal sealed partial class SponzaLoop
 
         // Resolve before the graph executes, so the pass is recorded with the rest of the frame.
         if (!settling) using (Prof("taa")) RecordTaaResolve();
-        // Last: this frame's surface keys become the next frame's history (after TAA reads it). Only for a reader: the
-        // full-res incident pass's reuse, TAA -- under the half-res lighting with TAA off, nothing read it and it was
-        // 0.85 ms a frame at 2880 x 1620 (2026-10-24).
-        if (SurfaceTargets && (IncidentReuseOn && !halfLightingNow || render.Taa > 0f))
+        // Last: this frame's surface keys become the next frame's history (after TAA reads it). Only for a reader, TAA:
+        // with TAA off nothing read it and it was 0.85 ms a frame at 2880 x 1620 (2026-10-24).
+        if (SurfaceTargets && render.Taa > 0f)
         {
             graph.Pass(surfaceKeyHistoryPassHandle, scope => fullscreen.Draw(scope, surfaceKeyHistoryPipeline,
                 new[] { new ShaderTextureBinding("uSource", graph.GetColorTexture(surfaceKeyHandle)) }));
-            surfaceKeyHistoryFrame = framesRendered;
         }
         using (Prof("upload")) UploadVisible();
         using (Prof("execute")) graph.Execute(commandList);
@@ -1037,8 +998,6 @@ internal sealed partial class SponzaLoop
         AuditOcclusion();
         WriteWalkDumps();
         WriteRtgiCapture();
-        WriteLevelProbeDumps();
-        SampleWatch();
         if (shotPath is { } path && !shotWritten && fullyLoaded && !AbOffPhase
             && framePeriodCount >= 60 && (measuredFrames >= shotFrame || ShotReady()))
         {
@@ -1059,24 +1018,16 @@ internal sealed partial class SponzaLoop
             WriteStability(Path.ChangeExtension(path, null));
             WriteSurfaceCheck();
             WriteMoverShot(Path.ChangeExtension(path, null));
-            WriteWatch();
             WritePassBreakdown();
             WriteLodCensus();
             WriteClusterCensus();
             WriteRayBenchmark();
             WriteRayCheck();
-            WriteClipmapCheck();
             WriteRayView(Path.ChangeExtension(path, null));
             WriteRtShadows(Path.ChangeExtension(path, null));
             WriteLeakCensus(Path.ChangeExtension(path, null));
             WriteMemoryReport();
             WriteFrameTracerStats();
-            if (probeReference)
-            {
-                WriteSkyVisibilityReference(samples: 200, rays: 2048);
-                WriteSkyConsistency();
-                WriteSurfaceReference(grid: 24, paths: refPaths, bounces: refBounces);
-            }
             WriteGpuSurfaceReference();
             WriteFrameStats();
             host.RequestClose();
@@ -1298,7 +1249,6 @@ internal sealed partial class SponzaLoop
             "normal" => "normal mapping",
             "cull"    => "camera frustum culling",
             "castercull" => "shadow caster culling against the camera",
-            "increuse" => "the incident pass reusing last frame's answer at rest (OFF: every pixel every frame)",
             "occlskip" => "the occlusion test and late pre-pass skipped while nothing moves (OFF: every frame)",
             "queue"   => "the Metal tracers on the Vulkan device's command queue (OFF: their own)",
             "lod"     => lodArmOff > 0f
@@ -1485,13 +1435,9 @@ internal sealed partial class SponzaLoop
         return result;
     }
 
-    // Whether the fog has a real field to scatter: the probe clipmap, once it has solved. Until then the medium is
-    // back to a constant, so say so once here rather than at the dispatch.
-    private bool fogIndirect => ClipmapActive;
-
-    // Whether the lit pass reads the incident field this frame: on (not --no-incident), the clipmap has solved, and
-    // not the --ab incident off phase. The incident pass records its draw under the same conditions.
-    private bool IncidentFieldNow => incidentField && ClipmapActive && !(abMode == "incident" && AbOffPhase);
+    // Whether the lit pass reads the incident field this frame: always but under --rt-isolated, whose sky is the trace's.
+    // RTGI's readout fills it, or the frame's clear leaves it black (RenderFrame).
+    private bool IncidentFieldNow => !rtIsolated;
 
     private ShaderTextureBinding[] FroxelBindings() => new[]
     {
@@ -1500,10 +1446,6 @@ internal sealed partial class SponzaLoop
         new ShaderTextureBinding("uCascadeShadowMaps[1]", graph.GetDepthTexture(cascadeHandles[1])),
         new ShaderTextureBinding("uCascadeShadowMaps[2]", graph.GetDepthTexture(cascadeHandles[2])),
         new ShaderTextureBinding("uIrradiance", irradianceCubeTexture),
-        // Never a hole, even before the first solve: a descriptor set with a gap is a device loss,
-        // and uFogParams.z is what tells the shader not to read these.
-        new ShaderTextureBinding("uClipmapIrradiance", clipmap is not null ? clipmapIrradiance : brdfLutTexture),
-        new ShaderTextureBinding("uClipmapDepth", clipmap is not null ? clipmapDepth : brdfLutTexture),
         new ShaderTextureBinding("uScatterPrev", fogScatterTextures[fogScatterWrite ^ 1]),
         new ShaderTextureBinding("uScatter", fogScatterTextures[fogScatterWrite]),
     };

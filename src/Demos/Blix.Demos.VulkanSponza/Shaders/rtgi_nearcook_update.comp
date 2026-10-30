@@ -1,6 +1,6 @@
 #version 450
 
-// --rtgi-near-cook (rtgi_nearcook.glsl): each cooked cell's near light this frame, over its own NEAR_RAYS fixed cosine rays
+// The cooked near field (rtgi_nearcook.glsl): each cooked cell's near light this frame, over its own NEAR_RAYS fixed cosine rays
 // (PI x L_in each): a ray that met a surface within the contact radius brings that surface's light from the cache -- albedo
 // x (its indirect irradiance plus the sun by its cell's sun visibility); one that left brings nothing here, the readout
 // putting the cache's far light over it (rtgi_readout.frag). No rays: the cook traced them; only light is read. Blended
