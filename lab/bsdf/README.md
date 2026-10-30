@@ -26,29 +26,30 @@ The formulas and constants are the paper's; the reference reproduces its claims:
 everywhere: radiance out is `E / pi * albedo(mu_o)`, which is Lambert's `E / pi * rho` at r = 0). The RTGI demo's lit shader
 (`Blix.Demos.VulkanSponza/Shaders/lit_body.glsl`) uses it for the sun, the sheet glow, the sky's irradiance and the incident field's bounce.
 
-- **Opt-in for now (`--diffuse eon`).** The default stays Lambert because the frame still approximates EON in two ways the reference does not (below), so
-  with EON on the GI sits 2-8% off the reference where Lambert sits within 1-3%; `tools/testbeds/materials.sh` holds EON to its own, wider ratchets
-  (`materials.py` `EON_RATCHETS`, selected by `--diffuse eon`) and the Lambert default to the original ones: both hold. The diffuse roughness is the
-  material's roughness times `--diffuse-roughness-scale` (default 1); glTF has no diffuse roughness. `--diffuse lambert` is the default lobe; `--ab diffuse`
-  alternates the two in one process (with `--diffuse eon` as the on phase).
+- **On by default** (since the merge into the RTGI tree, 2026-10-31; `--diffuse lambert` for the old lobe, `--ab diffuse` alternates the two in one process).
+  It was opt-in on the material track because the frame approximates EON in two ways the reference does not (below): with EON on, the texel GI sat 2-8% off
+  the camera-path reference where Lambert sat within 1-3%, and `materials.sh` held both to their own ratchets. That reference and `materials.sh` went with the
+  texel GI; under RTGI the gate's GPU reference (`reference_wave.comp`) shades EON from the same baked words, and the gap under RTGI is unmeasured
+  (`tools/testbeds/bsdf.sh` and the gate are where it shows). The diffuse roughness is the material's roughness times `--diffuse-roughness-scale` (default 1);
+  glTF has no diffuse roughness.
 - **The transport conserves what the roughness loses, and the references evaluate EON.** A patch-to-patch bounce has no direction to evaluate a lobe against,
   so the rays' surface bake (`ray_surface_bake.comp`) stores EON's **hemispherical albedo** `rho <E> + rho_ms (1 - <E>)` = `A rho / (1 - (1 - A) rho)`
-  (`A = <E>`) at the material's diffuse roughness in the word's low three bytes: every transport consumer reads it unchanged, and the transport cache's
+  (`A = <E>`) at the material's diffuse roughness in the word's low three bytes: every ray consumer (RTGI, the reference) reads it unchanged, and the GPU reference cache's
   key includes it. The top byte now carries the coverage in sixteenths (bits 4..0) and the roughness level the albedo was baked at (bits 7..5, eight levels
   spaced where materials sit: 0, .2, .4, .55, .7, .8, .9, 1). Because the series sums in closed form it **inverts exactly**
   (`rho = hh / (A + (1 - A) hh)`, `eon.base_from_hemispherical`), so the references recover the material's own albedo from the word and the level, which
-  the hit record's alpha byte carries. Both GPU references (`reference_wave.comp`, `reference_path.glsl`) shade every hit, the camera's included, with
+  the hit record's alpha byte carries. The GPU reference (`reference_wave.comp`; `reference_path.glsl` was the monolithic one's, removed) shades every hit with
   EON itself: the sun with `f_EON(sun, toPrevious) cos`, and the next direction drawn at the hit, cosine-sampled about the normal, so the bounce carries
   `pi f_EON(next, toPrevious)` for the direction actually taken (not an expectation over directions, which would treat the incoming light as isotropic).
   At roughness 0 all of it is Lambert exactly: `--diffuse eon --diffuse-roughness-scale 0` reproduces the Lambert verdicts line for line.
-  Four decoders of the top byte changed in step (`ray_query.glsl`, the Metal tracer's source, `RayQueryGpuData`, the transport's cutout tests); a fifth
+  Four decoders of the top byte changed in step (`ray_query.glsl`, the Metal tracer's source, `RayQueryGpuData`, the texel GI's cutout tests, since removed); a fifth
   reader of it (the patch placement's "cutout" test) had been missed and, with every triangle suddenly under 255, placed no patches: Section BZ now pins
   the packing and the decoders, and the demo logs the roughness levels a bake wrote.
 - **What the EON frame still approximates** (and the ratchets record, 2026-10-25): the lit shader multiplies an irradiance by EON's albedo toward the eye
   (exact for a cosine-distributed field; a room seen from inside has its light on the camera's side, where EON retroreflects, so the opaque views read
   2-8% under: drapes 0.921, plant 0.952), and the transport bounces with the hemispherical albedo (the GI's irradiance records read 1.6-1.9% over the
   reference's). Using the view-independent hemispherical albedo instead of the eye-dependent one in the lit shader moved neither (0.923, 0.953), so the
-  view-dependence is not the cause. `--viz 26`, which `materials.sh` compares, had a hardcoded Lambert sun term: it now uses the frame's own lobe. One
+  view-dependence is not the cause. (`--viz 26` and `materials.sh`, which made these measurements, are gone with the texel GI.) One
   discrepancy is NOT explained: khronos-test's two-sided view ratio is 0.808 in EON (0.954 in Lambert).
 - **Measured** (scene renders, same camera, EON against Lambert), lit shader only: cornell -1.4% and the Khronos plant -4.8% mean luminance; 4.8% and
   1.3% of pixels move by more than 8/255, the largest moves (57 and 64 of 255) at grazing rims. With the transport as well, in the cornell room: the
@@ -57,7 +58,7 @@ everywhere: radiance out is `E / pi * albedo(mu_o)`, which is Lambert's `E / pi 
 
 ### Not done
 
-Per-material diffuse roughness (a cook-time override, `MaterialPatch`); the CPU reference (`--probe-reference`) still bounces with Lambert; the two-sided
+Per-material diffuse roughness (a cook-time override, `MaterialPatch`); the CPU reference (`--probe-reference`, since removed) bounced with Lambert; the two-sided
 discrepancy above; a directional (not isotropic) lit-shader indirect; the Studio and other older shaders (`pbr.glsl`'s
 `blix_cookTorranceBrdf` and the Studio lit shader still use Lambert).
 
