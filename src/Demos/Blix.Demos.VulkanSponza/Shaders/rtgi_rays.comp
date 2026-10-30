@@ -126,7 +126,7 @@ bool surfacePoint(inout vec3 p, inout vec3 n, uint h) {
     uint lv = rtgiLevel(p, u.uCamera.xyz, u.uParams);
     float size = rtgiSize(lv, u.uParams);
     uint side = rtgiSide(n);
-    ivec3 cell = ivec3(floor((p - RTGI_ORIGIN) / size));
+    ivec3 cell = ivec3(floor((p - rtgiOrigin(side)) / size));
     uint subs = max(1u, uint(size / NEAR_PARAMS.x + 0.5));
     // Only cells of the point's own region at its level (rtgi_nearcook_cook.comp's pieces): a cache cell keyed by a piece
     // is trained over that piece. Drawn from any, a piece split off at a junction was trained only when a draw happened
@@ -136,13 +136,13 @@ bool surfacePoint(inout vec3 p, inout vec3 n, uint h) {
     for (uint k = 0u; k < 6u; k++) {
         uint hk = nearHash(h ^ (k + 1u) * 0x9E3779B9u);
         uvec3 sub = uvec3(hk % subs, (hk >> 10) % subs, (hk >> 20) % subs);
-        vec3 at = RTGI_ORIGIN + vec3(cell) * size + (vec3(sub) + 0.5) * (size / float(subs));
-        uint j = nearFind(ivec3(floor((at - RTGI_ORIGIN) / NEAR_PARAMS.x)), side);
+        vec3 at = rtgiOrigin(side) + vec3(cell) * size + (vec3(sub) + 0.5) * (size / float(subs));
+        uint j = nearFind(ivec3(floor((at - rtgiOrigin(side)) / NEAR_PARAMS.x)), side);
         if (j == 0xFFFFFFFFu) continue;
         if ((floatBitsToUint(nearPoints[2u * j].w) & NEAR_BURIED) != 0u) continue;
         if ((lv < NEAR_LEVELS ? nearRegions[j * NEAR_LEVELS + lv] : 0u) != want) continue;
         vec3 q = nearPoints[2u * j].xyz;
-        if (ivec3(floor((q - RTGI_ORIGIN) / size)) != cell) continue;
+        if (ivec3(floor((q - rtgiOrigin(side)) / size)) != cell) continue;
         p = q;
         n = nearPoints[2u * j + 1u].xyz;
         return true;
@@ -154,7 +154,7 @@ void captureCell(vec3 p, vec3 n, uint at) {
     uint side = rtgiSide(n);
     rtgiRegion = nearRegion(p, side);
     uint lv = rtgiLevel(p, u.uCamera.xyz, u.uParams);
-    uint sc = rtgiFind(rtgiCellHash(ivec3(floor((p - RTGI_ORIGIN) / rtgiSize(lv, u.uParams))), lv, side, u.uParams), u.uParams);
+    uint sc = rtgiFind(rtgiCellHash(ivec3(floor((p - rtgiOrigin(side)) / rtgiSize(lv, u.uParams))), lv, side, u.uParams), u.uParams);
     captureOut[at] = vec4(p, float(rtgiRegionFor(lv)));
     captureOut[at + 1u] = vec4(n, float(lv));
     captureOut[at + 2u] = sc != 0xFFFFFFFFu ? vec4(rtgiResolved[2u * sc].rgb, rtgiResolved[2u * sc + 1u].y) : vec4(-1.0);
@@ -405,7 +405,7 @@ void main() {
     uint sc = 0xFFFFFFFFu;
     if ((u.uSeq.x > 0.5 || u.uSeq.z > 0.5) && (uint(u.uSkip.x) & 2u) == 0u) {
         uint lv = rtgiLevel(p, u.uCamera.xyz, u.uParams);
-        ch = rtgiCellHash(ivec3(floor((p - RTGI_ORIGIN) / rtgiSize(lv, u.uParams))), lv, rtgiSide(n), u.uParams);
+        ch = rtgiCellHash(ivec3(floor((p - rtgiOrigin(rtgiSide(n))) / rtgiSize(lv, u.uParams))), lv, rtgiSide(n), u.uParams);
         sc = rtgiFind(ch, u.uParams);
     }
     // The cell's sequence index (uSeq.x, below), its counter's old value: the top bit its sun settled (rtgi_resolve.comp
@@ -457,7 +457,7 @@ void main() {
     float gsum = 0.0;
     if (u.uGuide.x > 0.0 && u.uGuide.w > 0.0 && (uint(u.uSkip.x) & 4u) == 0u) {
         uint gl = min(rtgiLevel(p, u.uCamera.xyz, u.uParams) + 2u, uint(u.uParams.w));
-        gslot = guideFind(guideHash(ivec3(floor((p - RTGI_ORIGIN) / rtgiSize(gl, u.uParams))), gl, gside, uint(u.uGuide.w)), uint(u.uGuide.w));
+        gslot = guideFind(guideHash(ivec3(floor((p - rtgiOrigin(gside)) / rtgiSize(gl, u.uParams))), gl, gside, uint(u.uGuide.w)), uint(u.uGuide.w));
         if (gslot != 0xFFFFFFFFu) {
             vec4 meta = guideDist[9u * gslot + 8u];
             gsum = meta.y;

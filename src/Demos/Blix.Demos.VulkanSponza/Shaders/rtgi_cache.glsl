@@ -24,13 +24,27 @@
 //   x the finest cell (m), y its growth per metre of distance, z slots - 1 (a power of two), w the top level.
 
 #define RTGI_PROBES 8u
-// Every cell grid's origin (the cache's at every level, the cooked near cells'): off the round coordinates scenes are
-// modelled on. At the world's origin a floor at y = 0, a wall on a 5 cm multiple, lay on a cell boundary, and a point
-// rebuilt from the depth buffer fell a hair either side as the view changed -- its cell, the cooked cell it read, chosen
-// at random: half the floor's samples in each of two cells, lookups missing in streaks that moved with the camera (the
-// user, the crevices testbed, 2026-10-30). Shared by all levels (a cell's parent is still its coordinates halved).
-#ifndef RTGI_ORIGIN
-#define RTGI_ORIGIN vec3(0.0137, 0.0271, 0.0419)
+#ifndef RTGI_ORIGIN_DEFINED
+#define RTGI_ORIGIN_DEFINED
+// Every cell grid's origin (the cache's at every level, the cooked near cells') for a side: the round coordinates along the
+// surface, and RTGI_KEY_INSET back along its normal. A floor at y = 0 lay on a cell boundary and a point rebuilt from the
+// depth buffer fell a hair either side as the view changed -- half the floor's samples in each of two cells, lookups
+// missing in streaks that moved with the camera (the user, the crevices testbed, 2026-10-30). The grid moved off the round
+// coordinates altogether (1.4, 2.7, 4.2 cm) cured that, but put a cell across every edge where one thing meets another,
+// 1-4 cm of it past the edge: the light changing over that sliver and not at the edge, the walls seeming to float a
+// little off the floor and the roof (the user, 2026-10-30). The flip is along the normal alone, so only the normal's
+// axis is moved: a surface on a round coordinate sits 2.13 cm inside its cell at every level (0.0213 is no multiple of
+// any cell size, 1.25 cm up), its edges on cell boundaries. Shared by all levels (a cell's parent is still its coordinates
+// halved).
+#define RTGI_KEY_INSET 0.0213
+vec3 rtgiOrigin(uint side) {
+    vec3 o = vec3(0.0);
+    o[side >> 1u] = (side & 1u) == 0u ? RTGI_KEY_INSET : -RTGI_KEY_INSET;
+    return o;
+}
+// The cooked cells' cell sizes' table (rtgi_nearcook.glsl's nearScaleAt) is by position alone, any side: off the round
+// coordinates on every axis, so no surface lies on its boundaries.
+#define NEAR_SCALE_ORIGIN vec3(0.0137, 0.0271, 0.0419)
 #endif
 // A slot's accumulator words: indirect rgb, count, sky misses, sun reached, sun traced, luminance squared, and the
 // irradiance vector's three components (signed, two's complement in the uints: rtgi_train.comp), the near visibility's

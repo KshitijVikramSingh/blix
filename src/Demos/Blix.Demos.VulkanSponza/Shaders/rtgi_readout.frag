@@ -42,7 +42,7 @@ layout(set = 0, binding = 0) uniform RtgiReadout {
     vec4 uVolumeGeom;    // rtgi_volume.glsl's VOL_GEOM (the cells sized by the geometry)
     vec4 uNearCook;      // --rtgi-near-cook: rtgi_nearcook.glsl's NEAR_PARAMS (w 0: off)
     vec4 uVolume2;       // x the volume's light's relative error, as a cell's (its weight against the cells'); y the visibility
-                         // requests' room; z 1: neighbours left out where their traced ray was blocked; w 1: the probes read
+                         // requests' room; z 1: neighbours left out where their traced ray was blocked
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -146,7 +146,7 @@ bool visKnown = false;
 uint visWord = 0u, visLevel0 = 0u;
 void cellVisFetch(vec3 p, vec3 n, uint side, uint level) {
     if (u.uVolume.w < 0.5) return;
-    uint sc = rtgiFind(rtgiCellHash(ivec3(floor((p - RTGI_ORIGIN) / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
+    uint sc = rtgiFind(rtgiCellHash(ivec3(floor((p - rtgiOrigin(side)) / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
     if (sc == 0xFFFFFFFFu) return;
     uint key = rtgiKeys[sc];
     uvec2 v = cellVis[sc];
@@ -171,7 +171,7 @@ void cellVisFetch(vec3 p, vec3 n, uint side, uint level) {
 bool neighbourSeen(vec3 p, ivec3 cc, uint level, uint a0, uint a1, float size) {
     if (u.uVolume2.z < 0.5 || !visKnown || level < visLevel0 || level - visLevel0 > 2u) return true;
     uint base = 16u + (level - visLevel0) * 4u;
-    int d0 = cc[a0] - int(floor((p[a0] - RTGI_ORIGIN[a0]) / size)), d1 = cc[a1] - int(floor((p[a1] - RTGI_ORIGIN[a1]) / size));
+    int d0 = cc[a0] - int(floor((p[a0] - 0.0) / size)), d1 = cc[a1] - int(floor((p[a1] - 0.0) / size));
     if (d0 > 0 && (visWord & (1u << base)) == 0u) return false;
     if (d0 < 0 && (visWord & (1u << (base + 1u))) == 0u) return false;
     if (d1 > 0 && (visWord & (1u << (base + 2u))) == 0u) return false;
@@ -179,11 +179,11 @@ bool neighbourSeen(vec3 p, ivec3 cc, uint level, uint a0, uint a1, float size) {
     return true;
 }
 
-// --rtgi-volume: the volume's light at p facing n through the probes the pixel's cell was traced to see; none -- the cache
-// alone -- until it has been.
+// --rtgi-volume: the volume's light at p facing n through the probes the pixel's cell was traced to see (view 10 alone; the
+// light is the cells' -- the probes read in leaked, 2026-10-29).
 vec4 volumeCell(vec3 p, vec3 n, out float sky) {
     sky = 0.0;
-    if (!visKnown || u.uVolume2.w < 0.5) return vec4(0.0);
+    if (!visKnown) return vec4(0.0);
     uint lv = (visWord >> 8) & 15u;
     if (lv >= uint(VOL_PARAMS.y)) return vec4(0.0);
     vec4 e = volumeLevelMasked(p, n, lv, visWord & 0xFFu, sky);
@@ -209,7 +209,7 @@ float readRel = 1.0;
 vec4 readLevel(vec3 p, uint side, uint level, out float sky, out vec3 bvec, out float near, out float far) {
     float relSum = 0.0;
     float size = rtgiSize(level, u.uParams);
-    vec3 f = (p - RTGI_ORIGIN) / size - 0.5;
+    vec3 f = (p - rtgiOrigin(side)) / size - 0.5;
     ivec3 c0 = ivec3(floor(f));
     vec3 t = f - vec3(c0);
     vec3 e = vec3(0.0);
@@ -225,7 +225,7 @@ vec4 readLevel(vec3 p, uint side, uint level, out float sky, out vec3 bvec, out 
     bool plane = u.uNearField.z > 0.5;
     uint axis = side >> 1u;
     uint a0 = (axis + 1u) % 3u, a1 = (axis + 2u) % 3u;
-    int cAxis = int(floor((p[axis] - RTGI_ORIGIN[axis]) / size));
+    int cAxis = int(floor((p[axis] - rtgiOrigin(side)[axis]) / size));
     for (int k = 0; k < (plane ? 4 : 8); k++) {
         ivec3 o = ivec3(k & 1, (k >> 1) & 1, k >> 2);
         if (plane) {
@@ -267,7 +267,7 @@ vec4 readLevel(vec3 p, uint side, uint level, out float sky, out vec3 bvec, out 
 // each holds (full at 16): their near visibility, w the weight found.
 vec2 readContact(vec3 p, uint side, uint level) {
     float size = 0.25 * rtgiSize(level, u.uParams);
-    vec3 f = (p - RTGI_ORIGIN) / size - 0.5;
+    vec3 f = (p - rtgiOrigin(side)) / size - 0.5;
     ivec3 c0 = ivec3(floor(f));
     vec3 t = f - vec3(c0);
     float v = 0.0, w = 0.0;
@@ -293,7 +293,7 @@ vec2 readContact(vec3 p, uint side, uint level) {
 // samples held, weighed the same way.
 vec4 readNear(vec3 p, uint side, uint level, out float held) {
     float size = 0.25 * rtgiSize(level, u.uParams);
-    vec3 f = (p - RTGI_ORIGIN) / size - 0.5;
+    vec3 f = (p - rtgiOrigin(side)) / size - 0.5;
     ivec3 c0 = ivec3(floor(f));
     vec3 t = f - vec3(c0);
     vec4 acc = vec4(0.0);
@@ -321,10 +321,10 @@ vec4 readNearCooked(vec3 p, uint side, out float found) {
     if (NEAR_PARAMS.w < 0.5) return vec4(0.0);
     float size = NEAR_PARAMS.x;
     uint axis = side >> 1u, a0 = (axis + 1u) % 3u, a1 = (axis + 2u) % 3u;
-    vec3 f = (p - RTGI_ORIGIN) / size - 0.5;
+    vec3 f = (p - rtgiOrigin(side)) / size - 0.5;
     ivec3 c0 = ivec3(floor(f));
     vec3 t = f - vec3(c0);
-    int cAxis = int(floor((p[axis] - RTGI_ORIGIN[axis]) / size));
+    int cAxis = int(floor((p[axis] - rtgiOrigin(side)[axis]) / size));
     vec4 acc = vec4(0.0);
     for (int k = 0; k < 4; k++) {
         ivec3 cc = c0;
@@ -477,7 +477,7 @@ void main() {
     uint level = uint(lf);
     float blurR = -1.0;
     if (unsureIn) {
-        uint sc = rtgiFindKept(rtgiCellHash(ivec3(floor((p - RTGI_ORIGIN) / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
+        uint sc = rtgiFindKept(rtgiCellHash(ivec3(floor((p - rtgiOrigin(side)) / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
         float unsure = 1.0;
         float rel = 1.0, invD = 0.0;
         if (sc != 0xFFFFFFFFu) {
@@ -505,9 +505,7 @@ void main() {
     float near0, near1, far0, far1;
     cellVisFetch(p, n, side, level);
     vec4 e0 = readLevel(p, side, level, sky0, b0, near0, far0);
-    float rel0 = readRel;
     vec4 e1 = level < top ? readLevel(p, side, level + 1u, sky1, b1, near1, far1) : vec4(0.0);
-    float rel1 = readRel;
     vec4 e;
     float sky, nearCell, farShare;
     vec3 bv;
@@ -543,29 +541,6 @@ void main() {
     else if (e0.w >= 0.05) { e = e0; sky = sky0; bv = b0; nearCell = near0; farShare = far0; }
     else if (e1.w >= 0.05) { e = e1; sky = sky1; bv = b1; nearCell = near1; farShare = far1; }
     else e = readLevel(p, side, min(level + 2u, top), sky, bv, nearCell, farShare);
-    // --rtgi-volume: the cells' light against the world's probes by how sure each is -- a cell's relative error (the blend's,
-    // at the pixel's own level where it holds any) and its fill (held / 32), the volume's uVolume2.x: inverse variance. A
-    // surface the camera just reached reads the probes' light, trained before it got there, and the cells' as they settle;
-    // where no cell holds anything, the probes' alone.
-    if (u.uVolume.w > 0.5) {
-        float vsky;
-        vec4 v = volumeCell(p, n, vsky);
-        if (v.w > 0.5) {
-            // Both by where the point sits between its two levels (rtgiLevelF), as the light is: taken at the point's own
-            // level alone, the weight jumped where the level did -- a ring at a fixed distance that moved with the camera
-            // (the user, Bistro, 2026-10-29).
-            float f0 = clamp(e0.w, 0.0, 1.0), f1 = clamp(e1.w, 0.0, 1.0);
-            bool h0 = e0.w >= 0.05, h1 = e1.w >= 0.05;
-            float fill = h0 && h1 ? mix(f0, f1, t) : h0 ? f0 : h1 ? f1 : clamp(e.w, 0.0, 1.0);
-            float rel = max(h0 && h1 ? mix(rel0, rel1, t) : h0 ? rel0 : h1 ? rel1 : readRel, 0.02);
-            float wc = e.w > 0.0 ? fill * fill / (rel * rel) : 0.0;
-            float wv = 1.0 / (u.uVolume2.x * u.uVolume2.x);
-            if (e.w <= 0.0) { bv = vec3(0.0); nearCell = 1.0; farShare = 1.0; sky = 0.0; settledRead = false; }
-            e.rgb = (e.rgb * wc + v.rgb * wv) / (wc + wv);
-            sky = (sky * wc + vsky * wv) / (wc + wv);
-            e.w = 1.0;
-        }
-    }
     // Contact detail: the cell's light split into what came from past the contact radius (its far share) and what from
     // nearer, each scaled by its own visibility at the pixel against the cell's -- the contact cells' near visibility over
     // the light cells' (both the share of rays past the radius, cosine-weighted, by rays: rtgi_train.comp,
@@ -633,17 +608,12 @@ void main() {
         nearCur[2u * unsureAt] = vec4(0.0);
         nearCur[2u * unsureAt + 1u] = vec4(0.0);
     }
-    // --rtgi-near-cook: where a cooked cell lies, its own gathered irradiance in place of the cache's (faded in by how much
-    // of the point the cooked cells cover): the geometry's own answer at every crease and edge, no ratio of the cache's
-    // statistics in it.
+    // --rtgi-near-cook: where a cooked cell lies, its near light over the cache's far light (faded in by how much of the
+    // point the cooked cells cover).
     if (u.uHybrid.x < 0.5 && NEAR_PARAMS.w > 0.5) {
         float found;
         vec4 nc = readNearCooked(p, side, found);
-        if (found > 0.05 && NEAR_PARAMS.w > 1.5) {
-            e.rgb = e.w > 0.0 ? mix(e.rgb, nc.rgb, clamp(found, 0.0, 1.0)) : nc.rgb;
-            if (e.w <= 0.0) { sky = 0.0; bv = vec3(0.0); }
-            e.w = 1.0;
-        } else if (found > 0.05 && e.w > 0.0) {
+        if (found > 0.05 && e.w > 0.0) {
             // The near light over the cache's far light: per ray, a surface met brings the cooked light, one past the
             // contact radius the cell's far light per such ray (E x farShare / nearCell).
             float esc = nc.w - 1.0;
@@ -669,7 +639,7 @@ void main() {
     // (2026-10-26): the bounce light lost every normal map. uNearField.y 0: none.
     // The visible share done: one half-res pixel in 16, its level's nearest cell.
     if (e.w > 0.0 && ((uint(h.x) & 3u) | ((uint(h.y) & 3u) << 2)) == 0u) {
-        uint sd = rtgiFindKept(rtgiCellHash(ivec3(floor((p - RTGI_ORIGIN) / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
+        uint sd = rtgiFindKept(rtgiCellHash(ivec3(floor((p - rtgiOrigin(side)) / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
         atomicAdd(doneCount[0], 1u);
         atomicAdd(doneCount[2], lookups);
         atomicAdd(doneCount[3], misses);
@@ -694,10 +664,10 @@ void main() {
     // but the screen's stages, each as the pixel reads it. Magenta: none.
     if ((view >= 11 && view <= 21) || view == 24) {
         vec3 c = vec3(1.0, 0.0, 1.0);
-        uint sc = rtgiFind(rtgiCellHash(ivec3(floor((p - RTGI_ORIGIN) / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
+        uint sc = rtgiFind(rtgiCellHash(ivec3(floor((p - rtgiOrigin(side)) / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
         if (view == 11) {
             // The pixel's cell: a colour by its key (its level's, its side's) -- its bounds, what it spans.
-            uvec2 hk = rtgiCellHash(ivec3(floor((p - RTGI_ORIGIN) / rtgiSize(level, u.uParams))), level, side, u.uParams);
+            uvec2 hk = rtgiCellHash(ivec3(floor((p - rtgiOrigin(side)) / rtgiSize(level, u.uParams))), level, side, u.uParams);
             uint hh = rtgiHash(hk.y);
             c = vec3(hh & 255u, (hh >> 8) & 255u, (hh >> 16) & 255u) / 255.0 * 0.8 + 0.2;
         } else if (view == 12) {
@@ -723,7 +693,7 @@ void main() {
             // The cooked near cell under the pixel: its colour by index, its escape share (white open, black enclosed), its
             // near light.
             uint ax = side >> 1u;
-            ivec3 cc = ivec3(floor((p - RTGI_ORIGIN) / max(NEAR_PARAMS.x, 1e-4)));
+            ivec3 cc = ivec3(floor((p - rtgiOrigin(side)) / max(NEAR_PARAMS.x, 1e-4)));
             uint ni = NEAR_PARAMS.w > 0.5 ? nearFind(cc, side) : 0xFFFFFFFFu;
             if (ni != 0xFFFFFFFFu) {
                 vec4 nl = nearLight[ni];
@@ -764,7 +734,7 @@ void main() {
         outIncident = vec4(v.w > 0.5 ? v.rgb : vec3(1.0, 0.0, 1.0), vsky);
     }
     if (view >= 1 && view <= 7) {
-        uint s = rtgiFindKept(rtgiCellHash(ivec3(floor((p - RTGI_ORIGIN) / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
+        uint s = rtgiFindKept(rtgiCellHash(ivec3(floor((p - rtgiOrigin(side)) / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
         vec3 c = vec3(1.0, 0.0, 1.0);
         if (s != 0xFFFFFFFFu && rtgiResolved[2u * s + 1u].y >= 0.5) {
             vec4 r1 = rtgiResolved[2u * s + 1u];

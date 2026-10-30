@@ -76,7 +76,7 @@ vec3 cellLight(vec3 q, vec3 n) {
     uint level = rtgiLevel(q, u.uCamera.xyz, u.uParams), side = rtgiSide(n);
     uint top = uint(u.uParams.w);
     for (uint l = level; l <= min(level + 2u, top); ++l) {
-        uint s = rtgiFind(rtgiCellHash(ivec3(floor((q - RTGI_ORIGIN) / rtgiSize(l, u.uParams))), l, side, u.uParams), u.uParams);
+        uint s = rtgiFind(rtgiCellHash(ivec3(floor((q - rtgiOrigin(side)) / rtgiSize(l, u.uParams))), l, side, u.uParams), u.uParams);
         if (s == 0xFFFFFFFFu) continue;
         uvec4 a = rtgiRecord[2u * s], c = rtgiRecord[2u * s + 1u];
         if (uintBitsToFloat(c.w) < 0.5) continue;
@@ -90,7 +90,7 @@ vec3 cellLight(vec3 q, vec3 n) {
 // The sample into the point's near cell (made if not held), listed once a frame for the resolve.
 void nearCellAdd(vec3 p, vec3 n, vec4 sample0, uint slot) {
     uint level = rtgiLevel(p, u.uCamera.xyz, u.uParams);
-    ivec3 c = ivec3(floor((p - RTGI_ORIGIN) / (0.25 * rtgiSize(level, u.uParams))));
+    ivec3 c = ivec3(floor((p - rtgiOrigin(rtgiSide(n))) / (0.25 * rtgiSize(level, u.uParams))));
     uint side = rtgiSide(n);
     rtgiRegion = nearRegion(p, side);
     uvec2 h = rtgiCellHash(c, level + 24u, side, u.uParams);

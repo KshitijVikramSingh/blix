@@ -92,7 +92,7 @@ uint visWord = 0u, visLevel0 = 0u;
 void fixVis(vec3 p, uint side, uint level) {
     if (u.uVolume.w < 0.5) return;
     vec4 params = u.uCacheParams;
-    uint sc = rtgiFind(rtgiCellHash(ivec3(floor((p - RTGI_ORIGIN) / rtgiSize(level, params))), level, side, params), params);
+    uint sc = rtgiFind(rtgiCellHash(ivec3(floor((p - rtgiOrigin(side)) / rtgiSize(level, params))), level, side, params), params);
     if (sc == 0xFFFFFFFFu) return;
     uvec2 v = cellVis[sc];
     if (v.x != rtgiKeys[sc] || (v.y & 0x1000u) == 0u) return;
@@ -101,7 +101,7 @@ void fixVis(vec3 p, uint side, uint level) {
     visLevel0 = level;
 }
 bool neighbourSeen(vec3 p, ivec3 cc, uint level, uint a0, uint a1, float size) {
-    int d0 = cc[a0] - int(floor((p[a0] - RTGI_ORIGIN[a0]) / size)), d1 = cc[a1] - int(floor((p[a1] - RTGI_ORIGIN[a1]) / size));
+    int d0 = cc[a0] - int(floor((p[a0] - 0.0) / size)), d1 = cc[a1] - int(floor((p[a1] - 0.0) / size));
     // Not traced (the readout asks only at its half-res points): its own cell alone, never a blind neighbour.
     if (!visKnown) return u.uVolume.w < 0.5 || (d0 == 0 && d1 == 0);
     if (level < visLevel0 || level - visLevel0 > 2u) return true;
@@ -119,10 +119,10 @@ vec4 fixLevel(vec3 p, uint side, uint level, out float sky, out float near, out 
     vec4 params = u.uCacheParams;
     float size = rtgiSize(level, params);
     uint axis = side >> 1u, a0 = (axis + 1u) % 3u, a1 = (axis + 2u) % 3u;
-    vec3 f = (p - RTGI_ORIGIN) / size - 0.5;
+    vec3 f = (p - rtgiOrigin(side)) / size - 0.5;
     ivec3 c0 = ivec3(floor(f));
     vec3 t = f - vec3(c0);
-    int cAxis = int(floor((p[axis] - RTGI_ORIGIN[axis]) / size));
+    int cAxis = int(floor((p[axis] - rtgiOrigin(side)[axis]) / size));
     vec3 e = vec3(0.0);
     float w = 0.0;
     sky = 0.0; near = 0.0; far = 0.0;
@@ -174,10 +174,10 @@ vec4 fixUp(vec3 p, vec3 n) {
     if (NEAR_PARAMS.w > 0.5) {
         float size = NEAR_PARAMS.x;
         uint axis = side >> 1u, a0 = (axis + 1u) % 3u, a1 = (axis + 2u) % 3u;
-        vec3 f = (p - RTGI_ORIGIN) / size - 0.5;
+        vec3 f = (p - rtgiOrigin(side)) / size - 0.5;
         ivec3 c0 = ivec3(floor(f));
         vec3 tt = f - vec3(c0);
-        int cAxis = int(floor((p[axis] - RTGI_ORIGIN[axis]) / size));
+        int cAxis = int(floor((p[axis] - rtgiOrigin(side)[axis]) / size));
         vec4 acc = vec4(0.0);
         float found = 0.0;
         for (int k = 0; k < 4; k++) {
@@ -194,8 +194,7 @@ vec4 fixUp(vec3 p, vec3 n) {
             found += w;
         }
         vec4 nc = found > 0.05 ? acc / found : vec4(0.0);
-        if (found > 0.05 && NEAR_PARAMS.w > 1.5) e = e.r < -0.5 ? nc.rgb : mix(e, nc.rgb, clamp(found, 0.0, 1.0));
-        else if (found > 0.05 && e.r >= -0.5)
+        if (found > 0.05 && e.r >= -0.5)
             e = mix(e, (nc.w - 1.0) * e * farShare / max(nearCell, 0.05) + nc.rgb, clamp(found, 0.0, 1.0));
     }
     if (e.r < -0.5) return vec4(0.0, 0.0, 0.0, 1.0);

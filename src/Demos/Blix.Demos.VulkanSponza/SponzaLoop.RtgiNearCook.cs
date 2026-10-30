@@ -31,9 +31,6 @@ internal sealed partial class SponzaLoop
     private Task<NearCookLayout>? rtgiNearBuild;
     private int rtgiNearCells, rtgiNearTableSlots, rtgiNearCookCursor, rtgiNearUpdateCursor;
     private int rtgiNearCookFirstNow, rtgiNearCookCountNow, rtgiNearCookRaysNow;
-    // The cook's second pass: each cell's region (rtgi_nearcook_cook.comp kinds 2 and 3; rtgi_cache.glsl's rtgiRegion).
-    private bool rtgiNearRegionPass;
-    private const int NearRegionLevel = 2;
     private uint rtgiNearCookFrom;
     private readonly System.Diagnostics.Stopwatch rtgiNearCookClock = new();
     private GpuBufferHandle rtgiNearTable, rtgiNearPoints, rtgiNearLinks, rtgiNearLightBuf;
@@ -43,7 +40,13 @@ internal sealed partial class SponzaLoop
     private PipelineHandle rtgiNearCookPipeline, rtgiNearUpdatePipeline;
     private const int RtgiNearCookChunk = 32768;
     private const int NearRays = 32;
-    private static readonly Vector3 NearGridOrigin = new(0.0137f, 0.0271f, 0.0419f);
+    // rtgi_cache.glsl's rtgiOrigin: the round coordinates along a surface, RTGI_KEY_INSET back along its normal.
+    private static Vector3 NearGridOrigin(uint side)
+    {
+        const float inset = 0.0213f;
+        var v = (side & 1) == 0 ? inset : -inset;
+        return (side >> 1) switch { 0 => new Vector3(v, 0f, 0f), 1 => new Vector3(0f, v, 0f), _ => new Vector3(0f, 0f, v) };
+    }
 
     private sealed record NearCookLayout(Vector4[] Points, Vector4[] Candidates, uint[] Table, int Slots, double Ms);
     // A cell's samples summed, and one sample kept per 4 x 4 sub-square of it across its surface: its candidate points
@@ -65,7 +68,6 @@ internal sealed partial class SponzaLoop
     }
     private const int NearCandidates = 16, NearChooseRays = 8;
     private bool rtgiNearChoosePass = true;
-    private int rtgiNearLinkRound;
     private bool rtgiNearConnecting;
     // A cook dispatch over every cell (the regions' passes: no rays).
     private DispatchCommand NearCookDispatchAll(int cur, int kind, int cells, bool firstLabels)
@@ -76,7 +78,6 @@ internal sealed partial class SponzaLoop
         rtgiNearCookCountNow = 0;
         return d;
     }
-    private const int NearLinkRounds = 1;
     private GpuBufferHandle rtgiNearCandidates;
     // The regions by connectivity (rtgi_nearcook_cook.comp kinds 6-10): each cell's links, its label and region at each of
     // NearLevels cube sizes, the cube hash. The stage: 0 the links, 1 the labels' passes, 2 the cubes' lowest, 3 the
@@ -130,10 +131,7 @@ internal sealed partial class SponzaLoop
 
     private bool RtgiNearCookOn => rtgiNearCook && rtgiNearCookReady;
     // rtgi_nearcook.glsl's NEAR_PARAMS.
-    private Vector4 RtgiNearParams => new(rtgiNearCell, Math.Max(rtgiNearTableSlots, 1) - 1, rtgiNearCells, RtgiNearCookOn ? (rtgiNearGather ? 2f : 1f) : 0f);
-    // The panel's "Cooked near: full gather": each cell's own 32-ray gather shown (rtgi_nearcook_update.comp), else its near
-    // light over the cache's far light (the default: the gather patchy, 2026-10-30).
-    private bool rtgiNearGather;
+    private Vector4 RtgiNearParams => new(rtgiNearCell, Math.Max(rtgiNearTableSlots, 1) - 1, rtgiNearCells, RtgiNearCookOn ? 1f : 0f);
     private GpuBufferHandle RtgiNearTableOrDummy => rtgiNearCookBuilt ? rtgiNearTable : rtgiVolDummy;
     private GpuBufferHandle RtgiNearLightOrDummy => rtgiNearCookBuilt ? rtgiNearLightBuf : rtgiVolDummy;
     private GpuBufferHandle RtgiNearPointsOrDummy => rtgiNearCookBuilt ? rtgiNearPoints : rtgiVolDummy;
@@ -271,8 +269,8 @@ internal sealed partial class SponzaLoop
                     if (u + v > 1f) continue;
                     var p = a + (b - a) * u + (c - a) * v;
                     if (!Inside(p)) continue;
-                    // rtgi_cache.glsl's RTGI_ORIGIN: the grid off the round coordinates surfaces sit on.
-                    var g = (p - NearGridOrigin) / cell;
+                    // rtgi_cache.glsl's rtgiOrigin.
+                    var g = (p - NearGridOrigin(side)) / cell;
                     var key = ((int)MathF.Floor(g.X), (int)MathF.Floor(g.Y), (int)MathF.Floor(g.Z), side);
                     if (!local.TryGetValue(key, out var e)) local[key] = e = new NearAcc();
                     // Its 4 x 4 sub-square of the cell across its surface (the side's two other axes).
@@ -366,7 +364,6 @@ internal sealed partial class SponzaLoop
             new("uNearCook", new Vector4Uniform(RtgiNearParams)),
             new("uCook", new Vector4Uniform(new Vector4(rtgiNearCookFirstNow, rtgiNearCookCountNow, rtgiContactRadius, kind))),
             new("uVolume", new Vector4Uniform(RtgiVolumeParams)),
-            new("uRegion", new Vector4Uniform(new Vector4(NearRegionLevel, rtgiNearLinkRound, NearLinkRounds, 0f))),
             new("uConn", new Vector4Uniform(new Vector4(firstLabels ? 1f : 0f, Math.Max(rtgiNearCubeSlots, 1) - 1, rtgiNearScalePass & 1, 0f))),
             new("uGeom", new Vector4Uniform(RtgiVolumeGeom)),
             new("uNear", new Vector4Uniform(new Vector4(cameraPosition, rtgiNearReach))),
@@ -417,24 +414,12 @@ internal sealed partial class SponzaLoop
                 return;
             }
             rtgiNearCookCountNow = Math.Min(RtgiNearCookChunk, rtgiNearCells - rtgiNearCookCursor);
-            var region = rtgiNearRegionPass;
-            rtgiNearCookRaysNow = rtgiNearCookCountNow * (region ? 8 : NearRays);
-            graph.Dispatch(rtgiNearCookRaysPassHandle, NearCookDispatch(cur, region ? 2 : 0, rtgiNearCookRaysNow));
-            graph.Dispatch(rtgiNearCookPassHandle, NearCookDispatch(cur, region ? 3 : 1, rtgiNearCookCountNow));
+            rtgiNearCookRaysNow = rtgiNearCookCountNow * NearRays;
+            graph.Dispatch(rtgiNearCookRaysPassHandle, NearCookDispatch(cur, 0, rtgiNearCookRaysNow));
+            graph.Dispatch(rtgiNearCookPassHandle, NearCookDispatch(cur, 1, rtgiNearCookCountNow));
             rtgiNearCookCursor += rtgiNearCookCountNow;
-            if (rtgiNearCookCursor >= rtgiNearCells && !region && rtgiNearLinkRound < NearLinkRounds - 1)
+            if (rtgiNearCookCursor >= rtgiNearCells)
             {
-                rtgiNearLinkRound++;
-                rtgiNearCookCursor = 0;
-            }
-            else if (rtgiNearCookCursor >= rtgiNearCells && !region)
-            {
-                rtgiNearRegionPass = true;
-                rtgiNearCookCursor = 0;
-            }
-            else if (rtgiNearCookCursor >= rtgiNearCells)
-            {
-                rtgiNearRegionPass = false;
                 rtgiNearConnStage = 0;
                 rtgiNearCookCursor = 0;
                 rtgiNearConnecting = true;

@@ -9,15 +9,34 @@
 // chunk, as the volume is.
 //
 // The includer declares NEAR_TABLE(i) (uvec2: key, cell) and NEAR_PARAMS (vec4: x the cell's size; y the table's slots -
-// 1; z the cells; w 1 on, the near light over the cache's far light; 2 on, each cell's own full gather shown). Per cell: its point and side (vec4: xyz, w the side as bits), its normal (vec4); its links,
+// 1; z the cells; w 1 on: the near light over the cache's far light). Per cell: its point and side (vec4: xyz, w the side as bits), its normal (vec4); its links,
 // NEAR_RAYS uvec2 (x: bit 31 met, bits 16-30 the distance in 32768ths of the radius, bits 0-15 the normal octahedral 8:8;
 // y: the albedo, unorm 4x8); its light (vec4: rgb the near light, w the escape share).
 #ifndef RTGI_NEARCOOK_GLSL
 #define RTGI_NEARCOOK_GLSL
 
 #define NEAR_RAYS 32u
-#ifndef RTGI_ORIGIN
-#define RTGI_ORIGIN vec3(0.0137, 0.0271, 0.0419)
+#ifndef RTGI_ORIGIN_DEFINED
+#define RTGI_ORIGIN_DEFINED
+// Every cell grid's origin (the cache's at every level, the cooked near cells') for a side: the round coordinates along the
+// surface, and RTGI_KEY_INSET back along its normal. A floor at y = 0 lay on a cell boundary and a point rebuilt from the
+// depth buffer fell a hair either side as the view changed -- half the floor's samples in each of two cells, lookups
+// missing in streaks that moved with the camera (the user, the crevices testbed, 2026-10-30). The grid moved off the round
+// coordinates altogether (1.4, 2.7, 4.2 cm) cured that, but put a cell across every edge where one thing meets another,
+// 1-4 cm of it past the edge: the light changing over that sliver and not at the edge, the walls seeming to float a
+// little off the floor and the roof (the user, 2026-10-30). The flip is along the normal alone, so only the normal's
+// axis is moved: a surface on a round coordinate sits 2.13 cm inside its cell at every level (0.0213 is no multiple of
+// any cell size, 1.25 cm up), its edges on cell boundaries. Shared by all levels (a cell's parent is still its coordinates
+// halved).
+#define RTGI_KEY_INSET 0.0213
+vec3 rtgiOrigin(uint side) {
+    vec3 o = vec3(0.0);
+    o[side >> 1u] = (side & 1u) == 0u ? RTGI_KEY_INSET : -RTGI_KEY_INSET;
+    return o;
+}
+// The cooked cells' cell sizes' table (rtgi_nearcook.glsl's nearScaleAt) is by position alone, any side: off the round
+// coordinates on every axis, so no surface lies on its boundaries.
+#define NEAR_SCALE_ORIGIN vec3(0.0137, 0.0271, 0.0419)
 #endif
 #define NEAR_PROBE_STEPS 8u
 // A cell's point's w (bits): its side (0-2), and NEAR_BURIED where its rays mostly met back faces -- sampled from a floor
@@ -66,8 +85,6 @@ vec3 nearRayDir(uint i, uint k, vec3 n) {
     return normalize(t * (cos(phi) * sr) + b * (sin(phi) * sr) + n * sqrt(max(0.0, 1.0 - r1)));
 }
 
-// The region of a point (rtgi_cache.glsl's rtgiRegion): its cooked cell's (the normal's w, rtgi_nearcook_cook.comp's
-// third pass: 1 + the 2 m probe it reaches), 0 where none is cooked. The includer declares NEAR_POINTS(i) for it.
 // The 8 neighbours of a cooked cell across its surface (along the side's two other axes), ordered so a neighbour's way
 // back is k ^ 1; a cell's links (NEAR_ADJ: bit k, a clear ray to that neighbour's point, rtgi_nearcook_cook.comp).
 const ivec2 NEAR_RING[8] = ivec2[8](ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1), ivec2(1, 1), ivec2(-1, -1), ivec2(1, -1), ivec2(-1, 1));
@@ -81,11 +98,11 @@ const ivec2 NEAR_RING[8] = ivec2[8](ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec
 uint nearRegion(vec3 p, uint side) {
     if (NEAR_PARAMS.w < 0.5) return 0u;
     float size = NEAR_PARAMS.x;
-    ivec3 c = ivec3(floor((p - RTGI_ORIGIN) / size));
+    ivec3 c = ivec3(floor((p - rtgiOrigin(side)) / size));
     uint j = nearFind(c, side);
     if (j != 0xFFFFFFFFu && (floatBitsToUint(NEAR_POINTS(2u * j).w) & NEAR_BURIED) == 0u) return j + 1u;
     uint axis = side >> 1u, a0 = (axis + 1u) % 3u, a1 = (axis + 2u) % 3u;
-    vec3 off = (p - RTGI_ORIGIN) / size - (vec3(c) + 0.5);
+    vec3 off = (p - rtgiOrigin(side)) / size - (vec3(c) + 0.5);
     ivec3 cc = c;
     if (abs(off[a0]) >= abs(off[a1])) cc[a0] += off[a0] >= 0.0 ? 1 : -1;
     else cc[a1] += off[a1] >= 0.0 ? 1 : -1;
@@ -104,7 +121,7 @@ uint rtgiRegion = 0u;
 // NEAR_SCALE(i) (uvec2: key, size's bits; the near table's slots).
 float nearScaleAt(vec3 p) {
     if (NEAR_PARAMS.w < 0.5) return -1.0;
-    uvec2 h = nearCellHash(ivec3(floor((p - RTGI_ORIGIN) / NEAR_PARAMS.x)), 7u);
+    uvec2 h = nearCellHash(ivec3(floor((p - NEAR_SCALE_ORIGIN) / NEAR_PARAMS.x)), 7u);
     for (uint k = 0u; k < NEAR_PROBE_STEPS; k++) {
         uvec2 e = NEAR_SCALE((h.x + k) & uint(NEAR_PARAMS.y));
         if (e.x == h.y) return uintBitsToFloat(e.y);
@@ -127,8 +144,8 @@ bool nearLinked(uint own, uint i, uint side) {
     if (own == i) return true;
     if (own == 0xFFFFFFFFu) return false;
     float size = NEAR_PARAMS.x;
-    ivec3 co = ivec3(floor((NEAR_POINTS(2u * own).xyz - RTGI_ORIGIN) / size));
-    ivec3 ci = ivec3(floor((NEAR_POINTS(2u * i).xyz - RTGI_ORIGIN) / size));
+    ivec3 co = ivec3(floor((NEAR_POINTS(2u * own).xyz - rtgiOrigin(side)) / size));
+    ivec3 ci = ivec3(floor((NEAR_POINTS(2u * i).xyz - rtgiOrigin(side)) / size));
     uint axis = side >> 1u, a0 = (axis + 1u) % 3u, a1 = (axis + 2u) % 3u;
     ivec2 d = ivec2(ci[a0] - co[a0], ci[a1] - co[a1]);
     for (uint k = 0u; k < 8u; k++) if (NEAR_RING[k] == d) return (NEAR_ADJ(own) & (1u << k)) != 0u;

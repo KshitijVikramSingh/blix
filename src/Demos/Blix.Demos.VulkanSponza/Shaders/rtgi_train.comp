@@ -142,7 +142,7 @@ layout(std430, set = 0, binding = 25) readonly buffer RtgiNearPoints { vec4 near
 uint rtgiInsertHashed(uvec2 h, ivec4 cell);
 
 uint rtgiInsertAt(vec3 p, vec3 n, uint level) {
-    ivec3 c = ivec3(floor((p - RTGI_ORIGIN) / rtgiSize(level, u.uParams)));
+    ivec3 c = ivec3(floor((p - rtgiOrigin(rtgiSide(n))) / rtgiSize(level, u.uParams)));
     uint side = rtgiSide(n);
     rtgiRegion = nearRegion(p, side);
     uvec2 h = rtgiCellHash(c, level, side, u.uParams);
@@ -171,7 +171,7 @@ uint rtgiInsertHashed(uvec2 h, ivec4 cell) {
 
 uvec2 cellAt(vec3 p, vec3 n, uint level) {
     rtgiRegion = nearRegion(p, rtgiSide(n));
-    return rtgiCellHash(ivec3(floor((p - RTGI_ORIGIN) / rtgiSize(level, u.uParams))), level, rtgiSide(n), u.uParams);
+    return rtgiCellHash(ivec3(floor((p - rtgiOrigin(rtgiSide(n))) / rtgiSize(level, u.uParams))), level, rtgiSide(n), u.uParams);
 }
 
 // q's outgoing radiance times PI over its albedo: E_ind + direct sun, from its cell once it holds 8 samples, else the cell
@@ -562,7 +562,7 @@ void main() {
     if (live && counted && u.uGuideTable.x > 0.0 && !twice(1024u)) {
         uint gl = min(level + 2u, uint(u.uParams.w));
         uint gside = rtgiSide(n);
-        uvec2 gh = guideHash(ivec3(floor((p.xyz - RTGI_ORIGIN) / rtgiSize(gl, u.uParams))), gl, gside, uint(u.uGuideTable.x));
+        uvec2 gh = guideHash(ivec3(floor((p.xyz - rtgiOrigin(gside)) / rtgiSize(gl, u.uParams))), gl, gside, uint(u.uGuideTable.x));
         uint g = 0xFFFFFFFFu;
         for (uint k = 0u; k < GUIDE_PROBES; k++) {
             uint gs = (gh.x + k) & uint(u.uGuideTable.x);
@@ -617,7 +617,7 @@ void main() {
         if (!table && !here) continue;
         if (twice(2048u)) continue;
         if (twice(2u) && here) {
-            ivec3 cn = ivec3(floor((p.xyz - RTGI_ORIGIN) / rtgiSize(level + k, u.uParams))) + ivec3(1, 0, 0);
+            ivec3 cn = ivec3(floor((p.xyz - rtgiOrigin(rtgiSide(n))) / rtgiSize(level + k, u.uParams))) + ivec3(1, 0, 0);
             sink(rtgiFind(rtgiCellHash(cn, level + k, rtgiSide(n), u.uParams), u.uParams) == 0xFFFFFFFEu);
         }
         // Finding the levels above once a workgroup instead (the table keyed by the cell's hash, the flush's thread

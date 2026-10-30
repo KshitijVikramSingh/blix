@@ -1,11 +1,10 @@
 #version 450
 
-// --rtgi-near-cook (rtgi_nearcook.glsl): the cook, a chunk of cells a frame. Kind 0 (placement time): each listed cell's
-// NEAR_RAYS rays, from its point lifted off its surface, to the contact radius, into the Metal batch (closest hit). Kind 1
-// (with the training): their hits into the cell's links and its escape share. Kinds 2 and 3, a second pass over every
-// cell: a ray from its point to each of the 8 probes of the volume's 2 m level around it, then its region -- 1 + the
-// nearest it reached (0: none) -- into its normal's w (rtgi_nearcook.glsl's nearRegion; rtgi_cache.glsl's rtgiRegion:
-// the two sides of a thin wall, reaching different probes, keyed apart).
+// --rtgi-near-cook (rtgi_nearcook.glsl): the cook, a chunk of cells a frame. Kinds 4 and 5: each cell's point chosen among
+// its candidates. Kind 0 (placement time): each cell's NEAR_RAYS rays, from its point lifted off its surface, into the
+// Metal batch (closest hit). Kind 1 (with the training): their hits into the cell's links (within the contact radius), its
+// escape share, and whether it is buried. Kinds 6-10: the regions by connectivity. Kinds 11-13: the cells' sizes. Kinds 14,
+// 15: the cells near the camera listed (--rtgi-near-train).
 
 layout(local_size_x = 64) in;
 
@@ -13,7 +12,6 @@ layout(set = 0, binding = 0) uniform RtgiNearCookCook {
     vec4 uNearCook;  // rtgi_nearcook.glsl's NEAR_PARAMS
     vec4 uCook;      // x the chunk's first cell; y its cells; z the contact radius (m); w the kind
     vec4 uVolume;    // rtgi_volume.glsl's VOL_PARAMS (kinds 2 and 3); x the level the regions are probes of
-    vec4 uRegion;    // x the volume's level the regions are drawn from; y the links' round; z the rounds
     vec4 uConn;      // x 1: the labels' first pass (each its own index); y the cube hash's slots - 1; z the scale's pass (its parity)
     vec4 uGeom;      // rtgi_volume.glsl's VOL_GEOM (kinds 11-13: x the cells' share of the distance, y their most, w the level)
     vec4 uNear;      // kinds 14 and 15: xyz the camera, w the reach (m)
@@ -68,7 +66,7 @@ layout(std430, set = 0, binding = 16) buffer RtgiNearList { uint nearListCount; 
 uint nearNeighbour(uint i, uint k) {
     vec3 p = nearPoints[2u * i].xyz;
     uint side = floatBitsToUint(nearPoints[2u * i].w) & 7u;
-    ivec3 c = ivec3(floor((p - RTGI_ORIGIN) / NEAR_PARAMS.x));
+    ivec3 c = ivec3(floor((p - rtgiOrigin(side)) / NEAR_PARAMS.x));
     uint axis = side >> 1u, a0 = (axis + 1u) % 3u, a1 = (axis + 2u) % 3u;
     c[a0] += NEAR_RING[k].x;
     c[a1] += NEAR_RING[k].y;
@@ -76,7 +74,7 @@ uint nearNeighbour(uint i, uint k) {
     if (j == 0xFFFFFFFFu || (floatBitsToUint(nearPoints[2u * j].w) & NEAR_BURIED) != 0u) return 0xFFFFFFFFu;
     return j;
 }
-ivec3 nearCube(uint i, uint level) { return ivec3(floor((nearPoints[2u * i].xyz - RTGI_ORIGIN) / (NEAR_PARAMS.x * exp2(float(level))))); }
+ivec3 nearCube(uint i, uint level) { return ivec3(floor((nearPoints[2u * i].xyz - rtgiOrigin((floatBitsToUint(nearPoints[2u * i].w) & 7u))) / (NEAR_PARAMS.x * exp2(float(level))))); }
 bool nearLive(uint i) { return (floatBitsToUint(nearPoints[2u * i].w) & NEAR_BURIED) == 0u; }
 #define VOL_PARAMS vec4(u.uVolume.xyz, 1.0)
 // The probes' raw harmonic distance (volCellScale with a share of 1, no most).
@@ -202,7 +200,7 @@ void main() {
         }
         float inv = nearScale[src + i];
         float size = inv > 0.0 ? min(u.uGeom.x / inv, u.uGeom.y) : u.uGeom.y;
-        uvec2 h = nearCellHash(ivec3(floor((nearPoints[2u * i].xyz - RTGI_ORIGIN) / NEAR_PARAMS.x)), 7u);
+        uvec2 h = nearCellHash(ivec3(floor((nearPoints[2u * i].xyz - NEAR_SCALE_ORIGIN) / NEAR_PARAMS.x)), 7u);
         for (uint k = 0u; k < NEAR_PROBE_STEPS; k++) {
             uint s = (h.x + k) & uint(NEAR_PARAMS.y);
             uint prev = atomicCompSwap(nearScaleTable[s].x, 0u, h.y);
@@ -239,43 +237,6 @@ void main() {
             if (backs < bestBacks || (backs == bestBacks && dm < bestD)) { bestBacks = backs; bestD = dm; best = c; }
         }
         if (best != 0xFFFFFFFFu) nearPoints[2u * i].xyz = nearCandidates[NEAR_CANDIDATES * i + best].xyz;
-        return;
-    }
-    uint rl = uint(u.uRegion.x);
-    if (kind == 2u) {
-        if (t >= cells * 8u) return;
-        uint i = first + t / 8u, k = t % 8u;
-        vec3 p = nearPoints[2u * i].xyz, n = nearPoints[2u * i + 1u].xyz;
-        vec3 o = p + n * 0.01, q;
-        cookRays[2u * t] = vec4(o, 0.0);
-        cookRays[2u * t + 1u] = vec4(0.0, 1.0, 0.0, 1e-6);
-        if (volProbeAt(p, rl, k, q) == 0xFFFFFFFFu) return;
-        vec3 d = q - o;
-        float len = length(d);
-        if (len > 1e-3) cookRays[2u * t + 1u] = vec4(d / len, max(len - 0.01, 1e-3));
-        return;
-    }
-    if (kind == 3u) {
-        if (t >= cells) return;
-        uint i = first + t;
-        vec3 p = nearPoints[2u * i].xyz;
-        // Region 0 where it reaches every live probe around it: nothing near it to keep apart, and keyed by probe it broke
-        // open floors into patches at every probe's reach (the user: the light broke where the regions did, 2026-10-30).
-        // Else the lowest probe it reaches, so the cells along one side of a wall agree.
-        uint best = 0xFFFFFFFFu, live = 0u, reached = 0u;
-        for (uint k = 0u; k < 8u; k++) {
-            uint r = t * 8u + k;
-            vec3 q;
-            uint id = volProbeAt(p, rl, k, q);
-            if (id == 0xFFFFFFFFu) continue;
-            live++;
-            vec4 d = cookRays[2u * r + 1u];
-            if (d.w <= 1e-5 || (cookHits[3u * r].w & 1u) != 0u) continue;
-            reached++;
-            best = min(best, id);
-        }
-        uint region = reached == live || best == 0xFFFFFFFFu ? 0u : best + 1u;
-        nearPoints[2u * i + 1u].w = uintBitsToFloat(region);
         return;
     }
     if (u.uCook.w < 0.5) {

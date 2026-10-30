@@ -134,8 +134,8 @@ internal sealed partial class SponzaLoop
     // The panel's A/B switches: the traced neighbour test, the probes read at all.
     // The probes' light in the readout off by default: Crytek Sponza leaked and blotched with it, the cells' traced
     // visibility notwithstanding (the user's A/B, 2026-10-29); the volume sizes the cells and gates the settle.
-    private bool rtgiVolumeNeighbours = true, rtgiVolumeRead;
-    private Vector4 RtgiVolumeReadout => new(rtgiVolumeTrust, RtgiVolVisRoom, rtgiVolumeNeighbours ? 1f : 0f, rtgiVolumeRead ? 1f : 0f);
+    private bool rtgiVolumeNeighbours = true;
+    private Vector4 RtgiVolumeReadout => new(rtgiVolumeTrust, RtgiVolVisRoom, rtgiVolumeNeighbours ? 1f : 0f, 0f);
     private GpuBufferHandle RtgiVolCellVisOrDummy => rtgiVolumeBuilt ? rtgiVolCellVis : rtgiVolDummy;
     // The requests the readout writes this frame (the next frame's RecordRtgiVolumeVis traces them).
     private GpuBufferHandle RtgiVolVisRequestsNow => rtgiVolumeBuilt ? rtgiVolVisRequests[(int)(rtgiFrameCount & 1u)] : rtgiVolDummy;
