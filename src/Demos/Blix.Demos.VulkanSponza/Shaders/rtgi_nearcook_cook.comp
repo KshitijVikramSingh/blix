@@ -16,6 +16,7 @@ layout(set = 0, binding = 0) uniform RtgiNearCookCook {
     vec4 uRegion;    // x the volume's level the regions are drawn from; y the links' round; z the rounds
     vec4 uConn;      // x 1: the labels' first pass (each its own index); y the cube hash's slots - 1; z the scale's pass (its parity)
     vec4 uGeom;      // rtgi_volume.glsl's VOL_GEOM (kinds 11-13: x the cells' share of the distance, y their most, w the level)
+    vec4 uNear;      // kinds 14 and 15: xyz the camera, w the reach (m)
 } u;
 // Per cell, its candidate points (one sample per 4 x 4 sub-square of it across its surface, w 1 where it had one): kinds 4
 // and 5 test each with 8 rays and keep the one meeting no back face, nearest the cell's middle, as its point -- the
@@ -56,6 +57,8 @@ layout(std430, set = 0, binding = 13) readonly buffer RtgiNearTable { uvec2 near
 // steps of light along the crevices testbed's floor (the user, 2026-10-30); a cooked cell's own rays are its surface's.
 layout(std430, set = 0, binding = 14) buffer RtgiNearScale { float nearScale[]; };
 layout(std430, set = 0, binding = 15) buffer RtgiNearScaleTable { uvec2 nearScaleTable[]; };
+// The live cells within uNear.w of the camera (kind 14 empties it, 15 lists them): rtgi_rays.comp's --rtgi-near-train points.
+layout(std430, set = 0, binding = 16) buffer RtgiNearList { uint nearListCount; uint nearListPad[3]; uint nearList[]; };
 
 #define NEAR_PARAMS u.uNearCook
 #define NEAR_TABLE(i) nearTable[i]
@@ -159,6 +162,14 @@ void main() {
             if (kind == 9u) atomicMin(nearCubes[slot].y, lab);
             else nearRegions[i * NEAR_LEVELS + l] = lab == nearCubes[slot].y ? 0u : lab + 1u;
         }
+        return;
+    }
+    if (kind == 14u) { if (t == 0u) nearListCount = 0u; return; }
+    if (kind == 15u) {
+        if (t >= cells) return;
+        uint i = first + t;
+        if (!nearLive(i) || distance(nearPoints[2u * i].xyz, u.uNear.xyz) > u.uNear.w) return;
+        nearList[atomicAdd(nearListCount, 1u)] = i;
         return;
     }
     if (kind == 11u || kind == 12u || kind == 13u) {

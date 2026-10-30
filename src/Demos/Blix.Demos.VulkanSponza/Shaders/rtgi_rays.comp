@@ -27,7 +27,8 @@ layout(set = 0, binding = 0) uniform RtgiRays {
     vec4 uVolumeGeom;    // rtgi_volume.glsl's VOL_GEOM
     vec4 uNearCook;      // --rtgi-near-cook: rtgi_nearcook.glsl's NEAR_PARAMS -- its cells the surface a visible point's
                          // cell is trained over (surfacePoint)
-    vec4 uNearField;     // x the near field's radius (RTGI_NEAR)
+    vec4 uNearField;     // x the near field's radius (RTGI_NEAR); y of the hit points, how many are cooked cells' points near
+                         // the camera instead (--rtgi-near-train, the list RtgiNearList); z the list's turning offset
     vec4 uGuide;         // x the share of rays guided where a cell has learnt its light's way (0: none); y samples it must hold;
                          // z the lobe's concentration at most; w the guide table's slots - 1 (0: the lobe, no table)
     vec4 uAdapt;         // x the share of visible points placed by uncertainty (0: every tile its own); y tiles weighed for each;
@@ -57,6 +58,8 @@ layout(std430, set = 0, binding = 20) readonly buffer RtgiCapturePixels { uint c
 // and the cell its moved point trains, each: the point and the region at its level; the normal and the level; the cell's
 // resolved light and the samples it holds (-1: no cell).
 layout(std430, set = 0, binding = 27) writeonly buffer RtgiCaptureOut { vec4 captureOut[]; };
+// --rtgi-near-train: the live cooked cells within reach of the camera (rtgi_nearcook_cook.comp kind 15, every few frames).
+layout(std430, set = 0, binding = 28) readonly buffer RtgiNearList { uint nearListCount; uint nearListPad[3]; uint nearList[]; };
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
 layout(set = 0, binding = 2) uniform sampler2D uPrepassNormal;
 layout(std430, set = 0, binding = 3) readonly buffer RtgiPrevRays { vec4 prevRays[]; };
@@ -348,13 +351,22 @@ void main() {
     } else {
         if (u.uSun.w < 0.5) { none(i); return; }
         uint j = i - visible;
-        if (j < min(requestCount, uint(u.uCounts.y))) {
+        uint asked = min(requestCount, uint(u.uCounts.y));
+        if (j < asked) {
             requestPoint = true;
             p = requests[5u * j].xyz;
             n = requests[5u * j + 1u].xyz;
             pointOrigins[3u * i] = requests[5u * j + 2u];
             pointOrigins[3u * i + 1u] = requests[5u * j + 3u];
             pointOrigins[3u * i + 2u] = requests[5u * j + 4u];
+        } else if (j - asked < uint(u.uNearField.y) && nearListCount > 0u) {
+            // A cooked cell near the camera, in turn (--rtgi-near-train): its cache cells trained over their own surface before
+            // the camera faces them. Trained only from the screen, a dead end's cells first seen as the camera walked in held
+            // nothing, and the readout faded each in over its parent -- twice its size, the wider and brighter light, its size
+            // steps showing -- bright for a second or two (the user, the crevices testbed, 2026-10-30).
+            uint e = nearList[(uint(u.uNearField.z) + j - asked) % nearListCount];
+            p = nearPoints[2u * e].xyz;
+            n = nearPoints[2u * e + 1u].xyz;
         } else {
             if ((uint(u.uSkip.x) & 8u) != 0u) { none(i); return; }
             // A share of last frame's training rays, spread over all of them and turning each frame.

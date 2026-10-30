@@ -89,6 +89,20 @@ internal sealed partial class SponzaLoop
     // each cell's mean inverse distance (two halves), averaged NearScalePasses times over its linked neighbours, then by
     // 5 cm cube into a table of the near table's slots (rtgi_nearcook.glsl's nearScaleAt).
     private const int NearScalePasses = 4;
+    // --rtgi-near-train N (8192; 0 off): N of the hit points a frame are cooked cells' points within --rtgi-near-reach m (6)
+    // of the camera, in turn (rtgi_rays.comp), the list remade every 30 frames (rtgi_nearcook_cook.comp kinds 14, 15).
+    private int rtgiNearTrain = 8192, rtgiNearTrainCursor;
+    private float rtgiNearReach = 6f;
+    private GpuBufferHandle rtgiNearList;
+    private GpuBufferHandle RtgiNearListOrDummy => rtgiNearCookBuilt ? rtgiNearList : rtgiVolDummy;
+    private Vector4 RtgiNearTrainUniform(int hits)
+    {
+        if (!RtgiNearCookOn || rtgiNearTrain <= 0) return new Vector4(rtgiNearField, 0f, 0f, 0f);
+        var n = Math.Min(rtgiNearTrain, hits);
+        var at = rtgiNearTrainCursor;
+        rtgiNearTrainCursor = (rtgiNearTrainCursor + n) & 0x3FFFFFFF;
+        return new Vector4(rtgiNearField, n, at, 0f);
+    }
     // BLIX_RTGI_NEAR_PROBE="x,y,z": once cooked, the cooked cells within 6 cm of the point written to the log -- their point,
     // side and flags, candidates, light (the crevices testbed's black strips, 2026-10-30).
     private bool rtgiNearProbePending;
@@ -131,6 +145,8 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-near-cell") is { } nc) rtgiNearCell = MathF.Max(0.01f, nc);
         if (args.Int("rtgi-near-cook-most") is { } most) rtgiNearCookMost = Math.Max(1024, most);
         if (args.Float("rtgi-near-blend") is { } nb) rtgiNearBlend = Math.Clamp(nb, 0.01f, 1f);
+        if (args.Int("rtgi-near-train") is { } nt) rtgiNearTrain = Math.Max(0, nt);
+        if (args.Float("rtgi-near-reach") is { } nr) rtgiNearReach = MathF.Max(0.5f, nr);
     }
 
     private void DeclareRtgiNearCookPasses(Func<string, ShaderInterface> reflect)
@@ -326,6 +342,7 @@ internal sealed partial class SponzaLoop
         var cubes = new uint[rtgiNearCubeSlots * 2];
         for (var k = 1; k < cubes.Length; k += 2) cubes[k] = 0xFFFFFFFFu;
         rtgiNearCubes = Own(device.CreateGpuBuffer(cubes.Length * 4, MemoryMarshal.AsBytes(cubes.AsSpan()).ToArray(), "sponza.rtgi.near-cubes"));
+        rtgiNearList = Own(device.CreateGpuBuffer(16 + cells * 4, new byte[16 + cells * 4], "sponza.rtgi.near-list"));
         rtgiNearScale = Own(device.CreateGpuBuffer(cells * 8, new byte[cells * 8], "sponza.rtgi.near-scale"));
         var scaleTable = new uint[layout.Slots * 2];
         for (var k = 1; k < scaleTable.Length; k += 2) scaleTable[k] = 0xFFFFFFFFu;
@@ -352,6 +369,7 @@ internal sealed partial class SponzaLoop
             new("uRegion", new Vector4Uniform(new Vector4(NearRegionLevel, rtgiNearLinkRound, NearLinkRounds, 0f))),
             new("uConn", new Vector4Uniform(new Vector4(firstLabels ? 1f : 0f, Math.Max(rtgiNearCubeSlots, 1) - 1, rtgiNearScalePass & 1, 0f))),
             new("uGeom", new Vector4Uniform(RtgiVolumeGeom)),
+            new("uNear", new Vector4Uniform(new Vector4(cameraPosition, rtgiNearReach))),
         },
         Array.Empty<ShaderTextureBinding>(),
         Buffers: new[]
@@ -371,6 +389,7 @@ internal sealed partial class SponzaLoop
             new ShaderBufferBinding("RtgiNearTable", rtgiNearTable),
             new ShaderBufferBinding("RtgiNearScale", rtgiNearScale),
             new ShaderBufferBinding("RtgiNearScaleTable", rtgiNearScaleTable),
+            new ShaderBufferBinding("RtgiNearList", rtgiNearList),
         });
 
     // Placement time: the next chunk's rays (traced in the Metal batch: RtgiNearCookRaysNow); with the training their
@@ -468,6 +487,12 @@ internal sealed partial class SponzaLoop
             return;
         }
         if (rtgiNearProbePending && rtgiFrameCount > rtgiNearCookFrom + 4) { rtgiNearProbePending = false; ProbeRtgiNearCells(); }
+        // The cells near the camera listed again (--rtgi-near-train).
+        if (rtgiNearTrain > 0 && rtgiFrameCount % 30 == 0)
+        {
+            graph.Dispatch(rtgiNearCookPassHandle, NearCookDispatchAll(cur, 14, 1, false));
+            graph.Dispatch(rtgiNearCookPassHandle, NearCookDispatchAll(cur, 15, rtgiNearCells, false));
+        }
         var count = Math.Min(rtgiNearCells, rtgiNearUpdateMost);
         var first = rtgiNearUpdateCursor;
         rtgiNearUpdateCursor = (rtgiNearUpdateCursor + count) % rtgiNearCells;
