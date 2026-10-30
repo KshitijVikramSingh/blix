@@ -5,25 +5,23 @@ using Blix.Graphics.MetalHWX;
 
 namespace Blix.Demos.VulkanSponza;
 
-// The two batch operations every ray consumer migrates onto (plan.md, stage 5, hardware rays): GLSL under MoltenVK
-// cannot reach Metal's intersector, so a consumer writes its rays to a buffer, a batch answers them, and a later pass
-// reads the answers -- a wavefront.
+// The two batch operations a ray consumer writes its rays for: GLSL under MoltenVK cannot reach Metal's intersector, so a
+// consumer writes its rays to a buffer, a batch answers them, and a later pass reads the answers -- a wavefront.
 //
 //   CLOSEST  rays (two vec4s: origin, tMin; direction, tMax) -> answers (three uvec4s: t, barycentrics, flags;
-//            placement, triangle; world normal, linear albedo) -- ray_check.comp's formats
+//            placement, triangle; world normal, linear albedo)
 //   SHADOW   origins (vec4: position, tMax; tMax <= 0 no ray) toward one direction -> a uint each, 1 where occluded
 //
-// Each is answered by the software traversal (ray_batch_closest.comp / ray_batch_shadow.comp over ray_query.glsl) or by
-// Metal's hardware (an external pass in the frame: MetalRayTracer.EncodeTrace / EncodeShadow), in the same formats and
-// with the same coverage seeds (the base plus the ray's index), so a consumer reads either. Frame work goes to Metal
-// under --ray-backend hw|both, once its structures exist (EnsureFrameTracer); the software kernels otherwise, and they
-// stay the reference behaviour.
+// Each is answered by Metal's hardware (an external pass in the frame: MetalRayTracer.EncodeTrace / EncodeShadow) once
+// the frame's tracer exists (EnsureFrameTracer), or, where it failed to build, by the software traversal
+// (ray_batch_closest.comp / ray_batch_shadow.comp over ray_query.glsl), in the same formats and with the same coverage
+// seeds (the base plus the ray's index), so a consumer reads either.
 internal sealed partial class SponzaLoop
 {
     private ShaderInterface batchClosestInterface = null!, batchShadowInterface = null!;
     private PipelineHandle batchClosestPipeline, batchShadowPipeline;
-    // The traced shadows put frame rays on Metal too: the traced shadows' premise is that rays answer, and Metal answers fastest.
-    private bool FrameRaysOnHardware => rayBackend is "hw" or "both" || rtShadows;
+    // Frame rays go to Metal unless its tracer failed to build (rtShadows off then: RecordRtShadows).
+    private bool FrameRaysOnHardware => rtShadows;
 
     /// <summary>One consumer's batch: a compute pass for the software traversal and an external pass for Metal, declared
     /// where the consumer needs the answers; a frame dispatches one of the two.</summary>

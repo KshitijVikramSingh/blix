@@ -31,8 +31,8 @@ public readonly record struct MetalShadowStats(long Dispatches, double TotalGpuM
 /// <para>
 /// One bottom-level acceleration structure per distinct hierarchy, built from the Positions block where it lies, and
 /// one top-level instance per entry, so a hit names the same entry, triangle row and owner that ray_query.glsl's does
-/// and is resolved through the same blocks. Rays and answers are ray_check.comp's: two float4 per ray (origin and tMin,
-/// direction and tMax), seed = the base plus its index; three uint4 per answer.
+/// and is resolved through the same blocks. Rays and answers are the closest batch's (VulkanSponza's SponzaLoop.RayBatch.cs):
+/// two float4 per ray (origin and tMin, direction and tMax), seed = the base plus its index; three uint4 per answer.
 /// </para>
 /// <para>
 /// Every call waits for its GPU work, and expects Vulkan to be idle on the buffers it names: the caller orders it
@@ -204,7 +204,7 @@ public sealed class MetalRayTracer : IDisposable
     }
 
     /// <summary>Traces <paramref name="count"/> rays, <paramref name="repeats"/> times; each dispatch's GPU milliseconds.</summary>
-    /// <param name="closestOnly">Skip the any-hit trace (its flag then repeats the closest hit's), as --ray-bench does.</param>
+    /// <param name="closestOnly">Skip the any-hit trace (its flag then repeats the closest hit's).</param>
     /// <param name="sun">With it (toward the sun, xyz; w the lift along the hit's normal), each hit's sun too: a shadow ray
     /// from the hit to <paramref name="reach"/>, its hit flags gaining 8 when nothing meets it.</param>
     /// <param name="discTan">With <paramref name="sun"/>: the tangent of the sun's angular radius, each shadow ray toward its
@@ -230,7 +230,8 @@ public sealed class MetalRayTracer : IDisposable
     /// From now on this tracer submits on the Vulkan device's own Metal command queue
     /// (<see cref="IGraphicsDevice.ExportMetalCommandQueue"/>), its in-frame passes in commit order with the frame's
     /// Vulkan work on one queue; <paramref name="deviceQueue"/> false: back to its own. Whether one queue is cheaper
-    /// than two is measured, not assumed (VulkanSponza --ab queue).
+    /// than two is measured, not assumed: on VulkanSponza's frame (2026-10) two were, the tracers' work running beside
+    /// the Vulkan passes rather than between them.
     /// </summary>
     public void UseDeviceQueue(bool deviceQueue = true)
     {

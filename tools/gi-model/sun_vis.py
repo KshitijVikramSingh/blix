@@ -28,7 +28,7 @@ candidates (a light-space map, a shadow ray at the hit):
   map      a light-space depth map, its texels r apart on S, read with bilinear PCF (a point sun), or of the disc's sun
   ray      a shadow ray at the hit: exact, a point sun, or a point on the disc
 
-Truth is the point sun (what the GPU reference traces, reference_path.glsl) and the 0.53 degree disc (what the frame's
+Truth is the point sun (what the GPU reference traces, reference_wave.comp) and the 0.53 degree disc (what the frame's
 direct sun has). A grid's phase against the edge is the texel-scale pattern: each estimator is run at 32 phases, and the
 spread over phases is what neighbouring texels along the surface see differently.
 """

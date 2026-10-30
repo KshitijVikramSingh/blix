@@ -82,9 +82,6 @@ internal sealed partial class SponzaLoop
         if (args.Int("ref-bounces") is { } rb) refBounces = Math.Clamp(rb, 1, 64);
         if (args.Int("ref-paths") is { } rp) refPaths = Math.Clamp(rp, 16, 1 << 20);
         if (args.Int("ref-seed") is { } rs) refSeed = rs;
-        refSheets = !args.Flag("ref-opaque-sheets");
-        refFaceNormal = args.Flag("ref-face-normal");
-        refSunClosest = !args.Flag("ref-shadow-batch");
         if (args.Float("ref-lift") is { } rl) refLift = Math.Max(1e-5f, rl);
         if (args.Float("ref-sky") is { } rsk) refSky = Math.Max(0f, rsk);
         refSunDisc = args.String("ref-sun") switch
@@ -149,27 +146,6 @@ internal sealed partial class SponzaLoop
         iblBrdfLut = args.Flag("ibl-brdf-lut");
         cascadesAlways = args.Flag("cascades-always");
         shadowKeep = !args.Flag("no-shadow-keep");
-        // --ray-check: also trace a fixed batch of rays on the GPU every frame and hold them against the CPU at the shot.
-        rayCheck = args.Flag("ray-check");
-        if (args.String("ray-bench") is { } bench)
-        {
-            if (bench is not ("mixed" or "probe" or "camera" or "surface")) throw new AppArgsException($"--ray-bench takes mixed, probe, camera or surface, not '{bench}'.");
-            rayBench = bench;
-            rayCheck = true;
-        }
-        if (args.Int("ray-bench-repeat") is { } repeat)
-        {
-            if (repeat < 1) throw new AppArgsException($"--ray-bench-repeat takes a count of at least 1, not {repeat}.");
-            rayBenchRepeat = repeat;
-        }
-        // --ray-backend sw|hw|both: who answers the ray check or bench at the shot: the software traversal
-        // (ray_query.glsl, every frame, the default), Metal's hardware intersector (SponzaLoop.HardwareRays), or both.
-        if (args.String("ray-backend") is { } backend)
-        {
-            if (backend is not ("sw" or "hw" or "both")) throw new AppArgsException($"--ray-backend takes sw, hw or both, not '{backend}'.");
-            rayBackend = backend;
-            rayCheck = true;
-        }
         ParseRtgi(args);
         // GTAO off unless --ao (AmbientSettings.Enabled): RTGI's light holds its own occlusion (the bounce never took
         // GTAO), and GTAO occluded the sky's specular reflection a second time over the sky visibility that already held
@@ -201,9 +177,6 @@ internal sealed partial class SponzaLoop
         if (args.Float("rt-alpha-mip") is { } alphaMip) rtAlphaMip = Math.Clamp(alphaMip, 0f, 12f);
         rtAlphaAb = args.Flag("rt-alpha-ab");
         var fogAsked = args.Flag("fog");
-        // --ray-view: trace the camera's view and hold it against the raster at the shot (it brings the ray check with it).
-        rayView = args.Flag("ray-view");
-        rayCheck |= rayView;
         // --no-taa: no TAA and so no sub-pixel jitter: the control for --stability, whose variation otherwise
         // counts every edge the jitter moves.
         if (args.Flag("no-taa")) render.Taa = 0f;
@@ -230,7 +203,6 @@ internal sealed partial class SponzaLoop
         if (args.Int("stability") is { } stability) stabilityFrames = Math.Max(2, stability);
         if (args.Float("taa-dynamic-count") is { } tdc) taaDynamicCount = Math.Max(1f, tdc);
         ParseMoverArgs();
-        keepRayNodes = args.Flag("keep-ray-nodes");
         // --surface-check: hold the pre-pass's SurfaceKey and velocity against CPU rays at the shot (stage 4e-iv).
         surfaceCheck = args.Flag("surface-check");
         if (args.Float("incident-normal-bias") is { } nb) incidentNormalBias = Math.Clamp(nb, 0f, 12f);
@@ -238,13 +210,6 @@ internal sealed partial class SponzaLoop
         if (args.Int("orbit-frames") is { } orbitFrames) OrbitFrames = Math.Max(2, orbitFrames);
         if (args.Int("ray-region-triangles") is { } regionTriangles) rayRegionTriangles = Math.Max(1, regionTriangles);
         if (args.Float("ray-lod-error") is { } lodError) rayLodError = Math.Max(0f, lodError);
-        if (args.Values("ray-probe", 3) is [var probeRay, var probeInstance, var probeTriangle])
-        {
-            rayCheckProbe = (int.Parse(probeRay, CultureInfo.InvariantCulture), int.Parse(probeInstance, CultureInfo.InvariantCulture),
-                int.Parse(probeTriangle, CultureInfo.InvariantCulture));
-        }
-        // The probe's answer is written after the batch's last ray, where a tiled batch puts another copy.
-        if (rayCheckProbe is not null && rayBenchRepeat > 1) throw new AppArgsException("--ray-probe reads a single batch; it does not combine with --ray-bench-repeat.");
         // --no-occlusion: the GPU cull without its two-phase occlusion test (scene_occlusion.comp), for the A/B.
         occlusionCull = gpuCull && !args.Flag("no-occlusion");
         // --occlusion-cut: every frame is a camera cut. The early list draws nothing, so the late list carries
@@ -254,8 +219,6 @@ internal sealed partial class SponzaLoop
         gpuReference = args.Flag("gpu-reference");
         // --ref-in-frame: the gate's reference wave beside the scene's frames, as before; otherwise behind the cook screen.
         refInFrame = args.Flag("ref-in-frame");
-        // --reference-monolithic: the GPU reference's first form (whole paths in one kernel), the wavefront's cross-check.
-        referenceMonolithic = args.Flag("reference-monolithic");
         if (args.Int("gpu-ref-paths") is { } grp) gpuReferencePathsWanted = Math.Clamp(grp, 256, 1 << 22);
         if (args.Int("gpu-ref-lanes") is { } grl) referenceLanesAsked = Math.Clamp(grl, 64, 8192);
         if (args.Int("gpu-ref-seams") is { } grs) gpuReferenceSeams = Math.Clamp(grs, 0, 1024);
@@ -271,7 +234,6 @@ internal sealed partial class SponzaLoop
             orbit = true;
         }
         ReadWalkArgs(args);
-        ReadReferenceArgs(args);
         // --no-cook-screen: the scene drawn while the frame's tracer builds or the reference traces (SponzaLoop.CookScreen.cs).
         cookScreenOff = args.Flag("no-cook-screen");
         // --lod-pixels E: the LOD error budget (0: full detail everywhere) -- the [Tune] field is not reachable from the
@@ -446,8 +408,6 @@ internal sealed partial class SponzaLoop
         cullPassHandle = graph.ComputePass("scene-cull").Shader(cullInterface).Handle;
         raySurfaceBakeInterface = Reflect("ray_surface_bake.comp");
         raySurfaceBakePassHandle = graph.ComputePass("ray-surface-bake").Shader(raySurfaceBakeInterface).Handle;
-        rayCheckInterface = Reflect("ray_check.comp");
-        rayCheckPassHandle = graph.ComputePass("ray-check").Shader(rayCheckInterface).Handle;
 
         // One graphics pass per cascade, each writing its own depth target.
         // Both shadow programs are render-pass-compatible with these passes.
@@ -569,10 +529,6 @@ internal sealed partial class SponzaLoop
         if (MsaaSamples > 1) lateBuilder = lateBuilder.ResolveColor(prepassNormalResolveHandle).ResolveDepth(depthResolveHandle);
         latePrepassHandle = lateBuilder.Handle;
 
-        // --ray-view: the traced camera view beside the raster depth, after every pre-pass has drawn into it.
-        rayViewInterface = Reflect("ray_view.comp");
-        rayViewPassHandle = graph.ComputePass("ray-view").Shader(rayViewInterface).Read(SampleableSceneDepth).Handle;
-
         // The traced shadows: the shadow rays as soon as the pre-pass has the depth and normals they start from, and the Metal
         // pass that traces them; the lit pass joins it (rt-shadow-join, below). Everything between (Hi-Z, GTAO, the
         // RTGI's readout) reads none of it, so it runs while the rays are traced.
@@ -626,19 +582,13 @@ internal sealed partial class SponzaLoop
             .Shader(gtaoDenoiseInterface)
             .Handle;
 
-        referenceInterface = Reflect("reference_trace.comp");
-        gpuReferenceInterface = Reflect("reference_points.comp");
-        gpuReferencePassHandle = graph.ComputePass("reference-points").Shader(gpuReferenceInterface).Handle;
-        // The reference as a wavefront (SponzaLoop.GpuReference.cs), its batches between its steps, in frame order.
+        // The gate's reference as a wavefront (SponzaLoop.GpuReference.cs), its batches between its steps, in frame order.
         referenceWaveInterface = Reflect("reference_wave.comp");
         referenceWaveStepPass = graph.ComputePass("reference-wave-step").Shader(referenceWaveInterface).Handle;
         referenceClosestBatch = DeclareClosestBatch("reference-closest");
         referenceWaveShadePass = graph.ComputePass("reference-wave-shade").Shader(referenceWaveInterface).Handle;
-        referenceShadowBatch = DeclareShadowBatch("reference-shadow");
         referenceSunBatch = DeclareClosestBatch("reference-sun");
         referenceWaveResolvePass = graph.ComputePass("reference-wave-resolve").Shader(referenceWaveInterface).Handle;
-        referencePassHandle = graph.ComputePass("reference-trace").Shader(referenceInterface)
-            .Read(SampleableSceneDepth).Read(SampleablePrepassNormal).Handle;
 
         // The incident targets cleared and nothing drawn, for a frame with no readout yet (the cache not built, the
         // Metal tracer pending): the lit pass then reads no indirect light. Its interface is the upsample's, which
@@ -937,9 +887,6 @@ internal sealed partial class SponzaLoop
         var cullSpv = File.ReadAllBytes(Path.Combine(shaderDir, "scene_cull.comp.spv"));
         var cullProgram = Own(device.CreateComputeShaderProgramFromSpv(cullSpv, cullInterface, "scene_cull"));
         cullPipeline = Own(device.CreateComputePipeline(cullProgram, "scene_cull"));
-        var rayViewSpv = File.ReadAllBytes(Path.Combine(shaderDir, "ray_view.comp.spv"));
-        rayViewPipeline = Own(device.CreateComputePipeline(
-            Own(device.CreateComputeShaderProgramFromSpv(rayViewSpv, rayViewInterface, "ray_view")), "ray_view"));
         rtShadowRaysPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "rt_shadow_rays.comp.spv")), rtShadowRaysInterface, "rt_shadow_rays")), "rt_shadow_rays"));
         rtShadowFilterPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
@@ -949,16 +896,9 @@ internal sealed partial class SponzaLoop
         CreateRayBatchPipelines(shaderDir);
         referenceWavePipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "reference_wave.comp.spv")), referenceWaveInterface, "reference_wave")), "reference_wave"));
-        gpuReferencePipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
-            File.ReadAllBytes(Path.Combine(shaderDir, "reference_points.comp.spv")), gpuReferenceInterface, "reference_points")), "reference_points"));
-        referencePipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
-            File.ReadAllBytes(Path.Combine(shaderDir, "reference_trace.comp.spv")), referenceInterface, "reference_trace")), "reference_trace"));
         var bakeSpv = File.ReadAllBytes(Path.Combine(shaderDir, "ray_surface_bake.comp.spv"));
         raySurfaceBakePipeline = Own(device.CreateComputePipeline(
             Own(device.CreateComputeShaderProgramFromSpv(bakeSpv, raySurfaceBakeInterface, "ray_surface_bake")), "ray_surface_bake"));
-        var rayCheckSpv = File.ReadAllBytes(Path.Combine(shaderDir, "ray_check.comp.spv"));
-        rayCheckPipeline = Own(device.CreateComputePipeline(
-            Own(device.CreateComputeShaderProgramFromSpv(rayCheckSpv, rayCheckInterface, "ray_check")), "ray_check"));
         var occlusionSpv = File.ReadAllBytes(Path.Combine(shaderDir, "scene_occlusion.comp.spv"));
         var occlusionProgram = Own(device.CreateComputeShaderProgramFromSpv(occlusionSpv, occlusionInterface, "scene_occlusion"));
         occlusionPipeline = Own(device.CreateComputePipeline(occlusionProgram, "scene_occlusion"));

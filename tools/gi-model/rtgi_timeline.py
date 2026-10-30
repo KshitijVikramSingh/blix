@@ -3,22 +3,18 @@
 # dependencies = ["numpy"]
 # ///
 """The RTGI cache's incident light over time against a truth boot's path trace
-(uv run tools/gi-model/rtgi_timeline.py TRUTH DUMP [DUMP ...]).
+(uv run tools/gi-model/rtgi_timeline.py TRUTH.log DUMP [DUMP ...]).
 
-TRUTH a log (.log): a --gpu-reference run's points (the gate's hardware wavefront reference: "surface at x,y ... ref R",
+TRUTH a --gpu-reference run's log: its points (the gate's hardware wavefront reference: "surface at x,y ... ref R",
 SponzaLoop.GpuReference.cs), each dump's field read at those pixels -- energy, rel |error| and median as the gate's.
-TRUTH a dump directory: the per-pixel reference view below (--gi-reference: the software BVH, ~290 ms a frame at
-1440x810, 2026-10-26 -- the points are the one to use).
 
 Dumps are --rtgi-dump's (SponzaLoop.Rtgi.cs): incident.rgba16f the full-res field the lit pass read (rgb the indirect
-irradiance, no direct sun), normal.rgba16f, meta.json; the truth's also reference.f32x4 (--gi-reference: per half-res
-pixel the sum of PI x radiance and the paths) and reference_moments.f32. The same camera in every run. A reference pixel
-h stands for a full-res pixel of its 2x2 (rotating), so the field is the 2x2's mean there. Pixels with no surface (a
-zero normal in any of the four) are left out.
+irradiance, no direct sun), normal.rgba16f, meta.json. The same camera in every run. Points with no surface under them
+(a zero normal) are left out.
 
-Printed per dump: energy (field over trace, summed), rel |error| (mean |F - R| over mean R, as the gate's), the median
-F/R where R is over 2% of its mean, and the trace's own noise on the same scale (its standard errors' mean over mean R):
-the floor no field can be judged below."""
+Printed per dump: energy (field over truth, summed), rel |error| (mean |F - R| over mean R, as the gate's) and the median
+F/R where R is over 2% of its mean. --mean: the dumps' fields averaged first; --flicker: how much each point's light moves
+frame to frame; --settle: each dump's distance from the last; --pair: two seeds' runs, the noise left in one."""
 import json
 import sys
 from pathlib import Path
@@ -166,41 +162,10 @@ def main():
         half = len(args) // 2
         pair_mode(sys.argv[1], args[:half], args[half:])
         return
-    if sys.argv[1].endswith('.log'):
-        args = [a for a in sys.argv[2:] if a not in ('--mean', '--flicker', '--settle')]
-        points_mode(sys.argv[1], args, mean_of='--mean' in sys.argv, flicker='--flicker' in sys.argv, settle='--settle' in sys.argv)
-        return
-    tmeta, _, tnrm = load(sys.argv[1])
-    rw, rh = tmeta['referenceWidth'], tmeta['referenceHeight']
-    acc = np.frombuffer((Path(sys.argv[1]) / 'reference.f32x4').read_bytes(), np.float32).reshape(rh, rw, 4)
-    mom = np.frombuffer((Path(sys.argv[1]) / 'reference_moments.f32').read_bytes(), np.float32).reshape(rh, rw)
-    n = np.maximum(acc[..., 3], 1.0)
-    ref = lum(acc[..., :3]) / n
-    var = np.maximum(mom / n - ref * ref, 0.0)
-    se = np.sqrt(var / n)
-    print(f'truth: {Path(sys.argv[1]).name}, {acc[..., 3].mean():.0f} paths a pixel, {rw}x{rh}')
-    for d in sys.argv[2:]:
-        meta, inc, nrm = load(d)
-        h2, w2 = rh * 2, rw * 2
-        f = lum(inc[:h2, :w2, :3]).reshape(rh, 2, rw, 2).mean(axis=(1, 3))
-        surface = (np.abs(nrm[:h2, :w2, :3]).sum(axis=2) > 1e-6).reshape(rh, 2, rw, 2).all(axis=(1, 3))
-        ok = surface & (acc[..., 3] > 0)
-        F, R, S = f[ok], ref[ok], se[ok]
-        mean = R.mean()
-        big = R > 0.02 * mean
-        # 8x8 blocks of reference pixels, each the mean of its surface pixels: the trace's noise mostly averaged out.
-        bh, bw = rh // 8, rw // 8
-        def blocks(x):
-            x = np.where(ok, x, 0.0)[:bh * 8, :bw * 8].reshape(bh, 8, bw, 8).sum(axis=(1, 3))
-            return x
-        cnt = blocks(np.ones_like(f))
-        bf, br = blocks(f) / np.maximum(cnt, 1), blocks(ref) / np.maximum(cnt, 1)
-        bs = np.sqrt(blocks(se * se)) / np.maximum(cnt, 1)
-        bok = cnt >= 32
-        bmean = br[bok].mean()
-        print(f'{Path(d).name:>10} (frame {meta["frame"]}): energy {F.sum() / R.sum():.4f}, pixel rel |error| {np.abs(F - R).mean() / mean:.4f} '
-              f'(trace noise {S.mean() / mean:.4f}), median {np.median(F[big] / R[big]):.4f}; 8x8 blocks rel |error| '
-              f'{np.abs(bf - br)[bok].mean() / bmean:.4f} (trace noise {bs[bok].mean() / bmean:.4f})')
+    if not sys.argv[1].endswith('.log'):
+        raise SystemExit(f'{sys.argv[1]}: the truth is a --gpu-reference run\'s log (.log)')
+    args = [a for a in sys.argv[2:] if a not in ('--mean', '--flicker', '--settle')]
+    points_mode(sys.argv[1], args, mean_of='--mean' in sys.argv, flicker='--flicker' in sys.argv, settle='--settle' in sys.argv)
 
 
 if __name__ == '__main__':

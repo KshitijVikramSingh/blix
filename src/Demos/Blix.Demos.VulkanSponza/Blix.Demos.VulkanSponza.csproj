@@ -13,7 +13,8 @@
     <ProjectReference Include="..\..\Blix.Geometry\Blix.Geometry.csproj" />
     <ProjectReference Include="..\..\Blix.Graphics\Blix.Graphics.csproj" />
     <ProjectReference Include="..\..\Blix.Graphics.Images\Blix.Graphics.Images.csproj" />
-    <!-- The ray check and bench on Apple's ray tracing hardware, ray-backend hw or both (SponzaLoop.HardwareRays). -->
+    <!-- The frame's tracer on Apple's ray tracing hardware: the traced sun shadows, RTGI's rays and the GPU reference's
+         batches (SponzaLoop.RtShadows, SponzaLoop.RayBatch). -->
     <ProjectReference Include="..\..\Blix.Graphics.MetalHWX\Blix.Graphics.MetalHWX.csproj" />
     <ProjectReference Include="..\..\Blix.Render\Blix.Render.csproj" />
     <ProjectReference Include="..\..\Blix.Runtime.Silk\Blix.Runtime.Silk.csproj" />
@@ -66,7 +67,6 @@
     <GlslShader Include="Shaders\mover.comp" />
     <GlslShader Include="Shaders\mover_rays.comp" />
     <GlslShader Include="Shaders\scene_occlusion.comp" />
-    <GlslShader Include="Shaders\ray_check.comp" />
     <GlslShader Include="Shaders\rt_shadow_rays.comp" />
     <GlslShader Include="Shaders\rtgi_rays.comp" />
     <GlslShader Include="Shaders\rtgi_train.comp" />
@@ -85,10 +85,7 @@
     <GlslShader Include="Shaders\rtgi_blur.frag" />
     <GlslShader Include="Shaders\rt_shadow_filter.comp" />
     <GlslShader Include="Shaders\rt_shadow_fill.comp" />
-    <GlslShader Include="Shaders\ray_view.comp" />
     <GlslShader Include="Shaders\ray_surface_bake.comp" />
-    <GlslShader Include="Shaders\reference_trace.comp" />
-    <GlslShader Include="Shaders\reference_points.comp" />
     <GlslShader Include="Shaders\reference_wave.comp" />
     <GlslShader Include="Shaders\ray_batch_closest.comp" />
     <GlslShader Include="Shaders\ray_batch_shadow.comp" />

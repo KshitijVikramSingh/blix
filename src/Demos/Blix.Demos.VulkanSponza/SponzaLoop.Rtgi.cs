@@ -915,8 +915,8 @@ internal sealed partial class SponzaLoop
     }
 
     // --rtgi-dump DIR --rtgi-dump-frames F1,F2,...: at those post-load frames the incident field the lit pass read
-    // (full res), the pre-pass normal and the per-pixel path trace if it runs (--gi-reference), for
-    // tools/gi-model/rtgi_timeline.py to hold against a truth boot's trace.
+    // (full res) and the pre-pass normal, for tools/gi-model/rtgi_timeline.py to hold against a --gpu-reference run's
+    // points.
     private string? rtgiDumpDir;
     private SortedSet<int> rtgiDumpFrames = new();
 
@@ -934,21 +934,19 @@ internal sealed partial class SponzaLoop
         void Texture(string name, TextureHandle handle) => File.WriteAllBytes(Path.Combine(dir, name), device.ReadTexture(handle, out _, out _, out _));
         Texture("incident.rgba16f", graph.GetColorTexture(incidentHandle));
         Texture("normal.rgba16f", graph.GetColorTexture(SampleablePrepassNormal));
-        if (referenceSamples > 0)
-        {
-            File.WriteAllBytes(Path.Combine(dir, "reference.f32x4"), device.ReadGpuBuffer(referenceAccum, 0, referenceSize.X * referenceSize.Y * 16));
-            File.WriteAllBytes(Path.Combine(dir, "reference_moments.f32"), device.ReadGpuBuffer(referenceMoments, 0, referenceSize.X * referenceSize.Y * 4));
-        }
         var (w, h) = profFrameSize;
         File.WriteAllText(Path.Combine(dir, "meta.json"), System.Text.Json.JsonSerializer.Serialize(new
         {
-            frame = postLoadFrames, width = w, height = h, referenceWidth = referenceSize.X, referenceHeight = referenceSize.Y,
-            referenceSamples, sunToward = new[] { -sunDirection.X, -sunDirection.Y, -sunDirection.Z }, camera = new[] { cameraPosition.X, cameraPosition.Y, cameraPosition.Z },
+            frame = postLoadFrames, width = w, height = h, sunToward = new[] { -sunDirection.X, -sunDirection.Y, -sunDirection.Z }, camera = new[] { cameraPosition.X, cameraPosition.Y, cameraPosition.Z },
         }));
         Console.WriteLine($"[VulkanSponza] rtgi dump at frame {postLoadFrames}: {dir}");
     }
 
     private bool RtgiReadoutReady => !rtgiKeys.Equals(default(GpuBufferHandle));
+
+    // Whether the incident field holds its own occlusion: RTGI's readout does, its rays having found it, so the lit pass
+    // takes neither the material's occlusion texture nor anything else for it on top (frame.uIncident.x, lit_body.glsl).
+    private bool IncidentHoldsOcclusion => RtgiReadoutReady;
 
     // A full-res pixel's footprint per metre of distance, as the readout sizes the blur's radius and the blur its plane
     // tolerance (uUnsure.w, uBlur.w): doubled. Both were tuned by eye at render scale 1 on a Retina display when this came

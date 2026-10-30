@@ -17,8 +17,9 @@ through but scattered. A point behind the sheet gets the glow of the sheet's lit
 
 The frame's traced shadows (blix_hwx.mm, blix_sheet_light) answer it from the sun's ray at p alone: where that ray crosses a
 sheet, a lit disc of radius 0.6 m centred there, E = E_s cos_p T c cos_x^2 R^2 / (R^2 + d^2). The GI's cook leaves the sun
-through sheets to the frame (texel_nodes_solve.comp: the twins carry the BOUNCE light through), and the GPU reference meets
-a sheet as an opaque surface (reference_path.glsl), so neither has the glow nor its bounce.
+through sheets to the frame (texel_nodes_solve.comp: the twins carry the BOUNCE light through), and the GPU reference met
+a sheet as an opaque surface, so neither had the glow nor its bounce (the reference has since scattered sheets as the spec
+has them: reference_wave.comp).
 
 Here, along lines on drapes' floor (blix drapes), E(p) / (T c E_s): the exact single scattering, and the frame's disc."""
 import numpy as np

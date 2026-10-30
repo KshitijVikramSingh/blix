@@ -4,7 +4,8 @@
 // VK_EXT_metal_objects: the packed ray scene's Instances, Triangles, Positions, Owners and Surfaces blocks
 // (RayQueryGpuData), and the ray and hit buffers of a trace. This library builds one bottom-level acceleration
 // structure per distinct hierarchy straight from Positions, a top-level one with one instance per entry, and traces
-// with Metal's intersector, answering in ray_check.comp's record so the CPU oracle can hold it ray for ray.
+// with Metal's intersector, answering in the closest batch's record (VulkanSponza's SponzaLoop.RayBatch.cs), the one the
+// software traversal answers in too.
 //
 // Coverage (RayTests.Covered): a hierarchy's solid triangles are an opaque geometry; its partly covered ones a
 // non-opaque geometry whose intersection function flips ray_query.glsl's coin; uncovered triangles are left out.
@@ -277,7 +278,7 @@ kernel void blix_shadow(device const float4* origins [[buffer(0)]],
     occluded[packed ? pixelOf[i] : i] = word;
 }
 
-// ray_check.comp's contract: each ray two float4s (origin, tMin; direction, tMax), its seed seedBase + its index;
+// The closest batch's contract: each ray two float4s (origin, tMin; direction, tMax), its seed seedBase + its index;
 // each answer three uint4s (t, barycentrics, flags: 1 hit, 2 front face, 4 any hit; placement, triangle, 0, 0;
 // world normal, linear albedo packed).
 kernel void blix_trace(device const float4* rays [[buffer(0)]],
@@ -1399,7 +1400,7 @@ HWX_EXPORT int hwx_encode_shadow(HwxContext* ctx, void* sharedEvent, uint64_t wa
     }
 }
 
-// Closest hits inside a frame -- a wavefront's batch (ray_check.comp's records, as hwx_trace answers them, the any-hit
+// Closest hits inside a frame -- a wavefront's batch (the closest batch's records, as hwx_trace answers them, the any-hit
 // trace skipped): waits for `waitValue` on the frame timeline, traces `count` rays (two float4 each from raysOffset) into
 // `hits` (three uint4 each from hitsOffset), signals `signalValue`. Returns at once. As hwx_encode_shadow, the signal is
 // encoded whatever happens, since a frame waits for it; a skipped or failed dispatch is counted (hwx_trace_stats).

@@ -6,7 +6,7 @@
 #
 # Three headed runs at 960x540 (a window opens and closes each time): the Cornell box from outside the open front,
 # then the thin-wall scene from inside its sealed room and from the open one. Each converges 1500 frames; the judge is
-# the GPU path-traced reference at 16,384 paths a point (--gpu-reference, reference_points.comp; the CPU's 1,024 a point
+# the GPU path-traced reference at 16,384 paths a point (--gpu-reference, reference_wave.comp; the CPU's 1,024 a point
 # were a suspect for the run-to-run noise); tools/testbeds/gate.py turns the logs into the verdict (targets and ratchets: see
 # there). Exit 0 when every ratchet holds. Logs stay in the directory printed at the end.
 #

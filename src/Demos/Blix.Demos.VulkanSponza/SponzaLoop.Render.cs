@@ -765,7 +765,6 @@ internal sealed partial class SponzaLoop
         }
         RtgiDumpIfDue();
         FlushTracerGroup();
-        RecordRayCheck();
 
         // Occlusion needs the pre-pass's depth; without one the early list is the whole frustum's.
         var skipPrepass = noPrepass || (abMode == "prepass" && AbOffPhase);
@@ -819,7 +818,6 @@ internal sealed partial class SponzaLoop
             using (Prof("occlusion")) RecordOcclusion(cameraCull, perFrame, frame.Width, frame.Height);
             occlusionStillFrames++;
         }
-        RecordRayView(frame.Width, frame.Height);
 
         // Hi-Z pyramid: level 0 reduces the resolved depth, each level after reduces its parent.
         RecordPyramid(hiZPassHandles, hiZPipelines, hiZHandles, frame.Width, frame.Height, skip: abMode == "hiz" && AbOffPhase || !ambient.Enabled);
@@ -907,8 +905,6 @@ internal sealed partial class SponzaLoop
             // edge-on.
             Matrix4x4.Invert(cameraProjection * cameraJitter, out var incidentInvProj);
             Matrix4x4.Invert(cameraView, out var incidentInvView);
-            // The reference view accumulates (--gi-reference, G) for RTGI's dump (SponzaLoop.Rtgi.cs); nothing shows it.
-            RecordReference(incidentInvProj, incidentInvView, frame.Width, frame.Height);
             RecordGpuReference();
             UpdateScreenRest();
             // A settled, still view's screen light every other frame (SponzaLoop.RtgiBudget.cs): the targets hold it.
@@ -1021,9 +1017,6 @@ internal sealed partial class SponzaLoop
             WritePassBreakdown();
             WriteLodCensus();
             WriteClusterCensus();
-            WriteRayBenchmark();
-            WriteRayCheck();
-            WriteRayView(Path.ChangeExtension(path, null));
             WriteRtShadows(Path.ChangeExtension(path, null));
             WriteLeakCensus(Path.ChangeExtension(path, null));
             WriteMemoryReport();

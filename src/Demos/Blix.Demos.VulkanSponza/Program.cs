@@ -593,12 +593,9 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private int refBounces = 3;
     private int refPaths = 1024;
     private int refSeed;
-    // The GPU reference's thin sheets (KHR_materials_diffuse_transmission as the spec has it, reference_wave.comp): a path
-    // reflects off a sheet with 1 - T of its albedo or passes to the far side tinted T c, and the sun on either side lights
-    // both. --ref-opaque-sheets: met as opaque surfaces, as before (2026-10-21). --ref-sky S: the sky's radiance scaled
-    // (0: the sun alone, for closed forms).
-    private bool refSheets = true;
-    private bool refFaceNormal;
+    // The GPU reference meets thin sheets (KHR_materials_diffuse_transmission) as the spec has them (reference_wave.comp):
+    // a path reflects off a sheet with 1 - T of its albedo or passes to the far side tinted T c, and the sun on either side
+    // lights both. --ref-sky S: the sky's radiance scaled (0: the sun alone, for closed forms).
     private float refSky = 1f;
     // The GPU reference's sun rays (the wavefront's, on Metal) each toward its own point of the sun's disc, as the frame's
     // direct sun has it: one sun for the picture and its truth (2026-10-21; the gate's history before was against a point

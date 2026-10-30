@@ -134,8 +134,8 @@ bool blix_rayTriangle(BlixShearedRay r, vec3 v0, vec3 v1, vec3 v2, float tMin, f
     frontFace = false;
     // precise throughout: nothing fused, every product rounded where the CPU rounds it. Fused, the two triangles on
     // an edge compute its function in opposite orders and stop being exact negatives, so a ray through the edge
-    // can pass between them (measured: a vertex-aimed ray on the city, --ray-check); and the shear and the rest
-    // drift from the CPU oracle's answer on near-edge hits.
+    // can pass between them (measured: a vertex-aimed ray on the city, against the CPU oracle); and the shear and
+    // the rest drift from the CPU oracle's answer on near-edge hits.
     precise vec3 a = v0 - r.origin;
     precise vec3 b = v1 - r.origin;
     precise vec3 c = v2 - r.origin;
