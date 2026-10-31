@@ -164,6 +164,11 @@ uint cookPieceIndex(uvec4 head, ivec3 c, uint level, uint side, vec3 p) {
     uint axis = side >> 1u, a0 = (axis + 1u) % 3u, a1 = (axis + 2u) % 3u;
     float cs = cookSize(level);
     vec3 g = (p - rtgiOrigin(side)) / cs - vec3(c);
+    // p inside the cube (its own, as training keys it): the footprint holding it first, as the cook laid the pieces out --
+    // softened there too, a pixel on a curved vault keyed another piece than its cell's training points did (cells never
+    // trained, magenta in the readout's view 12, white blobs over Crytek Sponza's vaults and cloth, 2026-10-31). Clamped
+    // into a neighbouring cube: the footprint only a quarter of a cell's penalty (below).
+    bool inside = g[a0] >= 0.0 && g[a0] < 1.0 && g[a1] >= 0.0 && g[a1] < 1.0;
     float u = clamp(g[a0], 0.0, 0.999), v = clamp(g[a1], 0.0, 0.999);
     uint bit = 1u << (uint(u * 4.0) + 4u * uint(v * 4.0));
     vec3 pc = p;
@@ -178,7 +183,7 @@ uint cookPieceIndex(uvec4 head, ivec3 c, uint level, uint side, vec3 p) {
         // crown, inside the sealed pocket, spanned the whole of a neighbouring cube where the vault spanned part, and won
         // by its footprint -- the level blend read the pocket's dark light, dots along the crown (the readout's view 28,
         // the arches testbed, 2026-10-31).
-        float score = ((e.w & bit) != 0u ? 0.0 : 0.25 * cs) + abs(d[axis]) + 0.1 * length(vec2(d[a0], d[a1]));
+        float score = ((e.w & bit) != 0u ? 0.0 : inside ? 1e3 : 0.25 * cs) + abs(d[axis]) + (inside ? 0.25 : 0.1) * length(vec2(d[a0], d[a1]));
         if (score < bestScore) { bestScore = score; best = k; }
     }
     return best;

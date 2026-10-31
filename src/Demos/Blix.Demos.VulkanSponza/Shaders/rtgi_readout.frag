@@ -467,7 +467,7 @@ void main() {
         outIncidentGradient = vec4(0.0);
         return;
     }
-    if ((view >= 10 && view <= 18) || view == 21 || view == 24 || view == 30 || view == 31 || view == 32 || view == 33 || view == 34 || view == 35) {
+    if ((view >= 10 && view <= 18) || view == 21 || view == 24 || view == 30 || view == 31 || view == 32 || view == 33 || view == 34 || view == 35 || view == 36) {
         vec3 c = vec3(1.0, 0.0, 1.0);
         uint sc = rtgiFind(rtgiCellHash(ivec3(floor((p - rtgiOrigin(side)) / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
         uint cooked = cookCellAt(p, side, level);
@@ -543,6 +543,36 @@ void main() {
             // something, no live one near; the size table's tier 13, BLIX_RTGI_COOK_DROPPED=1).
             if (COOK_PARAMS.w > 0.5 && cookScaleIn(ivec3(floor((p - NEAR_SCALE_ORIGIN) / COOK_PARAMS.x)), 13u, side) > 0.0
                 && fract((gl_FragCoord.x + gl_FragCoord.y) / 6.0) < 0.5) c *= 0.15;
+        } else if (view == 36) {
+            // Why the pixel's own cell is missing: green found (held); red one of another piece of its cube (the piece
+            // chosen differs); blue one a level finer or coarser; yellow one of another side; magenta none (untrained).
+            ivec3 cq = ivec3(floor((p - rtgiOrigin(side)) / rtgiSize(level, u.uParams)));
+            if (sc != 0xFFFFFFFFu && rtgiResolved[2u * sc + 1u].y >= 0.5) c = vec3(0.1, 0.7, 0.1);
+            else {
+                c = vec3(1.0, 0.0, 1.0);
+                bool hit = false;
+                for (uint r = 0u; r <= 8u && !hit; r++) {
+                    uint t = rtgiFind(rtgiCellHashR(cq, level, side, r, u.uParams), u.uParams);
+                    if (t != 0xFFFFFFFFu && rtgiResolved[2u * t + 1u].y >= 0.5) { c = vec3(0.9, 0.1, 0.1); hit = true; }
+                }
+                for (int dl = -1; dl <= 1 && !hit; dl += 2) {
+                    int l2 = int(level) + dl;
+                    if (l2 < 0 || l2 > int(top)) continue;
+                    ivec3 c2 = ivec3(floor((p - rtgiOrigin(side)) / rtgiSize(uint(l2), u.uParams)));
+                    for (uint r = 0u; r <= 8u && !hit; r++) {
+                        uint t = rtgiFind(rtgiCellHashR(c2, uint(l2), side, r, u.uParams), u.uParams);
+                        if (t != 0xFFFFFFFFu && rtgiResolved[2u * t + 1u].y >= 0.5) { c = vec3(0.1, 0.3, 1.0); hit = true; }
+                    }
+                }
+                for (uint s2 = 0u; s2 < 6u && !hit; s2++) {
+                    if (s2 == side) continue;
+                    ivec3 c3 = ivec3(floor((p - rtgiOrigin(s2)) / rtgiSize(level, u.uParams)));
+                    for (uint r = 0u; r <= 8u && !hit; r++) {
+                        uint t = rtgiFind(rtgiCellHashR(c3, level, s2, r, u.uParams), u.uParams);
+                        if (t != 0xFFFFFFFFu && rtgiResolved[2u * t + 1u].y >= 0.5) { c = vec3(1.0, 0.9, 0.1); hit = true; }
+                    }
+                }
+            }
         } else if (view == 34 || view == 35) {
             // The pixel's own cell before the neighbour blend (rtgi_filter.comp): 34 its assembled light (its own surface's
             // and its children's by area; a level-0 cell's own); 35 the share of that its own surface gave (white all,

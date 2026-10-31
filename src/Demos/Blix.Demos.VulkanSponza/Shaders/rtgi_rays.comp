@@ -139,7 +139,12 @@ bool surfacePoint(inout vec3 p, inout vec3 n) {
     vec3 q;
     if (!cookTrainPoint(j, lv, side, want, q)) return false;
     p = q;
-    n = COOK_POINTS(2u * j + 1u).xyz;
+    // The cooked cell's mean normal where it keeps the pixel's side, else the pixel's own: the cell is keyed by its side,
+    // and a curved surface's cell's mean normal tips past 45 degrees into the next side -- trained under that side's key,
+    // the cell the pixel reads was never trained (magenta in the readout's view 12 over Crytek Sponza's vaults,
+    // 2026-10-31).
+    vec3 cn = COOK_POINTS(2u * j + 1u).xyz;
+    if (rtgiSide(cn) == side) n = cn;
     cookedLevel = lv;
     return true;
 }
@@ -344,6 +349,9 @@ void main() {
             // steps showing -- bright for a second or two (the user, the crevices testbed, 2026-10-30).
             uint e = nearList[(uint(u.uNearField.z) + j - asked) % nearListCount];
             n = cookPoints[2u * e + 1u].xyz;
+            // Its side's: a mean normal tipped past 45 degrees keyed another side's cell (surfacePoint above).
+            uint se = floatBitsToUint(cookPoints[2u * e].w) & 7u;
+            if (rtgiSide(n) != se) { vec3 ax = vec3(0.0); ax[se >> 1u] = (se & 1u) == 0u ? 1.0 : -1.0; n = normalize(n * 0.25 + ax); }
             uint ce = cookPointCount(e);
             p = cookPoints[2u * e].xyz;
             if (ce > 0u) {

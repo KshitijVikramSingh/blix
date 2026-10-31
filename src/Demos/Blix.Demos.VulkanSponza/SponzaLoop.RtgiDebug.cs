@@ -28,6 +28,7 @@ internal sealed partial class SponzaLoop
         "Own light (unblended) vs snapshot (as view 30, before the blend)",
         "Cell assembled light (before the neighbour blend)",
         "Assembly: children vs own (white own only, blue children darker, red brighter; black children only)",
+        "Why the cell is missing (green found, red another piece, blue another level, yellow another side, magenta none)",
     };
 
     // The view (rtgi_readout.frag's uView.x, rtgi_blur.frag's uHalf.x, rtgi_temporal.frag's uDebug.x): 0 the light; 1-7 a
