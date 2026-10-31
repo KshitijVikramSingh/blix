@@ -555,17 +555,23 @@ public static class Program
             Box(p, new Vector3(0f, 0f, -aisle), new Vector3(pw, groundTop, -5.5f));
             Box(p, new Vector3(0f, 0f, -4.5f), new Vector3(pw, groundTop, -court - 0.6f));
             Box(p, new Vector3(0f, 2.2f, -5.5f), new Vector3(pw, groundTop, -4.5f));
-            // A barrel vault over the north aisle, springing at 5 m to the gallery's floor: a curved ceiling lit by bounce
-            // alone.
-            const float vr = 1.5f, vSpring = 5f;
-            var vc = 0.5f * (court + 0.6f + aisle);
+            // A barrel vault over the north aisle, a segmental one: springing at 5.8 m (over the ground arches' 5.7 m crowns,
+            // so no arch shows its back) to a 6.45 m crown under the gallery's floor. A curved ceiling lit by bounce alone.
+            const float vSpring = 5.8f, vCrown = 6.45f;
+            float vz0 = court + 0.6f, vz1 = aisle, vc = 0.5f * (vz0 + vz1), half2 = 0.5f * (vz1 - vz0), sag = vCrown - vSpring;
+            var vr = (half2 * half2 + sag * sag) / (2f * sag);
+            var vcy = vCrown - vr;
+            var vSpan = MathF.Asin(half2 / vr);
             for (var i = 0; i < segments; i++)
             {
-                float ta = MathF.PI * i / segments, tb = MathF.PI * (i + 1) / segments, tm = 0.5f * (ta + tb);
-                var a = new Vector3(-half, vSpring + vr * MathF.Sin(ta), vc + vr * MathF.Cos(ta));
-                var b = new Vector3(-half, vSpring + vr * MathF.Sin(tb), vc + vr * MathF.Cos(tb));
+                float ta = MathF.PI / 2f - vSpan + 2f * vSpan * i / segments, tb = MathF.PI / 2f - vSpan + 2f * vSpan * (i + 1) / segments, tm = 0.5f * (ta + tb);
+                var a = new Vector3(-half, vcy + vr * MathF.Sin(ta), vc + vr * MathF.Cos(ta));
+                var b = new Vector3(-half, vcy + vr * MathF.Sin(tb), vc + vr * MathF.Cos(tb));
                 Quad(p, a, b - a, new Vector3(2f * half, 0f, 0f), -new Vector3(0f, MathF.Sin(tm), MathF.Cos(tm)));
             }
+            // The wall from the vault's springing up to the gallery's floor along both sides closes the pocket over it.
+            Box(p, new Vector3(-half, vSpring, vz0), new Vector3(half, groundTop, vz0 + 0.05f), bottom: true);
+            Box(p, new Vector3(-half, vSpring, vz1 - 0.05f), new Vector3(half, groundTop, vz1), bottom: true);
             // Round columns in the courtyard, 0.25 m in radius and 4 m tall: curved, and in contact with the floor.
             foreach (var (cx, cz) in new[] { (4f, 1.8f), (4f, -1.8f), (7f, 1.8f), (7f, -1.8f) })
                 Column(p, new Vector3(cx, 0f, cz), 0.25f, 4f, 24);

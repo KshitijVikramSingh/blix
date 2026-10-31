@@ -140,6 +140,12 @@ internal sealed partial class SponzaLoop
     private GpuBufferHandle rtgiHitInv;
     // Per slot: the cell's assembled light and (samples, variance, inverse hit distance) -- rtgi_filter.comp's assembly.
     private GpuBufferHandle rtgiAssembled;
+    // The readout's light turned to the pixel's normal from its cooked cell's by the irradiance vector
+    // (--rtgi-no-normal-turn off).
+    private bool rtgiNormalTurn = true;
+    // The readout's light blended across the sides' 45 degree edges over this band of |n| (--rtgi-no-side-blend off).
+    private bool rtgiSideBlend = true;
+    private const float RtgiSideBand = 0.25f;
 
     // What the readout reads of a cell, in one 32-byte line (rtgi_cache.glsl's rtgiRecord): written by the resolve and the
     // blend, zeroed by the eviction. 32 bytes a slot (128 MB at 4 M).
@@ -313,6 +319,8 @@ internal sealed partial class SponzaLoop
         if (args.Float("rtgi-hit-sun") is { } hs) rtgiHitSun = MathF.Max(0f, hs);
         if (args.Flag("rtgi-no-trace-hit-sun")) rtgiTraceHitSun = false;
         if (args.Flag("rtgi-no-assemble")) rtgiAssemble = false;
+        if (args.Flag("rtgi-no-normal-turn")) rtgiNormalTurn = false;
+        if (args.Flag("rtgi-no-side-blend")) rtgiSideBlend = false;
         if (args.Flag("rtgi-no-thin")) rtgiThin = false;
         if (args.Flag("rtgi-no-read-first")) rtgiReadFirst = false;
         if (args.Float("rtgi-interp-from") is { } inf) rtgiInterpFrom = MathF.Max(0f, inf);
@@ -499,7 +507,9 @@ internal sealed partial class SponzaLoop
         if (frameTracer is not { } tracer) return;
         // This frame's spend (SponzaLoop.RtgiBudget.cs; the most without --rtgi-budget); the buffers are sized for the most.
         var lastTotal = rtgiLastPointTotal;
-        var n = rtgiTilesNow + rtgiHitsNow;
+        // The hit points with the world's on top (RtgiWorldNow), within the buffers' room.
+        var hitsAll = Math.Min(rtgiHitsNow + RtgiWorldNow, RtgiPoints - rtgiTilesNow);
+        var n = rtgiTilesNow + hitsAll;
         if (rtgiKeys.Equals(default(GpuBufferHandle)))
         {
             var most = RtgiPoints;
@@ -721,7 +731,7 @@ internal sealed partial class SponzaLoop
         var tilesY = Math.Max(1, (rtgiTilesNow + tilesX - 1) / tilesX);
         // The visible points are as many tiles as the grid has (a whole grid, so every row is covered).
         Matrix4x4.Invert(viewProjJittered, out var invViewProj);
-        rtgiLastPointTotal = Math.Min(rtgiTilesNow, tilesX * tilesY) + rtgiHitsNow;
+        rtgiLastPointTotal = Math.Min(rtgiTilesNow, tilesX * tilesY) + hitsAll;
         rtgiCaptureSize = (width, height);
         var place = new DispatchCommand(rtgiRaysPipeline, groups, 1, 1,
             new ShaderUniform[]
@@ -729,10 +739,10 @@ internal sealed partial class SponzaLoop
                 new("uInvViewProj", new Matrix4x4Uniform(invViewProj)),
                 new("uSize", new Vector4Uniform(new Vector4(width, height, tilesX, tilesY))),
                 new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, 0f))),
-                new("uCounts", new Vector4Uniform(new Vector4(Math.Min(rtgiTilesNow, tilesX * tilesY), rtgiHitsNow, RtgiRandomFrame, rayReach))),
+                new("uCounts", new Vector4Uniform(new Vector4(Math.Min(rtgiTilesNow, tilesX * tilesY), hitsAll, RtgiRandomFrame, rayReach))),
                 new("uSun", new Vector4Uniform(new Vector4(towardSun, rtgiTraced > 0 ? 1f : 0f))),
                 new("uParams", new Vector4Uniform(RtgiParams)),
-                new("uNearField", new Vector4Uniform(RtgiNearTrainUniform(rtgiHitsNow))),
+                new("uNearField", new Vector4Uniform(RtgiNearTrainUniform(hitsAll))),
                 new("uAdapt", new Vector4Uniform(new Vector4(rtgiAdaptive, rtgiAdaptiveK, rtgiDoneError, rtgiTrickle))),
                 new("uSkip", new Vector4Uniform(new Vector4((rtgiBenching && rtgiBenchPass == "rays" ? (int)rtgiTrainDouble : 0) | (rtgiPool ? 0 : 16), 0, 0, 0))),
                 new("uBudget", new Vector4Uniform(new Vector4(rtgiBudgetError, rtgiBudgetFloor, rtgiSettledSamples, rtgiSettledKeep))),
@@ -846,7 +856,7 @@ internal sealed partial class SponzaLoop
                 // Within four full-res pixels' footprint of the point.
                 new("uReuse", new Vector4Uniform(new Vector4(reuse ? 1f : 0f, rtgiFrameCount & 3u, 4f * RtgiPixelFootprint, rtgiReusePrevSub.X + 2f * rtgiReusePrevSub.Y))),
                 new("uPrevCamera", new Vector4Uniform(new Vector4(rtgiReusePrevCamera, 0f))),
-                new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, rtgiNoGradient ? 0f : 1f, 0f, 0f))),
+                new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, rtgiNoGradient ? 0f : 1f, rtgiNormalTurn ? 1f : 0f, rtgiSideBlend ? RtgiSideBand : 0f))),
                 new("uView", new Vector4Uniform(new Vector4(rtgiView, cellSnapshot.Equals(default(GpuBufferHandle)) ? 0f : 1f, RtgiAssembling ? 1f : 0f, 0f))),
                 new("uUnsure", new Vector4Uniform(new Vector4(rtgiDoneError, rtgiHalfRow, RtgiUnsureSize, RtgiPixelFootprint))),
                 new("uBlurAt", new Vector4Uniform(new Vector4(RtgiBlurNow, rtgiBlurHit, rtgiFrameCount, 0f))),

@@ -61,8 +61,32 @@ internal sealed partial class SponzaLoop
     // Surfels within this many of the larger spacing of the two, on one plane to a share of it, join.
     private const float CookPieceReach = 1.8f, CookPiecePlane = 0.35f;
 
-    // Per level, per cube (CensusCellKey), its pieces: largest whole area first.
-    private static Dictionary<long, CookPiece[]>[] BuildCookPieces(Dictionary<long, CookSurfel> surfelMap, float finest, int levels, out double ms)
+    // The surfels, laid out, and their candidate joins (grid neighbours within reach on one plane): each join then traced
+    // (a ray between the two, lifted off the surface -- rtgi_cook.comp kinds 18, 19), and only the clear ones join.
+    // Joined by distance alone, a floor ran on under a 2 cm partition (its buried strip narrower than a join's reach) and
+    // the light crossed it (the arches testbed's aisle, 2026-10-31).
+    private sealed class CookSurfelSet
+    {
+        public long[] Keys = Array.Empty<long>();
+        public int[] Lv = Array.Empty<int>();
+        public uint[] Sd = Array.Empty<uint>();
+        public Vector3[] C = Array.Empty<Vector3>(), Nrm = Array.Empty<Vector3>();
+        public float[] Area = Array.Empty<float>(), H = Array.Empty<float>();
+        public (int A, int B)[] Edges = Array.Empty<(int, int)>();
+        public double Ms;
+        // A join's ray: from a's centroid to b's, each lifted off its surface by a centimetre or a quarter of the join's
+        // length -- over the chord's dip on a convex surface (normals within the plane test's 45 degrees: a fifth of the
+        // length at most). Lifted by a fifth of the spacing, a 25 cm column's joins met the column itself, each facet its
+        // own piece, the column lit flat-faced (the arches testbed, 2026-10-31).
+        public (Vector3 From, Vector3 To) JoinRay(int e)
+        {
+            var (a, b) = Edges[e];
+            var lift = MathF.Max(0.01f, 0.25f * Vector3.Distance(C[a], C[b]));
+            return (C[a] + Nrm[a] * lift, C[b] + Nrm[b] * lift);
+        }
+    }
+
+    private static CookSurfelSet PrepareCookSurfels(Dictionary<long, CookSurfel> surfelMap, float finest, int levels)
     {
         var clock = Stopwatch.StartNew();
         // In key order, so the pieces come out the same every cook.
@@ -105,7 +129,27 @@ internal sealed partial class SponzaLoop
                         }
             }
         });
-        var edges = edgeLists.SelectMany(e => e).ToArray();
+        var set = new CookSurfelSet { Keys = keys, Lv = lv, Sd = sd, C = c, Nrm = nrm, Area = area, H = h, Edges = edgeLists.SelectMany(e => e).ToArray() };
+        set.Ms = clock.Elapsed.TotalMilliseconds;
+        return set;
+
+        bool Joins(int a, int b)
+        {
+            var hm = MathF.Max(h[a], h[b]);
+            var d = c[b] - c[a];
+            if (d.LengthSquared() > CookPieceReach * CookPieceReach * hm * hm) return false;
+            return MathF.Abs(Vector3.Dot(nrm[a], d)) <= CookPiecePlane * hm + 0.003f && Vector3.Dot(nrm[a], nrm[b]) >= 0.7f;
+        }
+    }
+
+    // Per level, per cube (CensusCellKey), its pieces: largest whole area first. clear: per join a bit, set where its ray
+    // was clear (null: every join).
+    private static Dictionary<long, CookPiece[]>[] BuildCookPieces(CookSurfelSet set, uint[]? clear, float finest, int levels, out double ms)
+    {
+        var clock = Stopwatch.StartNew();
+        var n = set.Keys.Length;
+        var (lv, sd, c, area, h) = (set.Lv, set.Sd, set.C, set.Area, set.H);
+        var edges = clear is null ? set.Edges : set.Edges.Where((_, e) => (clear[e >> 5] & (1u << (e & 31))) != 0).ToArray();
         var edgeMs = clock.Elapsed.TotalMilliseconds;
         // Per level: the joins within a cube unioned, each cube's pieces from its surfels' roots; each surfel's piece's
         // index in its cube kept (the parents, below).
@@ -178,16 +222,9 @@ internal sealed partial class SponzaLoop
                     piece.Parent = pieceOf[l + 1][piece.Rep];
         ms = clock.Elapsed.TotalMilliseconds;
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"[VulkanSponza] rtgi cook: surface pieces: {n:N0} surfels, {edges.Length:N0} joins in {edgeMs:0} ms, {levels} levels in {ms - edgeMs:0} ms; cubes of several pieces by level {string.Join("/", result.Select(r => r.Values.Count(v => v.Length > 1)))}, the most in one by level {string.Join("/", result.Select(r => r.Count == 0 ? 0 : r.Values.Max(v => v.Length)))}."));
+            $"[VulkanSponza] rtgi cook: surface pieces: {n:N0} surfels, {edges.Length:N0} of {set.Edges.Length:N0} joins clear (found in {set.Ms:0} ms), {levels} levels in {ms - edgeMs:0} ms; cubes of several pieces by level {string.Join("/", result.Select(r => r.Values.Count(v => v.Length > 1)))}, the most in one by level {string.Join("/", result.Select(r => r.Count == 0 ? 0 : r.Values.Max(v => v.Length)))}."));
         return result;
 
-        bool Joins(int a, int b)
-        {
-            var hm = MathF.Max(h[a], h[b]);
-            var d = c[b] - c[a];
-            if (d.LengthSquared() > CookPieceReach * CookPieceReach * hm * hm) return false;
-            return MathF.Abs(Vector3.Dot(nrm[a], d)) <= CookPiecePlane * hm + 0.003f && Vector3.Dot(nrm[a], nrm[b]) >= 0.7f;
-        }
         static float Axis(Vector3 v, int a) => a == 0 ? v.X : a == 1 ? v.Y : v.Z;
         static float CubeAxis((int X, int Y, int Z) v, int a) => a == 0 ? v.X : a == 1 ? v.Y : v.Z;
     }

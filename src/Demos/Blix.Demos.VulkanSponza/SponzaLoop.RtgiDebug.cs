@@ -76,6 +76,8 @@ internal sealed partial class SponzaLoop
             rtgiHitPrior = debug.Controls.Float("Hit prior (0 off)", rtgiHitPrior, 0f, 2f);
             rtgiParentShrink = debug.Controls.Toggle("Cascade: shrinkage", rtgiParentShrink);
             // A switch of what trains the coarse cells: the cache emptied with it.
+            rtgiSideBlend = debug.Controls.Toggle("Readout: blend across the sides' 45 degree edges (--rtgi-no-side-blend off)", rtgiSideBlend);
+            rtgiNormalTurn = debug.Controls.Toggle("Readout: light turned to the pixel's normal (--rtgi-no-normal-turn off)", rtgiNormalTurn);
             var assemble = debug.Controls.Toggle("Coarse cells assembled by area (--rtgi-no-assemble off; resets the cache)", rtgiAssemble);
             if (assemble != rtgiAssemble) { rtgiAssemble = assemble; rtgiResetPending = true; }
             rtgiAge = debug.Controls.Float("History: share of age (0 no limit)", rtgiAge, 0f, 1f);

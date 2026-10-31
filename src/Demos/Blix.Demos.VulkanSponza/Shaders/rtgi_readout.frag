@@ -21,7 +21,9 @@ layout(set = 0, binding = 0) uniform RtgiReadout {
     vec4 uParams;        // rtgiParams (rtgi_cache.glsl)
     vec4 uCamera;        // xyz position
     vec4 uHalf;          // yz the full-res pixel of its 2x2
-    vec4 uNearField;     // x the near field's radius (rtgi_cache.glsl's RTGI_NEAR); y 1: the gradient written
+    vec4 uNearField;     // x the near field's radius (rtgi_cache.glsl's RTGI_NEAR); y 1: the gradient written; z 1: the
+                         // light turned to the pixel's normal from its cooked cell's; w the band (in |n| difference) over
+                         // which a side's edge blends in the next side's light (0: none)
     vec4 uView;          // x the RTGI panel's view (0: the light); y 1 once the panel's snapshot exists (views 30, 31); z 1
                          // cells assembled (view 29 reads the assembly)
     vec4 uUnsure;        // x the done threshold (relative error); y the uncertainty map's row (half-res pixels); z its size;
@@ -244,6 +246,8 @@ void main() {
     if (raw >= 1.0 - 1e-6 || dot(ns.xyz, ns.xyz) < 1e-6) {
         if (unsureIn) { rtgiUnsure[unsureAt] = -1.0; rtgiBlurRadius[unsureAt] = 0.0; }
         outIncident = vec4(0.0, 0.0, 0.0, 1.0);
+        // View 25: a pre-pass normal with no depth (a surface the depth missed) marked -1 in red.
+        if (int(u.uView.x + 0.5) == 25 && dot(ns.xyz, ns.xyz) >= 1e-6) outIncident = vec4(-1.0, 0.0, 0.0, 1.0);
         return;
     }
     vec2 ndc = (vec2(q) + 0.5) / vec2(fullSize) * 2.0 - 1.0;
@@ -345,6 +349,45 @@ void main() {
     else if (e0.w >= 0.05) { e = e0; sky = sky0; bv = b0; nearCell = near0; farShare = far0; }
     else if (e1.w >= 0.05) { e = e1; sky = sky1; bv = b1; nearCell = near1; farShare = far1; }
     else e = readLevel(p, side, min(level + 2u, top), sky, bv, nearCell, farShare);
+    // Across a side's edge (uNearField.w): within it the light of the next side the normal leans to, blended in toward half
+    // at the 45 degree edge itself. Cells are keyed by the six sides, and a curved surface's two sides' cells never met:
+    // a column's light stepped at each 45 degrees (the arches testbed's columns, 2026-10-31).
+    if (u.uNearField.w > 0.0 && e.w > 0.0) {
+        vec3 an = abs(n);
+        uint a1 = side >> 1u;
+        uint a2 = a1 == 0u ? (an.y >= an.z ? 1u : 2u) : a1 == 1u ? (an.x >= an.z ? 0u : 2u) : (an.x >= an.y ? 0u : 1u);
+        float gap = an[a1] - an[a2];
+        float w2 = 0.5 * (1.0 - clamp(gap / u.uNearField.w, 0.0, 1.0));
+        if (w2 > 0.01) {
+            uint side2 = a2 * 2u + (n[a2] >= 0.0 ? 0u : 1u);
+            uint keepR = rtgiRegion; vec3 keepP = rtgiRegionP;
+            rtgiKeyAt(p, side2);
+            float lf2 = rtgiLevelF(p, side2, u.uCamera.xyz, u.uParams);
+            uint l2 = uint(lf2);
+            float s2a, s2b, n2a, n2b, f2a, f2b; vec3 b2a, b2b;
+            vec4 g0 = readLevel(p, side2, l2, s2a, b2a, n2a, f2a);
+            vec4 g1 = l2 < top ? readLevel(p, side2, l2 + 1u, s2b, b2b, n2b, f2b) : vec4(0.0);
+            vec4 g = g0.w >= 0.05 && g1.w >= 0.05 ? vec4(mix(g0.rgb, g1.rgb, lf2 - float(l2)), 1.0) : g0.w >= 0.05 ? g0 : g1;
+            float gs = g0.w >= 0.05 && g1.w >= 0.05 ? mix(s2a, s2b, lf2 - float(l2)) : g0.w >= 0.05 ? s2a : s2b;
+            if (g.w >= 0.05) { e.rgb = mix(e.rgb, g.rgb, w2); sky = mix(sky, gs, w2); }
+            rtgiRegion = keepR; rtgiRegionP = keepP;
+        }
+    }
+    // Turned to the pixel's own normal (uNearField.z): a cell's light is its surface's mean over its points' normals, one
+    // for its whole cube on one of the six sides -- a 25 cm column a quarter at a time, lit flat-faced (the arches testbed,
+    // 2026-10-31). Its irradiance vector (bv) gives how that light turns with the normal: by the pixel's normal against
+    // the cooked cell's, as the lit pass carries it onto a normal map (lit_body.glsl), within half either way.
+    if (u.uNearField.z > 0.5 && e.w > 0.0 && COOK_PARAMS.w > 0.5) {
+        uint jn = cookFind(cookCoords(p, side, level), level, side);
+        if (jn != COOK_NONE) {
+            vec3 nc = COOK_POINTS(2u * jn + 1u).xyz;
+            float le = dot(e.rgb, vec3(0.2126, 0.7152, 0.0722));
+            if (dot(nc, nc) > 0.5 && le > 1e-5) {
+                vec3 g = (8.0 / 3.0) * (bv - dot(bv, nc) * nc);
+                e.rgb *= clamp(1.0 + dot(g, n - nc) / le, 0.5, 1.5);
+            }
+        }
+    }
     // The cooked near field: where a cooked cell lies, its near light over the cache's far light (faded in by how much of the
     // point the cooked cells cover).
     if (COOK_PARAMS.w > 0.5 && COOK_COUNTS.y > 0.5) {

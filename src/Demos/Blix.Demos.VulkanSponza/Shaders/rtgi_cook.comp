@@ -16,7 +16,9 @@
 //           bit set where clear (rtgi_cook.glsl's neighbour mask) -- once, for every pixel alike
 //   6, 7    the near field of the level-0 junction cells: NEAR_RAYS rays each to the contact radius (uMore.w), then their
 //           links (met: distance, normal, albedo), the escape share; buried where most met back faces
-//   14, 15  the live own-level cells within uNear.w of the camera listed (rtgi_rays.comp's near-train points)
+//   18, 19  the surface pieces' candidate joins: a ray between the two ends each, its bit set where clear
+//   14, 15  the live own-level cells within uNear.w of the camera short of uConn.w samples listed (rtgi_rays.comp's
+//           world-train points)
 
 layout(local_size_x = 64) in;
 
@@ -55,6 +57,10 @@ layout(std430, set = 0, binding = 9) buffer RtgiCookPoints { vec4 cookPoints[]; 
 layout(std430, set = 0, binding = 10) buffer RtgiNearLinks { uvec2 nearLinks[]; };
 layout(std430, set = 0, binding = 11) buffer RtgiNearLight { vec4 nearLight[]; };
 layout(std430, set = 0, binding = 13) readonly buffer RtgiCookPieces { uvec4 cookPieces[]; };
+// Kinds 18, 19: the surface pieces' candidate joins this chunk (two a join: the lifted ends), and per join of the whole
+// set a bit, set where its ray was clear (SponzaLoop.RtgiPieces.cs).
+layout(std430, set = 0, binding = 12) readonly buffer RtgiCookJoins { vec4 cookJoins[]; };
+layout(std430, set = 0, binding = 14) buffer RtgiCookJoinBits { uint cookJoinBits[]; };
 layout(std430, set = 0, binding = 15) buffer RtgiNearList { uint nearListCount; uint nearListPad[3]; uint nearList[]; };
 // Per near link, where its hit lies in the cooked set (kind 7): bits 0-27 the hit's level-0 cooked cell + 1 (its region:
 // rtgi_cook.glsl's nearRegion; 0 none), bits 28-31 its cache level (the size table's; 15 not covered) -- each frame's relight
@@ -248,6 +254,25 @@ void main() {
         cookPoints[2u * i + 1u].w = uintBitsToFloat(mask);
         return;
     }
+    if (kind == 18u) {
+        // A join's ray, end to end (uChunk.x the chunk's first join; its items from 0).
+        if (t >= count) return;
+        nullRay(t);
+        vec3 o = cookJoins[2u * t].xyz, q = cookJoins[2u * t + 1u].xyz;
+        float len = length(q - o);
+        if (len < 1e-4) return;
+        cookRays[2u * t] = vec4(o, 0.0);
+        cookRays[2u * t + 1u] = vec4((q - o) / len, max(len - 0.002, 1e-4));
+        return;
+    }
+    if (kind == 19u) {
+        // Clear (nothing met before its end): its bit set.
+        if (t >= count) return;
+        if ((cookHits[3u * t].w & 1u) != 0u && cookRays[2u * t + 1u].w > 1e-5) return;
+        uint e = first + t;
+        atomicOr(cookJoinBits[e >> 5], 1u << (e & 31u));
+        return;
+    }
     if (kind == 6u) {
         if (t >= count * NEAR_RAYS) return;
         uint i = first + t / NEAR_RAYS, k = t % NEAR_RAYS;
@@ -330,6 +355,15 @@ void main() {
         uint i = first + t;
         uint bits = cookBits(i);
         if ((bits & NEAR_BURIED) != 0u || (bits & COOK_OWN) == 0u || distance(cookPoints[2u * i].xyz, u.uNear.xyz) > u.uNear.w) return;
+        // Only the cells short of uConn.w samples (0: every one): the world's training goes where it is needed -- its cache
+        // cell not made yet, or holding fewer (its record's count, assembled for a coarse one).
+        if (u.uConn.w > 0.0) {
+            vec3 p = cookPoints[2u * i].xyz;
+            uint side = bits & 7u, level = (bits >> 8) & 15u;
+            rtgiKeyAt(p, side);
+            uint s = rtgiFind(rtgiCellHash(cookCoords(p, side, level), level, side, u.uCache), u.uCache);
+            if (s != COOK_NONE && uintBitsToFloat(rtgiRecord[2u * s + 1u].w) >= u.uConn.w) return;
+        }
         nearList[atomicAdd(nearListCount, 1u)] = i;
         return;
     }
