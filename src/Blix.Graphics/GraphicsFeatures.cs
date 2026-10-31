@@ -66,6 +66,10 @@ public enum GraphicsFeatures
     /// <summary>A second queue async compute runs on (ComputePassBuilder.Async), beside the frame; without it async
     /// passes run in place, and an async external pass (RenderGraph.ExternalPass's async) has no async run to wait for it.</summary>
     AsyncCompute = 1 << 14,
+
+    /// <summary>Atomic adds of 32-bit floats in storage buffers (VK_EXT_shader_atomic_float's
+    /// shaderBufferFloat32AtomicAdd): atomicAdd on a float buffer member.</summary>
+    BufferFloatAtomicAdd = 1 << 15,
 }
 
 /// <summary>What a compute program needs of how it runs (IGraphicsDevice.CreateComputePipeline).</summary>

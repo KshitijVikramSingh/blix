@@ -45,6 +45,11 @@ public sealed partial class VulkanGraphicsDevice
 
     private const StructureType PhysicalDeviceVulkan14FeaturesType = (StructureType)55;
 
+    // VK_EXT_shader_atomic_float: float atomic adds on storage buffers (the RTGI cook's GPU walk sums positions and
+    // normals per cell). Its feature struct is chained only where the device lists the extension.
+    private const string AtomicFloatExtension = "VK_EXT_shader_atomic_float";
+    private bool atomicFloatAvailable;
+
     // What device creation chains onto its create-info: a struct, so the caller's local holds the four feature structs
     // on its stack, where the chain's pointers stay valid until vkCreateDevice returns.
     private struct ModernFeatures
@@ -53,6 +58,7 @@ public sealed partial class VulkanGraphicsDevice
         public PhysicalDeviceVulkan12Features V12;
         public PhysicalDeviceVulkan13Features V13;
         public PhysicalDeviceVulkan14Features V14;
+        public PhysicalDeviceShaderAtomicFloatFeaturesEXT AtomicFloat;
         public bool ShaderInt16;
         public GraphicsFeatures Capabilities;
         public uint MinSubgroupSize, MaxSubgroupSize;
@@ -74,7 +80,8 @@ public sealed partial class VulkanGraphicsDevice
         var s12 = new PhysicalDeviceVulkan12Features { SType = StructureType.PhysicalDeviceVulkan12Features, PNext = &s11 };
         var s13 = new PhysicalDeviceVulkan13Features { SType = StructureType.PhysicalDeviceVulkan13Features, PNext = &s12 };
         var s14 = new PhysicalDeviceVulkan14Features { SType = PhysicalDeviceVulkan14FeaturesType, PNext = &s13 };
-        var supported = new PhysicalDeviceFeatures2 { SType = StructureType.PhysicalDeviceFeatures2, PNext = &s14 };
+        var sAtomic = new PhysicalDeviceShaderAtomicFloatFeaturesEXT { SType = StructureType.PhysicalDeviceShaderAtomicFloatFeaturesExt, PNext = &s14 };
+        var supported = new PhysicalDeviceFeatures2 { SType = StructureType.PhysicalDeviceFeatures2, PNext = atomicFloatAvailable ? &sAtomic : &s14 };
         Vk.GetPhysicalDeviceFeatures2(PhysicalDevice, &supported);
         var p11 = new PhysicalDeviceVulkan11Properties { SType = StructureType.PhysicalDeviceVulkan11Properties };
         var p13 = new PhysicalDeviceVulkan13Properties { SType = StructureType.PhysicalDeviceVulkan13Properties, PNext = &p11 };
@@ -88,6 +95,7 @@ public sealed partial class VulkanGraphicsDevice
             V12 = new PhysicalDeviceVulkan12Features { SType = StructureType.PhysicalDeviceVulkan12Features, TimelineSemaphore = timelineWanted },
             V13 = new PhysicalDeviceVulkan13Features { SType = StructureType.PhysicalDeviceVulkan13Features },
             V14 = new PhysicalDeviceVulkan14Features { SType = PhysicalDeviceVulkan14FeaturesType },
+            AtomicFloat = new PhysicalDeviceShaderAtomicFloatFeaturesEXT { SType = StructureType.PhysicalDeviceShaderAtomicFloatFeaturesExt },
             MinSubgroupSize = p13.MinSubgroupSize,
             MaxSubgroupSize = p13.MaxSubgroupSize,
         };
@@ -153,16 +161,25 @@ public sealed partial class VulkanGraphicsDevice
             m.V14.PushDescriptor = true;
             caps |= GraphicsFeatures.PushDescriptors;
         }
+        if (atomicFloatAvailable && sAtomic.ShaderBufferFloat32AtomicAdd)
+        {
+            m.AtomicFloat.ShaderBufferFloat32Atomics = sAtomic.ShaderBufferFloat32Atomics;
+            m.AtomicFloat.ShaderBufferFloat32AtomicAdd = true;
+            caps |= GraphicsFeatures.BufferFloatAtomicAdd;
+        }
         m.Capabilities = caps;
         return m;
     }
 
-    // The enabled structs chained (1.4 -> 1.3 -> 1.2 -> 1.1) for DeviceCreateInfo.PNext; m is the caller's stack local.
-    private static unsafe void* ChainModernFeatures(ModernFeatures* m)
+    // The enabled structs chained (atomic float -> 1.4 -> 1.3 -> 1.2 -> 1.1) for DeviceCreateInfo.PNext; m is the
+    // caller's stack local. The atomic float struct only where its extension is enabled.
+    private unsafe void* ChainModernFeatures(ModernFeatures* m)
     {
         m->V12.PNext = &m->V11;
         m->V13.PNext = &m->V12;
         m->V14.PNext = &m->V13;
-        return &m->V14;
+        if (!atomicFloatAvailable) return &m->V14;
+        m->AtomicFloat.PNext = &m->V14;
+        return &m->AtomicFloat;
     }
 }

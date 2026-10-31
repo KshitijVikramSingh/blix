@@ -1,0 +1,1141 @@
+#version 450
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_vote : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_EXT_shader_atomic_float : require
+
+// The cook's walk over every surface on the GPU (SponzaLoop.RtgiCookGpu.cs): what SponzaLoop.RtgiCook.cs's CookWalk and
+// its sinks did a point at a time on the CPU, minutes of Crytek Sponza's cook (2026-10-31). The same rules, in stages:
+//   the size field  each sample's dead-near-live mark (KIND_MARK) and its log size smoothed along its plane
+//                   (KIND_SMOOTH): CookField's MarkDeadNearLive and Smooth;
+//   the pieces      every triangle's two sides (KIND_SEED) split in rounds (KIND_ROUND, a workgroup a piece): halved
+//                   while longer than CensusPieceLattices of its pass's lattice, taken a pass finer where its lattice
+//                   finds finer samples, else final -- its lattice's samples (filled as the CPU fills them), the smoothed
+//                   field at its lattice points, its spacing and each point's area;
+//   the points      every final piece's points (KIND_POINTS, a workgroup a piece) into the mode's sink:
+//                     MODE_VERIFY  the burial check's kept planes by coarse cube, its dropped fine cubes (KIND_VCHECK
+//                                  then lists those near kept surface: BuildCookVerifyPass);
+//                     MODE_TABLE   the size table's sums by fine and coarse cube and the coarse cubes' curvature
+//                                  (KIND_BEND, KIND_CAP, KIND_FINE, KIND_TDROP then write the table, rtgi_cook.glsl's
+//                                  layout);
+//                     MODE_KEYS    every kept point's cell inserted (KIND_DENSE then numbers them);
+//                     MODE_ACC     the cells' normals, areas, junction flags, their best and sub-square keys, their
+//                                  surfels' occupancy;
+//                     MODE_FINAL   the winning points' positions, the surfels' sums.
+// Sums by key are pre-reduced over the subgroup (its points mostly share a cell) before the atomics.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform RtgiCookWalk {
+    vec4 uKind;   // x the kind; y the mode (KIND_POINTS), the drops-only flag (KIND_ROUND), the buffer (KIND_CLEAR) or the
+                  // list (KIND_ARGS); z the items; w the round's input list (KIND_ROUND), the fill value's bits (KIND_CLEAR)
+                  // or the smoothing's source (KIND_SMOOTH: 0 y, 1 z)
+    vec4 uField;  // x the finest cell (m); y the top size (m); z the last pass; w the dropped tier on
+    vec4 uRoom;   // x a piece list's room; y the final pieces' room; z the lattice's room; w the verify list's room
+    vec4 uMisc;   // x the coarse cube (m); y the live reach (m); z the curvature cap's angle; w the scale table's mask
+    vec4 uClear;  // KIND_CLEAR: x the first word
+} u;
+
+// Per pass p: [2p] its grid's cell (m), its lattice (its traced spacing, m), the grid table's mask and first slot (bits);
+// [2p + 1] its first sample and its samples. From MAP_DESC: per map its first key slot, its mask, its first value word and
+// its words a slot.
+layout(std430, set = 0, binding = 1) readonly buffer WalkTris { vec4 walkTris[]; };
+layout(std430, set = 0, binding = 2) readonly buffer WalkPass { uvec4 walkPass[]; };
+// The passes' grids: per slot its key (two words, 0 empty), the first of its samples in WalkOrder and their count.
+layout(std430, set = 0, binding = 3) readonly buffer WalkGrid { uvec4 walkGrid[]; };
+layout(std430, set = 0, binding = 4) readonly buffer WalkOrder { uint walkOrder[]; };
+// Per sample three vec4s: its point and bits (side | dead << 3 | pass << 4); its normal and size; its nearest hit, its
+// log size (y, z: the smoothing's two copies) and whether a live sample lies near (dead ones).
+layout(std430, set = 0, binding = 5) buffer WalkSamples { vec4 walkSamples[]; };
+layout(std430, set = 0, binding = 6) buffer WalkCount { uint walkCount[]; };
+// The rounds' two lists (uRoom.x pieces each), four vec4s a piece: a and its bits (level | side << 4), b, c, the normal.
+layout(std430, set = 0, binding = 7) buffer WalkPieces { vec4 walkPieces[]; };
+// The final pieces, five vec4s each: the longest edge's ends and the apex (w: bits, the lattice's first entry, the
+// spacing), the normal and each point's area, the base's length, height, lattice rows and point rows.
+layout(std430, set = 0, binding = 8) buffer WalkFinal { vec4 walkFinal[]; };
+// The final pieces' lattices: x its sample + 1 (0 none) | 0x80000000 a live sample near (dead ones); y its smoothed log
+// size's bits (0xFFFFFFFF none).
+layout(std430, set = 0, binding = 9) buffer WalkLattice { uvec2 walkLattice[]; };
+// Every map's keys (two words a slot) and values.
+layout(std430, set = 0, binding = 10) buffer WalkKeys { uint walkKeys[]; };
+layout(std430, set = 0, binding = 11) buffer WalkMapF { float walkMapF[]; };
+layout(std430, set = 0, binding = 12) buffer WalkMapU { uint walkMapU[]; };
+// The cells, numbered (KIND_DENSE): their keys; their sums (normal 3, area, best point 3, spare, 16 sub-square points 3
+// each); their keys to win (best, 16 sub-squares); their flags, surfel occupancy (two words) and first surfel.
+layout(std430, set = 0, binding = 13) buffer WalkCellKeys { uvec2 walkCellKeys[]; };
+layout(std430, set = 0, binding = 14) buffer WalkCellF { float walkCellF[]; };
+layout(std430, set = 0, binding = 15) buffer WalkCellU { uint walkCellU[]; };
+layout(std430, set = 0, binding = 16) buffer WalkCellM { uvec4 walkCellM[]; };
+// The surfels: their points' cell-local position (3), normal (3), area and count summed.
+layout(std430, set = 0, binding = 17) buffer WalkSurfels { float walkSurfels[]; };
+// The size table (rtgi_cook.glsl's COOK_SCALE layout: key, size's bits).
+layout(std430, set = 0, binding = 18) buffer WalkScale { uint walkScale[]; };
+// The burial check's samples (two vec4s each: the point and side, the normal).
+layout(std430, set = 0, binding = 19) buffer WalkVerify { vec4 walkVerify[]; };
+
+#define COOK_PARAMS vec4(0.0)
+#define COOK_COUNTS vec4(0.0)
+#define COOK_TABLE(i) uvec2(0u)
+#define COOK_POINTS(i) vec4(0.0)
+#include "rtgi_cook.glsl"
+
+#define KIND_CLEAR 0u
+#define KIND_SEED 1u
+#define KIND_ARGS 2u
+#define KIND_ROUND 3u
+#define KIND_POINTS 4u
+#define KIND_MARK 5u
+#define KIND_SMOOTH 6u
+#define KIND_BEND 7u
+#define KIND_CAP 8u
+#define KIND_FINE 9u
+#define KIND_TDROP 10u
+#define KIND_VCHECK 11u
+#define KIND_DENSE 12u
+
+#define MODE_VERIFY 0u
+#define MODE_TABLE 1u
+#define MODE_KEYS 2u
+#define MODE_ACC 3u
+#define MODE_FINAL 4u
+#define MODE_VERIFY_PICK 5u
+
+// WalkCount: the lists' counts, the final pieces', the lattice's entries used; the walk's counts (points kept, dropped,
+// lattice points filled, pieces without a sample); room run out (bits: 1 a list, 2 the final pieces, 4 the lattice, 8 a
+// lattice over LAT_MOST, 16 the verify list); map inserts that found no slot; the verify list's count; the cells
+// numbered; the scale table's inserts that found no slot; the size table's fine and coarse cubes, those capped by
+// curvature; the indirect dispatch's three words (C_ARGS); the dropped tier's cubes.
+#define C_LIST 0u
+#define C_FINAL 2u
+#define C_LATTICE 3u
+#define C_POINTS 4u
+#define C_BURIED 5u
+#define C_FILLED 6u
+#define C_NONE 7u
+#define C_OVER 8u
+#define C_MAP_FAIL 9u
+#define C_VERIFY 10u
+#define C_CELLS 11u
+#define C_SCALE_FAIL 12u
+#define C_FINE_N 13u
+#define C_COARSE_N 14u
+#define C_BENT 15u
+#define C_TDROP_N 20u
+#define C_ARGS 16u
+
+#define MAP_DESC 16u
+#define MAP_FINE 0u
+#define MAP_COARSE 1u
+#define MAP_TDROP 2u
+#define MAP_CELLS 3u
+#define MAP_KEPT 4u
+#define MAP_VDROP 5u
+#define MAP_PROBES 512u
+#define NONE 0xFFFFFFFFu
+
+// SponzaLoop.RtgiCensus.cs and SponzaLoop.RtgiCook.cs's constants.
+#define PIECE_LATTICES 8.0
+#define PLANE_OFF 0.02
+#define PLANE_SLOPE 0.3
+#define SIZE_SIGMA 0.5
+#define SMOOTH_REACH 1.5
+#define FINE_BELOW 0.2
+#define FINE_CUBE_FOR_SPACING 0.05
+#define JUNCTION_REACH 1.5
+#define JUNCTION_MOST 0.375
+#define LAT_MOST 128u
+#define SCALE_ORIGIN vec3(0.0137, 0.0271, 0.0419)
+
+uint kind() { return uint(u.uKind.x); }
+// Counts too large for a float's integers come as bits.
+uint roomList() { return floatBitsToUint(u.uRoom.x); }
+uint roomFinal() { return floatBitsToUint(u.uRoom.y); }
+uint roomLattice() { return floatBitsToUint(u.uRoom.z); }
+uint roomVerify() { return floatBitsToUint(u.uRoom.w); }
+uint lastPass() { return uint(u.uField.z); }
+// The cache's levels: the finest cell (uField.x) to the top size (uField.y).
+uint topLevel() { return uint(round(log2(u.uField.y / u.uField.x))); }
+float walkCellSize(uint level) { return ldexp(u.uField.x, int(level)); }
+
+uint cookSideOf(vec3 n) {
+    vec3 a = abs(n);
+    if (a.x >= a.y && a.x >= a.z) return n.x >= 0.0 ? 0u : 1u;
+    if (a.y >= a.z) return n.y >= 0.0 ? 2u : 3u;
+    return n.z >= 0.0 ? 4u : 5u;
+}
+
+// ---- Samples and their grids ----
+
+vec3 samplePos(uint g) { return walkSamples[3u * g].xyz; }
+uint sampleBits(uint g) { return floatBitsToUint(walkSamples[3u * g].w); }
+uint sampleSide(uint g) { return sampleBits(g) & 7u; }
+bool sampleDead(uint g) { return (sampleBits(g) & 8u) != 0u; }
+uint samplePass(uint g) { return (sampleBits(g) >> 4) & 15u; }
+vec3 sampleNormal(uint g) { return walkSamples[3u * g + 1u].xyz; }
+float sampleSize(uint g) { return walkSamples[3u * g + 1u].w; }
+float sampleNearest(uint g) { return walkSamples[3u * g + 2u].x; }
+// The smoothed log size: the smoothing's last copy (y).
+float sampleLog(uint g) { return walkSamples[3u * g + 2u].y; }
+bool sampleDeadNearLive(uint g) { return walkSamples[3u * g + 2u].w > 0.5; }
+
+float passGrid(uint p) { return uintBitsToFloat(walkPass[2u * p].x); }
+float passLattice(uint p) { return uintBitsToFloat(walkPass[2u * p].y); }
+
+// A 64-bit key of a cube (18 bits an axis), a side and a level or tier; both words never 0 (an empty slot).
+uvec2 packKey(ivec3 c, uint side, uint level) {
+    uvec3 b = uvec3(c + ivec3(1 << 17)) & 0x3FFFFu;
+    return uvec2(0x80000000u | b.x | ((b.y & 0x1FFFu) << 18), 0x80000000u | (b.y >> 13) | (b.z << 5) | (side << 23) | (level << 26));
+}
+uint keyHash(uvec2 k) { return cookHashU(k.x * 0x9E3779B1u ^ cookHashU(k.y + 0x7F4A7C15u)); }
+
+// The grid cell c of pass p: its samples' first entry in WalkOrder and their count (0 none).
+uvec2 gridRun(uint p, ivec3 c) {
+    uvec2 k = packKey(c, 0u, p);
+    uint mask = walkPass[2u * p].z, base = walkPass[2u * p].w;
+    uint h = keyHash(k);
+    for (uint i = 0u; i < 64u; i++) {
+        uvec4 e = walkGrid[base + ((h + i) & mask)];
+        if (e.x == k.x && e.y == k.y) return e.zw;
+        if (e.x == 0u) break;
+    }
+    return uvec2(0u);
+}
+
+// Whether sample g lies on q's plane (normal n): off it by at most PLANE_OFF plus PLANE_SLOPE of its distance along it.
+bool onPlane(uint g, vec3 q, vec3 n, out float d2) {
+    vec3 d = samplePos(g) - q;
+    d2 = dot(d, d);
+    float off = abs(dot(d, n));
+    return off <= PLANE_OFF + PLANE_SLOPE * sqrt(max(d2 - off * off, 0.0));
+}
+
+// CensusGrid.Nearest (sameOnly): the nearest sample of pass p facing side on q's plane, searched outward to `most`
+// cells; -1 none. x the sample, y its squared distance's bits.
+ivec2 gridNearest(uint p, vec3 q, uint side, vec3 n, int most) {
+    float gs = passGrid(p);
+    ivec3 c = ivec3(floor(q / gs));
+    for (int reach = 1; reach <= most; reach *= 2) {
+        int best = -1;
+        float bestD = 3.4e38;
+        for (int dz = -reach; dz <= reach; dz++)
+        for (int dy = -reach; dy <= reach; dy++)
+        for (int dx = -reach; dx <= reach; dx++) {
+            uvec2 run = gridRun(p, c + ivec3(dx, dy, dz));
+            for (uint k = run.x; k < run.x + run.y; k++) {
+                uint g = walkOrder[k];
+                float d2;
+                if (!onPlane(g, q, n, d2)) continue;
+                if (sampleSide(g) == side && d2 < bestD) { bestD = d2; best = int(g); }
+            }
+        }
+        if (best >= 0) return ivec2(best, int(floatBitsToUint(bestD)));
+    }
+    return ivec2(-1, 0);
+}
+
+// CensusGrid.Average over pass p's live samples facing side on q's plane within radius of q, each weighed 1 - its
+// distance over the radius, and by its log size's distance from ref where ref is given; x the sum, y the weight.
+// src: 1 the smoothing's y copy, 2 its z copy.
+vec2 gridAverage(uint p, vec3 q, uint side, vec3 n, float radius, uint src, bool useRef, float ref) {
+    float gs = passGrid(p);
+    ivec3 c = ivec3(floor(q / gs));
+    int reach = max(1, int(ceil(radius / gs)));
+    float sum = 0.0, weight = 0.0, r2 = radius * radius;
+    for (int dz = -reach; dz <= reach; dz++)
+    for (int dy = -reach; dy <= reach; dy++)
+    for (int dx = -reach; dx <= reach; dx++) {
+        uvec2 run = gridRun(p, c + ivec3(dx, dy, dz));
+        for (uint k = run.x; k < run.x + run.y; k++) {
+            uint g = walkOrder[k];
+            if (sampleSide(g) != side || sampleDead(g)) continue;
+            float d2;
+            if (!onPlane(g, q, n, d2) || d2 > r2) continue;
+            float v = walkSamples[3u * g + 2u][src];
+            float w = 1.0 - sqrt(d2) / radius + 1e-3;
+            if (useRef) { float dv = v - ref; w *= exp(-dv * dv / (2.0 * SIZE_SIGMA * SIZE_SIGMA)); }
+            sum += w * v;
+            weight += w;
+        }
+    }
+    return vec2(sum, weight);
+}
+
+// CensusGrid.Least: the least log size over the same samples as gridAverage's; x it, y 1 where any.
+vec2 gridLeast(uint p, vec3 q, uint side, vec3 n, float radius) {
+    float gs = passGrid(p);
+    ivec3 c = ivec3(floor(q / gs));
+    int reach = max(1, int(ceil(radius / gs)));
+    float least = 3.4e38, r2 = radius * radius;
+    bool any = false;
+    for (int dz = -reach; dz <= reach; dz++)
+    for (int dy = -reach; dy <= reach; dy++)
+    for (int dx = -reach; dx <= reach; dx++) {
+        uvec2 run = gridRun(p, c + ivec3(dx, dy, dz));
+        for (uint k = run.x; k < run.x + run.y; k++) {
+            uint g = walkOrder[k];
+            if (sampleSide(g) != side || sampleDead(g)) continue;
+            float d2;
+            if (!onPlane(g, q, n, d2) || d2 > r2) continue;
+            least = min(least, sampleLog(g));
+            any = true;
+        }
+    }
+    return vec2(least, any ? 1.0 : 0.0);
+}
+
+// Whether a live sample facing side lies within radius of q on its plane, in any pass (CookField.LiveWithin).
+bool liveWithin(vec3 q, uint side, vec3 n, float radius) {
+    for (int p = int(lastPass()); p >= 0; p--) {
+        float gs = passGrid(uint(p));
+        ivec3 c = ivec3(floor(q / gs));
+        int reach = max(1, int(ceil(radius / gs)));
+        float r2 = radius * radius;
+        for (int dz = -reach; dz <= reach; dz++)
+        for (int dy = -reach; dy <= reach; dy++)
+        for (int dx = -reach; dx <= reach; dx++) {
+            uvec2 run = gridRun(uint(p), c + ivec3(dx, dy, dz));
+            for (uint k = run.x; k < run.x + run.y; k++) {
+                uint g = walkOrder[k];
+                if (sampleSide(g) != side || sampleDead(g)) continue;
+                float d2;
+                if (onPlane(g, q, n, d2) && d2 <= r2) return true;
+            }
+        }
+    }
+    return false;
+}
+
+// CookField.FinestNear: the finest pass's sample near q facing its side, -1 none.
+int finestNear(vec3 q, uint side, vec3 n) {
+    for (uint p = lastPass(); p > 0u; p--) {
+        ivec2 j = gridNearest(p, q, side, n, 1);
+        float reach = 1.5 * passLattice(p);
+        if (j.x >= 0 && uintBitsToFloat(uint(j.y)) <= reach * reach) return j.x;
+    }
+    return gridNearest(0u, q, side, n, 8).x;
+}
+
+// CookField.Kernel: the smoothed log size at q, the finest pass with live samples near on its plane; y 1 where any.
+vec2 kernelAt(vec3 q, uint side, vec3 n) {
+    for (int p = int(lastPass()); p >= 0; p--) {
+        float r = passLattice(uint(p));
+        vec2 least = gridLeast(uint(p), q, side, n, r);
+        if (least.y < 0.5) continue;
+        vec2 a = gridAverage(uint(p), q, side, n, r, 1u, true, least.x);
+        if (a.y > 0.0) return vec2(a.x / a.y, 1.0);
+    }
+    return vec2(0.0);
+}
+
+// ---- Maps ----
+
+uvec4 mapDesc(uint m) { return walkPass[MAP_DESC + m]; }
+
+// The slot of key k in map m, inserted if new (fresh: this call inserted it); NONE when no slot was found. Two words, no
+// lock: a slot is its first word's (set from 0 by compare-and-swap) and then its second's; a thread whose second word
+// lost moves on.
+uint mapInsert(uint m, uvec2 k, out bool fresh) {
+    uvec4 d = mapDesc(m);
+    uint h = keyHash(k);
+    fresh = false;
+    for (uint i = 0u; i < MAP_PROBES; i++) {
+        uint s = (h + i) & d.y;
+        uint a = 2u * (d.x + s);
+        uint w0 = walkKeys[a];
+        if (w0 == 0u) {
+            w0 = atomicCompSwap(walkKeys[a], 0u, k.x);
+            if (w0 == 0u) w0 = k.x;
+        }
+        if (w0 != k.x) continue;
+        uint w1 = walkKeys[a + 1u];
+        if (w1 == 0u) {
+            w1 = atomicCompSwap(walkKeys[a + 1u], 0u, k.y);
+            if (w1 == 0u) { fresh = true; return s; }
+        }
+        if (w1 == k.y) return s;
+    }
+    atomicAdd(walkCount[C_MAP_FAIL], 1u);
+    return NONE;
+}
+
+uint mapFind(uint m, uvec2 k) {
+    uvec4 d = mapDesc(m);
+    uint h = keyHash(k);
+    for (uint i = 0u; i < MAP_PROBES; i++) {
+        uint s = (h + i) & d.y;
+        uint a = 2u * (d.x + s);
+        uint w0 = walkKeys[a];
+        if (w0 == 0u) return NONE;
+        if (w0 == k.x && walkKeys[a + 1u] == k.y) return s;
+    }
+    return NONE;
+}
+uvec2 mapKeyAt(uint m, uint s) { uint a = 2u * (mapDesc(m).x + s); return uvec2(walkKeys[a], walkKeys[a + 1u]); }
+uint mapVal(uint m, uint s) { uvec4 d = mapDesc(m); return d.z + s * d.w; }
+
+ivec3 keyCube(uvec2 k) {
+    uint bx = k.x & 0x3FFFFu, by = (k.x >> 18) & 0x1FFFu | ((k.y & 0x1Fu) << 13), bz = (k.y >> 5) & 0x3FFFFu;
+    return ivec3(uvec3(bx, by, bz)) - ivec3(1 << 17);
+}
+uint keySide(uvec2 k) { return (k.y >> 23) & 7u; }
+uint keyLevel(uvec2 k) { return (k.y >> 26) & 15u; }
+
+// The size table's entry (cube, tier, side) = size, as SponzaLoop.RtgiCook.cs's CookHashTable lays it.
+void scaleInsert(ivec3 cube, uint tier, uint side, float size) {
+    uint mask = floatBitsToUint(u.uMisc.w);
+    uvec2 h = cookCellHash(cube, tier, side, mask);
+    for (uint k = 0u; k < COOK_PROBE_STEPS; k++) {
+        uint at = (h.x + k) & mask;
+        if (atomicCompSwap(walkScale[2u * at], 0u, h.y) == 0u) { walkScale[2u * at + 1u] = floatBitsToUint(size); return; }
+    }
+    atomicAdd(walkCount[C_SCALE_FAIL], 1u);
+}
+float scaleIn(ivec3 cube, uint tier, uint side) {
+    uint mask = floatBitsToUint(u.uMisc.w);
+    uvec2 h = cookCellHash(cube, tier, side, mask);
+    for (uint k = 0u; k < COOK_PROBE_STEPS; k++) {
+        uint at = (h.x + k) & mask;
+        uint e = walkScale[2u * at];
+        if (e == h.y) return uintBitsToFloat(walkScale[2u * at + 1u]);
+        if (e == 0u) break;
+    }
+    return -1.0;
+}
+// CookTableSize: the side's fine cube, else its coarse; -1 none.
+float tableSize(vec3 p, uint side) {
+    float f = scaleIn(ivec3(floor((p - SCALE_ORIGIN) / u.uField.x)), 15u, side);
+    if (f > 0.0) return f;
+    return scaleIn(ivec3(floor((p - SCALE_ORIGIN) / u.uMisc.x)), 14u, side);
+}
+
+// CookField.LevelOf without the logarithm: the largest level whose size the size reaches (exact at powers of two).
+uint levelOf(float size) {
+    uint l = 0u;
+    while (l < topLevel() && size >= walkCellSize(l + 1u)) l++;
+    return l;
+}
+
+// ---- Subgroup pre-reduction: the lanes holding the same key summed, one atomic each ----
+
+// The lane that leads key k's lanes among those pending, and whether this lane is one of them.
+uint leaderOf(bool pending, uvec2 k, out bool mine) {
+    uint leader = subgroupBallotFindLSB(subgroupBallot(pending));
+    uvec2 lk = uvec2(subgroupShuffle(k.x, leader), subgroupShuffle(k.y, leader));
+    mine = pending && k == lk;
+    return leader;
+}
+
+// ---- The pieces ----
+
+shared vec3 sA, sB, sC, sN;
+shared uint sBits, sFiner, sLeast, sSmooth, sRows0, sL, sFinal, sLatBase, sRows;
+shared uint sRowStart[16], sRowLen[16];
+shared int sJ[LAT_MOST];
+shared uint sLatY[LAT_MOST];
+shared bool sNear[LAT_MOST];
+shared float sH, sArea, sBase, sHeight;
+shared vec3 sEa, sEb, sApex;
+shared uint sCount;
+
+void appendPiece(uint list, vec3 a, vec3 b, vec3 c, vec3 n, uint bits) {
+    uint i = atomicAdd(walkCount[C_LIST + list], 1u);
+    if (i >= roomList()) { atomicOr(walkCount[C_OVER], 1u); return; }
+    uint at = 4u * (list * roomList() + i);
+    walkPieces[at] = vec4(a, uintBitsToFloat(bits));
+    walkPieces[at + 1u] = vec4(b, 0.0);
+    walkPieces[at + 2u] = vec4(c, 0.0);
+    walkPieces[at + 3u] = vec4(n, 0.0);
+}
+
+// The walk's counts and picks as SponzaLoop.RtgiCook.cs's CookCeil and CookRoundDiv: by integers and a tolerance, the
+// same points as the CPU's walk whatever a division's last bit.
+uint cookCeil(float x) { return uint(max(ceil(x - 0.01), 0.0)); }
+uint roundDiv(uint num, uint den) {
+    uint q = num / den, rem = num - q * den;
+    return (2u * rem > den || (2u * rem == den && (q & 1u) != 0u)) ? q + 1u : q;
+}
+
+float longest(vec3 a, vec3 b, vec3 c) { return sqrt(max(dot(b - a, b - a), max(dot(c - b, c - b), dot(a - c, a - c)))); }
+
+// The lattice's point i: its row and its position along it.
+vec3 latticePoint(uint i, float lat) {
+    uint r = 0u;
+    while (r + 1u <= sRows0 && sRowStart[r + 1u] <= i) r++;
+    uint k = i - sRowStart[r];
+    float f = float(r) / float(sRows0);
+    vec3 p0 = sEa + (sApex - sEa) * f, p1 = sEb + (sApex - sEb) * f;
+    uint m = sRowLen[r] - 1u;
+    return m == 0u ? p0 : p0 + (p1 - p0) * (float(k) / float(m));
+}
+
+void lay(float lat) {
+    // The longest edge the base, rows parallel to it (CookWalk).
+    vec3 pa = sA, pb = sB, pc = sC;
+    vec3 ea = pa, eb = pb, apex = pc;
+    float ab = dot(pb - pa, pb - pa), bc = dot(pc - pb, pc - pb), ca = dot(pa - pc, pa - pc);
+    if (bc >= ab && bc >= ca) { ea = pb; eb = pc; apex = pa; }
+    else if (ca >= ab && ca >= bc) { ea = pc; eb = pa; apex = pb; }
+    float len = length(cross(pb - pa, pc - pa));
+    sEa = ea; sEb = eb; sApex = apex;
+    sBase = length(eb - ea);
+    sHeight = len / max(sBase, 1e-9);
+    sArea = len;
+    uint rows0 = max(1u, cookCeil(sHeight / lat));
+    if (rows0 > 15u) { atomicOr(walkCount[C_OVER], 8u); rows0 = 15u; }
+    sRows0 = rows0;
+    uint at = 0u;
+    for (uint r = 0u; r <= rows0; r++) {
+        float f = float(r) / float(rows0);
+        uint m = cookCeil((1.0 - f) * sBase / lat);
+        sRowStart[r] = at;
+        sRowLen[r] = m + 1u;
+        at += m + 1u;
+    }
+    if (at > LAT_MOST) { atomicOr(walkCount[C_OVER], 8u); at = LAT_MOST; }
+    sL = at;
+}
+
+bool rowAny(uint r) {
+    for (uint k = 0u; k < sRowLen[r]; k++) if (sJ[sRowStart[r] + k] >= 0) return true;
+    return false;
+}
+
+// The lattice filled as CookWalk fills it, in place and in order: a point without a sample takes its row's nearest that
+// has one; a row without any takes the nearest row's (the last row with any first).
+void fillLattice(out bool none) {
+    int anyRow = -1;
+    for (uint r = 0u; r <= sRows0; r++) if (rowAny(r)) anyRow = int(r);
+    none = anyRow < 0;
+    if (none) return;
+    uint filled = 0u;
+    for (uint r = 0u; r <= sRows0; r++) {
+        uint s = sRowStart[r], len = sRowLen[r];
+        if (rowAny(r)) {
+            for (uint k = 0u; k < len; k++) {
+                if (sJ[s + k] >= 0) continue;
+                for (uint d = 1u; d < len; d++) {
+                    if (k >= d && sJ[s + k - d] >= 0) { sJ[s + k] = sJ[s + k - d]; break; }
+                    if (k + d < len && sJ[s + k + d] >= 0) { sJ[s + k] = sJ[s + k + d]; break; }
+                }
+                filled++;
+            }
+            continue;
+        }
+        uint from = uint(anyRow);
+        for (uint d = 1u; d <= sRows0; d++) {
+            if (r >= d && rowAny(r - d)) { from = r - d; break; }
+            if (r + d <= sRows0 && rowAny(r + d)) { from = r + d; break; }
+        }
+        uint fs = sRowStart[from], fl = sRowLen[from];
+        for (uint k = 0u; k < len; k++) sJ[s + k] = sJ[fs + roundDiv(k * (fl - 1u), max(1u, len - 1u))];
+        filled += len;
+    }
+    atomicAdd(walkCount[C_FILLED], filled);
+}
+
+// CookSpacing: a quarter of the local size, a third of the size table's cube at most.
+float cookSpacing(float least) { return min(0.25 * least, (least < FINE_BELOW ? FINE_CUBE_FOR_SPACING : u.uMisc.x) / 3.0); }
+
+void roundPiece() {
+    uint tid = gl_LocalInvocationID.x;
+    uint list = uint(u.uKind.w);
+    uint piece = gl_WorkGroupID.x;
+    if (piece >= walkCount[C_LIST + list] || piece >= roomList()) return;
+    bool dropsOnly = u.uKind.y > 0.5;
+    if (tid == 0u) {
+        uint at = 4u * (list * roomList() + piece);
+        vec4 a = walkPieces[at];
+        sA = a.xyz; sBits = floatBitsToUint(a.w);
+        sB = walkPieces[at + 1u].xyz; sC = walkPieces[at + 2u].xyz; sN = walkPieces[at + 3u].xyz;
+        sFiner = 0u; sLeast = floatBitsToUint(u.uField.y); sSmooth = 0xFFFFFFFFu;
+    }
+    barrier();
+    uint level = sBits & 15u, side = (sBits >> 4) & 7u;
+    float lat = passLattice(level);
+    uint next = 1u - list;
+    if (longest(sA, sB, sC) > PIECE_LATTICES * lat) {
+        // Halved across its longest edge (CensusBisect).
+        if (tid == 0u) {
+            vec3 a = sA, b = sB, c = sC;
+            float ab = dot(b - a, b - a), bc = dot(c - b, c - b), ca = dot(a - c, a - c);
+            if (ab >= bc && ab >= ca) { vec3 m = (a + b) * 0.5; appendPiece(next, a, m, c, sN, sBits); appendPiece(next, m, b, c, sN, sBits); }
+            else if (bc >= ca) { vec3 m = (b + c) * 0.5; appendPiece(next, a, b, m, sN, sBits); appendPiece(next, a, m, c, sN, sBits); }
+            else { vec3 k = (c + a) * 0.5; appendPiece(next, a, b, k, sN, sBits); appendPiece(next, k, b, c, sN, sBits); }
+        }
+        return;
+    }
+    if (!(length(cross(sB - sA, sC - sA)) > 1e-12)) return;
+    if (tid == 0u) lay(lat);
+    barrier();
+    // The lattice's finest samples, whether any is a finer pass's, the least live size.
+    for (uint i = tid; i < sL; i += 64u) {
+        int j = finestNear(latticePoint(i, lat), side, sN);
+        sJ[i] = j;
+        if (j >= 0) {
+            if (samplePass(uint(j)) > level) atomicOr(sFiner, 1u);
+            if (!sampleDead(uint(j))) atomicMin(sLeast, floatBitsToUint(sampleSize(uint(j))));
+        }
+    }
+    barrier();
+    if (sFiner != 0u && level < lastPass()) {
+        if (tid == 0u) appendPiece(next, sA, sB, sC, sN, (sBits & ~15u) | (level + 1u));
+        return;
+    }
+    if (tid == 0u) {
+        bool none;
+        fillLattice(none);
+        if (none && !dropsOnly) atomicAdd(walkCount[C_NONE], 1u);
+    }
+    barrier();
+    // The smoothed field at the lattice points (none: drops only), and per point whose sample is dead whether a live
+    // one lies near.
+    for (uint i = tid; i < sL; i += 64u) {
+        int lj = sJ[i];
+        sNear[i] = lj >= 0 && sampleDead(uint(lj)) && sampleDeadNearLive(uint(lj));
+        uint y = 0xFFFFFFFFu;
+        if (!dropsOnly) {
+            vec2 v = kernelAt(latticePoint(i, lat), side, sN);
+            if (v.y > 0.5) { y = floatBitsToUint(v.x); atomicMin(sSmooth, floatBitsToUint(exp2(v.x))); }
+        }
+        sLatY[i] = y;
+    }
+    barrier();
+    if (tid == 0u) {
+        float least = uintBitsToFloat(sLeast);
+        if (sSmooth != 0xFFFFFFFFu) least = clamp(uintBitsToFloat(sSmooth), u.uField.x, u.uField.y);
+        sH = cookSpacing(least);
+        sRows = max(1u, cookCeil(sHeight / sH));
+        sCount = 0u;
+    }
+    barrier();
+    // The piece's points, each one's share of its area.
+    uint mine = 0u;
+    for (uint r = tid; r <= sRows; r += 64u) mine += cookCeil((1.0 - float(r) / float(sRows)) * sBase / sH) + 1u;
+    mine = subgroupAdd(mine);
+    if (subgroupElect()) atomicAdd(sCount, mine);
+    barrier();
+    if (tid == 0u) {
+        sFinal = atomicAdd(walkCount[C_FINAL], 1u);
+        sLatBase = atomicAdd(walkCount[C_LATTICE], sL);
+        if (sFinal >= roomFinal()) atomicOr(walkCount[C_OVER], 2u);
+        if (sLatBase + sL > roomLattice()) atomicOr(walkCount[C_OVER], 4u);
+    }
+    barrier();
+    if (sFinal >= roomFinal() || sLatBase + sL > roomLattice()) return;
+    if (tid == 0u) {
+        float pointArea = 0.5 * sArea / float(max(sCount, 1u));
+        uint at = 5u * sFinal;
+        walkFinal[at] = vec4(sEa, uintBitsToFloat(sBits));
+        walkFinal[at + 1u] = vec4(sEb, uintBitsToFloat(sLatBase));
+        walkFinal[at + 2u] = vec4(sApex, sH);
+        walkFinal[at + 3u] = vec4(sN, pointArea);
+        walkFinal[at + 4u] = vec4(sBase, sHeight, uintBitsToFloat(sRows0), uintBitsToFloat(sRows));
+    }
+    for (uint i = tid; i < sL; i += 64u)
+        walkLattice[sLatBase + i] = uvec2(uint(sJ[i] + 1) | (sNear[i] ? 0x80000000u : 0u), sLatY[i]);
+}
+
+// ---- The points ----
+
+// CookInterp over the lattice's log sizes at point (r of the rows, k of m), by integers as the CPU's; y 1 where any.
+vec2 rowAt(uint lr, uint k, uint m) {
+    uint len = sRowLen[lr], span = len - 1u;
+    uint k0 = m == 0u ? 0u : min(k * span / m, span), k1 = min(k0 + 1u, span);
+    float t = m == 0u ? 0.0 : float(k * span - k0 * m) / float(m);
+    uint a = sLatY[sRowStart[lr] + k0], b = sLatY[sRowStart[lr] + k1];
+    if (a == 0xFFFFFFFFu) return b == 0xFFFFFFFFu ? vec2(0.0) : vec2(uintBitsToFloat(b), 1.0);
+    if (b == 0xFFFFFFFFu) return vec2(uintBitsToFloat(a), 1.0);
+    return vec2(mix(uintBitsToFloat(a), uintBitsToFloat(b), t), 1.0);
+}
+vec2 interp(uint r, uint k, uint m) {
+    uint r0 = min(r * sRows0 / sRows, sRows0), r1 = min(r0 + 1u, sRows0);
+    vec2 a = rowAt(r0, k, m), b = rowAt(r1, k, m);
+    if (a.y < 0.5) return b;
+    if (b.y < 0.5) return a;
+    return vec2(mix(a.x, b.x, float(r * sRows0 - r0 * sRows) / float(sRows)), 1.0);
+}
+bool nearRow(uint lr, uint k, uint m) {
+    uint span = sRowLen[lr] - 1u;
+    uint k0 = m == 0u ? 0u : min(k * span / m, span);
+    return sNear[sRowStart[lr] + k0] || sNear[sRowStart[lr] + min(k0 + 1u, span)];
+}
+// CookLiveCorner: any of the lattice points around point (r, k) has a live sample near.
+bool liveCorner(uint r, uint k, uint m) {
+    uint r0 = min(r * sRows0 / sRows, sRows0), r1 = min(r0 + 1u, sRows0);
+    return nearRow(r0, k, m) || nearRow(r1, k, m);
+}
+
+vec3 sideAxis(uint side) { vec3 a = vec3(0.0); a[side >> 1] = (side & 1u) == 0u ? 1.0 : -1.0; return a; }
+
+// A point's identity for ties: its position's bits.
+uint pointHash(vec3 p, uint side) {
+    return cookHashU(floatBitsToUint(p.x) ^ cookHashU(floatBitsToUint(p.y) ^ cookHashU(floatBitsToUint(p.z) + side * 0x9E3779B1u)));
+}
+
+// Which of a dropped fine cube's points stands for it: the nearest its middle, ties by position (SponzaLoop.RtgiCook.cs's
+// CookDroppedKey).
+uint droppedKey(vec3 p, ivec3 cube, uint side) {
+    vec3 d = (p - SCALE_ORIGIN) / u.uField.x - (vec3(cube) + 0.5);
+    uint q = uint(clamp(dot(d, d) / 0.75 * 65535.0, 0.0, 65535.0));
+    return (q << 16) | (pointHash(p, side) & 0xFFFFu);
+}
+
+// MODE_VERIFY's sink: kept points' planes by coarse cube (a bit of 64, the plane's 2 cm step mod 64), dropped points'
+// fine cubes (their keys, the least kept); MODE_VERIFY_PICK's: the point holding a dropped cube's least key written.
+void sinkVerify(uint mode, bool live, bool dropped, vec3 p, uint side, vec3 n) {
+    ivec3 cube = ivec3(floor((p - SCALE_ORIGIN) / u.uField.x));
+    if (mode == MODE_VERIFY_PICK) {
+        if (!(live && dropped)) return;
+        uint s = mapFind(MAP_VDROP, packKey(cube, side, 0u));
+        if (s == NONE) return;
+        uint v = mapVal(MAP_VDROP, s);
+        if (walkMapU[v] != droppedKey(p, cube, side)) return;
+        walkMapU[v + 1u] = floatBitsToUint(p.x); walkMapU[v + 2u] = floatBitsToUint(p.y); walkMapU[v + 3u] = floatBitsToUint(p.z);
+        walkMapU[v + 4u] = floatBitsToUint(n.x); walkMapU[v + 5u] = floatBitsToUint(n.y); walkMapU[v + 6u] = floatBitsToUint(n.z);
+        return;
+    }
+    if (live && !dropped) {
+        bool fresh;
+        uint s = mapInsert(MAP_KEPT, packKey(ivec3(floor((p - SCALE_ORIGIN) / u.uMisc.x)), side, 0u), fresh);
+        if (s != NONE) {
+            int plane = int(roundEven(dot(p, n) / 0.02));
+            uint bit = uint(plane) & 63u;
+            atomicOr(walkMapU[mapVal(MAP_KEPT, s) + (bit >> 5)], 1u << (bit & 31u));
+        }
+    }
+    if (live && dropped) {
+        bool fresh;
+        uint s = mapInsert(MAP_VDROP, packKey(cube, side, 0u), fresh);
+        if (s != NONE) atomicMin(walkMapU[mapVal(MAP_VDROP, s)], droppedKey(p, cube, side));
+    }
+}
+
+// MODE_TABLE's sink (BuildCookCells' first walk): the mean log size by side in each fine cube (sizes under FINE_BELOW)
+// and coarse cube (sizes from FINE_BELOW up, and all), and the coarse cube's curvature sums (positions about its middle,
+// normals about the side's axis: CookBend's covariances are the same, the sums small).
+void sinkTable(bool live, bool dropped, vec3 p, uint side, vec3 n, float size) {
+    if (live && dropped && u.uField.w > 0.5) {
+        bool fresh;
+        mapInsert(MAP_TDROP, packKey(ivec3(floor((p - SCALE_ORIGIN) / u.uField.x)), side, 0u), fresh);
+        if (fresh) atomicAdd(walkCount[C_TDROP_N], 1u);
+    }
+    bool kept = live && !dropped;
+    float ls = kept ? log2(size) : 0.0;
+    // The fine cube.
+    bool fine = kept && size < FINE_BELOW;
+    uvec2 fk = packKey(ivec3(floor((p - SCALE_ORIGIN) / u.uField.x)), side, 0u);
+    bool pending = fine;
+    while (subgroupAny(pending)) {
+        bool mine;
+        uint leader = leaderOf(pending, fk, mine);
+        float sum = subgroupAdd(mine ? ls : 0.0), cnt = subgroupAdd(mine ? 1.0 : 0.0);
+        if (gl_SubgroupInvocationID == leader) {
+            bool fresh;
+            uint s = mapInsert(MAP_FINE, fk, fresh);
+            if (fresh) atomicAdd(walkCount[C_FINE_N], 1u);
+            if (s != NONE) { uint v = mapVal(MAP_FINE, s); atomicAdd(walkMapF[v], sum); atomicAdd(walkMapF[v + 1u], cnt); }
+        }
+        pending = pending && !mine;
+    }
+    // The coarse cube.
+    ivec3 cc = ivec3(floor((p - SCALE_ORIGIN) / u.uMisc.x));
+    uvec2 ck = packKey(cc, side, 0u);
+    vec3 lp = p - (SCALE_ORIGIN + (vec3(cc) + 0.5) * u.uMisc.x);
+    vec3 ln = n - sideAxis(side);
+    bool big = kept && size >= FINE_BELOW;
+    pending = kept;
+    while (subgroupAny(pending)) {
+        bool mine;
+        uint leader = leaderOf(pending, ck, mine);
+        float w = mine ? 1.0 : 0.0;
+        float bigSum = subgroupAdd(mine && big ? ls : 0.0), bigN = subgroupAdd(mine && big ? 1.0 : 0.0);
+        float allSum = subgroupAdd(w * ls), allN = subgroupAdd(w);
+        vec3 sp = subgroupAdd(w * lp), sn = subgroupAdd(w * ln);
+        vec3 pp0 = subgroupAdd(w * lp.x * lp), pp1 = subgroupAdd(w * lp.y * lp), pp2 = subgroupAdd(w * lp.z * lp);
+        vec3 nn0 = subgroupAdd(w * ln.x * ln), nn1 = subgroupAdd(w * ln.y * ln), nn2 = subgroupAdd(w * ln.z * ln);
+        vec3 np0 = subgroupAdd(w * ln.x * lp), np1 = subgroupAdd(w * ln.y * lp), np2 = subgroupAdd(w * ln.z * lp);
+        if (gl_SubgroupInvocationID == leader) {
+            bool fresh;
+            uint s = mapInsert(MAP_COARSE, ck, fresh);
+            if (fresh) atomicAdd(walkCount[C_COARSE_N], 1u);
+            if (s != NONE) {
+                uint v = mapVal(MAP_COARSE, s);
+                atomicAdd(walkMapF[v], bigSum); atomicAdd(walkMapF[v + 1u], bigN);
+                atomicAdd(walkMapF[v + 2u], allSum); atomicAdd(walkMapF[v + 3u], allN);
+                for (uint i = 0u; i < 3u; i++) {
+                    atomicAdd(walkMapF[v + 4u + i], sp[i]); atomicAdd(walkMapF[v + 7u + i], sn[i]);
+                    atomicAdd(walkMapF[v + 10u + i], pp0[i]); atomicAdd(walkMapF[v + 13u + i], pp1[i]); atomicAdd(walkMapF[v + 16u + i], pp2[i]);
+                    atomicAdd(walkMapF[v + 19u + i], nn0[i]); atomicAdd(walkMapF[v + 22u + i], nn1[i]); atomicAdd(walkMapF[v + 25u + i], nn2[i]);
+                    atomicAdd(walkMapF[v + 28u + i], np0[i]); atomicAdd(walkMapF[v + 31u + i], np1[i]); atomicAdd(walkMapF[v + 34u + i], np2[i]);
+                }
+            }
+        }
+        pending = pending && !mine;
+    }
+}
+
+// The cell a kept point falls in: its level by the size table (its own size where the table has none), coordinates.
+void cellOf(vec3 p, uint side, float own, out uint level, out ivec3 c, out vec3 g) {
+    float s = tableSize(p, side);
+    if (!(s > 0.0)) s = own;
+    level = levelOf(s);
+    // A point on a cell's boundary in the cell above it (SponzaLoop.RtgiCook.cs's CookGridCoords).
+    g = (p - rtgiOrigin(side)) / walkCellSize(level) + 1e-3;
+    c = ivec3(floor(g));
+}
+
+#define CELL_F 56u
+#define CELL_U 17u
+
+// MODE_KEYS, MODE_ACC, MODE_FINAL's sinks (BuildCookCells' second walk, in three): each kept point's cell.
+void sinkCells(uint mode, bool live, bool dropped, vec3 p, uint side, vec3 n, int j, float size, float area) {
+    bool kept = live && !dropped;
+    uint level;
+    ivec3 c;
+    vec3 g;
+    cellOf(p, side, kept ? size : 1.0, level, c, g);
+    uvec2 key = packKey(c, side, level);
+    if (mode == MODE_KEYS) {
+        bool pending = kept;
+        while (subgroupAny(pending)) {
+            bool mine;
+            uint leader = leaderOf(pending, key, mine);
+            if (gl_SubgroupInvocationID == leader) { bool fresh; mapInsert(MAP_CELLS, key, fresh); }
+            pending = pending && !mine;
+        }
+        return;
+    }
+    uint slot = kept ? mapFind(MAP_CELLS, key) : NONE;
+    uint cell = slot != NONE ? walkMapU[mapVal(MAP_CELLS, slot)] : NONE;
+    kept = kept && cell != NONE;
+    float cs = walkCellSize(level);
+    uint axis = side >> 1u, a0 = (axis + 1u) % 3u, a1 = (axis + 2u) % 3u;
+    float u0 = g[a0] - floor(g[a0]), u1 = g[a1] - floor(g[a1]);
+    float d = (u0 - 0.5) * (u0 - 0.5) + (u1 - 0.5) * (u1 - 0.5);
+    float s0 = u0 * 4.0, s1 = u1 * 4.0;
+    uint q = min(uint(s0), 3u) + 4u * min(uint(s1), 3u);
+    float dq = (s0 - floor(s0) - 0.5) * (s0 - floor(s0) - 0.5) + (s1 - floor(s1) - 0.5) * (s1 - floor(s1) - 0.5);
+    uint ph = pointHash(p, side) & 0xFFFFu;
+    uint bestKey = (uint(clamp(d, 0.0, 0.5) * 131070.0) << 16) | ph;
+    uint subKey = (uint(clamp(dq, 0.0, 0.5) * 131070.0) << 16) | ph;
+    uvec3 sub3 = uvec3(clamp(ivec3(floor(g * 4.0)) - 4 * c, ivec3(0), ivec3(3)));
+    uint surfel = sub3.x + 4u * sub3.y + 16u * sub3.z;
+    if (mode == MODE_ACC) {
+        bool junction = kept && j >= 0 && sampleNearest(uint(j)) < min(JUNCTION_REACH * cs, JUNCTION_MOST);
+        if (kept) atomicMin(walkCellU[CELL_U * cell + 1u + q], subKey);
+        bool pending = kept;
+        uvec2 ck = uvec2(cell, 0u);
+        while (subgroupAny(pending)) {
+            bool mine;
+            uint leader = leaderOf(pending, ck, mine);
+            float w = mine ? 1.0 : 0.0;
+            vec3 sn = subgroupAdd(w * n);
+            float sa = subgroupAdd(w * area);
+            uint jn = subgroupOr(mine && junction ? 1u : 0u);
+            uint occ0 = subgroupOr(mine && surfel < 32u ? 1u << surfel : 0u);
+            uint occ1 = subgroupOr(mine && surfel >= 32u ? 1u << (surfel - 32u) : 0u);
+            uint bk = subgroupMin(mine ? bestKey : NONE);
+            if (gl_SubgroupInvocationID == leader) {
+                atomicAdd(walkCellF[CELL_F * cell], sn.x); atomicAdd(walkCellF[CELL_F * cell + 1u], sn.y);
+                atomicAdd(walkCellF[CELL_F * cell + 2u], sn.z); atomicAdd(walkCellF[CELL_F * cell + 3u], sa);
+                if (jn != 0u) atomicOr(walkCellM[cell].x, 1u);
+                if (occ0 != 0u) atomicOr(walkCellM[cell].y, occ0);
+                if (occ1 != 0u) atomicOr(walkCellM[cell].z, occ1);
+                atomicMin(walkCellU[CELL_U * cell], bk);
+            }
+            pending = pending && !mine;
+        }
+        return;
+    }
+    // MODE_FINAL: the winners' positions, the surfels' sums.
+    if (kept && walkCellU[CELL_U * cell] == bestKey) {
+        walkCellF[CELL_F * cell + 4u] = p.x; walkCellF[CELL_F * cell + 5u] = p.y; walkCellF[CELL_F * cell + 6u] = p.z;
+    }
+    if (kept && walkCellU[CELL_U * cell + 1u + q] == subKey) {
+        uint at = CELL_F * cell + 8u + 3u * q;
+        walkCellF[at] = p.x; walkCellF[at + 1u] = p.y; walkCellF[at + 2u] = p.z;
+    }
+    uint index = NONE;
+    if (kept) {
+        uvec4 m = walkCellM[cell];
+        uint below = surfel < 32u ? bitCount(m.y & ((1u << surfel) - 1u)) : bitCount(m.y) + bitCount(m.z & ((1u << (surfel - 32u)) - 1u));
+        index = m.w + below;
+    }
+    vec3 local = g - vec3(c);
+    bool pending = kept;
+    uvec2 sk = uvec2(index, 0u);
+    while (subgroupAny(pending)) {
+        bool mine;
+        uint leader = leaderOf(pending, sk, mine);
+        float w = mine ? 1.0 : 0.0;
+        vec3 sp = subgroupAdd(w * local), sn = subgroupAdd(w * n);
+        float sa = subgroupAdd(w * area), cnt = subgroupAdd(w);
+        if (gl_SubgroupInvocationID == leader) {
+            uint at = 8u * index;
+            for (uint i = 0u; i < 3u; i++) { atomicAdd(walkSurfels[at + i], sp[i]); atomicAdd(walkSurfels[at + 3u + i], sn[i]); }
+            atomicAdd(walkSurfels[at + 6u], sa); atomicAdd(walkSurfels[at + 7u], cnt);
+        }
+        pending = pending && !mine;
+    }
+}
+
+void pointsPiece() {
+    uint tid = gl_LocalInvocationID.x;
+    uint piece = gl_WorkGroupID.x;
+    if (piece >= min(walkCount[C_FINAL], roomFinal())) return;
+    uint mode = uint(u.uKind.y);
+    if (tid == 0u) {
+        uint at = 5u * piece;
+        vec4 a = walkFinal[at], b = walkFinal[at + 1u], c = walkFinal[at + 2u], nn = walkFinal[at + 3u], e = walkFinal[at + 4u];
+        sEa = a.xyz; sBits = floatBitsToUint(a.w);
+        sEb = b.xyz; sLatBase = floatBitsToUint(b.w);
+        sApex = c.xyz; sH = c.w;
+        sN = nn.xyz; sArea = nn.w;
+        sBase = e.x; sHeight = e.y; sRows0 = floatBitsToUint(e.z); sRows = floatBitsToUint(e.w);
+        float lat = passLattice(sBits & 15u);
+        uint at2 = 0u;
+        for (uint r = 0u; r <= sRows0; r++) {
+            float f = float(r) / float(sRows0);
+            uint m = cookCeil((1.0 - f) * sBase / lat);
+            sRowStart[r] = at2;
+            sRowLen[r] = m + 1u;
+            at2 += m + 1u;
+        }
+        sL = min(at2, LAT_MOST);
+    }
+    barrier();
+    for (uint i = tid; i < sL; i += 64u) {
+        uvec2 e = walkLattice[sLatBase + i];
+        sJ[i] = int(e.x & 0x7FFFFFFFu) - 1;
+        sNear[i] = (e.x & 0x80000000u) != 0u;
+        sLatY[i] = e.y;
+    }
+    barrier();
+    uint side = (sBits >> 4) & 7u;
+    vec3 n = sN;
+    uint points = 0u, buried = 0u;
+    for (uint r = 0u; r <= sRows; r++) {
+        float f = float(r) / float(sRows);
+        vec3 p0 = sEa + (sApex - sEa) * f, p1 = sEb + (sApex - sEb) * f;
+        uint m = cookCeil((1.0 - f) * sBase / sH);
+        uint rr = min(roundDiv(r * sRows0, sRows), sRows0);
+        uint rs = sRowStart[rr], rl = sRowLen[rr];
+        for (uint kb = 0u; kb <= m; kb += 64u) {
+            uint k = kb + tid;
+            bool live = k <= m;
+            float along = m == 0u ? 0.0 : float(k) / float(m);
+            int j = live ? sJ[rs + (m == 0u ? 0u : min(roundDiv(k * (rl - 1u), m), rl - 1u))] : -1;
+            vec2 lv = interp(r, k, m);
+            bool dropped = live && j >= 0 && sampleDead(uint(j)) && !liveCorner(r, k, m);
+            vec3 p = p0 + (p1 - p0) * along;
+            float size = lv.y < 0.5 ? (j >= 0 ? sampleSize(uint(j)) : u.uField.y) : clamp(exp2(lv.x), u.uField.x, u.uField.y);
+            if (live) { if (dropped) buried++; else points++; }
+            if (mode == MODE_VERIFY || mode == MODE_VERIFY_PICK) sinkVerify(mode, live, dropped, p, side, n);
+            else if (mode == MODE_TABLE) sinkTable(live, dropped, p, side, n, size);
+            else sinkCells(mode, live, dropped, p, side, n, j, size, sArea);
+        }
+    }
+    if (mode == MODE_TABLE) {
+        points = subgroupAdd(points);
+        buried = subgroupAdd(buried);
+        if (subgroupElect()) { atomicAdd(walkCount[C_POINTS], points); atomicAdd(walkCount[C_BURIED], buried); }
+    }
+}
+
+// ---- The per-item kinds ----
+
+// A mean size within a few float steps of a level's size taken as it: summed by float atomics, a cube of equal sizes
+// (the top size, a sample's clamp) came out a step under, a level lower than the CPU's double sums gave it.
+float snapSize(float size) {
+    float l = round(log2(size / u.uField.x));
+    float exact = ldexp(u.uField.x, int(l));
+    return abs(size / exact - 1.0) < 4e-6 ? exact : size;
+}
+
+// CookBend.Radius from a coarse slot's sums: the radius of curvature along the direction its normals vary most.
+float bendRadius(uint v) {
+    float N = walkMapF[v + 3u];
+    if (N < 8.0) return 3.4e38;
+    vec3 P = vec3(walkMapF[v + 4u], walkMapF[v + 5u], walkMapF[v + 6u]) / N;
+    vec3 Nn = vec3(walkMapF[v + 7u], walkMapF[v + 8u], walkMapF[v + 9u]) / N;
+    mat3 pp, nn, np;
+    for (uint i = 0u; i < 3u; i++)
+        for (uint k = 0u; k < 3u; k++) {
+            pp[i][k] = walkMapF[v + 10u + 3u * i + k] / N - P[i] * P[k];
+            nn[i][k] = walkMapF[v + 19u + 3u * i + k] / N - Nn[i] * Nn[k];
+            np[i][k] = walkMapF[v + 28u + 3u * i + k] / N - Nn[i] * P[k];
+        }
+    if (nn[0][0] + nn[1][1] + nn[2][2] < 1e-6) return 3.4e38;
+    vec3 d = vec3(1.0, 0.7, 0.3);
+    for (int it = 0; it < 16; it++) {
+        vec3 e = vec3(0.0);
+        for (uint i = 0u; i < 3u; i++) for (uint k = 0u; k < 3u; k++) e[i] += nn[i][k] * d[k];
+        float l = length(e);
+        if (l < 1e-12) return 3.4e38;
+        d = e / l;
+    }
+    float npv = 0.0, ppv = 0.0;
+    for (uint i = 0u; i < 3u; i++)
+        for (uint k = 0u; k < 3u; k++) { npv += d[i] * np[i][k] * d[k]; ppv += d[i] * pp[i][k] * d[k]; }
+    if (ppv < 1e-8) return 3.4e38;
+    float slope = abs(npv / ppv);
+    return slope < 1e-3 ? 3.4e38 : 1.0 / slope;
+}
+
+void main() {
+    uint k = kind();
+    uint t = gl_GlobalInvocationID.x;
+    if (k == KIND_ROUND) { roundPiece(); return; }
+    if (k == KIND_POINTS) { pointsPiece(); return; }
+    uint items = floatBitsToUint(u.uKind.z);
+    if (k == KIND_CLEAR) {
+        if (t >= items) return;
+        uint at = floatBitsToUint(u.uClear.x) + t, fill = floatBitsToUint(u.uKind.w);
+        uint which = uint(u.uKind.y);
+        if (which == 0u) walkKeys[at] = fill;
+        else if (which == 1u) walkMapF[at] = uintBitsToFloat(fill);
+        else if (which == 2u) walkMapU[at] = fill;
+        else if (which == 3u) walkCellF[at] = uintBitsToFloat(fill);
+        else if (which == 4u) walkCellU[at] = fill;
+        else if (which == 5u) walkSurfels[at] = uintBitsToFloat(fill);
+        else if (which == 6u) walkCount[at] = fill;
+        else if (which == 7u) walkScale[at] = fill;
+        else if (which == 8u) walkCellM[at] = uvec4(fill);
+        return;
+    }
+    if (k == KIND_ARGS) {
+        if (t != 0u) return;
+        uint which = uint(u.uKind.y);
+        uint count = which < 2u ? min(walkCount[C_LIST + which], roomList()) : min(walkCount[C_FINAL], roomFinal());
+        walkCount[C_ARGS] = count;
+        walkCount[C_ARGS + 1u] = 1u;
+        walkCount[C_ARGS + 2u] = 1u;
+        // The round reading `which` appends to the other list: emptied.
+        if (which < 2u) walkCount[C_LIST + 1u - which] = 0u;
+        return;
+    }
+    if (k == KIND_SEED) {
+        if (t >= items) return;
+        vec3 a = walkTris[3u * t].xyz, b = walkTris[3u * t + 1u].xyz, c = walkTris[3u * t + 2u].xyz;
+        vec3 cr = cross(b - a, c - a);
+        float len = length(cr);
+        if (!(len > 1e-12)) return;
+        vec3 nrm = cr / len;
+        appendPiece(0u, a, b, c, nrm, cookSideOf(nrm) << 4);
+        appendPiece(0u, a, b, c, -nrm, cookSideOf(-nrm) << 4);
+        return;
+    }
+    if (k == KIND_MARK) {
+        if (t >= items) return;
+        if (!sampleDead(t)) { walkSamples[3u * t + 2u].w = 0.0; return; }
+        walkSamples[3u * t + 2u].w = liveWithin(samplePos(t), sampleSide(t), sampleNormal(t), u.uMisc.y) ? 1.0 : 0.0;
+        return;
+    }
+    if (k == KIND_SMOOTH) {
+        if (t >= items) return;
+        uint src = u.uKind.w > 0.5 ? 2u : 1u, dst = 3u - src;
+        float own = walkSamples[3u * t + 2u][src];
+        float next = own;
+        if (!sampleDead(t)) {
+            uint p = samplePass(t);
+            vec2 a = gridAverage(p, samplePos(t), sampleSide(t), sampleNormal(t), SMOOTH_REACH * passLattice(p), src, true, own);
+            if (a.y > 0.0) next = a.x / a.y;
+        }
+        walkSamples[3u * t + 2u][dst] = next;
+        return;
+    }
+    if (k == KIND_BEND) {
+        // Each coarse cube's own cap: R x the cap's angle, the finest cell at least.
+        if (t >= items) return;
+        if (mapKeyAt(MAP_COARSE, t).x == 0u) return;
+        uint v = mapVal(MAP_COARSE, t);
+        float radius = bendRadius(v);
+        walkMapF[v + 37u] = radius < 3.0e38 ? max(u.uField.x, radius * u.uMisc.z) : 3.4e38;
+        return;
+    }
+    if (k == KIND_CAP) {
+        // The least of its own and its 26 neighbours' caps of its side; its size from its sums.
+        if (t >= items) return;
+        uvec2 key = mapKeyAt(MAP_COARSE, t);
+        if (key.x == 0u) return;
+        ivec3 c = keyCube(key);
+        uint side = keySide(key);
+        float cap = 3.4e38;
+        for (int dz = -1; dz <= 1; dz++)
+        for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++) {
+            uint s = mapFind(MAP_COARSE, packKey(c + ivec3(dx, dy, dz), side, 0u));
+            if (s != NONE) cap = min(cap, walkMapF[mapVal(MAP_COARSE, s) + 37u]);
+        }
+        uint v = mapVal(MAP_COARSE, t);
+        walkMapF[v + 38u] = cap;
+        if (cap < 3.0e38) atomicAdd(walkCount[C_BENT], 1u);
+        float bigN = walkMapF[v + 1u];
+        float size = snapSize(exp2(bigN > 0.0 ? walkMapF[v] / bigN : walkMapF[v + 2u] / walkMapF[v + 3u]));
+        scaleInsert(c, 14u, side, min(size, cap));
+        return;
+    }
+    if (k == KIND_FINE) {
+        // Its mean size, capped by its middle's coarse cube's cap.
+        if (t >= items) return;
+        uvec2 key = mapKeyAt(MAP_FINE, t);
+        if (key.x == 0u) return;
+        ivec3 c = keyCube(key);
+        uint side = keySide(key);
+        uint v = mapVal(MAP_FINE, t);
+        float size = snapSize(exp2(walkMapF[v] / walkMapF[v + 1u]));
+        vec3 centre = SCALE_ORIGIN + (vec3(c) + 0.5) * u.uField.x;
+        uint s = mapFind(MAP_COARSE, packKey(ivec3(floor((centre - SCALE_ORIGIN) / u.uMisc.x)), side, 0u));
+        if (s != NONE) size = min(size, walkMapF[mapVal(MAP_COARSE, s) + 38u]);
+        scaleInsert(c, 15u, side, size);
+        return;
+    }
+    if (k == KIND_TDROP) {
+        if (t >= items) return;
+        uvec2 key = mapKeyAt(MAP_TDROP, t);
+        if (key.x == 0u) return;
+        scaleInsert(keyCube(key), 13u, keySide(key), 1.0);
+        return;
+    }
+    if (k == KIND_VCHECK) {
+        // A dropped fine cube's point within a coarse cube of kept points on its plane (a step either way): listed.
+        if (t >= items) return;
+        uvec2 key = mapKeyAt(MAP_VDROP, t);
+        if (key.x == 0u) return;
+        uint v = mapVal(MAP_VDROP, t);
+        vec3 p = uintBitsToFloat(uvec3(walkMapU[v + 1u], walkMapU[v + 2u], walkMapU[v + 3u]));
+        vec3 n = uintBitsToFloat(uvec3(walkMapU[v + 4u], walkMapU[v + 5u], walkMapU[v + 6u]));
+        uint side = keySide(key);
+        ivec3 c = ivec3(floor((p - SCALE_ORIGIN) / u.uMisc.x));
+        int plane = int(roundEven(dot(p, n) / 0.02));
+        bool near = false;
+        for (int dz = -1; dz <= 1 && !near; dz++)
+        for (int dy = -1; dy <= 1 && !near; dy++)
+        for (int dx = -1; dx <= 1 && !near; dx++) {
+            uint s = mapFind(MAP_KEPT, packKey(c + ivec3(dx, dy, dz), side, 0u));
+            if (s == NONE) continue;
+            uint w = mapVal(MAP_KEPT, s);
+            for (int dp = -1; dp <= 1 && !near; dp++) {
+                uint bit = uint(plane + dp) & 63u;
+                near = (walkMapU[w + (bit >> 5)] & (1u << (bit & 31u))) != 0u;
+            }
+        }
+        if (!near) return;
+        uint i = atomicAdd(walkCount[C_VERIFY], 1u);
+        if (i >= roomVerify()) { atomicOr(walkCount[C_OVER], 16u); return; }
+        walkVerify[2u * i] = vec4(p, uintBitsToFloat(side));
+        walkVerify[2u * i + 1u] = vec4(n, 0.0);
+        return;
+    }
+    if (k == KIND_DENSE) {
+        if (t >= items) return;
+        uvec2 key = mapKeyAt(MAP_CELLS, t);
+        if (key.x == 0u) return;
+        uint i = atomicAdd(walkCount[C_CELLS], 1u);
+        walkMapU[mapVal(MAP_CELLS, t)] = i;
+        walkCellKeys[i] = key;
+        return;
+    }
+}

@@ -549,6 +549,14 @@ internal sealed partial class SponzaLoop
             return least;
         }
 
+        // The samples in cell order, and each cell's run of them (the GPU walk's copy, SponzaLoop.RtgiCookGpu.cs).
+        public int[] Order => order;
+        public IEnumerable<(int X, int Y, int Z, int Start, int Count)> Runs()
+        {
+            foreach (var (k, (start, count)) in cells)
+                yield return ((int)((k >> 42) & 0x1FFFFF) - (1 << 20), (int)((k >> 21) & 0x1FFFFF) - (1 << 20), (int)(k & 0x1FFFFF) - (1 << 20), start, count);
+        }
+
         private long KeyOf(Vector3 p) => Key((int)MathF.Floor(p.X / Size), (int)MathF.Floor(p.Y / Size), (int)MathF.Floor(p.Z / Size));
         private static long Key(int x, int y, int z) => ((long)(x + (1 << 20)) << 42) | ((long)(y + (1 << 20)) << 21) | (long)(z + (1 << 20));
 

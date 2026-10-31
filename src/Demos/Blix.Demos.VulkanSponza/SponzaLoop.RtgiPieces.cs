@@ -52,7 +52,7 @@ internal sealed partial class SponzaLoop
     // A kept point into its surfel (the cells' walk, CookWalk's sink).
     private static void AddCookSurfel(Dictionary<long, CookSurfel> surfels, Vector3 p, Vector3 n, float area, uint side, int level, float finest)
     {
-        var q = (p - NearGridOrigin(side)) / (finest * MathF.Pow(2f, level)) * 4f;
+        var q = CookGridCoords(p, side, finest * MathF.Pow(2f, level)) * 4f;
         var key = CookSurfelKey(level, side, (int)MathF.Floor(q.X), (int)MathF.Floor(q.Y), (int)MathF.Floor(q.Z));
         if (!surfels.TryGetValue(key, out var s)) surfels[key] = s = new CookSurfel();
         s.Add(p, n, area);
@@ -88,28 +88,56 @@ internal sealed partial class SponzaLoop
 
     private static CookSurfelSet PrepareCookSurfels(Dictionary<long, CookSurfel> surfelMap, float finest, int levels)
     {
+        var keys = surfelMap.Keys.ToArray();
+        var c = new Vector3[keys.Length];
+        var nrm = new Vector3[keys.Length];
+        var area = new float[keys.Length];
+        for (var i = 0; i < keys.Length; i++)
+        {
+            var s = surfelMap[keys[i]];
+            c[i] = s.SumP / s.Count;
+            nrm[i] = s.SumN;
+            area[i] = s.Area;
+        }
+        return PrepareCookSurfels(keys, c, nrm, area, finest, levels);
+    }
+
+    // The surfels by key (any order): their centroids, summed normals and areas (the GPU walk's, SponzaLoop.RtgiCookGpu.cs,
+    // or the CPU walk's dictionary).
+    private static CookSurfelSet PrepareCookSurfels(long[] keys, Vector3[] c, Vector3[] normalSum, float[] area, float finest, int levels)
+    {
         var clock = Stopwatch.StartNew();
         // In key order, so the pieces come out the same every cook.
-        var keys = surfelMap.Keys.ToArray();
-        Array.Sort(keys);
+        var order = Enumerable.Range(0, keys.Length).ToArray();
+        Array.Sort((long[])keys.Clone(), order);
+        keys = order.Select(i => keys[i]).ToArray();
+        c = order.Select(i => c[i]).ToArray();
+        area = order.Select(i => area[i]).ToArray();
         var n = keys.Length;
         var index = new Dictionary<long, int>(n);
         for (var i = 0; i < n; i++) index[keys[i]] = i;
         var lv = new int[n];
         var sd = new uint[n];
-        var c = new Vector3[n];
         var nrm = new Vector3[n];
-        var area = new float[n];
         var h = new float[n];
         for (var i = 0; i < n; i++)
         {
             var (l, side, _, _, _) = CookSurfelUnkey(keys[i]);
-            var s = surfelMap[keys[i]];
+            var sn = normalSum[order[i]];
             lv[i] = l; sd[i] = side;
-            c[i] = s.SumP / s.Count;
-            nrm[i] = s.SumN.LengthSquared() > 1e-12f ? Vector3.Normalize(s.SumN) : Vector3.UnitY;
-            area[i] = s.Area;
+            nrm[i] = sn.LengthSquared() > 1e-12f ? Vector3.Normalize(sn) : Vector3.UnitY;
             h[i] = 0.25f * finest * MathF.Pow(2f, l);
+        }
+        if (CookDumpPath("surfels.bin") is { } dump)
+        {
+            using var bw = new BinaryWriter(File.Create(dump));
+            for (var i = 0; i < n; i++)
+            {
+                bw.Write(keys[i]);
+                bw.Write(c[i].X); bw.Write(c[i].Y); bw.Write(c[i].Z);
+                bw.Write(nrm[i].X); bw.Write(nrm[i].Y); bw.Write(nrm[i].Z);
+                bw.Write(area[i]);
+            }
         }
         // The joins: each surfel's grid neighbours at its level (from the lower index), and at the next level up's.
         var edgeLists = new List<(int, int)>[Environment.ProcessorCount];
@@ -161,7 +189,7 @@ internal sealed partial class SponzaLoop
             var cube = new (int X, int Y, int Z)[n];
             for (var i = 0; i < n; i++)
             {
-                var g = (c[i] - NearGridOrigin(sd[i])) / cs;
+                var g = CookGridCoords(c[i], sd[i], cs);
                 cube[i] = ((int)MathF.Floor(g.X), (int)MathF.Floor(g.Y), (int)MathF.Floor(g.Z));
             }
             var parent = new int[n];
@@ -186,7 +214,7 @@ internal sealed partial class SponzaLoop
                 if (lv[i] <= l) piece.Whole += area[i];
                 // Its footprint, its spacing wide, across the cube's 4 x 4.
                 int axis = (int)(sd[i] >> 1), a0 = (axis + 1) % 3, a1 = (axis + 2) % 3;
-                var g = (c[i] - NearGridOrigin(sd[i])) / cs;
+                var g = CookGridCoords(c[i], sd[i], cs);
                 float u = Axis(g, a0) - CubeAxis(cube[i], a0), v = Axis(g, a1) - CubeAxis(cube[i], a1);
                 var hw = 0.5f * h[i] / cs;
                 int u0 = Math.Clamp((int)MathF.Floor((u - hw) * 4f), 0, 3), u1 = Math.Clamp((int)MathF.Floor((u + hw) * 4f), 0, 3);
@@ -215,6 +243,13 @@ internal sealed partial class SponzaLoop
                 return x;
             }
         });
+        if (CookDumpPath("multi.bin") is { } multi)
+        {
+            using var bw = new BinaryWriter(File.Create(multi));
+            for (var l = 0; l < levels; l++)
+                foreach (var (key, pieces) in result[l])
+                    if (pieces.Length > 1) { bw.Write(l); bw.Write(key); bw.Write(pieces.Length); }
+        }
         // Each piece's parent: the piece a level up its representative lies in.
         for (var l = 0; l + 1 < levels; l++)
             foreach (var pieces in result[l].Values)

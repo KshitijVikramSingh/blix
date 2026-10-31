@@ -342,6 +342,7 @@ public sealed partial class VulkanGraphicsDevice
             if (name == "VK_KHR_portability_subset") PortabilitySubsetRequired = true;
             else if (name == MetalObjectsExtension) MetalObjectsEnabled = true;
             else if (name == DisplayTimingExtension) displayTimingSupported = true;
+            else if (name == AtomicFloatExtension) atomicFloatAvailable = true;
         }
 
         if (!TryFindGraphicsAndPresentQueueFamily(PhysicalDevice, out var qf))
@@ -423,6 +424,8 @@ public sealed partial class VulkanGraphicsDevice
         if (PortabilitySubsetRequired) deviceExts.Add("VK_KHR_portability_subset");
         if (MetalObjectsEnabled) deviceExts.Add(MetalObjectsExtension);
         if (displayTimingSupported && presentPaceWanted) { deviceExts.Add(DisplayTimingExtension); displayTimingEnabled = true; }
+        // Enabled with the extension only where its buffer float add is offered (ChooseModernFeatures).
+        if (atomicFloatAvailable) deviceExts.Add(AtomicFloatExtension);
         using var extNames = new Utf8ArrayPin(deviceExts);
 
         // Enable anisotropic filtering when the device offers it. Without it,
