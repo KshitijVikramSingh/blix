@@ -435,7 +435,8 @@ void main() {
             else if (dv != 23) e.rgb = mix(e.rgb, cooked, clamp(found, 0.0, 1.0));
         }
     }
-    outIncident = e.w > 0.0 ? vec4(e.rgb, sky) : vec4(0.0, 0.0, 0.0, 1.0);
+    // A surface with no cell found: no light and no sky (1 let the lit pass's specular sky through unoccluded, rtgi_temporal.frag).
+    outIncident = e.w > 0.0 ? vec4(e.rgb, sky) : vec4(0.0, 0.0, 0.0, 0.0);
     if (pickHere) rtgiPick[8] = outIncident;
     // How the irradiance turns with the normal, for the lit pass to carry it onto the normal-mapped one (its gradient,
     // luminance per unit of normal along the surface). Radiance taken as linear in direction, L = a + b.w, the irradiance

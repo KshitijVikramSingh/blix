@@ -165,7 +165,10 @@ vec4 fixUp(vec3 p, vec3 n) {
         if (found > 0.05 && e.r >= -0.5)
             e = mix(e, (nc.w - 1.0) * e * farShare / max(nearCell, 0.05) + nc.rgb, clamp(found, 0.0, 1.0));
     }
-    if (e.r < -0.5) return vec4(0.0, 0.0, 0.0, 1.0);
+    // None found: no light and no sky. Sky visibility 1 here let the lit pass's specular sky through unoccluded -- a mirror
+    // of the sky on every pixel with no trained cell, white blobs over Crytek Sponza's vaults and cloth (the picker,
+    // 2026-10-31).
+    if (e.r < -0.5) return vec4(0.0, 0.0, 0.0, 0.0);
     return vec4(e, sky);
 }
 

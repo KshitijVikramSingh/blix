@@ -101,7 +101,7 @@ void main() {
     float blocker = 0.0, blocked = 0.0;
     int lit = 0, sampled = 0;
     float bestPlane = 1e30;
-    vec4 bestIncident = vec4(0.0, 0.0, 0.0, 1.0), bestGradient = vec4(0.0, 0.0, 0.0, 1.0);
+    vec4 bestIncident = vec4(0.0), bestGradient = vec4(0.0, 0.0, 0.0, 1.0);   // no sample: no sky either (rtgi_temporal.frag)
     for (int k = 0; k < 4; ++k) {
         ivec2 h = clamp(base + ivec2(k & 1, k >> 1), ivec2(0), halfSize - 1);
         ivec2 rep = min(h * 2 + offset, fullSize - 1);
