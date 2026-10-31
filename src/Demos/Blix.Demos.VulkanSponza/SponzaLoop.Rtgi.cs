@@ -293,10 +293,12 @@ internal sealed partial class SponzaLoop
     private uint rtgiSeed;
     // --rtgi-hit-sun S: the direct sun at a training ray's hit scaled by S (1; 0: none) -- a diagnostic.
     private float rtgiHitSun = 1f;
-    // Each training ray's hit shoots its own sun ray (the trace's hit flag 8), not the hit cell's mean (rtgi_train.comp):
-    // Crytek Sponza's downward faces 1.088 -> 1.059 against its truth settled, 1.107 -> 1.058 at 60 frames, energy 1.012 ->
-    // 1.003; the frame alike (2026-10-26). --rtgi-no-trace-hit-sun: the cell's.
-    private bool rtgiTraceHitSun = true;
+    // A training ray's hit lit by its hit cell's sun visibility (rtgi_train.comp), not its own sun ray (the trace's hit flag
+    // 8): one ray each sample was all sun or none, cells seeing a sunlit floor through a gap held rare bright samples and
+    // never settled -- columns, jambs, arch undersides, cloth blotchy and drifting (the readout's view 32, the arches
+    // testbed, 2026-10-31). The cell's mean read downward faces 8% bright on Crytek Sponza before cooked cells (2026-10-26);
+    // with them its mean indirect is the same either way (0.197 / 0.196, 2026-10-31). --rtgi-trace-hit-sun: the ray's.
+    private bool rtgiTraceHitSun;
     // A sample added three levels up 1 in 2, four up 1 in 4 (rtgi_train.comp). --rtgi-no-thin: every level every sample.
     private bool rtgiThin = true;
     // Keys and stamps read before their atomics in training (rtgi_train.comp). --rtgi-no-read-first: the atomics always.
@@ -318,6 +320,7 @@ internal sealed partial class SponzaLoop
         if (args.Int("rtgi-seed") is { } sd) rtgiSeed = (uint)Math.Max(0, sd);
         if (args.Float("rtgi-hit-sun") is { } hs) rtgiHitSun = MathF.Max(0f, hs);
         if (args.Flag("rtgi-no-trace-hit-sun")) rtgiTraceHitSun = false;
+        if (args.Flag("rtgi-trace-hit-sun")) rtgiTraceHitSun = true;
         if (args.Flag("rtgi-no-assemble")) rtgiAssemble = false;
         if (args.Flag("rtgi-no-normal-turn")) rtgiNormalTurn = false;
         if (args.Flag("rtgi-no-side-blend")) rtgiSideBlend = false;
