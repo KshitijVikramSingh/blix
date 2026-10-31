@@ -45,6 +45,10 @@ public sealed record RenderPassDescription(
     // next async run and the frame's end wait for it, on a timeline of its own.
     bool ExternalAsync = false,
 
+    // An async external pass whose work is read on the next frame (RenderGraph.ExternalPass's readNextFrame): this frame's
+    // async run does not wait for it; the frame's end and the next frame's first submission do.
+    bool ExternalNextFrame = false,
+
     // Graphics pass: its draws write GPU buffers (a fragment shader appending to a list, say), fenced after the
     // render pass ends so a later dispatch, an indirect fetch or a draw sees them (GraphicsPassBuilder.WritesGpuBuffers).
     // Without it only dispatches fence GPU buffers.

@@ -84,7 +84,12 @@ internal sealed partial class SponzaLoop
     private bool rtgiStaleHits = true;
     // The cache's update on the device's second queue (DeclareRtgiCachePasses); --rtgi-no-async: in place.
     private bool rtgiAsync = true;
-    private PassHandle rtgiTracePassHandle;
+    private PassHandle rtgiTracePassHandle, rtgiCookTracePassHandle;
+    // --rtgi-next-frame-train: the training on the frame before's rays and hits, the async update needing no Metal work
+    // of its frame (the trace read next frame). Measured no faster on Crytek Sponza (2026-11-01: the update and the main
+    // queue's work did not overlap for other reasons yet), and a frame's latency more between a ray and its sample: off.
+    private bool rtgiNextFrameTrain;
+    private int rtgiPrevPointTotal;
     // The same trace in place, where neither async compute nor the tracer groups take it (declared in setup before the
     // traced shadows' trace).
     private PassHandle rtgiInlineTracePassHandle;
@@ -313,6 +318,7 @@ internal sealed partial class SponzaLoop
 
     private void ParseRtgi(Blix.Core.AppArgs args)
     {
+        if (args.Flag("rtgi-next-frame-train")) rtgiNextFrameTrain = true;
         ParseRtgiBudget(args);
         ParseRtgiCapture(args);
         ParseScreenRest(args);
@@ -577,13 +583,18 @@ internal sealed partial class SponzaLoop
         var frameNumber = rtgiFrameCount + 1u;
         // On the bench (SponzaLoop.RtgiBench.cs) the training dispatched N times, the rest of the cache's frame skipped.
         var trainReps = RtgiTrainReps();
-        if (rtgiTraced > 0)
+        // Next-frame training: the frame before's points, rays and hits (none the first frame, nor across a sun's turn: its
+        // hits were lit by the sun before).
+        var trainSlot = rtgiNextFrameTrain ? prev : cur;
+        var trainN = rtgiNextFrameTrain ? rtgiPrevPointTotal : n;
+        var trainNow = rtgiNextFrameTrain ? rtgiTraced > 1 && !sunTurned && trainN > 0 : rtgiTraced > 0;
+        if (trainNow)
         {
-            var train = new DispatchCommand(rtgiTrainPipeline, groups, 1, 1,
+            var train = new DispatchCommand(rtgiTrainPipeline, (trainN + 63) / 64, 1, 1,
                 new ShaderUniform[]
                 {
                     new("uParams", new Vector4Uniform(RtgiParams)),
-                    new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, n))),
+                    new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, trainN))),
                     new("uSun", new Vector4Uniform(new Vector4(towardSun, 1f))),
                     new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 0f))),
                     new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, rtgiContactRadius, rtgiHitSun, rtgiTrainLevels))),
@@ -601,10 +612,10 @@ internal sealed partial class SponzaLoop
                 new[] { new ShaderTextureBinding("uSkyRadiance", envCubeTexture) },
                 Buffers: new[]
                 {
-                    new ShaderBufferBinding("RtgiPoints", rtgiPointsBuf[cur]),
-                    new ShaderBufferBinding("RtgiRayBuffer", rtgiRaysBuf[cur]),
-                    new ShaderBufferBinding("RtgiHits", rtgiHitsBuf[cur]),
-                    new ShaderBufferBinding("RtgiOccluded", rtgiOccludedBuf[cur]),
+                    new ShaderBufferBinding("RtgiPoints", rtgiPointsBuf[trainSlot]),
+                    new ShaderBufferBinding("RtgiRayBuffer", rtgiRaysBuf[trainSlot]),
+                    new ShaderBufferBinding("RtgiHits", rtgiHitsBuf[trainSlot]),
+                    new ShaderBufferBinding("RtgiOccluded", rtgiOccludedBuf[trainSlot]),
                     new ShaderBufferBinding("RtgiKeys", rtgiKeys),
                     new ShaderBufferBinding("RtgiAccum", rtgiAccum),
                     new ShaderBufferBinding("RtgiResolved", rtgiResolved),
@@ -805,13 +816,15 @@ internal sealed partial class SponzaLoop
         // The cook's rays this frame (SponzaLoop.RtgiCook.cs), in the same batch.
         var cookRays = rtgiBenching ? 0 : cookRaysNow;
         var cookParityNow = cookRaysParity;
+        // The cook's rays in an async pass of their own, read this frame, where the cache's are read the next.
+        var cookApart = cookRays > 0 && rtgiNextFrameTrain && rtgiAsync && (device.Features & GraphicsFeatures.AsyncCompute) != 0;
         var hitSunDisc = SunDiscTangent;
         void Encode(ExternalWorkSync sync, MetalRayTracer t)
         {
             if (traceHitSun) t.EncodeTrace(sync, rays, 0, hits, 0, n, seed, sun: new Vector4(towardSun, 0.01f), reach: hitSunReach, discTan: hitSunDisc);
             else t.EncodeTrace(sync, rays, 0, hits, 0, n, seed);
             t.EncodeShadow(sync, origins, occluded, 0, n, towardSun, seed, statSlot: 3);
-            EncodeRtgiCookWith(sync, t, cookRays, cookParityNow, seed);
+            if (!cookApart) EncodeRtgiCookWith(sync, t, cookRays, cookParityNow, seed);
         }
         // On the bench of the trace, N times.
         var traceReps = rtgiBenching && rtgiBenchPass == "trace" ? rtgiBenchReps : 1;
@@ -823,9 +836,13 @@ internal sealed partial class SponzaLoop
         // pass's join no longer waits for -- in the sun's group, the frame waited at that join for the cache's ~2 ms of
         // rays too, ahead of the upsample and the lit pass (Crytek Sponza's intervals, 2026-10-28).
         if (rtgiAsync && (device.Features & GraphicsFeatures.AsyncCompute) != 0)
+        {
             graph.External(rtgiTracePassHandle, sync => tracer.EncodeGroup(sync, () => EncodeAll(sync, tracer)));
+            if (cookApart) graph.External(rtgiCookTracePassHandle, sync => tracer.EncodeGroup(sync, () => EncodeRtgiCookWith(sync, tracer, cookRays, cookParityNow, seed)));
+        }
         else if (!TracerGroupsOn) graph.External(rtgiInlineTracePassHandle, sync => tracer.EncodeGroup(sync, () => EncodeAll(sync, tracer)));
         else DeferTracerBatch(EncodeAll);
+        rtgiPrevPointTotal = n;
         // The bench: the frame stands still (its number, its buffers' parity).
         if (rtgiBenching) return;
         rtgiFrameCount++;

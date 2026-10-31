@@ -812,6 +812,13 @@ public sealed partial class VulkanGraphicsDevice
             SignalSemaphoreCount = signalCount,
             PSignalSemaphores = signalCount > 0 ? signals : null,
         };
+        if (submitLog && currentGpuFrameNumber % 300 == 0)
+        {
+            string Name(Semaphore x) => x.Handle == frameTimeline.Handle ? "frame" : x.Handle == asyncTimeline.Handle ? "async" : x.Handle == imageAvail.Handle ? "image" : $"other{x.Handle & 0xFFF}";
+            var ws = string.Join(" ", Enumerable.Range(0, (int)waitCount).Select(i => $"{Name(waits[i])}>={waitValues[i]}"));
+            var ss = string.Join(" ", Enumerable.Range(0, (int)signalCount).Select(i => $"{Name(signals[i])}={signalValues[i]}"));
+            Console.WriteLine($"[submit] {submitClock.Elapsed.TotalMilliseconds:0.00} frame {currentGpuFrameNumber} {what} on {(queue.Handle == GraphicsQueue.Handle ? "main" : "other")}: wait [{ws}] signal [{ss}]{(fence.Handle != 0 ? " fence" : "")}");
+        }
         ThrowIfNotSuccess(Vk.QueueSubmit(queue, 1, in submit, fence), what);
     }
 
@@ -924,6 +931,8 @@ public sealed partial class VulkanGraphicsDevice
             SignalSemaphoreCount = 1,
             PSignalSemaphores = &signalSemaphore,
         };
+        if (submitLog && currentGpuFrameNumber % 300 == 0)
+            Console.WriteLine($"[submit] {submitClock.Elapsed.TotalMilliseconds:0.00} frame {currentGpuFrameNumber} async run on async: wait [frame>={wait}{string.Concat(Enumerable.Range(0, waitCount - 1).Select(i => $" ext>={waitValues[1 + i]}"))}] signal [async={signal}]");
         ThrowIfNotSuccess(Vk.QueueSubmit(AsyncQueue, 1, in submit, default), "vkQueueSubmit(async)");
         done = Math.Max(done, signal);
         asyncCmd = default;
@@ -938,23 +947,37 @@ public sealed partial class VulkanGraphicsDevice
     private ulong previousAsyncDone;
     // This frame's async external passes' signals: the async run and the frame's end wait for them.
     private readonly List<(Semaphore Semaphore, ulong Value)> asyncExternalWaits = new();
+    // This frame's async external passes read next frame (ExternalNextFrame): the frame's end waits for them, and they
+    // become the next frame's first submission's waits (lastFrameNextFrameWaits).
+    private readonly List<(Semaphore Semaphore, ulong Value)> nextFrameExternalWaits = new(), lastFrameNextFrameWaits = new();
     private readonly bool asyncChainOn = Environment.GetEnvironmentVariable("BLIX_ASYNC_CHAIN") != "off";
+    private readonly bool submitLog = Environment.GetEnvironmentVariable("BLIX_SUBMIT_LOG") == "1";
+    private readonly Stopwatch submitClock = Stopwatch.StartNew();
+    private readonly bool externalAfterAsync = Environment.GetEnvironmentVariable("BLIX_EXTERNAL_AFTER_ASYNC") != "off";
 
     // The frame's end with an async run: no commands, waiting for the main work's signal (the frame timeline) and the
     // run's (its own), signalling the frame timeline's end value and the slot's fence (a fence signals for its own batch:
     // the waits put every earlier batch under it).
     // onAsync: on the async queue, after the run (its own order), waiting for the main work and signalling the fence alone
     // -- no timeline value, which there would come after the graphics queue's later ones (a timeline only rises).
-    private unsafe void SubmitFrameEnd(ulong mainDone, ulong asyncDone, ulong end, Fence fence, bool onAsync)
+    private unsafe void SubmitFrameEnd(ulong mainDone, ulong asyncDone, ulong end, Fence fence, bool onAsync,
+        List<(Semaphore Semaphore, ulong Value)> extra)
     {
-        var waits = stackalloc Semaphore[2] { frameTimeline, asyncTimeline };
-        var waitValues = stackalloc ulong[2] { mainDone, asyncDone };
-        var waitStages = stackalloc PipelineStageFlags[2] { PipelineStageFlags.AllCommandsBit, PipelineStageFlags.AllCommandsBit };
+        // Main work, the async run, and async external work read next frame (its fence covering it all). On the async queue
+        // the run before it on that queue is waited for by its order: the main work and the extra waits only.
+        var count = 2 + extra.Count;
+        var waits = stackalloc Semaphore[count];
+        var waitValues = stackalloc ulong[count];
+        var waitStages = stackalloc PipelineStageFlags[count];
+        var w = 0;
+        waits[w] = frameTimeline; waitValues[w] = mainDone; waitStages[w++] = PipelineStageFlags.AllCommandsBit;
+        if (!onAsync) { waits[w] = asyncTimeline; waitValues[w] = asyncDone; waitStages[w++] = PipelineStageFlags.AllCommandsBit; }
+        foreach (var (semaphore, value) in extra) { waits[w] = semaphore; waitValues[w] = value; waitStages[w++] = PipelineStageFlags.AllCommandsBit; }
         var signal = frameTimeline;
         var timelineInfo = new TimelineSemaphoreSubmitInfo
         {
             SType = StructureType.TimelineSemaphoreSubmitInfo,
-            WaitSemaphoreValueCount = onAsync ? 1u : 2u,
+            WaitSemaphoreValueCount = (uint)w,
             PWaitSemaphoreValues = waitValues,
             SignalSemaphoreValueCount = onAsync ? 0u : 1u,
             PSignalSemaphoreValues = onAsync ? null : &end,
@@ -963,7 +986,7 @@ public sealed partial class VulkanGraphicsDevice
         {
             SType = StructureType.SubmitInfo,
             PNext = &timelineInfo,
-            WaitSemaphoreCount = onAsync ? 1u : 2u,
+            WaitSemaphoreCount = (uint)w,
             PWaitSemaphores = waits,
             PWaitDstStageMask = waitStages,
             CommandBufferCount = 0,
@@ -1154,6 +1177,7 @@ public sealed partial class VulkanGraphicsDevice
 
         var swEncode = Stopwatch.GetTimestamp();
         var waitMs = Stopwatch.GetElapsedTime(swWait, swEncode).TotalMilliseconds;
+        if (submitLog && currentGpuFrameNumber % 300 == 0) Console.WriteLine($"[submit] {submitClock.Elapsed.TotalMilliseconds:0.00} frame {currentGpuFrameNumber} begins after waiting {waitMs:0.00} ms");
 
         var beginInfo = new CommandBufferBeginInfo
         {
@@ -1206,6 +1230,8 @@ public sealed partial class VulkanGraphicsDevice
         // Done long before as a rule; without it a frame could read hits still being written.
         pendingExtraWaits.AddRange(asyncExternalWaits);
         asyncExternalWaits.Clear();
+        pendingExtraWaits.AddRange(lastFrameNextFrameWaits);
+        lastFrameNextFrameWaits.Clear();
         foreach (var pass in commandList.Passes)
         {
             // The first pass reading what the last frame's async run writes (RenderPassDescription.AfterAsync): frames chain
@@ -1282,7 +1308,10 @@ public sealed partial class VulkanGraphicsDevice
                     Vk.SignalSemaphore(Device, in signal);
                     throw;
                 }
-                asyncExternalWaits.Add((asyncExternalTimeline[side], sideAfter));
+                // Read on the next frame (ExternalNextFrame): this frame's run goes on beside it; the frame's end and the
+                // next frame's first submission wait for it instead.
+                if (pass.Description.ExternalNextFrame) nextFrameExternalWaits.Add((asyncExternalTimeline[side], sideAfter));
+                else asyncExternalWaits.Add((asyncExternalTimeline[side], sideAfter));
                 cmd = NextContinuationBuffer();
                 continue;
             }
@@ -1298,7 +1327,8 @@ public sealed partial class VulkanGraphicsDevice
                     pendingJoins.Clear();
                 }
                 // Likewise an async run already out (its run ended at this pass, above): its signal comes before this one's.
-                if (asyncDone != 0) pendingAsyncWait = asyncDone;
+                // BLIX_EXTERNAL_AFTER_ASYNC=off: the external pass and what follows it run beside the run instead.
+                if (asyncDone != 0 && externalAfterAsync) pendingAsyncWait = asyncDone;
                 cmd = RunExternalPass(cmd, pass, external, ref isolationFirstSubmit, ref timelineWait, f.ImageAvailable, out var signalled);
                 if (pass.Description.ExternalJoinLater) (pendingJoins ??= new Dictionary<string, ulong>())[pass.Name] = signalled;
                 else timelineWait = Math.Max(timelineWait, signalled);
@@ -1575,7 +1605,7 @@ public sealed partial class VulkanGraphicsDevice
             // done (the trace's command buffers, Crytek Sponza 1080p, 2026-10-28).
             var onAsync = asyncChainOn && HasAsyncQueue;
             var end = onAsync ? 0 : ++frameTimelineValue;
-            SubmitFrameEnd(mainDone, asyncDone, end, f.InFlight, onAsync);
+            SubmitFrameEnd(mainDone, asyncDone, end, f.InFlight, onAsync, nextFrameExternalWaits);
             written = mainDone;
             // The next frame chained on the main work alone (asyncChainOn): it starts while this run is out, its first
             // pass reading what the run writes waiting for it (AfterAsync). Else on the frame's end, run and all.
@@ -1586,11 +1616,14 @@ public sealed partial class VulkanGraphicsDevice
         {
             // No async run read them: the frame's end waits for this frame's async external work itself.
             pendingExtraWaits.AddRange(asyncExternalWaits);
+            pendingExtraWaits.AddRange(nextFrameExternalWaits);
             var frameEnd = (ChainFrames || decoupledPresent) && frameTimeline.Handle != 0 ? ++frameTimelineValue : 0;
             SubmitFrameBatch(cmd, ref isolationFirstSubmit, ref timelineWait, f.ImageAvailable, signalTimeline: frameEnd, renderDone, f.InFlight, "vkQueueSubmit");
             if (frameEnd != 0 && ChainFrames) previousFrameEnd = frameEnd;
             written = frameEnd;
         }
+        lastFrameNextFrameWaits.AddRange(nextFrameExternalWaits);
+        nextFrameExternalWaits.Clear();
 
         if (decoupledPresent)
         {

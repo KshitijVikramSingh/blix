@@ -399,7 +399,11 @@ internal sealed partial class SponzaLoop
         rtShadowTracePassHandle = graph.ExternalPass("rt-shadow-trace");
         // The cache's rays (SponzaLoop.Rtgi.cs): traced after the sun's, which the lit pass waits for, and read only by the
         // cache's async update -- an async external pass, nothing in the frame waiting for it.
-        rtgiTracePassHandle = graph.ExternalPass("rtgi-trace", async: true);
+        // Read on the next frame (rtgiNextFrameTrain): the training trains on the frame before's rays, so this frame's async
+        // update runs beside the trace and the lit pass instead of after them.
+        rtgiTracePassHandle = graph.ExternalPass("rtgi-trace", async: true, readNextFrame: rtgiNextFrameTrain);
+        // The cook's rays, which its reduce reads the same frame (SponzaLoop.RtgiCook.cs), apart from the cache's then.
+        rtgiCookTracePassHandle = graph.ExternalPass("rtgi-cook-trace", async: true);
 
         // The gate's reference as a wavefront (SponzaLoop.GpuReference.cs), its batches between its steps, in frame order.
         referenceWaveInterface = Reflect("reference_wave.comp");
@@ -427,6 +431,13 @@ internal sealed partial class SponzaLoop
         DeclareRtgiReadoutPass((vert, frag) => Reflect(vert, frag));
 
 
+        // --rtgi-temporal: the raw upsample, the accumulation into the incident targets, and its copy
+        // (SponzaLoop.RtgiTemporal.cs) -- before the cache's async update: the temporal pass reads the cache's keys, records
+        // and near light, which the update writes, and Metal held it, and every main pass queued behind it, until the
+        // whole update was done (its hazard tracking across queues): the lit pass and the traces ran after the update,
+        // not beside it (Crytek Sponza's Metal System Trace, 2026-11-01). It reads no traced shadow: before the join too.
+        DeclareRtgiTemporalPasses((vert, frag) => Reflect(vert, frag), fullSize);
+
         // The traced shadows are needed from here on.
         if (!rtNoOverlap) graph.ExternalJoin(rtShadowTracePassHandle, "rt-shadow-join");
         // RTGI: the cache's update, after its last reader (the readout's blur) and the trace it trains from (the join
@@ -452,8 +463,6 @@ internal sealed partial class SponzaLoop
             .Read(SampleablePrepassNormal)
             .Shader(lightingUpsampleInterface)
             .Handle;
-        // --rtgi-temporal: the raw upsample, the accumulation into the targets above, and its copy (SponzaLoop.RtgiTemporal.cs).
-        DeclareRtgiTemporalPasses((vert, frag) => Reflect(vert, frag), fullSize);
 
         // At one sample there is nothing to resolve, and asking for a resolve anyway is invalid —
         // so the single-sample path renders straight into the target present reads.
