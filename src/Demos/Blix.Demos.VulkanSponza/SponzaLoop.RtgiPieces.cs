@@ -73,6 +73,9 @@ internal sealed partial class SponzaLoop
         public Vector3[] C = Array.Empty<Vector3>(), Nrm = Array.Empty<Vector3>();
         public float[] Area = Array.Empty<float>(), H = Array.Empty<float>();
         public (int A, int B)[] Edges = Array.Empty<(int, int)>();
+        // The joins found on the GPU (rtgi_cookwalk.comp's KIND_JOINS, kept there: -1 none), and the count either way.
+        public long GpuJoins = -1;
+        public int JoinCount => GpuJoins >= 0 ? (int)GpuJoins : Edges.Length;
         public double Ms;
         // A join's ray: from a's centroid to b's, each lifted off its surface by a centimetre or a quarter of the join's
         // length -- over the chord's dip on a convex surface (normals within the plane test's 45 degrees: a fifth of the

@@ -25,10 +25,11 @@ internal sealed partial class SponzaLoop
 
     // rtgi_cookwalk.comp's kinds, modes, counters, maps and their values' strides.
     private const int WkClear = 0, WkSeed = 1, WkArgs = 2, WkRound = 3, WkPoints = 4, WkMark = 5, WkSmooth = 6, WkBend = 7,
-        WkCap = 8, WkFine = 9, WkTDrop = 10, WkVCheck = 11, WkDense = 12;
+        WkCap = 8, WkFine = 9, WkTDrop = 10, WkVCheck = 11, WkDense = 12, WkRank = 13, WkSurfPrep = 14, WkJoins = 15, WkJoinFill = 16;
     private const int WmVerify = 0, WmTable = 1, WmKeys = 2, WmAcc = 3, WmFinal = 4, WmVerifyPick = 5;
     private const int WcList = 0, WcFinal = 2, WcLattice = 3, WcPoints = 4, WcBuried = 5, WcFilled = 6, WcNone = 7, WcOver = 8,
-        WcMapFail = 9, WcVerify = 10, WcCells = 11, WcScaleFail = 12, WcFineN = 13, WcCoarseN = 14, WcBent = 15, WcArgs = 16, WcTDropN = 20;
+        WcMapFail = 9, WcVerify = 10, WcCells = 11, WcScaleFail = 12, WcFineN = 13, WcCoarseN = 14, WcBent = 15, WcArgs = 16, WcTDropN = 20,
+        WcEdges = 21;
     private const int WalkCounters = 32;
     private const int WmapFine = 0, WmapCoarse = 1, WmapTDrop = 2, WmapCells = 3, WmapKept = 4, WmapVDrop = 5, WalkMaps = 6;
     // Values a slot, and where (0 the float values, 1 the uint).
@@ -40,7 +41,11 @@ internal sealed partial class SponzaLoop
 
     private sealed record WalkField(Vector4[] Samples, uint[] Passes, WalkSlot[] Grid, uint[] Order, int LastPass, int Count);
     [StructLayout(LayoutKind.Sequential)]
-    private record struct WalkSlot(uint X, uint Y, uint Z, uint W);
+    private struct WalkSlot
+    {
+        public uint X, Y, Z, W;
+        public WalkSlot(uint x, uint y, uint z, uint w) { X = x; Y = y; Z = z; W = w; }
+    }
 
     private sealed class CookWalkGpu
     {
@@ -49,11 +54,24 @@ internal sealed partial class SponzaLoop
         public WalkField? Field;
         public Vector4[]? Triangles;
         public GpuBufferHandle Tris, Pass, Grid, Order, Samples, Count, Pieces, Final, Lattice, Keys, MapF, MapU,
-            CellKeys, CellF, CellU, CellM, Surfels, Scale, Verify;
+            CellKeys, CellF, CellU, CellM, Surfels, Scale, Verify, Rank, SurfOwner, Edges;
+        public int EdgeRoom, EdgeCount;
+        // The pieces' stage (SponzaLoop.RtgiCookPiecesGpu.cs).
+        public GpuBufferHandle Label, PieceIds, PieceRoot, PieceF, PieceU, CubeKeys, CubeVals, Cubes, PieceList, PieceOut,
+            PieceOfCur, PieceOfUp, PieceCount;
+        public int PStep, PLevel, PieceRoom, CubeSlots, Pieces_, Cubes_;
+        public (WalkSlot[] Cubes, WalkSlot[] Out)[] LevelPieces = Array.Empty<(WalkSlot[], WalkSlot[])>();
+        public readonly Stopwatch PClock = new();
+        public void PieceBuffersFree()
+        {
+            Label = PieceIds = PieceRoot = PieceF = PieceU = CubeKeys = CubeVals = Cubes = PieceList = PieceOut = default;
+            PieceOfCur = PieceOfUp = PieceCount = default;
+        }
         public int ListRoom = 1 << 20, FinalRoom = 1 << 20, LatticeRoom = 1 << 23, VerifyRoom;
         public int[] MapLog2 = { 22, 19, 4, 23, 20, 22 };
         public int ScaleSlots = 1 << 24;
         public int Cells, Surfels_;
+        public (uint[] Keys, float[] F, uint[] U, uint[] Meta, uint[] Scale, uint[] Counters)? CellsRead;
         public long KeySlots, MapFWords, MapUWords;
         public long[] MapValueBase = new long[WalkMaps];
         public uint[] Counters = Array.Empty<uint>();
@@ -195,7 +213,8 @@ internal sealed partial class SponzaLoop
         foreach (var h in w.Owned) Disown(h);
         w.Owned.Clear();
         w.Tris = w.Pass = w.Grid = w.Order = w.Samples = w.Count = w.Pieces = w.Final = w.Lattice = w.Keys = w.MapF = w.MapU = default;
-        w.CellKeys = w.CellF = w.CellU = w.CellM = w.Surfels = w.Scale = w.Verify = default;
+        w.CellKeys = w.CellF = w.CellU = w.CellM = w.Surfels = w.Scale = w.Verify = w.Rank = w.SurfOwner = w.Edges = default;
+        w.PieceBuffersFree();
     }
 
     // The field's buffers (the passes' samples, grids, order, descriptors), the triangles', the pieces', the maps'.
@@ -252,7 +271,7 @@ internal sealed partial class SponzaLoop
 
     private GpuBufferHandle WalkOr(GpuBufferHandle h) => h.Equals(default(GpuBufferHandle)) ? cookDummy : h;
 
-    private DispatchCommand WalkDispatch(int kind, long groups, float y = 0f, long items = 0, float w = 0f, long clearAt = 0, bool indirect = false)
+    private DispatchCommand WalkDispatch(int kind, long groups, float y = 0f, long items = 0, float w = 0f, long clearAt = 0, bool indirect = false, uint clearY = 0, float clearZ = 0f)
     {
         var g = cookWalk!;
         var top = rtgiCell * MathF.Pow(2f, RtgiTopLevel);
@@ -263,7 +282,7 @@ internal sealed partial class SponzaLoop
                 new("uField", new Vector4Uniform(new Vector4(rtgiCell, top, g.Field?.LastPass ?? 0, CookDroppedTier ? 1f : 0f))),
                 new("uRoom", new Vector4Uniform(new Vector4(Bits(g.ListRoom), Bits(g.FinalRoom), Bits(g.LatticeRoom), Bits(g.VerifyRoom)))),
                 new("uMisc", new Vector4Uniform(new Vector4(CookCoarseCube, CookLiveReach, CookBendAngle, Bits(g.ScaleSlots - 1)))),
-                new("uClear", new Vector4Uniform(new Vector4(Bits((uint)clearAt), 0f, 0f, 0f))),
+                new("uClear", new Vector4Uniform(new Vector4(Bits((uint)clearAt), Bits(clearY), clearZ, 0f))),
             },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]
@@ -287,6 +306,10 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("WalkSurfels", WalkOr(g.Surfels)),
                 new ShaderBufferBinding("WalkScale", WalkOr(g.Scale)),
                 new ShaderBufferBinding("WalkVerify", WalkOr(g.Verify)),
+                new ShaderBufferBinding("WalkRank", WalkOr(g.Rank)),
+                new ShaderBufferBinding("WalkSurfOwner", WalkOr(g.SurfOwner)),
+                new ShaderBufferBinding("WalkEdges", WalkOr(g.Edges)),
+                new ShaderBufferBinding("WalkJoinRays", WalkOr(cookJoins)),
             },
             IndirectArgs: indirect ? g.Count : null,
             IndirectOffset: indirect ? WcArgs * 4 : 0);
@@ -523,6 +546,20 @@ internal sealed partial class SponzaLoop
                 w.Cells = (int)w.Counters[WcCells];
                 var cells = Math.Max(w.Cells, 1);
                 WalkFree(w, ref w.CellF); WalkFree(w, ref w.CellU); WalkFree(w, ref w.CellM);
+                // The cells numbered in key order, the same every cook (KIND_DENSE numbered them as threads met them): their
+                // surfels' and pieces' order follows.
+                var dense = ReadWalkU(w.CellKeys, 2L * w.Cells);
+                var sortKeys = new ulong[w.Cells];
+                var byKey = new int[w.Cells];
+                for (var i = 0; i < w.Cells; i++) { sortKeys[i] = ((ulong)dense[2 * i + 1] << 32) | dense[2 * i]; byKey[i] = i; }
+                Array.Sort(sortKeys, byKey);
+                var rank = new uint[cells];
+                var sorted = new uint[2 * cells];
+                for (var r = 0; r < w.Cells; r++) { rank[byKey[r]] = (uint)r; sorted[2 * r] = (uint)sortKeys[r]; sorted[2 * r + 1] = (uint)(sortKeys[r] >> 32); }
+                device.WriteGpuBuffer(w.CellKeys, 0, MemoryMarshal.AsBytes(sorted.AsSpan()));
+                WalkFree(w, ref w.Rank);
+                w.Rank = WalkBuffer(w, cells * 4L, "sponza.rtgi.walk-rank", MemoryMarshal.AsBytes(rank.AsSpan()));
+                WalkRun(WkRank, MapSlots(w, WmapCells));
                 w.CellF = WalkBuffer(w, (long)cells * WalkCellF * 4, "sponza.rtgi.walk-cell-f");
                 w.CellU = WalkBuffer(w, (long)cells * WalkCellU * 4, "sponza.rtgi.walk-cell-u");
                 w.CellM = WalkBuffer(w, (long)cells * 16, "sponza.rtgi.walk-cell-m");
@@ -564,28 +601,71 @@ internal sealed partial class SponzaLoop
                 if (c[WcScaleFail] > w.Counters[WcScaleFail])
                     Console.WriteLine($"[VulkanSponza] rtgi cook walk: the size table rewritten small lost {c[WcScaleFail] - w.Counters[WcScaleFail]} entries.");
                 var n = w.Cells;
-                var keys = ReadWalkU(w.CellKeys, 2L * n);
-                var f = ReadWalkF(w.CellF, (long)n * WalkCellF);
-                var uw = ReadWalkU(w.CellU, (long)n * WalkCellU);
-                var meta = ReadWalkU(w.CellM, 4L * n);
-                var surfels = ReadWalkF(w.Surfels, Math.Max(w.Surfels_, 1) * 8L);
-                var scale = ReadWalkU(w.Scale, 2L * w.ScaleSlots);
+                w.CellsRead = (ReadWalkU(w.CellKeys, 2L * n), ReadWalkF(w.CellF, (long)n * WalkCellF), ReadWalkU(w.CellU, (long)n * WalkCellU),
+                    ReadWalkU(w.CellM, 4L * n), ReadWalkU(w.Scale, 2L * w.ScaleSlots), c);
+                // The surfels from their sums, then their candidate joins (the pieces' graph, PrepareCookSurfels').
+                w.SurfOwner = WalkBuffer(w, Math.Max(w.Surfels_, 1) * 4L, "sponza.rtgi.walk-surf-owner");
+                w.EdgeRoom = (int)Math.Min(int.MaxValue / 8, Math.Max(1L << 20, 4L * w.Surfels_));
+                w.Edges = WalkBuffer(w, (long)w.EdgeRoom * 8, "sponza.rtgi.walk-edges");
+                WalkRun(WkSurfPrep, n);
+                RecordWalkJoins(w);
+                w.Step = 8;
+                w.Drain = 0;
+                return false;
+            }
+            case 8:
+            {
+                if (++w.Drain < 2) return false;
+                device.WaitIdle();
+                var c = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(w.Count, 0, WalkCounters * 4).AsSpan()).ToArray();
+                if ((c[WcOver] & 32u) != 0)
+                {
+                    w.EdgeRoom = (int)Math.Min(int.MaxValue / 8, Math.Max(2L * w.EdgeRoom, c[WcEdges] * 5L / 4));
+                    Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[VulkanSponza] rtgi cook walk (joins): room ran out -- again with {w.EdgeRoom:N0} joins."));
+                    WalkFree(w, ref w.Edges);
+                    w.Edges = WalkBuffer(w, (long)w.EdgeRoom * 8, "sponza.rtgi.walk-edges");
+                    RecordWalkJoins(w);
+                    w.Drain = 0;
+                    return false;
+                }
+                w.EdgeCount = (int)c[WcEdges];
+                var (keys, f, uw, meta, scale, cc) = w.CellsRead!.Value;
+                w.CellsRead = null;
                 w.CellsMs = w.StepClock.Elapsed.TotalMilliseconds;
-                var counts = new CookWalkCounts { Points = c[WcPoints], Buried = c[WcBuried], Filled = w.Counters[WcFilled], None = w.Counters[WcNone], Pieces = w.Counters[WcFinal], Lattice = w.Counters[WcLattice] };
+                var n = w.Cells;
+                var counts = new CookWalkCounts { Points = cc[WcPoints], Buried = cc[WcBuried], Filled = w.Counters[WcFilled], None = w.Counters[WcNone], Pieces = w.Counters[WcFinal], Lattice = w.Counters[WcLattice] };
                 var table = (Fine: (long)w.Counters[WcFineN], Coarse: (long)w.Counters[WcCoarseN], Bent: (int)w.Counters[WcBent], TDrop: (int)w.Counters[WcTDropN]);
                 var scaleSlots = w.ScaleSlots;
                 var finest = rtgiCell;
-                var (tableMs, cellsMs, pieces, lattice) = (w.TableMs, w.CellsMs, w.Counters[WcFinal], w.Counters[WcLattice]);
-                WalkFreeAll(w);
-                cookWalk = null;
+                var (tableMs, cellsMs, pieces, lattice, surfels, joins) = (w.TableMs, w.CellsMs, w.Counters[WcFinal], w.Counters[WcLattice], w.Surfels_, w.EdgeCount);
+                // Everything but the surfels and their joins freed: the pieces' stage reads those (StepGpuPieces).
+                foreach (var h in new[] { w.Tris, w.Pass, w.Grid, w.Order, w.Samples, w.Pieces, w.Final, w.Lattice, w.Keys, w.MapF, w.MapU,
+                    w.CellKeys, w.CellF, w.CellU, w.CellM, w.Scale, w.Verify, w.Rank, w.SurfOwner })
+                    if (!h.Equals(default(GpuBufferHandle))) { w.Owned.Remove(h); Disown(h); }
+                w.Tris = w.Pass = w.Grid = w.Order = w.Samples = w.Pieces = w.Final = w.Lattice = w.Keys = w.MapF = w.MapU = default;
+                w.CellKeys = w.CellF = w.CellU = w.CellM = w.Scale = w.Verify = w.Rank = w.SurfOwner = default;
+                w.Field = null;
+                w.Triangles = null;
                 Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-                    $"[VulkanSponza] rtgi cook walk: cells on the GPU: {pieces:N0} pieces, {lattice:N0} lattice points, {counts.Points:N0} points kept, {counts.Buried:N0} dropped; size table and cell keys {tableMs:0} ms, cells and surfels {cellsMs:0} ms."));
-                cookCellsBuild = Task.Run(() => AssembleWalkCells(n, keys, f, uw, meta, surfels, scale, scaleSlots, counts, table, finest, tableMs, cellsMs));
+                    $"[VulkanSponza] rtgi cook walk: cells on the GPU: {pieces:N0} pieces, {lattice:N0} lattice points, {counts.Points:N0} points kept, {counts.Buried:N0} dropped; {surfels:N0} surfels, {joins:N0} candidate joins; size table and cell keys {tableMs:0} ms, cells, surfels and joins {cellsMs:0} ms."));
+                cookCellsBuild = Task.Run(() => AssembleWalkCells(n, keys, f, uw, meta, scale, scaleSlots, counts, table, finest, tableMs, cellsMs, surfels, joins));
+                w.Step = 9;
                 return true;
             }
         }
         return false;
     }
+
+    private void RecordWalkJoins(CookWalkGpu w)
+    {
+        WalkClear(WbCount, 1, 0u, WcEdges);
+        WalkClear(WbCount, 1, 0u, WcOver);
+        graph.Dispatch(walkPassHandle, WalkDispatch(WkJoins, (w.Surfels_ + 63) / 64, items: w.Surfels_, clearY: (uint)w.EdgeRoom, clearZ: RtgiTopLevel + 1));
+    }
+
+    // A chunk of the joins' rays' ends into rtgi_cook.comp's RtgiCookJoins (the cook's JoinTrace stage, kinds 18 and 19 next).
+    private void RecordWalkJoinFill(CookWalkGpu w, int first, int count) =>
+        graph.Dispatch(walkPassHandle, WalkDispatch(WkJoinFill, (count + 63) / 64, items: count, clearAt: first));
 
     private void RecordWalkTable(CookWalkGpu w)
     {
@@ -607,20 +687,16 @@ internal sealed partial class SponzaLoop
         WalkRun(WkDense, MapSlots(w, WmapCells));
     }
 
-    // The GPU walk's results as BuildCookCells' (the cells' accumulations by level, their surfels, the size table).
-    private static CookCells AssembleWalkCells(int n, uint[] keys, float[] f, uint[] uw, uint[] meta, float[] surfels, uint[] scale,
-        int scaleSlots, CookWalkCounts counts, (long Fine, long Coarse, int Bent, int TDrop) table, float finest, double tableMs, double cellsMs)
+    // The GPU walk's results as BuildCookCells' (the cells' accumulations by level, the size table); the surfels and their
+    // joins stay on the GPU for the pieces (StepGpuPieces).
+    private static CookCells AssembleWalkCells(int n, uint[] keys, float[] f, uint[] uw, uint[] meta, uint[] scale,
+        int scaleSlots, CookWalkCounts counts, (long Fine, long Coarse, int Bent, int TDrop) table, float finest, double tableMs, double cellsMs,
+        int surfels, int joins)
     {
         var clock = Stopwatch.StartNew();
         var levels = RtgiTopLevel + 1;
         var cells = new CookCells { Share = 1f, FineCube = finest, Counts = counts };
         var acc = Enumerable.Range(0, levels).Select(_ => new Dictionary<long, CookAcc>()).ToArray();
-        var surfelCount = 0;
-        for (var i = 0; i < n; i++) surfelCount += BitOperations.PopCount(meta[4 * i + 1]) + BitOperations.PopCount(meta[4 * i + 2]);
-        var sKeys = new long[surfelCount];
-        var sC = new Vector3[surfelCount];
-        var sN = new Vector3[surfelCount];
-        var sA = new float[surfelCount];
         for (var i = 0; i < n; i++)
         {
             var (x, y, z, side, level) = UnpackWalkKey(keys[2 * i], keys[2 * i + 1]);
@@ -638,26 +714,10 @@ internal sealed partial class SponzaLoop
                 a.SubMask |= 1 << q;
             }
             acc[level][CensusCellKey(x, y, z, side)] = a;
-            // Its surfels: its occupied quarter-cubes in order from its first.
-            var cs = finest * MathF.Pow(2f, level);
-            var occ = (ulong)meta[4 * i + 1] | ((ulong)meta[4 * i + 2] << 32);
-            var s = (int)meta[4 * i + 3];
-            for (var b = 0; b < 64; b++)
-            {
-                if ((occ & (1ul << b)) == 0) continue;
-                var sv = 8 * s;
-                var count = MathF.Max(surfels[sv + 7], 1f);
-                var local = new Vector3(surfels[sv], surfels[sv + 1], surfels[sv + 2]) / count;
-                sKeys[s] = CookSurfelKey((int)level, side, 4 * x + (b & 3), 4 * y + ((b >> 2) & 3), 4 * z + (b >> 4));
-                sC[s] = NearGridOrigin(side) + (new Vector3(x, y, z) + local) * cs;
-                sN[s] = new Vector3(surfels[sv + 3], surfels[sv + 4], surfels[sv + 5]);
-                sA[s] = surfels[sv + 6];
-                s++;
-            }
         }
         cells.Acc = acc;
-        cells.Surfels = PrepareCookSurfels(sKeys, sC, sN, sA, finest, levels);
-        cells.SurfacePoints = surfelCount;
+        cells.Surfels = new CookSurfelSet { GpuJoins = joins };
+        cells.SurfacePoints = surfels;
         cells.FineCubes = table.Fine;
         cells.CoarseCubes = table.Coarse;
         cells.BentCubes = table.Bent;

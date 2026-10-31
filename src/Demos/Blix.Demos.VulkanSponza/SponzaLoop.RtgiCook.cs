@@ -95,7 +95,7 @@ internal sealed partial class SponzaLoop
     private bool rtgiCookProbePending;
     private uint cookReadyFrame;
 
-    private enum CookStage { Waiting, Geometry, SizePlace, SizeTrace, SizeDrain, GpuVerify, GpuCells, Cells, InsideTrace, InsideDrain, JoinTrace, JoinDrain, Finalize, NearLinks, Neighbours, Finish, Ready }
+    private enum CookStage { Waiting, Geometry, SizePlace, SizeTrace, SizeDrain, GpuVerify, GpuCells, GpuPieces, Cells, InsideTrace, InsideDrain, JoinTrace, JoinDrain, Finalize, NearLinks, Neighbours, Finish, Ready }
     private CookStage cookStage = CookStage.Waiting;
     private readonly Stopwatch cookClock = new();
     // Per stage, as the cook screen and the log show it.
@@ -269,8 +269,10 @@ internal sealed partial class SponzaLoop
     private void DeclareRtgiCookRaysPass(Func<string, ShaderInterface> reflect)
     {
         cookInterface = reflect("rtgi_cook.comp");
-        cookRaysPassHandle = graph.ComputePass("rtgi-cook-rays").AfterAsync().Shader(cookInterface).Handle;
+        // The GPU walk's passes first: a frame's join rays' ends are written (rtgi_cookwalk.comp) before traced.
         DeclareRtgiCookWalkPass(reflect);
+        DeclareRtgiCookPiecesPass(reflect);
+        cookRaysPassHandle = graph.ComputePass("rtgi-cook-rays").AfterAsync().Shader(cookInterface).Handle;
     }
 
     private void DeclareRtgiCookAsyncPasses(Func<string, ShaderInterface> reflect)
@@ -285,6 +287,7 @@ internal sealed partial class SponzaLoop
         cookPipeline = compute("rtgi_cook", cookInterface, ComputePipelineOptions.None);
         nearUpdatePipeline = compute("rtgi_nearcook_update", nearUpdateInterface, ComputePipelineOptions.None);
         CreateRtgiCookWalkPipeline(compute);
+        CreateRtgiCookPiecesPipeline(compute);
     }
 
     // The buffers the cache's shaders bind whether or not the cook is done.
@@ -1642,6 +1645,11 @@ internal sealed partial class SponzaLoop
                 if (StepGpuCells(cookGeometry!)) cookStage = CookStage.Cells;
                 return;
             }
+            case CookStage.GpuPieces:
+            {
+                if (StepGpuPieces(cookCells!, cookInsideList, cookChosenResult, rtgiCookKeepBacks)) cookStage = CookStage.Finalize;
+                return;
+            }
             case CookStage.Cells:
             {
                 if (cookCellsBuild is not { IsCompleted: true } build) return;
@@ -1701,7 +1709,7 @@ internal sealed partial class SponzaLoop
                 cookCandidates = default; cookChosen = default;
                 cookChosenResult = chosen;
                 // The surface pieces' joins traced next, a chunk a frame.
-                var joins = cookCells!.Surfels.Edges.Length;
+                var joins = cookCells!.Surfels.JoinCount;
                 cookJoinBits = Own(device.CreateGpuBuffer(Math.Max(4, (joins + 31) / 32 * 4), new byte[Math.Max(4, (joins + 31) / 32 * 4)], "sponza.rtgi.cook-join-bits"));
                 cookJoins = Own(device.CreateGpuBuffer(CookJoinChunk * 32, new byte[CookJoinChunk * 32], "sponza.rtgi.cook-joins"));
                 cookCursor = 0;
@@ -1713,9 +1721,16 @@ internal sealed partial class SponzaLoop
             case CookStage.JoinTrace:
             {
                 var set = cookCells!.Surfels;
-                var joins = set.Edges.Length;
+                var joins = set.JoinCount;
                 var count = Math.Min(Math.Min(CookJoinChunk, Math.Max(1, budget)), joins - cookCursor);
-                if (count > 0)
+                if (count > 0 && cookWalk is { } gw)
+                {
+                    // The joins' rays' ends written on the GPU from its surfels (rtgi_cookwalk.comp), traced next.
+                    RecordWalkJoinFill(gw, cookCursor, count);
+                    CookRayChunk(18, cookCursor, count, 1);
+                    cookCursor += count;
+                }
+                else if (count > 0)
                 {
                     var items = new Vector4[2 * count];
                     for (var k = 0; k < count; k++)
@@ -1739,10 +1754,19 @@ internal sealed partial class SponzaLoop
                 if (++cookDrain < 3) return;
                 device.WaitIdle();
                 var cells = cookCells!;
-                var joins = cells.Surfels.Edges.Length;
+                var joins = cells.Surfels.JoinCount;
                 var clear = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(cookJoinBits, 0, Math.Max(4, (joins + 31) / 32 * 4)).AsSpan()).ToArray();
                 var cleared = clear.Sum(w => (long)BitOperations.PopCount(w));
                 CookEnd("joins", joins, string.Create(CultureInfo.InvariantCulture, $"{joins:N0} candidate joins traced, {cleared:N0} clear"));
+                if (cookWalk is not null)
+                {
+                    // The pieces on the GPU from its surfels and these joins' bits (SponzaLoop.RtgiCookPiecesGpu.cs).
+                    Disown(cookJoins);
+                    cookJoins = default;
+                    CookBegin("finalize", 0);
+                    cookStage = CookStage.GpuPieces;
+                    return;
+                }
                 Disown(cookJoins); Disown(cookJoinBits);
                 cookJoins = default; cookJoinBits = default;
                 var inside = cookInsideList;

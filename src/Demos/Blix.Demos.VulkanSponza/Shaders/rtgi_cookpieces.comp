@@ -1,0 +1,244 @@
+#version 450
+#extension GL_EXT_shader_atomic_float : require
+
+// The cooked cells' surface pieces on the GPU (SponzaLoop.RtgiCookGpu.cs; the CPU's BuildCookPieces, SponzaLoop.RtgiPieces.cs):
+// a level at a time, the surfels joined by their clear joins within each cube of the level, each piece's sums, and each
+// cube's pieces in order -- largest whole area first, then lowest surfel. The surfels and joins are rtgi_cookwalk.comp's
+// (KIND_SURF_PREP, KIND_JOINS), the joins' bits rtgi_cook.comp's (kinds 18, 19).
+//   KIND_INIT, KIND_HOOK, KIND_JUMP  connected components: each surfel's label its own index, then each clear join within a
+//                                    cube hooks the larger root under the smaller, and labels jump to their labels' until
+//                                    nothing changes -- each surfel's root the least index of its piece (the CPU's Rep);
+//   KIND_PIECE_ID                    the roots numbered (pieces);
+//   KIND_PIECE_ACC                   each piece's centroid sum and count, own and whole area, 4 x 4 footprint;
+//   KIND_PIECE_CUBE, KIND_CUBE_DENSE each piece's cube found (inserted) and its slot there; the cubes numbered, their
+//                                    pieces counted (the CPU lays out where each cube's run starts);
+//   KIND_PIECE_FILL, KIND_PIECE_RANK each cube's run filled, each piece's place in it by (whole, root), written in order
+//                                    with its parent (the piece a level up holding its root);
+//   KIND_PIECE_OF                    each surfel's piece's place, for the level below's parents.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform RtgiCookPieces {
+    vec4 uKind;   // x the kind; y the level; z the items (bits); w the levels
+    vec4 uField;  // x the finest cell (m); y the cube map's mask (bits); z the buffer to clear (KIND_CLEAR); w its fill's bits
+    vec4 uClear;  // x the first word to clear (bits)
+} u;
+
+// The surfels (eight floats each: centroid, normal, area, bits: level | side << 4) and joins, and the joins' clear bits.
+layout(std430, set = 0, binding = 1) readonly buffer PieceSurfels { float pieceSurfels[]; };
+layout(std430, set = 0, binding = 2) readonly buffer PieceEdges { uvec2 pieceEdges[]; };
+layout(std430, set = 0, binding = 3) readonly buffer PieceJoinBits { uint pieceJoinBits[]; };
+// Counters: x changes this round, pieces, cubes, cube inserts without a slot.
+layout(std430, set = 0, binding = 4) buffer PieceCount { uint pieceCount[]; };
+layout(std430, set = 0, binding = 5) buffer PieceLabel { uint pieceLabel[]; };
+// Per surfel: its piece (roots); per piece: its root.
+layout(std430, set = 0, binding = 6) buffer PieceId { uint pieceId[]; };
+layout(std430, set = 0, binding = 7) buffer PieceRoot { uint pieceRoot[]; };
+// Per piece: its centroid sum (3), count, own area, whole area; its footprint, its slot in its cube, its cube's map slot,
+// its place in its cube.
+layout(std430, set = 0, binding = 8) buffer PieceF { float pieceF[]; };
+layout(std430, set = 0, binding = 9) buffer PieceU { uint pieceU[]; };
+// The level's cubes: a map (two key words a slot; values: its pieces, its number), then by number its key, pieces and
+// first entry (SponzaLoop.RtgiCookGpu.cs writes the first entries).
+layout(std430, set = 0, binding = 10) buffer PieceCubeKeys { uint pieceCubeKeys[]; };
+layout(std430, set = 0, binding = 11) buffer PieceCubeVals { uint pieceCubeVals[]; };
+layout(std430, set = 0, binding = 12) buffer PieceCubes { uvec4 pieceCubes[]; };
+// Each cube's run of pieces, then the pieces in their places (two uvec4s each: the centroid's bits and the footprint;
+// the own and whole area's bits, the parent's place, the root).
+layout(std430, set = 0, binding = 13) buffer PieceList { uint pieceList[]; };
+layout(std430, set = 0, binding = 14) buffer PieceOut { uvec4 pieceOut[]; };
+// Per surfel its piece's place at this level, and at the level above.
+layout(std430, set = 0, binding = 15) buffer PieceOfCur { uint pieceOfCur[]; };
+layout(std430, set = 0, binding = 16) readonly buffer PieceOfUp { uint pieceOfUp[]; };
+
+#define KIND_CLEAR 0u
+#define KIND_INIT 1u
+#define KIND_HOOK 2u
+#define KIND_JUMP 3u
+#define KIND_PIECE_ID 4u
+#define KIND_PIECE_ACC 5u
+#define KIND_PIECE_CUBE 6u
+#define KIND_CUBE_DENSE 7u
+#define KIND_PIECE_FILL 8u
+#define KIND_PIECE_RANK 9u
+#define KIND_PIECE_OF 10u
+
+#define C_CHANGED 0u
+#define C_PIECES 1u
+#define C_CUBES 2u
+#define C_CUBE_FAIL 3u
+#define PF 6u
+#define PU 4u
+#define NONE 0xFFFFFFFFu
+
+uint hashU(uint x) {
+    x ^= x >> 16; x *= 0x7feb352du;
+    x ^= x >> 15; x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+vec3 surfC(uint s) { return vec3(pieceSurfels[8u * s], pieceSurfels[8u * s + 1u], pieceSurfels[8u * s + 2u]); }
+float surfArea(uint s) { return pieceSurfels[8u * s + 6u]; }
+uint surfBits(uint s) { return floatBitsToUint(pieceSurfels[8u * s + 7u]); }
+float cellSize(uint level) { return ldexp(u.uField.x, int(level)); }
+
+vec3 origin(uint side) {
+    vec3 o = vec3(0.0);
+    o[side >> 1] = (side & 1u) == 0u ? 0.0213 : -0.0213;
+    return o;
+}
+// A point's coordinates on a level's grid of a side, a point on a boundary in the cell above (CookGridCoords).
+vec3 gridCoords(vec3 p, uint side, float cs) { return (p - origin(side)) / cs + 1e-3; }
+ivec3 surfCube(uint s, uint level) { return ivec3(floor(gridCoords(surfC(s), (surfBits(s) >> 4) & 7u, cellSize(level)))); }
+
+uint findRoot(uint x) {
+    for (uint i = 0u; i < 64u; i++) {
+        uint l = pieceLabel[x];
+        if (l == x) return x;
+        x = l;
+    }
+    return x;
+}
+
+// The cube map (two words a key, as rtgi_cookwalk.comp's mapInsert).
+uvec2 cubeKey(ivec3 c, uint side) {
+    uvec3 b = uvec3(c + ivec3(1 << 17)) & 0x3FFFFu;
+    return uvec2(0x80000000u | b.x | ((b.y & 0x1FFFu) << 18), 0x80000000u | (b.y >> 13) | (b.z << 5) | (side << 23));
+}
+uint cubeInsert(uvec2 k) {
+    uint mask = floatBitsToUint(u.uField.y);
+    uint h = hashU(k.x * 0x9E3779B1u ^ hashU(k.y + 0x7F4A7C15u));
+    for (uint i = 0u; i < 512u; i++) {
+        uint s = (h + i) & mask;
+        uint w0 = pieceCubeKeys[2u * s];
+        if (w0 == 0u) {
+            w0 = atomicCompSwap(pieceCubeKeys[2u * s], 0u, k.x);
+            if (w0 == 0u) w0 = k.x;
+        }
+        if (w0 != k.x) continue;
+        uint w1 = pieceCubeKeys[2u * s + 1u];
+        if (w1 == 0u) {
+            w1 = atomicCompSwap(pieceCubeKeys[2u * s + 1u], 0u, k.y);
+            if (w1 == 0u) return s;
+        }
+        if (w1 == k.y) return s;
+    }
+    atomicAdd(pieceCount[C_CUBE_FAIL], 1u);
+    return NONE;
+}
+
+void main() {
+    uint kind = uint(u.uKind.x), level = uint(u.uKind.y), items = floatBitsToUint(u.uKind.z), levels = uint(u.uKind.w);
+    uint t = gl_GlobalInvocationID.x;
+    if (t >= items) return;
+    if (kind == KIND_CLEAR) {
+        uint at = floatBitsToUint(u.uClear.x) + t, fill = floatBitsToUint(u.uField.w);
+        uint which = uint(u.uField.z);
+        if (which == 0u) pieceCount[at] = fill;
+        else if (which == 1u) pieceF[at] = uintBitsToFloat(fill);
+        else if (which == 2u) pieceU[at] = fill;
+        else if (which == 3u) pieceCubeKeys[at] = fill;
+        else if (which == 4u) pieceCubeVals[at] = fill;
+        return;
+    }
+    if (kind == KIND_INIT) { pieceLabel[t] = t; return; }
+    if (kind == KIND_HOOK) {
+        // A clear join within one cube of the level: the larger root hooked under the smaller.
+        if ((pieceJoinBits[t >> 5] & (1u << (t & 31u))) == 0u) return;
+        uvec2 e = pieceEdges[t];
+        if (surfCube(e.x, level) != surfCube(e.y, level)) return;
+        uint ra = findRoot(e.x), rb = findRoot(e.y);
+        if (ra == rb) return;
+        atomicMin(pieceLabel[max(ra, rb)], min(ra, rb));
+        atomicAdd(pieceCount[C_CHANGED], 1u);
+        return;
+    }
+    if (kind == KIND_JUMP) {
+        uint l1 = pieceLabel[t], l2 = pieceLabel[l1];
+        if (l2 == l1) return;
+        pieceLabel[t] = l2;
+        atomicAdd(pieceCount[C_CHANGED], 1u);
+        return;
+    }
+    if (kind == KIND_PIECE_ID) {
+        if (pieceLabel[t] != t) return;
+        uint p = atomicAdd(pieceCount[C_PIECES], 1u);
+        pieceId[t] = p;
+        pieceRoot[p] = t;
+        return;
+    }
+    if (kind == KIND_PIECE_ACC) {
+        uint p = pieceId[pieceLabel[t]];
+        uint bits = surfBits(t), lv = bits & 15u, side = (bits >> 4) & 7u;
+        vec3 c = surfC(t);
+        atomicAdd(pieceF[PF * p], c.x); atomicAdd(pieceF[PF * p + 1u], c.y); atomicAdd(pieceF[PF * p + 2u], c.z);
+        atomicAdd(pieceF[PF * p + 3u], 1.0);
+        if (lv == level) atomicAdd(pieceF[PF * p + 4u], surfArea(t));
+        if (lv <= level) atomicAdd(pieceF[PF * p + 5u], surfArea(t));
+        // Its footprint, its spacing wide, across the cube's 4 x 4.
+        float cs = cellSize(level);
+        vec3 g = gridCoords(c, side, cs);
+        vec3 cube = floor(g);
+        uint axis = side >> 1u, a0 = (axis + 1u) % 3u, a1 = (axis + 2u) % 3u;
+        float uu = g[a0] - cube[a0], vv = g[a1] - cube[a1];
+        float hw = 0.5 * (0.25 * cellSize(lv)) / cs;
+        int u0 = clamp(int(floor((uu - hw) * 4.0)), 0, 3), u1 = clamp(int(floor((uu + hw) * 4.0)), 0, 3);
+        int v0 = clamp(int(floor((vv - hw) * 4.0)), 0, 3), v1 = clamp(int(floor((vv + hw) * 4.0)), 0, 3);
+        uint mask = 0u;
+        for (int su = u0; su <= u1; su++)
+            for (int sv = v0; sv <= v1; sv++)
+                mask |= 1u << uint(su + 4 * sv);
+        atomicOr(pieceU[PU * p], mask);
+        return;
+    }
+    if (kind == KIND_PIECE_CUBE) {
+        uint r = pieceRoot[t];
+        uint s = cubeInsert(cubeKey(surfCube(r, level), (surfBits(r) >> 4) & 7u));
+        pieceU[PU * t + 2u] = s;
+        if (s == NONE) return;
+        pieceU[PU * t + 1u] = atomicAdd(pieceCubeVals[2u * s], 1u);
+        return;
+    }
+    if (kind == KIND_CUBE_DENSE) {
+        if (pieceCubeKeys[2u * t] == 0u) return;
+        uint d = atomicAdd(pieceCount[C_CUBES], 1u);
+        pieceCubeVals[2u * t + 1u] = d;
+        pieceCubes[d] = uvec4(pieceCubeKeys[2u * t], pieceCubeKeys[2u * t + 1u], pieceCubeVals[2u * t], 0u);
+        return;
+    }
+    if (kind == KIND_PIECE_FILL) {
+        uint s = pieceU[PU * t + 2u];
+        if (s == NONE) return;
+        uvec4 cube = pieceCubes[pieceCubeVals[2u * s + 1u]];
+        pieceList[cube.w + pieceU[PU * t + 1u]] = t;
+        return;
+    }
+    if (kind == KIND_PIECE_RANK) {
+        // Its place among its cube's pieces: largest whole area first, then lowest root.
+        uint s = pieceU[PU * t + 2u];
+        if (s == NONE) return;
+        uvec4 cube = pieceCubes[pieceCubeVals[2u * s + 1u]];
+        float whole = pieceF[PF * t + 5u];
+        uint root = pieceRoot[t], rank = 0u;
+        for (uint k = 0u; k < cube.z; k++) {
+            uint q = pieceList[cube.w + k];
+            if (q == t) continue;
+            float wq = pieceF[PF * q + 5u];
+            if (wq > whole || (wq == whole && pieceRoot[q] < root)) rank++;
+        }
+        pieceU[PU * t + 3u] = rank;
+        float count = max(pieceF[PF * t + 3u], 1.0);
+        vec3 mean = vec3(pieceF[PF * t], pieceF[PF * t + 1u], pieceF[PF * t + 2u]) / count;
+        uint parent = level + 1u < levels ? pieceOfUp[root] : 0xFFFFu;
+        uint at = 2u * (cube.w + rank);
+        pieceOut[at] = uvec4(floatBitsToUint(mean), pieceU[PU * t]);
+        pieceOut[at + 1u] = uvec4(floatBitsToUint(pieceF[PF * t + 4u]), floatBitsToUint(whole), parent, root);
+        return;
+    }
+    if (kind == KIND_PIECE_OF) {
+        uint p = pieceId[pieceLabel[t]];
+        pieceOfCur[t] = pieceU[PU * p + 2u] == NONE ? 0xFFFEu : min(pieceU[PU * p + 3u], 0xFFFEu);
+        return;
+    }
+}

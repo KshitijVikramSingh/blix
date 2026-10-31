@@ -34,18 +34,25 @@ def multi(d):
     return {(l, k): n for l, k, n in records(os.path.join(d, 'multi.bin'), '<iqi')}
 
 
-def main(a, b):
-    ca, cb = cells(a), cells(b)
-    both = ca.keys() & cb.keys()
-    print(f'cells: {len(ca):,} / {len(cb):,}, in both {len(both):,}; only first by level {dict(sorted(Counter(k[0] for k in ca.keys() - cb.keys()).items()))}, '
-          f'only second {dict(sorted(Counter(k[0] for k in cb.keys() - ca.keys()).items()))}')
-    print(f'  in both: points differ {sum(1 for k in both if abs(ca[k][0] - cb[k][0]) > 0.5):,}, sub-squares differ {sum(1 for k in both if ca[k][2] != cb[k][2]):,}')
+def compare_surfels(a, b):
     sa, sb = surfels(a), surfels(b)
     both = sa.keys() & sb.keys()
     moved = sorted(math.dist(sa[k][0], sb[k][0]) for k in both)
     ratios = [sb[k][2] / max(sa[k][2], 1e-12) for k in both]
     print(f'surfels: {len(sa):,} / {len(sb):,}, in both {len(both):,}; centroid moved p99 {moved[int(len(moved) * .99)] if moved else 0:.2e} m, '
           f'area off by >0.1% {sum(1 for r in ratios if abs(r - 1) > 1e-3):,}')
+
+
+def main(a, b):
+    ca, cb = cells(a), cells(b)
+    both = ca.keys() & cb.keys()
+    print(f'cells: {len(ca):,} / {len(cb):,}, in both {len(both):,}; only first by level {dict(sorted(Counter(k[0] for k in ca.keys() - cb.keys()).items()))}, '
+          f'only second {dict(sorted(Counter(k[0] for k in cb.keys() - ca.keys()).items()))}')
+    print(f'  in both: points differ {sum(1 for k in both if abs(ca[k][0] - cb[k][0]) > 0.5):,}, sub-squares differ {sum(1 for k in both if ca[k][2] != cb[k][2]):,}')
+    if not all(os.path.exists(os.path.join(d, 'surfels.bin')) for d in (a, b)):
+        print('surfels: not in both (the GPU cook keeps its surfels on the GPU)')
+    else:
+        compare_surfels(a, b)
     ma, mb = multi(a), multi(b)
     levels = max([k[0] for k in ma] + [k[0] for k in mb] + [0]) + 1
     print('cubes of several pieces by level: ' + ' '.join(f'{sum(1 for k in ma if k[0] == l)}/{sum(1 for k in mb if k[0] == l)}' for l in range(levels))
