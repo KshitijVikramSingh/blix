@@ -79,6 +79,9 @@ layout(std430, set = 0, binding = 14) buffer RtgiAssembled { vec4 rtgiAssembled[
 layout(std430, set = 0, binding = 16) readonly buffer RtgiDirection { vec4 rtgiDirection[]; };
 // The cooked cells' surface pieces: a cell's neighbours, parent and children keyed by them (main).
 layout(std430, set = 0, binding = 17) readonly buffer RtgiCookPieces { uvec4 cookPieces[]; };
+// Per piece its children (SponzaLoop.RtgiCook.cs's CookLayout.Children: from its second entry's w, a count, then each
+// child: its child cube 0-7 | 8 its cube of several pieces | its piece index << 4, its whole area's bits).
+layout(std430, set = 0, binding = 18) readonly buffer RtgiCookChildren { uvec2 cookChildren[]; };
 #define COOK_PARAMS u.uCook
 #define COOK_COUNTS u.uCookCounts
 #define COOK_TABLE(i) cookTable[i]
@@ -174,37 +177,33 @@ void main() {
             float wOwn = held >= 0.5 ? uintBitsToFloat(COOK_PIECES(ownPiece + 1u).x) : 0.0;
             vec4 sumL = r0 * wOwn, sumD = dir * wOwn;
             float sumW = wOwn, sumH = held, sumV = varSelf * wOwn, sumF = far * wOwn, sumI = hitInv * wOwn;
-            for (uint k = 0u; k < 8u; k++) {
+            // Its piece's children, as the cook listed them (each a cooked piece a level down whose parent link is this
+            // cell's piece, by its whole area): a cache cell a level down the cook did not make (trained there by a point
+            // a level up, rtgi_train.comp's finer cell) is no part of this cell's surface -- weighed 1 against areas of a
+            // few hundredths of a m2, they made most of a flat panel's light, its blotches (the readout's view 35, the
+            // user, the crevices testbed, 2026-10-31).
+            uint first = COOK_PIECES(ownPiece + 1u).w;
+            uint kids = cookChildren[first].x;
+            for (uint e = 1u; e <= kids; e++) {
+                uvec2 kid = cookChildren[first + e];
+                uint k = kid.x & 7u;
                 ivec3 cc = cell.xyz * 2 + ivec3(int(k & 1u), int((k >> 1) & 1u), int(k >> 2));
-                // Only the cooked children's pieces that are of this cell's piece (their parent links), by their whole
-                // area: a cache cell a level down the cook did not make (trained there by a
-                // point a level up, rtgi_train.comp's finer cell) is no part of this cell's surface -- weighed 1 against
-                // areas of a few hundredths of a m2, they made most of a flat panel's light, its blotches (the readout's
-                // view 35, the user, the crevices testbed, 2026-10-31).
-                uint cj = cookFind(cc, level - 1u, side);
-                if (cj == COOK_NONE) continue;
-                uvec4 ch = COOK_PIECES(cj);
-                for (uint kk = 0u; kk < ch.y; kk++) {
-                    // Of this cell's piece: its parent link (the cook's) this cell's piece's index.
-                    uvec4 cw = COOK_PIECES(ch.x + 2u * kk + 1u);
-                    if (cw.z != ownIndex) continue;
-                    float wa = uintBitsToFloat(cw.y);
-                    uint t = rtgiFind(rtgiCellHashR(cc, level - 1u, side, ch.y > 1u ? kk + 1u : 0u, u.uParams), u.uParams);
-                    if (t == 0xFFFFFFFFu) continue;
-                    vec4 at1 = rtgiAssembled[2u * t + 1u];
-                    if (at1.x < 0.5) continue;
-                    if (!(wa > 0.0)) continue;
-                    uvec4 c1 = rtgiRecord[2u * t + 1u];
-                    vec2 dxy = unpackHalf2x16(c1.x), dzn = unpackHalf2x16(c1.y), fe = unpackHalf2x16(c1.z);
-                    sumL += rtgiAssembled[2u * t] * wa;
-                    sumD += vec4(dxy, dzn) * wa;
-                    sumW += wa;
-                    sumH += at1.x;
-                    sumV += at1.y * wa;
-                    sumF += fe.x * wa;
-                    sumI += at1.z * wa;
-                    if (held < 0.5) epoch = fe.y;
-                }
+                float wa = uintBitsToFloat(kid.y);
+                uint t = rtgiFind(rtgiCellHashR(cc, level - 1u, side, (kid.x & 8u) != 0u ? (kid.x >> 4) + 1u : 0u, u.uParams), u.uParams);
+                if (t == 0xFFFFFFFFu) continue;
+                vec4 at1 = rtgiAssembled[2u * t + 1u];
+                if (at1.x < 0.5) continue;
+                if (!(wa > 0.0)) continue;
+                uvec4 c1 = rtgiRecord[2u * t + 1u];
+                vec2 dxy = unpackHalf2x16(c1.x), dzn = unpackHalf2x16(c1.y), fe = unpackHalf2x16(c1.z);
+                sumL += rtgiAssembled[2u * t] * wa;
+                sumD += vec4(dxy, dzn) * wa;
+                sumW += wa;
+                sumH += at1.x;
+                sumV += at1.y * wa;
+                sumF += fe.x * wa;
+                sumI += at1.z * wa;
+                if (held < 0.5) epoch = fe.y;
             }
             if (sumW > 0.0) {
                 ownShare = wOwn / sumW;

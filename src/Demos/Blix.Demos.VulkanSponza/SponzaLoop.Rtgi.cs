@@ -694,6 +694,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiStats", rtgiStats),
                 new ShaderBufferBinding("RtgiAssembled", rtgiAssembled),
                 new ShaderBufferBinding("RtgiDirection", rtgiDirection),
+                new ShaderBufferBinding("RtgiCookChildren", CookChildrenOrDummy),
                 new ShaderBufferBinding("RtgiCookPieces", CookPiecesOrDummy),
             }));
         // A sixteenth of the slots a frame: those no training reached for --rtgi-max-age frames emptied, while more than

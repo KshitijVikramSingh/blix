@@ -203,6 +203,8 @@ internal sealed partial class SponzaLoop
     private uint[] cookChosenResult = Array.Empty<uint>();
     private const int CookJoinChunk = 1 << 20;
     private GpuBufferHandle CookPiecesOrDummy => CookOr(cookPieces);
+    private GpuBufferHandle cookChildren;
+    private GpuBufferHandle CookChildrenOrDummy => CookOr(cookChildren);
     private GpuBufferHandle cookTable, cookPoints, cookScale, nearLinks, nearHits, nearLightBuf, nearList;
     private long cookGpuBytes;
     private ShaderInterface cookInterface = null!, nearUpdateInterface = null!;
@@ -1169,6 +1171,9 @@ internal sealed partial class SponzaLoop
         // its 4 x 4 footprint; its own area at its level and its whole (m2), its parent piece's index a level up (0xFFFF
         // none) -- rtgi_cook.glsl's cookPieceAt and rtgi_filter.comp's assembly.
         public uint[] Pieces = Array.Empty<uint>();
+        // Per piece with children (its second entry's w the first of them): their count, then each child (its child cube
+        // 0-7 | 8 its cube of several pieces | its piece index << 4; its whole area's bits).
+        public uint[] Children = Array.Empty<uint>();
         public int PieceCount, MultiPieceCells;
         public uint[] Table = Array.Empty<uint>(), Scale = Array.Empty<uint>(), CellPoints = Array.Empty<uint>();
         public long[] PointsPerCell = new long[CookCandidates + 1];
@@ -1309,6 +1314,32 @@ internal sealed partial class SponzaLoop
             if (ps.Length > 1) layout.MultiPieceCells++;
         }
         layout.Pieces = new uint[4 * (order.Count + 2 * layout.PieceCount)];
+        // Each piece's children (the cooked pieces a level down whose parent link is it, in the cube's eight child cubes
+        // that are cooked cells, live, of some area): rtgi_filter.comp's assembly reads them straight. Found there by
+        // scanning each child cube's pieces for the link, a coarse cell scanned thousands (a level-9 cube holds 14k pieces)
+        // -- the filter 12 ms a frame at Crytek Sponza, 1.3 ms without the assembly (2026-11-01).
+        var orderIndex = Enumerable.Range(0, levels).Select(_ => new Dictionary<long, int>()).ToArray();
+        for (var i = 0; i < order.Count; i++) orderIndex[order[i].Level][order[i].Key] = i;
+        var kids = new List<(int Cell, int Piece, uint Packed, float Whole)>();
+        for (var l = 1; l < levels && l < cells.Pieces.Length; l++)
+            foreach (var (childKey, childPieces) in cells.Pieces[l - 1])
+            {
+                if (!orderIndex[l - 1].ContainsKey(childKey) || (cellsAt[l - 1][childKey].Bits & 16u) != 0) continue;
+                if (!orderIndex[l].TryGetValue(CensusParent(childKey), out var parentCell)) continue;
+                var (cx, cy, cz, _) = CensusCellUnkey(childKey);
+                var k = (uint)((cx & 1) | ((cy & 1) << 1) | ((cz & 1) << 2));
+                var multi = childPieces.Length > 1 ? 8u : 0u;
+                for (var kk = 0; kk < childPieces.Length; kk++)
+                {
+                    var pc = childPieces[kk];
+                    if (pc.Parent == 0xFFFF || !(pc.Whole > 0f)) continue;
+                    kids.Add((parentCell, pc.Parent, k | multi | ((uint)kk << 4), pc.Whole));
+                }
+            }
+        kids.Sort((x, y) => x.Cell != y.Cell ? x.Cell.CompareTo(y.Cell) : x.Piece.CompareTo(y.Piece));
+        // Entry 0 a piece without children (a count of 0); then per piece with children its count, then its children.
+        var children = new List<uint> { 0u, 0u };
+        var kidAt = 0;
         var pieceAt = order.Count;
         for (var i = 0; i < order.Count; i++)
         {
@@ -1328,9 +1359,21 @@ internal sealed partial class SponzaLoop
                 layout.Pieces[w + 4] = BitConverter.SingleToUInt32Bits(buried ? 0f : pc.Own);
                 layout.Pieces[w + 5] = BitConverter.SingleToUInt32Bits(buried ? 0f : pc.Whole);
                 layout.Pieces[w + 6] = (uint)pc.Parent;
+                // Its children: the run of kids for (this cell, this piece's index).
+                var q = pc.Index;
+                while (kidAt < kids.Count && (kids[kidAt].Cell < i || (kids[kidAt].Cell == i && kids[kidAt].Piece < q))) kidAt++;
+                var from = kidAt;
+                while (kidAt < kids.Count && kids[kidAt].Cell == i && kids[kidAt].Piece == q) kidAt++;
+                if (kidAt > from)
+                {
+                    layout.Pieces[w + 7] = (uint)(children.Count / 2);
+                    children.Add((uint)(kidAt - from)); children.Add(0u);
+                    for (var e = from; e < kidAt; e++) { children.Add(kids[e].Packed); children.Add(BitConverter.SingleToUInt32Bits(buried ? 0f : kids[e].Whole)); }
+                }
                 pieceAt += 2;
             }
         }
+        layout.Children = children.ToArray();
         layout.PartMs[1] = clock.Elapsed.TotalMilliseconds;
         var totalPts = order.Sum(o => (long)cellsAt[o.Level][o.Key].Pts.Length);
         // The training points after the cells' index words (rtgi_cook.glsl's COOK_CELL_POINTS).
@@ -1917,6 +1960,7 @@ internal sealed partial class SponzaLoop
         }
         cookCellPoints = Own(device.CreateGpuBuffer(Math.Max(layout.CellPoints.Length, 2) * 4, layout.CellPoints.Length > 0 ? MemoryMarshal.AsBytes(layout.CellPoints.AsSpan()).ToArray() : new byte[8], "sponza.rtgi.cook-cell-points"));
         cookPoints = Own(device.CreateGpuBuffer(cells * 32, layout.Cells > 0 ? MemoryMarshal.AsBytes(layout.Points.AsSpan()).ToArray() : new byte[32], "sponza.rtgi.cook-points"));
+        cookChildren = Own(device.CreateGpuBuffer(Math.Max(layout.Children.Length, 2) * 4, MemoryMarshal.AsBytes(layout.Children.AsSpan()).ToArray(), "sponza.rtgi.cook-children"));
         cookPieces = Own(device.CreateGpuBuffer(Math.Max(layout.Pieces.Length, 4) * 4, layout.Pieces.Length > 0 ? MemoryMarshal.AsBytes(layout.Pieces.AsSpan()).ToArray() : new byte[16], "sponza.rtgi.cook-pieces"));
         cookScale = Own(device.CreateGpuBuffer(layout.Scale.Length * 4, MemoryMarshal.AsBytes(layout.Scale.AsSpan()).ToArray(), "sponza.rtgi.cook-scale"));
         nearLinks = Own(device.CreateGpuBuffer(nj * CookNearRays * 8, new byte[nj * CookNearRays * 8], "sponza.rtgi.near-links"));
@@ -1924,7 +1968,7 @@ internal sealed partial class SponzaLoop
         nearLightBuf = Own(device.CreateGpuBuffer(nj * 16, new byte[nj * 16], "sponza.rtgi.near-light"));
         // Read where it lies (its count, RecordRtgiNearField): a read that waited for the device was a 100 ms frame.
         nearList = Own(device.CreateReadableGpuBuffer(16 + cells * 4, "sponza.rtgi.near-list"));
-        cookGpuBytes = layout.CellPoints.Length * 4L + layout.Table.Length * 4L + cells * 32L + layout.Scale.Length * 4L + layout.Pieces.Length * 4L + nj * (CookNearRays * 12L + 16L) + 16L + cells * 4L;
+        cookGpuBytes = layout.CellPoints.Length * 4L + layout.Table.Length * 4L + cells * 32L + layout.Scale.Length * 4L + layout.Pieces.Length * 4L + layout.Children.Length * 4L + nj * (CookNearRays * 12L + 16L) + 16L + cells * 4L;
     }
 
     // The cook done: the cache started over on the cooked cells, the totals logged; its transient buffers freed a few
@@ -1941,7 +1985,8 @@ internal sealed partial class SponzaLoop
         cookClock.Stop();
         // The cells the cache held until now were sized by the camera: emptied, its cells the cooked ones from here.
         rtgiResetPending = true;
-        rtgiCookProbePending = true;
+        // The probe reads the cooked data back (a 300 ms frame at Crytek Sponza): asked for alone (BLIX_RTGI_NEAR_PROBE_FRAMES).
+        rtgiCookProbePending = Environment.GetEnvironmentVariable("BLIX_RTGI_NEAR_PROBE_FRAMES") is { Length: > 0 } || Environment.GetEnvironmentVariable("BLIX_RTGI_NEAR_PROBE") is { Length: > 0 };
         cookReadyFrame = rtgiFrameCount;
         var l = cookLayout!;
         // The cook's millions of objects (its cells, pieces and dictionaries) collected now, behind the cook screen: left to
