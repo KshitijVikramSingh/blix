@@ -61,14 +61,14 @@ internal sealed partial class SponzaLoop
         public int EdgeRoom, EdgeCount;
         // The pieces' stage (SponzaLoop.RtgiCookPiecesGpu.cs).
         public GpuBufferHandle Label, PieceIds, PieceRoot, PieceF, PieceU, CubeKeys, CubeVals, Cubes, PieceList, PieceOut,
-            PieceOfCur, PieceOfUp, PieceCount;
+            PieceOfCur, PieceOfUp, PieceCount, EdgeLevels;
         public int PStep, PLevel, PieceRoom, CubeSlots, Pieces_, Cubes_;
         public (WalkSlot[] Cubes, WalkSlot[] Out)[] LevelPieces = Array.Empty<(WalkSlot[], WalkSlot[])>();
         public readonly Stopwatch PClock = new();
         public void PieceBuffersFree()
         {
             Label = PieceIds = PieceRoot = PieceF = PieceU = CubeKeys = CubeVals = Cubes = PieceList = PieceOut = default;
-            PieceOfCur = PieceOfUp = PieceCount = default;
+            PieceOfCur = PieceOfUp = PieceCount = EdgeLevels = default;
         }
         public int ListRoom = 1 << 20, FinalRoom = 1 << 20, LatticeRoom = 1 << 23, VerifyRoom;
         public int[] MapLog2 = { 22, 19, 4, 23, 20, 22 };
@@ -705,7 +705,10 @@ internal sealed partial class SponzaLoop
         var clock = Stopwatch.StartNew();
         var levels = RtgiTopLevel + 1;
         var cells = new CookCells { Share = 1f, FineCube = finest, Counts = counts };
-        var acc = Enumerable.Range(0, levels).Select(_ => new Dictionary<long, CookAcc>()).ToArray();
+        // The cells are in key order, level first: each level's a run.
+        var perLevel = new int[levels];
+        for (var i = 0; i < n; i++) perLevel[(keys[2 * i + 1] >> 26) & 15u]++;
+        var acc = Enumerable.Range(0, levels).Select(l => new Dictionary<long, CookAcc>(perLevel[l])).ToArray();
         for (var i = 0; i < n; i++)
         {
             var (x, y, z, side, level) = UnpackWalkKey(keys[2 * i], keys[2 * i + 1]);
@@ -714,7 +717,7 @@ internal sealed partial class SponzaLoop
             {
                 N = new Vector3(f[at], f[at + 1], f[at + 2]), Area = f[at + 3], Junction = (meta[4 * i] & 1u) != 0,
                 Best = new Vector3(f[at + 4], f[at + 5], f[at + 6]), BestD = 0f,
-                Sub = new Vector3[CookCandidates], SubD = new float[CookCandidates],
+                Sub = new Vector3[CookCandidates],
             };
             for (var q = 0; q < CookCandidates; q++)
             {

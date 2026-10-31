@@ -17,9 +17,9 @@ internal sealed partial class SponzaLoop
     private PipelineHandle piecesPipeline;
 
     private const int PkClear = 0, PkInit = 1, PkHook = 2, PkJump = 3, PkPieceId = 4, PkPieceAcc = 5, PkPieceCube = 6,
-        PkCubeDense = 7, PkPieceFill = 8, PkPieceRank = 9, PkPieceOf = 10;
+        PkCubeDense = 7, PkPieceFill = 8, PkPieceRank = 9, PkPieceOf = 10, PkEdgeLevels = 11;
     private const int PcChanged = 0, PcPieces = 1, PcCubes = 2, PcCubeFail = 3, PieceCounters = 16;
-    private const int PbCount = 0, PbF = 1, PbU = 2, PbCubeKeys = 3, PbCubeVals = 4;
+    private const int PbCount = 0, PbF = 1, PbU = 2, PbCubeKeys = 3, PbCubeVals = 4, PbEdgeLevels = 5;
     // Hook-and-jump rounds a frame (the frame's last round's changes read back: none, the components are done).
     private const int PieceRounds = 6;
 
@@ -61,6 +61,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("PieceOut", WalkOr(w.PieceOut)),
                 new ShaderBufferBinding("PieceOfCur", WalkOr(w.PieceOfCur)),
                 new ShaderBufferBinding("PieceOfUp", WalkOr(w.PieceOfUp)),
+                new ShaderBufferBinding("PieceEdgeLevels", WalkOr(w.EdgeLevels)),
             });
     }
 
@@ -103,6 +104,9 @@ internal sealed partial class SponzaLoop
                 w.PieceOfUp = WalkBuffer(w, Math.Max(n, 1) * 4L, "sponza.rtgi.piece-of-b");
                 w.PieceCount = WalkBuffer(w, PieceCounters * 4, "sponza.rtgi.piece-count");
                 PiecesClear(PbCount, PieceCounters);
+                // Each clear join's levels where its surfels share a cube, once.
+                w.EdgeLevels = WalkBuffer(w, Math.Max((w.EdgeCount + 1) / 2, 1) * 4L, "sponza.rtgi.piece-edge-levels");
+                PiecesRun(PkEdgeLevels, w.EdgeCount);
                 w.PLevel = levels - 1;
                 w.LevelPieces = new (WalkSlot[] Cubes, WalkSlot[] Out)[levels];
                 PiecesRun(PkInit, n);
@@ -220,7 +224,7 @@ internal sealed partial class SponzaLoop
     private static Dictionary<long, CookPiece[]>[] WalkPiecesByCube((WalkSlot[] Cubes, WalkSlot[] Out)[] levels, int surfels, int joins, double ms)
     {
         var result = new Dictionary<long, CookPiece[]>[levels.Length];
-        for (var l = 0; l < levels.Length; l++)
+        Parallel.For(0, levels.Length, l =>
         {
             var (cubes, outs) = levels[l];
             var mine = result[l] = new Dictionary<long, CookPiece[]>(cubes.Length);
@@ -241,7 +245,7 @@ internal sealed partial class SponzaLoop
                 }
                 mine[CensusCellKey(x, y, z, side)] = pieces;
             }
-        }
+        });
         if (CookDumpPath("multi.bin") is { } multi)
         {
             using var bw = new BinaryWriter(File.Create(multi));

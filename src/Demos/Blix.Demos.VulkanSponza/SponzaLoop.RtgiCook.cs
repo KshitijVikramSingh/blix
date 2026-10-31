@@ -1191,10 +1191,10 @@ internal sealed partial class SponzaLoop
         var clock = Stopwatch.StartNew();
         var levels = RtgiTopLevel + 1;
         var layout = new CookLayout();
-        // The inside test's choices by cell.
-        var choice = new Dictionary<(int, long), int>(inside.Length);
-        var bestOnly = new HashSet<(int, long)>();
-        for (var i = 0; i < inside.Length; i++) choice[inside[i]] = i;
+        // The inside test's choices by cell, by level.
+        var choice = Enumerable.Range(0, levels).Select(_ => new Dictionary<long, int>()).ToArray();
+        var bestOnly = Enumerable.Range(0, levels).Select(_ => new HashSet<long>()).ToArray();
+        for (var i = 0; i < inside.Length; i++) choice[inside[i].Level][inside[i].Key] = i;
         // Per level, every cell's representative point, normal, bits, and its training points; ancestors' from their
         // children's.
         var cellsAt = new Dictionary<long, (Vector3 P, Vector3 N, uint Bits, Vector3[] Pts, byte[] Backs)>[levels];
@@ -1202,15 +1202,23 @@ internal sealed partial class SponzaLoop
         {
             var mine = cellsAt[l] = new Dictionary<long, (Vector3, Vector3, uint, Vector3[], byte[])>(cells.All[l].Length);
             var cs = finest * MathF.Pow(2f, l);
-            foreach (var (key, a) in cells.Acc[l])
+            // The level's own cells, each on its own (in parallel), then gathered in order.
+            var own = cells.Acc[l].ToArray();
+            var made = new ((Vector3, Vector3, uint, Vector3[], byte[]) Cell, int Buried, bool BestOnly, int Before, int Now)[own.Length];
+            var level = l;
+            var levelChoice = choice[l];
+            Parallel.For(0, own.Length, i =>
             {
+                var (key, a) = own[i];
                 var (_, _, _, side) = CensusCellUnkey(key);
                 var p = a.Best;
-                var bits = side | 64u | ((uint)l << 8) | (a.Junction ? 32u : 0u);
+                var bits = side | 64u | ((uint)level << 8) | (a.Junction ? 32u : 0u);
                 var mask = a.SubMask;
-                var backs = new byte[CookCandidates];
-                Array.Fill(backs, (byte)255);
-                if (choice.TryGetValue((l, key), out var ci))
+                Span<byte> backs = stackalloc byte[CookCandidates];
+                backs.Fill(255);
+                int buried = 0, before = 0, now = 0;
+                var isBestOnly = false;
+                if (levelChoice.TryGetValue(key, out var ci))
                 {
                     var c = chosen[5 * ci];
                     var bestK = (int)(c & 0xFF);
@@ -1223,21 +1231,32 @@ internal sealed partial class SponzaLoop
                     }
                     // The rule before (bd877111): a level-0/1 junction cell's candidates under the buried share; any other
                     // cell's every candidate, untested.
-                    var tested = a.Junction && l <= 1;
-                    var before = tested ? a.SubMask & (int)(c >> 16) : a.SubMask;
-                    if ((c & 256u) != 0) { bits |= 16u; layout.InsideBuried++; mask = 0; if (tested) before = 0; }
+                    var tested = a.Junction && level <= 1;
+                    var beforeMask = tested ? a.SubMask & (int)(c >> 16) : a.SubMask;
+                    if ((c & 256u) != 0) { bits |= 16u; buried = 1; mask = 0; if (tested) beforeMask = 0; }
                     // None clean: its best alone if that met at most CookBestOnlyBacks of its rays on back faces, else the
                     // cell is buried -- its one point half inside a wall trained it dark or speckled (0.7% of crevices'
                     // best-only cells under half or over twice their neighbours' light, none of the others; 2026-10-31).
-                    else if (clean == 0 && backs[bestK] <= CookBestOnlyBacks) { mask = 1 << bestK; layout.BestOnly++; bestOnly.Add((l, key)); }
-                    else if (clean == 0) { bits |= 16u; layout.InsideBuried++; mask = 0; }
+                    else if (clean == 0 && backs[bestK] <= CookBestOnlyBacks) { mask = 1 << bestK; isBestOnly = true; }
+                    else if (clean == 0) { bits |= 16u; buried = 1; mask = 0; }
                     else mask = clean;
-                    layout.InsidePointsBefore += CookPick(a.Sub, before).Pts.Length;
-                    layout.InsidePointsNow += CookPick(a.Sub, mask).Pts.Length;
+                    before = CookPickCount(a.Sub, beforeMask);
+                    now = CookPickCount(a.Sub, mask);
                 }
                 var n = a.N.LengthSquared() > 1e-12f ? Vector3.Normalize(a.N) : Vector3.UnitY;
                 var pick = CookPick(a.Sub, mask);
-                mine[key] = (p, n, bits, pick.Pts, pick.Subs.Select(k => backs[k]).ToArray());
+                var pickBacks = new byte[pick.Subs.Length];
+                for (var k = 0; k < pickBacks.Length; k++) pickBacks[k] = backs[pick.Subs[k]];
+                made[i] = ((p, n, bits, pick.Pts, pickBacks), buried, isBestOnly, before, now);
+            });
+            for (var i = 0; i < own.Length; i++)
+            {
+                var m = made[i];
+                mine[own[i].Key] = m.Cell;
+                layout.InsideBuried += m.Buried;
+                layout.InsidePointsBefore += m.Before;
+                layout.InsidePointsNow += m.Now;
+                if (m.BestOnly) { layout.BestOnly++; bestOnly[l].Add(own[i].Key); }
             }
             if (l == 0) continue;
             // The ancestors: from the level below's live cells -- the representative the child's nearest the middle, the
@@ -1340,7 +1359,7 @@ internal sealed partial class SponzaLoop
                 at++;
             }
             layout.PointsPerCell[c.Pts.Length]++;
-            layout.CellFlags[i] = (byte)((bestOnly.Contains((l, key)) ? 1 : 0) | (choice.ContainsKey((l, key)) ? 2 : 0));
+            layout.CellFlags[i] = (byte)((bestOnly[l].Contains(key) ? 1 : 0) | (choice[l].ContainsKey(key) ? 2 : 0));
             layout.ByLevel[l]++;
             if ((c.Bits & 64u) != 0) layout.OwnByLevel[l]++;
             if ((c.Bits & 32u) != 0) layout.JunctionByLevel[l]++;
@@ -1390,6 +1409,14 @@ internal sealed partial class SponzaLoop
     // clamp(ceil(occupied / 2), 4, 16), at most the occupied -- one per (cell size / 2)^2 of its surface, a full cell's 8,
     // a sliver's all -- taken in a 4 x 4 Bayer order, so any count is spread over the cell.
     private static readonly int[] CookBayer = { 0, 10, 2, 8, 5, 15, 7, 13, 1, 11, 3, 9, 4, 14, 6, 12 };
+    // CookPick's count alone.
+    private static int CookPickCount(Vector3[]? sub, int mask)
+    {
+        if (sub is null || mask == 0) return 0;
+        var occupied = BitOperations.PopCount((uint)mask);
+        return Math.Min(occupied, Math.Clamp((occupied + 1) / 2, 4, 16));
+    }
+
     private static (Vector3[] Pts, int[] Subs) CookPick(Vector3[]? sub, int mask)
     {
         if (sub is null || mask == 0) return (Array.Empty<Vector3>(), Array.Empty<int>());

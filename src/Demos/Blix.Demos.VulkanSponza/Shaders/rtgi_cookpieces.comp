@@ -50,6 +50,9 @@ layout(std430, set = 0, binding = 14) buffer PieceOut { uvec4 pieceOut[]; };
 // Per surfel its piece's place at this level, and at the level above.
 layout(std430, set = 0, binding = 15) buffer PieceOfCur { uint pieceOfCur[]; };
 layout(std430, set = 0, binding = 16) readonly buffer PieceOfUp { uint pieceOfUp[]; };
+// Per join 16 bits, two a word (KIND_EDGE_LEVELS): bit l set where its surfels share level l's cube and its ray was
+// clear -- a round tests a bit, not two cubes.
+layout(std430, set = 0, binding = 17) buffer PieceEdgeLevels { uint pieceEdgeLevels[]; };
 
 #define KIND_CLEAR 0u
 #define KIND_INIT 1u
@@ -62,6 +65,7 @@ layout(std430, set = 0, binding = 16) readonly buffer PieceOfUp { uint pieceOfUp
 #define KIND_PIECE_FILL 8u
 #define KIND_PIECE_RANK 9u
 #define KIND_PIECE_OF 10u
+#define KIND_EDGE_LEVELS 11u
 
 #define C_CHANGED 0u
 #define C_PIECES 1u
@@ -140,14 +144,23 @@ void main() {
         else if (which == 2u) pieceU[at] = fill;
         else if (which == 3u) pieceCubeKeys[at] = fill;
         else if (which == 4u) pieceCubeVals[at] = fill;
+        else if (which == 5u) pieceEdgeLevels[at] = fill;
         return;
     }
     if (kind == KIND_INIT) { pieceLabel[t] = t; return; }
-    if (kind == KIND_HOOK) {
-        // A clear join within one cube of the level: the larger root hooked under the smaller.
+    if (kind == KIND_EDGE_LEVELS) {
         if ((pieceJoinBits[t >> 5] & (1u << (t & 31u))) == 0u) return;
         uvec2 e = pieceEdges[t];
-        if (surfCube(e.x, level) != surfCube(e.y, level)) return;
+        uint mask = 0u;
+        for (uint l = 0u; l < levels; l++)
+            if (surfCube(e.x, l) == surfCube(e.y, l)) mask |= 1u << l;
+        if (mask != 0u) atomicOr(pieceEdgeLevels[t >> 1], mask << (16u * (t & 1u)));
+        return;
+    }
+    if (kind == KIND_HOOK) {
+        // A clear join within one cube of the level: the larger root hooked under the smaller.
+        if (((pieceEdgeLevels[t >> 1] >> (16u * (t & 1u))) & (1u << level)) == 0u) return;
+        uvec2 e = pieceEdges[t];
         uint ra = findRoot(e.x), rb = findRoot(e.y);
         if (ra == rb) return;
         atomicMin(pieceLabel[max(ra, rb)], min(ra, rb));
