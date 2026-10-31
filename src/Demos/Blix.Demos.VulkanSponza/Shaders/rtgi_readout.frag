@@ -22,7 +22,8 @@ layout(set = 0, binding = 0) uniform RtgiReadout {
     vec4 uCamera;        // xyz position
     vec4 uHalf;          // yz the full-res pixel of its 2x2
     vec4 uNearField;     // x the near field's radius (rtgi_cache.glsl's RTGI_NEAR); y 1: the gradient written
-    vec4 uView;          // x the RTGI panel's view (0: the light)
+    vec4 uView;          // x the RTGI panel's view (0: the light); y 1 once the panel's snapshot exists (views 30, 31); z 1
+                         // cells assembled (view 29 reads the assembly)
     vec4 uUnsure;        // x the done threshold (relative error); y the uncertainty map's row (half-res pixels); z its size;
                          // w a full-res pixel's footprint per metre of distance
     vec4 uBlurAt;        // x the blur's radius at most (full-res pixels; 0: none); y the share of the hit distance it may reach;
@@ -80,17 +81,22 @@ layout(set = 0, binding = 18) uniform usampler2D uHistGuide;
 // cells' near light.
 layout(std430, set = 0, binding = 22) readonly buffer RtgiCookTable { uvec2 cookTable[]; };
 layout(std430, set = 0, binding = 23) readonly buffer RtgiCookPoints { vec4 cookPoints[]; };
-layout(std430, set = 0, binding = 24) readonly buffer RtgiCookRegions { uint cookRegions[]; };
+layout(std430, set = 0, binding = 24) readonly buffer RtgiCookPieces { uvec4 cookPieces[]; };
 layout(std430, set = 0, binding = 25) readonly buffer RtgiCookScale { uvec2 cookScale[]; };
 layout(std430, set = 0, binding = 26) readonly buffer RtgiNearLight { vec4 nearLight[]; };
 #define COOK_PARAMS u.uCook
 #define COOK_COUNTS u.uCookCounts
 #define COOK_TABLE(i) cookTable[i]
 #define COOK_POINTS(i) cookPoints[i]
-#define COOK_REGIONS(i) cookRegions[i]
+#define COOK_PIECES(i) cookPieces[i]
 #define COOK_SCALE(i) cookScale[i]
 // The cooked cells' training points (view 24 marks them).
 layout(std430, set = 0, binding = 27) readonly buffer RtgiCookCellPoints { uvec2 cookCellPoints[]; };
+// The panel's snapshot of every slot (rtgi_cook.comp kind 17: key, blended luminance, samples, resolved luminance), for
+// views 30 and 31.
+layout(std430, set = 0, binding = 28) readonly buffer RtgiCellSnapshot { uvec4 cellSnapshot[]; };
+// rtgi_filter.comp's assembly (views 34, 35: w the share of the cell's cooked area left out, + 2 a region miss).
+layout(std430, set = 0, binding = 29) readonly buffer RtgiAssembled { vec4 rtgiAssembled[]; };
 #define COOK_CELL_POINTS(i) cookCellPoints[i]
 #define RTGI_REGION_OF 1
 #include "rtgi_cook.glsl"
@@ -298,7 +304,7 @@ void main() {
         }
     }
     uint side = rtgiSide(n);
-    rtgiRegion = nearRegion(p, side);
+    rtgiKeyAt(p, side);
     // The two levels around the point's, blended by where it sits between them (rtgiLevelF): no jump at a level's edge.
     float lf = rtgiLevelF(p, side, u.uCamera.xyz, u.uParams);
     uint level = uint(lf);
@@ -395,7 +401,9 @@ void main() {
     if (view == 29) {
         uint l1 = min(level + 1u, top);
         uint s1 = rtgiFind(rtgiCellHash(ivec3(floor((p - rtgiOrigin(side)) / rtgiSize(l1, u.uParams))), l1, side, u.uParams), u.uParams);
-        outIncident = vec4(s1 != 0xFFFFFFFFu ? rtgiResolved[2u * s1].rgb : vec3(-0.25), float(rtgiRegionFor(l1)));
+        // Assembled (uView.z): its assembled light (rtgi_filter.comp) -- a coarse cell's own samples are its own surface's alone.
+        vec3 raw1 = u.uView.z > 0.5 ? rtgiAssembled[2u * s1].rgb : rtgiResolved[2u * s1].rgb;
+        outIncident = vec4(s1 != 0xFFFFFFFFu ? raw1 : vec3(-0.25), float(rtgiRegionFor(ivec3(floor((p - rtgiOrigin(side)) / rtgiSize(l1, u.uParams))), l1, side)));
         outIncidentGradient = vec4(0.0);
         return;
     }
@@ -406,7 +414,7 @@ void main() {
     }
     if (view == 26) {
         uint ck0 = cookCellAt(p, side, level), ck1 = cookCellAt(p, side, min(level + 1u, uint(u.uParams.w)));
-        outIncident = vec4(lf + 1.0, float(rtgiRegionFor(level)) + 1.0, (ck0 != COOK_NONE ? 2.0 : 1.0) + (ck1 != COOK_NONE ? 2.0 : 0.0), 1.0);
+        outIncident = vec4(lf + 1.0, float(rtgiRegionFor(ivec3(floor((p - rtgiOrigin(side)) / rtgiSize(level, u.uParams))), level, side)) + 1.0, (ck0 != COOK_NONE ? 2.0 : 1.0) + (ck1 != COOK_NONE ? 2.0 : 0.0), 1.0);
         outIncidentGradient = vec4(0.0);
         return;
     }
@@ -416,7 +424,7 @@ void main() {
         outIncidentGradient = vec4(0.0);
         return;
     }
-    if ((view >= 10 && view <= 18) || view == 21 || view == 24) {
+    if ((view >= 10 && view <= 18) || view == 21 || view == 24 || view == 30 || view == 31 || view == 32 || view == 33 || view == 34 || view == 35) {
         vec3 c = vec3(1.0, 0.0, 1.0);
         uint sc = rtgiFind(rtgiCellHash(ivec3(floor((p - rtgiOrigin(side)) / rtgiSize(level, u.uParams))), level, side, u.uParams), u.uParams);
         uint cooked = cookCellAt(p, side, level);
@@ -464,7 +472,7 @@ void main() {
         } else if (view == 21) {
             // Its region (rtgi_cache.glsl's rtgiRegion): a colour by it; grey region 0 (no cooked cell here, or the cube's
             // first piece).
-            uint rg = rtgiRegionFor(level);
+            uint rg = rtgiRegionFor(ivec3(floor((p - rtgiOrigin(side)) / rtgiSize(level, u.uParams))), level, side);
             uint hh = rtgiHash(rg * 0x9E3779B9u);
             c = rg == 0u ? vec3(0.5) : vec3(hh & 255u, (hh >> 8) & 255u, (hh >> 16) & 255u) / 255.0;
         } else if (view == 24) {
@@ -480,7 +488,77 @@ void main() {
                 float dr = distance(COOK_POINTS(2u * ci).xyz, p);
                 if (dr < 1.4 * dot0 && dr > dot0) c = vec3(0.0);
                 uint np = cookPointCount(ci);
-                for (uint k = 0u; k < np; k++) if (distance(cookPointAt(ci, k), p) < dot0) c = vec3(1.0);
+                // Red: a point retired by its back-face tally (rtgi_train.comp; trains no more).
+                for (uint k = 0u; k < np; k++) if (distance(cookPointAt(ci, k), p) < dot0) c = cookPointDead(ci, k) ? vec3(1.0, 0.0, 0.0) : vec3(1.0);
+            } else {
+                // None at its level: orange one a level finer, cyan one a level coarser (the size the readout asks for
+                // here and the cook's cells disagree), magenta none at either (the cook made no cell here at all).
+                if (level > 0u && cookFind(cookCoords(p, side, level - 1u), level - 1u, side) != COOK_NONE) c = vec3(1.0, 0.55, 0.0);
+                else if (level < top && cookFind(cookCoords(p, side, level + 1u), level + 1u, side) != COOK_NONE) c = vec3(0.0, 0.85, 0.9);
+            }
+            // Black stripes: the cook's walk dropped points in this 5 cm cube as buried (its nearest size sample under
+            // something, no live one near; the size table's tier 13, BLIX_RTGI_COOK_DROPPED=1).
+            if (COOK_PARAMS.w > 0.5 && cookScaleIn(ivec3(floor((p - NEAR_SCALE_ORIGIN) / COOK_PARAMS.x)), 13u, side) > 0.0
+                && fract((gl_FragCoord.x + gl_FragCoord.y) / 6.0) < 0.5) c *= 0.15;
+        } else if (view == 34 || view == 35) {
+            // The pixel's own cell before the neighbour blend (rtgi_filter.comp): 34 its assembled light (its own surface's
+            // and its children's by area; a level-0 cell's own); 35 the share of that its own surface gave (white all,
+            // black none: its children's alone), and red where the parent's lean gave more than 5% of the shown light.
+            if (sc != 0xFFFFFFFFu && u.uView.z > 0.5) {
+                vec2 ln = unpackHalf2x16(floatBitsToUint(rtgiAssembled[2u * sc + 1u].w));
+                if (view == 34) c = rtgiAssembled[2u * sc].rgb;
+                else if (ln.y > 0.98 || rtgiResolved[2u * sc + 1u].y < 0.5) c = vec3(1.0);
+                else {
+                    // The children's part (the assembly less the cell's own share) over the cell's own light, log2:
+                    // blue the children darker, grey alike, red brighter (a stop full); black children only.
+                    const vec3 LW2 = vec3(0.2126, 0.7152, 0.0722);
+                    float own = dot(rtgiResolved[2u * sc].rgb, LW2), all = dot(rtgiAssembled[2u * sc].rgb, LW2);
+                    float kids = (all - ln.y * own) / max(1.0 - ln.y, 1e-3);
+                    if (ln.y < 0.02) c = vec3(0.0);
+                    else {
+                        float r = clamp(log2(max(kids, 1e-5) / max(own, 1e-5)), -1.0, 1.0);
+                        c = r < 0.0 ? mix(vec3(0.5), vec3(0.05, 0.2, 1.0), -r) : mix(vec3(0.5), vec3(1.0, 0.1, 0.05), r);
+                    }
+                }
+            }
+        } else if (view == 32) {
+            // Still moving: its recent light (the resolve's fast mean, rtgi_resolve.comp) against the light it shows (the
+            // slow mean), in the fast mean's standard errors (from the cell's luminance moments over the fast window): grey
+            // within 2 (the fast mean's own noise), blue the recent darker, red brighter, full colour at 6 -- a real move,
+            // not noise: upstream light changing, or what trains the cell changing.
+            if (sc != 0xFFFFFFFFu && rtgiResolved[2u * sc + 1u].y >= 0.5) {
+                const vec3 LW = vec3(0.2126, 0.7152, 0.0722);
+                vec4 mo = rtgiMoments[3u * sc];
+                float n = max(rtgiMoments[3u * sc + 2u].z, 1.0);
+                float se = sqrt(max(mo.y - mo.x * mo.x, 0.0) / n) + 1e-6;
+                float z = (dot(rtgiMoments[3u * sc + 1u].rgb, LW) - dot(rtgiResolved[2u * sc].rgb, LW)) / se;
+                float r = clamp((abs(z) - 2.0) / 4.0, 0.0, 1.0);
+                c = z < 0.0 ? mix(vec3(0.5), vec3(0.05, 0.2, 1.0), r) : mix(vec3(0.5), vec3(1.0, 0.1, 0.05), r);
+            }
+        } else if (view == 30 || view == 31 || view == 33) {
+            // Against the panel's snapshot (rtgi_cook.comp kind 17), the pixel's own cell. 30: its blended light now over
+            // then, log2 -- blue darker, grey the same, red brighter (a stop at full colour); white a cell then dark, now lit.
+            // 31: samples gained since -- dark red none (no training reached it), green to yellow 1 to 16,384 gained (log);
+            // cyan fewer than then (emptied and trained afresh). Magenta: no cell, or no snapshot of it (taken before it was).
+            if (u.uView.y > 0.5 && sc != 0xFFFFFFFFu && cellSnapshot[sc].x == rtgiKeys[sc] && rtgiKeys[sc] != 0u) {
+                uvec4 sn = cellSnapshot[sc];
+                if (view == 30 || view == 33) {
+                    // 33: its own light alone (the resolve's, unblended) against the snapshot's -- 30 darker but 33 grey:
+                    // what the blend leans it on moved, not its own training.
+                    uvec4 a = rtgiRecord[2u * sc];
+                    float now = view == 30 ? dot(vec3(unpackHalf2x16(a.x), unpackHalf2x16(a.y).x), vec3(0.2126, 0.7152, 0.0722))
+                                           : dot(rtgiResolved[2u * sc].rgb, vec3(0.2126, 0.7152, 0.0722));
+                    float then = uintBitsToFloat(view == 30 ? sn.y : sn.w);
+                    if (!(then > 1e-5)) c = now > 1e-5 ? vec3(1.0) : vec3(0.5);
+                    else {
+                        float r = clamp(log2(max(now, 1e-6) / then), -1.0, 1.0);
+                        c = r < 0.0 ? mix(vec3(0.5), vec3(0.05, 0.2, 1.0), -r) : mix(vec3(0.5), vec3(1.0, 0.1, 0.05), r);
+                    }
+                } else {
+                    float gained = rtgiResolved[2u * sc + 1u].y - uintBitsToFloat(sn.z);
+                    c = gained < -0.5 ? vec3(0.0, 0.9, 0.9) : gained < 0.5 ? vec3(0.35, 0.0, 0.0)
+                      : mix(vec3(0.1, 0.8, 0.1), vec3(1.0, 0.9, 0.1), clamp(log2(gained) / 14.0, 0.0, 1.0));
+                }
             }
         } else {
             // 18: how many samples its cell holds, 1 to 16,384 (log) -- where the light is thin.

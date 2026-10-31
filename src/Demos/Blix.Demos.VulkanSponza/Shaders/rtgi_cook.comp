@@ -16,8 +16,6 @@
 //           bit set where clear (rtgi_cook.glsl's neighbour mask) -- once, for every pixel alike
 //   6, 7    the near field of the level-0 junction cells: NEAR_RAYS rays each to the contact radius (uMore.w), then their
 //           links (met: distance, normal, albedo), the escape share; buried where most met back faces
-//   8-10    the regions: label passes (each level-0 cell's label at each of NEAR_LEVELS cube sizes, the lowest reached
-//           along clear neighbour rays within the cube), each cube's lowest label, each cell's regions
 //   14, 15  the live own-level cells within uNear.w of the camera listed (rtgi_rays.comp's near-train points)
 
 layout(local_size_x = 64) in;
@@ -28,7 +26,7 @@ layout(set = 0, binding = 0) uniform RtgiCookPass {
     vec4 uChunk;   // x the chunk's first item; y its items; z the rays' reach (m); w the kind
     vec4 uMore;    // x the lift off the surface (m); y the placements (RtgiCookSided); z the void's downward y; w the near
                    // distance and the contact radius (m)
-    vec4 uConn;    // x 1: the labels' first pass; y the cube hash's slots - 1; z the share of a candidate's rays on back
+    vec4 uConn;    // x, y unused; z the share of a candidate's rays on back
                    // faces past which it is buried
     vec4 uNear;    // kinds 14 and 15: xyz the camera, w the reach (m)
     vec4 uCache;   // kind 16: rtgiParams (rtgi_cache.glsl)
@@ -56,9 +54,7 @@ layout(std430, set = 0, binding = 8) readonly buffer RtgiCookTable { uvec2 cookT
 layout(std430, set = 0, binding = 9) buffer RtgiCookPoints { vec4 cookPoints[]; };
 layout(std430, set = 0, binding = 10) buffer RtgiNearLinks { uvec2 nearLinks[]; };
 layout(std430, set = 0, binding = 11) buffer RtgiNearLight { vec4 nearLight[]; };
-layout(std430, set = 0, binding = 12) buffer RtgiCookLabels { uint cookLabels[]; };
-layout(std430, set = 0, binding = 13) buffer RtgiCookRegions { uint cookRegions[]; };
-layout(std430, set = 0, binding = 14) buffer RtgiCookCubes { uvec4 cookCubes[]; };   // key, lowest label, highest, pad
+layout(std430, set = 0, binding = 13) readonly buffer RtgiCookPieces { uvec4 cookPieces[]; };
 layout(std430, set = 0, binding = 15) buffer RtgiNearList { uint nearListCount; uint nearListPad[3]; uint nearList[]; };
 // Per near link, where its hit lies in the cooked set (kind 7): bits 0-27 the hit's level-0 cooked cell + 1 (its region:
 // rtgi_cook.glsl's nearRegion; 0 none), bits 28-31 its cache level (the size table's; 15 not covered) -- each frame's relight
@@ -71,7 +67,7 @@ layout(std430, set = 0, binding = 17) readonly buffer RtgiCookScale { uvec2 cook
 #define COOK_TABLE(i) cookTable[i]
 #define COOK_POINTS(i) cookPoints[i]
 #define COOK_SCALE(i) cookScale[i]
-#define COOK_REGIONS(i) cookRegions[i]
+#define COOK_PIECES(i) cookPieces[i]
 #include "rtgi_cook.glsl"
 // Kind 16 (BLIX_RTGI_OUTLIERS, SponzaLoop.RtgiCook.cs's outlier scan): each cooked cell's cache cell read -- its resolved
 // light and samples, its blended light and region (two vec4s a cell into RtgiCookScan; -1 not held).
@@ -79,6 +75,9 @@ layout(std430, set = 0, binding = 18) readonly buffer RtgiKeys { uint rtgiKeys[]
 layout(std430, set = 0, binding = 19) readonly buffer RtgiResolved { vec4 rtgiResolved[]; };
 layout(std430, set = 0, binding = 20) readonly buffer RtgiRecord { uvec4 rtgiRecord[]; };
 layout(std430, set = 0, binding = 21) buffer RtgiCookScan { vec4 cookScan[]; };
+// Kind 17: the panel's snapshot of every cache slot (its key, its blended light's luminance, its samples, its resolved
+// light's luminance), which the readout's views 30 and 31 compare against now.
+layout(std430, set = 0, binding = 22) buffer RtgiCellSnapshot { uvec4 cellSnapshot[]; };
 #define RTGI_KEYS(i) rtgiKeys[i]
 #define RTGI_REGION_OF 1
 #include "rtgi_cache.glsl"
@@ -144,9 +143,6 @@ uint cookNeighbour(uint i, uint k) {
     c[a1] += NEAR_RING[k].y;
     uint j = cookFind(c, level, side);
     return j != COOK_NONE && cookLive(j) ? j : COOK_NONE;
-}
-ivec3 cookCube(uint i, uint level) {
-    return ivec3(floor((cookPoints[2u * i].xyz - rtgiOrigin(cookBits(i) & 7u)) / (COOK_PARAMS.x * exp2(float(level)))));
 }
 
 void main() {
@@ -288,10 +284,9 @@ void main() {
                 // Where the hit lies, as the relight will ask it: from the point its link decodes to.
                 vec3 nd = nearOctDecode(vec2(o) / 255.0);
                 vec3 q = cookRays[2u * r].xyz + d * (float(dq) / 32767.0 * radius);
-                uint region = min(nearRegion(q, cookSideOf(nd)), 0x0FFFFFFFu);
                 float g = cookScaleAt(q, cookSideOf(nd));
                 uint level = g > 0.0 ? uint(clamp(floor(log2(max(g, COOK_PARAMS.x) / COOK_PARAMS.x)), 0.0, 10.0)) : 15u;
-                nearHits[i * NEAR_RAYS + k] = region | (level << 28);
+                nearHits[i * NEAR_RAYS + k] = level << 28;
             }
             nearLinks[i * NEAR_RAYS + k] = link;
         }
@@ -304,65 +299,14 @@ void main() {
         nearLight[i] = buried ? vec4(0.0, 0.0, 0.0, -1.0) : vec4(0.0);
         return;
     }
-    if (kind == 8u) {
-        // A pass of the labels: each level's the lowest of its own and its linked neighbours' (both ways) in its cube.
-        if (t >= count) return;
-        uint i = first + t;
-        for (uint l = 0u; l < NEAR_LEVELS; l++) {
-            uint lab = u.uConn.x > 0.5 ? i : cookLabels[i * NEAR_LEVELS + l];
-            if (u.uConn.x < 0.5 && cookLive(i)) {
-                ivec3 cube = cookCube(i, l);
-                uint adj = cookAdj(i);
-                for (uint k = 0u; k < 8u; k++) {
-                    if ((adj & (1u << k)) == 0u) continue;
-                    uint j = cookNeighbour(i, k);
-                    if (j == COOK_NONE || (cookAdj(j) & (1u << (k ^ 1u))) == 0u || cookCube(j, l) != cube) continue;
-                    lab = min(lab, cookLabels[j * NEAR_LEVELS + l]);
-                }
-            }
-            cookLabels[i * NEAR_LEVELS + l] = lab;
-        }
-        return;
-    }
-    if (kind == 9u || kind == 10u) {
-        // 9: each cube's lowest label (its key claimed, the lowest kept); 10: the regions.
-        if (t >= count) return;
-        uint i = first + t;
-        uint side = cookBits(i) & 7u;
-        for (uint l = 0u; l < NEAR_LEVELS; l++) {
-            if (!cookLive(i)) { if (kind == 10u) cookRegions[i * NEAR_LEVELS + l] = 0u; continue; }
-            ivec3 cube = cookCube(i, l);
-            uint ha = cookHashU(uint(cube.x) * 0x9E3779B1u ^ cookHashU(uint(cube.y) * 0x85EBCA77u ^ cookHashU(uint(cube.z) * 0xC2B2AE3Du ^ (side + 8u * l + 0x51Fu))));
-            uvec2 h = uvec2(ha, cookHashU(ha ^ 0x2545F491u ^ uint(cube.x) * 0x1B873593u ^ uint(cube.y) * 0xCC9E2D51u) | 1u);
-            uint mask = uint(u.uConn.y);
-            uint lab = cookLabels[i * NEAR_LEVELS + l];
-            uint slot = COOK_NONE;
-            for (uint k = 0u; k < 32u; k++) {
-                uint s = (h.x + k) & mask;
-                if (kind == 9u) {
-                    uint prev = atomicCompSwap(cookCubes[s].x, 0u, h.y);
-                    if (prev == 0u || prev == h.y) { slot = s; break; }
-                } else if (cookCubes[s].x == h.y) { slot = s; break; }
-                else if (cookCubes[s].x == 0u) break;
-            }
-            if (slot == COOK_NONE) { if (kind == 10u) cookRegions[i * NEAR_LEVELS + l] = 0u; continue; }
-            if (kind == 9u) { atomicMin(cookCubes[slot].y, lab); atomicMax(cookCubes[slot].z, lab); }
-            // A cube of one piece: region 0. Of several: every piece its own, 1 + its label, the lowest's too -- a point
-            // with no level-0 cell takes region 0 (rtgi_cook.glsl's nearRegion), and in a cube of several pieces that was
-            // whichever held the lowest label: an 8 cm gap's floor read the lit floor past its wall, which trained the
-            // cube's region 0 (the crevices testbed's front gap, 2026-10-31). Now region 0 there names no piece's cell.
-            else cookRegions[i * NEAR_LEVELS + l] = cookCubes[slot].y == cookCubes[slot].z ? 0u : lab + 1u;
-        }
-        return;
-    }
     if (kind == 16u) {
         if (t >= count) return;
         uint i = first + t;
         uint bits = cookBits(i), side = bits & 7u, level = (bits >> 8) & 15u;
         vec3 p = cookPoints[2u * i].xyz;
-        rtgiRegion = nearRegion(p, side);
+        rtgiKeyAt(p, side);
         uint s = rtgiFind(rtgiCellHash(cookCoords(p, side, level), level, side, u.uCache), u.uCache);
-        vec4 o0 = vec4(-1.0), o1 = vec4(-1.0, -1.0, -1.0, float(rtgiRegionFor(level)));
+        vec4 o0 = vec4(-1.0), o1 = vec4(-1.0, -1.0, -1.0, float(rtgiRegionFor(cookCoords(p, side, level), level, side)));
         if (s != COOK_NONE) {
             o0 = vec4(rtgiResolved[2u * s].rgb, rtgiResolved[2u * s + 1u].y);
             uvec4 a = rtgiRecord[2u * s];
@@ -370,6 +314,14 @@ void main() {
         }
         cookScan[2u * i] = o0;
         cookScan[2u * i + 1u] = o1;
+        return;
+    }
+    if (kind == 17u) {
+        if (t >= count) return;
+        uvec4 a = rtgiRecord[2u * t];
+        float rec = dot(vec3(unpackHalf2x16(a.x), unpackHalf2x16(a.y).x), vec3(0.2126, 0.7152, 0.0722));
+        float res = dot(rtgiResolved[2u * t].rgb, vec3(0.2126, 0.7152, 0.0722));
+        cellSnapshot[t] = uvec4(rtgiKeys[t], floatBitsToUint(rec), floatBitsToUint(rtgiResolved[2u * t + 1u].y), floatBitsToUint(res));
         return;
     }
     if (kind == 14u) { if (t == 0u) nearListCount = 0u; return; }

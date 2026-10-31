@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The correctness scenes: `blix cornell`, `blix thinwall` and `blix crevices` write glTF, and the cook reads them like any other source.
+# The correctness scenes: `blix cornell`, `blix thinwall`, `blix crevices` and `blix arches` write glTF, and the cook reads them like any other source.
 #
 #   BLIX_TESTBED_ASSETS  the COOKED tree (the scene host reads <it>/<scene>). Required: no default.
 #   BLIX_TESTBED_SRC     the generated glTF, defaulting to "<cooked>-src".
@@ -14,7 +14,7 @@ fi
 COOKED="$BLIX_TESTBED_ASSETS"
 SRC="${BLIX_TESTBED_SRC:-${COOKED%/}-src}"
 dotnet build "$REPO/src/Blix.Tools.Cook" -v quiet --nologo >/dev/null
-for scene in cornell thinwall crevices crevices-dark drapes sheetslab sheetshell sheetshell-thin; do
+for scene in cornell thinwall crevices crevices-dark arches drapes sheetslab sheetshell sheetshell-thin; do
     app="${scene%-dark}"
     extra=()
     [[ "$scene" == *-dark ]] && extra=(--albedo 0.25)

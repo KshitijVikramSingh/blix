@@ -131,23 +131,30 @@ bool rtgiSunSettled(float visibility, float rays) {
 #ifndef RTGI_REGION_DECLARED
 #define RTGI_REGION_DECLARED
 uint rtgiRegion = 0u;
+vec3 rtgiRegionP = vec3(0.0);
 #endif
 #ifdef RTGI_REGION_OF
-uint nearRegionOfLevel(uint level);
+uint cookPieceAt(ivec3 c, uint level, uint side, vec3 p);
 #endif
-uint rtgiRegionFor(uint level) {
+// The region of the cell (c, level, side) a key names: with the cooked cell set (RTGI_REGION_OF), the cube's surface
+// piece at rtgiRegionP (rtgi_cook.glsl's cookPieceAt; set by rtgiKeyAt with the point keyed) -- 0 its only piece, else
+// 1 + its index; a neighbouring cube's, the piece the point's surface runs on into it. Without it, rtgiRegion.
+uint rtgiRegionFor(ivec3 c, uint level, uint side) {
 #ifdef RTGI_REGION_OF
-    return nearRegionOfLevel(level);
+    return cookPieceAt(c, level, side, rtgiRegionP);
 #else
     return rtgiRegion;
 #endif
 }
 
-uvec2 rtgiCellHash(ivec3 c, uint level, uint side, vec4 params) {
-    uint region = rtgiRegionFor(level);
+uvec2 rtgiCellHashR(ivec3 c, uint level, uint side, uint region, vec4 params) {
     uint a = rtgiHash(uint(c.x) * 0x9E3779B1u ^ rtgiHash(uint(c.y) * 0x85EBCA77u ^ rtgiHash(uint(c.z) * 0xC2B2AE3Du ^ (level * 6u + side) ^ region * 0x632BE5ABu)));
     uint b = rtgiHash(a ^ 0x68E31DA4u ^ uint(c.x) * 0x1B873593u ^ uint(c.y) * 0xCC9E2D51u ^ uint(c.z) * 0x27D4EB2Fu ^ region * 0x5BD1E995u) | 1u;
     return uvec2(a & uint(params.z), b);
+}
+
+uvec2 rtgiCellHash(ivec3 c, uint level, uint side, vec4 params) {
+    return rtgiCellHashR(c, level, side, rtgiRegionFor(c, level, side), params);
 }
 
 // The slot holding the cell, or 0xFFFFFFFF; every probe is looked at (an evicted slot may sit before the one held).

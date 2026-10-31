@@ -138,6 +138,9 @@ internal sealed partial class SponzaLoop
     // (nooks keep their own light, open walls still borrow; 1 and 2 noisier, no better), 2026-10-26.
     private float rtgiHitPrior = 0.5f;
     private GpuBufferHandle rtgiHitInv;
+    // Per slot: the cell's assembled light and (samples, variance, inverse hit distance) -- rtgi_filter.comp's assembly.
+    private GpuBufferHandle rtgiAssembled;
+
     // What the readout reads of a cell, in one 32-byte line (rtgi_cache.glsl's rtgiRecord): written by the resolve and the
     // blend, zeroed by the eviction. 32 bytes a slot (128 MB at 4 M).
     private GpuBufferHandle rtgiRecord;
@@ -309,6 +312,7 @@ internal sealed partial class SponzaLoop
         if (args.Int("rtgi-seed") is { } sd) rtgiSeed = (uint)Math.Max(0, sd);
         if (args.Float("rtgi-hit-sun") is { } hs) rtgiHitSun = MathF.Max(0f, hs);
         if (args.Flag("rtgi-no-trace-hit-sun")) rtgiTraceHitSun = false;
+        if (args.Flag("rtgi-no-assemble")) rtgiAssemble = false;
         if (args.Flag("rtgi-no-thin")) rtgiThin = false;
         if (args.Flag("rtgi-no-read-first")) rtgiReadFirst = false;
         if (args.Float("rtgi-interp-from") is { } inf) rtgiInterpFrom = MathF.Max(0f, inf);
@@ -517,6 +521,7 @@ internal sealed partial class SponzaLoop
             rtgiUnsure = Own(device.CreateGpuBuffer(RtgiUnsureSize * 4, new byte[RtgiUnsureSize * 4], "sponza.rtgi.unsure"));
             rtgiBlurRadius = Own(device.CreateGpuBuffer(RtgiUnsureSize * 4, new byte[RtgiUnsureSize * 4], "sponza.rtgi.blur-radius"));
             rtgiHitInv = Own(device.CreateGpuBuffer(RtgiSlots * 4, new byte[RtgiSlots * 4], "sponza.rtgi.hit-inv"));
+            rtgiAssembled = Own(device.CreateGpuBuffer(RtgiSlots * 32, new byte[RtgiSlots * 32], "sponza.rtgi.assembled"));
             rtgiRecord = Own(device.CreateGpuBuffer(RtgiSlots * 32, new byte[RtgiSlots * 32], "sponza.rtgi.record"));
             // Readable where it lies: the budget reads its counters each frame without a wait (SponzaLoop.RtgiBudget.cs).
             rtgiStats = Own(device.CreateReadableGpuBuffer(256, "sponza.rtgi.stats"));
@@ -598,7 +603,7 @@ internal sealed partial class SponzaLoop
                     new ShaderBufferBinding("RtgiRecord", rtgiRecord),
                     new ShaderBufferBinding("RtgiCookTable", CookTableOrDummy),
                     new ShaderBufferBinding("RtgiCookPoints", CookPointsOrDummy),
-                    new ShaderBufferBinding("RtgiCookRegions", CookRegionsOrDummy),
+                    new ShaderBufferBinding("RtgiCookPieces", CookPiecesOrDummy),
                     new ShaderBufferBinding("RtgiCookScale", CookScaleOrDummy),
                     new ShaderBufferBinding("RtgiCookCellPoints", CookCellPointsOrDummy),
                     new ShaderBufferBinding("RtgiCookSided", CookSidedOrDummy),
@@ -648,7 +653,7 @@ internal sealed partial class SponzaLoop
                 new("uParent", new Vector4Uniform(new Vector4(rtgiParentWeight, RtgiTopLevel, rtgiFilterFloor, rtgiNoFilter ? 0f : 1f))),
                 new("uFilter2", new Vector4Uniform(new Vector4(rtgiCascade ? 1f : 0f, rtgiParentSigma, rtgiParentTol, rtgiParentMax))),
                 new("uParent2", new Vector4Uniform(new Vector4(rtgiParentInterp ? 1f : 0f, rtgiParentChain ? 1f : 0f, rtgiParentShrink ? 1f : 0f, rtgiParentPool ? 1f : 0f))),
-                new("uHit", new Vector4Uniform(new Vector4(rtgiHitPrior, 0f, 0f, 0f))),
+                new("uHit", new Vector4Uniform(new Vector4(rtgiHitPrior, RtgiAssembling ? 1f : 0f, 0f, 0f))),
                 new("uRota", new Vector4Uniform(new Vector4(rtgiFilterSettled, rtgiListOnTurn ? 1f : rtgiFilterEvery, rtgiListOnTurn ? 1f : rtgiFilterYoung, 0f))),
                 new("uInterp", new Vector4Uniform(new Vector4(rtgiInterpFrom, 0f, 0f, 0f))),
                 new("uDone", new Vector4Uniform(new Vector4(frameNumber, rtgiDoneWindow, rtgiDoneError, rtgiDarkFloor))),
@@ -672,6 +677,9 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiCookTable", CookTableOrDummy),
                 new ShaderBufferBinding("RtgiCookPoints", CookPointsOrDummy),
                 new ShaderBufferBinding("RtgiStats", rtgiStats),
+                new ShaderBufferBinding("RtgiAssembled", rtgiAssembled),
+                new ShaderBufferBinding("RtgiDirection", rtgiDirection),
+                new ShaderBufferBinding("RtgiCookPieces", CookPiecesOrDummy),
             }));
         // A sixteenth of the slots a frame: those no training reached for --rtgi-max-age frames emptied, while more than
         // --rtgi-evict-above of the slots are held.
@@ -705,6 +713,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiStats", rtgiStats),
                 new ShaderBufferBinding("RtgiOccupancy", rtgiOccupancy),
                 new ShaderBufferBinding("RtgiSeq", rtgiSeq),
+                new ShaderBufferBinding("RtgiAssembled", rtgiAssembled),
             }));
 
     BenchPlacement:
@@ -744,7 +753,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiPrevRays", rtgiRaysBuf[prev]),
                 new ShaderBufferBinding("RtgiCookTable", CookTableOrDummy),
                 new ShaderBufferBinding("RtgiCookPoints", CookPointsOrDummy),
-                new ShaderBufferBinding("RtgiCookRegions", CookRegionsOrDummy),
+                new ShaderBufferBinding("RtgiCookPieces", CookPiecesOrDummy),
                 new ShaderBufferBinding("RtgiCookScale", CookScaleOrDummy),
                 new ShaderBufferBinding("RtgiCookCellPoints", CookCellPointsOrDummy),
                 new ShaderBufferBinding("RtgiCapturePixels", RtgiCapturePixelBuffer),
@@ -838,7 +847,7 @@ internal sealed partial class SponzaLoop
                 new("uReuse", new Vector4Uniform(new Vector4(reuse ? 1f : 0f, rtgiFrameCount & 3u, 4f * RtgiPixelFootprint, rtgiReusePrevSub.X + 2f * rtgiReusePrevSub.Y))),
                 new("uPrevCamera", new Vector4Uniform(new Vector4(rtgiReusePrevCamera, 0f))),
                 new("uNearField", new Vector4Uniform(new Vector4(rtgiNearField, rtgiNoGradient ? 0f : 1f, 0f, 0f))),
-                new("uView", new Vector4Uniform(new Vector4(rtgiView, 0f, 0f, 0f))),
+                new("uView", new Vector4Uniform(new Vector4(rtgiView, cellSnapshot.Equals(default(GpuBufferHandle)) ? 0f : 1f, RtgiAssembling ? 1f : 0f, 0f))),
                 new("uUnsure", new Vector4Uniform(new Vector4(rtgiDoneError, rtgiHalfRow, RtgiUnsureSize, RtgiPixelFootprint))),
                 new("uBlurAt", new Vector4Uniform(new Vector4(RtgiBlurNow, rtgiBlurHit, rtgiFrameCount, 0f))),
                 new("uCook", new Vector4Uniform(CookParams)),
@@ -859,10 +868,12 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiRecord", rtgiRecord),
                 new ShaderBufferBinding("RtgiCookTable", CookTableOrDummy),
                 new ShaderBufferBinding("RtgiCookPoints", CookPointsOrDummy),
-                new ShaderBufferBinding("RtgiCookRegions", CookRegionsOrDummy),
+                new ShaderBufferBinding("RtgiCookPieces", CookPiecesOrDummy),
                 new ShaderBufferBinding("RtgiCookScale", CookScaleOrDummy),
                 new ShaderBufferBinding("RtgiCookCellPoints", CookCellPointsOrDummy),
                 new ShaderBufferBinding("RtgiNearLight", NearLightOrDummy),
+                new ShaderBufferBinding("RtgiCellSnapshot", CellSnapshotOrDummy),
+                new ShaderBufferBinding("RtgiAssembled", rtgiAssembled),
             }));
         rtgiUnsureWritten = true;
         // Blurred by how sure the cache is, into the incident the upsample reads (rtgi_blur.frag; at 0 a copy).

@@ -18,10 +18,16 @@ internal sealed partial class SponzaLoop
         "Cell samples held (log)", "Fix-up pixels (magenta)",
         "Temporal history held (blue 0 - red 16)", "Cell region (grey: none cooked)",
         "Cooked near: far term (escape share x far light per ray)", "Cooked near: the cache's light under it",
-        "Cooked cell (red buried, yellow junction, green own level, blue ancestor; white its training points, black ring its representative)",
+        "Cooked cell (red buried, yellow junction, green own level, blue ancestor; white its points (red retired), black ring its representative; none here: orange finer, cyan coarser, magenta neither)",
         "World position (diagnostic, for dumps)", "Level, region, cooked size (diagnostic, for dumps)",
         "Own level read alone (diagnostic, for dumps)", "Next level read alone (diagnostic, for dumps)",
-        "Next level own cell raw, w its region (diagnostic, for dumps)",
+        "Next level own cell (assembled when on), w its region (diagnostic, for dumps)",
+        "Light vs snapshot (blue darker, grey same, red brighter; a stop full)",
+        "Samples gained since snapshot (dark red none, green-yellow 1 to 16k, cyan restarted)",
+        "Still moving: recent light vs shown, in standard errors (grey under 2, blue darker, red brighter, full at 6)",
+        "Own light (unblended) vs snapshot (as view 30, before the blend)",
+        "Cell assembled light (before the neighbour blend)",
+        "Assembly: children vs own (white own only, blue children darker, red brighter; black children only)",
     };
 
     // The view (rtgi_readout.frag's uView.x, rtgi_blur.frag's uHalf.x, rtgi_temporal.frag's uDebug.x): 0 the light; 1-7 a
@@ -53,6 +59,8 @@ internal sealed partial class SponzaLoop
                 rtgiView = view;
             }
             if (debug.Controls.Button("Reset cache")) rtgiResetPending = true;
+            // Every slot's light and samples now, for views 30 and 31 to compare against (drift, cells no training reaches).
+            if (debug.Controls.Button("Snapshot cell light")) rtgiSnapshotPending = true;
             rtgiFrozen = debug.Controls.Toggle("Freeze (no rays, no training)", rtgiFrozen);
             if (rtgiCookReady)
             {
@@ -67,6 +75,9 @@ internal sealed partial class SponzaLoop
             rtgiBlurHit = debug.Controls.Float("Blur reach (of hit distance)", rtgiBlurHit, 0f, 1f);
             rtgiHitPrior = debug.Controls.Float("Hit prior (0 off)", rtgiHitPrior, 0f, 2f);
             rtgiParentShrink = debug.Controls.Toggle("Cascade: shrinkage", rtgiParentShrink);
+            // A switch of what trains the coarse cells: the cache emptied with it.
+            var assemble = debug.Controls.Toggle("Coarse cells assembled by area (--rtgi-no-assemble off; resets the cache)", rtgiAssemble);
+            if (assemble != rtgiAssemble) { rtgiAssemble = assemble; rtgiResetPending = true; }
             rtgiAge = debug.Controls.Float("History: share of age (0 no limit)", rtgiAge, 0f, 1f);
             rtgiDoneError = debug.Controls.Float("Done at relative error", rtgiDoneError, 0.001f, 0.05f);
             rtgiAdaptive = debug.Controls.Float("Placement by uncertainty (share)", rtgiAdaptive, 0f, 1f);

@@ -53,14 +53,14 @@ layout(std430, set = 0, binding = 9) readonly buffer RtgiRecord { uvec4 rtgiReco
 // The cooked cell set (rtgi_cook.glsl), as the readout reads it: the fix-up leaves out the same neighbours.
 layout(std430, set = 0, binding = 10) readonly buffer RtgiCookTable { uvec2 cookTable[]; };
 layout(std430, set = 0, binding = 11) readonly buffer RtgiCookPoints { vec4 cookPoints[]; };
-layout(std430, set = 0, binding = 12) readonly buffer RtgiCookRegions { uint cookRegions[]; };
+layout(std430, set = 0, binding = 12) readonly buffer RtgiCookPieces { uvec4 cookPieces[]; };
 layout(std430, set = 0, binding = 13) readonly buffer RtgiCookScale { uvec2 cookScale[]; };
 layout(std430, set = 0, binding = 14) readonly buffer RtgiNearLight { vec4 nearLight[]; };
 #define COOK_PARAMS u.uCook
 #define COOK_COUNTS u.uCookCounts
 #define COOK_TABLE(i) cookTable[i]
 #define COOK_POINTS(i) cookPoints[i]
-#define COOK_REGIONS(i) cookRegions[i]
+#define COOK_PIECES(i) cookPieces[i]
 #define COOK_SCALE(i) cookScale[i]
 #define RTGI_REGION_OF 1
 #include "rtgi_cook.glsl"
@@ -121,7 +121,7 @@ vec4 fixLevel(vec3 p, uint side, uint level, out float sky, out float near, out 
 vec4 fixUp(vec3 p, vec3 n) {
     vec4 params = u.uCacheParams;
     uint side = rtgiSide(n);
-    rtgiRegion = nearRegion(p, side);
+    rtgiKeyAt(p, side);
     float lf = rtgiLevelF(p, side, u.uCamera.xyz, params);
     uint level = uint(lf);
     float t = lf - float(level);

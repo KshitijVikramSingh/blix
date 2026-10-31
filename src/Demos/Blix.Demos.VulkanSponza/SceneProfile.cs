@@ -303,6 +303,22 @@ internal sealed record SceneProfile(
         Packs = new ScenePack[] { new("crevices-dark", Required: true) },
     };
 
+    /// <summary>Crytek Sponza's architecture, plain and untextured (<c>blix arches</c>): a two-storey arcaded atrium.</summary>
+    /// <remarks>
+    /// Round arches on square piers along both long sides, a roofed aisle behind the ground arcade and a roofed gallery
+    /// behind the upper one, the atrium open to the sky, a vestibule through a tall arch at the west end. The camera stands
+    /// at the east end of the atrium, looking down it.
+    /// </remarks>
+    public static readonly SceneProfile Arches = Crevices with
+    {
+        Name = "arches",
+        Title = "Vulkan arches",
+        Packs = new ScenePack[] { new("arches", Required: true) },
+        StartPosition = new Vector3(10f, 1.7f, 0f),
+        StartYaw = -90f,
+        StartPitch = 5f,
+    };
+
     /// <summary>Crytek Sponza (Khronos glTF-Sample-Assets' Sponza: the CRYENGINE Limited License, downloaded, not kept in the
     /// repo; tools/testbeds/setup.sh with BLIX_TESTBED_KHRONOS=1): the atrium at ~262 k triangles, normal-mapped stone
     /// throughout -- Sponza's layout at a testbed's cost, where a light change is quick to run.</summary>
@@ -382,7 +398,7 @@ internal sealed record SceneProfile(
         StartPitch = -40f,
     };
 
-    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, Drapes, SheetSlab, SheetShell, SheetShellThin, ThinWall, Crevices, CrevicesDark, KhronosPlant, KhronosTeacup, KhronosTest, KhronosAlpha, KhronosTransmission, KhronosDragon, KhronosCoat, KhronosAniso, KhronosSheen, KhronosIrid, KhronosLamp, MaterialRoom, MaterialGallery, KhronosGlassVase, HabelLeaves, CrytekSponza, Jungle, SanMiguel, LadderFloor, LadderCorner, LadderObjects, LadderClutter, LadderGrid };
+    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City, Cornell, Drapes, SheetSlab, SheetShell, SheetShellThin, ThinWall, Crevices, CrevicesDark, Arches, KhronosPlant, KhronosTeacup, KhronosTest, KhronosAlpha, KhronosTransmission, KhronosDragon, KhronosCoat, KhronosAniso, KhronosSheen, KhronosIrid, KhronosLamp, MaterialRoom, MaterialGallery, KhronosGlassVase, HabelLeaves, CrytekSponza, Jungle, SanMiguel, LadderFloor, LadderCorner, LadderObjects, LadderClutter, LadderGrid };
 
     /// <summary>The profile <c>--scene</c> names, Sponza when it names none.</summary>
     public static SceneProfile Named(string? name)

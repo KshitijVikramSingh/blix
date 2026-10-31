@@ -22,7 +22,7 @@ layout(set = 0, binding = 0) uniform RtgiNearCookUpdate {
 
 layout(std430, set = 0, binding = 1) readonly buffer RtgiCookTable { uvec2 cookTable[]; };
 layout(std430, set = 0, binding = 2) readonly buffer RtgiCookPoints { vec4 cookPoints[]; };
-layout(std430, set = 0, binding = 3) readonly buffer RtgiCookRegions { uint cookRegions[]; };
+layout(std430, set = 0, binding = 3) readonly buffer RtgiCookPieces { uvec4 cookPieces[]; };
 layout(std430, set = 0, binding = 4) readonly buffer RtgiCookScale { uvec2 cookScale[]; };
 layout(std430, set = 0, binding = 5) readonly buffer RtgiNearLinks { uvec2 nearLinks[]; };
 layout(std430, set = 0, binding = 6) buffer RtgiNearLight { vec4 nearLight[]; };
@@ -36,7 +36,7 @@ layout(std430, set = 0, binding = 10) readonly buffer RtgiNearHits { uint nearHi
 #define COOK_COUNTS u.uCookCounts
 #define COOK_TABLE(i) cookTable[i]
 #define COOK_POINTS(i) cookPoints[i]
-#define COOK_REGIONS(i) cookRegions[i]
+#define COOK_PIECES(i) cookPieces[i]
 #define COOK_SCALE(i) cookScale[i]
 #define RTGI_REGION_OF 1
 #include "rtgi_cook.glsl"
@@ -60,17 +60,13 @@ vec4 cellLightKeyed(vec3 q, vec3 n, uint level) {
     return vec4(0.0, 0.0, 0.0, -1.0);
 }
 
-// q's cell under its own region, else under the unsplit key (region 0): a hit right at a junction resolves to a region its
-// pieces split there that no training point keys alike -- a cell never trained, and a cooked cell all of whose rays met
-// it never gathered (the blue dashes along the crevices testbed's edges, 2026-10-30).
-// Its region and level the cook's (hit: rtgi_cook.comp kind 7), the level asked here only where the size table had none.
+// q's cell, keyed by q's own surface piece (rtgi_cook.glsl's cookPieceAt): its level the cook's (hit: rtgi_cook.comp
+// kind 7), the level asked here only where the size table had none.
 vec4 cellLight(vec3 q, vec3 n, uint hit) {
-    rtgiRegion = hit & 0x0FFFFFFFu;
+    rtgiRegionP = q;
     uint level = hit >> 28;
     if (level > 10u) level = rtgiLevel(q, rtgiSide(n), u.uCamera.xyz, u.uParams);
-    vec4 c = cellLightKeyed(q, n, level);
-    if (c.w < 0.0 && rtgiRegion != 0u) { rtgiRegion = 0u; c = cellLightKeyed(q, n, level); }
-    return c;
+    return cellLightKeyed(q, n, level);
 }
 
 void main() {

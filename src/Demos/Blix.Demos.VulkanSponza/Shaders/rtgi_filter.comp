@@ -37,7 +37,7 @@ layout(set = 0, binding = 0) uniform RtgiFilter {
                     // estimates (shrinkage), else by the agreement test (uFilter2.y, z); w 1: the shrinkage's cell error
                     // from the spread pooled over its neighbours, else its own
     vec4 uHit;      // x the share of the light its parent may differ from the cell by, per parent size over the mean hit
-                    // distance (the geometric prior on the shrinkage's bias; 0: none)
+                    // distance (the geometric prior on the shrinkage's bias; 0: none); y 1: cells assembled by area (below)
     vec4 uInterp;   // x the samples from which the parent is read interpolated (uParent2.x), below it the one holding it
     vec4 uRota;     // x the samples from which a cell is settled; y a settled cell blended one frame in this many (its turn by
                     // its slot), 1: every frame; z a young cell's (1: every frame)
@@ -71,10 +71,20 @@ layout(std430, set = 0, binding = 11) buffer RtgiStats { uint rtgiStats[64]; };
 // (rtgi_cook.comp kinds 4, 5), the same for every pixel and every frame.
 layout(std430, set = 0, binding = 12) readonly buffer RtgiCookTable { uvec2 cookTable[]; };
 layout(std430, set = 0, binding = 13) readonly buffer RtgiCookPoints { vec4 cookPoints[]; };
+// Per slot, the cell's assembled light (rgba) and (samples it stands for, its samples' variance, its mean inverse hit
+// distance, -): its own surface's light and its children's by area (main). Read here as a neighbour's and a parent's.
+layout(std430, set = 0, binding = 14) buffer RtgiAssembled { vec4 rtgiAssembled[]; };
+
+// Per slot: the irradiance vector (xyz) and near visibility (w), the resolve's -- an assembled cell's own words.
+layout(std430, set = 0, binding = 16) readonly buffer RtgiDirection { vec4 rtgiDirection[]; };
+// The cooked cells' surface pieces: a cell's neighbours, parent and children keyed by them (main).
+layout(std430, set = 0, binding = 17) readonly buffer RtgiCookPieces { uvec4 cookPieces[]; };
 #define COOK_PARAMS u.uCook
 #define COOK_COUNTS u.uCookCounts
 #define COOK_TABLE(i) cookTable[i]
 #define COOK_POINTS(i) cookPoints[i]
+#define COOK_PIECES(i) cookPieces[i]
+#define RTGI_REGION_OF 1
 #include "rtgi_cook.glsl"
 
 // Whether the cell may take the neighbour d3 away along its plane (the filter's ua, va): its cooked cell's ray to that
@@ -109,6 +119,18 @@ void tally(uint slot, bool v) {
 
 float lum(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 
+// A cell's light, samples and variance as the blend reads them: assembled (uHit.y), else its own.
+// The blend's lean on the parent, and the share of the assembly's weight that was the cell's own surface (the readout's
+// view 35).
+float leanShare = 0.0, ownShare = 1.0;
+vec4 stateLight(uint t) { return u.uHit.y > 0.5 ? rtgiAssembled[2u * t] : rtgiResolved[2u * t]; }
+float stateHeld(uint t) { return u.uHit.y > 0.5 ? rtgiAssembled[2u * t + 1u].x : rtgiResolved[2u * t + 1u].y; }
+float stateVar(uint t) {
+    if (u.uHit.y > 0.5) return rtgiAssembled[2u * t + 1u].y;
+    vec4 mt = rtgiMoments[3u * t];
+    return max(mt.y - mt.x * mt.x, 0.0);
+}
+
 void main() {
     uint i = gl_GlobalInvocationID.x;
     if (i >= min(dirtyCount, uint(u.uFilter.w))) return;
@@ -116,6 +138,89 @@ void main() {
     if (rtgiKeys[s] == 0u) return;
     vec4 r0 = rtgiResolved[2u * s];
     float held = rtgiResolved[2u * s + 1u].y;
+    vec4 m = rtgiMoments[3u * s];
+    float varSelf = max(m.y - m.x * m.x, 0.0);
+    ivec4 cell = rtgiCells[s];
+    uint level = (uint(cell.w) & 0xFFu) / 6u, side = (uint(cell.w) & 0xFFu) % 6u;
+    // Its neighbours, parent and children found by its surface piece (rtgi_cook.glsl's cookPieceAt, from the piece's
+    // centroid; its region, bits 8 up, the piece of its cube it is): never across a thin wall, nor onto a face a gap in
+    // front of it. Keyed by its region number at every level, a parent was looked up under its child's region -- a
+    // panel's face leaned on the cell of the face across its 8 cm gap, or on none (the readout's views 12 and 13, the
+    // user, the crevices testbed, 2026-10-31).
+    uint ownRegion = uint(cell.w) >> 8;
+    uint ownCooked = cookFind(cell.xyz, level, side);
+    uint ownPiece = COOK_NONE, ownIndex = 0u;
+    rtgiRegionP = (vec3(cell.xyz) + 0.5) * rtgiSize(level, u.uParams) + rtgiOrigin(side);
+    if (ownCooked != COOK_NONE) {
+        uvec4 head = COOK_PIECES(ownCooked);
+        uint k = ownRegion > 0u ? ownRegion - 1u : 0u;
+        if (k < head.y) { ownPiece = head.x + 2u * k; ownIndex = k; rtgiRegionP = uintBitsToFloat(COOK_PIECES(ownPiece).xyz); }
+    }
+    // Assembled (uHit.y): the cell's light its own surface's (its own points', the resolve's mean) and its children's
+    // (the cells a level down within it, as each was assembled), each by the area it covers (the cook's) -- the cell's
+    // area mean, whichever of them trained lately. Trained by every sample below it, a coarse cell held the mean of the
+    // children that trained: the screen's, the unsure ones' -- placement spends on the open cells, the settled stop --
+    // its light sliding toward a crease's and staying (a wall's coarse cell 20% darker with the camera still, the
+    // readout's view 33, the user, the crevices testbed, 2026-10-31). A child not trained yet is left out until it is
+    // (step 2 trains them all). Its record's words (direction, near, far, hit distance, samples) assembled alike: the
+    // readout, the hits and the level blend read them. Before the turns below: every listed cell's, every frame.
+    if (u.uHit.y > 0.5) {
+        vec4 dir = rtgiDirection[s];
+        float far = rtgiMoments[3u * s + 2u].w, hitInv = rtgiHitInv[s];
+        uvec4 rec1 = rtgiRecord[2u * s + 1u];
+        float epoch = unpackHalf2x16(rec1.z).y;
+        // Not a cooked cell's piece (dynamic geometry, a cell the cook did not make): its own light alone.
+        if (level > 0u && ownPiece != COOK_NONE) {
+            float wOwn = held >= 0.5 ? uintBitsToFloat(COOK_PIECES(ownPiece + 1u).x) : 0.0;
+            vec4 sumL = r0 * wOwn, sumD = dir * wOwn;
+            float sumW = wOwn, sumH = held, sumV = varSelf * wOwn, sumF = far * wOwn, sumI = hitInv * wOwn;
+            for (uint k = 0u; k < 8u; k++) {
+                ivec3 cc = cell.xyz * 2 + ivec3(int(k & 1u), int((k >> 1) & 1u), int(k >> 2));
+                // Only the cooked children's pieces that are of this cell's piece (their parent links), by their whole
+                // area: a cache cell a level down the cook did not make (trained there by a
+                // point a level up, rtgi_train.comp's finer cell) is no part of this cell's surface -- weighed 1 against
+                // areas of a few hundredths of a m2, they made most of a flat panel's light, its blotches (the readout's
+                // view 35, the user, the crevices testbed, 2026-10-31).
+                uint cj = cookFind(cc, level - 1u, side);
+                if (cj == COOK_NONE) continue;
+                uvec4 ch = COOK_PIECES(cj);
+                for (uint kk = 0u; kk < ch.y; kk++) {
+                    // Of this cell's piece: its parent link (the cook's) this cell's piece's index.
+                    uvec4 cw = COOK_PIECES(ch.x + 2u * kk + 1u);
+                    if (cw.z != ownIndex) continue;
+                    float wa = uintBitsToFloat(cw.y);
+                    uint t = rtgiFind(rtgiCellHashR(cc, level - 1u, side, ch.y > 1u ? kk + 1u : 0u, u.uParams), u.uParams);
+                    if (t == 0xFFFFFFFFu) continue;
+                    vec4 at1 = rtgiAssembled[2u * t + 1u];
+                    if (at1.x < 0.5) continue;
+                    if (!(wa > 0.0)) continue;
+                    uvec4 c1 = rtgiRecord[2u * t + 1u];
+                    vec2 dxy = unpackHalf2x16(c1.x), dzn = unpackHalf2x16(c1.y), fe = unpackHalf2x16(c1.z);
+                    sumL += rtgiAssembled[2u * t] * wa;
+                    sumD += vec4(dxy, dzn) * wa;
+                    sumW += wa;
+                    sumH += at1.x;
+                    sumV += at1.y * wa;
+                    sumF += fe.x * wa;
+                    sumI += at1.z * wa;
+                    if (held < 0.5) epoch = fe.y;
+                }
+            }
+            if (sumW > 0.0) {
+                ownShare = wOwn / sumW;
+                r0 = sumL / sumW;
+                dir = sumD / sumW;
+                far = sumF / sumW;
+                hitInv = sumI / sumW;
+                varSelf = sumV / sumW;
+                held = sumH;
+            }
+        }
+        rtgiAssembled[2u * s] = r0;
+        rtgiAssembled[2u * s + 1u] = vec4(held, varSelf, hitInv, 0.0);
+        rtgiRecord[2u * s].w = floatBitsToUint(hitInv);
+        rtgiRecord[2u * s + 1u] = uvec4(packHalf2x16(dir.xy), packHalf2x16(dir.zw), packHalf2x16(vec2(far, epoch)), floatBitsToUint(held));
+    }
     tally(18u, true);
     bool skip = (u.uRota.y > 1.5 && held >= u.uRota.x && (s + uint(u.uDone.x)) % uint(u.uRota.y) != 0u)
              || (u.uRota.z > 1.5 && held >= 8.0 && held < u.uRota.x && (s + uint(u.uDone.x)) % uint(u.uRota.z) != 0u);
@@ -130,13 +235,9 @@ void main() {
     if (u.uRota.y > 1.5 && held >= u.uRota.x && (s + uint(u.uDone.x)) % uint(u.uRota.y) != 0u) return;
     // Under 8 samples every frame: a slot's blend is what its last occupant left until it is blended (eviction clears it not).
     if (u.uRota.z > 1.5 && held >= 8.0 && held < u.uRota.x && (s + uint(u.uDone.x)) % uint(u.uRota.z) != 0u) return;
-    ivec4 cell = rtgiCells[s];
-    uint level = (uint(cell.w) & 0xFFu) / 6u, side = (uint(cell.w) & 0xFFu) % 6u;
-    // Its neighbours and parents found in its own region (rtgi_cache.glsl's rtgiRegion): never across a thin wall.
-    rtgiRegion = uint(cell.w) >> 8;
-    // The cell's own spread: its samples' variance (the moments, over the fast window) over what it holds.
-    vec4 m = rtgiMoments[3u * s];
-    float sigma = sqrt(max(m.y - m.x * m.x, 0.0) / max(held, 1.0));
+    // The cell's own spread: its samples' variance (the moments, over the fast window; assembled, its parts') over what
+    // it holds.
+    float sigma = sqrt(varSelf / max(held, 1.0));
     float l0 = lum(r0.rgb);
     // At least uParent.z however many it holds: cells each converged on their own read a few percent apart, cloudy
     // blotches on a smooth wall (Cornell, the user, 2026-10-26); the luminance stop keeps real edges.
@@ -147,7 +248,6 @@ void main() {
     float wSum = wSelf;
     // The pooled spread (when is it done): the samples' variance over the cell and its neighbours alike in light, by the
     // same stop, each by its samples to 64 -- nine cells' samples, so a rare bright one is seldom missing from them all.
-    float varSelf = max(m.y - m.x * m.x, 0.0);
     float poolVar = varSelf * wSelf, poolW = wSelf;
     {
         if (u.uReach.x > 0.5) reachOwn = cookFind(cell.xyz, level, side);
@@ -165,15 +265,15 @@ void main() {
                 if (!reachable(cell.xyz, level, side, ua * a + va * b)) continue;
                 uint t = rtgiFind(rtgiCellHash(cell.xyz + ua * a + va * b, level, side, u.uParams), u.uParams);
                 if (t == 0xFFFFFFFFu) continue;
-                vec4 r1 = rtgiResolved[2u * t + 1u];
-                if (r1.y < 0.5) continue;
-                vec4 rn = rtgiResolved[2u * t];
-                vec4 mn = rtgiMoments[3u * t];
+                float heldN = stateHeld(t);
+                if (heldN < 0.5) continue;
+                vec4 rn = stateLight(t);
+                float varN = stateVar(t);
                 float ln = lum(rn.rgb);
-                float sigmaN2 = max(mn.y - mn.x * mn.x, 0.0) / max(r1.y, 1.0);
+                float sigmaN2 = varN / max(heldN, 1.0);
                 float d = (ln - l0) / (u.uFilter.z * sqrt(sigma * sigma + sigmaN2) + 0.1 * max(l0, ln) + 1e-5);
-                float pw = min(r1.y, 64.0) * ((a == 0 || b == 0) ? 1.0 : 0.7) * (max(abs(a), abs(b)) == 2 ? u.uReach.z : 1.0) * exp(-0.5 * d * d);
-                poolVar += max(mn.y - mn.x * mn.x, 0.0) * pw;
+                float pw = min(heldN, 64.0) * ((a == 0 || b == 0) ? 1.0 : 0.7) * (max(abs(a), abs(b)) == 2 ? u.uReach.z : 1.0) * exp(-0.5 * d * d);
+                poolVar += varN * pw;
                 poolW += pw;
                 float w = share * pw;
                 sum += rn * w;
@@ -186,10 +286,17 @@ void main() {
     float stands = held + (wSum - wSelf);
     float standsAll = stands;
     if (u.uParent.x > 0.0 && level < uint(u.uParent.y)) {
-        uint t = rtgiFind(rtgiCellHash(cell.xyz >> 1, level + 1u, side, u.uParams), u.uParams);
-        if (t != 0xFFFFFFFFu && rtgiResolved[2u * t + 1u].y >= 0.5) {
-            vec4 parent = u.uFilter2.x > 0.5 ? rtgiFiltered[t] : rtgiResolved[2u * t];
-            float heldP = rtgiResolved[2u * t + 1u].y;
+        // The parent: its piece this cell's piece's parent link (the cook's), else found from the centroid.
+        uint t;
+        if (ownPiece != COOK_NONE && COOK_PIECES(ownPiece + 1u).z != 0xFFFFu) {
+            uint pj = cookFind(cell.xyz >> 1, level + 1u, side);
+            uint pk = COOK_PIECES(ownPiece + 1u).z;
+            uint pr = pj != COOK_NONE && COOK_PIECES(pj).y > 1u ? pk + 1u : 0u;
+            t = rtgiFind(rtgiCellHashR(cell.xyz >> 1, level + 1u, side, pr, u.uParams), u.uParams);
+        } else t = rtgiFind(rtgiCellHash(cell.xyz >> 1, level + 1u, side, u.uParams), u.uParams);
+        if (t != 0xFFFFFFFFu && stateHeld(t) >= 0.5) {
+            vec4 parent = u.uFilter2.x > 0.5 ? rtgiFiltered[t] : stateLight(t);
+            float heldP = stateHeld(t);
             float standsP = u.uParent2.y > 0.5 ? max(rtgiStands[t], heldP) : heldP;
             // The parent level's light at the cell's centre: bilinear over its cells in the side's plane (the cell's
             // centre sits a quarter or three quarters across its parent), each by what it holds. The containing parent's
@@ -213,10 +320,10 @@ void main() {
                     int du = k & 1, dv = k >> 1;
                     uint q = rtgiFind(rtgiCellHash(base + ua * (pu + du) + va * (pv + dv), level + 1u, side, u.uParams), u.uParams);
                     if (q == 0xFFFFFFFFu) continue;
-                    float hq = rtgiResolved[2u * q + 1u].y;
+                    float hq = stateHeld(q);
                     if (hq < 0.5) continue;
                     float wq = (du == 1 ? tu : 1.0 - tu) * (dv == 1 ? tv : 1.0 - tv) * clamp(hq / 32.0, 1.0 / 32.0, 1.0);
-                    sum4 += (u.uFilter2.x > 0.5 ? rtgiFiltered[q] : rtgiResolved[2u * q]) * wq;
+                    sum4 += (u.uFilter2.x > 0.5 ? rtgiFiltered[q] : stateLight(q)) * wq;
                     standsSum4 += (u.uParent2.y > 0.5 ? max(rtgiStands[q], hq) : hq) * wq;
                     wSum4 += wq;
                 }
@@ -231,8 +338,7 @@ void main() {
             // wall each level up holds ~4x the samples.
             float wp = u.uParent.x;
             if (u.uFilter2.y > 0.0) {
-                vec4 mp = rtgiMoments[3u * t];
-                float seP2 = max(mp.y - mp.x * mp.x, 0.0) / max(standsP, 1.0);
+                float seP2 = stateVar(t) / max(standsP, 1.0);
                 float seB2 = sigma * sigma * held / max(stands, 1.0);
                 float lb = lum(blended.rgb), lp = lum(parent.rgb);
                 if (u.uParent2.z > 0.5) {
@@ -262,10 +368,13 @@ void main() {
                     wp += min(standsP, u.uFilter2.w) * exp(-0.5 * dp * dp);
                 }
             }
+            leanShare = wp / (stands + wp);
             blended = (blended * stands + parent * wp) / (stands + wp);
             standsAll = stands + wp;
         }
     }
+    // The readout's views 34, 35: the share of the shown light the parent gave, and the parent over the neighbours' blend.
+    if (u.uHit.y > 0.5) rtgiAssembled[2u * s + 1u].w = uintBitsToFloat(packHalf2x16(vec2(leanShare, ownShare)));
     bool showBlend = u.uParent.w > 0.5;
     vec4 shown = showBlend ? blended : r0;
     rtgiFiltered[s] = shown;

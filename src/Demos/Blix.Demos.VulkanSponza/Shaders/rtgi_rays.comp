@@ -79,13 +79,13 @@ layout(std430, set = 0, binding = 14) readonly buffer RtgiConfidence { vec4 rtgi
 // points are where a visible point's cell trains from.
 layout(std430, set = 0, binding = 23) readonly buffer RtgiCookTable { uvec2 cookTable[]; };
 layout(std430, set = 0, binding = 24) readonly buffer RtgiCookPoints { vec4 cookPoints[]; };
-layout(std430, set = 0, binding = 25) readonly buffer RtgiCookRegions { uint cookRegions[]; };
+layout(std430, set = 0, binding = 25) readonly buffer RtgiCookPieces { uvec4 cookPieces[]; };
 layout(std430, set = 0, binding = 26) readonly buffer RtgiCookScale { uvec2 cookScale[]; };
 #define COOK_PARAMS u.uCook
 #define COOK_COUNTS u.uCookCounts
 #define COOK_TABLE(i) cookTable[i]
 #define COOK_POINTS(i) cookPoints[i]
-#define COOK_REGIONS(i) cookRegions[i]
+#define COOK_PIECES(i) cookPieces[i]
 #define COOK_SCALE(i) cookScale[i]
 // The cooked cells' training points and each cell's turn through them (rtgi_cook.glsl's COOK_CELL_POINTS).
 layout(std430, set = 0, binding = 29) buffer RtgiCookCellPoints { uvec2 cookCellPoints[]; };
@@ -100,12 +100,18 @@ layout(std430, set = 0, binding = 29) buffer RtgiCookCellPoints { uvec2 cookCell
 // over its points' turns the cell's mean is its surface's mean, the same whatever the camera sees of it. Trained from what
 // the screen showed of it, a crevice's cell held the average of whatever part the camera saw: its light moved with the
 // view, and a corner leaked from some places and not others (the user, the crevices testbed, 2026-10-29); trained from one
-// cooked point, a big cell held that spot's light (the user, 2026-10-31). Only points of the pixel's region at that level
-// (rtgi_cook.comp's pieces: a cache cell keyed by a piece is trained over that piece) -- the turn goes on past the
-// others. None (not cooked, buried, no point of its piece, --rtgi-no-surface-train): the pixel's own point.
+// cooked point, a big cell held that spot's light (the user, 2026-10-31). Only points on the pixel's piece of the
+// cube (rtgi_cook.glsl's cookPieceAt: a cache cell keyed by a piece is trained over that piece) -- the turn goes on past
+// the others. None (not cooked, buried, no point of its piece, --rtgi-no-surface-train): the pixel's own point.
 // The training point's slot in COOK_CELL_POINTS (its tally kept by rtgi_train.comp, which drops its back-face samples),
 // COOK_NONE the pixel's own point or a cell's representative.
 uint cookedSource = COOK_NONE;
+// The cache level of the cell a point was moved onto the cooked points of (surfacePoint), 0xF none: trained at that level,
+// not at the level the size table names at the cooked point. A cell's points spread over its surface piece, some in a
+// cube the table sizes finer (or coarser): there they trained another level's cell, the cell the pixel reads went
+// untrained but for raw landings -- magenta (none) once landings moved onto cooked points too, blocky steps on the panels
+// before (the user, the crevices testbed, 2026-10-31).
+uint cookedLevel = 0xFu;
 bool cookTrainPoint(uint j, uint lv, uint side, uint want, out vec3 q) {
     uint count = cookPointCount(j);
     q = COOK_POINTS(2u * j).xyz;
@@ -116,10 +122,7 @@ bool cookTrainPoint(uint j, uint lv, uint side, uint want, out vec3 q) {
         // A point whose samples kept meeting back faces (rtgi_train.comp): out of the turn for good.
         if (cookPointDead(j, k)) continue;
         vec3 c = cookPointAt(j, k);
-        if (lv < NEAR_LEVELS) {
-            uint at = nearRegion(c, side);
-            if ((at != 0u ? COOK_REGIONS((at - 1u) * NEAR_LEVELS + lv) : 0u) != want) continue;
-        }
+        if (cookPieceAt(cookCoords(c, side, lv), lv, side, c) != want) continue;
         q = c;
         cookedSource = cookPointSlot(j, k);
         return true;
@@ -132,24 +135,21 @@ bool surfacePoint(inout vec3 p, inout vec3 n) {
     uint lv = rtgiLevel(p, side, u.uCamera.xyz, u.uParams);
     uint j = cookCellAt(p, side, lv);
     if (j == COOK_NONE) return false;
-    uint want = 0u;
-    if (lv < NEAR_LEVELS) {
-        uint own = nearRegion(p, side);
-        want = own != 0u ? COOK_REGIONS((own - 1u) * NEAR_LEVELS + lv) : 0u;
-    }
+    uint want = cookPieceAt(cookCoords(p, side, lv), lv, side, p);
     vec3 q;
     if (!cookTrainPoint(j, lv, side, want, q)) return false;
     p = q;
     n = COOK_POINTS(2u * j + 1u).xyz;
+    cookedLevel = lv;
     return true;
 }
 
 void captureCell(vec3 p, vec3 n, uint at) {
     uint side = rtgiSide(n);
-    rtgiRegion = nearRegion(p, side);
+    rtgiKeyAt(p, side);
     uint lv = rtgiLevel(p, rtgiSide(n), u.uCamera.xyz, u.uParams);
     uint sc = rtgiFind(rtgiCellHash(ivec3(floor((p - rtgiOrigin(side)) / rtgiSize(lv, u.uParams))), lv, side, u.uParams), u.uParams);
-    captureOut[at] = vec4(p, float(rtgiRegionFor(lv)));
+    captureOut[at] = vec4(p, float(rtgiRegionFor(ivec3(floor((p - rtgiOrigin(side)) / rtgiSize(lv, u.uParams))), lv, side)));
     captureOut[at + 1u] = vec4(n, float(lv));
     captureOut[at + 2u] = sc != 0xFFFFFFFFu ? vec4(rtgiResolved[2u * sc].rgb, rtgiResolved[2u * sc + 1u].y) : vec4(-1.0);
 }
@@ -379,8 +379,14 @@ void main() {
             n = normalize(n);
             if (dot(n, d.xyz) > 0.0) n = -n;
         }
+        // A landing (and a request, a landing in an untrained cell) names the cell to train, not where in it: moved onto
+        // its cell's cooked points as a visible point is (surfacePoint). Trained at the landings themselves, a cell held
+        // the mean of wherever the rays from the cells on screen happened to land in it -- a dead end's floor cell, lit
+        // from the wall in view, its landings bunched toward that wall's crease: its light moved with the camera, mostly
+        // darker as it moved (the readout's view 32, the user, the crevices testbed, 2026-10-31).
+        if (cookedSource == COOK_NONE) surfacePoint(p, n);
     }
-    rtgiRegion = nearRegion(p, rtgiSide(n));
+    rtgiKeyAt(p, rtgiSide(n));
     float lift = 0.01 + 0.001 * length(p - u.uCamera.xyz);
     vec3 o = p + n * lift;
     uint h2 = hash(h);
@@ -438,10 +444,11 @@ void main() {
     vec3 b = cross(n, t);
     vec3 d = normalize(t * (cos(phi) * s) + b * (sin(phi) * s) + n * sqrt(max(0.0, 1.0 - r2)));
     points[2u * i] = vec4(p, skipSun ? 2.0 : 1.0);
-    // w: the ray's weight against cosine sampling, 1 (rtgi_train.comp scales its sample by it).
     // w: the ray's weight against cosine sampling, 1 -- or a cooked training point's slot (bits 30-31 10: rtgi_train.comp
     // tallies its back-face samples and drops them), its weight 1.
-    points[2u * i + 1u] = vec4(n, cookedSource != COOK_NONE ? uintBitsToFloat(0x80000000u | cookedSource) : 1.0);
+    // Bits 26-29 the level it trains (cookedLevel + 1; 0 the table's at the point).
+    points[2u * i + 1u] = vec4(n, cookedSource != COOK_NONE
+        ? uintBitsToFloat(0x80000000u | (cookedLevel < 15u ? (cookedLevel + 1u) << 26 : 0u) | cookedSource) : 1.0);
     rays[2u * i] = vec4(o, 0.0);
     rays[2u * i + 1u] = vec4(d, u.uCounts.w);
     origins[i] = vec4(o, dot(n, u.uSun.xyz) > 0.0 && !skipSun ? u.uCounts.w : 0.0);

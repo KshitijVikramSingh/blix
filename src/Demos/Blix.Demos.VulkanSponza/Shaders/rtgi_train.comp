@@ -49,7 +49,7 @@ layout(set = 0, binding = 0) uniform RtgiTrain {
     vec4 uCookTrain;     // a cooked training point's samples (rtgi_rays.comp's cookedSource): x 1 its back-face samples dropped
                          // and tallied, the point dropped from its cell's turn past z of w (cookTally); y 1 the probe's
                          // lifetime counts (RtgiCookProbe); z the back-face samples a window of w allows; w the window
-    vec4 uCookTrain2;    // x the placements (RtgiCookSided's)
+    vec4 uCookTrain2;    // x the placements (RtgiCookSided's); y 1: the levels above a sample's own assembled, not trained
 } u;
 bool twice(uint b) { return (uint(u.uDouble.x) & b) != 0u; }
 // How a sample's words reach its cell (uFallback.w): 0 each lane's atomics, 1 the subgroup's rounds, 2 the workgroup's table.
@@ -102,13 +102,13 @@ void sink(bool never) { if (never) atomicAdd(rtgiStats[63], 1u); }
 // regions key them (rtgiRegion).
 layout(std430, set = 0, binding = 24) readonly buffer RtgiCookTable { uvec2 cookTable[]; };
 layout(std430, set = 0, binding = 25) readonly buffer RtgiCookPoints { vec4 cookPoints[]; };
-layout(std430, set = 0, binding = 26) readonly buffer RtgiCookRegions { uint cookRegions[]; };
+layout(std430, set = 0, binding = 26) readonly buffer RtgiCookPieces { uvec4 cookPieces[]; };
 layout(std430, set = 0, binding = 27) readonly buffer RtgiCookScale { uvec2 cookScale[]; };
 #define COOK_PARAMS u.uCook
 #define COOK_COUNTS u.uCookCounts
 #define COOK_TABLE(i) cookTable[i]
 #define COOK_POINTS(i) cookPoints[i]
-#define COOK_REGIONS(i) cookRegions[i]
+#define COOK_PIECES(i) cookPieces[i]
 #define COOK_SCALE(i) cookScale[i]
 // The cooked training points' tallies (rtgi_cook.glsl's COOK_CELL_POINTS), the triangles' alpha-tested bits (rtgi_cook.comp's
 // RtgiCookSided: a leaf's back face is a front), and the probe's lifetime counts per point (BLIX_RTGI_NEAR_PROBE: samples,
@@ -127,10 +127,13 @@ uint rtgiInsertHashed(uvec2 h, ivec4 cell);
 uint rtgiInsertAt(vec3 p, vec3 n, uint level) {
     ivec3 c = ivec3(floor((p - rtgiOrigin(rtgiSide(n))) / rtgiSize(level, u.uParams)));
     uint side = rtgiSide(n);
-    rtgiRegion = nearRegion(p, side);
-    uvec2 h = rtgiCellHash(c, level, side, u.uParams);
+    rtgiKeyAt(p, side);
+    uint region = rtgiRegionFor(c, level, side);
+    uvec2 h = rtgiCellHashR(c, level, side, region, u.uParams);
     if (twice(512u)) return h.x & uint(u.uParams.z);
-    return rtgiInsertHashed(h, ivec4(c, int((level * 6u + side) | (rtgiRegionFor(level) << 8))));
+    // Its region (its cube's surface piece, rtgi_cook.glsl's cookPieceAt) in bits 8 up: the filter keys its neighbours,
+    // parent and children from the piece's centroid (rtgi_filter.comp).
+    return rtgiInsertHashed(h, ivec4(c, int((level * 6u + side) | (region << 8))));
 }
 
 // Cell (its coordinates, level * 6 + side) of hash h found or made.
@@ -153,7 +156,7 @@ uint rtgiInsertHashed(uvec2 h, ivec4 cell) {
 }
 
 uvec2 cellAt(vec3 p, vec3 n, uint level) {
-    rtgiRegion = nearRegion(p, rtgiSide(n));
+    rtgiKeyAt(p, rtgiSide(n));
     return rtgiCellHash(ivec3(floor((p - rtgiOrigin(rtgiSide(n))) / rtgiSize(level, u.uParams))), level, rtgiSide(n), u.uParams);
 }
 
@@ -202,7 +205,9 @@ vec4 irradianceAt(vec3 q, vec3 nq, out bool fine, float sunAt) {
         // Two levels up, then (uFallback.x) further: the first holding any light.
         for (uint k = 2u; k <= 2u + uint(u.uFallback.x); k++) {
             uint s = rtgiFind(cellAt(q, nq, min(level + k, uint(u.uParams.w))), u.uParams);
-            if (s != 0xFFFFFFFFu && rtgiResolved[2u * s + 1u].y >= 0.5) { r0 = rtgiFiltered[s]; r1 = rtgiResolved[2u * s + 1u]; keepAlive(s); break; }
+            // Held by the record (an assembled cell's own samples may be none; rtgi_filter.comp).
+            float hk = s != 0xFFFFFFFFu ? uintBitsToFloat(rtgiRecord[2u * s + 1u].w) : 0.0;
+            if (hk >= 0.5) { r0 = rtgiFiltered[s]; r1 = vec4(rtgiResolved[2u * s + 1u].x, hk, 0.0, 0.0); keepAlive(s); break; }
         }
     }
     // No probes here: a landing given the (since removed) world volume's light trained it into the cell for good -- the
@@ -213,6 +218,8 @@ vec4 irradianceAt(vec3 q, vec3 nq, out bool fine, float sunAt) {
 }
 
 vec4 dither;
+// The level a cooked point trains + 1 (rtgi_rays.comp: bits 26-29 of its normal's w), 0 the size table's at the point.
+uint cookedLevel = 0u;
 vec3 sampleDir;
 float captureFlags; // --rtgi-capture: 8 its hit a back face (read dark), 16 its hit's cell held no light
 float nearWord;   // this sample's near visibility, weighted (256ths): it left past the contact radius
@@ -463,7 +470,8 @@ bool pointSample(uint i, out vec4 p, out vec3 n, out vec3 e, out bool counted, o
     // The ray's weight against cosine sampling (rtgi_rays.comp: 1, its rays cosine). Its sample is PI x L_in x it.
     uint wb = floatBitsToUint(points[2u * i + 1u].w);
     bool cooked = (wb & 0xC0000000u) == 0x80000000u;
-    uint cookedSlot = wb & 0x3FFFFFFFu;
+    uint cookedSlot = wb & 0x03FFFFFFu;
+    cookedLevel = cooked ? (wb >> 26) & 15u : 0u;
     float weight = cooked ? 1.0 : uintBitsToFloat(wb);
     captureHit = vec4(rays[2u * i].xyz + d * 1e4, weight);
     captureHitN = vec4(0.0, 0.0, 0.0, 1e30);
@@ -552,7 +560,8 @@ void main() {
     }
     tally(1u, live);
     if (!table && !live) return;
-    uint level = live ? rtgiLevel(p.xyz, rtgiSide(n), u.uCamera.xyz, u.uParams) : 0u;
+    // A cooked point trains the level of the cell it was chosen for (rtgi_rays.comp's cookedLevel), not the table's at it.
+    uint level = !live ? 0u : cookedLevel > 0u ? cookedLevel - 1u : rtgiLevel(p.xyz, rtgiSide(n), u.uCamera.xyz, u.uParams);
     // Its level and uNearField.w - 1 above (3: the next, which the readout blends in, and two up, the fallback; more feed
     // the blend's cascade further up, rtgi_filter.comp).
     uint top = uint(u.uParams.w);
@@ -586,6 +595,13 @@ void main() {
         // Finding the levels above once a workgroup instead (the table keyed by the cell's hash, the flush's thread
         // finding it) moved each find in front of that cell's atomics: 3.36 -> 3.31 ms, nothing (the bench, 2026-10-27).
         uint slot = here ? rtgiInsertAt(p.xyz, n, level + k) : RTGI_EMPTY;
-        add(slot, e, counted, sky, sunTraced, sunLit, k < 3u);
+        // Assembled (uCookTrain2.y): the levels above only touched -- made and listed, no sample -- their light put
+        // together from their own surface's and their children's by area (rtgi_filter.comp). Trained by every sample
+        // below them, a coarse cell held the mean of whichever of its children trained: the screen's, the unsure
+        // ones' -- placement spends on the open cells, the settled stop -- its light sliding toward a crease's and
+        // staying (a wall's coarse cell 20% darker with the camera still, the readout's view 33, the user, the
+        // crevices testbed, 2026-10-31).
+        if (k > 0u && u.uCookTrain2.y > 0.5) add(slot, e, false, false, false, false, false);
+        else add(slot, e, counted, sky, sunTraced, sunLit, k < 3u);
     }
 }

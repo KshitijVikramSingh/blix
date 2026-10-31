@@ -34,6 +34,8 @@ layout(std430, set = 0, binding = 8) readonly buffer RtgiCells { ivec4 rtgiCells
 // holding 8 samples or more.
 // Per slot: its direction sequence's counter, the top bit its sun settled (rtgi_resolve.comp): cleared with the cell.
 layout(std430, set = 0, binding = 12) buffer RtgiSeq { uint rtgiSeq[]; };
+// rtgi_filter.comp's assembled light: emptied with the slot (a neighbour reads it before the next occupant is blended).
+layout(std430, set = 0, binding = 13) buffer RtgiAssembled { vec4 rtgiAssembled[]; };
 layout(std430, set = 0, binding = 9) buffer RtgiStats { uint rtgiStats[64]; };
 
 void main() {
@@ -59,6 +61,8 @@ void main() {
     rtgiStamps[s] = uvec2(0u);
     rtgiDirection[s] = vec4(0.0);
     rtgiConfidence[s] = vec4(0.0);
+    rtgiAssembled[2u * s] = vec4(0.0);
+    rtgiAssembled[2u * s + 1u] = vec4(0.0);
     rtgiRecord[2u * s] = uvec4(0u);
     rtgiRecord[2u * s + 1u] = uvec4(0u);
 }

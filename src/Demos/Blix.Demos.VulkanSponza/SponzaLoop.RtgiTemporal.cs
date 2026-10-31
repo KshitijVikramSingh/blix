@@ -149,7 +149,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiRecord", rtgiRecord),
                 new ShaderBufferBinding("RtgiCookTable", CookTableOrDummy),
                 new ShaderBufferBinding("RtgiCookPoints", CookPointsOrDummy),
-                new ShaderBufferBinding("RtgiCookRegions", CookRegionsOrDummy),
+                new ShaderBufferBinding("RtgiCookPieces", CookPiecesOrDummy),
                 new ShaderBufferBinding("RtgiCookScale", CookScaleOrDummy),
                 new ShaderBufferBinding("RtgiNearLight", NearLightOrDummy),
             }));

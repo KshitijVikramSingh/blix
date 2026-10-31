@@ -485,6 +485,235 @@ public static class Program
         return 0;
     }
 
+    /// <summary>
+    /// Crytek Sponza's architecture, flat and plain: an atrium open to the sky, 24.6 m by 6 m and 12.5 m tall, its two long
+    /// sides two storeys of round arches on square piers -- a ground arcade (springing at 4 m) with a roofed aisle behind
+    /// it, a gallery arcade above (springing 3 m over its floor) with a roofed gallery behind; the east end closed, the west end
+    /// a tall arched doorway into a dark vestibule. Everything one grey (--albedo, 0.73), untextured, as the crevices are:
+    /// the GI across curved soffits, stacked storeys, deep aisles lit only through the arches, without Sponza's textures.
+    /// </summary>
+    [BlixApp("arches", Summary = "write a plain two-storey arcaded atrium (Crytek Sponza's layout, untextured), as glTF: arches, storeys, aisles")]
+    public static int Arches(AppArgs args)
+    {
+        var output = args.String("out") ?? "arches.gltf";
+        var grey = args.Float("albedo") ?? 0.73f;
+        if (grey <= 0f || grey >= 1f) throw new AppArgsException("--albedo must lie between 0 and 1.");
+        // --segments N: the arches' segments (a half circle in N; 16 by default).
+        var segments = Math.Clamp(args.Int("segments") ?? 16, 4, 64);
+        // --plain: the arcades alone, none of the adversarial pieces (curtains, parapets, partition, vault, columns, steps,
+        // closet, planter, red wall).
+        var plain = args.Flag("plain");
+        var mesh = new Mesh("arches");
+        var p = mesh.UsePrimitive(Matte("white", new Vector3(grey)));
+        const float half = 12.3f;                    // the hall's half length: 6 bays of 3.4 m, 7 piers of 0.6 m
+        const float court = 3f, aisle = 6.6f, wall = 0.5f;
+        const float slab = 0.3f, groundTop = 6.5f, galleryTop = 12.2f;
+        // The bays' openings along x: a pier, then a bay, six times, then the last pier.
+        var bays = Enumerable.Range(0, 6).Select(k => (-half + 0.6f + 4f * k, -half + 4f * (k + 1))).ToArray();
+        Vector3 AlongX(Vector3 l) => l;                                  // (u, y, w) = (x, y, z)
+        Vector3 AlongZ(Vector3 l) => new(l.Z, l.Y, l.X);                 // (u, y, w) = (z, y, x)
+
+        // The floor, under the hall, the aisles and the vestibule.
+        Box(p, new Vector3(-half - 4.9f, -0.3f, -aisle - wall), new Vector3(half + wall, 0f, aisle + wall));
+        foreach (var s in new[] { 1f, -1f })
+        {
+            // The ground arcade (0.6 m thick) and its aisle's ceiling, the gallery's floor.
+            Arcade(p, AlongX, -half, half, court * s, (court + 0.6f) * s, bays, 0f, 4f, groundTop, segments);
+            Box(p, new Vector3(-half, groundTop, MathF.Min(court * s, aisle * s)), new Vector3(half, groundTop + slab, MathF.Max(court * s, aisle * s)));
+            // The gallery arcade (0.4 m thick) on it, and the gallery's roof.
+            Arcade(p, AlongX, -half, half, court * s, (court + 0.4f) * s, bays, groundTop + slab, groundTop + slab + 3f, galleryTop, segments);
+            Box(p, new Vector3(-half, galleryTop, MathF.Min(court * s, (aisle + wall) * s)), new Vector3(half, galleryTop + slab, MathF.Max(court * s, (aisle + wall) * s)));
+            // The aisles' back wall, both storeys.
+            Box(p, new Vector3(-half, 0f, MathF.Min(aisle * s, (aisle + wall) * s)), new Vector3(half, galleryTop, MathF.Max(aisle * s, (aisle + wall) * s)));
+        }
+        // The east end, closed.
+        Box(p, new Vector3(half, 0f, -aisle - wall), new Vector3(half + wall, galleryTop + slab, aisle + wall));
+        // The west end: a 4 m arch springing at 4.5 m in the middle, into the vestibule.
+        Arcade(p, AlongZ, -aisle - wall, aisle + wall, -half, -half - wall, new[] { (-2f, 2f) }, 0f, 4.5f, galleryTop + slab, segments);
+        // The vestibule: 4 m deep, 6 m wide, 7.5 m tall (over the arch's 6.5 m crown), roofed, lit only through the arch.
+        Box(p, new Vector3(-half - 4.9f, 0f, 3f), new Vector3(-half - wall, 7.5f, 3.4f));
+        Box(p, new Vector3(-half - 4.9f, 0f, -3.4f), new Vector3(-half - wall, 7.5f, -3f));
+        var red = mesh.UsePrimitive(Matte("red", new Vector3(0.63f, 0.065f, 0.05f)));
+        // Its back wall red (--plain: grey): the colour's bleed onto the vestibule's grey.
+        Box(plain ? p : red, new Vector3(-half - 4.9f, 0f, -3f), new Vector3(-half - 4.5f, 7.5f, 3f));
+        Box(p, new Vector3(-half - 4.9f, 7.5f, -3.4f), new Vector3(-half - wall, 7.8f, 3.4f));
+
+        // The adversarial pieces (--plain: none), each a way the light goes wrong.
+        var curtains = new Mesh("curtains");
+        if (!plain)
+        {
+            var gallery = groundTop + slab;
+            // Parapets, 10 cm thick and 1 m tall, across the gallery's arches (the north one with the curtain left open):
+            // thin walls lit on both sides.
+            foreach (var s in new[] { 1f, -1f })
+                for (var k = 0; k < bays.Length; k++)
+                    if (!(s > 0f && k == 3))
+                        Box(p, new Vector3(bays[k].Item1, gallery, MathF.Min(court * s, (court + 0.1f) * s)), new Vector3(bays[k].Item2, gallery + 1f, MathF.Max(court * s, (court + 0.1f) * s)));
+            // A 2 cm partition across the south aisle at x = 0, a 1 m doorway 2.2 m tall in it: what leaks through a thin
+            // wall against what comes through the door.
+            const float pw = 0.02f;
+            Box(p, new Vector3(0f, 0f, -aisle), new Vector3(pw, groundTop, -5.5f));
+            Box(p, new Vector3(0f, 0f, -4.5f), new Vector3(pw, groundTop, -court - 0.6f));
+            Box(p, new Vector3(0f, 2.2f, -5.5f), new Vector3(pw, groundTop, -4.5f));
+            // A barrel vault over the north aisle, springing at 5 m to the gallery's floor: a curved ceiling lit by bounce
+            // alone.
+            const float vr = 1.5f, vSpring = 5f;
+            var vc = 0.5f * (court + 0.6f + aisle);
+            for (var i = 0; i < segments; i++)
+            {
+                float ta = MathF.PI * i / segments, tb = MathF.PI * (i + 1) / segments, tm = 0.5f * (ta + tb);
+                var a = new Vector3(-half, vSpring + vr * MathF.Sin(ta), vc + vr * MathF.Cos(ta));
+                var b = new Vector3(-half, vSpring + vr * MathF.Sin(tb), vc + vr * MathF.Cos(tb));
+                Quad(p, a, b - a, new Vector3(2f * half, 0f, 0f), -new Vector3(0f, MathF.Sin(tm), MathF.Cos(tm)));
+            }
+            // Round columns in the courtyard, 0.25 m in radius and 4 m tall: curved, and in contact with the floor.
+            foreach (var (cx, cz) in new[] { (4f, 1.8f), (4f, -1.8f), (7f, 1.8f), (7f, -1.8f) })
+                Column(p, new Vector3(cx, 0f, cz), 0.25f, 4f, 24);
+            // Three steps up to a dais at the east end: stacked surfaces facing alike, a step apart.
+            for (var k = 0; k < 3; k++)
+                Box(p, new Vector3(half - 3f + 0.4f * k, 0.2f * k, -court), new Vector3(half, 0.2f * (k + 1), court), bottom: false);
+            // A dark closet at the north aisle's east end, 2 m by 3 m and 2.5 m tall, a slit door 0.3 m wide: lit through a
+            // sliver.
+            Box(p, new Vector3(half - 2f, 0f, court + 0.6f), new Vector3(half - 1.9f, 2.6f, 4.8f));
+            Box(p, new Vector3(half - 2f, 0f, 5.1f), new Vector3(half - 1.9f, 2.6f, aisle));
+            Box(p, new Vector3(half - 2f, 2f, 4.8f), new Vector3(half - 1.9f, 2.6f, 5.1f));
+            Box(p, new Vector3(half - 1.9f, 0f, court + 0.6f), new Vector3(half, 2.6f, court + 0.7f));
+            Box(p, new Vector3(half - 2f, 2.6f, court + 0.6f), new Vector3(half, 2.7f, aisle));
+            // A planter sunk 0.2 m into the floor: geometry through geometry.
+            Box(p, new Vector3(-6f, -0.2f, -0.5f), new Vector3(-5f, 0.6f, 0.5f));
+            // Curtains in two of the south ground arches and one north gallery arch: red, double-sided, translucent cloth
+            // (30% through), folded.
+            var curtainRed = new Vector3(0.6f, 0.12f, 0.1f);
+            var cp = curtains.UsePrimitive(Cloth("curtain", curtainRed, 0.3f, curtainRed / MathF.Max(curtainRed.X, MathF.Max(curtainRed.Y, curtainRed.Z))));
+            Curtain(cp, bays[1].Item1 + 0.1f, bays[1].Item2 - 0.1f, -court - 0.3f, 0.3f, 3.9f);
+            Curtain(cp, bays[2].Item1 + 0.1f, bays[2].Item2 - 0.1f, -court - 0.3f, 0.3f, 3.9f);
+            Curtain(cp, bays[3].Item1 + 0.1f, bays[3].Item2 - 0.1f, court + 0.2f, gallery + 0.3f, gallery + 2.8f);
+        }
+
+        var scene = new SceneBuilder();
+        scene.AddRigidMesh(mesh, Matrix4x4.Identity);
+        if (!plain) scene.AddRigidMesh(curtains, Matrix4x4.Identity);
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!);
+        scene.ToGltf2().SaveGLTF(output);
+        Console.WriteLine($"arches: a {2f * half:0.#} m atrium, two storeys of 6 round arches a side, a vestibule{(plain ? "" : ", curtains, parapets, a partition, a vault, columns, steps, a closet, a planter")}, grey {grey:0.##}, {segments} segments an arch -> {output}");
+        return 0;
+    }
+
+    // A round column standing at `foot`: its side in `segments` faces (smooth normals) and its top.
+    private static void Column(PrimitiveBuilder<MaterialBuilder, VertexPositionNormal, VertexTexture1, VertexEmpty> p, Vector3 foot, float r, float height, int segments)
+    {
+        var top = foot + new Vector3(0f, height, 0f);
+        for (var i = 0; i < segments; i++)
+        {
+            float ta = 2f * MathF.PI * i / segments, tb = 2f * MathF.PI * (i + 1) / segments;
+            var na = new Vector3(MathF.Cos(ta), 0f, MathF.Sin(ta));
+            var nb = new Vector3(MathF.Cos(tb), 0f, MathF.Sin(tb));
+            var a = new Vertex(foot + r * na, na, new Vector2(r * ta, 0f));
+            var b = new Vertex(foot + r * nb, nb, new Vector2(r * tb, 0f));
+            var c = new Vertex(top + r * nb, nb, new Vector2(r * tb, height));
+            var d = new Vertex(top + r * na, na, new Vector2(r * ta, height));
+            // Wound outward: counter-clockwise seen from outside.
+            p.AddTriangle(a, c, b);
+            p.AddTriangle(a, d, c);
+            var t0 = new Vertex(top, Vector3.UnitY, Vector2.Zero);
+            var t1 = new Vertex(top + r * na, Vector3.UnitY, new Vector2(na.X, na.Z) * r);
+            var t2 = new Vertex(top + r * nb, Vector3.UnitY, new Vector2(nb.X, nb.Z) * r);
+            p.AddTriangle(t0, t2, t1);
+        }
+    }
+
+    // A folded curtain across x0..x1 hanging at depth z, from y0 to y1: its folds a sine in z, smooth normals.
+    private static void Curtain(PrimitiveBuilder<MaterialBuilder, VertexPositionNormal, VertexTexture1, VertexEmpty> cp, float x0, float x1, float z, float y0, float y1)
+    {
+        const float period = 0.35f, depth = 0.08f, step = 0.025f;
+        var n = (int)MathF.Round((x1 - x0) / step);
+        for (var i = 0; i < n; i++)
+        {
+            Vertex At(float x, float y)
+            {
+                var k = 2f * MathF.PI / period;
+                var zz = z + 0.5f * depth * MathF.Sin(k * (x - x0));
+                var slope = 0.5f * depth * k * MathF.Cos(k * (x - x0));
+                return new Vertex(new Vector3(x, y, zz), Vector3.Normalize(new Vector3(-slope, 0f, 1f)), new Vector2(x - x0, y));
+            }
+            float xa = x0 + i * (x1 - x0) / n, xb = x0 + (i + 1) * (x1 - x0) / n;
+            var a = At(xa, y0);
+            var b = At(xb, y0);
+            var c = At(xb, y1);
+            var d = At(xa, y1);
+            cp.AddTriangle(a, b, c);
+            cp.AddTriangle(a, c, d);
+        }
+    }
+
+    // A wall of round arches, built in its own frame (u along it, y up, w across it; `map` to the world, a permutation):
+    // from u0 to u1, its faces at w0 (front) and w1 (back), from yBase to top; each opening (a, b) a round arch springing at
+    // `spring`, its half circle in `segments`. Its faces: the piers' fronts and backs, the spandrels over each arch to the
+    // top, the openings' jambs and the arches' soffits, the wall's top and its two ends.
+    private static void Arcade(PrimitiveBuilder<MaterialBuilder, VertexPositionNormal, VertexTexture1, VertexEmpty> p,
+        Func<Vector3, Vector3> map, float u0, float u1, float w0, float w1, (float A, float B)[] openings, float yBase,
+        float spring, float top, int segments)
+    {
+        var frontN = new Vector3(0f, 0f, MathF.Sign(w0 - w1));
+        foreach (var (w, n) in new[] { (w0, frontN), (w1, -frontN) })
+        {
+            // The piers, full height, between the openings; over each opening the spandrel down to the arch.
+            var at = u0;
+            foreach (var (a, b) in openings)
+            {
+                Face(new Vector3(at, yBase, w), new Vector3(a - at, 0f, 0f), new Vector3(0f, top - yBase, 0f), n);
+                var r = 0.5f * (b - a);
+                var c = 0.5f * (a + b);
+                for (var i = 0; i < segments; i++)
+                {
+                    float ta = MathF.PI * i / segments, tb = MathF.PI * (i + 1) / segments;
+                    var pa = new Vector3(c + r * MathF.Cos(ta), spring + r * MathF.Sin(ta), w);
+                    var pb = new Vector3(c + r * MathF.Cos(tb), spring + r * MathF.Sin(tb), w);
+                    Tri(pa, pb, new Vector3(pb.X, top, w), n);
+                    Tri(pa, new Vector3(pb.X, top, w), new Vector3(pa.X, top, w), n);
+                }
+                at = b;
+            }
+            Face(new Vector3(at, yBase, w), new Vector3(u1 - at, 0f, 0f), new Vector3(0f, top - yBase, 0f), n);
+        }
+        var depth = new Vector3(0f, 0f, w1 - w0);
+        foreach (var (a, b) in openings)
+        {
+            // The jambs, up to the springing, facing into the opening; the soffit, facing the arch's centre.
+            Face(new Vector3(a, yBase, w0), depth, new Vector3(0f, spring - yBase, 0f), Vector3.UnitX);
+            Face(new Vector3(b, yBase, w0), depth, new Vector3(0f, spring - yBase, 0f), -Vector3.UnitX);
+            var r = 0.5f * (b - a);
+            var c = 0.5f * (a + b);
+            for (var i = 0; i < segments; i++)
+            {
+                float ta = MathF.PI * i / segments, tb = MathF.PI * (i + 1) / segments;
+                var pa = new Vector3(c + r * MathF.Cos(ta), spring + r * MathF.Sin(ta), w0);
+                var pb = new Vector3(c + r * MathF.Cos(tb), spring + r * MathF.Sin(tb), w0);
+                var tm = 0.5f * (ta + tb);
+                var n = -new Vector3(MathF.Cos(tm), MathF.Sin(tm), 0f);
+                Tri(pa, pb, pb + depth, n);
+                Tri(pa, pb + depth, pa + depth, n);
+            }
+        }
+        // The top, and the two ends.
+        Face(new Vector3(u0, top, w0), new Vector3(u1 - u0, 0f, 0f), depth, Vector3.UnitY);
+        Face(new Vector3(u0, yBase, w0), depth, new Vector3(0f, top - yBase, 0f), -Vector3.UnitX);
+        Face(new Vector3(u1, yBase, w0), depth, new Vector3(0f, top - yBase, 0f), Vector3.UnitX);
+
+        void Face(Vector3 o, Vector3 u, Vector3 v, Vector3 n) => Quad(p, map(o), map(u), map(v), map(n));
+        void Tri(Vector3 a, Vector3 b, Vector3 c, Vector3 n)
+        {
+            Vector3 wa = map(a), wb = map(b), wc = map(c), wn = map(n);
+            var cross = Vector3.Cross(wb - wa, wc - wa);
+            if (cross.LengthSquared() < 1e-12f) return;
+            var va = new Vertex(wa, wn, new Vector2(wa.X + wa.Z, wa.Y));
+            var vb = new Vertex(wb, wn, new Vector2(wb.X + wb.Z, wb.Y));
+            var vc = new Vertex(wc, wn, new Vector2(wc.X + wc.Z, wc.Y));
+            if (Vector3.Dot(cross, wn) >= 0f) p.AddTriangle(va, vb, vc);
+            else p.AddTriangle(va, vc, vb);
+        }
+    }
+
     // The Cornell box's room, size m inside: one closed 0.2 m shell, a skylight of side `skylight` in its ceiling, its front
     // (+Z) open; white floor, back and ceiling, red left (-X) and green right (+X). Cornell and its variants share it.
     private static void CornellShell(Mesh mesh, MaterialBuilder white, MaterialBuilder red, MaterialBuilder green, float size, float skylight)

@@ -8,9 +8,9 @@
 //   - the size table: the cache's cell size by position (cookScaleAt; rtgi_cache.glsl's rtgiCellSize asks it first), 5 cm
 //     cubes where the size is under the fine tier's bound, COOK_COUNTS.w cubes elsewhere -- the size the cells were
 //     enumerated with, so the cache's cells are the cooked ones wherever the cook covered;
-//   - the regions: within each cube of the first NEAR_LEVELS levels, the level-0 cells joined by clear neighbour rays
-//     are one piece, every piece but the cube's lowest a region of its own (rtgi_cache.glsl's rtgiRegion: the two sides of
-//     a thin wall, a floor running under it, kept apart);
+//   - the surface pieces: within every cell's cube, at every level, its surface's points joined where they lie within
+//     their spacing on one plane -- each piece a cache cell of its own (cookPieceAt; rtgi_cache.glsl's rtgiRegionFor:
+//     the two sides of a thin wall, a floor running under it, a wall and a face a gap in front of it, kept apart);
 //   - the near field of the level-0 junction cells (the first COOK_COUNTS.y cells): NEAR_RAYS fixed links each to what
 //     lies within the contact radius, relit each frame (rtgi_nearcook_update.comp), read over the cache's far light.
 // Cells are ordered level 0's live junction cells first (the near field's), then level 0's others (COOK_COUNTS.x level-0
@@ -20,7 +20,7 @@
 // COOK_COUNTS (vec4: x the level-0 cells; y the near field's cells; z the size table's slots - 1; w the coarse cube (m)),
 // COOK_TABLE(i) (uvec2: key, cell) and COOK_POINTS(i) (vec4, two a cell: the point (xyz) and its bits (w: side, flags,
 // level); the normal (xyz) and the neighbour mask (w, bits)); and, where it reads them, COOK_SCALE(i) (uvec2: key, size's
-// bits) and COOK_REGIONS(i) (uint: a level-0 cell's region at each of NEAR_LEVELS levels).
+// bits) and COOK_PIECES(i) (uvec4: the cells' surface pieces, cookPieceAt).
 #ifndef RTGI_COOK_GLSL
 #define RTGI_COOK_GLSL
 
@@ -53,8 +53,6 @@ vec3 rtgiOrigin(uint side) {
 #define COOK_ADJ_TRACED 256u
 // The near field's rays a cell.
 #define NEAR_RAYS 32u
-// The cache levels whose cubes the regions are found in (5 cm to 1.6 m); coarser, region 0.
-#define NEAR_LEVELS 6u
 
 uint cookHashU(uint x) {
     x ^= x >> 16; x *= 0x7feb352du;
@@ -114,6 +112,7 @@ bool cookReaches(uint own, int d0, int d1) {
 #ifndef RTGI_REGION_DECLARED
 #define RTGI_REGION_DECLARED
 uint rtgiRegion = 0u;
+vec3 rtgiRegionP = vec3(0.0);
 #endif
 
 // The point's level-0 cooked cell, 1 + its index (0 none): its own -- or, that one missing or buried (a cell straddling a
@@ -146,11 +145,84 @@ bool cookLinked(uint own, ivec3 co, uint i, ivec3 ci, uint side) {
     return k < 8u && (cookAdj(own) & (1u << k)) != 0u;
 }
 
-#ifdef COOK_REGIONS
-// rtgi_cache.glsl's hook: the point's level-0 cooked cell's region at a level.
-uint nearRegionOfLevel(uint level) {
-    if (rtgiRegion == 0u || level >= NEAR_LEVELS || COOK_PARAMS.w < 0.5) return 0u;
-    return COOK_REGIONS((rtgiRegion - 1u) * NEAR_LEVELS + level);
+// A key's point: its level-0 cooked cell (rtgiRegion, the near field's) and the position its regions are found from
+// (rtgiRegionP, rtgi_cache.glsl's rtgiRegionFor).
+void rtgiKeyAt(vec3 p, uint side) {
+    rtgiRegion = nearRegion(p, side);
+    rtgiRegionP = p;
+}
+
+#ifdef COOK_PIECES
+// The cooked cells' surface pieces (SponzaLoop.RtgiPieces.cs): COOK_PIECES(i) uvec4 -- per cell its head (first entry,
+// pieces), then per piece two (its centroid's bits, its 4 x 4 footprint across the cube; its own area, its whole).
+// p's piece of the cube (c, level, side), 1 + its index -- 0 the cube's only piece, or no cooked cell: of the pieces
+// whose footprint holds p (clamped into the cube across the surface: a neighbour's, the edge p's surface runs on
+// into), the nearest along the normal; none, the nearest by both.
+// The index of p's piece among the pieces of cooked cell j (its cube c at level, head its head): of those whose
+// footprint holds p clamped into the cube, the nearest along the normal; none, the nearest by both.
+uint cookPieceIndex(uvec4 head, ivec3 c, uint level, uint side, vec3 p) {
+    uint axis = side >> 1u, a0 = (axis + 1u) % 3u, a1 = (axis + 2u) % 3u;
+    float cs = cookSize(level);
+    vec3 g = (p - rtgiOrigin(side)) / cs - vec3(c);
+    float u = clamp(g[a0], 0.0, 0.999), v = clamp(g[a1], 0.0, 0.999);
+    uint bit = 1u << (uint(u * 4.0) + 4u * uint(v * 4.0));
+    vec3 pc = p;
+    pc[a0] = (float(c[a0]) + u) * cs + rtgiOrigin(side)[a0];
+    pc[a1] = (float(c[a1]) + v) * cs + rtgiOrigin(side)[a1];
+    uint best = 0u;
+    float bestScore = 1e30;
+    for (uint k = 0u; k < head.y; k++) {
+        uvec4 e = COOK_PIECES(head.x + 2u * k);
+        vec3 d = pc - uintBitsToFloat(e.xyz);
+        float score = ((e.w & bit) != 0u ? 0.0 : 1e3) + abs(d[axis]) + 0.25 * length(vec2(d[a0], d[a1]));
+        if (score < bestScore) { bestScore = score; best = k; }
+    }
+    return best;
+}
+
+// The pieces in a cube past which a lookup starts a level finer (COOK_PIECE_SCAN): a coarse cube holds hundreds (every
+// column, parapet and step under it, each its own -- 650 in one of the arches testbed's, its filter 36 ms a frame
+// scanning them, 2026-10-31).
+#define COOK_PIECE_SCAN 8u
+
+// p's piece of the cube (c, level, side), 1 + its index -- 0 the cube's only piece, or no cooked cell. In a cube of many,
+// found a level or more finer (the finest cooked cube holding p, clamped into this one, of few pieces) and followed up
+// its parents: each piece a level up holds the pieces below it whole.
+uint cookPieceAt(ivec3 c, uint level, uint side, vec3 p) {
+    uint j = cookFind(c, level, side);
+    if (j == COOK_NONE) return 0u;
+    uvec4 head = COOK_PIECES(j);
+    if (head.y <= 1u) return 0u;
+    if (head.y <= COOK_PIECE_SCAN) return cookPieceIndex(head, c, level, side, p) + 1u;
+    // p clamped into the cube, every axis: the finer cubes searched are this one's.
+    float cs = cookSize(level);
+    vec3 lo = vec3(c) * cs + rtgiOrigin(side);
+    vec3 q = clamp(p, lo + 1e-4 * cs, lo + (1.0 - 1e-4) * cs);
+    uint l = level;
+    uvec4 hl = head;
+    ivec3 cl = c;
+    while (l > 0u && hl.y > COOK_PIECE_SCAN) {
+        ivec3 cf = cookCoords(q, side, l - 1u);
+        uint jf = cookFind(cf, l - 1u, side);
+        if (jf == COOK_NONE) break;
+        l--;
+        cl = cf;
+        hl = COOK_PIECES(jf);
+    }
+    uint k = cookPieceIndex(hl, cl, l, side, q);
+    // Up the parents to the level asked.
+    for (; l < level; l++) {
+        uint parent = COOK_PIECES(hl.x + 2u * k + 1u).z;
+        if (parent == 0xFFFFu) return cookPieceIndex(head, c, level, side, p) + 1u;
+        k = parent;
+        if (l + 1u < level) {
+            ivec3 cu = cookCoords(q, side, l + 1u);
+            uint ju = cookFind(cu, l + 1u, side);
+            if (ju == COOK_NONE) return cookPieceIndex(head, c, level, side, p) + 1u;
+            hl = COOK_PIECES(ju);
+        }
+    }
+    return k + 1u;
 }
 #endif
 
