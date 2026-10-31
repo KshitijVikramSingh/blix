@@ -569,9 +569,8 @@ public static class Program
                 var b = new Vector3(-half, vcy + vr * MathF.Sin(tb), vc + vr * MathF.Cos(tb));
                 Quad(p, a, b - a, new Vector3(2f * half, 0f, 0f), -new Vector3(0f, MathF.Sin(tm), MathF.Cos(tm)));
             }
-            // The wall from the vault's springing up to the gallery's floor along both sides closes the pocket over it.
-            Box(p, new Vector3(-half, vSpring, vz0), new Vector3(half, groundTop, vz0 + 0.05f), bottom: true);
-            Box(p, new Vector3(-half, vSpring, vz1 - 0.05f), new Vector3(half, groundTop, vz1), bottom: true);
+            // No walls to close the pocket over it: at its springing it meets the arcade's back face and the aisle's wall,
+            // which close it already (walls added there showed slivers and overhangs along the springing, 2026-10-31).
             // Round columns in the courtyard, 0.25 m in radius and 4 m tall: curved, and in contact with the floor.
             foreach (var (cx, cz) in new[] { (4f, 1.8f), (4f, -1.8f), (7f, 1.8f), (7f, -1.8f) })
                 Column(p, new Vector3(cx, 0f, cz), 0.25f, 4f, 24);

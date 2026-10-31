@@ -159,7 +159,7 @@ void rtgiKeyAt(vec3 p, uint side) {
 // whose footprint holds p (clamped into the cube across the surface: a neighbour's, the edge p's surface runs on
 // into), the nearest along the normal; none, the nearest by both.
 // The index of p's piece among the pieces of cooked cell j (its cube c at level, head its head): of those whose
-// footprint holds p clamped into the cube, the nearest along the normal; none, the nearest by both.
+// nearest along the normal, a footprint not holding p a quarter of a cell further.
 uint cookPieceIndex(uvec4 head, ivec3 c, uint level, uint side, vec3 p) {
     uint axis = side >> 1u, a0 = (axis + 1u) % 3u, a1 = (axis + 2u) % 3u;
     float cs = cookSize(level);
@@ -174,7 +174,11 @@ uint cookPieceIndex(uvec4 head, ivec3 c, uint level, uint side, vec3 p) {
     for (uint k = 0u; k < head.y; k++) {
         uvec4 e = COOK_PIECES(head.x + 2u * k);
         vec3 d = pc - uintBitsToFloat(e.xyz);
-        float score = ((e.w & bit) != 0u ? 0.0 : 1e3) + abs(d[axis]) + 0.25 * length(vec2(d[a0], d[a1]));
+        // Nearest along the normal first, the footprint a quarter of a cell's penalty: a slab's underside 5 cm above a vault's
+        // crown, inside the sealed pocket, spanned the whole of a neighbouring cube where the vault spanned part, and won
+        // by its footprint -- the level blend read the pocket's dark light, dots along the crown (the readout's view 28,
+        // the arches testbed, 2026-10-31).
+        float score = ((e.w & bit) != 0u ? 0.0 : 0.25 * cs) + abs(d[axis]) + 0.1 * length(vec2(d[a0], d[a1]));
         if (score < bestScore) { bestScore = score; best = k; }
     }
     return best;
