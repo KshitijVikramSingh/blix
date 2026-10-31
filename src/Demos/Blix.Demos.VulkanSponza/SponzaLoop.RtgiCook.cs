@@ -1922,7 +1922,8 @@ internal sealed partial class SponzaLoop
         nearLinks = Own(device.CreateGpuBuffer(nj * CookNearRays * 8, new byte[nj * CookNearRays * 8], "sponza.rtgi.near-links"));
         nearHits = Own(device.CreateGpuBuffer(nj * CookNearRays * 4, new byte[nj * CookNearRays * 4], "sponza.rtgi.near-hits"));
         nearLightBuf = Own(device.CreateGpuBuffer(nj * 16, new byte[nj * 16], "sponza.rtgi.near-light"));
-        nearList = Own(device.CreateGpuBuffer(16 + cells * 4, new byte[16 + cells * 4], "sponza.rtgi.near-list"));
+        // Read where it lies (its count, RecordRtgiNearField): a read that waited for the device was a 100 ms frame.
+        nearList = Own(device.CreateReadableGpuBuffer(16 + cells * 4, "sponza.rtgi.near-list"));
         cookGpuBytes = layout.CellPoints.Length * 4L + layout.Table.Length * 4L + cells * 32L + layout.Scale.Length * 4L + layout.Pieces.Length * 4L + nj * (CookNearRays * 12L + 16L) + 16L + cells * 4L;
     }
 
@@ -1943,6 +1944,10 @@ internal sealed partial class SponzaLoop
         rtgiCookProbePending = true;
         cookReadyFrame = rtgiFrameCount;
         var l = cookLayout!;
+        // The cook's millions of objects (its cells, pieces and dictionaries) collected now, behind the cook screen: left to
+        // the collector, a full collection of them took a second of a frame in the scene (Crytek Sponza, 2026-11-01).
+        cookCells = null;
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
         var stageMs = string.Join(", ", CookStageOrder.Where(cookStages.ContainsKey).Select(s => $"{s} {cookStages[s].Ms:0}"));
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"[VulkanSponza] rtgi cook: done in {cookClock.Elapsed.TotalSeconds:0.0} s ({stageMs} ms; {cookRaysTotal / 1e6:0.0} M rays{(cookAloneGpuMs > 1 ? $", {cookAloneRays / cookAloneGpuMs * 1000.0 / 1e6:0} M rays/s the trace's GPU time alone" : "")}): {l.Cells:N0} cells (L0 {l.Level0:N0}, of them {l.NearCells:N0} junction with a near field), {l.Buried:N0} buried; cooked data {cookGpuBytes / 1048576.0:0.0} MB on the GPU (version {CookVersion})."));
@@ -1983,7 +1988,9 @@ internal sealed partial class SponzaLoop
         if (rtgiNearTrain > 0 && rtgiFrameCount == rtgiWorldReadAt)
         {
             rtgiWorldReadAt = uint.MaxValue;
-            rtgiWorldListed = (int)MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(nearList, 0, 4).AsSpan())[0];
+            Span<uint> listed = stackalloc uint[1];
+            device.ReadMappedGpuBuffer(nearList, 0, MemoryMarshal.AsBytes(listed));
+            rtgiWorldListed = (int)listed[0];
             var perRemake = 30f * rtgiNearTrain;
             var bar = rtgiWorldBar;
             if (rtgiWorldListed * 16f < perRemake) rtgiWorldBar = MathF.Min(rtgiWorldBar * 2f, rtgiWorldTarget);
@@ -1995,7 +2002,7 @@ internal sealed partial class SponzaLoop
         {
             graph.Dispatch(cookReducePassHandle, CookDispatch(0, 14, 0, 1, 1));
             graph.Dispatch(cookReducePassHandle, CookDispatch(0, 15, 0, layout.Cells, layout.Cells));
-            rtgiWorldReadAt = rtgiFrameCount + 3;
+            rtgiWorldReadAt = rtgiFrameCount + 4;
         }
         var cells = rtgiNearCook ? layout.NearCells : 0;
         if (cells == 0) return;

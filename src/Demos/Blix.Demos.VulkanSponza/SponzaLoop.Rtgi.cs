@@ -423,6 +423,7 @@ internal sealed partial class SponzaLoop
         rtgiFilterPassHandle = graph.ComputePass("rtgi-filter").Async(rtgiAsync).Shader(rtgiFilterInterface).Handle;
         rtgiEvictInterface = reflect("rtgi_evict.comp");
         rtgiEvictPassHandle = graph.ComputePass("rtgi-evict").Async(rtgiAsync).Shader(rtgiEvictInterface).Handle;
+        DeclareRtgiStatsPass(reflect);
     }
 
     // Setup, after the pre-pass: placement (this frame's rays, traced in the shadow trace's group after it).
@@ -489,6 +490,7 @@ internal sealed partial class SponzaLoop
         CreateRtgiCookPipelines(Compute);
         rtgiResolvePipeline = Compute("rtgi_resolve", rtgiResolveInterface);
         rtgiEvictPipeline = Compute("rtgi_evict", rtgiEvictInterface);
+        rtgiStatSnapPipeline = Compute("rtgi_statsnap", rtgiStatSnapInterface);
         rtgiFilterPipeline = Compute("rtgi_filter", rtgiFilterInterface);
         rtgiRaysPipeline = Compute("rtgi_rays", rtgiRaysInterface, full32);
         rtgiReadoutPipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
@@ -728,6 +730,7 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiSeq", rtgiSeq),
                 new ShaderBufferBinding("RtgiAssembled", rtgiAssembled),
             }));
+        RecordRtgiStatSnap();
 
     BenchPlacement:
         var tilesX = Math.Max(1, (int)MathF.Round(MathF.Sqrt(rtgiTilesNow * (float)width / height)));
@@ -961,75 +964,4 @@ internal sealed partial class SponzaLoop
     // the same radius in the world.
     private float RtgiPixelFootprint => 2f / LodErrorScale;
 
-    // At the profile window: how full the cache is and how much its cells hold.
-    private string RtgiCounts()
-    {
-        if (!RtgiReadoutReady || rtgiTraced < 2) return "";
-        // A 512th of the slots (hashed, so any run of them is a fair sample), scaled up: reading them all was ~670 MB at 8 M
-        // slots, a 400 ms hitch every profile window (San Miguel, 2026-10-26); a 32nd with the device drained first was ~13
-        // MB of large arrays every window, the full collections behind a walk's 30-40 ms frames (2026-10-28). Each read
-        // waits for its own copy; the counts are a sample, a frame's update racing them is no matter.
-        const int Share = 512;
-        var count = RtgiSlots / Share;
-        var keys = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(rtgiKeys, 0, count * 4).AsSpan());
-        var resolved = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(rtgiResolved, 0, count * 32).AsSpan());
-        var moments = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(rtgiMoments, 0, count * 48).AsSpan());
-        var confidence = MemoryMarshal.Cast<byte, Vector4>(device.ReadGpuBuffer(rtgiConfidence, 0, count * 16).AsSpan());
-        var seen = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(rtgiDoneCount, 0, 40).AsSpan()).ToArray();
-        var work = RtgiWork();
-        device.WriteGpuBuffer(rtgiDoneCount, 0, new byte[32]);
-        device.WriteGpuBuffer(rtgiDoneCount, 36, new byte[4]);
-        double done = 0;
-        double cutsLight = 0;
-        int used = 0, trained = 0, bad = 0;
-        double samples = 0, energy = 0;
-        string firstBad = "";
-        for (var s = 0; s < keys.Length; s++)
-        {
-            if (keys[s] == 0u) continue;
-            used++;
-            var r1 = resolved[2 * s + 1];
-            var r0 = resolved[2 * s];
-            if (!float.IsFinite(r0.X + r0.Y + r0.Z + r0.W + r1.X + r1.Y + r1.Z + r1.W))
-            {
-                if (bad++ == 0) firstBad = string.Create(CultureInfo.InvariantCulture, $" first not finite: slot {s} {r0} {r1}");
-                continue;
-            }
-            if (r1.Y < 0.5f) continue;
-            trained++;
-            samples += r1.Y;
-            cutsLight += moments[3 * s].W;
-            if (confidence[s].W > 0.5f) done++;
-            var e = resolved[2 * s];
-            energy += 0.2126 * e.X + 0.7152 * e.Y + 0.0722 * e.Z;
-        }
-        used *= Share;
-        trained *= Share;
-        bad *= Share;
-        samples *= Share;
-        energy *= Share;
-        cutsLight *= Share;
-        done *= Share;
-        return string.Create(CultureInfo.InvariantCulture,
-            $"rtgi: ~{used:N0} of {RtgiSlots:N0} slots held ({100.0 * used / RtgiSlots:0.0}%), {trained:N0} trained, {samples / Math.Max(1, trained):0.0} samples a cell, {100.0 * done / Math.Max(1, trained):0.0}% of cells done, {100.0 * seen[1] / Math.Max(1u, seen[0]):0.0}% of the visible (under 1% error {100.0 * seen[6] / Math.Max(1u, seen[0]):0.0}%, under 3% {100.0 * seen[7] / Math.Max(1u, seen[0]):0.0}%), history cut {cutsLight / Math.Max(1, trained):0.00} times a cell, mean indirect {energy / Math.Max(1, trained):0.000}; {bad:N0} not finite{firstBad}; {rtgiTraced:N0} frames traced{work}; readout lookups {100.0 * seen[3] / Math.Max(1u, seen[2]):0.0}% missed ({seen[2] / (double)Math.Max(1u, seen[0]):0.0} a pixel), {100.0 * seen[5] / Math.Max(1u, seen[4]):0.0}% of pixels no blur, {100.0 * seen[9] / Math.Max(1u, seen[0]):0.00}% of pixels sized by the camera (not cooked)");
-    }
-
-    // The cache's work a frame since the last window: points live, cell updates by level offset (0 the sample's own, then
-    // 1-4 up), cells newly listed by offset, the resolve's listed / rota-skipped / young / settled / settled that drifted,
-    // the blend's listed / skipped / blended. What a finest-level training (A) or change-driven work (B) would leave.
-    private string RtgiWork()
-    {
-        var w = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(rtgiStats, 0, 256).AsSpan()).ToArray();
-        device.WriteGpuBuffer(rtgiStats, 0, new byte[256]);
-        var frames = Math.Max(1L, rtgiTraced - rtgiStatsTraced);
-        rtgiStatsTraced = rtgiTraced;
-        string F(int i) => (w[i] / (double)frames).ToString("N0", CultureInfo.InvariantCulture);
-        return RtgiBudgetWork() + $"; work a frame: points {F(1)}, updates by offset {F(2)}/{F(3)}/{F(4)}/{F(5)}/{F(6)}, new listings {F(7)}/{F(8)}/{F(9)}/{F(10)}/{F(11)}; "
-            + $"resolve listed {F(12)}, rota-skipped {F(13)}, young {F(14)}, settled {F(15)} (drifted {F(16)}); "
-            + $"blend listed {F(18)}, skipped {F(19)}, blended {F(20)}; "
-            + $"evicted by level {F(21)}/{F(22)}/{F(23)}/{F(24)}/{F(25)}/{F(26)}, holding 8+ {F(28)}; "
-            + $"created at own level {F(29)}, above {F(30)}, landings {F(31)}; "
-            + $"young: age-capped {F(32)}, cut {F(33)}, epoch-cut {F(34)}, held <8/<32/<128/<256 {F(35)}/{F(36)}/{F(37)}/{F(38)}, "
-            + $"samples {F(39)}, by level {F(40)}/{F(41)}/{F(42)}/{F(43)}/{F(44)}/{F(45)}, disagreeing {F(46)}, age 1024+ {F(47)}";
-    }
 }

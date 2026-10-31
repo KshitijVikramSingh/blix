@@ -1,0 +1,27 @@
+#version 450
+
+// The profile window's sample of the cache (SponzaLoop.RtgiStats.cs): the first uSnap.x slots' key, resolved light,
+// samples, history cuts and done flag copied into a buffer the CPU reads where it lies, a few frames on -- no read that
+// waits for the device. The reads it replaced drained the frames in flight ten times over, a 100-200 ms hitch every
+// window (Crytek Sponza, 2026-11-01).
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform RtgiStatSnapPass {
+    vec4 uSnap;   // x the slots sampled
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer RtgiKeys { uint rtgiKeys[]; };
+layout(std430, set = 0, binding = 2) readonly buffer RtgiResolved { vec4 rtgiResolved[]; };
+layout(std430, set = 0, binding = 3) readonly buffer RtgiMoments { vec4 rtgiMoments[]; };
+layout(std430, set = 0, binding = 4) readonly buffer RtgiConfidence { vec4 rtgiConfidence[]; };
+// Per slot three vec4s: its resolved light's two vec4s, then its key's bits, its history cuts, its done flag.
+layout(std430, set = 0, binding = 5) buffer RtgiStatSnap { vec4 rtgiStatSnap[]; };
+
+void main() {
+    uint s = gl_GlobalInvocationID.x;
+    if (s >= uint(u.uSnap.x)) return;
+    rtgiStatSnap[3u * s] = rtgiResolved[2u * s];
+    rtgiStatSnap[3u * s + 1u] = rtgiResolved[2u * s + 1u];
+    rtgiStatSnap[3u * s + 2u] = vec4(uintBitsToFloat(rtgiKeys[s]), rtgiMoments[3u * s].w, rtgiConfidence[s].w, 0.0);
+}
