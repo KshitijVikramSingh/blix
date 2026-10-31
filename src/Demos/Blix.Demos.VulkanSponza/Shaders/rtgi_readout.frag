@@ -37,6 +37,7 @@ layout(set = 0, binding = 0) uniform RtgiReadout {
     vec4 uCook;          // the cooked cell set: rtgi_cook.glsl's COOK_PARAMS (w 0: not cooked yet)
     vec4 uCookCounts;    // rtgi_cook.glsl's COOK_COUNTS (y the near field's cells: 0 off)
     vec4 uCookRead;      // x 1: neighbours left out where the cooked ray to them was blocked
+    vec4 uPick;          // the panel's picker (P, SponzaLoop.RtgiPick.cs): xy the half-res pixel, z 1 on
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -99,6 +100,14 @@ layout(std430, set = 0, binding = 27) readonly buffer RtgiCookCellPoints { uvec2
 layout(std430, set = 0, binding = 28) readonly buffer RtgiCellSnapshot { uvec4 cellSnapshot[]; };
 // rtgi_filter.comp's assembly (views 34, 35: w the share of the cell's cooked area left out, + 2 a region miss).
 layout(std430, set = 0, binding = 29) readonly buffer RtgiAssembled { vec4 rtgiAssembled[]; };
+// The picked pixel's readout, step by step (SponzaLoop.RtgiPick.cs reads it): 0 p, side; 1 n, the continuous level;
+// 2 e0; 3 e1; 4 the level blend's result (w: 1 both, 2 e0 alone, 3 e1 alone, 4 two levels up); 5 after the side-edge
+// blend and the normal turn; 6 the cooked near light (rgba); 7 its found weight, escape share, far share, near share;
+// 8 the final (rgb, sky); 10 + 8 x lv + 2 x k per tap k of readLevel lv (0 own, 1 next, 2 fallback): the cell's coords
+// and region, then (seen, held (-1 none), luminance, weight).
+layout(std430, set = 0, binding = 30) writeonly buffer RtgiPick { vec4 rtgiPick[]; };
+bool pickHere = false;
+int pickLevel = 0;
 #define COOK_CELL_POINTS(i) cookCellPoints[i]
 #define RTGI_REGION_OF 1
 #include "rtgi_cook.glsl"
@@ -171,7 +180,12 @@ vec4 readLevel(vec3 p, uint side, uint level, out float sky, out vec3 bvec, out 
         o[a1] = k >> 1;
         ivec3 cc = c0 + o;
         cc[axis] = cAxis;
-        if (!neighbourSeen(p, side, cc, level)) continue;
+        bool seen = neighbourSeen(p, side, cc, level);
+        if (pickHere && pickLevel < 3) {
+            rtgiPick[10 + 8 * pickLevel + 2 * k] = vec4(vec3(cc), float(rtgiRegionFor(cc, level, side)));
+            rtgiPick[11 + 8 * pickLevel + 2 * k] = vec4(seen ? 1.0 : 0.0, -1.0, 0.0, 0.0);
+        }
+        if (!seen) continue;
         uint s = rtgiFindKept(rtgiCellHash(cc, level, side, u.uParams), u.uParams);
         lookups++;
         if (s == 0xFFFFFFFFu) { misses++; continue; }
@@ -184,6 +198,10 @@ vec4 readLevel(vec3 p, uint side, uint level, out float sky, out vec3 bvec, out 
         // one refilled) fades in under its neighbours rather than showing its first draw -- odd lights that came and went.
         float wk = b.x * b.y * b.z * clamp(held / 32.0, 1.0 / 32.0, 1.0);
         if (held < 32.0) settledRead = false;
+        if (pickHere && pickLevel < 3) {
+            vec2 rgp = unpackHalf2x16(a.x), bsp = unpackHalf2x16(a.y);
+            rtgiPick[11 + 8 * pickLevel + 2 * k] = vec4(1.0, held, dot(vec3(rgp, bsp.x), vec3(0.2126, 0.7152, 0.0722)), wk);
+        }
         vec2 rg = unpackHalf2x16(a.x), bs = unpackHalf2x16(a.y);
         vec2 dxy = unpackHalf2x16(c.x), dzn = unpackHalf2x16(c.y);
         e += vec3(rg, bs.x) * wk;
@@ -232,6 +250,7 @@ vec4 readNearCooked(vec3 p, uint side, out float found) {
 
 void main() {
     ivec2 h = ivec2(gl_FragCoord.xy);
+    pickHere = u.uPick.z > 0.5 && h == ivec2(u.uPick.xy);
     // Each pixel of an 8x8 block in turn.
     keeper = ((uint(h.x) & 7u) | ((uint(h.y) & 7u) << 3)) == (uint(u.uBlurAt.z) & 63u);
     ivec2 fullSize = textureSize(uSceneDepth, 0);
@@ -261,7 +280,7 @@ void main() {
     // the rest take last frame's values where its pixel there is this surface -- the same plane and normal, within
     // uReuse.z of the distance -- else read fresh too (a disocclusion). A cell's change shows within four frames (the
     // cache's own turns are sixteen).
-    if (u.uReuse.x > 0.5) {
+    if (u.uReuse.x > 0.5 && !pickHere) {
         uvec2 blk = uvec2(h) / 16u;
         bool fresh = ((blk.x & 1u) | ((blk.y & 1u) << 1)) == uint(u.uReuse.y);
         vec4 pc = u.uPrevViewProj * vec4(p, 1.0);
@@ -340,8 +359,12 @@ void main() {
     float sky0, sky1;
     vec3 b0, b1;
     float near0, near1, far0, far1;
+    if (pickHere) { rtgiPick[0] = vec4(p, float(side)); rtgiPick[1] = vec4(n, lf); }
+    pickLevel = 0;
     vec4 e0 = readLevel(p, side, level, sky0, b0, near0, far0);
+    pickLevel = 1;
     vec4 e1 = level < top ? readLevel(p, side, level + 1u, sky1, b1, near1, far1) : vec4(0.0);
+    pickLevel = 2;
     vec4 e;
     float sky, nearCell, farShare;
     vec3 bv;
@@ -349,6 +372,11 @@ void main() {
     else if (e0.w >= 0.05) { e = e0; sky = sky0; bv = b0; nearCell = near0; farShare = far0; }
     else if (e1.w >= 0.05) { e = e1; sky = sky1; bv = b1; nearCell = near1; farShare = far1; }
     else e = readLevel(p, side, min(level + 2u, top), sky, bv, nearCell, farShare);
+    pickLevel = 3;
+    if (pickHere) {
+        rtgiPick[2] = e0; rtgiPick[3] = e1;
+        rtgiPick[4] = vec4(e.rgb, e0.w >= 0.05 && e1.w >= 0.05 ? 1.0 : e0.w >= 0.05 ? 2.0 : e1.w >= 0.05 ? 3.0 : 4.0);
+    }
     // Across a side's edge (uNearField.w): within it the light of the next side the normal leans to, blended in toward half
     // at the 45 degree edge itself. Cells are keyed by the six sides, and a curved surface's two sides' cells never met:
     // a column's light stepped at each 45 degrees (the arches testbed's columns, 2026-10-31).
@@ -388,6 +416,7 @@ void main() {
             }
         }
     }
+    if (pickHere) rtgiPick[5] = e;
     // The cooked near field: where a cooked cell lies, its near light over the cache's far light (faded in by how much of the
     // point the cooked cells cover).
     if (COOK_PARAMS.w > 0.5 && COOK_COUNTS.y > 0.5) {
@@ -398,6 +427,7 @@ void main() {
             // contact radius the cell's far light per such ray (E x farShare / nearCell).
             float esc = nc.w - 1.0;
             vec3 farPer = e.rgb * farShare / max(nearCell, 0.05);
+            if (pickHere) { rtgiPick[6] = nc; rtgiPick[7] = vec4(found, esc, farShare, nearCell); }
             vec3 cooked = esc * farPer + nc.rgb;
             // Views 22 and 23 (SponzaLoop.RtgiDebug.cs): its far term alone (esc x far per ray), the cache's light under it.
             int dv = int(u.uView.x + 0.5);
@@ -406,6 +436,7 @@ void main() {
         }
     }
     outIncident = e.w > 0.0 ? vec4(e.rgb, sky) : vec4(0.0, 0.0, 0.0, 1.0);
+    if (pickHere) rtgiPick[8] = outIncident;
     // How the irradiance turns with the normal, for the lit pass to carry it onto the normal-mapped one (its gradient,
     // luminance per unit of normal along the surface). Radiance taken as linear in direction, L = a + b.w, the irradiance
     // vector's part along the surface is pi/4 b_t and the irradiance's change 2 pi / 3 b_t: 8/3 of it. Zero before

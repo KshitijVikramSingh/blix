@@ -122,5 +122,7 @@ internal sealed partial class SponzaLoop
             Console.WriteLine($"[VulkanSponza] camera pose: --cam {camera.Pose} (post-load frame {postLoadFrames})");
         // M: the sun moving, or held (SponzaLoop.SunMove.cs).
         if (input[Key.M].Pressed) ToggleSunMove();
+        // P: the pixel under the mouse through the RTGI readout, step by step, into the log (SponzaLoop.RtgiPick.cs).
+        if (input[Key.P].Pressed) ReadRtgiPick(input.MousePosition);
     }
 }

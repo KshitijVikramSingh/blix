@@ -866,6 +866,7 @@ internal sealed partial class SponzaLoop
                 new("uCook", new Vector4Uniform(CookParams)),
                 new("uCookCounts", new Vector4Uniform(CookCounts)),
                 new("uCookRead", new Vector4Uniform(new Vector4(rtgiCookNeighbours ? 1f : 0f, 0f, 0f, 0f))),
+                new("uPick", new Vector4Uniform(RtgiPickUniform(profFrameSize.Item1, profFrameSize.Item2))),
             },
             buffers: new[]
             {
@@ -887,8 +888,10 @@ internal sealed partial class SponzaLoop
                 new ShaderBufferBinding("RtgiNearLight", NearLightOrDummy),
                 new ShaderBufferBinding("RtgiCellSnapshot", CellSnapshotOrDummy),
                 new ShaderBufferBinding("RtgiAssembled", rtgiAssembled),
+                new ShaderBufferBinding("RtgiPick", RtgiPickBuffer),
             }));
         rtgiUnsureWritten = true;
+        FinishRtgiPick();
         // Blurred by how sure the cache is, into the incident the upsample reads (rtgi_blur.frag; at 0 a copy).
         graph.Pass(rtgiBlurPassHandle, scope => fullscreen.Draw(
             scope, rtgiBlurPipeline,
