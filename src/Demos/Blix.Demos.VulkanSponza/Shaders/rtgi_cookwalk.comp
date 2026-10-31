@@ -253,13 +253,13 @@ ivec2 gridNearest(uint p, vec3 q, uint side, vec3 n, int most) {
 // src: 1 the smoothing's y copy, 2 its z copy.
 vec2 gridAverage(uint p, vec3 q, uint side, vec3 n, float radius, uint src, bool useRef, float ref) {
     float gs = passGrid(p);
-    ivec3 c = ivec3(floor(q / gs));
-    int reach = max(1, int(ceil(radius / gs)));
+    // Only the cells the radius reaches (the CPU's scan of every cell within ceil(radius / cell) finds the same samples).
+    ivec3 lo = ivec3(floor((q - radius) / gs)), hi = ivec3(floor((q + radius) / gs));
     float sum = 0.0, weight = 0.0, r2 = radius * radius;
-    for (int dz = -reach; dz <= reach; dz++)
-    for (int dy = -reach; dy <= reach; dy++)
-    for (int dx = -reach; dx <= reach; dx++) {
-        uvec2 run = gridRun(p, c + ivec3(dx, dy, dz));
+    for (int z = lo.z; z <= hi.z; z++)
+    for (int y = lo.y; y <= hi.y; y++)
+    for (int x = lo.x; x <= hi.x; x++) {
+        uvec2 run = gridRun(p, ivec3(x, y, z));
         for (uint k = run.x; k < run.x + run.y; k++) {
             uint g = walkOrder[k];
             if (sampleSide(g) != side || sampleDead(g)) continue;
@@ -278,14 +278,13 @@ vec2 gridAverage(uint p, vec3 q, uint side, vec3 n, float radius, uint src, bool
 // CensusGrid.Least: the least log size over the same samples as gridAverage's; x it, y 1 where any.
 vec2 gridLeast(uint p, vec3 q, uint side, vec3 n, float radius) {
     float gs = passGrid(p);
-    ivec3 c = ivec3(floor(q / gs));
-    int reach = max(1, int(ceil(radius / gs)));
+    ivec3 lo = ivec3(floor((q - radius) / gs)), hi = ivec3(floor((q + radius) / gs));
     float least = 3.4e38, r2 = radius * radius;
     bool any = false;
-    for (int dz = -reach; dz <= reach; dz++)
-    for (int dy = -reach; dy <= reach; dy++)
-    for (int dx = -reach; dx <= reach; dx++) {
-        uvec2 run = gridRun(p, c + ivec3(dx, dy, dz));
+    for (int z = lo.z; z <= hi.z; z++)
+    for (int y = lo.y; y <= hi.y; y++)
+    for (int x = lo.x; x <= hi.x; x++) {
+        uvec2 run = gridRun(p, ivec3(x, y, z));
         for (uint k = run.x; k < run.x + run.y; k++) {
             uint g = walkOrder[k];
             if (sampleSide(g) != side || sampleDead(g)) continue;
@@ -302,13 +301,12 @@ vec2 gridLeast(uint p, vec3 q, uint side, vec3 n, float radius) {
 bool liveWithin(vec3 q, uint side, vec3 n, float radius) {
     for (int p = int(lastPass()); p >= 0; p--) {
         float gs = passGrid(uint(p));
-        ivec3 c = ivec3(floor(q / gs));
-        int reach = max(1, int(ceil(radius / gs)));
+        ivec3 lo = ivec3(floor((q - radius) / gs)), hi = ivec3(floor((q + radius) / gs));
         float r2 = radius * radius;
-        for (int dz = -reach; dz <= reach; dz++)
-        for (int dy = -reach; dy <= reach; dy++)
-        for (int dx = -reach; dx <= reach; dx++) {
-            uvec2 run = gridRun(uint(p), c + ivec3(dx, dy, dz));
+        for (int z = lo.z; z <= hi.z; z++)
+        for (int y = lo.y; y <= hi.y; y++)
+        for (int x = lo.x; x <= hi.x; x++) {
+            uvec2 run = gridRun(uint(p), ivec3(x, y, z));
             for (uint k = run.x; k < run.x + run.y; k++) {
                 uint g = walkOrder[k];
                 if (sampleSide(g) != side || sampleDead(g)) continue;

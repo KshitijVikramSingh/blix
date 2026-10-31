@@ -1182,6 +1182,8 @@ internal sealed partial class SponzaLoop
         public long[] ByLevel = new long[RtgiTopLevel + 1], OwnByLevel = new long[RtgiTopLevel + 1], JunctionByLevel = new long[RtgiTopLevel + 1];
         public long Buried, InsideBuried;
         public double Ms;
+        // Its parts' times (ms): the cells and their points, the order and pieces, the points laid out, the cell table.
+        public readonly double[] PartMs = new double[4];
     }
 
     private static CookLayout FinalizeCook(CookCells cells, (int Level, long Key)[] inside, uint[] chosen, float finest, int keepBacks)
@@ -1268,6 +1270,7 @@ internal sealed partial class SponzaLoop
                 mine[key] = (b.P, b.N, side | ((uint)l << 8) | (b.Live ? 0u : 16u), pts, pts.Select(_ => (byte)255).ToArray());
             }
         }
+        layout.PartMs[0] = clock.Elapsed.TotalMilliseconds;
         // The order: level 0's live junction cells (the near field's), its others, level 1 up.
         var order = new List<(int Level, long Key)>();
         order.AddRange(cellsAt[0].Where(kv => (kv.Value.Bits & 48u) == 32u).Select(kv => (0, kv.Key)));
@@ -1309,6 +1312,7 @@ internal sealed partial class SponzaLoop
                 pieceAt += 2;
             }
         }
+        layout.PartMs[1] = clock.Elapsed.TotalMilliseconds;
         var totalPts = order.Sum(o => (long)cellsAt[o.Level][o.Key].Pts.Length);
         // The training points after the cells' index words (rtgi_cook.glsl's COOK_CELL_POINTS).
         layout.CellPoints = new uint[2 * (order.Count + totalPts)];
@@ -1342,6 +1346,7 @@ internal sealed partial class SponzaLoop
             if ((c.Bits & 32u) != 0) layout.JunctionByLevel[l]++;
             if ((c.Bits & 16u) != 0) layout.Buried++;
         }
+        layout.PartMs[2] = clock.Elapsed.TotalMilliseconds;
         // The cell table: (key, cell), linear probing within rtgi_cook.glsl's COOK_PROBE_STEPS; grown until every cell fits.
         layout.Table = CookHashTable(order.Count, i =>
         {
@@ -1369,6 +1374,8 @@ internal sealed partial class SponzaLoop
             }, out layout.ScaleSlots);
         }
         layout.Ms = clock.Elapsed.TotalMilliseconds;
+        layout.PartMs[3] = layout.Ms;
+        for (var k = 3; k > 0; k--) layout.PartMs[k] -= layout.PartMs[k - 1];
         return layout;
     }
 
@@ -1797,7 +1804,7 @@ internal sealed partial class SponzaLoop
                 cookPass = null;
                 if (cookSampleCapacity > 0) { Disown(cookSamples); Disown(cookResults); cookSamples = default; cookResults = default; cookSampleCapacity = 0; }
                 CookEnd("finalize", layout.Cells, string.Create(CultureInfo.InvariantCulture,
-                    $"{layout.Cells:N0} cells by level {string.Join("/", layout.ByLevel)} (own-level {string.Join("/", layout.OwnByLevel)}; junction {string.Join("/", layout.JunctionByLevel)}), {layout.Buried:N0} buried; the inside-tested cells' training points {layout.InsidePointsNow:N0} (at most {rtgiCookKeepBacks} of {CookChooseRays} rays on back faces; {layout.InsidePointsBefore:N0} under the buried share, the rule before; {layout.BestOnly:N0} cells their best candidate alone); training points {layout.PointsPerCell.Select((c, k) => (long)c * k).Sum():N0}, cells by points 0-16 {string.Join("/", layout.PointsPerCell)} ({(layout.CellPoints.Length * 4L) / 1048576.0:0.0} MB); cell table {layout.TableSlots:N0} slots ({layout.Table.Length * 4L / 1048576.0:0.0} MB), size table {layout.ScaleEntries:N0} cubes by side in {layout.ScaleSlots:N0} slots ({layout.Scale.Length * 4L / 1048576.0:0.0} MB); {cookGpuBytes / 1048576.0:0.0} MB on the GPU"));
+                    $"{layout.Cells:N0} cells by level {string.Join("/", layout.ByLevel)} (own-level {string.Join("/", layout.OwnByLevel)}; junction {string.Join("/", layout.JunctionByLevel)}), {layout.Buried:N0} buried; the inside-tested cells' training points {layout.InsidePointsNow:N0} (at most {rtgiCookKeepBacks} of {CookChooseRays} rays on back faces; {layout.InsidePointsBefore:N0} under the buried share, the rule before; {layout.BestOnly:N0} cells their best candidate alone); training points {layout.PointsPerCell.Select((c, k) => (long)c * k).Sum():N0}, cells by points 0-16 {string.Join("/", layout.PointsPerCell)} ({(layout.CellPoints.Length * 4L) / 1048576.0:0.0} MB); cell table {layout.TableSlots:N0} slots ({layout.Table.Length * 4L / 1048576.0:0.0} MB), size table {layout.ScaleEntries:N0} cubes by side in {layout.ScaleSlots:N0} slots ({layout.Scale.Length * 4L / 1048576.0:0.0} MB); {cookGpuBytes / 1048576.0:0.0} MB on the GPU; laid out in {layout.Ms:0} ms (cells and points {layout.PartMs[0]:0}, order and pieces {layout.PartMs[1]:0}, points {layout.PartMs[2]:0}, cell table {layout.PartMs[3]:0})"));
                 cookCursor = 0;
                 CookBegin("near field", layout.NearCells);
                 cookStage = CookStage.NearLinks;

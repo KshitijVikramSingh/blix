@@ -113,7 +113,7 @@ internal sealed partial class SponzaLoop
             }
             case 2:
             {
-                if (++w.Drain < 2) return false;
+                if (++w.Drain < WalkDrainFrames) return false;
                 device.WaitIdle();
                 var c = ReadPieceCounters(w);
                 w.Drain = 0;
@@ -129,7 +129,7 @@ internal sealed partial class SponzaLoop
             }
             case 3:
             {
-                if (++w.Drain < 2) return false;
+                if (++w.Drain < WalkDrainFrames) return false;
                 device.WaitIdle();
                 var pieces = (int)ReadPieceCounters(w)[PcPieces];
                 w.Pieces_ = pieces;
@@ -162,7 +162,7 @@ internal sealed partial class SponzaLoop
             }
             case 4:
             {
-                if (++w.Drain < 2) return false;
+                if (++w.Drain < WalkDrainFrames) return false;
                 device.WaitIdle();
                 var c = ReadPieceCounters(w);
                 if (c[PcCubeFail] > 0) Console.WriteLine($"[VulkanSponza] rtgi cook pieces: {c[PcCubeFail]} pieces found no cube slot at level {w.PLevel}.");
@@ -182,7 +182,7 @@ internal sealed partial class SponzaLoop
             }
             case 5:
             {
-                if (++w.Drain < 2) return false;
+                if (++w.Drain < WalkDrainFrames) return false;
                 device.WaitIdle();
                 var cubes = MemoryMarshal.Cast<byte, WalkSlot>(device.ReadGpuBuffer(w.Cubes, 0, Math.Max(w.Cubes_, 1) * 16).AsSpan()).ToArray();
                 var outs = MemoryMarshal.Cast<byte, WalkSlot>(device.ReadGpuBuffer(w.PieceOut, 0, Math.Max(w.Pieces_, 1) * 32).AsSpan()).ToArray();

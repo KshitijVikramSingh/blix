@@ -38,6 +38,9 @@ internal sealed partial class SponzaLoop
     // The clear kinds' buffers.
     private const int WbKeys = 0, WbMapF = 1, WbMapU = 2, WbCellF = 3, WbCellU = 4, WbSurfels = 5, WbCount = 6, WbScale = 7, WbCellM = 8;
     private const int WalkSmoothPasses = CookSmoothPasses;
+    // Frames a step's dispatches are given before they are read back: the frame that recorded them is submitted before the
+    // next one's cook step runs, and the read waits for the device.
+    private const int WalkDrainFrames = 1;
 
     private sealed record WalkField(Vector4[] Samples, uint[] Passes, WalkSlot[] Grid, uint[] Order, int LastPass, int Count);
     [StructLayout(LayoutKind.Sequential)]
@@ -418,7 +421,7 @@ internal sealed partial class SponzaLoop
             }
             case 2:
             {
-                if (++w.Drain < 2) return false;
+                if (++w.Drain < WalkDrainFrames) return false;
                 device.WaitIdle();
                 if (WalkOverflowed(w, "burial check"))
                 {
@@ -495,6 +498,12 @@ internal sealed partial class SponzaLoop
             case 3:
             case 0:
             {
+                // Room from the burial check's walk (fewer passes, so fewer pieces): a retry is a whole walk again.
+                if (w.Counters.Length > WcLattice)
+                {
+                    w.FinalRoom = (int)Math.Min(int.MaxValue / 80, Math.Max(w.FinalRoom, 2L * w.Counters[WcFinal]));
+                    w.LatticeRoom = (int)Math.Min(int.MaxValue / 8, Math.Max(w.LatticeRoom, 3L * w.Counters[WcLattice]));
+                }
                 var passes = w.Passes = cookPasses.ToArray();
                 w.StepClock.Restart();
                 w.FieldBuild = Task.Run(() =>
@@ -517,7 +526,7 @@ internal sealed partial class SponzaLoop
             }
             case 5:
             {
-                if (++w.Drain < 2) return false;
+                if (++w.Drain < WalkDrainFrames) return false;
                 device.WaitIdle();
                 if (WalkOverflowed(w, "size table and cells"))
                 {
@@ -573,7 +582,7 @@ internal sealed partial class SponzaLoop
             }
             case 6:
             {
-                if (++w.Drain < 2) return false;
+                if (++w.Drain < WalkDrainFrames) return false;
                 device.WaitIdle();
                 // Each cell's first surfel: its occupied quarter-cubes counted in order.
                 var meta = ReadWalkU(w.CellM, 4L * w.Cells);
@@ -595,7 +604,7 @@ internal sealed partial class SponzaLoop
             }
             case 7:
             {
-                if (++w.Drain < 2) return false;
+                if (++w.Drain < WalkDrainFrames) return false;
                 device.WaitIdle();
                 var c = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(w.Count, 0, WalkCounters * 4).AsSpan()).ToArray();
                 if (c[WcScaleFail] > w.Counters[WcScaleFail])
@@ -615,7 +624,7 @@ internal sealed partial class SponzaLoop
             }
             case 8:
             {
-                if (++w.Drain < 2) return false;
+                if (++w.Drain < WalkDrainFrames) return false;
                 device.WaitIdle();
                 var c = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(w.Count, 0, WalkCounters * 4).AsSpan()).ToArray();
                 if ((c[WcOver] & 32u) != 0)
