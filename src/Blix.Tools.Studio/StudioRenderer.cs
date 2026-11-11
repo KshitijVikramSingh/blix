@@ -612,6 +612,9 @@ public sealed class StudioRenderer : IDisposable
         groundIndexCount = gi.Length;
     }
 
+    /// <summary>The scene's depth, single sample whatever the MSAA, for something drawn after the stage that needs to know what stands where.</summary>
+    public TextureHandle SceneDepth => graph.GetDepthTexture(SampleableSceneDepth);
+
     /// <summary>The HDR colour the scene is lit into, before tonemapping. For anything that wants to sample it.</summary>
     public TextureHandle SceneColour => graph.GetColorTexture(sceneColourTarget);
 

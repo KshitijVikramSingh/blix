@@ -35,7 +35,7 @@ public sealed class StudioLook : ITunable
     /// Rogue's shaded side legible without weakening the key light; zero remains a useful inspection
     /// mode for isolating direct-light contribution.
     /// </remarks>
-    [Tune(0, 0.5f, Group = "sun")] public float AmbientStrength { get; set; } = 0.30f;
+    [Tune(0, 2f, Group = "sun")] public float AmbientStrength { get; set; } = 0.30f;
 
     /// <summary>Metres around the origin the SHARPEST cascade covers — the subject's own box.</summary>
     /// <remarks>
