@@ -260,6 +260,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         {
             input.Keyboards[i].KeyDown += OnKeyDown;
             input.Keyboards[i].KeyUp += OnKeyUp;
+            input.Keyboards[i].KeyChar += OnKeyChar;
         }
         for (var i = 0; i < input.Mice.Count; i++)
         {
@@ -417,8 +418,47 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         graphicsDevice?.SetDefaultRenderSurfaceSize(Math.Max(size.X, 1), Math.Max(size.Y, 1));
     }
 
+    // What a text field takes: the typed characters, and the keys that edit them. ImGui is told whether or not the application owns the press;
+    // it is UiWantsKeyboard, read below, that keeps the game from also acting on a key a field took.
+    private void OnKeyChar(IKeyboard kbd, char character) => imguiRenderer?.AddChar(character);
+
+    private static ImGuiNET.ImGuiKey UiKey(SilkKey key) => key switch
+    {
+        SilkKey.Backspace => ImGuiNET.ImGuiKey.Backspace,
+        SilkKey.Delete => ImGuiNET.ImGuiKey.Delete,
+        SilkKey.Enter => ImGuiNET.ImGuiKey.Enter,
+        SilkKey.KeypadEnter => ImGuiNET.ImGuiKey.KeypadEnter,
+        SilkKey.Tab => ImGuiNET.ImGuiKey.Tab,
+        SilkKey.Escape => ImGuiNET.ImGuiKey.Escape,
+        SilkKey.Space => ImGuiNET.ImGuiKey.Space,
+        SilkKey.Left => ImGuiNET.ImGuiKey.LeftArrow,
+        SilkKey.Right => ImGuiNET.ImGuiKey.RightArrow,
+        SilkKey.Up => ImGuiNET.ImGuiKey.UpArrow,
+        SilkKey.Down => ImGuiNET.ImGuiKey.DownArrow,
+        SilkKey.Home => ImGuiNET.ImGuiKey.Home,
+        SilkKey.End => ImGuiNET.ImGuiKey.End,
+        SilkKey.PageUp => ImGuiNET.ImGuiKey.PageUp,
+        SilkKey.PageDown => ImGuiNET.ImGuiKey.PageDown,
+        SilkKey.ShiftLeft => ImGuiNET.ImGuiKey.LeftShift,
+        SilkKey.ShiftRight => ImGuiNET.ImGuiKey.RightShift,
+        SilkKey.ControlLeft => ImGuiNET.ImGuiKey.LeftCtrl,
+        SilkKey.ControlRight => ImGuiNET.ImGuiKey.RightCtrl,
+        SilkKey.AltLeft => ImGuiNET.ImGuiKey.LeftAlt,
+        SilkKey.AltRight => ImGuiNET.ImGuiKey.RightAlt,
+        SilkKey.SuperLeft => ImGuiNET.ImGuiKey.LeftSuper,
+        SilkKey.SuperRight => ImGuiNET.ImGuiKey.RightSuper,
+        SilkKey.A => ImGuiNET.ImGuiKey.A,
+        SilkKey.C => ImGuiNET.ImGuiKey.C,
+        SilkKey.V => ImGuiNET.ImGuiKey.V,
+        SilkKey.X => ImGuiNET.ImGuiKey.X,
+        SilkKey.Y => ImGuiNET.ImGuiKey.Y,
+        SilkKey.Z => ImGuiNET.ImGuiKey.Z,
+        _ => ImGuiNET.ImGuiKey.None,
+    };
+
     private void OnKeyDown(IKeyboard kbd, SilkKey key, int scancode)
     {
+        imguiRenderer?.AddKey(UiKey(key), true);
         // The runtime's own shortcuts OBSERVE, and do not consume. They still answer before any UI,
         // so a focused panel cannot swallow the dump key or the overlay toggle — the two things
         // most needed exactly when something has gone wrong. What changed is the `return` that
@@ -439,6 +479,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 
     private void OnKeyUp(IKeyboard kbd, SilkKey key, int scancode)
     {
+        imguiRenderer?.AddKey(UiKey(key), false);
         // Delivered when the application owned the press, and not otherwise — see GestureOwnership. A
         // release always reaching the application fixes the stranded-key case and creates its mirror: a
         // key the UI swallowed handing the application an up it never had a down for.

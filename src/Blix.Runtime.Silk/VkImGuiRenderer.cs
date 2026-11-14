@@ -138,6 +138,19 @@ public sealed class VkImGuiRenderer : IDisposable
     public bool WantCaptureKeyboard => ImGui.GetIO().WantCaptureKeyboard;
 
     /// <summary>
+    /// A key going down or up, for ImGui's own text fields and shortcuts. <b>BeginFrame only ever carried the mouse</b>, so nothing typed
+    /// reached an input box: the characters, backspace, the arrows and the copy and paste chords were never told to ImGui at all.
+    /// </summary>
+    public void AddKey(ImGuiKey key, bool down)
+    {
+        if (key != ImGuiKey.None)
+            ImGui.GetIO().AddKeyEvent(key, down);
+    }
+
+    /// <summary>A typed character, as the platform composed it: what a text field inserts.</summary>
+    public void AddChar(char character) => ImGui.GetIO().AddInputCharacter(character);
+
+    /// <summary>
     /// Opens an ImGui frame, lets <paramref name="content"/> fill it, and closes it.
     /// </summary>
     /// <remarks>
