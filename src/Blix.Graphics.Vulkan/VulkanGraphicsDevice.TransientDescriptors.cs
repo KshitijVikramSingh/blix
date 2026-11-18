@@ -19,10 +19,13 @@ public sealed partial class VulkanGraphicsDevice
     // (draws × sets-per-program). VulkanSponza's cascaded-shadow scene is the
     // current high-water mark: ~455 lit draws × 2 sets (per-frame + per-pass)
     // plus ~1190 shadow-cascade draws × 1 set ≈ 2100 sets/frame. 4096 leaves
-    // ~2× headroom for more lights / cascades. PerType stays comfortably above
-    // the matching per-type descriptor counts (~3900 combined-image-samplers).
-    private const uint TransientPoolMaxSets = 4096;
-    private const uint TransientPoolPerType = 8192;
+    // ~2× headroom for more lights / cascades. The Marches terrain is the
+    // per-type high-water mark: ~1200 chunk runs and ~200 pieces a frame, each
+    // binding ~9 sampled images (the voxel grid, the light volumes, shadow
+    // maps), ≈ 13000 sampled images/frame, past the 8192 it had. Both raised
+    // for that with ~4× headroom; the pools are small either way.
+    private const uint TransientPoolMaxSets = 16384;
+    private const uint TransientPoolPerType = 65536;
 
     private DescriptorPool[] transientPools = Array.Empty<DescriptorPool>();
 
