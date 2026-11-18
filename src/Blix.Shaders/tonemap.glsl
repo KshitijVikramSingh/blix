@@ -1,8 +1,10 @@
 #pragma once
 
+#include "gt7.glsl"
+
 // Tonemap operators -- HDR-linear input, [0,1] LDR-linear output.
 //
-// All four operators take and return linear values. Apply gamma encode
+// All six operators take and return linear values. Apply gamma encode
 // AFTER the operator. Apply colour grading (saturation, contrast,
 // temperature) BEFORE the operator while still in HDR linear space; the
 // operator's curve assumes a meaningful dynamic range and grading after
@@ -62,15 +64,20 @@ vec3 blix_agx(vec3 x)
     return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
 }
 
-// Mode selector. Caller passes a float uniform in [0..3]; values <0.5 pick
-// ACES, <1.5 AgX, <2.5 Reinhard, else Neutral. Matches the engine's
-// existing tonemap-mode convention.
+// Mode selector. Caller passes a float uniform in [0..5]; values <0.5 pick
+// ACES, <1.5 AgX, <2.5 Reinhard, <3.5 Neutral, <4.5 GT7 (the published
+// parameters), else GT7 (the lab-tuned set). Matches the engine's existing
+// tonemap-mode convention; modes 4 and 5 are new, and a mode above 3 used to
+// mean Neutral. GT7's SDR form, and the 250-nit scene white it assumes, are in
+// gt7.glsl; its parameters are generated (gt7_params.glsl).
 vec3 blix_tonemap(vec3 hdr, float mode)
 {
     if (mode < 0.5)      return blix_acesFilm(hdr);
     else if (mode < 1.5) return blix_agx(hdr);
     else if (mode < 2.5) return blix_reinhard(hdr);
-    else                 return blix_neutral(hdr);
+    else if (mode < 3.5) return blix_neutral(hdr);
+    else if (mode < 4.5) return blix_gt7_sdr(hdr, BLIX_GT7_PUBLISHED);
+    else                 return blix_gt7_sdr(hdr, BLIX_GT7_TUNED);
 }
 
 // --- Colour grading -------------------------------------------------------

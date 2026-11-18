@@ -43,6 +43,8 @@
     <GlslInclude Include="..\..\Blix.Shaders\fullscreen.glsl" />
     <GlslInclude Include="..\..\Blix.Shaders\bloom.glsl" />
     <GlslInclude Include="..\..\Blix.Shaders\tonemap.glsl" />
+    <GlslInclude Include="..\..\Blix.Shaders\gt7.glsl" />
+    <GlslInclude Include="..\..\Blix.Shaders\gt7_params.glsl" />
   </ItemGroup>
 
 
