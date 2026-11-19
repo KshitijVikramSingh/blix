@@ -44,6 +44,13 @@ internal sealed partial class VulkanRenderGraphBackend : IRenderGraphBackend
         PerPassBarriers = BarrierInference.Infer(graph);
     }
 
+    public void Reallocate()
+    {
+        if (!BackendCompiled || Device is null) return;
+        Device.WaitIdle();
+        OnSwapchainRecreated();
+    }
+
     public bool TryGetPassSurface(int passId, out RenderSurfaceHandle surface)
     {
         var found = BackendPasses.TryGetValue(passId, out var pass);

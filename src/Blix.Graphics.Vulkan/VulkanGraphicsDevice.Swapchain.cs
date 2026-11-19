@@ -745,6 +745,21 @@ public sealed partial class VulkanGraphicsDevice
         };
         ThrowIfNotSuccess(Vk.BeginCommandBuffer(f.CommandBuffer, in beginInfo), "vkBeginCommandBuffer");
 
+        // <b>This frame's work starts only after the last frame's is done with memory.</b> Frames in flight share the graph's
+        // targets and the textures uploaded each frame, and nothing else orders one frame's command buffer after the previous
+        // one's on the queue: without this, a frame's first render pass cleared a depth target the last frame's was still
+        // storing (sync validation: WRITE_AFTER_WRITE across the two command buffers), and a frame's uploads (a game's per-frame
+        // textures) could overwrite what the last frame's passes were still reading. Torn targets and garbage texels followed,
+        // worst where the uploaded textures change (the Marches' pieces) and wherever more of the screen was being drawn.
+        var frameStart = new MemoryBarrier
+        {
+            SType = StructureType.MemoryBarrier,
+            SrcAccessMask = AccessFlags.MemoryWriteBit,
+            DstAccessMask = AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit,
+        };
+        Vk.CmdPipelineBarrier(f.CommandBuffer, PipelineStageFlags.AllCommandsBit, PipelineStageFlags.AllCommandsBit, 0,
+            1, &frameStart, 0, null, 0, null);
+
         // vkCmdResetQueryPool must run outside a render pass.
         var slotQueryBase = (uint)(currentFrame * (int)QueriesPerFrameSlot);
         if (timestampsSupported)
@@ -1686,7 +1701,7 @@ public sealed partial class VulkanGraphicsDevice
             // silently swap two blocks between bindings.
             var dynamicCount = 0;
 
-            foreach (var slot in sr.Slots.OrderBy(x => x.Binding))
+            foreach (var slot in sr.Slots)   // (sorted by binding when the program was made)
             {
                 if (slot.BlockLayout is not { } block) continue;
 
@@ -1860,26 +1875,34 @@ public sealed partial class VulkanGraphicsDevice
 
             var (baseName, index) = SplitArrayName(b);
             var element = index ?? b.ArrayIndex;
-            var inSets = new List<(int Set, DescriptorSetSlot Slot)>();
+            // (Counted without a list: this runs for every texture of every draw.)
+            var found = 0;
+            DescriptorSetSlot? only = null;
             for (var setIdx = 0; setIdx < prog.Sets.Length; setIdx++)
             {
                 if (setIdx == MaterialOwnedSet || prog.Sets[setIdx] is not { } sr) continue;
-                if (ImageSlotNamed(sr, baseName) is { } slot) inSets.Add((setIdx, slot));
+                if (ImageSlotNamed(sr, baseName) is { } slot) { found++; only = slot; }
             }
 
             // Vulkan scopes bindings by set, so two sets may both declare uDepth. A name is then not
             // one binding, and binding it to both would be a guess that happens to be right.
-            if (inSets.Count > 1)
+            if (found > 1)
             {
+                var inSets = new List<(int Set, DescriptorSetSlot Slot)>();
+                for (var setIdx = 0; setIdx < prog.Sets.Length; setIdx++)
+                {
+                    if (setIdx == MaterialOwnedSet || prog.Sets[setIdx] is not { } sr) continue;
+                    if (ImageSlotNamed(sr, baseName) is { } slot) inSets.Add((setIdx, slot));
+                }
                 throw new InvalidOperationException(
                     $"Program '{prog.Name}' has '{baseName}' in more than one descriptor set " +
                     $"({string.Join(", ", inSets.Select(x => $"set {x.Set} binding {x.Slot.Binding}"))}), " +
                     "so binding it by name is ambiguous. Rename one of them in the shader.");
             }
 
-            if (inSets.Count == 1)
+            if (found == 1)
             {
-                RequireElementInRange(prog, baseName, element, inSets[0].Slot);
+                RequireElementInRange(prog, baseName, element, only!);
                 continue;
             }
 

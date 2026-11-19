@@ -162,6 +162,12 @@ public sealed partial class VulkanGraphicsDevice : IGraphicsDevice, IRenderGraph
     // records + submits Vk command buffers. Until the swapchain integration
     // lands the body is metadata-only — it produces a valid FrameDebugPacket so the
     // diagnostic surface stays observable, but no GPU work is issued.
+    /// <summary>
+    /// Whether <see cref="Execute"/> fills each draw's inputs in its packet (shader name, uniform values formatted, textures, push
+    /// constants) for the overlay's Pipeline tab or a diagnostics sink. The window turns it off while neither will read them.
+    /// </summary>
+    public bool DetailedFramePackets { get; set; } = true;
+
     public FrameDebugPacket Execute(RenderCommandList commandList)
     {
         ThrowIfDisposed();
@@ -184,7 +190,13 @@ public sealed partial class VulkanGraphicsDevice : IGraphicsDevice, IRenderGraph
             var draws = new List<FrameDebugDraw>();
             foreach (var cmd in pass.Commands)
             {
-                if (cmd is DrawIndexedCommand d)
+                if (cmd is DrawIndexedCommand plain && !DetailedFramePackets)
+                {
+                    // Nobody is looking at the draws' inputs this frame: count them, but do not format every uniform of every
+                    // draw into strings (thousands of draws a frame is megabytes of garbage, and full collections after it).
+                    draws.Add(new FrameDebugDraw(plain.Pipeline, plain.VertexBuffer, plain.IndexBuffer, plain.IndexCount, Array.Empty<string>(), Array.Empty<FrameDebugTexture>()));
+                }
+                else if (cmd is DrawIndexedCommand d)
                 {
                     draws.Add(new FrameDebugDraw(
                         Pipeline: d.Pipeline,

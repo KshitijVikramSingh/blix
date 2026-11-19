@@ -85,6 +85,24 @@ public sealed partial class RenderGraph : IDisposable
         return new GraphResourceHandle(id);
     }
 
+    /// <summary>
+    /// Changes the scale of swapchain-sized targets after compile (a render-resolution setting) and reallocates them in place, as
+    /// a window resize does: their texture and surface handles stay valid. Waits for the device, so call it between frames and
+    /// only when the scale actually changed.
+    /// </summary>
+    public void Rescale(IEnumerable<(GraphResourceHandle Target, MatchSwapchainGraphSize Size)> sizes)
+    {
+        foreach (var (target, size) in sizes)
+        {
+            if (!Resources.TryGetValue(target.Id, out var entry))
+                throw new ArgumentException($"Unknown graph resource {target.Id}.", nameof(sizes));
+            if (entry.Size is not MatchSwapchainGraphSize)
+                throw new InvalidOperationException($"'{entry.Name}' is not swapchain-sized and cannot be rescaled.");
+            Resources[target.Id] = entry with { Size = size };
+        }
+        if (IsCompiled) Backend?.Reallocate();
+    }
+
     // Persistent depth render-target resource (2D). samples>1 = MSAA depth
     // (matches the pass's MSAA colour; depth isn't resolved).
     public GraphResourceHandle DepthTarget(string name, GraphSize size, int samples = 1)

@@ -355,6 +355,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         FrameDebugPacket packet;
         using (debugSystem?.Current?.Timers.Measure("execute"))
         {
+            graphicsDevice.DetailedFramePackets = debugSystem?.State.ShowOverlay == true || diagnostics is not null;
             packet = graphicsDevice.Execute(commandList);
         }
         // Hand the per-pass/per-draw packet to the overlay's Pipeline tab.

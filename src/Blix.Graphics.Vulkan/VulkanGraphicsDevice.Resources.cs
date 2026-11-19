@@ -354,6 +354,8 @@ public sealed partial class VulkanGraphicsDevice
         for (var setIdx = 0; setIdx <= maxSet; setIdx++)
         {
             var setSlots = slotsBySet.TryGetValue(setIdx, out var bucket) ? bucket : new List<DescriptorSetSlot>();
+            // In ascending binding order once, here: a draw hands the set's dynamic offsets over in that order.
+            setSlots.Sort((a, b) => a.Binding.CompareTo(b.Binding));
             entry.Sets[setIdx] = CreateOneSetResources(entry.Name, setIdx, setSlots);
         }
     }
