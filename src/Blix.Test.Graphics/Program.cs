@@ -1031,12 +1031,9 @@ static ShaderInterface MinimalShader() => new(new[]
 // Section N — Barrier inference contract (VB.iv).
 // ============================================================================
 //
-// For v1 graphics-only graphs, per-pass barrier lists are empty —
-// subpass dependencies on each VkRenderPass already cover the
-// cross-pass color/depth → fragment-shader-read memory barrier. The
-// InferBarriers function ships its data shape now so the contract is
-// locked; explicit emission lights up when ComputePass.Execute does in
-// step 8.
+// A sampled Read edge needs a global memory dependency, including when the
+// consumer changes resolution or gathers neighbouring pixels. Framebuffer-local
+// subpass dependencies do not express that access pattern.
 
 {
     // N.1 — Empty graph produces empty per-pass barriers map. (Validation
@@ -1051,32 +1048,43 @@ static ShaderInterface MinimalShader() => new(new[]
         barriers.Count, 1);
     foreach (var list in barriers.Values)
     {
-        t.ExpectClose("N.1 graphics-only pass barriers empty (subpass deps cover)", list.Count, 0);
+        t.ExpectClose("N.1 a pass without sampled reads needs no read barrier", list.Count, 0);
     }
 }
 
 {
-    // N.2 — Multi-pass graph with a Read edge still produces no explicit
-    // barriers (the Read drives finalLayout = SHADER_READ_ONLY on the
-    // producer's color attachment + subpass deps cover the memory barrier).
+    // N.2 — A quarter-size post pass reads both colour and depth. Their
+    // producers and the consuming fragment shader must be in the dependency.
     var graph = new RenderGraph();
     var sceneColor = graph.ColorTarget("scene", TextureFormat.Rgba16F, new FixedGraphSize(64, 64));
-    var presentColor = graph.ColorTarget("present", TextureFormat.Rgba8, new FixedGraphSize(64, 64));
-    graph.GraphicsPass("scene-pass")
+    var depth = graph.DepthTarget("depth", new FixedGraphSize(64, 64));
+    var presentColor = graph.ColorTarget("present", TextureFormat.Rgba8, new FixedGraphSize(16, 16));
+    var producer = graph.GraphicsPass("scene-pass")
         .Target(sceneColor, LoadOp.Clear, StoreOp.Store)
-        .Shader(MinimalShader());
-    graph.GraphicsPass("present-pass")
+        .Depth(depth, LoadOp.Clear, StoreOp.Store)
+        .Shader(MinimalShader()).Handle;
+    var consumer = graph.GraphicsPass("present-pass")
         .Target(presentColor, LoadOp.Clear, StoreOp.Store)
         .Read(sceneColor)
-        .Shader(MinimalShader());
+        .Read(depth)
+        .Shader(MinimalShader()).Handle;
     graph.Compile();
     var twoPassBarriers = BarrierInference.Infer(graph);
     t.ExpectClose("N.2 two-pass graph has two barrier lists",
         twoPassBarriers.Count, 2);
-    var total = 0;
-    foreach (var list in twoPassBarriers.Values) total += list.Count;
-    t.ExpectClose("N.2 graphics-only multi-pass: zero explicit barriers (subpass deps cover)",
-        total, 0);
+    t.ExpectClose("N.2 producer without reads has no read barrier", twoPassBarriers[producer.Id].Count, 0);
+    var reads = twoPassBarriers[consumer.Id];
+    t.ExpectClose("N.2 both sampled inputs have dependencies", reads.Count, 2);
+    t.ExpectTrue("N.2 colour writes are available to the consumer", reads.Any(b =>
+        b.ResourceId == sceneColor.Id && (b.SrcStage & VkPipelineStageFlags.ColorAttachmentOutputBit) != 0 &&
+        (b.SrcAccess & VkAccessFlags.ColorAttachmentWriteBit) != 0));
+    t.ExpectTrue("N.2 early and late depth writes are available to the consumer", reads.Any(b =>
+        b.ResourceId == depth.Id && (b.SrcStage & VkPipelineStageFlags.EarlyFragmentTestsBit) != 0 &&
+        (b.SrcStage & VkPipelineStageFlags.LateFragmentTestsBit) != 0 &&
+        (b.SrcAccess & VkAccessFlags.DepthStencilAttachmentWriteBit) != 0));
+    t.ExpectTrue("N.2 every dependency makes its writes visible to sampled fragment reads", reads.All(b =>
+        b.DstStage == VkPipelineStageFlags.FragmentShaderBit && b.DstAccess == VkAccessFlags.ShaderReadBit &&
+        b.OldLayout == VkImageLayout.ShaderReadOnlyOptimal && b.NewLayout == VkImageLayout.ShaderReadOnlyOptimal));
 }
 
 {

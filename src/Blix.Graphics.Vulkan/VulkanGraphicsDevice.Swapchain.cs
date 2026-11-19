@@ -840,6 +840,25 @@ public sealed partial class VulkanGraphicsDevice
                 defaultPasses++;
             }
 
+            if (customSurface is { SampledReadBarriers.Count: > 0 })
+            {
+                var sampled = new MemoryBarrier { SType = StructureType.MemoryBarrier };
+                var sourceStages = default(PipelineStageFlags);
+                var targetStages = default(PipelineStageFlags);
+                foreach (var dependency in customSurface.SampledReadBarriers)
+                {
+                    sampled.SrcAccessMask |= dependency.SrcAccess;
+                    sampled.DstAccessMask |= dependency.DstAccess;
+                    sourceStages |= dependency.SrcStage;
+                    targetStages |= dependency.DstStage;
+                }
+                // Global, not BY_REGION: sampled inputs can be at a different
+                // resolution or gathered from outside the destination pixel's tile.
+                // This is a GPU memory dependency, not a queue/fence wait.
+                Vk.CmdPipelineBarrier(f.CommandBuffer, sourceStages, targetStages, 0,
+                    1, &sampled, 0, null, 0, null);
+            }
+
             // Empty ClearColors on the default target → OverlayRenderPass
             // (LoadOp.Load). Custom surfaces always clear (no Load variant).
             var hasClear = false;

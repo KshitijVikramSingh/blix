@@ -4,19 +4,13 @@ namespace Blix.Graphics.Vulkan;
 
 // Barrier inference for cross-pass resource reads.
 //
-// Graphics-only graphs need no explicit barriers: each pass's render-pass
-// subpass-dependency pair already handles the cross-pass layout transition
-// AND memory-availability barrier (color/depth → ShaderReadOnlyOptimal,
-// ColorAttachmentWrite → ShaderRead). That holds only because every target
-// rests in one layout between passes (RenderGraph.RestingLayout) and every
-// pass that loads starts from it: a render pass's initial layout is a claim
-// about where the image is, not a transition from wherever it happens to be. When compute passes start writing,
-// inference will emit vkCmdPipelineBarrier ops between compute writes and
-// downstream graphics reads (and vice versa) — compute lives outside the
-// render-pass dependency system.
+// Render passes perform attachment layout transitions. Sampled Read edges also
+// need a global memory dependency: a consumer can gather neighbours, or read a
+// full-size depth target while drawing a quarter-size air pass. A framebuffer-local
+// subpass dependency alone is not sufficient for those reads on tile GPUs.
 
-// One image-memory barrier op. Caller emits via vkCmdPipelineBarrier
-// after resolving ResourceId → VkImage from the graph's BackendResources.
+// One resource's dependency scopes. Attachment render passes establish the
+// layouts; sampled-read scopes are combined into a global vkCmdPipelineBarrier.
 internal sealed record BarrierOp(
     int ResourceId,
     ImageLayout OldLayout,
@@ -29,22 +23,37 @@ internal sealed record BarrierOp(
 internal static class BarrierInference
 {
     // Returns a per-pass list of pre-pass barriers. Pass id → barriers
-    // that must be emitted via vkCmdPipelineBarrier BEFORE that pass's
-    // render-pass-begin (graphics) or dispatch (compute).
+    // that must be emitted via vkCmdPipelineBarrier BEFORE that graphics
+    // pass's render-pass-begin.
     //
-    // For v1 graphics-only graphs: every pass maps to an empty list.
-    // The subpass dependencies baked into each VkRenderPass cover the
-    // cross-pass barriers. See file header for rationale.
+    // Layouts already rest in ShaderReadOnlyOptimal. The backend combines these
+    // scopes into a global memory barrier before a graphics consumer, avoiding
+    // stale image handles after a graph resize. Compute dispatches retain their
+    // storage-image transitions in TranslateComputePass.
     public static Dictionary<int, List<BarrierOp>> Infer(RenderGraph graph)
     {
         var result = new Dictionary<int, List<BarrierOp>>(graph.PassOrder.Count);
         foreach (var passId in graph.PassOrder)
         {
-            result[passId] = new List<BarrierOp>();
+            var barriers = new List<BarrierOp>();
+            result[passId] = barriers;
+            if (!graph.GraphicsPasses.TryGetValue(passId, out var pass)) continue;
+            foreach (var read in pass.Reads.DistinctBy(r => r.Resource.Id))
+            {
+                var depth = graph.Resources[read.Resource.Id].Kind != GraphResourceKind.ColorTarget;
+                var attachmentStage = depth
+                    ? PipelineStageFlags.EarlyFragmentTestsBit | PipelineStageFlags.LateFragmentTestsBit
+                    : PipelineStageFlags.ColorAttachmentOutputBit;
+                var attachmentAccess = depth
+                    ? AccessFlags.DepthStencilAttachmentWriteBit
+                    : AccessFlags.ColorAttachmentWriteBit;
+                barriers.Add(new BarrierOp(read.Resource.Id,
+                    ImageLayout.ShaderReadOnlyOptimal, ImageLayout.ShaderReadOnlyOptimal,
+                    attachmentStage | PipelineStageFlags.ComputeShaderBit,
+                    attachmentAccess | AccessFlags.ShaderWriteBit,
+                    PipelineStageFlags.FragmentShaderBit, AccessFlags.ShaderReadBit));
+            }
         }
-        // Step 8 (compute Execute) fills this loop body with real
-        // BarrierOp emission. Until then, graphics-only Read edges are
-        // covered by per-pass subpass dependencies.
         return result;
     }
 }

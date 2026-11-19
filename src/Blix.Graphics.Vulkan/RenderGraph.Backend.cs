@@ -40,8 +40,8 @@ internal sealed partial class VulkanRenderGraphBackend : IRenderGraphBackend
 
     public void Compile()
     {
-        CompileBackend();
         PerPassBarriers = BarrierInference.Infer(graph);
+        CompileBackend();
     }
 
     public void Reallocate()
@@ -114,7 +114,8 @@ internal sealed partial class VulkanRenderGraphBackend : IRenderGraphBackend
                 // How many colour attachments this pass's render pass has. A graph pass can
                 // have none — a depth-only shadow caster — and anything routing a
                 // commandList.Pass at this surface needs the real number, not a guess.
-                colorAttachmentCount: gpass?.ColorTargets.Count ?? 0);
+                colorAttachmentCount: gpass?.ColorTargets.Count ?? 0,
+                sampledReadBarriers: PerPassBarriers[passId]);
         }
     }
 

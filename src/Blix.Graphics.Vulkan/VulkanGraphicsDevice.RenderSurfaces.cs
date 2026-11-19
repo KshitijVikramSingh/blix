@@ -6,9 +6,9 @@ namespace Blix.Graphics.Vulkan;
 // (registered as a sampleable VkTextureEntry), an optional depth
 // attachment, plus a VkRenderPass + VkFramebuffer.
 //
-// Color final layout is ShaderReadOnlyOptimal so a downstream sampling
-// pass doesn't need a manual barrier — the render pass + subpass dep
-// pair handles both the layout transition and the memory dependency.
+// Color final layout is ShaderReadOnlyOptimal. Graph-owned surfaces additionally
+// carry explicit sampled-read dependencies for non-local and cross-resolution
+// consumers; the render-pass dependency pair alone is framebuffer-local.
 //
 // Multi-color attachments are supported by shape but untested. Depth
 // today is render-target only (DepthRenderbuffer); DepthTexture /
@@ -54,6 +54,9 @@ public sealed partial class VulkanGraphicsDevice
         // through the union that is float32[4] = {1, 0, 0, 0}: the target cleared to pure
         // red and whatever was in it was destroyed.
         public int ColorAttachmentCount;
+        // Global sampled-read dependencies from the graph. These contain no image
+        // handles, so they remain valid when the surface is resized in place.
+        public IReadOnlyList<BarrierOp> SampledReadBarriers = Array.Empty<BarrierOp>();
     }
 
     public unsafe RenderSurface CreateRenderSurface(RenderSurfaceDescription description)
@@ -187,7 +190,8 @@ public sealed partial class VulkanGraphicsDevice
         bool hasDepth,
         Silk.NET.Vulkan.RenderPass renderPassLoad = default,
         SampleCountFlags samples = SampleCountFlags.Count1Bit,
-        int colorAttachmentCount = 1)
+        int colorAttachmentCount = 1,
+        IReadOnlyList<BarrierOp>? sampledReadBarriers = null)
     {
         var entry = new VkRenderSurfaceEntry
         {
@@ -201,6 +205,7 @@ public sealed partial class VulkanGraphicsDevice
             Samples = samples,
             IsExternal = true,
             ColorAttachmentCount = colorAttachmentCount,
+            SampledReadBarriers = sampledReadBarriers ?? Array.Empty<BarrierOp>(),
             // Color/depth attachment ownership stays with the caller.
             ColorAttachments = Array.Empty<TextureHandle>(),
         };
